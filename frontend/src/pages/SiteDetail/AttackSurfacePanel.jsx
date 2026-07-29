@@ -9,6 +9,8 @@ const STATUS_LABELS = {
   skipped: "Skipped"
 };
 
+const PROGRESS_STATUS_ORDER = ["finding", "covered", "skipped", "in_progress", "not_started"];
+
 function Section({ id, title, detail, expanded, onToggle, children }) {
   return <div className="attack-surface-section">
     <button type="button" className="attack-surface-section-head" onClick={() => onToggle(id)}>
@@ -28,7 +30,7 @@ function CoverageBadges({ statuses = {} }) {
 }
 
 export function AttackSurfacePanel({ summary }) {
-  const [expanded, setExpanded] = useState({ routes: true, access: false, signals: true, meta: false });
+  const [expanded, setExpanded] = useState({ meta: true, routes: true, access: false, signals: true });
   const [query, setQuery] = useState("");
   const [accessFilter, setAccessFilter] = useState("all");
   const toggle = key => setExpanded(previous => ({ ...previous, [key]: !previous[key] }));
@@ -64,6 +66,15 @@ export function AttackSurfacePanel({ summary }) {
       <div className="surface-summary-card"><strong>{inputs.parameters || 0}</strong><span>Parameters</span></div>
       <div className="surface-summary-card"><strong>{coverage.completion_percent || 0}%</strong><span>Coverage resolved</span></div>
     </div>
+
+    <Section id="meta" title="Observed Technologies" detail={`${technologies.length} detected`} expanded={expanded.meta} onToggle={toggle}>
+      {summary.waf ? <div className="surface-callout surface-callout-warning">
+        <strong>⚠ WAF/bot-management detected: {summary.waf.provider}</strong> ({summary.waf.confidence} confidence)
+        <div className="subtle">{summary.waf.evidence}. Raw HTTP requests may be blocked (403) even with valid payloads/sessions —
+          the scanner routes http_request calls through the authenticated browser context to work around this automatically.</div>
+      </div> : null}
+      <div className="surface-profile-list">{technologies.map(item => <span key={item.name} className={`surface-chip${item.category === "waf" ? " surface-chip-waf" : ""}`}>{item.name} <span className="subtle">via {item.source}</span></span>)}</div>
+    </Section>
 
     <Section id="routes" title="Route & Input Inventory" detail={`${filteredRoutes.length} of ${routes.length} routes`} expanded={expanded.routes} onToggle={toggle}>
       <div className="surface-filters">
@@ -111,11 +122,26 @@ export function AttackSurfacePanel({ summary }) {
         <span key={`${profile.credential_id}-${profile.username}-${index}`} className="surface-chip">{profile.label}{profile.username && profile.label !== profile.username ? ` (${profile.username})` : ""}</span>)}</div> : null}
       {(access.mixed_routes || []).length ? <div className="surface-callout">{access.mixed_routes.length} routes were observed in both anonymous and authenticated contexts. This is evidence to investigate, not an automatic vulnerability classification.</div> : null}
     </Section>
-
-    <Section id="meta" title="Observed Technologies" detail={`${technologies.length} detected`} expanded={expanded.meta} onToggle={toggle}>
-      <div className="surface-profile-list">{technologies.map(item => <span key={item.name} className="surface-chip">{item.name} <span className="subtle">via {item.source}</span></span>)}</div>
-    </Section>
   </div>;
+}
+
+function MultiSegmentProgress({ statuses = {}, total = 0 }) {
+  if (!total) return <span className="surface-progress" />;
+
+  return (
+    <span className="surface-progress">
+      {PROGRESS_STATUS_ORDER.map(status => {
+        const label = STATUS_LABELS[status];
+        const count = statuses[status] || 0;
+        return count > 0 ? <span
+          key={status}
+          className={`surface-progress-segment status-${status}`}
+          style={{ width: `${count / total * 100}%` }}
+          title={`${label}: ${count}`}
+        /> : null;
+      })}
+    </span>
+  );
 }
 
 export function CoverageGapsPanel({ summary }) {
@@ -139,12 +165,10 @@ export function CoverageGapsPanel({ summary }) {
       <CoverageBadges statuses={coverage.statuses} />
       {(coverage.by_category || []).length ? <div className="surface-coverage-list">
         {coverage.by_category.map(item => {
-          const resolved = item.total - item.remaining;
-          const percent = item.total ? Math.round(100 * resolved / item.total) : 0;
           return <div key={item.category} className="surface-coverage-row">
             <span className="owasp-badge">{item.category}</span>
             <span className="surface-coverage-name">{item.label}</span>
-            <span className="surface-progress"><span style={{ width: `${percent}%` }} /></span>
+            <MultiSegmentProgress statuses={item.statuses} total={item.total} />
             <span className="surface-coverage-count">{item.remaining} remaining</span>
             {item.gap_route_total > 0 ? <span className="subtle">{item.gap_route_total} routes</span> : null}
           </div>;

@@ -143,20 +143,23 @@ Copy `.env.example` to `.env` and adjust as needed:
 cp .env.example .env
 ```
 
-| Variable             | Default                | Description             |
-| -------------------- | ---------------------- | ----------------------- |
-| `AESPA_DATABASE_URL` | `sqlite:///./aespa.db` | SQLAlchemy database URL |
-| `AESPA_HOST`         | `127.0.0.1`            | Bind address            |
-| `AESPA_PORT`         | `8000`                 | Bind port               |
+| Variable             | Default                | Description                                       |
+| -------------------- | ---------------------- | ------------------------------------------------- |
+| `AESPA_DATABASE_URL` | `sqlite:///./aespa.db` | SQLAlchemy database URL                           |
+| `AESPA_HOST`         | `127.0.0.1`            | Bind address                                      |
+| `AESPA_PORT`         | `8000`                 | Bind port                                         |
+| `AESPA_WEB_DIR`      | `./src/aespa/web`      | Path to static web UI assets                      |
+| `AESPA_DATA_DIR`     | `./aespa_data`         | Path to persistent uploads and temporary storage  |
 
 If you don't do this, it will use the values above as the default.
 
 ## LLM Configuration
 
-Open the app, go to **LLM Settings**, and configure:
+Open the app, go to **Settings → LLM**, and configure:
 
-- **Providers** — reusable connection settings with a name, API format, optional base URL, API key, and model names. Built-in formats include GitHub Copilot, Anthropic, OpenAI, OpenAI-compatible, OpenRouter, Google Gemini, Amazon Bedrock Runtime, Azure OpenAI, and Azure AI Foundry. Leave model names blank to use the examples shown in the field. Use OpenAI-compatible for local models such as LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`). For GitHub Copilot, leave the username and token blank to use Copilot CLI's selected default account, or enter a username from its `/user` list. For Bedrock, leave the API key blank to use boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.
-- **Profiles** — named runtime choices that select a provider and one model from that provider's configured model list. Runs can use the system default profile or a specific profile.
+- **Providers** — reusable connection settings with a name, API format, optional base URL, API key, and model names. Built-in formats include GitHub Copilot, Factory Droid CLI, Anthropic, OpenAI, OpenAI-compatible, OpenRouter, Google Gemini, Amazon Bedrock Runtime, Amazon Bedrock Mantle, Azure OpenAI, and Azure AI Foundry. Use **Load models from API** to automatically discover available models for supported providers. Use OpenAI-compatible for local models such as LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`). For Factory Droid, credentials are used directly from Droid CLI. For GitHub Copilot, leave the username and token blank to use Copilot CLI's selected default account. For Bedrock, leave the API key blank to use boto3 credentials from `AWS_PROFILE`, environment variables, SSO, or the instance role.
+- **Models & Profiles** — configure model parameters (max tokens, temperature, vision support) and create scan profiles. Scan profiles set default models and allow per-agent-role model assignments (e.g. assigning separate models for Test Lead, Specialist, Validator, or ALICE).
+- **Import / Export** — export or import your entire LLM configuration (providers, models, profiles) as a JSON file.
 
 ## Use
 
@@ -175,7 +178,7 @@ Site Map:
 A.L.I.C.E chat:  
 ![Screenshot](docs/images/alice.png)
 
-Dynamic scan in progress:  
+Agents view: 
 ![Screenshot](docs/images/agentstatus.png)
 
 Attack Surface  

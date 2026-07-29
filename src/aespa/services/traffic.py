@@ -20,9 +20,63 @@ from aespa.db import get_engine
 BODY_LIMIT = 8192  # 8 KB per body stored
 SKIP_RESOURCE_TYPES = {"image", "font", "media"}  # noisy, rarely useful
 
+# In-memory cache of WAF detections, keyed by (run_kind, run_id), so the
+# agentic scan loop can check "is this run behind a WAF?" on every tool call
+# without a DB round-trip. Populated as a side effect of _write() below;
+# the DB columns (TestRun/ApiTestRun.waf_*) are the durable copy used by the
+# UI and across process restarts.
+_waf_cache: dict[tuple[str, int], dict] = {}
+
+
+def get_cached_waf(run_id: int, *, api_run_id: Optional[int] = None) -> Optional[dict]:
+    """Return the cached WAF detection for a run, if any (see ``_waf_cache``)."""
+    if api_run_id is not None:
+        return _waf_cache.get(("api", api_run_id))
+    return _waf_cache.get(("web", run_id))
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _safe_playwright_post_data(request) -> Optional[str]:
+    """Best-effort extraction of Playwright request body.
+
+    Some Playwright requests carry binary/compressed payloads where
+    ``request.post_data`` raises UnicodeDecodeError. This helper never raises.
+    """
+    try:
+        post_data = request.post_data
+        if isinstance(post_data, str):
+            return post_data
+        if isinstance(post_data, (bytes, bytearray)):
+            return bytes(post_data).decode(errors="replace")
+    except UnicodeDecodeError:
+        try:
+            post_data_bytes = request.post_data_buffer
+            if isinstance(post_data_bytes, (bytes, bytearray)) and post_data_bytes:
+                return f"[binary, {len(post_data_bytes)} bytes]"
+        except Exception:
+            return "[binary request body]"
+        return "[binary request body]"
+    except Exception:
+        pass
+
+    try:
+        pd_json = request.post_data_json
+        if pd_json is not None:
+            return json.dumps(pd_json)
+    except Exception:
+        pass
+
+    try:
+        post_data_bytes = request.post_data_buffer
+        if isinstance(post_data_bytes, (bytes, bytearray)) and post_data_bytes:
+            return bytes(post_data_bytes).decode(errors="replace")
+    except Exception:
+        pass
+
+    return None
 
 
 # ── Low-level writer ──────────────────────────────────────────────────────────
@@ -65,6 +119,86 @@ def _write(
         )
         s.add(entry)
         s.commit()
+
+    _maybe_record_waf(run_id, api_run_id, url, response_headers, response_body)
+
+
+def _maybe_record_waf(
+    run_id: int,
+    api_run_id: Optional[int],
+    url: str,
+    response_headers: dict,
+    response_body: Optional[str],
+) -> None:
+    """Passively fingerprint a WAF/bot-manager from this response and persist
+    the first (highest-confidence) detection for the run, both to the in-memory
+    cache (fast path for the scan loop) and to the run row (durable, for the
+    Attack Surface UI). Idempotent and best-effort — never raises.
+    """
+    from urllib.parse import urlparse
+
+    from aespa.services.waf_detect import detect_waf
+
+    try:
+        detection = detect_waf(response_headers, response_body)
+        if detection is None:
+            return
+
+        req_hostname = (urlparse(url).hostname or "").lower() if url else ""
+        if not req_hostname:
+            return
+
+        cache_key = ("api", api_run_id) if api_run_id is not None else ("web", run_id)
+        cached = _waf_cache.get(cache_key)
+        if cached and cached.get("provider") == detection["provider"]:
+            return  # already known; avoid a DB write on every matching request
+
+        from aespa.models import ApiCollection, ApiTestRun, Site, TestRun
+        from aespa.services.scope import _same_root_domain
+
+        with Session(get_engine()) as s:
+            if api_run_id is not None:
+                api_run = s.get(ApiTestRun, api_run_id)
+                if api_run is None:
+                    return
+                collection = (
+                    s.get(ApiCollection, api_run.collection_id)
+                    if api_run.collection_id
+                    else None
+                )
+                scope_hosts = json.loads(
+                    (collection.scope_hosts if collection else None) or "[]"
+                )
+                base_url = collection.base_url if collection else None
+                run = api_run
+            else:
+                run = s.get(TestRun, run_id)
+                if run is None:
+                    return
+                site = s.get(Site, run.site_id) if run.site_id else None
+                scope_hosts = json.loads((site.scope_hosts if site else None) or "[]")
+                base_url = site.base_url if site else None
+
+            # Enforce scope check: only attribute WAF to in-scope hostnames
+            if scope_hosts:
+                if req_hostname not in scope_hosts:
+                    return
+            elif base_url:
+                base_hostname = (urlparse(base_url).hostname or "").lower()
+                if base_hostname and not _same_root_domain(req_hostname, base_hostname):
+                    return
+
+            if run.waf_provider == detection["provider"]:
+                return
+            _waf_cache[cache_key] = detection
+            run.waf_provider = detection["provider"]
+            run.waf_confidence = detection["confidence"]
+            run.waf_evidence = detection["evidence"][:500]
+            s.add(run)
+            s.commit()
+    except Exception:
+        # Passive fingerprinting must never break traffic logging.
+        pass
 
 
 # ── Query ─────────────────────────────────────────────────────────────────────
@@ -327,14 +461,7 @@ def setup_playwright_logging(
         # explicitly set, which is why callers were seeing just the host header.
         rid = id(request)
         _pending[rid] = time.monotonic()
-        post_data = request.post_data
-        if post_data is None:
-            try:
-                pd_json = request.post_data_json
-                if pd_json is not None:
-                    post_data = json.dumps(pd_json)
-            except Exception:
-                pass
+        post_data = _safe_playwright_post_data(request)
         _req_data[rid] = {
             "method": request.method,
             "post_data": post_data,
@@ -364,14 +491,7 @@ def setup_playwright_logging(
         # Prefer the body captured at request time; fall back to response.request.
         post_data = req_data.get("post_data")
         if post_data is None:
-            try:
-                post_data = response.request.post_data
-                if post_data is None:
-                    pd_json = response.request.post_data_json
-                    if pd_json is not None:
-                        post_data = json.dumps(pd_json)
-            except Exception:
-                pass
+            post_data = _safe_playwright_post_data(response.request)
 
         # Use response.body() (raw bytes) — more reliable than response.text().
         # text() can fail if encoding detection breaks or the body is already consumed;
@@ -433,14 +553,7 @@ def setup_playwright_logging(
 
         post_data = req_data.get("post_data")
         if post_data is None:
-            try:
-                post_data = request.post_data
-                if post_data is None:
-                    pd_json = request.post_data_json
-                    if pd_json is not None:
-                        post_data = json.dumps(pd_json)
-            except Exception:
-                pass
+            post_data = _safe_playwright_post_data(request)
 
         error_text = request.failure or "Request failed"
 

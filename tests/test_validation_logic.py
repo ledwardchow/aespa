@@ -33,7 +33,7 @@ def test_validate_finding_result_without_probe_results_is_false_positive():
     assert "No validation probes" in result["reasoning"]
 
 
-def test_access_control_validation_without_credentials_is_unconfirmed():
+def test_access_control_validation_without_comparison_data_falls_through():
     finding = ScanFinding(
         test_run_id=1,
         page_id=1,
@@ -53,11 +53,140 @@ def test_access_control_validation_without_credentials_is_unconfirmed():
         )
     )
 
-    assert result is not None
-    verdict, reason, poc_spec = result
-    assert verdict == "unconfirmed"
-    assert "no alternate user sessions" in reason
-    assert poc_spec is None
+    assert result is None
+
+
+def test_unauthenticated_access_claim_is_false_positive_when_anonymous_is_denied(
+    monkeypatch,
+):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["cookies"] == {}
+            assert "Authorization" not in kwargs["headers"]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def request(self, method, url):
+            request = __import__("httpx").Request(method, url)
+            return __import__("httpx").Response(
+                401, text='{"error":"unauthorized"}', request=request
+            )
+
+    from aespa.services import traffic
+
+    monkeypatch.setattr(validator, "get_engine", lambda: engine)
+    monkeypatch.setattr(traffic, "LoggingAsyncClient", FakeClient)
+    finding = ScanFinding(
+        id=1,
+        test_run_id=1,
+        owasp_category="A01",
+        severity="high",
+        title="Unauthenticated access to account data",
+        description="Sensitive records returned without authentication.",
+        affected_url="https://target.local/api/accounts",
+        evidence="",
+    )
+    policy = SimpleNamespace(
+        request_timeout_s=10,
+        follow_redirects=True,
+        response_body_read_limit_bytes=65536,
+    )
+    try:
+        result = asyncio.run(
+            validator._deterministic_validate_finding(finding, {}, policy)
+        )
+        assert result is not None
+        assert result[0] == "false_positive"
+        assert "credential-free request" in result[1]
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_unauthenticated_access_claim_is_confirmed_against_exact_route_baseline(
+    monkeypatch,
+):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    protected_text = "Account owner amelia@example.test balance 12500"
+    try:
+        with Session(engine) as session:
+            page = CrawledPage(
+                test_run_id=1,
+                url="https://target.local/api/accounts",
+                title="Account records",
+                page_text=protected_text,
+            )
+            session.add(page)
+            session.commit()
+            session.refresh(page)
+            page_id = page.id
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                assert kwargs["cookies"] == {}
+                assert "Authorization" not in kwargs["headers"]
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def request(self, method, url):
+                request = __import__("httpx").Request(method, url)
+                return __import__("httpx").Response(
+                    200,
+                    text=protected_text,
+                    headers={"content-type": "application/json"},
+                    request=request,
+                )
+
+        from aespa.services import traffic
+
+        monkeypatch.setattr(validator, "get_engine", lambda: engine)
+        monkeypatch.setattr(traffic, "LoggingAsyncClient", FakeClient)
+        finding = ScanFinding(
+            id=1,
+            test_run_id=1,
+            page_id=page_id,
+            owasp_category="A01",
+            severity="critical",
+            title="Unauthenticated access to account data",
+            description="Sensitive records returned without authentication.",
+            affected_url="https://target.local/api/accounts",
+            evidence="",
+        )
+        policy = SimpleNamespace(
+            request_timeout_s=10,
+            follow_redirects=True,
+            response_body_read_limit_bytes=65536,
+        )
+
+        result = asyncio.run(
+            validator._deterministic_validate_finding(finding, {}, policy)
+        )
+        assert result is not None
+        assert result[0] == "confirmed"
+        assert result[2]["poc_request"].get("use_session") is None
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
 
 
 def test_severity_threshold_skip_is_not_an_unconfirmed_verdict(monkeypatch):
@@ -830,6 +959,52 @@ def test_thinking_context_tools_filter_routes_and_history():
     assert history_result["matches"][0]["response_status"] == 200
 
 
+def test_page_detail_preserves_interactive_replay_recipe_and_legacy_rows():
+    action = {
+        "kind": "select_option",
+        "role": "combobox",
+        "name": "Cover type",
+        "value": "comprehensive",
+    }
+    page = {
+        "id": 2,
+        "url": "https://target.local/quote/step-2",
+        "state_kind": "interactive",
+        "replay_steps_json": json.dumps(
+            {"root_url": "https://target.local/quote", "steps": [action]}
+        ),
+    }
+
+    detail = scanner._run_thinking_context_tool(
+        "page_detail",
+        {"page_id": 2},
+        pages_snapshot=[page],
+        findings_snapshot=[],
+        history=[],
+    )
+    legacy = scanner._run_thinking_context_tool(
+        "page_detail",
+        {"page_id": 2},
+        pages_snapshot=[{**page, "replay_steps_json": json.dumps([action])}],
+        findings_snapshot=[],
+        history=[],
+    )
+
+    assert detail["browser_replay"] == {
+        "url": "https://target.local/quote",
+        "steps": [
+            {"op": "goto", "url": "https://target.local/quote"},
+            {
+                "op": "select_option",
+                "role": "combobox",
+                "name": "Cover type",
+                "value": "comprehensive",
+            },
+        ],
+    }
+    assert legacy["browser_replay"]["url"] == page["url"]
+
+
 def test_thinking_context_tools_compare_mutate_and_extract():
     history = [
         {
@@ -960,6 +1135,51 @@ def test_static_asset_check_still_flags_real_endpoints():
         )
         is True
     )
+
+
+def test_explicitly_public_endpoints_are_not_flagged_by_auth_matrix():
+    # Endpoints whose URL path contains a segment that signals intentional public
+    # access must never be classified as "requires auth or sensitive", even when
+    # the crawl tagged them req_auth=True because they were discovered during an
+    # authenticated session (classify_http_exchange sets req_auth=authenticated).
+    public_urls = [
+        "http://app.local/api/public-config",
+        "http://app.local/api/public-holidays?start=2026-01-01",
+        "http://app.local/public/data",
+        "http://app.local/health",
+        "http://app.local/healthz",
+        "http://app.local/health-check",
+        "http://app.local/api/health",
+        "http://app.local/ping",
+        "http://app.local/status",
+        "http://app.local/version",
+        "http://app.local/ready",
+        "http://app.local/readyz",
+        "http://app.local/liveness",
+    ]
+    for url in public_urls:
+        # req_auth=True simulates what classify_http_exchange sets for endpoints
+        # discovered during an authenticated crawl phase.
+        assert (
+            scanner._target_requires_auth_or_sensitive({"url": url, "req_auth": True})
+            is False
+        ), f"Expected {url} to be excluded as explicitly public"
+
+
+def test_explicitly_public_check_does_not_suppress_protected_endpoints():
+    # Protected endpoints that happen to have non-public-sounding names must
+    # still be flagged.
+    for url in (
+        "http://app.local/api/users",
+        "http://app.local/api/admin/settings",
+        "http://app.local/api/config",  # /config marker
+        "http://app.local/api/dashboard",
+        "http://app.local/api/publications",  # 'publications' ≠ 'public'
+    ):
+        assert (
+            scanner._target_requires_auth_or_sensitive({"url": url, "req_auth": True})
+            is True
+        ), f"Expected {url} to still be treated as sensitive"
 
 
 def test_deterministic_result_analysis_detects_sql_error():

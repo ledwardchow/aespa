@@ -70,6 +70,28 @@ export function markdownCodeBlock(value) {
   return `${fence}\n${text}\n${fence}`;
 }
 
+// ── Sitemap graph settings (client-only, localStorage) ─────────────────────
+// 0.06 is the strength d3.forceX/forceY were first given when the sitemap
+// graph's centering ("gravity") force was introduced.
+export const DEFAULT_SITEMAP_GRAVITY = 0.06;
+const SITEMAP_GRAVITY_KEY = "aespa_sitemap_gravity";
+
+export function getSitemapGravity() {
+  try {
+    const raw = localStorage.getItem(SITEMAP_GRAVITY_KEY);
+    const val = raw === null ? NaN : parseFloat(raw);
+    return Number.isFinite(val) ? Math.min(Math.max(val, 0), 0.2) : DEFAULT_SITEMAP_GRAVITY;
+  } catch {
+    return DEFAULT_SITEMAP_GRAVITY;
+  }
+}
+
+export function setSitemapGravity(value) {
+  try {
+    localStorage.setItem(SITEMAP_GRAVITY_KEY, String(value));
+  } catch {}
+}
+
 export function slugForFilename(value) {
   return String(value || "issues")
     .toLowerCase()

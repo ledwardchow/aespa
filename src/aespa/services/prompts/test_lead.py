@@ -760,7 +760,7 @@ _API_THINKING_AGENT_SYSTEM = (
 )
 
 
-_THINKING_AGENT_SYSTEM = (
+_THINKING_AGENT_SYSTEM_BASE = (
     "You are an expert web application penetration tester conducting a hands-on "
     "security assessment.\n"
     "Use the provided tools to investigate the target. Work iteratively — after each "
@@ -814,6 +814,15 @@ _THINKING_AGENT_SYSTEM = (
     "at the end of the scan. Use context_tool with tool=lead_list to see all leads and "
     "their current statuses.\n"
     "- remove_finding: delete a finding by ID if written in error or duplicate.\n"
+    "- reauthenticate: if the primary authenticated session appears expired, evicted, or "
+    "soft-blocked (e.g. a route that used to return 2xx now returns 401/403/419/440 with the "
+    "same session, or a browser step lands back on a login page), call reauthenticate instead "
+    "of trying to work out or re-drive the login form yourself with browser fill/click/snapshot "
+    "steps. It re-runs this site's actual configured login flow — including automatic TOTP "
+    "code generation or email-mailbox OTP retrieval when the credential is configured that "
+    "way — which a hand-driven browser sequence cannot replicate. Only after reauthenticate "
+    "reports its attempts exhausted should you fall back to skip_coverage(disposition=blocked) "
+    "for the affected obligations.\n"
     "- done: call ONLY when every input-taking route in site_map has been probed, all high-priority applicable Work Program areas have meaningful evidence, imported leads are resolved, and no specialist is still running. Writing a finding is a milestone, not an exit — resume probing the next untested surface immediately after write_finding returns. An agent_dispatch is an asynchronous handoff — keep probing other routes yourself in parallel. A high step count is NOT a done condition.\n"
     "- Confirmed findings are CLOSED — do not re-probe them.\n"
     "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
@@ -845,7 +854,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "url": {"type": "string"},
                 "headers": {"type": "object"},
                 "body": {},
-                "use_session": {"type": "string"},
+                "use_session": {
+                    "type": "string",
+                    "description": (
+                        "Reusable session label. Omit to use the primary authenticated "
+                        "session. Set exactly 'anonymous' for a request with no session "
+                        "cookies or credential headers."
+                    ),
+                },
                 "owasp_category": {
                     "type": "string",
                     "description": (
@@ -862,6 +878,13 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "sqli, reflected_xss, stored_xss, command_injection, ssti, idor, "
                         "or auth_bypass. Required for A03 probes so one injection class "
                         "does not count as coverage of another."
+                    ),
+                },
+                "obligation_id": {
+                    "type": "integer",
+                    "description": (
+                        "Optional obligation ID from the Work Program queue to attribute "
+                        "this probe to. When provided, backend constraints are verified."
                     ),
                 },
                 "repeat_sequence": {
@@ -900,12 +923,23 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "properties": {
                 "url": {"type": "string"},
                 "use_session": {"type": "string"},
+                "headers": {
+                    "type": "object",
+                    "description": (
+                        "Optional custom request headers applied to every navigation "
+                        "in this call (e.g. X-Forwarded-For to satisfy operator "
+                        "WAF/rate-limit bypass guidance). Use this whenever operator "
+                        "guidance or a 403/429 response calls for a specific header — "
+                        "the browser tool sends none of these by default."
+                    ),
+                },
                 "steps": {
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Ordered ops: {op: goto|fill|type|click|press|wait|snapshot|dom_check, ...}. "
-                        "fill: selector+value. click: selector. press: selector+key. "
+                        "Ordered ops: {op: goto|fill|type|click|check|uncheck|select_option|press|wait|snapshot|dom_check, ...}. "
+                        "Controls accept selector, testid, or role+name locators. "
+                        "fill: locator+value. select_option: locator+value. press: selector+key. "
                         "wait: state or ms. dom_check: selector plus optional attribute "
                         "and equals; it safely asserts rendered DOM without arbitrary JS."
                     ),
@@ -1161,6 +1195,38 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "note": {"type": "string"},
             },
             "required": ["url"],
+        },
+    },
+    {
+        "name": "reauthenticate",
+        "description": (
+            "Re-run the site's configured login flow to obtain a fresh 'configured_primary' "
+            "session, instead of manually driving the login form yourself with browser "
+            "fill/click/snapshot steps. Use this the moment the primary session looks expired, "
+            "evicted, or blocked — e.g. a route that previously returned 2xx now returns "
+            "401/403/419/440 with the same session, or a browser step lands back on a login "
+            "page. The configured credential's real login flow is used, including automatic "
+            "TOTP code generation or email-mailbox OTP retrieval when that is how this site's "
+            "credential is set up — capabilities a hand-driven browser sequence cannot "
+            "reproduce. Do NOT attempt to re-create the login form yourself with browser "
+            "steps; call this tool instead. If it reports exhausted attempts, stop retrying "
+            "logins and use skip_coverage with disposition=blocked for the affected "
+            "obligations, citing the eviction evidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Concrete evidence that the session is expired/evicted, e.g. "
+                        "'GET /profile returned 403 with configured_primary after "
+                        "previously returning 200'."
+                    ),
+                },
+                "note": {"type": "string"},
+            },
+            "required": ["reason"],
         },
     },
     {
@@ -1474,6 +1540,10 @@ HTTP body rules:
 - Use a plain string for form-encoded or raw bodies.
 - Set use_session to one of the reusable session labels when you want the scanner to
   attach a discovered token/session automatically.
+- Omitted or null use_session means the primary authenticated session. For a genuinely
+  unauthenticated request, set use_session to "anonymous". Never describe a request as
+  unauthenticated unless its returned request evidence says Authorization: none and
+  Cookies: none.
 
 To use the browser:
 {{
@@ -1495,7 +1565,9 @@ To use the browser:
 }}
 
 Browser step rules:
-- Supported ops: goto, fill, type, click, press, wait, snapshot, dom_check.
+- Supported ops: goto, fill, type, click, check, uncheck, select_option, press, wait, snapshot, dom_check.
+- Controls accept a CSS selector, testid, or role plus exact accessible name.
+- For select_option, include the option value.
 - For press, include selector and key (for example "Enter").
 - For wait, include state ("domcontentloaded", "load", or "networkidle") or ms.
 - For dom_check, include a CSS selector and equals. Optionally include attribute;
@@ -1582,10 +1654,32 @@ Register-account rules:
 - Do not request privileged roles unless the registration endpoint itself exposes that field and the test is low-impact.
 - Omit username/email/password values unless the form requires specific values; the scanner generates safe disposable values.
 - Successful registration responses store a durable scanner session under store_as when cookies or bearer tokens are captured.
+"""
 
+_THINKING_AGENT_SYSTEM_STRICT_FINISH = """
 To finish the assessment ONLY after verifying via site_map that zero untested input routes remain, resolving imported leads, and covering all high-priority applicable Work Program areas:
-{{
+{
   "action": "done",
   "summary": "2-3 sentence summary of notable findings and tested areas"
-}}
+}
 """
+
+_THINKING_AGENT_SYSTEM_LENIENT_FINISH = """
+To finish the assessment (when key areas covered, or steps nearly exhausted):
+{
+  "action": "done",
+  "summary": "2-3 sentence summary of notable findings and tested areas"
+}
+"""
+
+
+def get_thinking_agent_system(enforce_full_coverage_obligations: bool = True) -> str:
+    finish = (
+        _THINKING_AGENT_SYSTEM_STRICT_FINISH
+        if enforce_full_coverage_obligations
+        else _THINKING_AGENT_SYSTEM_LENIENT_FINISH
+    )
+    return _THINKING_AGENT_SYSTEM_BASE + "\n\n" + finish.strip()
+
+
+_THINKING_AGENT_SYSTEM = get_thinking_agent_system(True)

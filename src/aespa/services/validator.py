@@ -12,6 +12,7 @@ For each unvalidated finding:
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import re
@@ -31,6 +32,7 @@ from aespa.models import (
     ScanFinding,
     Site,
     TestRun,
+    TrafficEntry,
 )
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
@@ -254,18 +256,22 @@ async def validate_finding_inline(
         )
         return
 
-    if cred_sessions is None:
-        cred_sessions = (
-            await _get_or_create_sessions(
-                run_id,
-                str(site.base_url or "").strip(),
-                site.login_url,
-                creds,
-                site.requires_auth,
-            )
-            if site
-            else {}
+    # Inline validation is often handed only the session that the Test Lead is
+    # currently using. Merge it with every active/persisted/configured identity
+    # so that snapshot does not hide other accounts from access-control checks.
+    complete_sessions = (
+        await _get_or_create_sessions(
+            run_id,
+            str(site.base_url or "").strip(),
+            site.login_url,
+            creds,
+            site.requires_auth,
         )
+        if site
+        else {}
+    )
+    complete_sessions.update(cred_sessions or {})
+    cred_sessions = complete_sessions
 
     users_list: list[dict] | None = [
         {"username": cs["username"], "label": cs.get("label")}
@@ -582,7 +588,10 @@ async def _validator_http_request(
     body = tool_input.get("body")
     use_session = tool_input.get("use_session")
 
-    session = user_sessions.get(use_session) if use_session else primary_session
+    # Validator probes are anonymous unless the model explicitly selects a named
+    # session. This matches the validator prompt and prevents a disproof request
+    # from silently inheriting the primary authenticated identity.
+    session = user_sessions.get(use_session) if use_session else None
     cookies = session["cookies"] if session else {}
     hdrs = {"User-Agent": _UA, **(session.get("extra_headers", {}) if session else {})}
 
@@ -616,6 +625,11 @@ async def _validator_http_request(
             "body": resp.text[:2000],
             "duration_ms": duration_ms,
             "url": str(resp.url),
+            "request_evidence": scanner_svc._request_evidence(
+                f"{method} {resp.request.url}\n"
+                f"use_session: {use_session or 'anonymous'}\n"
+                f"{scanner_svc._sent_request_auth_summary(resp.request.headers)}"
+            ),
         }
     except Exception as exc:
         return {"error": str(exc), "status": None, "headers": {}, "body": ""}
@@ -1088,27 +1102,107 @@ async def _deterministic_validate_finding(
 ) -> tuple[str, str, dict | None] | None:
     if not _is_access_control_finding(finding):
         return None
-    if not cred_sessions:
-        return (
-            "unconfirmed",
-            "Access-control validation could not run because no alternate user sessions were available.",
-            None,
+
+    url = (finding.affected_url or "").strip()
+    if not url:
+        return None
+    method = _finding_validation_method(finding)
+    # Deterministic validation must not replay a potentially state-changing
+    # request. The adversarial validator can construct a safe near-no-op POST
+    # when the finding genuinely requires one.
+    if method not in {"GET", "HEAD"}:
+        return None
+
+    claim_text = " ".join(
+        [finding.title or "", finding.description or "", finding.evidence or ""]
+    ).lower()
+    claims_anonymous_access = any(
+        marker in claim_text
+        for marker in (
+            "unauthenticated",
+            "without authentication",
+            "without auth",
+            "missing authentication",
+            "no authentication",
+            "no auth",
+            "publicly accessible",
+            "public access",
         )
+    )
 
     with Session(get_engine()) as s:
         page = (
             s.get(CrawledPage, finding.page_id) if finding.page_id is not None else None
         )
-        accessible_by = json.loads(page.accessible_by or "[]") if page else []
+        # Page access observations are safe to use only when the finding points to
+        # that exact route. Dynamic findings can otherwise inherit the root page.
+        page_matches_finding = bool(page and _same_validation_route(page.url, url))
+        accessible_by = (
+            json.loads(page.accessible_by or "[]")
+            if page_matches_finding and page
+            else []
+        )
         page_text = page.page_text or "" if page else ""
         page_title = page.title or "" if page else ""
-
-    if not accessible_by:
-        return (
-            "unconfirmed",
-            "The crawl did not record a user that could access this page, so there is no access-control baseline to compare against.",
-            None,
+        baseline_bodies = list(
+            s.exec(
+                select(TrafficEntry.response_body)
+                .where(TrafficEntry.test_run_id == finding.test_run_id)
+                .where(TrafficEntry.url == url)
+                .where(TrafficEntry.status >= 200)
+                .where(TrafficEntry.status < 300)
+                .order_by(TrafficEntry.created_at.desc())
+                .limit(20)
+            ).all()
         )
+
+    # Missing-auth findings have a decisive, always-available actor: anonymous.
+    # Test it before consulting any account inventory.
+    if claims_anonymous_access:
+        anonymous_result = await _request_access_validation_actor(
+            finding,
+            scanner_policy,
+            method=method,
+            username="anonymous",
+            session=None,
+        )
+        if anonymous_result is None:
+            return None
+        anonymous_resp, anonymous_body = anonymous_result
+        if _response_denies_access(anonymous_resp) or _looks_like_spa_shell(
+            anonymous_body,
+            anonymous_resp.headers.get("content-type", ""),
+        ):
+            return (
+                "false_positive",
+                "A credential-free request to the exact affected URL was denied, redirected to login, or returned only a generic application shell.",
+                None,
+            )
+        evidence_match = _first_matching_response_evidence(
+            anonymous_body,
+            baseline_bodies,
+            page_title if page_matches_finding else "",
+            page_text if page_matches_finding else "",
+        )
+        if evidence_match:
+            return (
+                "confirmed",
+                f"A credential-free request to the exact affected URL returned HTTP {anonymous_resp.status_code} with content matching the protected response baseline.",
+                {
+                    "poc_request": {"method": "GET", "url": url},
+                    "poc_expect": {
+                        "status": anonymous_resp.status_code,
+                        "body_contains": evidence_match,
+                    },
+                },
+            )
+        # A real anonymous request ran, but the response could not be tied to the
+        # claimed protected content. Let the adversarial validator investigate;
+        # do not turn incomplete deterministic evidence into a terminal verdict.
+        return None
+
+    if not cred_sessions or not accessible_by:
+        return None
 
     unauthorized = {
         cred_id: session
@@ -1116,46 +1210,26 @@ async def _deterministic_validate_finding(
         if cred_id not in accessible_by
     }
     if not unauthorized:
-        return (
-            "unconfirmed",
-            "No lower-privileged or unauthorized user session was available to reproduce the access-control issue.",
-            None,
-        )
+        return None
 
-    url = finding.affected_url or ""
-    if not url:
-        return (
-            "unconfirmed",
-            "The finding did not include an affected URL to re-test.",
-            None,
-        )
-
+    completed_requests = 0
     for cred_id, session in unauthorized.items():
         username = session.get("username") or f"credential {cred_id}"
-        try:
-            from aespa.services.traffic import LoggingAsyncClient
-
-            async with LoggingAsyncClient(
-                run_id=finding.test_run_id,
-                username=username,
-                cookies=session.get("cookies", {}),
-                headers={"User-Agent": _UA, **session.get("extra_headers", {})},
-                timeout=scanner_policy.request_timeout_s,
-                follow_redirects=scanner_policy.follow_redirects,
-                verify=False,
-            ) as client:
-                resp = await client.get(url)
-        except Exception as exc:
-            return (
-                "unconfirmed",
-                f"Validation request as {username} failed: {exc}",
-                None,
-            )
+        actor_result = await _request_access_validation_actor(
+            finding,
+            scanner_policy,
+            method=method,
+            username=username,
+            session=session,
+        )
+        if actor_result is None:
+            continue
+        resp, body = actor_result
+        completed_requests += 1
 
         if _response_denies_access(resp):
             continue
 
-        body = resp.text[: scanner_policy.response_body_read_limit_bytes]
         content_type = resp.headers.get("content-type", "")
         if _looks_like_spa_shell(body, content_type):
             continue
@@ -1182,11 +1256,102 @@ async def _deterministic_validate_finding(
                 poc_spec,
             )
 
+    if completed_requests:
+        return (
+            "false_positive",
+            "Validation could not reproduce unauthorized access. Alternate users received an access denial, login response, generic application shell, or no protected content signal.",
+            None,
+        )
+    return None
+
+
+def _same_validation_route(left: str, right: str) -> bool:
+    left_url = urlparse(str(left or ""))
+    right_url = urlparse(str(right or ""))
     return (
-        "false_positive",
-        "Validation could not reproduce unauthorized access. Alternate users received an access denial, login response, generic SPA shell, or no protected content signal.",
-        None,
+        left_url.scheme.lower(),
+        left_url.netloc.lower(),
+        left_url.path.rstrip("/") or "/",
+    ) == (
+        right_url.scheme.lower(),
+        right_url.netloc.lower(),
+        right_url.path.rstrip("/") or "/",
     )
+
+
+def _finding_validation_method(finding: ScanFinding) -> str:
+    evidence = "\n".join(
+        [finding.request_evidence or "", finding.evidence or "", finding.title or ""]
+    )
+    match = re.search(r"(?:^|\n|\b)(GET|HEAD|POST|PUT|PATCH|DELETE)\s+\S+", evidence)
+    return match.group(1) if match else "GET"
+
+
+async def _request_access_validation_actor(
+    finding: ScanFinding,
+    scanner_policy,
+    *,
+    method: str,
+    username: str,
+    session: dict | None,
+) -> tuple[httpx.Response, str] | None:
+    from aespa.services.traffic import LoggingAsyncClient
+
+    try:
+        async with LoggingAsyncClient(
+            run_id=finding.test_run_id,
+            username=username,
+            cookies=(session or {}).get("cookies", {}),
+            headers={
+                "User-Agent": _UA,
+                **((session or {}).get("extra_headers", {})),
+            },
+            timeout=scanner_policy.request_timeout_s,
+            follow_redirects=scanner_policy.follow_redirects,
+            verify=False,
+        ) as client:
+            resp = await client.request(method, finding.affected_url)
+        body = resp.text[: scanner_policy.response_body_read_limit_bytes]
+        return resp, body
+    except Exception as exc:
+        log.info(
+            "Access-control validation request failed for finding=%s actor=%s: %s",
+            finding.id,
+            username,
+            exc,
+        )
+        return None
+
+
+def _first_matching_response_evidence(
+    body: str,
+    baseline_bodies: list[str | None],
+    page_title: str,
+    page_text: str,
+) -> str:
+    page_match = _first_page_evidence_match(body, page_title, page_text)
+    if page_match:
+        return page_match
+    candidate = re.sub(r"\s+", " ", body or "").strip()
+    if len(candidate) < 20:
+        return ""
+    for baseline in baseline_bodies:
+        expected = re.sub(r"\s+", " ", baseline or "").strip()
+        if len(expected) < 20:
+            continue
+        if (
+            candidate == expected
+            or difflib.SequenceMatcher(
+                None, candidate[:20000], expected[:20000]
+            ).ratio()
+            >= 0.85
+        ):
+            # Use a stable, bounded assertion marker rather than the whole body.
+            for marker in re.findall(r"[A-Za-z0-9_@./:-]{12,120}", candidate):
+                if marker.lower() not in {"application/json", "text/html"}:
+                    return marker
+            return candidate[:120]
+    return ""
 
 
 def _is_access_control_finding(finding: ScanFinding) -> bool:

@@ -3,6 +3,7 @@ import { api } from "../../lib/api";
 import { nav } from "../../lib/router";
 import { StatusBadge } from "../../components/StatusBadge";
 import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
+import { formatPhase, formatTerminalReason } from "../SiteDetail/_helpers";
 import { ApiRunStatusTab } from "./ApiRunStatusTab";
 import { ApiRunFindingsTab } from "./ApiRunFindingsTab";
 import { ApiRunLeadsTab } from "./ApiRunLeadsTab";
@@ -109,7 +110,10 @@ export function ApiTestRunDetail({
     const t = setInterval(() => {
       api.getApiScanStatus(runId).then(st => {
         setScanStatus(st);
-        if (!st.running) api.getApiRun(runId).then(setRun).catch(() => {});
+        // Refresh the full run record too — phase/outcome/terminal_reason only
+        // live there, and would otherwise stay stuck at whatever they were when
+        // the scan started until it finishes.
+        api.getApiRun(runId).then(setRun).catch(() => {});
       }).catch(() => {});
     }, 3000);
     return () => clearInterval(t);
@@ -163,7 +167,22 @@ export function ApiTestRunDetail({
         <Crumb href={run ? `#/apis/${run.collection_id}` : "#/apis"}>API collection</Crumb>
         <Sep />
         {run ? run.name : "…"}
-        {run && <> <StatusBadge status={run.status} /></>}
+        {run && (
+          <>
+            {" "}
+            <StatusBadge status={run.status} />
+            {run.phase && run.phase !== "created" && (
+              <span className="run-status-badge" style={{ marginLeft: 6, opacity: 0.85 }}>
+                phase: {formatPhase(run.phase)}
+              </span>
+            )}
+            {run.terminal_reason && (
+              <span className="run-status-badge" style={{ marginLeft: 6, color: run.outcome === "complete" ? "var(--ok)" : "var(--warn)" }}>
+                reason: {formatTerminalReason(run.terminal_reason)}
+              </span>
+            )}
+          </>
+        )}
       </>}
       actions={<>
         {scanRunning ? <button className="btn danger-outline" disabled={scanBusy} onClick={onStopScan}>

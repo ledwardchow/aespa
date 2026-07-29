@@ -1,12 +1,26 @@
 import { IconPlay, IconStop } from "../../components/Icons";
 import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
 
-const STATUS_COLOR = { neutral: "var(--muted)", pending: "var(--muted)", running: "var(--warn)", stopping: "var(--warn)", partial: "var(--text-2)", ok: "var(--ok)", danger: "var(--danger)" };
-
-export function WebRunHeader({ run, siteName, profiles, headerStatus, canStart, canStop, canStartScan, canStopScan, canResume, canImportCrawl, crawlStopping, scanStopping, coverageMode, onCoverageMode, onStart, onStop, onStartScan, onStopScan, onResume, onExportCrawl, onImportCrawl, aliceRunning, onStopAlice }) {
+export function WebRunHeader({ run, siteName, profiles, crawlerActive, testLeadActive, canStart, canStop, canStartScan, canStopScan, canResume, canImportCrawl, crawlStopping, scanStopping, coverageMode, onCoverageMode, onStart, onStop, onStartScan, onStopScan, onResume, onExportCrawl, onImportCrawl, aliceRunning, onStopAlice }) {
   const profile = profiles.find(item => item.id === run?.llm_profile_id);
   return <PageHeader titleStyle={{ flexDirection: "column", alignItems: "flex-start", gap: 2 }} title={<>
-    <div className="row" style={{ alignItems: "center", gap: 0 }}><Crumb href={run ? `#/sites/${run.site_id}` : "#/"}>{siteName || "Site"}</Crumb><Sep />{run ? run.name : "…"}{run && <span className={'run-status-badge' + (["running", "stopping"].includes(headerStatus.key) ? " running" : "")} style={{ color: STATUS_COLOR[headerStatus.key] || "var(--muted)" }}>● {headerStatus.label}</span>}</div>
+    <div className="row" style={{ alignItems: "center", gap: 0 }}>
+      <Crumb href={run ? `#/sites/${run.site_id}` : "#/"}>{siteName || "Site"}</Crumb>
+      <Sep />{run ? run.name : "…"}
+      {run && (
+        <span className="run-agent-badges">
+          <span className={`badge ${crawlerActive ? "ok" : "neutral"}`} title={`Crawler agent is ${crawlerActive ? "active" : "inactive"}`}>
+            Crawler {crawlerActive ? "active" : "inactive"}
+          </span>
+          <span className={`badge ${testLeadActive ? "ok" : "neutral"}`} title={`Test Lead agent is ${testLeadActive ? "active" : "inactive"}`}>
+            Test Lead {testLeadActive ? "active" : "inactive"}
+          </span>
+          <span className={`badge ${aliceRunning ? "ok" : "neutral"}`} title={`ALICE agent is ${aliceRunning ? "active" : "inactive"}`}>
+            ALICE {aliceRunning ? "active" : "inactive"}
+          </span>
+        </span>
+      )}
+    </div>
     {run?.llm_profile_id && profiles.length > 0 && <div style={{ fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>Profile: {profile?.name || '#' + run.llm_profile_id}</div>}
   </>} actions={<>
     {canStart && <button className="btn sm" onClick={onStart}><IconPlay /> Start crawl</button>}

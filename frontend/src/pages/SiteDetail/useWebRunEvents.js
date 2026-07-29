@@ -101,6 +101,16 @@ export function useWebRunEvents(options) {
         });
       } else if (evt.type === "thinking_scan_update") {
         setThinkingStatus(evt);
+        // Keep the header's phase/outcome/reason badges live during the dynamic
+        // scan — these fields on `run` are otherwise only refreshed by the
+        // initial load or the crawl-only poll, so they'd get stuck once the
+        // scan phase started.
+        setRun(prev => prev ? {
+          ...prev,
+          phase: evt.run_phase ?? prev.phase,
+          outcome: evt.run_outcome ?? prev.outcome,
+          terminal_reason: evt.run_terminal_reason ?? prev.terminal_reason
+        } : prev);
         if (evt.status && !isDynamicScanActive(evt.status)) {
           setThinkingStopReq(false);
           if (setCheckpointStatus) {

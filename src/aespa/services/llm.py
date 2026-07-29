@@ -328,6 +328,7 @@ def set_run_context(run_id: int, emit_fn: Any, run_kind: str = "web") -> None:
                     "cache_read",
                     "cache_write",
                     "ai_credits",
+                    "factory_credits",
                     "premium_requests",
                     "requests",
                 ):
@@ -377,6 +378,9 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
         "total_cache_write": sum(v.get("cache_write", 0) for v in bucket.values()),
         "total_ai_credits": sum(v.get("ai_credits", 0) for v in bucket.values()),
+        "total_factory_credits": sum(
+            v.get("factory_credits", 0) for v in bucket.values()
+        ),
         "total_premium_requests": sum(
             v.get("premium_requests", 0) for v in bucket.values()
         ),
@@ -396,6 +400,7 @@ def _record_usage(
     usage_context: _UsageContext | None = None,
     provider: str | None = None,
     ai_credits: float = 0,
+    factory_credits: float = 0,
     premium_requests: float = 0,
     requests: int = 0,
     copilot_quota: dict[str, Any] | None = None,
@@ -421,9 +426,8 @@ def _record_usage(
     if provider:
         entry["provider"] = provider
     entry["ai_credits"] = entry.get("ai_credits", 0) + ai_credits
-    entry["premium_requests"] = (
-        entry.get("premium_requests", 0) + premium_requests
-    )
+    entry["factory_credits"] = entry.get("factory_credits", 0) + factory_credits
+    entry["premium_requests"] = entry.get("premium_requests", 0) + premium_requests
     entry["requests"] = entry.get("requests", 0) + requests
     if copilot_quota:
         entry["copilot_quota"] = copilot_quota
@@ -440,6 +444,7 @@ def _record_usage(
                     "cache_read_tokens": cache_read_tokens,
                     "cache_write_tokens": cache_write_tokens,
                     "ai_credits": ai_credits,
+                    "factory_credits": factory_credits,
                     "premium_requests": premium_requests,
                     "totals": _usage_totals(bucket),
                 }
@@ -596,6 +601,17 @@ def _strip_thinking_blocks(raw: str) -> str:
         text = re.sub(
             rf"<{tag}\b[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE
         )
+        # Handle unclosed reasoning tags (e.g. <think> without matching </think>)
+        if re.search(rf"<{tag}\b[^>]*>", text, flags=re.IGNORECASE):
+            # If an explicit final output marker exists after the tag, strip up to the marker
+            m_marker = re.search(
+                r"(?is)(?:final\s+(?:output|answer|json)|output|result)\s*:?\s*",
+                text,
+            )
+            if m_marker:
+                text = text[m_marker.end() :]
+            else:
+                text = re.sub(rf"<{tag}\b[^>]*>", "", text, flags=re.IGNORECASE)
 
     # Some local/OpenRouter reasoning models emit pseudo-markup blocks without a
     # closing tag when they are interrupted near the final JSON.
@@ -610,9 +626,11 @@ def _extract_json(raw: str, expect: type = list) -> Any:
 
     Handles:
     - <think>...</think> reasoning blocks (Gemma, QwQ, DeepSeek-R1, etc.)
+    - Unclosed <think> blocks
     - Markdown code fences (```json ... ```)
     - Preamble / explanation text before the JSON
     - Trailing prose after the closing bracket
+    - Multiple top-level JSON blocks (prefers the last valid container)
     """
     if not raw:
         raise ValueError("empty response")
@@ -627,51 +645,66 @@ def _extract_json(raw: str, expect: type = list) -> Any:
     except json.JSONDecodeError:
         pass
 
-    # Find the first balanced JSON container matching `expect` that parses.
     open_ch = "[" if expect is list else "{"
     close_ch = "]" if expect is list else "}"
-    starts = [i for i, ch in enumerate(text) if ch == open_ch]
-    if not starts:
-        # Stripped text has no JSON delimiters — the model may have embedded the answer
-        # inside a thinking block.  Try searching the un-stripped original text so we can
-        # still extract JSON that appears within <think>...</think> tags.
-        raw_no_fence = (
-            re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
-        )
-        alt_starts = [i for i, ch in enumerate(raw_no_fence) if ch == open_ch]
-        if alt_starts:
-            text = raw_no_fence
-            starts = alt_starts
-        else:
-            raise ValueError(f"no '{open_ch}' found in LLM response")
 
-    for start in starts:
-        depth = 0
-        in_str = False
-        escape = False
-        for i, ch in enumerate(text[start:], start):
-            if escape:
-                escape = False
+    def _find_valid_containers(src_text: str) -> list[Any]:
+        candidates: list[Any] = []
+        idx = 0
+        n = len(src_text)
+        while idx < n:
+            if src_text[idx] != open_ch:
+                idx += 1
                 continue
-            if ch == "\\" and in_str:
-                escape = True
-                continue
-            if ch == '"' and not escape:
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if ch == open_ch:
-                depth += 1
-            elif ch == close_ch:
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start : i + 1])
-                    except json.JSONDecodeError:
+            depth = 0
+            in_str = False
+            escape = False
+            parsed_end = None
+            for i in range(idx, n):
+                ch = src_text[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\" and in_str:
+                    escape = True
+                    continue
+                if ch == '"' and not escape:
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if ch == open_ch:
+                    depth += 1
+                elif ch == close_ch:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            val = json.loads(src_text[idx : i + 1])
+                            candidates.append(val)
+                            parsed_end = i
+                        except json.JSONDecodeError:
+                            pass
                         break
+            if parsed_end is not None:
+                idx = parsed_end + 1
+            else:
+                idx += 1
+        return candidates
 
-    raise ValueError("could not extract balanced JSON from LLM response")
+    valid_containers = _find_valid_containers(text)
+    if valid_containers:
+        # Prefer the last valid top-level JSON container (the final answer block)
+        return valid_containers[-1]
+
+    # Stripped text has no valid JSON delimiters — try un-stripped original text
+    raw_no_fence = (
+        re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
+    )
+    raw_containers = _find_valid_containers(raw_no_fence)
+    if raw_containers:
+        return raw_containers[-1]
+
+    raise ValueError(f"no valid '{open_ch}' container found in LLM response")
 
 
 def _extract_action_json(raw: str) -> dict:
@@ -826,7 +859,7 @@ async def decide_login_action(
     *,
     url: str,
     observation: str,
-    username_hint: str,
+    credential_fields: list[dict],
     history: list[str],
     screenshot_b64: Optional[str] = None,
 ) -> dict:
@@ -834,14 +867,18 @@ async def decide_login_action(
 
     Returns ``{"action", "selector", "text", "value", "reason"}`` where
     ``action`` is one of fill/click/press/done/give_up. Used by the crawler's
-    LLM-driven login fallback. The model returns ``{{username}}`` / ``{{password}}``
-    placeholders rather than real secrets — the crawler substitutes them locally.
+    LLM-driven login fallback. The model returns configured placeholder tokens
+    rather than real values — the crawler substitutes them locally.
     On any parse failure this returns a ``give_up`` action so the caller stops
     cleanly rather than raising.
     """
     history_text = "\n".join(f"- {h}" for h in history[-12:]) or "(none yet)"
+    fields_text = "\n".join(
+        f"- {field['label']}: {{{{credential.{field['key']}}}}}"
+        for field in credential_fields
+    )
     prompt = LOGIN_ACTION_PROMPT.format(
-        username_hint=username_hint or "(see credential)",
+        credential_fields=fields_text or "(none configured)",
         url=url,
         observation=observation[:6000],
         history=history_text,
@@ -904,6 +941,8 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     limiter = get_limiter_for_config(config)
     if limiter is None:
+        if config.provider == "factory_droid":
+            return await _factory_droid(config, prompt, screenshot_b64)
         if config.provider == "github_copilot":
             return await _github_copilot(config, prompt, screenshot_b64)
         if config.provider == "anthropic":
@@ -939,7 +978,9 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     )
 
     try:
-        if config.provider == "github_copilot":
+        if config.provider == "factory_droid":
+            resp = await _factory_droid(config, prompt, screenshot_b64)
+        elif config.provider == "github_copilot":
             resp = await _github_copilot(config, prompt, screenshot_b64)
         elif config.provider == "anthropic":
             resp = await _anthropic(config, prompt, screenshot_b64)
@@ -991,7 +1032,7 @@ async def stream_chat_completion(
     messages: list[dict],
 ) -> AsyncGenerator[str, None]:
     """Stream a chat completion from the configured LLM provider in real-time."""
-    if config.provider == "github_copilot":
+    if config.provider in ("factory_droid", "github_copilot"):
         # Copilot's full response still travels through the same provider adapter.
         # Yielding it as one chunk preserves this public generator contract.
         combined = "\n\n".join(
@@ -1004,7 +1045,10 @@ async def stream_chat_completion(
                 ],
             ]
         )
-        yield await _github_copilot(config, combined, None)
+        if config.provider == "factory_droid":
+            yield await _factory_droid(config, combined, None)
+        else:
+            yield await _github_copilot(config, combined, None)
     elif config.provider == "anthropic":
         import anthropic as _ant
 
@@ -1453,6 +1497,46 @@ async def _github_copilot(
         _copilot_usage_callback(),
         _llm_proxy_var.get(),
     )
+
+
+async def _factory_droid(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    """Call Factory through the installed Droid CLI and its signed-in account."""
+    from aespa.services import droid_provider
+
+    return await droid_provider.plain_completion(
+        config,
+        prompt,
+        screenshot_b64,
+        _droid_usage_callback(),
+        _llm_proxy_var.get(),
+    )
+
+
+def _droid_usage_callback() -> Any:
+    usage_context = _capture_usage_context()
+
+    def record(
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        **details: Any,
+    ) -> None:
+        _record_usage(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            usage_context=usage_context,
+            provider="factory_droid",
+            **details,
+        )
+
+    return record
 
 
 def _copilot_usage_callback() -> Any:
@@ -3042,11 +3126,84 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 # ── Continuous agentic session (Anthropic native tool use) ────────────────────
 
 TOOL_RESULT_CHAR_LIMIT = 8_000
+CONTEXT_TOOL_RESULT_CHAR_LIMIT = 12_000
+
+
+def compact_agentic_messages(
+    messages: list[dict],
+    *,
+    max_context_chars: int,
+    recent_messages: int = 32,
+) -> tuple[list[dict], dict[str, int] | None]:
+    """Compact completed tool exchanges while preserving protocol-valid pairs.
+
+    The first user brief is retained. Older assistant/tool-result pairs become a
+    short mechanical journal, and a recent suffix remains verbatim. Raw secrets
+    and full response bodies are deliberately excluded from the journal.
+    """
+    before_chars = len(json.dumps(messages, default=str))
+    if max_context_chars <= 0 or before_chars <= max_context_chars or len(messages) < 8:
+        return messages, None
+
+    suffix_start = max(1, len(messages) - max(8, recent_messages))
+    while (
+        suffix_start < len(messages)
+        and messages[suffix_start].get("role") != "assistant"
+    ):
+        suffix_start += 1
+    if suffix_start >= len(messages) - 1:
+        return messages, None
+
+    removed = messages[1:suffix_start]
+    journal_lines: list[str] = []
+    for message in removed:
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_input = (
+                    block.get("input") if isinstance(block.get("input"), dict) else {}
+                )
+                details = [str(block.get("name") or "tool")]
+                for key in ("method", "url", "owasp_category", "test_class", "title"):
+                    value = tool_input.get(key)
+                    if value not in (None, ""):
+                        details.append(f"{key}={str(value)[:240]}")
+                journal_lines.append("- " + " ".join(details))
+            elif block.get("type") == "tool_result":
+                result = str(block.get("content") or "").replace("\n", " ").strip()
+                if result:
+                    journal_lines.append(f"  result: {result[:360]}")
+
+    journal = (
+        f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
+        "Use context tools for full durable evidence.]\n"
+        + "\n".join(journal_lines[-80:])
+    )[:16_000]
+    first = dict(messages[0])
+    first_content = first.get("content")
+    if isinstance(first_content, list):
+        first["content"] = list(first_content) + [{"type": "text", "text": journal}]
+    else:
+        first["content"] = f"{first_content or ''}\n\n{journal}"
+    compacted = [first, *messages[suffix_start:]]
+    after_chars = len(json.dumps(compacted, default=str))
+    return compacted, {
+        "before_chars": before_chars,
+        "after_chars": after_chars,
+        "removed_messages": len(removed),
+        "remaining_messages": len(compacted),
+    }
+
+
 # All providers that support native tool use and therefore run the continuous
 # agentic session.  Non-Anthropic providers use the OpenAI function-calling
 # wire format or the Bedrock Runtime toolConfig format.
 AGENTIC_LOOP_PROVIDERS = frozenset(
     {
+        "factory_droid",
         "github_copilot",
         "anthropic",
         "azure_foundry_anthropic",
@@ -3199,6 +3356,17 @@ async def _call_with_tools_impl(
     Anthropic-format so the growing messages list stays consistent).
     """
     _active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    if config.provider == "factory_droid":
+        from aespa.services import droid_provider
+
+        return await droid_provider.completion_with_tools(
+            config,
+            system_message,
+            messages,
+            _active_tools,
+            _droid_usage_callback(),
+            _llm_proxy_var.get(),
+        )
     if config.provider == "github_copilot":
         from aespa.services import copilot_provider
 
@@ -3934,10 +4102,15 @@ async def thinking_agentic_loop(
     after_tool_result=None,
     termination_check=None,
     resume_messages: list[dict] | None = None,
+    resume_step_count: int = 0,
     on_checkpoint=None,
     tools: list[dict] | None = None,
     before_tool_execution=None,
     after_tool_rejection=None,
+    execution_monitor_enabled: bool = True,
+    max_consecutive_text_turns: int = 3,
+    max_context_chars: int = 0,
+    on_context_compaction=None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -3953,7 +4126,12 @@ async def thinking_agentic_loop(
         instead of building a fresh one from initial_user_message.  Used when
         resuming an interrupted scan.
 
-    on_checkpoint: optional async callable ``(messages: list[dict]) -> None``
+    resume_step_count: the step number the conversation had already reached
+        before the resume (e.g. from a checkpoint's persisted step_count), so
+        the loop's own step numbering continues (Step N+1, N+2, …) instead of
+        restarting at Step 1 while the LLM sees N prior turns in its context.
+
+    on_checkpoint: optional async callable ``(messages: list[dict], step_count: int) -> None``
         invoked after every completed LLM turn so the caller can persist the
         current conversation state to durable storage.
 
@@ -3964,7 +4142,7 @@ async def thinking_agentic_loop(
 
     Returns the summary string from the final ``done`` call (empty string otherwise).
     """
-    if before_tool_execution:
+    if before_tool_execution and execution_monitor_enabled:
         from aespa.services.execution_monitor import add_strategy_justification_to_tools
 
         tools = add_strategy_justification_to_tools(
@@ -4018,7 +4196,7 @@ async def thinking_agentic_loop(
             }
     else:
         messages: list[dict] = [{"role": "user", "content": initial_user_message}]
-    tool_call_count = 0
+    tool_call_count = resume_step_count
     final_summary = ""
     consecutive_text_only_turns = 0
 
@@ -4070,6 +4248,34 @@ async def thinking_agentic_loop(
                         except Exception:
                             pass
                     break
+
+            messages, compaction = compact_agentic_messages(
+                messages,
+                max_context_chars=max_context_chars,
+            )
+            if compaction:
+                if on_context_compaction:
+                    try:
+                        on_context_compaction(compaction)
+                    except Exception:
+                        pass
+                if emit_fn:
+                    try:
+                        emit_fn(
+                            {
+                                "type": "scanner_phase",
+                                "phase": "context_compaction",
+                                "status": "complete",
+                                "message": (
+                                    "Compacted older model context from "
+                                    f"{compaction['before_chars']:,} to "
+                                    f"{compaction['after_chars']:,} characters."
+                                ),
+                                "data": compaction,
+                            }
+                        )
+                    except Exception:
+                        pass
 
             if emit_fn:
                 try:
@@ -4265,7 +4471,10 @@ async def thinking_agentic_loop(
                 if text_blocks:
                     final_summary = (text_blocks[-1].get("text") or "")[:500]
                 consecutive_text_only_turns += 1
-                if consecutive_text_only_turns >= 3:
+                if (
+                    max_consecutive_text_turns > 0
+                    and consecutive_text_only_turns >= max_consecutive_text_turns
+                ):
                     log.warning(
                         "thinking_agentic_loop: model returned %d consecutive text-only turns; ending assessment.",
                         consecutive_text_only_turns,
@@ -4279,7 +4488,7 @@ async def thinking_agentic_loop(
                                     "status": "error",
                                     "message": (
                                         f"Step {tool_call_count + 1}: scan loop terminated "
-                                        "after 3 consecutive responses without a tool call; "
+                                        f"after {max_consecutive_text_turns} consecutive responses without a tool call; "
                                         "the model did not call done."
                                     ),
                                     "data": {
@@ -4437,7 +4646,11 @@ async def thinking_agentic_loop(
                             "thinking_agentic_loop: after_tool_result failed: %s", exc
                         )
 
-                limit = 30000 if tool_name == "context_tool" else TOOL_RESULT_CHAR_LIMIT
+                limit = (
+                    CONTEXT_TOOL_RESULT_CHAR_LIMIT
+                    if tool_name == "context_tool"
+                    else TOOL_RESULT_CHAR_LIMIT
+                )
                 if len(result_str) > limit:
                     omitted = len(result_str) - limit
                     result_str = (
@@ -4458,7 +4671,7 @@ async def thinking_agentic_loop(
 
             if on_checkpoint:
                 try:
-                    await on_checkpoint(messages)
+                    await on_checkpoint(messages, tool_call_count)
                 except Exception:
                     pass  # checkpoint write failures must never abort the scan
 
@@ -4466,18 +4679,23 @@ async def thinking_agentic_loop(
                 break
 
     finally:
-        if config.provider == "github_copilot":
+        if config.provider in ("factory_droid", "github_copilot"):
             try:
-                from aespa.services import copilot_provider
+                if config.provider == "factory_droid":
+                    from aespa.services import droid_provider
 
-                await copilot_provider.close_conversation(messages)
+                    await droid_provider.close_conversation(messages)
+                else:
+                    from aespa.services import copilot_provider
+
+                    await copilot_provider.close_conversation(messages)
             except Exception:
-                log.debug("Failed to close Copilot conversation", exc_info=True)
+                log.debug("Failed to close provider conversation", exc_info=True)
         # Save a final checkpoint on any exit — including CancelledError raised
         # by task.cancel() — so the conversation state is always recoverable.
         if on_checkpoint and len(messages) > 1:
             try:
-                await on_checkpoint(messages)
+                await on_checkpoint(messages, tool_call_count)
             except Exception:
                 pass
 

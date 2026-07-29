@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -12,7 +14,7 @@ from aespa.db import get_engine
 from aespa.models import ScannerSession
 from aespa.schemas import ScannerSessionValidationItem, ScannerSessionValidationResult
 
-_INVALID_SESSION_STATUSES = {401, 403, 419, 440}
+_INVALID_SESSION_STATUSES = {401, 419, 440}
 
 
 def _utcnow() -> datetime:
@@ -32,10 +34,16 @@ def stable_label(raw: str, existing: set[str] | None = None) -> str:
     return label
 
 
-def credential_label(username: str | None, *, primary: bool = False) -> str:
+def credential_label(
+    username: str | None,
+    *,
+    primary: bool = False,
+    existing: set[str] | None = None,
+) -> str:
     if primary:
-        return "configured_primary"
-    return stable_label(f"configured_{username or 'user'}")
+        base = stable_label(username or "user")
+        return stable_label(f"{base}_{secrets.token_hex(3)}", existing)
+    return stable_label(f"configured_{username or 'user'}", existing)
 
 
 def _json_dump(value: dict[str, Any] | None) -> str:
@@ -65,6 +73,21 @@ def _token_hint(extra_headers: dict[str, Any] | None) -> str | None:
     return f"{token[:8]}...{token[-6:]}"
 
 
+def _token_fingerprint(extra_headers: dict[str, Any] | None) -> str | None:
+    auth = next(
+        (
+            str(value)
+            for key, value in (extra_headers or {}).items()
+            if str(key).lower() == "authorization"
+        ),
+        "",
+    )
+    if not auth:
+        return None
+    token = auth.split(None, 1)[-1]
+    return hashlib.sha256(token.encode("utf-8", errors="replace")).hexdigest()
+
+
 def upsert_session(
     run_id: int,
     *,
@@ -78,9 +101,12 @@ def upsert_session(
     extra_headers: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
     run_kind: str = "web",
+    lifecycle_state: str | None = None,
+    validation_url: str | None = None,
 ) -> ScannerSession:
     normalized_label = stable_label(label)
     now = _utcnow()
+    fingerprint = _token_fingerprint(extra_headers)
     with Session(get_engine()) as session:
         existing = session.exec(
             select(ScannerSession)
@@ -88,6 +114,13 @@ def upsert_session(
             .where(ScannerSession.run_kind == run_kind)
             .where(ScannerSession.label == normalized_label)
         ).first()
+        if existing is None and fingerprint:
+            existing = session.exec(
+                select(ScannerSession)
+                .where(ScannerSession.test_run_id == run_id)
+                .where(ScannerSession.run_kind == run_kind)
+                .where(ScannerSession.token_fingerprint == fingerprint)
+            ).first()
         record = existing or ScannerSession(
             test_run_id=run_id, run_kind=run_kind, label=normalized_label
         )
@@ -106,6 +139,13 @@ def upsert_session(
         record.extra_headers_json = _json_dump(extra_headers)
         record.session_metadata = _json_dump(metadata)
         record.token_hint = _token_hint(extra_headers)
+        record.token_fingerprint = fingerprint
+        if lifecycle_state is not None:
+            record.lifecycle_state = lifecycle_state
+        elif existing is None:
+            record.lifecycle_state = "active" if kind == "anonymous" else "candidate"
+        if validation_url is not None:
+            record.validation_url = validation_url
         record.is_active = True
         record.updated_at = now
         if existing is None:
@@ -128,6 +168,7 @@ def ensure_anonymous_session(
         extra_headers={},
         metadata={"description": "No cookies or Authorization header"},
         run_kind=run_kind,
+        lifecycle_state="active",
     )
 
 
@@ -160,8 +201,52 @@ def load_session_vault(
             "cookies": _json_load(record.cookies_json),
             "extra_headers": _json_load(record.extra_headers_json),
             "metadata": _json_load(record.session_metadata),
+            "lifecycle_state": record.lifecycle_state,
+            "validation_url": record.validation_url,
         }
     return vault
+
+
+def record_session_probe_result(
+    run_id: int,
+    label: str,
+    status_code: int,
+    *,
+    run_kind: str = "web",
+    validation_url: str | None = None,
+) -> None:
+    """Persist the lifecycle result of using a session on a real target route."""
+    now = _utcnow()
+    with Session(get_engine()) as session:
+        record = session.exec(
+            select(ScannerSession)
+            .where(ScannerSession.test_run_id == run_id)
+            .where(ScannerSession.run_kind == run_kind)
+            .where(ScannerSession.label == stable_label(label))
+        ).first()
+        if record is None:
+            return
+        status = int(status_code or 0)
+        record.last_status = status or None
+        record.last_validated_at = now
+        if validation_url:
+            record.validation_url = validation_url
+        if record.kind == "anonymous":
+            # Anonymous is a deliberate no-auth probe identity, not a credential that
+            # can "expire". 401/419/440 only mean the tested endpoint requires auth.
+            record.lifecycle_state = "verified"
+            record.is_active = True
+        elif status in _INVALID_SESSION_STATUSES:
+            record.lifecycle_state = "invalid"
+            record.is_active = False
+        elif 200 <= status < 500:
+            record.lifecycle_state = "verified"
+            record.is_active = True
+        # Transport failures and 5xx responses are inconclusive and do not alter
+        # the previous lifecycle state.
+        record.updated_at = now
+        session.add(record)
+        session.commit()
 
 
 async def _probe_session(
@@ -213,7 +298,7 @@ async def validate_active_sessions(
             continue
 
         result.checked += 1
-        url = (probe_urls or {}).get(record.id, default_url)
+        url = (probe_urls or {}).get(record.id, record.validation_url or default_url)
         try:
             status_code = await request_fn(url, headers, cookies)
         except Exception as exc:
@@ -230,11 +315,18 @@ async def validate_active_sessions(
 
         if status_code in _INVALID_SESSION_STATUSES:
             record.is_active = False
+            record.lifecycle_state = "invalid"
             record.updated_at = now
             db.add(record)
             result.evicted += 1
             outcome = "evicted"
-        elif 200 <= status_code < 400:
+        elif 200 <= status_code < 500:
+            record.lifecycle_state = "verified"
+            record.last_status = status_code
+            record.last_validated_at = now
+            record.validation_url = url
+            record.updated_at = now
+            db.add(record)
             result.valid += 1
             outcome = "valid"
         else:
@@ -258,6 +350,6 @@ async def validate_active_sessions(
             )
         )
 
-    if result.evicted:
+    if result.checked:
         db.commit()
     return result
