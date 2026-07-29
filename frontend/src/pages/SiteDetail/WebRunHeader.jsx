@@ -1,5 +1,6 @@
 import { IconPlay, IconStop } from "../../components/Icons";
 import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
+import { formatPhase, formatTerminalReason } from "./_helpers";
 
 const STATUS_COLOR = { neutral: "var(--muted)", pending: "var(--muted)", running: "var(--warn)", stopping: "var(--warn)", partial: "var(--text-2)", ok: "var(--ok)", danger: "var(--danger)" };
 
@@ -14,14 +15,14 @@ export function WebRunHeader({ run, siteName, profiles, headerStatus, canStart, 
           ● {headerStatus.label}
         </span>
       )}
-      {run?.phase && (
+      {run?.phase && run.phase !== "created" && (
         <span className="run-status-badge" style={{ marginLeft: 6, opacity: 0.85 }}>
-          phase: {run.phase}
+          phase: {formatPhase(run.phase)}
         </span>
       )}
       {run?.terminal_reason && (
         <span className="run-status-badge" style={{ marginLeft: 6, color: run.outcome === "complete" ? "var(--ok)" : "var(--warn)" }}>
-          reason: {run.terminal_reason.replace(/_/g, " ")}
+          reason: {formatTerminalReason(run.terminal_reason)}
         </span>
       )}
     </div>
