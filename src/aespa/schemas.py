@@ -713,6 +713,7 @@ class ScannerPolicyBase(BaseModel):
     follow_redirects: bool = True
     allow_subdomains: bool = True
     require_approval_for_destructive: bool = True
+    strict_locator_enforcement: bool = True
 
     @field_validator("methods_by_mode", mode="before")
     @classmethod
@@ -778,6 +779,9 @@ class RunScannerPolicyOut(ScannerPolicyBase):
 
 class CrawlerConfigBase(BaseModel):
     js_endpoint_discovery_enabled: bool = False
+    skip_dangerous_actions: bool = True
+    suppress_form_submit_actions: bool = True
+    block_non_idempotent_interactive_replay: bool = True
 
 
 class CrawlerConfigIn(CrawlerConfigBase):

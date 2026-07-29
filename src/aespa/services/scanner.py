@@ -456,7 +456,9 @@ async def _dispatch_http_request(
     """
     from aespa.services import traffic as traffic_svc
 
-    use_browser = selected_session is None and traffic_svc.get_cached_waf(run_id) is not None
+    use_browser = (
+        selected_session is None and traffic_svc.get_cached_waf(run_id) is not None
+    )
     if not use_browser:
         if isinstance(body, dict):
             headers.setdefault("Content-Type", "application/json")
@@ -490,7 +492,6 @@ async def _dispatch_http_request(
         text=text,
         sent_headers=dict(headers),
     )
-
 
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -6026,13 +6027,12 @@ async def _do_thinking_scan(run_id: int) -> None:
             and creds
             and (cookie_jar or _authorization_header(extra_headers))
         ):
-            configured_primary_label = (
-                str((_primary_vault_session or {}).get("label") or "").strip()
-                or session_svc.credential_label(
-                    creds[0].username,
-                    primary=True,
-                    existing=set(session_vault.keys()),
-                )
+            configured_primary_label = str(
+                (_primary_vault_session or {}).get("label") or ""
+            ).strip() or session_svc.credential_label(
+                creds[0].username,
+                primary=True,
+                existing=set(session_vault.keys()),
             )
             browser_metadata = {
                 "login_url": _login_url_for_credential(login_url, creds[0]),
@@ -6417,8 +6417,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     steps = action.get("steps") or []
                     use_session = action.get("use_session") or action.get("as_session")
                     use_session = use_session if isinstance(use_session, str) else None
-                    use_session, selected_session, _ = (
-                        _resolve_requested_scan_session(session_vault, use_session)
+                    use_session, selected_session, _ = _resolve_requested_scan_session(
+                        session_vault, use_session
                     )
                     payload_summary = _thinking_browser_payload_summary(steps)
                     action_message = _thinking_action_log_message(
@@ -6856,8 +6856,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     )
                     use_session = action.get("use_session") or action.get("as_session")
                     use_session = use_session if isinstance(use_session, str) else None
-                    use_session, selected_session, _ = (
-                        _resolve_requested_scan_session(session_vault, use_session)
+                    use_session, selected_session, _ = _resolve_requested_scan_session(
+                        session_vault, use_session
                     )
                     body_format = str(action.get("body_format") or "json").lower()
                     action_message = _thinking_action_log_message(
@@ -7015,8 +7015,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     body = action.get("body")
                     use_session = action.get("use_session") or action.get("as_session")
                     use_session = use_session if isinstance(use_session, str) else None
-                    use_session, selected_session, _ = (
-                        _resolve_requested_scan_session(session_vault, use_session)
+                    use_session, selected_session, _ = _resolve_requested_scan_session(
+                        session_vault, use_session
                     )
                     action_message = _thinking_action_log_message(
                         step, method, url, action
@@ -7757,13 +7757,12 @@ async def _do_agentic_thinking_loop(
             # Refresh session vault
             if new_cookies:
                 prev = session_vault.get("configured_primary") or {}
-                configured_primary_label = (
-                    str(prev.get("label") or "").strip()
-                    or session_svc.credential_label(
-                        creds[0].username,
-                        primary=True,
-                        existing=set(session_vault.keys()),
-                    )
+                configured_primary_label = str(
+                    prev.get("label") or ""
+                ).strip() or session_svc.credential_label(
+                    creds[0].username,
+                    primary=True,
+                    existing=set(session_vault.keys()),
                 )
                 session_vault["configured_primary"] = {
                     **prev,
@@ -10629,11 +10628,11 @@ _STATIC_ASSET_EXTENSIONS: tuple[str, ...] = _BROWSER_SKIP_EXTENSIONS + (".js", "
 # "unauthenticated access to a protected endpoint".
 # Examples: /api/public-config, /api/public-holidays, /health, /healthz, /ping.
 _EXPLICITLY_PUBLIC_INFRA_PREFIXES: tuple[str, ...] = (
-    "health",   # /health, /healthz, /health-check
+    "health",  # /health, /healthz, /health-check
     "ping",
     "status",
     "version",
-    "ready",    # /ready, /readyz
+    "ready",  # /ready, /readyz
     "liveness",
 )
 
@@ -11110,6 +11109,9 @@ async def _run_thinking_browser_action(
     timeout_ms = int(
         (scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT) * 1000
     )
+    strict_locators = (
+        scanner_policy.strict_locator_enforcement if scanner_policy else True
+    )
     last_status: Optional[int] = None
     last_headers: dict = {}
     action_log: list[str] = []
@@ -11237,7 +11239,13 @@ async def _run_thinking_browser_action(
                     )
                     value = str(raw_step.get("value") or "")
                     if locator is None:
-                        action_log.append(f"{op} skipped: missing locator")
+                        if strict_locators:
+                            action_log.append(
+                                f"{op} failed: missing locator (requires selector, "
+                                "testid, or role+name)"
+                            )
+                        else:
+                            action_log.append(f"{op} skipped: missing locator")
                         continue
                     action_log.append(
                         f"{op} {selector}={_compact_log_value(value, 120)}"
@@ -11255,7 +11263,13 @@ async def _run_thinking_browser_action(
                         or f"{raw_step.get('role')}:{raw_step.get('name')}"
                     )
                     if locator is None:
-                        action_log.append(f"{op} skipped: missing locator")
+                        if strict_locators:
+                            action_log.append(
+                                f"{op} failed: missing locator (requires selector, "
+                                "testid, or role+name)"
+                            )
+                        else:
+                            action_log.append(f"{op} skipped: missing locator")
                         continue
                     action_log.append(f"{op} {target}")
                     if op == "select_option":

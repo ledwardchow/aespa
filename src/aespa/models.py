@@ -365,6 +365,7 @@ class ScannerPolicy(SQLModel, table=True):
     follow_redirects: bool = Field(default=True)
     allow_subdomains: bool = Field(default=True)
     require_approval_for_destructive: bool = Field(default=True)
+    strict_locator_enforcement: bool = Field(default=True)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -375,6 +376,9 @@ class CrawlerConfig(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     js_endpoint_discovery_enabled: bool = Field(default=False)
+    skip_dangerous_actions: bool = Field(default=True)
+    suppress_form_submit_actions: bool = Field(default=True)
+    block_non_idempotent_interactive_replay: bool = Field(default=True)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -584,7 +588,9 @@ class TestRun(SQLModel, table=True):
     waf_evidence: Optional[str] = Field(default=None)
     # When set, the crawl runs as this single credential only (no anon phase,
     # no other credentials).  NULL = crawl all phases (default behaviour).
-    crawl_credential_id: Optional[int] = Field(default=None, foreign_key="credential.id")
+    crawl_credential_id: Optional[int] = Field(
+        default=None, foreign_key="credential.id"
+    )
 
 
 class CrawledPage(SQLModel, table=True):
