@@ -57,6 +57,11 @@ Frontend refactoring notes:
 - Runtime config is env-only via `pydantic-settings`, prefix `AESPA_` (see `config.py`): `AESPA_DATABASE_URL`, `AESPA_HOST`, `AESPA_PORT`. Copy `.env.example` to `.env`.
 - LLM provider config is not in env. It lives in the DB and is edited through the UI. `LLMProviderConfig` holds reusable connections, keys, and rate limits; `LLMConfig` is a runtime profile selecting a provider and model.
 - Supported LLM provider formats include anthropic, openai, openai_compatible, openrouter, google, bedrock, azure_openai, and azure_foundry. The multi-provider client lives in `services/llm.py`.
+- Provider model discovery: Endpoint `GET /api/llm/models` dynamically discovers models for SDK-backed providers (e.g. `factory_droid`, `github_copilot`) via provider clients (`droid_provider.discover_models()`, `copilot_provider.discover_models()`) while preserving `PROVIDER_DEFAULT_MODELS` as fallback choices.
+
+## Sandbox Execution Notes
+
+- When inspecting Python virtual environments or installed packages under sandbox mode, `uv run` may attempt network fetches and `python` binaries managed by `pyenv` may trigger `dyld` file sandbox blocks on `~/.pyenv/versions/`. Prefer inspecting `.venv` package source files directly via `view_file`, `grep_search`, or lightweight string/JSON scripts (e.g. Node/Python tools without `pyenv` dynamic library linkage) before requesting sandbox bypass.
 
 ## Architecture
 
@@ -90,16 +95,18 @@ Everything is asyncio. Crawl, scan, SAST, and ALICE jobs run as background `asyn
 
 ## Database And Migrations
 
-SQLite via SQLModel, single file `aespa.db` (gitignored; never commit it). Do not inspect it by default, but read-only inspection is allowed when the user explicitly asks to diagnose a local run; use SQLite read-only mode and avoid exposing stored secrets. There is no Alembic. All schema evolution is hand-rolled in `db.py::_migrate()`, run on every startup.
+SQLite via SQLModel, single file `aespa.db` (gitignored; never commit it). Do not inspect it by default, but read-only inspection is allowed when the user explicitly asks to diagnose a local run; use SQLite read-only mode and avoid exposing stored secrets. Schema evolution is managed via **Alembic**.
 
-Migration rules:
+Migration workflow for schema changes:
 
-- New columns are added idempotently via `_ensure_column(engine, table, column, col_def)`.
-- New tables use `CREATE TABLE IF NOT EXISTS` blocks inline in `_migrate()`.
-- Changing a constraint, such as making a column nullable, on SQLite requires a full table rebuild. Copy the `_ensure_*_nullable` helper pattern.
-- All migration steps must be idempotent and best-effort, wrapped so they never block startup.
-
-When adding a field, update the SQLModel in `models.py`, add a matching `_ensure_column(...)` line in `_migrate()`, and update `schemas.py` if it crosses the API boundary.
+1. Update the SQLModel definition in `models.py`.
+2. Generate an Alembic revision script via autogenerate:
+   ```bash
+   uv run alembic revision --autogenerate -m "describe_change"
+   ```
+3. Inspect and verify the generated script in `alembic/versions/`.
+4. Update `schemas.py` if the change crosses the API boundary.
+5. `init_db()` in `db.py` automatically runs `command.upgrade(cfg, "head")` on startup. Legacy databases lacking an `alembic_version` table are automatically stamped with the baseline revision.
 
 ## Critical Gotcha: Run-ID Collision
 

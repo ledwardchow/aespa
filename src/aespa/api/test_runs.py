@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlparse, urlsplit, urlunparse
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -42,6 +42,7 @@ from aespa.schemas import (
     ScannerSessionUpdate,
     ScannerSessionValidationResult,
     ScopeUpdate,
+    StartCrawlBody,
     TargetIntelItemOut,
     TargetIntelSummary,
     TestRunCreate,
@@ -281,6 +282,9 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
                     "extra_headers_json": record.extra_headers_json,
                     "session_metadata": record.session_metadata,
                     "token_hint": record.token_hint,
+                    "lifecycle_state": record.lifecycle_state,
+                    "validation_url": record.validation_url,
+                    "last_status": record.last_status,
                     "is_active": record.is_active,
                 }
                 for record in session.exec(
@@ -366,6 +370,10 @@ def _scanner_session_out(record: ScannerSession) -> ScannerSessionOut:
         cookie_names=sorted(str(k) for k in cookies.keys()),
         header_names=sorted(str(k) for k in headers.keys()),
         token_hint=record.token_hint,
+        lifecycle_state=record.lifecycle_state,
+        validation_url=record.validation_url,
+        last_status=record.last_status,
+        last_validated_at=record.last_validated_at,
         session_metadata=metadata,
         is_active=record.is_active,
         created_at=record.created_at,
@@ -910,6 +918,7 @@ def update_test_run(
 @router.post("/api/test-runs/{run_id}/start", response_model=TestRunSummary)
 async def start_test_run(
     run_id: int,
+    body: StartCrawlBody | None = None,
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     run = _get_run_or_404(session, run_id)
@@ -930,6 +939,19 @@ async def start_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    if body and body.crawl_credential_id is not None:
+        from aespa.models import Credential
+
+        cred = session.get(Credential, body.crawl_credential_id)
+        if cred is None or cred.site_id != run.site_id:
+            raise HTTPException(
+                status_code=404,
+                detail="Credential not found or does not belong to this site",
+            )
+        run.crawl_credential_id = body.crawl_credential_id
+    else:
+        # Reset to "all credentials" if no specific user was requested.
+        run.crawl_credential_id = None
     # Clear stale per_user_progress synchronously so the response (and the
     # first poll) never contains data from a previous crawl.
     run.per_user_progress = None
@@ -942,6 +964,7 @@ async def start_test_run(
 @router.post("/api/test-runs/{run_id}/restart", response_model=TestRunSummary)
 async def restart_test_run(
     run_id: int,
+    body: StartCrawlBody | None = None,
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     """Wipe all crawled pages/links for this run and start a fresh crawl."""
@@ -953,6 +976,18 @@ async def restart_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    if body and body.crawl_credential_id is not None:
+        from aespa.models import Credential
+
+        cred = session.get(Credential, body.crawl_credential_id)
+        if cred is None or cred.site_id != run.site_id:
+            raise HTTPException(
+                status_code=404,
+                detail="Credential not found or does not belong to this site",
+            )
+        run.crawl_credential_id = body.crawl_credential_id
+    else:
+        run.crawl_credential_id = None
     _clear_crawl_state(session, run)
     session.commit()
     session.refresh(run)
@@ -1205,6 +1240,9 @@ async def import_test_run_crawl(
                     extra_headers_json=item.get("extra_headers_json") or "{}",
                     session_metadata=item.get("session_metadata") or "{}",
                     token_hint=item.get("token_hint"),
+                    lifecycle_state=item.get("lifecycle_state") or "candidate",
+                    validation_url=item.get("validation_url"),
+                    last_status=item.get("last_status"),
                     is_active=bool(item.get("is_active", True)),
                 )
             )
@@ -1380,6 +1418,56 @@ def get_page_views(
     return [PageCredentialViewOut.model_validate(v) for v in views]
 
 
+def _infer_parent_url_candidates(url_str: str) -> list[str]:
+    candidates = []
+    parsed = urlparse(url_str)
+    if parsed.query:
+        no_query = urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                "",
+                parsed.fragment,
+            )
+        )
+        candidates.append(no_query)
+        url_str = no_query
+
+    scheme, netloc, path, params, query, fragment = urlparse(url_str)
+    if fragment and fragment.startswith("/"):
+        frag_parts = [p for p in fragment.split("/") if p]
+        while len(frag_parts) > 1:
+            frag_parts.pop()
+            parent_frag = "/" + "/".join(frag_parts)
+            candidates.append(
+                urlunparse((scheme, netloc, path, params, "", parent_frag))
+            )
+        cand_base = urlunparse((scheme, netloc, path, params, "", ""))
+        candidates.append(cand_base)
+        if cand_base.endswith("/"):
+            candidates.append(cand_base.rstrip("/"))
+    else:
+        path_parts = [p for p in path.split("/") if p]
+        while len(path_parts) > 1:
+            path_parts.pop()
+            parent_path = "/" + "/".join(path_parts)
+            cand = urlunparse((scheme, netloc, parent_path, params, "", fragment))
+            candidates.append(cand)
+            if not parent_path.endswith("/"):
+                candidates.append(cand + "/")
+
+    seen = set()
+    res = []
+    for c in candidates:
+        c_norm = c.rstrip("/") if len(c) > len(scheme + "://" + netloc) else c
+        if c != url_str and c_norm not in seen:
+            seen.add(c_norm)
+            res.append(c)
+    return res
+
+
 @router.get("/api/test-runs/{run_id}/graph", response_model=GraphData)
 def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData:
     _get_run_or_404(session, run_id)
@@ -1425,6 +1513,36 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
         and link.source_page_id in page_ids
         and link.target_page_id in page_ids
     ]
+
+    targeted_page_ids = {e.target for e in edges}
+    root_page_id = min((p.id for p in pages), default=None)
+    page_url_map = {p.url: p.id for p in pages}
+    page_url_map_norm = {p.url.rstrip("/"): p.id for p in pages if len(p.url) > 8}
+
+    for p in pages:
+        if p.id == root_page_id or p.id in targeted_page_ids:
+            continue
+        candidates = _infer_parent_url_candidates(p.url)
+        parent_id = None
+        for cand in candidates:
+            cand_norm = cand.rstrip("/")
+            if cand in page_url_map:
+                parent_id = page_url_map[cand]
+                break
+            elif cand_norm in page_url_map_norm:
+                parent_id = page_url_map_norm[cand_norm]
+                break
+        if parent_id and parent_id != p.id and parent_id in page_ids:
+            edges.append(
+                GraphLink(
+                    source=parent_id,
+                    target=p.id,
+                    link_text=None,
+                    action_kind="inferred",
+                )
+            )
+            targeted_page_ids.add(p.id)
+
     return GraphData(nodes=nodes, links=edges)
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, Request
@@ -13,6 +14,7 @@ from aespa.models import (
     AdversarialValidatorConfig,
     BurpRestApiConfig,
     CloudflareAccessConfig,
+    CrawlerConfig,
     GlobalHttpHeaderConfig,
     LLMConfig,
     LLMProfile,
@@ -28,6 +30,8 @@ from aespa.schemas import (
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
+    CrawlerConfigIn,
+    CrawlerConfigOut,
     GlobalHttpHeaderConfigIn,
     GlobalHttpHeaderConfigOut,
     LLMConfigExport,
@@ -230,6 +234,60 @@ def list_llm_providers(session: Session) -> list[LLMProviderConfigOut]:
     return [_provider_out(provider) for provider in providers]
 
 
+async def discover_models_for_format(
+    api_format: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    username: str | None = None,
+) -> list[str]:
+    if api_format == "factory_droid":
+        from aespa.services import droid_provider
+
+        return await droid_provider.discover_models()
+    elif api_format == "github_copilot":
+        from aespa.services import copilot_provider
+
+        return await copilot_provider.discover_models()
+    elif api_format == "openrouter":
+        from aespa.services import openrouter_provider
+
+        key = api_key or os.getenv("OPENROUTER_API_KEY")
+        return await openrouter_provider.discover_models(api_key=key, base_url=base_url)
+    elif api_format == "openai":
+        from aespa.services import model_discovery
+
+        key = api_key or os.getenv("OPENAI_API_KEY")
+        return await model_discovery.discover_openai_models(
+            api_key=key, base_url=base_url
+        )
+    elif api_format == "openai_compatible":
+        from aespa.services import model_discovery
+
+        url = base_url or "http://localhost:1234/v1"
+        return await model_discovery.discover_openai_models(
+            api_key=api_key, base_url=url
+        )
+    elif api_format == "anthropic":
+        from aespa.services import model_discovery
+
+        key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        return await model_discovery.discover_anthropic_models(
+            api_key=key, base_url=base_url
+        )
+    elif api_format == "google":
+        from aespa.services import model_discovery
+
+        key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        return await model_discovery.discover_google_models(
+            api_key=key, base_url=base_url
+        )
+    elif api_format == "bedrock":
+        from aespa.services import model_discovery
+
+        return await model_discovery.discover_bedrock_models(region_name=base_url)
+    return []
+
+
 def get_llm_provider(session: Session, provider_id: int) -> LLMProviderConfig:
     provider = session.get(LLMProviderConfig, provider_id)
     if provider is None:
@@ -273,15 +331,21 @@ def _apply_llm_provider(
     _ensure_unique_llm_provider_name(session, payload.name, provider.id)
     provider.name = payload.name
     provider.api_format = payload.api_format
-    if payload.api_key is not None:
+    if payload.api_format == "factory_droid":
+        provider.api_key = None
+    elif payload.api_key is not None:
         key_str = payload.api_key.strip()
         provider.api_key = key_str if key_str else None
-    provider.base_url = payload.base_url
+    provider.base_url = (
+        None if payload.api_format == "factory_droid" else payload.base_url
+    )
     username = (payload.username or "").strip()
     provider.username = (
         username or None if payload.api_format == "github_copilot" else None
     )
-    provider.project_id = payload.project_id
+    provider.project_id = (
+        None if payload.api_format == "factory_droid" else payload.project_id
+    )
     provider.models_json = _json_dumps(payload.models)
     provider.max_tpm = payload.max_tpm
     provider.max_rpm = payload.max_rpm
@@ -542,6 +606,13 @@ def _json_dumps(value) -> str:
 def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
     return ScannerPolicyOut(
         execution_monitor_enabled=cfg.execution_monitor_enabled,
+        disable_deterministic_checks=getattr(
+            cfg, "disable_deterministic_checks", False
+        ),
+        max_consecutive_text_turns=getattr(cfg, "max_consecutive_text_turns", 0),
+        enforce_full_coverage_obligations=getattr(
+            cfg, "enforce_full_coverage_obligations", False
+        ),
         scan_mode=cfg.scan_mode,
         max_probes_per_page=cfg.max_probes_per_page,
         thinking_max_steps=cfg.thinking_max_steps,
@@ -555,6 +626,7 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
         follow_redirects=cfg.follow_redirects,
         allow_subdomains=cfg.allow_subdomains,
         require_approval_for_destructive=cfg.require_approval_for_destructive,
+        strict_locator_enforcement=getattr(cfg, "strict_locator_enforcement", True),
         updated_at=cfg.updated_at,
     )
 
@@ -574,6 +646,9 @@ def upsert_scanner_policy(
         cfg = ScannerPolicy(id=_SINGLETON_ID)
 
     cfg.execution_monitor_enabled = payload.execution_monitor_enabled
+    cfg.disable_deterministic_checks = payload.disable_deterministic_checks
+    cfg.max_consecutive_text_turns = payload.max_consecutive_text_turns
+    cfg.enforce_full_coverage_obligations = payload.enforce_full_coverage_obligations
     cfg.scan_mode = payload.scan_mode
     cfg.max_probes_per_page = payload.max_probes_per_page
     cfg.thinking_max_steps = payload.thinking_max_steps
@@ -587,12 +662,48 @@ def upsert_scanner_policy(
     cfg.follow_redirects = payload.follow_redirects
     cfg.allow_subdomains = payload.allow_subdomains
     cfg.require_approval_for_destructive = payload.require_approval_for_destructive
+    cfg.strict_locator_enforcement = payload.strict_locator_enforcement
     cfg.updated_at = _utcnow()
 
     session.add(cfg)
     session.commit()
     session.refresh(cfg)
     return _policy_from_model(cfg)
+
+
+def get_crawler_config(session: Session) -> CrawlerConfigOut:
+    cfg = session.get(CrawlerConfig, _SINGLETON_ID)
+    if cfg is None:
+        return CrawlerConfigOut(
+            **CrawlerConfigIn().model_dump(),
+            updated_at=_utcnow(),
+        )
+    return CrawlerConfigOut(
+        js_endpoint_discovery_enabled=cfg.js_endpoint_discovery_enabled,
+        skip_dangerous_actions=cfg.skip_dangerous_actions,
+        suppress_form_submit_actions=cfg.suppress_form_submit_actions,
+        block_non_idempotent_interactive_replay=cfg.block_non_idempotent_interactive_replay,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_crawler_config(
+    session: Session, payload: CrawlerConfigIn
+) -> CrawlerConfigOut:
+    cfg = session.get(CrawlerConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = CrawlerConfig(id=_SINGLETON_ID)
+    cfg.js_endpoint_discovery_enabled = payload.js_endpoint_discovery_enabled
+    cfg.skip_dangerous_actions = payload.skip_dangerous_actions
+    cfg.suppress_form_submit_actions = payload.suppress_form_submit_actions
+    cfg.block_non_idempotent_interactive_replay = (
+        payload.block_non_idempotent_interactive_replay
+    )
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_crawler_config(session)
 
 
 def get_run_scanner_policy(session: Session, run: TestRun) -> RunScannerPolicyOut:
@@ -792,9 +903,17 @@ def get_global_http_header_config(session: Session) -> GlobalHttpHeaderConfigOut
         return GlobalHttpHeaderConfigOut(
             **GlobalHttpHeaderConfigIn().model_dump(), updated_at=_utcnow()
         )
+    try:
+        parsed_headers = json.loads(cfg.headers_json or "[]")
+        headers = parsed_headers if isinstance(parsed_headers, list) else []
+    except (TypeError, json.JSONDecodeError):
+        headers = []
+    # Databases created before multi-header support have values only in these
+    # legacy fields. Return that value until the user saves the new table.
+    if not headers and cfg.header_name and cfg.header_value:
+        headers = [{"header_name": cfg.header_name, "header_value": cfg.header_value}]
     return GlobalHttpHeaderConfigOut(
-        header_name=cfg.header_name,
-        header_value=cfg.header_value,
+        headers=headers,
         updated_at=cfg.updated_at,
     )
 
@@ -805,8 +924,14 @@ def upsert_global_http_header_config(
     cfg = session.get(GlobalHttpHeaderConfig, _SINGLETON_ID)
     if cfg is None:
         cfg = GlobalHttpHeaderConfig(id=_SINGLETON_ID)
-    cfg.header_name = payload.header_name
-    cfg.header_value = payload.header_value
+    cfg.headers_json = json.dumps(
+        [header.model_dump() for header in payload.headers], separators=(",", ":")
+    )
+    # Keep the old columns in sync with the first header for a graceful rollback
+    # to an earlier AESPA version.
+    first_header = payload.headers[0] if payload.headers else None
+    cfg.header_name = first_header.header_name if first_header else None
+    cfg.header_value = first_header.header_value if first_header else None
     cfg.updated_at = _utcnow()
     session.add(cfg)
     session.commit()

@@ -59,6 +59,19 @@ def test_upsert_session_reuses_label_and_loads_vault(monkeypatch):
         engine.dispose()
 
 
+def test_primary_credential_label_is_username_plus_random_and_unique():
+    first = scanner_sessions.credential_label(
+        "Admin User", primary=True, existing={"anonymous"}
+    )
+    second = scanner_sessions.credential_label(
+        "Admin User", primary=True, existing={"anonymous", first}
+    )
+
+    assert first.startswith("admin_user_")
+    assert second.startswith("admin_user_")
+    assert first != second
+
+
 def test_anonymous_session_is_first_class(monkeypatch):
     engine = create_engine(
         "sqlite:///:memory:",
@@ -78,6 +91,33 @@ def test_anonymous_session_is_first_class(monkeypatch):
         assert vault["anonymous"]["cookies"] == {}
         assert vault["anonymous"]["extra_headers"] == {}
         assert vault["anonymous"]["source"] == "dynamic_scan"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_record_session_probe_result_does_not_evict_anonymous(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        monkeypatch.setattr(scanner_sessions, "get_engine", lambda: engine)
+
+        anon = scanner_sessions.ensure_anonymous_session(99, source="dynamic_scan")
+        scanner_sessions.record_session_probe_result(99, "anonymous", 401)
+
+        with Session(engine) as db:
+            row = db.get(_models.ScannerSession, anon.id)
+            assert row is not None
+            assert row.kind == "anonymous"
+            assert row.is_active is True
+            assert row.lifecycle_state == "verified"
+            assert row.last_status == 401
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -187,6 +227,12 @@ def test_validate_active_sessions_evicts_only_explicit_rejections(monkeypatch):
             kind="cookie",
             cookies={"sid": "expired"},
         )
+        restricted = scanner_sessions.upsert_session(
+            12,
+            label="restricted_token",
+            kind="bearer",
+            extra_headers={"Authorization": "Bearer restricted"},
+        )
         scanner_sessions.ensure_anonymous_session(12)
         scanner_sessions.upsert_session(
             12,
@@ -200,7 +246,11 @@ def test_validate_active_sessions_evicts_only_explicit_rejections(monkeypatch):
 
         async def request(url, headers, cookies):
             calls.append((url, headers, cookies))
-            return 401 if cookies.get("sid") == "expired" else 200
+            if cookies.get("sid") == "expired":
+                return 401
+            if headers.get("Authorization") == "Bearer restricted":
+                return 403
+            return 200
 
         with Session(engine) as db:
             result = asyncio.run(
@@ -215,13 +265,47 @@ def test_validate_active_sessions_evicts_only_explicit_rejections(monkeypatch):
             db.expire_all()
             assert db.get(_models.ScannerSession, valid.id).is_active is True
             assert db.get(_models.ScannerSession, invalid.id).is_active is False
+            restricted_row = db.get(_models.ScannerSession, restricted.id)
+            assert restricted_row.is_active is True
+            assert restricted_row.lifecycle_state == "verified"
 
-        assert result.checked == 2
-        assert result.valid == 1
+        assert result.checked == 3
+        assert result.valid == 2
         assert result.evicted == 1
         assert result.errors == 0
         assert result.skipped == 1
-        assert len(calls) == 2
+        assert len(calls) == 3
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_upsert_session_deduplicates_the_same_bearer_token(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        monkeypatch.setattr(scanner_sessions, "get_engine", lambda: engine)
+        first = scanner_sessions.upsert_session(
+            21,
+            label="http_token",
+            kind="bearer",
+            extra_headers={"Authorization": "Bearer same-token"},
+        )
+        second = scanner_sessions.upsert_session(
+            21,
+            label="http_token_2",
+            kind="bearer",
+            extra_headers={"Authorization": "Bearer same-token"},
+        )
+
+        assert first.id == second.id
+        assert len(scanner_sessions.list_run_sessions(21)) == 1
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

@@ -1,21 +1,27 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Request, Response
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from aespa.db import get_session
+from aespa.models import LLMProviderConfig
 from aespa.schemas import (
     PROVIDER_DEFAULT_MODELS,
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
+    CrawlerConfigIn,
+    CrawlerConfigOut,
     GlobalHttpHeaderConfigIn,
     GlobalHttpHeaderConfigOut,
     LLMConfigExport,
     LLMConfigIn,
     LLMConfigOut,
     LLMImportResult,
+    LLMModelDiscoveryRequest,
     LLMProfileIn,
     LLMProfileOut,
     LLMProviderConfigIn,
@@ -33,6 +39,8 @@ from aespa.schemas import (
 )
 from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import settings as settings_service
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -184,9 +192,71 @@ def delete_llm_provider(
 
 
 @router.get("/llm/models")
-def default_models() -> dict[str, list[str]]:
-    """Return well-known model names for each provider (for UI dropdowns)."""
-    return PROVIDER_DEFAULT_MODELS
+async def default_models(
+    session: Session = Depends(get_session),
+) -> dict[str, list[str]]:
+    """Return model names for each provider format (loaded dynamically from APIs when available)."""
+    models = {name: list(values) for name, values in PROVIDER_DEFAULT_MODELS.items()}
+    providers = session.exec(select(LLMProviderConfig)).all()
+    providers_by_format = {p.api_format: p for p in providers}
+
+    for fmt in list(models.keys()):
+        p = providers_by_format.get(fmt)
+        api_key = p.api_key if p else None
+        base_url = p.base_url if p else None
+        username = p.username if p else None
+        try:
+            discovered = await settings_service.discover_models_for_format(
+                api_format=fmt,
+                api_key=api_key,
+                base_url=base_url,
+                username=username,
+            )
+            if discovered:
+                models[fmt] = discovered
+        except Exception as exc:
+            log.warning("Model discovery for format '%s' unavailable: %s", fmt, exc)
+
+    return models
+
+
+@router.post("/llm/discover-models")
+async def discover_llm_models(
+    payload: LLMModelDiscoveryRequest,
+    session: Session = Depends(get_session),
+) -> list[str]:
+    """Discover model names for a specific provider format using given or stored credentials."""
+    api_format = payload.api_format
+    api_key = payload.api_key
+    base_url = payload.base_url
+    username = payload.username
+
+    if not api_key or api_key.startswith("••"):
+        db_prov = session.exec(
+            select(LLMProviderConfig).where(LLMProviderConfig.api_format == api_format)
+        ).first()
+        if db_prov:
+            api_key = db_prov.api_key or api_key
+            if not base_url:
+                base_url = db_prov.base_url
+            if not username:
+                username = db_prov.username
+
+    try:
+        discovered = await settings_service.discover_models_for_format(
+            api_format=api_format,
+            api_key=api_key,
+            base_url=base_url,
+            username=username,
+        )
+        if discovered:
+            return discovered
+    except Exception as exc:
+        log.warning(
+            "Explicit model discovery for format '%s' failed: %s", api_format, exc
+        )
+
+    return list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
 
 
 @router.get("/llm/export", response_model=LLMConfigExport)
@@ -218,6 +288,19 @@ def upsert_scanner_policy(
     session: Session = Depends(get_session),
 ) -> ScannerPolicyOut:
     return settings_service.upsert_scanner_policy(session, payload)
+
+
+@router.get("/crawler-config", response_model=CrawlerConfigOut)
+def get_crawler_config(session: Session = Depends(get_session)) -> CrawlerConfigOut:
+    return settings_service.get_crawler_config(session)
+
+
+@router.put("/crawler-config", response_model=CrawlerConfigOut)
+def upsert_crawler_config(
+    payload: CrawlerConfigIn,
+    session: Session = Depends(get_session),
+) -> CrawlerConfigOut:
+    return settings_service.upsert_crawler_config(session, payload)
 
 
 @router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)

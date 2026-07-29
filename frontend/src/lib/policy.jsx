@@ -12,6 +12,9 @@ export const csv = (value, transform=(x)=>x) => String(value||"")
   .split(",").map(x=>transform(x.trim())).filter(Boolean);
 export const defaultPolicyForm = () => ({
   execution_monitor_enabled:false,
+  disable_deterministic_checks:false,
+  max_consecutive_text_turns:0,
+  enforce_full_coverage_obligations:false,
   scan_mode:"aggressive",
   max_probes_per_page:50,
   thinking_max_steps:120,
@@ -28,6 +31,7 @@ export const defaultPolicyForm = () => ({
   follow_redirects:true,
   allow_subdomains:true,
   require_approval_for_destructive:true,
+  strict_locator_enforcement:true,
 });
 export const policyToForm = (p) => {
   const f = defaultPolicyForm();
@@ -36,6 +40,9 @@ export const policyToForm = (p) => {
   return {
     ...f,
     execution_monitor_enabled:p.execution_monitor_enabled ?? false,
+    disable_deterministic_checks:p.disable_deterministic_checks ?? false,
+    max_consecutive_text_turns:p.max_consecutive_text_turns ?? f.max_consecutive_text_turns,
+    enforce_full_coverage_obligations:p.enforce_full_coverage_obligations ?? f.enforce_full_coverage_obligations,
     scan_mode:p.scan_mode || f.scan_mode,
     max_probes_per_page:p.max_probes_per_page ?? f.max_probes_per_page,
     thinking_max_steps:p.thinking_max_steps ?? f.thinking_max_steps,
@@ -52,10 +59,14 @@ export const policyToForm = (p) => {
     follow_redirects:p.follow_redirects ?? true,
     allow_subdomains:p.allow_subdomains ?? true,
     require_approval_for_destructive:p.require_approval_for_destructive ?? true,
+    strict_locator_enforcement:p.strict_locator_enforcement ?? true,
   };
 };
 export const policyPayload = (form) => ({
   execution_monitor_enabled:!!form.execution_monitor_enabled,
+  disable_deterministic_checks:!!form.disable_deterministic_checks,
+  max_consecutive_text_turns:Number(form.max_consecutive_text_turns),
+  enforce_full_coverage_obligations:!!form.enforce_full_coverage_obligations,
   scan_mode:form.scan_mode,
   max_probes_per_page:Number(form.max_probes_per_page),
   thinking_max_steps:Number(form.thinking_max_steps),
@@ -74,4 +85,5 @@ export const policyPayload = (form) => ({
   follow_redirects:!!form.follow_redirects,
   allow_subdomains:!!form.allow_subdomains,
   require_approval_for_destructive:!!form.require_approval_for_destructive,
+  strict_locator_enforcement:!!form.strict_locator_enforcement,
 });

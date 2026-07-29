@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from typing import Literal, Optional
@@ -14,16 +15,48 @@ from pydantic import (
 )
 
 
+class LoginField(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    label: str = Field(min_length=1, max_length=100)
+    value: str = Field(min_length=1)
+    sensitive: bool = False
+    selector: str | None = None
+
+
 class CredentialIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=1)
+    username: str | None = None
+    password: str | None = None
+    login_fields: list[LoginField] = Field(default_factory=list)
     label: str | None = None
     login_url: HttpUrl | None = None
     # Advanced auth
     auth_mode: str = "auto"
     totp_seed: str | None = None  # base32 TOTP secret; stored write-only
+    test_mailbox_url: HttpUrl | None = None
+
+    @model_validator(mode="after")
+    def _check_login_values(self) -> "CredentialIn":
+        if self.login_fields:
+            keys = [field.key for field in self.login_fields]
+            if len(keys) != len(set(keys)):
+                raise ValueError("login field keys must be unique")
+            # Keep the old required columns populated for compatibility with
+            # older code and exports. They are not used to label custom fields.
+            self.username = self.login_fields[0].value
+            self.password = (
+                self.login_fields[1].value if len(self.login_fields) > 1 else ""
+            )
+        elif not self.username or not self.password:
+            raise ValueError("provide username/password or at least one login field")
+        if self.auth_mode == "email_otp" and self.test_mailbox_url is None:
+            raise ValueError(
+                "test_mailbox_url is required for email_otp authentication"
+            )
+        return self
 
 
 class CredentialOut(BaseModel):
@@ -32,10 +65,51 @@ class CredentialOut(BaseModel):
     id: int
     username: str
     password: str
+    login_fields: list[LoginField] = Field(default_factory=list)
     label: str | None = None
     login_url: str | None = None
     auth_mode: str = "auto"
+    test_mailbox_url: str | None = None
     # totp_seed is intentionally excluded (write-only)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _load_login_fields(cls, value):
+        if isinstance(value, dict):
+            data = dict(value)
+        else:
+            data = {
+                "id": value.id,
+                "username": value.username,
+                "password": value.password,
+                "label": value.label,
+                "login_url": value.login_url,
+                "auth_mode": value.auth_mode,
+                "test_mailbox_url": value.test_mailbox_url,
+                "login_fields_json": getattr(value, "login_fields_json", None),
+            }
+        raw = data.pop("login_fields_json", None)
+        try:
+            fields = data.get("login_fields") or (json.loads(raw) if raw else [])
+        except (TypeError, ValueError):
+            fields = []
+        if not fields:
+            fields = [
+                {
+                    "key": "username",
+                    "label": "Username",
+                    "value": data.get("username") or "",
+                    "sensitive": False,
+                },
+                {
+                    "key": "password",
+                    "label": "Password",
+                    "value": data.get("password") or "",
+                    "sensitive": True,
+                },
+            ]
+        data["login_fields"] = fields
+        return data
 
 
 class SiteBase(BaseModel):
@@ -245,6 +319,9 @@ class ApiTestRunSummary(BaseModel):
     collection_id: int
     name: str
     status: str
+    phase: str = "created"
+    outcome: str | None = None
+    terminal_reason: str | None = None
     coverage_mode: str
     llm_config_id: int | None
     llm_profile_id: int | None = None
@@ -348,6 +425,7 @@ class ScanLeadOut(BaseModel):
 
 LLMProviderAPILiteral = Literal[
     "anthropic",
+    "factory_droid",
     "github_copilot",
     "openai",
     "openai_compatible",
@@ -362,6 +440,7 @@ LLMProviderAPILiteral = Literal[
 ]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
+    "factory_droid": [],
     "github_copilot": [
         "auto",
         "gpt-5.6-luna",
@@ -491,7 +570,7 @@ class LLMProviderConfigIn(BaseModel):
                 cleaned.append(model)
                 seen.add(key)
         if not cleaned:
-            raise ValueError("at least one model name is required")
+            raise ValueError("models must contain at least one non-empty model string")
         return cleaned
 
     @field_validator("base_url")
@@ -518,8 +597,16 @@ class LLMProviderConfigOut(BaseModel):
     has_api_key: bool = False
     api_key: str | None = None
     max_tpm: int | None = None
-    max_rpm: int | None = None
     updated_at: datetime
+
+
+class LLMModelDiscoveryRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    api_format: str
+    api_key: str | None = None
+    base_url: str | None = None
+    username: str | None = None
 
 
 class LLMConfigIn(BaseModel):
@@ -604,6 +691,9 @@ class ScannerPolicyBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     execution_monitor_enabled: bool = False
+    disable_deterministic_checks: bool = False
+    max_consecutive_text_turns: int = Field(default=0, ge=0, le=50)
+    enforce_full_coverage_obligations: bool = False
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)
@@ -623,6 +713,7 @@ class ScannerPolicyBase(BaseModel):
     follow_redirects: bool = True
     allow_subdomains: bool = True
     require_approval_for_destructive: bool = True
+    strict_locator_enforcement: bool = True
 
     @field_validator("methods_by_mode", mode="before")
     @classmethod
@@ -684,6 +775,21 @@ class ScannerPolicyOut(ScannerPolicyBase):
 class RunScannerPolicyOut(ScannerPolicyBase):
     source: Literal["run_snapshot", "global_default"]
     updated_at: datetime | None = None
+
+
+class CrawlerConfigBase(BaseModel):
+    js_endpoint_discovery_enabled: bool = False
+    skip_dangerous_actions: bool = True
+    suppress_form_submit_actions: bool = True
+    block_non_idempotent_interactive_replay: bool = True
+
+
+class CrawlerConfigIn(CrawlerConfigBase):
+    pass
+
+
+class CrawlerConfigOut(CrawlerConfigBase):
+    updated_at: datetime
 
 
 class UpstreamProxyConfigBase(BaseModel):
@@ -816,30 +922,38 @@ class ValidatorConfigOut(ValidatorConfigBase):
 # ── Global HTTP header config schemas ─────────────────────────────────────────
 
 
-class GlobalHttpHeaderConfigBase(BaseModel):
+class GlobalHttpHeader(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    header_name: str | None = Field(default=None, max_length=200)
-    header_value: str | None = Field(default=None, max_length=2000)
+    header_name: str = Field(min_length=1, max_length=200)
+    header_value: str = Field(max_length=2000)
 
     @field_validator("header_name")
     @classmethod
-    def _normalize_header_name(cls, v: str | None) -> str | None:
-        if not v:
-            return None
+    def _normalize_header_name(cls, v: str) -> str:
         v = v.strip()
-        if not v:
-            return None
         if not re.fullmatch(r"[a-zA-Z0-9!#$%&'*+.^_`|~-]+", v):
             raise ValueError(f"Invalid HTTP header name '{v}'")
         return v
 
     @field_validator("header_value")
     @classmethod
-    def _normalize_header_value(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        return v.strip() or None
+    def _normalize_header_value(cls, v: str) -> str:
+        return v.strip()
+
+
+class GlobalHttpHeaderConfigBase(BaseModel):
+    headers: list[GlobalHttpHeader] = Field(default_factory=list, max_length=100)
+
+    @field_validator("headers")
+    @classmethod
+    def _reject_duplicate_headers(
+        cls, v: list[GlobalHttpHeader]
+    ) -> list[GlobalHttpHeader]:
+        names = [header.header_name.lower() for header in v]
+        if len(names) != len(set(names)):
+            raise ValueError("HTTP header names must be unique")
+        return v
 
 
 class GlobalHttpHeaderConfigIn(GlobalHttpHeaderConfigBase):
@@ -947,6 +1061,16 @@ class TestRunUpdate(BaseModel):
     llm_profile_id: int | None = None
 
 
+class StartCrawlBody(BaseModel):
+    """Optional body for POST /api/test-runs/{run_id}/start and /restart.
+
+    When ``crawl_credential_id`` is supplied the crawl is restricted to that
+    single credential only (no anonymous phase, no other credentials).
+    """
+
+    crawl_credential_id: int | None = None
+
+
 class CredentialSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -964,6 +1088,9 @@ class TestRunSummary(BaseModel):
     site_id: int
     name: str
     status: str
+    phase: str = "created"
+    outcome: str | None = None
+    terminal_reason: str | None = None
     use_screenshots: bool
     max_depth: int
     max_pages: int
@@ -986,6 +1113,7 @@ class TestRunSummary(BaseModel):
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
     scope_hosts: list[str] = Field(default_factory=list)
+    crawl_credential_id: int | None = None
 
     @field_validator("per_user_progress", mode="before")
     @classmethod
@@ -1129,6 +1257,10 @@ class ScannerSessionOut(BaseModel):
     cookie_names: list[str] = Field(default_factory=list)
     header_names: list[str] = Field(default_factory=list)
     token_hint: str | None
+    lifecycle_state: str = "candidate"
+    validation_url: str | None = None
+    last_status: int | None = None
+    last_validated_at: datetime | None = None
     session_metadata: dict = Field(default_factory=dict)
     is_active: bool
     created_at: datetime

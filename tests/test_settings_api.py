@@ -15,6 +15,7 @@ def test_get_default_models(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert "anthropic" in data
+    assert "factory_droid" in data
     assert "github_copilot" in data
     assert "openai" in data
     assert "openai_compatible" in data
@@ -25,23 +26,26 @@ def test_get_default_models(client: TestClient):
     assert isinstance(data["anthropic"], list)
     assert isinstance(data["openrouter"], list)
     assert isinstance(data["bedrock"], list)
-    assert data["github_copilot"] == [
-        "auto",
-        "gpt-5.6-luna",
-        "gpt-5.6-terra",
-        "gpt-5.6-sol",
-        "claude-sonnet-5",
-        "claude-opus-4.8",
-    ]
-    assert data["openai"][:3] == [
-        "gpt-5.6-luna",
-        "gpt-5.6-terra",
-        "gpt-5.6-sol",
-    ]
-    assert data["bedrock"][:2] == [
-        "global.anthropic.claude-opus-4-8",
-        "global.anthropic.claude-sonnet-4-6",
-    ]
+    assert isinstance(data["github_copilot"], list)
+    assert "auto" in data["github_copilot"]
+    assert isinstance(data["factory_droid"], list)
+    assert isinstance(data["openai"], list)
+    assert isinstance(data["bedrock"], list)
+
+
+def test_discover_llm_models_endpoint(client: TestClient, monkeypatch):
+    async def fake_discover(api_format, api_key=None, base_url=None, username=None):
+        return ["custom-openrouter-model-1", "custom-openrouter-model-2"]
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_models_for_format", fake_discover
+    )
+    r = client.post(
+        "/api/settings/llm/discover-models",
+        json={"api_format": "openrouter", "api_key": "sk-or-v1-test"},
+    )
+    assert r.status_code == 200
+    assert r.json() == ["custom-openrouter-model-1", "custom-openrouter-model-2"]
 
 
 def test_burp_rest_api_config_round_trip(client: TestClient):
@@ -95,6 +99,42 @@ def test_cloudflare_access_config_round_trip(client: TestClient):
     assert r.status_code == 200
     assert r.json()["audience"] is None
 
+
+def test_global_http_headers_round_trip(client: TestClient):
+    initial = client.get("/api/settings/global-http-header")
+    assert initial.status_code == 200
+    assert initial.json()["headers"] == []
+
+    payload = {
+        "headers": [
+            {"header_name": " X-Debug-Token ", "header_value": " secret "},
+            {"header_name": "X-Scan-Mode", "header_value": "active"},
+        ]
+    }
+    updated = client.put("/api/settings/global-http-header", json=payload)
+    assert updated.status_code == 200
+    assert updated.json()["headers"] == [
+        {"header_name": "X-Debug-Token", "header_value": "secret"},
+        {"header_name": "X-Scan-Mode", "header_value": "active"},
+    ]
+    assert (
+        client.get("/api/settings/global-http-header").json()["headers"]
+        == updated.json()["headers"]
+    )
+
+
+def test_global_http_headers_reject_duplicate_names(client: TestClient):
+    response = client.put(
+        "/api/settings/global-http-header",
+        json={
+            "headers": [
+                {"header_name": "X-Trace", "header_value": "one"},
+                {"header_name": "x-trace", "header_value": "two"},
+            ]
+        },
+    )
+    assert response.status_code == 422
+
     r = client.put("/api/settings/cloudflare-access", json={"audience": "  abc123  "})
     assert r.status_code == 200
     # Whitespace is trimmed on the way in.
@@ -130,6 +170,27 @@ def _make_profile(client: TestClient, provider_id: int, **overrides):
     }
     payload.update(overrides)
     return client.post("/api/settings/llm/model-configs", json=payload)
+
+
+def test_factory_droid_provider_uses_cli_credentials(client: TestClient):
+    response = _make_provider(
+        client,
+        name="Factory",
+        api_format="factory_droid",
+        base_url="https://should-not-be-stored.example",
+        models=["gpt-5.6-luna"],
+        api_key="should-not-be-stored",
+        project_id="should-not-be-stored",
+        username="should-not-be-stored",
+    )
+
+    assert response.status_code == 200
+    provider = response.json()
+    assert provider["base_url"] is None
+    assert provider["has_api_key"] is False
+    assert provider["project_id"] is None
+    assert provider["username"] is None
+    assert provider["models"] == ["gpt-5.6-luna"]
 
 
 def test_create_provider_and_profile(client: TestClient):
@@ -470,6 +531,9 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is False
+    assert data["disable_deterministic_checks"] is False
+    assert data["max_consecutive_text_turns"] == 0
+    assert data["enforce_full_coverage_obligations"] is False
     assert data["scan_mode"] == "aggressive"
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
@@ -477,6 +541,7 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert data["min_delay_s"] == 0.05
     assert data["allowed_schemes"] == ["http", "https"]
     assert "POST" in data["methods_by_mode"]["safe_active"]
+    assert data["strict_locator_enforcement"] is True
 
 
 def test_upsert_scanner_policy(client: TestClient):
@@ -485,21 +550,29 @@ def test_upsert_scanner_policy(client: TestClient):
         {
             "scan_mode": "aggressive",
             "execution_monitor_enabled": True,
+            "disable_deterministic_checks": True,
+            "max_consecutive_text_turns": 0,
+            "enforce_full_coverage_obligations": False,
             "max_probes_per_page": 25,
             "thinking_max_steps": 180,
             "request_timeout_s": 12.5,
             "min_delay_s": 0.1,
             "blocked_headers": ["host", "cookie", "x-admin"],
+            "strict_locator_enforcement": False,
         }
     )
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is True
+    assert data["disable_deterministic_checks"] is True
+    assert data["max_consecutive_text_turns"] == 0
+    assert data["enforce_full_coverage_obligations"] is False
     assert data["scan_mode"] == "aggressive"
     assert data["max_probes_per_page"] == 25
     assert data["thinking_max_steps"] == 180
     assert data["blocked_headers"] == ["host", "cookie", "x-admin"]
+    assert data["strict_locator_enforcement"] is False
 
     r2 = client.get("/api/settings/scanner-policy")
     assert r2.json()["request_timeout_s"] == 12.5
@@ -517,6 +590,32 @@ def test_upsert_scanner_policy_invalid_method(client: TestClient):
     payload["methods_by_mode"]["safe_active"] = ["GET", "BAD METHOD"]
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 422
+
+
+def test_crawler_config_defaults_and_upsert(client: TestClient):
+    initial = client.get("/api/settings/crawler-config")
+    assert initial.status_code == 200
+    assert initial.json()["js_endpoint_discovery_enabled"] is False
+    assert initial.json()["skip_dangerous_actions"] is True
+    assert initial.json()["suppress_form_submit_actions"] is True
+    assert initial.json()["block_non_idempotent_interactive_replay"] is True
+
+    updated = client.put(
+        "/api/settings/crawler-config",
+        json={"js_endpoint_discovery_enabled": True},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["js_endpoint_discovery_enabled"] is True
+    assert updated.json()["skip_dangerous_actions"] is True
+    assert updated.json()["suppress_form_submit_actions"] is True
+    assert updated.json()["block_non_idempotent_interactive_replay"] is True
+
+    persisted = client.get("/api/settings/crawler-config")
+    assert persisted.status_code == 200
+    assert persisted.json()["js_endpoint_discovery_enabled"] is True
+    assert persisted.json()["skip_dangerous_actions"] is True
+    assert persisted.json()["suppress_form_submit_actions"] is True
+    assert persisted.json()["block_non_idempotent_interactive_replay"] is True
 
 
 def test_import_llm_config_rejects_duplicate_names(client: TestClient):

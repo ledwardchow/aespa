@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { DEFAULT_SPECIALIST_AGENT_FORM } from "./Settings/UpstreamProxySettings";
 import { PROVIDER_DEFAULT_BASE_URLS, PROVIDER_MODEL_PLACEHOLDERS, DEFAULT_PROVIDER_FORM, DEFAULT_LLM_FORM, API_FORMAT_LABELS } from "./Settings/BurpRestApiSettings";
 import { AGENT_ROLE_LABELS } from "./Settings/LLMModelForm";
@@ -126,8 +126,11 @@ export function providerToForm(provider) {
   };
 }
 export function providerPayload(form) {
+  const usesCliCredentials = form.api_format === "factory_droid";
   let apiKeyPayload = null;
-  if (form.clear_api_key) {
+  if (usesCliCredentials) {
+    apiKeyPayload = "";
+  } else if (form.clear_api_key) {
     apiKeyPayload = "";
   } else if (form.api_key.trim()) {
     apiKeyPayload = form.api_key.trim();
@@ -138,7 +141,7 @@ export function providerPayload(form) {
   return {
     name: form.name.trim(),
     api_format: form.api_format,
-    base_url: form.base_url.trim() || null,
+    base_url: usesCliCredentials ? null : form.base_url.trim() || null,
     username: form.api_format === "github_copilot" ? form.username.trim() || null : null,
     project_id: form.api_format === "bedrock_mantle" ? form.project_id.trim() || null : null,
     models: modelText.split(/\r?\n|,/).map(m => m.trim()).filter(Boolean),
@@ -201,6 +204,94 @@ export function SettingsPage() {
   const [error, setError] = useState(null);
   const [importing, setImporting] = useState(false);
   const importRef = useRef(null);
+
+  const [profileSort, setProfileSort] = useState({ field: "name", dir: "asc" });
+  const [modelSort, setModelSort] = useState({ field: "name", dir: "asc" });
+  const [providerSort, setProviderSort] = useState({ field: "name", dir: "asc" });
+
+  const toggleSort = (setter, field) => {
+    setter(s => ({
+      field,
+      dir: s.field === field && s.dir === "asc" ? "desc" : "asc"
+    }));
+  };
+
+  const sortArrow = (sortState, field) => {
+    if (sortState.field !== field) return null;
+    return <span style={{ marginLeft: "4px", fontSize: "10px", opacity: 0.85 }}>{sortState.dir === "asc" ? "▲" : "▼"}</span>;
+  };
+
+  const sortedProfiles = useMemo(() => {
+    if (!profiles) return [];
+    const { field, dir } = profileSort;
+    return [...profiles].sort((a, b) => {
+      let valA = a[field];
+      let valB = b[field];
+      if (field === "default_model_name") {
+        valA = a.default_model_name || (a.default_model_id ? `#${a.default_model_id}` : "");
+        valB = b.default_model_name || (b.default_model_id ? `#${b.default_model_id}` : "");
+      } else if (field === "overrides_count") {
+        valA = Object.keys(a.role_models || {}).length;
+        valB = Object.keys(b.role_models || {}).length;
+      }
+      if (valA == null) valA = "";
+      if (valB == null) valB = "";
+      let cmp = typeof valA === "number" && typeof valB === "number"
+        ? valA - valB
+        : String(valA).localeCompare(String(valB), undefined, { sensitivity: "base", numeric: true });
+      return dir === "asc" ? cmp : -cmp;
+    });
+  }, [profiles, profileSort]);
+
+  const sortedModels = useMemo(() => {
+    if (!models) return [];
+    const { field, dir } = modelSort;
+    return [...models].sort((a, b) => {
+      let valA = a[field];
+      let valB = b[field];
+      if (field === "provider_name") {
+        valA = a.provider_name || `Provider #${a.provider_id}`;
+        valB = b.provider_name || `Provider #${b.provider_id}`;
+      } else if (field === "use_vision" || field === "is_active") {
+        valA = a[field] ? 1 : 0;
+        valB = b[field] ? 1 : 0;
+      }
+      if (valA == null) valA = "";
+      if (valB == null) valB = "";
+      let cmp = typeof valA === "number" && typeof valB === "number"
+        ? valA - valB
+        : String(valA).localeCompare(String(valB), undefined, { sensitivity: "base", numeric: true });
+      return dir === "asc" ? cmp : -cmp;
+    });
+  }, [models, modelSort]);
+
+  const sortedProviders = useMemo(() => {
+    if (!providers) return [];
+    const { field, dir } = providerSort;
+    return [...providers].sort((a, b) => {
+      let valA = a[field];
+      let valB = b[field];
+      if (field === "api_label") {
+        valA = API_FORMAT_LABELS[a.api_format] || a.api_format || "";
+        valB = API_FORMAT_LABELS[b.api_format] || b.api_format || "";
+      } else if (field === "base_url_display") {
+        valA = a.base_url || PROVIDER_DEFAULT_BASE_URLS[a.api_format] || "";
+        valB = b.base_url || PROVIDER_DEFAULT_BASE_URLS[b.api_format] || "";
+      } else if (field === "models_display") {
+        valA = (a.models || []).join(", ");
+        valB = (b.models || []).join(", ");
+      } else if (field === "limits") {
+        valA = (a.max_tpm || 0) * 1000000 + (a.max_rpm || 0);
+        valB = (b.max_tpm || 0) * 1000000 + (b.max_rpm || 0);
+      }
+      if (valA == null) valA = "";
+      if (valB == null) valB = "";
+      let cmp = typeof valA === "number" && typeof valB === "number"
+        ? valA - valB
+        : String(valA).localeCompare(String(valB), undefined, { sensitivity: "base", numeric: true });
+      return dir === "asc" ? cmp : -cmp;
+    });
+  }, [providers, providerSort]);
   const load = useCallback(async () => {
     setError(null);
     try {
@@ -360,9 +451,13 @@ export function SettingsPage() {
         {models.length === 0 && <div className="alert">Create a model before adding scan profiles.</div>}
         <div className="settings-list settings-list-scanprofiles">
           <div className="settings-list-head">
-            <div>Name</div><div>Default model</div><div>Overrides</div><div>Status</div><div></div>
+            <div className="sortable" onClick={() => toggleSort(setProfileSort, "name")}>Name {sortArrow(profileSort, "name")}</div>
+            <div className="sortable" onClick={() => toggleSort(setProfileSort, "default_model_name")}>Default model {sortArrow(profileSort, "default_model_name")}</div>
+            <div className="sortable" onClick={() => toggleSort(setProfileSort, "overrides_count")}>Overrides {sortArrow(profileSort, "overrides_count")}</div>
+            <div className="sortable" onClick={() => toggleSort(setProfileSort, "is_active")}>Status {sortArrow(profileSort, "is_active")}</div>
+            <div></div>
           </div>
-          {profiles.map(p => <div className="settings-list-row" key={p.id}>
+          {sortedProfiles.map(p => <div className="settings-list-row" key={p.id}>
               <div><strong>{p.name}</strong></div>
               <div className="mono">{p.default_model_name || (p.default_model_id ? `#${p.default_model_id}` : "—")}</div>
               <div>{Object.keys(p.role_models || {}).length || <span className="subtle">none</span>}</div>
@@ -378,9 +473,14 @@ export function SettingsPage() {
         {providers.length === 0 && <div className="alert">Create a provider before adding models.</div>}
         <div className="settings-list settings-list-profiles">
           <div className="settings-list-head">
-            <div>Name</div><div>Provider</div><div>Model</div><div>Vision</div><div>Status</div><div></div>
+            <div className="sortable" onClick={() => toggleSort(setModelSort, "name")}>Name {sortArrow(modelSort, "name")}</div>
+            <div className="sortable" onClick={() => toggleSort(setModelSort, "provider_name")}>Provider {sortArrow(modelSort, "provider_name")}</div>
+            <div className="sortable" onClick={() => toggleSort(setModelSort, "model")}>Model {sortArrow(modelSort, "model")}</div>
+            <div className="sortable" onClick={() => toggleSort(setModelSort, "use_vision")}>Vision {sortArrow(modelSort, "use_vision")}</div>
+            <div className="sortable" onClick={() => toggleSort(setModelSort, "is_active")}>Status {sortArrow(modelSort, "is_active")}</div>
+            <div></div>
           </div>
-          {models.map(p => <div className="settings-list-row" key={p.id}>
+          {sortedModels.map(p => <div className="settings-list-row" key={p.id}>
               <div><strong>{p.name}</strong></div>
               <div>{p.provider_name || `Provider #${p.provider_id}`}</div>
               <div className="mono">{p.model}</div>
@@ -395,9 +495,14 @@ export function SettingsPage() {
         </div></>}
       {loaded && tab === "providers" && screen === "list" && <div className="settings-list settings-list-providers">
           <div className="settings-list-head">
-            <div>Name</div><div>API</div><div>Base URL</div><div>Models</div><div>Limits</div><div></div>
+            <div className="sortable" onClick={() => toggleSort(setProviderSort, "name")}>Name {sortArrow(providerSort, "name")}</div>
+            <div className="sortable" onClick={() => toggleSort(setProviderSort, "api_label")}>API {sortArrow(providerSort, "api_label")}</div>
+            <div className="sortable" onClick={() => toggleSort(setProviderSort, "base_url_display")}>Base URL {sortArrow(providerSort, "base_url_display")}</div>
+            <div className="sortable" onClick={() => toggleSort(setProviderSort, "models_display")}>Models {sortArrow(providerSort, "models_display")}</div>
+            <div className="sortable" onClick={() => toggleSort(setProviderSort, "limits")}>Limits {sortArrow(providerSort, "limits")}</div>
+            <div></div>
           </div>
-          {providers.map(p => <div className="settings-list-row" key={p.id}>
+          {sortedProviders.map(p => <div className="settings-list-row" key={p.id}>
               <div><strong>{p.name}</strong></div>
               <div>{API_FORMAT_LABELS[p.api_format] || p.api_format}</div>
               <div className="mono">{p.base_url || PROVIDER_DEFAULT_BASE_URLS[p.api_format] || "(must be set)"}</div>

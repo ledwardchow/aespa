@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -29,6 +30,7 @@ from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.settings import (
+    get_crawler_config,
     get_global_http_header_config,
     get_llm_config_for_role,
     get_upstream_proxy_config,
@@ -70,6 +72,7 @@ def _drop_cached_browser_session(run_id: int, credential) -> None:
     key = _credential_cache_key(run_id, credential)
     if key is not None:
         _guided_session_cache.pop(key, None)
+
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -292,6 +295,7 @@ async def _do_crawl_inner(run_id: int) -> None:
             )
         creds = list(site.credentials)
         upstream_proxy = get_upstream_proxy_config(s)
+        crawler_cfg = get_crawler_config(s)
         crawl_proxy_url = (
             upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
         )
@@ -300,11 +304,9 @@ async def _do_crawl_inner(run_id: int) -> None:
             s.expunge(obj)
 
     _pw_proxy = {"proxy": {"server": crawl_proxy_url}} if crawl_proxy_url else {}
-    _global_http_header: dict[str, str] = {}
-    if global_header_cfg.header_name and global_header_cfg.header_value:
-        _global_http_header = {
-            global_header_cfg.header_name: global_header_cfg.header_value
-        }
+    _global_http_header = {
+        header.header_name: header.header_value for header in global_header_cfg.headers
+    }
     base_url = _site_base_url(site.base_url)
     login_url = site.login_url or ""
     requires_auth = site.requires_auth
@@ -312,6 +314,11 @@ async def _do_crawl_inner(run_id: int) -> None:
     max_pages = run.max_pages
     crawler_mode = (
         run.crawler_mode if run.crawler_mode in {"url", "interactive"} else "url"
+    )
+    skip_dangerous_actions = bool(crawler_cfg.skip_dangerous_actions)
+    suppress_form_submit_actions = bool(crawler_cfg.suppress_form_submit_actions)
+    block_non_idempotent_interactive_replay = bool(
+        crawler_cfg.block_non_idempotent_interactive_replay
     )
     _parsed = urlparse(base_url)
     base_netloc = _parsed.netloc
@@ -374,6 +381,26 @@ async def _do_crawl_inner(run_id: int) -> None:
 
     phases = ([None] + list(creds)) if (requires_auth and creds) else [None]
 
+    # If the run was created with a specific credential pinned, restrict to
+    # exactly that one credential — no anonymous phase, no other credentials.
+    crawl_credential_id = getattr(run, "crawl_credential_id", None)
+    if crawl_credential_id is not None and requires_auth:
+        pinned = [c for c in creds if getattr(c, "id", None) == crawl_credential_id]
+        if pinned:
+            phases = pinned
+            _crawl_log(
+                run_id,
+                "crawl",
+                "start",
+                f"Single-user crawl — running as '{pinned[0].username}' only",
+            )
+        else:
+            log.warning(
+                "crawl_credential_id=%s not found in site credentials; "
+                "falling back to all phases",
+                crawl_credential_id,
+            )
+
     tasks = [
         asyncio.create_task(
             _crawl_as_credential(
@@ -393,6 +420,12 @@ async def _do_crawl_inner(run_id: int) -> None:
                 total_phases=len(phases),
                 pw_proxy=_pw_proxy,
                 global_http_header=_global_http_header,
+                js_endpoint_discovery_enabled=(
+                    crawler_cfg.js_endpoint_discovery_enabled
+                ),
+                skip_dangerous_actions=skip_dangerous_actions,
+                suppress_form_submit_actions=suppress_form_submit_actions,
+                block_non_idempotent_interactive_replay=block_non_idempotent_interactive_replay,
             ),
             name=f"crawl-{run_id}-cred{idx}",
         )
@@ -507,6 +540,10 @@ async def _crawl_as_credential(
     total_phases: int,
     pw_proxy: dict,
     global_http_header: dict[str, str],
+    js_endpoint_discovery_enabled: bool,
+    skip_dangerous_actions: bool,
+    suppress_form_submit_actions: bool,
+    block_non_idempotent_interactive_replay: bool,
 ) -> None:
     from playwright.async_api import async_playwright
 
@@ -621,6 +658,28 @@ async def _crawl_as_credential(
             auth_check_snapshot = await _capture_auth_check_snapshot(
                 page, credential_login_url
             )
+            # Guided and Entra ID logins persist their own session to the vault
+            # at the point of success. auto/totp/email_otp credentials didn't —
+            # they only got persisted as a side effect of the cross-user
+            # reconcile pass, which is skipped entirely for single-credential
+            # sites (`len(creds) < 2`). That left the Sessions tab empty and
+            # the validator with no alternate-user session for the common case
+            # of a single scanned account. Persist here so every successful
+            # login is recorded regardless of credential count.
+            mode = getattr(cred, "auth_mode", None) or AuthMode.auto
+            try:
+                mode = AuthMode(mode)
+            except ValueError:
+                mode = AuthMode.auto
+            if mode in (AuthMode.auto, AuthMode.totp, AuthMode.email_otp):
+                try:
+                    still_on_login = await _page_requires_login(
+                        page, credential_login_url
+                    )
+                except Exception:
+                    still_on_login = False
+                if not still_on_login:
+                    await _persist_recon_session(run_id, cred, page)
 
         observed_api_calls.clear()
 
@@ -631,15 +690,16 @@ async def _crawl_as_credential(
             base_path,
         )
         queued: set[str] = {_norm(url) for url in seed_urls}
-        queue: deque[tuple[str, int, Optional[int]]] = deque(
-            (url, 0, None) for url in seed_urls
+        queue: deque[tuple[str, int, Optional[int], Optional[dict]]] = deque(
+            (url, 0, None, None) for url in seed_urls
         )
+        pending_interactive_edges: dict[str, list[dict]] = {}
 
         while queue:
             if run_id in _stop_requested:
                 break
 
-            url, depth, parent_id = queue.popleft()
+            url, depth, parent_id, incoming_action = queue.popleft()
             norm = _norm(url)
 
             if requires_auth and _is_session_ending_url(url):
@@ -759,6 +819,10 @@ async def _crawl_as_credential(
                 )
             except Exception:
                 pass
+            # Static chrome can satisfy the check above before the real
+            # (often XHR-fetched) content has painted — settle further so we
+            # don't snapshot/index a page while it's still showing a spinner.
+            await _wait_for_content_settle(page)
             title = await page.title()
             try:
                 text = await page.evaluate("() => document.body.innerText")
@@ -787,7 +851,7 @@ async def _crawl_as_credential(
                 for r in raw_links
                 if _same_domain(r["href"], base_netloc)
             ]
-            await _record_page_intelligence(
+            js_endpoint_calls = await _record_page_intelligence(
                 run_id=run_id,
                 page=page,
                 page_url=final_url,
@@ -795,7 +859,20 @@ async def _crawl_as_credential(
                 raw_links=raw_links,
                 base_netloc=base_netloc,
                 username=username,
+                js_endpoint_discovery_enabled=js_endpoint_discovery_enabled,
             )
+            if js_endpoint_discovery_enabled and js_endpoint_calls:
+                await _promote_api_calls(
+                    run_id=run_id,
+                    calls=js_endpoint_calls,
+                    source_page_id=page_id,
+                    source_depth=depth,
+                    shared=shared,
+                    max_pages=max_pages,
+                    credential_id=credential_id,
+                    username=username,
+                    llm_cfg=llm_cfg,
+                )
 
             # ── LLM analysis ──────────────────────────────────────────────────
             cats: dict = {
@@ -862,8 +939,26 @@ async def _crawl_as_credential(
                         cats.get("owasp_applicable") or {}
                     ),
                 )
-                if is_first:
-                    _save_link(run_id, parent_id, page_id, final_url)
+            _save_link(
+                run_id,
+                parent_id,
+                page_id,
+                final_url,
+                link_text=(incoming_action or {}).get("link_text"),
+                action_kind=(incoming_action or {}).get("action_kind", "navigate"),
+                action_data=(incoming_action or {}).get("action_data"),
+            )
+            for edge_norm in {norm, norm_final}:
+                for edge in pending_interactive_edges.pop(edge_norm, []):
+                    _save_link(
+                        run_id,
+                        edge.get("source_page_id"),
+                        page_id,
+                        final_url,
+                        link_text=edge.get("link_text"),
+                        action_kind=edge.get("action_kind", "navigate"),
+                        action_data=edge.get("action_data"),
+                    )
 
             # ── SSE ───────────────────────────────────────────────────────────
             with Session(get_engine()) as s:
@@ -892,7 +987,10 @@ async def _crawl_as_credential(
                         "link": {
                             "source": parent_id,
                             "target": page_id,
-                            "link_text": None,
+                            "link_text": (incoming_action or {}).get("link_text"),
+                            "action_kind": (incoming_action or {}).get(
+                                "action_kind", "navigate"
+                            ),
                         }
                         if parent_id
                         else None,
@@ -951,23 +1049,58 @@ async def _crawl_as_credential(
             # mode, safely explore client-side views rooted at this document.
             # This runs after API-call promotion so replay traffic is not
             # attributed to the URL page currently being processed.
-            if crawler_mode == "interactive" and depth < max_depth:
-                await _explore_interactive_states(
+            interactive_discoveries: list[dict] = []
+            if crawler_mode == "interactive":
+                interactive_discoveries = await _explore_interactive_states(
                     run_id=run_id,
                     page=page,
                     root_url=final_url,
                     root_page_id=page_id,
                     root_depth=depth,
                     shared=shared,
-                    max_depth=max_depth,
                     max_pages=max_pages,
                     credential_id=credential_id,
                     username=username,
                     llm_cfg=llm_cfg,
                     base_netloc=base_netloc,
+                    skip_dangerous_actions=skip_dangerous_actions,
+                    suppress_form_submit_actions=suppress_form_submit_actions,
+                    block_non_idempotent_interactive_replay=block_non_idempotent_interactive_replay,
                 )
 
             if depth < max_depth:
+                for discovery in interactive_discoveries:
+                    discovered_url = discovery["url"]
+                    n = _norm(discovered_url)
+                    known_target_id = shared.crawled_norms.get(n)
+                    if known_target_id is not None:
+                        _save_link(
+                            run_id,
+                            discovery.get("source_page_id"),
+                            known_target_id,
+                            discovered_url,
+                            link_text=discovery.get("link_text"),
+                            action_kind=discovery.get("action_kind", "navigate"),
+                            action_data=discovery.get("action_data"),
+                        )
+                        continue
+                    pending_interactive_edges.setdefault(n, []).append(discovery)
+                    if (
+                        n not in queued
+                        and _same_domain(discovered_url, base_netloc)
+                        and not _is_session_ending_url(
+                            discovered_url, discovery.get("link_text")
+                        )
+                    ):
+                        queued.add(n)
+                        queue.appendleft(
+                            (
+                                discovered_url,
+                                depth + 1,
+                                discovery.get("source_page_id") or page_id,
+                                discovery,
+                            )
+                        )
                 filtered_suggested = _filter_suggested_links(
                     suggested, same_domain_links, base_netloc
                 )
@@ -985,7 +1118,7 @@ async def _crawl_as_credential(
                         and not _is_session_ending_url(sugg_url)
                     ):
                         queued.add(n)
-                        queue.appendleft((sugg_url, depth + 1, page_id))
+                        queue.appendleft((sugg_url, depth + 1, page_id, None))
                 for link_url, link_text in same_domain_links:
                     n = _norm(link_url)
                     if (
@@ -994,7 +1127,17 @@ async def _crawl_as_credential(
                         and not _is_session_ending_url(link_url, link_text)
                     ):
                         queued.add(n)
-                        queue.append((link_url, depth + 1, page_id))
+                        queue.append(
+                            (
+                                link_url,
+                                depth + 1,
+                                page_id,
+                                {
+                                    "link_text": link_text,
+                                    "action_kind": "navigate",
+                                },
+                            )
+                        )
 
         await browser.close()
 
@@ -1019,12 +1162,161 @@ async def _crawl_as_credential(
 
 # ── Interactive SPA state discovery ──────────────────────────────────────────
 
-_INTERACTIVE_ACTION_LIMIT = 12
+_INTERACTIVE_ACTION_LIMIT = 20
+_INTERACTIVE_MAX_STEPS = 4
+_INTERACTIVE_MAX_STATES = 25
+_INTERACTIVE_MAX_SELECT_OPTIONS = 5
+# Each "attempt" is a full page reload + replay of prior steps, so this cap
+# bounds the worst case (a page with many controls) directly in wall-clock
+# time. 100 was far too high in practice — combined with per-attempt network
+# waits it could burn 5-10+ minutes exploring a single page. Paired with the
+# wall-clock budget below as a second safety net.
+_INTERACTIVE_MAX_ATTEMPTS = 40
+_INTERACTIVE_MAX_SECONDS = 90.0
 _INTERACTIVE_DANGER_RE = re.compile(
     r"\b(?:delete|remove|destroy|logout|log\s*out|sign\s*out|purchase|pay|checkout|"
     r"transfer|send\s+money|revoke|cancel\s+subscription)\b",
     re.IGNORECASE,
 )
+_INTERACTIVE_DYNAMIC_TOKEN_RE = re.compile(
+    r"\b(?:"
+    r"[0-9a-f]{8}-[0-9a-f-]{27,}"
+    r"|[A-Z0-9_-]*\d[A-Z0-9_-]{3,}"
+    r"|\d+(?:[.,]\d+)*"
+    r")\b",
+    re.IGNORECASE,
+)
+_INTERACTIVE_EMAIL_RE = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE
+)
+_INTERACTIVE_TRANSIENT_RE = re.compile(
+    r"\b(?:loading|please\s+wait|fetching|initializing)\b", re.IGNORECASE
+)
+
+
+def _normalize_interactive_identity_text(value: object) -> str:
+    """Remove credential- and record-specific values from state identity text."""
+    text = " ".join(str(value or "").split()).lower()
+    text = _INTERACTIVE_EMAIL_RE.sub("<email>", text)
+    text = _INTERACTIVE_DYNAMIC_TOKEN_RE.sub("#", text)
+    return text[:240]
+
+
+def _interactive_route_shape(url: object) -> str:
+    """Keep route structure while removing object ids and query values."""
+    try:
+        parsed = urlparse(str(url or ""))
+        path = "/".join(
+            _normalize_interactive_identity_text(segment)
+            for segment in parsed.path.split("/")
+        )
+        query_keys = sorted(parse_qs(parsed.query, keep_blank_values=True))
+        fragment = parsed.fragment
+        if fragment.startswith("/"):
+            fragment = "/".join(
+                _normalize_interactive_identity_text(segment)
+                for segment in fragment.split("/")
+            )
+        else:
+            fragment = ""
+        result = path or "/"
+        if query_keys:
+            result += "?" + "&".join(query_keys)
+        if fragment:
+            result += "#" + fragment
+        return result
+    except Exception:
+        return _normalize_interactive_identity_text(url)
+
+
+def _interactive_state_identity(raw: dict, page_url: str, page_text: str) -> dict:
+    """Build a stable description of functionality, not user-specific content."""
+
+    def normalized_set(values) -> list[str]:
+        return sorted(
+            {
+                normalized
+                for value in values or []
+                if (normalized := _normalize_interactive_identity_text(value))
+            }
+        )
+
+    forms: list[list[tuple[str, str]]] = []
+    for form in raw.get("forms") or []:
+        fields: list[tuple[str, str]] = []
+        for field in form or []:
+            if isinstance(field, dict):
+                fields.append(
+                    (
+                        _normalize_interactive_identity_text(field.get("field")),
+                        _normalize_interactive_identity_text(field.get("kind")),
+                    )
+                )
+            else:
+                fields.append((_normalize_interactive_identity_text(field), ""))
+        forms.append(sorted(fields))
+
+    controls: set[tuple[str, str]] = set()
+    for control in raw.get("controls") or []:
+        if isinstance(control, dict):
+            controls.add(
+                (
+                    _normalize_interactive_identity_text(control.get("role")),
+                    _normalize_interactive_identity_text(control.get("name")),
+                )
+            )
+        else:
+            controls.add(("", _normalize_interactive_identity_text(control)))
+
+    navigation_routes: set[str] = set()
+    for link in raw.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        href = str(link.get("href") or "")
+        parsed = urlparse(href)
+        shape = _interactive_route_shape(href)
+        if parsed.query or re.search(r"(?:^|/)#(?:/|$)", shape):
+            continue
+        navigation_routes.add(shape)
+
+    return {
+        "url": _norm(page_url),
+        "title": _normalize_interactive_identity_text(raw.get("title")),
+        "headings": normalized_set(raw.get("headings")),
+        "dialogs": normalized_set(raw.get("dialogs")),
+        "form_sections": normalized_set(raw.get("formSections")),
+        "forms": sorted(forms),
+        "controls": sorted(controls),
+        "navigation_routes": sorted(navigation_routes),
+    }
+
+
+def _interactive_form_surface_grew(before: dict, after: dict) -> bool:
+    """Return whether a form choice revealed a new section or field."""
+
+    def fields(identity: dict) -> set[tuple[str, ...]]:
+        return {
+            tuple(str(part) for part in field)
+            for form in identity.get("forms") or []
+            for field in form or []
+        }
+
+    before_sections = set(before.get("form_sections") or [])
+    after_sections = set(after.get("form_sections") or [])
+    return bool(fields(after) - fields(before) or after_sections - before_sections)
+
+
+def _interactive_action_is_form_choice(action: dict) -> bool:
+    return str(action.get("kind") or "") in {
+        "select_option",
+        "check",
+        "uncheck",
+    }
+
+
+def _looks_like_transient_interactive_text(text: str) -> bool:
+    compact = " ".join((text or "").split())
+    return len(compact) < 300 and bool(_INTERACTIVE_TRANSIENT_RE.search(compact))
 
 
 async def _locator_is_exposed(locator, *, actionable: bool = False) -> bool:
@@ -1066,11 +1358,17 @@ async def _locator_is_exposed(locator, *, actionable: bool = False) -> bool:
             return False
 
 
-async def _interactive_controls(page) -> list[dict]:
-    """Return conservative, navigation-like controls with replayable locators.
+async def _interactive_controls(
+    page,
+    *,
+    skip_dangerous_actions: bool,
+    suppress_form_submit_actions: bool,
+) -> list[dict]:
+    """Return safe workflow controls with replayable locators.
 
-    Forms and destructive-looking controls are deliberately excluded. This is a
-    discovery feature, not permission to execute business actions.
+    Selecting a choice is safe to explore. Buttons inside forms are included,
+    but submit buttons are limited to navigation-like labels and every replay is
+    guarded against non-GET requests.
     """
     try:
         controls = await page.evaluate(
@@ -1091,18 +1389,60 @@ async def _interactive_controls(page) -> list[dict]:
                   || (!el.disabled && el.getAttribute('aria-disabled') !== 'true');
               };
               const candidates = Array.from(document.querySelectorAll(
-                'button, [role="button"], [role="tab"], [role="menuitem"], summary, '
+                'button, input[type="button"], input[type="submit"], '
+                + 'input[type="radio"], input[type="checkbox"], select, '
+                + 'label, '
+                + '[role="button"], [role="tab"], [role="menuitem"], '
+                + '[role="radio"], [role="checkbox"], [role="combobox"], '
+                + '[role="option"], summary, '
                 + '[aria-haspopup="dialog"], a[href="#"], a:not([href]), '
                 + 'a[href^="javascript:"], a[aria-controls]'
               ));
-              return candidates.filter(el => exposed(el, true) && !el.closest('form')).slice(0, 80).map(el => {
+              return candidates.filter(el => {
+                if (!exposed(el, true)) return false;
+                if (el.tagName.toLowerCase() !== 'label') return true;
+                const control = el.control;
+                return !!control && ['radio', 'checkbox'].includes(
+                  (control.getAttribute('type') || '').toLowerCase()
+                );
+              }).slice(0, 100).map(el => {
                 const tag = el.tagName.toLowerCase();
-                const role = el.getAttribute('role') || (tag === 'a' ? 'link' : 'button');
-                const name = (el.getAttribute('aria-label') || el.innerText || el.textContent || '')
+                const field = tag === 'label' && el.control ? el.control : el;
+                const inputType = (field.getAttribute('type') || '').toLowerCase();
+                const role = el.getAttribute('role')
+                  || (tag === 'a' ? 'link'
+                    : inputType === 'radio' ? 'radio'
+                    : inputType === 'checkbox' ? 'checkbox'
+                    : tag === 'select' ? 'combobox' : 'button');
+                const labelText = field.labels && field.labels.length
+                  ? Array.from(field.labels).map(label => label.innerText || label.textContent || '').join(' ')
+                  : '';
+                const name = (el.getAttribute('aria-label') || labelText
+                  || el.innerText || el.textContent || field.getAttribute('name')
+                  || field.value || '')
                   .replace(/\\s+/g, ' ').trim().slice(0, 80);
                 const testid = el.getAttribute('data-testid') || el.getAttribute('data-test') || null;
+                const form = field.closest('form');
                 return {
                   tag, role, name, testid, id: el.id || null,
+                  label_for: tag === 'label' ? (el.getAttribute('for') || null) : null,
+                  input_type: inputType,
+                  field_name: field.getAttribute('name') || null,
+                  value: field.value || null,
+                  checked: !!field.checked,
+                  button_type: tag === 'button'
+                    ? (el.getAttribute('type') || 'submit').toLowerCase()
+                    : inputType === 'submit' || inputType === 'button' ? inputType : null,
+                  inside_form: !!form,
+                  form_method: form ? (form.getAttribute('method') || 'get').toUpperCase() : null,
+                  form_action: form ? (form.action || location.href) : null,
+                  options: tag === 'select'
+                    ? Array.from(el.options).filter(option => !option.disabled).map(option => ({
+                        value: option.value,
+                        name: (option.textContent || option.label || option.value || '').trim().slice(0, 80),
+                        selected: option.selected
+                      }))
+                    : [],
                   expanded: el.getAttribute('aria-expanded'),
                   selected: el.getAttribute('aria-selected')
                 };
@@ -1112,110 +1452,437 @@ async def _interactive_controls(page) -> list[dict]:
     except Exception:
         return []
     unique: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for control in controls or []:
         role = str(control.get("role") or "button")
         name = str(control.get("name") or "").strip()
         testid = str(control.get("testid") or "")
         element_id = str(control.get("id") or "")
-        if not name or _INTERACTIVE_DANGER_RE.search(name):
+        label_for = str(control.get("label_for") or "")
+        field_name = str(control.get("field_name") or "")
+        value = str(control.get("value") or "")
+        input_type = str(control.get("input_type") or "")
+        tag = str(control.get("tag") or "")
+        checked = bool(control.get("checked"))
+        if not name:
             continue
-        key = (role, name, testid or element_id)
-        if key in seen:
+        if skip_dangerous_actions and _INTERACTIVE_DANGER_RE.search(name):
             continue
-        seen.add(key)
-        unique.append(
-            {
-                "role": role,
-                "name": name,
-                "testid": testid or None,
-                "element_id": element_id or None,
-                "selector": _interactive_selector(testid, element_id),
-            }
-        )
+        if input_type == "radio" and checked:
+            continue
+        if (
+            suppress_form_submit_actions
+            and control.get("inside_form")
+            and control.get("button_type") == "submit"
+            and not re.search(r"\b(?:next|continue|back|previous)\b", name, re.I)
+        ):
+            continue
+
+        if tag == "select":
+            options = [
+                option
+                for option in control.get("options") or []
+                if not option.get("selected")
+                and str(option.get("value") or "").strip()
+                and str(option.get("name") or "").strip()
+            ][:_INTERACTIVE_MAX_SELECT_OPTIONS]
+            for option in options:
+                option_value = str(option.get("value") or "")
+                option_name = str(option.get("name") or option_value)
+                key = ("select_option", name, field_name, option_value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(
+                    {
+                        "kind": "select_option",
+                        "role": role,
+                        "name": name,
+                        "option_name": option_name,
+                        "value": option_value,
+                        "field_name": field_name or None,
+                        "testid": testid or None,
+                        "element_id": element_id or None,
+                        "selector": _interactive_selector(
+                            testid, element_id, "", field_name, ""
+                        ),
+                    }
+                )
+        else:
+            if tag == "label":
+                kind = "click"
+            elif input_type == "checkbox" and checked:
+                kind = "uncheck"
+            elif input_type in {"radio", "checkbox"}:
+                kind = "check"
+            else:
+                kind = "click"
+            key_kind = "choice" if input_type in {"radio", "checkbox"} else kind
+            key = (key_kind, name, field_name, value or testid or element_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(
+                {
+                    "kind": kind,
+                    "role": role,
+                    "name": name,
+                    "value": value or None,
+                    "field_name": field_name or None,
+                    "testid": testid or None,
+                    "element_id": element_id or None,
+                    "selector": _interactive_selector(
+                        testid, element_id, label_for, field_name, value
+                    ),
+                    "inside_form": bool(control.get("inside_form")),
+                    "button_type": control.get("button_type"),
+                    "form_method": control.get("form_method"),
+                    "form_action": control.get("form_action"),
+                }
+            )
         if len(unique) >= _INTERACTIVE_ACTION_LIMIT:
-            break
+            return unique[:_INTERACTIVE_ACTION_LIMIT]
     return unique
 
 
-def _interactive_selector(testid: str, element_id: str) -> str:
+def _interactive_selector(
+    testid: str,
+    element_id: str,
+    label_for: str,
+    field_name: str,
+    value: str,
+) -> str:
     """Produce a stable selector, deferring semantic controls to role/name."""
     if testid:
         return f"[data-testid={json.dumps(testid)}]"
     if element_id:
         return f"[id={json.dumps(element_id)}]"
+    if label_for:
+        return f"label[for={json.dumps(label_for)}]"
+    if field_name and value:
+        return f"[name={json.dumps(field_name)}][value={json.dumps(value)}]"
+    if field_name:
+        return f"[name={json.dumps(field_name)}]"
     return ""
 
 
-async def _replay_interactive_steps(page, steps: list[dict]) -> bool:
-    for step in steps:
-        try:
-            if step.get("selector"):
-                locator = page.locator(step["selector"])
-            elif step.get("testid"):
-                locator = page.get_by_test_id(step["testid"])
-            else:
-                locator = page.get_by_role(
-                    step.get("role") or "button",
-                    name=step.get("name") or "",
-                    exact=True,
-                )
-            if await locator.count() != 1:
-                return False
-            if not await _locator_is_exposed(locator, actionable=True):
-                return False
-            await locator.click(timeout=4_000)
-            try:
-                await page.wait_for_timeout(200)
-                await page.wait_for_load_state("domcontentloaded", timeout=2_000)
-            except Exception:
-                pass
-        except Exception:
-            return False
-    return True
-
-
-async def _interactive_state_snapshot(page) -> dict | None:
+async def _interactive_action_signature(page) -> str:
+    """Small, non-sensitive fingerprint used to wait for an action outcome."""
     try:
         raw = await page.evaluate(
             """() => {
               const visible = el => {
                 const rect = el.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) return false;
-                for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
-                  const style = getComputedStyle(node);
-                  if (style.display === 'none' || style.visibility === 'hidden'
-                      || style.visibility === 'collapse'
-                      || Number.parseFloat(style.opacity || '1') <= 0.01
-                      || node.hidden || node.inert
-                      || node.getAttribute('aria-hidden') === 'true') return false;
-                }
-                return true;
+                return rect.width > 0 && rect.height > 0
+                  && getComputedStyle(el).display !== 'none'
+                  && getComputedStyle(el).visibility !== 'hidden';
               };
-              const text = el => (el.getAttribute('aria-label') || el.innerText || el.textContent || '')
-                .replace(/\\s+/g, ' ').trim().slice(0, 100);
-              const pick = selector => Array.from(document.querySelectorAll(selector)).filter(visible).slice(0, 20).map(text);
               return {
-                headings: pick('h1,h2,h3,[role="heading"]'),
-                dialogs: pick('[role="dialog"],[aria-modal="true"]'),
-                forms: Array.from(document.forms).filter(visible).slice(0, 12).map(f =>
-                  Array.from(f.querySelectorAll('input,textarea,select')).map(el => el.name || el.type || el.id).join('|')),
+                url: location.href,
+                text: (document.body ? document.body.innerText : '').slice(0, 6000),
                 controls: Array.from(document.querySelectorAll(
-                  'button,[role="button"],[role="tab"],[role="menuitem"],a[href="#"],a[aria-controls]'))
-                  .filter(visible).slice(0, 30).map(el => `${el.getAttribute('role') || el.tagName}:${text(el)}:${el.getAttribute('aria-selected') || ''}`),
-                title: document.title || '',
+                  'button,a[href],input[type="radio"],input[type="checkbox"],select,'
+                  + '[role="button"],[role="radio"],[role="checkbox"],'
+                  + '[role="combobox"],[role="option"]'
+                )).filter(visible).slice(0, 80).map(el => [
+                  el.tagName, el.getAttribute('name') || '', el.value || '',
+                  !!el.checked, el.getAttribute('aria-selected') || '',
+                  el.getAttribute('aria-checked') || '', !!el.disabled,
+                  el.getAttribute('aria-disabled') || '',
+                  (el.innerText || el.textContent || '').trim().slice(0, 80)
+                ])
               };
             }"""
         )
-        text = await page.evaluate("() => document.body ? document.body.innerText : ''")
-        title = await page.title()
-        normalized = re.sub(r"\b\d{2,}\b", "#", json.dumps(raw, sort_keys=True))
-        state_key = (
-            "spa:"
-            + _norm(page.url)
-            + ":"
-            + hashlib.sha256(normalized.encode()).hexdigest()[:24]
+        return hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
+    except Exception:
+        return _norm(getattr(page, "url", ""))
+
+
+async def _settle_interactive_action(page, before_signature: str) -> bool:
+    """Wait for a changed browser state to remain stable across several samples."""
+    changed = False
+    stable_samples = 0
+    previous_signature = before_signature
+    for _ in range(20):
+        try:
+            await page.wait_for_timeout(100)
+        except Exception:
+            await asyncio.sleep(0.1)
+        signature = await _interactive_action_signature(page)
+        if signature != before_signature:
+            changed = True
+        if changed and signature == previous_signature:
+            stable_samples += 1
+            if stable_samples >= 3:
+                return True
+        else:
+            stable_samples = 0
+        previous_signature = signature
+    return changed
+
+
+async def _perform_interactive_action(
+    page,
+    step: dict,
+    *,
+    block_non_idempotent_interactive_replay: bool,
+) -> dict:
+    blocked_requests: list[dict] = []
+
+    async def _safe_route(route) -> None:
+        if not block_non_idempotent_interactive_replay:
+            await route.continue_()
+            return
+        request = route.request
+        method = str(request.method or "GET").upper()
+        if method not in {"GET", "HEAD", "OPTIONS"}:
+            parsed_url = urlparse(str(request.url))
+            safe_url = urlunparse(
+                (
+                    parsed_url.scheme,
+                    parsed_url.netloc,
+                    parsed_url.path,
+                    "",
+                    "",
+                    "",
+                )
+            )
+            blocked_requests.append({"method": method, "url": safe_url[:1000]})
+            await route.abort("blockedbyclient")
+            return
+        await route.continue_()
+
+    route_installed = False
+    try:
+        await page.route("**/*", _safe_route)
+        route_installed = True
+    except Exception:
+        pass
+
+    before_signature = await _interactive_action_signature(page)
+    try:
+        if step.get("selector"):
+            locator = page.locator(step["selector"])
+        elif step.get("testid"):
+            locator = page.get_by_test_id(step["testid"])
+        else:
+            locator = page.get_by_role(
+                step.get("role") or "button",
+                name=step.get("name") or "",
+                exact=True,
+            )
+        if await locator.count() != 1:
+            return {"ok": False, "changed": False, "blocked_requests": []}
+        if not await _locator_is_exposed(locator, actionable=True):
+            return {"ok": False, "changed": False, "blocked_requests": []}
+        if step.get("kind") == "select_option":
+            await locator.select_option(value=step.get("value"), timeout=4_000)
+        elif step.get("kind") == "check":
+            await locator.check(timeout=4_000)
+        elif step.get("kind") == "uncheck":
+            await locator.uncheck(timeout=4_000)
+        else:
+            await locator.click(timeout=4_000)
+        try:
+            # Best-effort settle only — many apps under test never go fully
+            # idle (SSE streams, analytics/chat polling), so a long timeout
+            # here is pure wasted time on every single replayed step, not a
+            # correctness gate. _settle_interactive_action() below does the
+            # real "has the DOM stopped changing" check.
+            await page.wait_for_load_state("networkidle", timeout=500)
+        except Exception:
+            pass
+        changed = await _settle_interactive_action(page, before_signature)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=2_000)
+        except Exception:
+            pass
+        return {
+            "ok": not blocked_requests,
+            "changed": changed,
+            "blocked_requests": blocked_requests,
+        }
+    except Exception:
+        return {
+            "ok": False,
+            "changed": False,
+            "blocked_requests": blocked_requests,
+        }
+    finally:
+        if route_installed:
+            try:
+                await page.unroute("**/*", _safe_route)
+            except Exception:
+                pass
+
+
+async def _wait_for_content_settle(page, *, max_wait_ms: int = 3000) -> None:
+    """Wait past initial async paint before a snapshot is taken.
+
+    Static chrome (header/footer, nav links) often satisfies a naive
+    "has text or a link" check the instant a page mounts, even though the
+    real content is still behind a spinner/skeleton loader fetched via XHR
+    (e.g. a payment-lookup result page). Poll a lightweight signature —
+    visible text length, count of visible busy/spinner markers, and total
+    DOM node count — until it stops changing and no busy markers remain, so
+    we snapshot (and continue crawling from) the settled page. Capped at
+    ``max_wait_ms`` so pages with perpetual animations don't stall the crawl.
+    """
+    poll_ms = 150
+    stable_needed = 2  # ~300ms of no change once busy markers have cleared
+    previous: list | None = None
+    stable_count = 0
+    elapsed = 0
+    while elapsed < max_wait_ms:
+        try:
+            signature = await page.evaluate(
+                """() => {
+                  const busySelectors = '[aria-busy="true"], [class*="spinner" i],'
+                    + ' [class*="skeleton" i], [class*="loading" i]';
+                  let busyVisible = 0;
+                  document.querySelectorAll(busySelectors).forEach(el => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) busyVisible += 1;
+                  });
+                  const text = document.body ? document.body.innerText : '';
+                  return [text.length, busyVisible, document.querySelectorAll('*').length];
+                }"""
+            )
+        except Exception:
+            return
+        if previous is not None and signature == previous and signature[1] == 0:
+            stable_count += 1
+            if stable_count >= stable_needed:
+                return
+        else:
+            stable_count = 0
+        previous = signature
+        try:
+            await page.wait_for_timeout(poll_ms)
+        except Exception:
+            return
+        elapsed += poll_ms
+
+
+async def _replay_interactive_steps(
+    page,
+    steps: list[dict],
+    *,
+    block_non_idempotent_interactive_replay: bool,
+) -> dict:
+    changed = False
+    blocked_requests: list[dict] = []
+    for step in steps:
+        result = await _perform_interactive_action(
+            page,
+            step,
+            block_non_idempotent_interactive_replay=block_non_idempotent_interactive_replay,
         )
+        changed = changed or result["changed"]
+        blocked_requests.extend(result["blocked_requests"])
+        if not result["ok"]:
+            return {
+                "ok": False,
+                "changed": changed,
+                "blocked_requests": blocked_requests,
+            }
+    return {"ok": True, "changed": changed, "blocked_requests": blocked_requests}
+
+
+async def _interactive_state_snapshot(
+    page, *, capture_screenshot: bool = True
+) -> dict | None:
+    """Capture a stable functional state and ignore short loading placeholders."""
+    raw: dict = {}
+    text = ""
+    title = ""
+    identity: dict = {}
+    previous_identity_signature = ""
+    identity_stable = False
+    try:
+        for attempt in range(10):
+            raw = await page.evaluate(
+                """() => {
+                  const visible = el => {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) return false;
+                    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+                      const style = getComputedStyle(node);
+                      if (style.display === 'none' || style.visibility === 'hidden'
+                          || style.visibility === 'collapse'
+                          || Number.parseFloat(style.opacity || '1') <= 0.01
+                          || node.hidden || node.inert
+                          || node.getAttribute('aria-hidden') === 'true') return false;
+                    }
+                    return true;
+                  };
+                  const text = el => (el.getAttribute('aria-label') || el.innerText || el.textContent || '')
+                    .replace(/\\s+/g, ' ').trim().slice(0, 100);
+                  const pick = selector => Array.from(document.querySelectorAll(selector))
+                    .filter(visible).slice(0, 20).map(text);
+                  return {
+                    headings: pick('h1,h2,h3,[role="heading"]'),
+                    dialogs: pick('[role="dialog"],[aria-modal="true"]'),
+                    forms: Array.from(document.forms).filter(visible).slice(0, 12).map(f =>
+                      Array.from(f.querySelectorAll('input,textarea,select')).map(el => ({
+                        field: el.name || el.type || el.id,
+                        kind: (el.type || el.tagName || '').toLowerCase()
+                      }))),
+                    formSections: pick(
+                      'form fieldset > legend, form h2, form h3, '
+                      + '[role="form"] fieldset > legend, [role="form"] h2, [role="form"] h3'
+                    ),
+                    controls: Array.from(document.querySelectorAll(
+                      'button,[role="button"],[role="tab"],[role="menuitem"],'
+                      + '[role="radio"],[role="checkbox"],[role="combobox"],[role="option"],'
+                      + 'input[type="radio"],input[type="checkbox"],select,a[href="#"],a[aria-controls]'))
+                      .filter(visible).slice(0, 30).map(el => ({
+                        role: el.getAttribute('role') || el.tagName,
+                        name: text(el),
+                        selected: el.getAttribute('aria-selected') || '',
+                        checked: el.getAttribute('aria-checked') || !!el.checked,
+                        disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'
+                      })),
+                    links: Array.from(document.querySelectorAll('a[href]')).filter(visible)
+                      .slice(0, 80).map(el => ({
+                        href: el.href,
+                        text: text(el)
+                      })),
+                    title: document.title || '',
+                    bodyText: document.body ? document.body.innerText : '',
+                  };
+                }"""
+            )
+            text = str(raw.get("bodyText") or "")
+            title = str(raw.get("title") or "")
+            if _looks_like_transient_interactive_text(text):
+                previous_identity_signature = ""
+            else:
+                identity = _interactive_state_identity(raw, page.url, text)
+                identity_signature = hashlib.sha256(
+                    json.dumps(identity, sort_keys=True).encode()
+                ).hexdigest()
+                if identity_signature == previous_identity_signature:
+                    identity_stable = True
+                    break
+                previous_identity_signature = identity_signature
+            if attempt < 9:
+                try:
+                    await page.wait_for_timeout(150)
+                except Exception:
+                    await asyncio.sleep(0.15)
+        if (
+            _looks_like_transient_interactive_text(text)
+            or not identity
+            or not identity_stable
+        ):
+            return None
+
+        identity_signature = hashlib.sha256(
+            json.dumps(identity, sort_keys=True).encode()
+        ).hexdigest()
+        state_key = "spa:" + _norm(page.url) + ":" + identity_signature[:24]
         label = (
             next(iter(raw.get("dialogs") or []), "")
             or next(iter(raw.get("headings") or []), "")
@@ -1223,18 +1890,21 @@ async def _interactive_state_snapshot(page) -> dict | None:
             or "Interactive view"
         )
         screenshot_b64 = None
-        try:
-            screenshot_b64 = base64.b64encode(
-                await page.screenshot(type="png", full_page=False)
-            ).decode()
-        except Exception:
-            pass
+        if capture_screenshot:
+            try:
+                screenshot_b64 = base64.b64encode(
+                    await page.screenshot(type="png", full_page=False)
+                ).decode()
+            except Exception:
+                pass
         return {
             "key": state_key,
+            "identity": identity,
             "label": str(label)[:160],
             "title": title,
             "text": text or "",
             "screenshot_b64": screenshot_b64,
+            "links": raw.get("links") or [],
         }
     except Exception:
         return None
@@ -1248,26 +1918,148 @@ async def _explore_interactive_states(
     root_page_id: int,
     root_depth: int,
     shared: _CrawlShared,
-    max_depth: int,
     max_pages: int,
     credential_id: Optional[int],
     username: Optional[str],
     llm_cfg,
     base_netloc: str,
-) -> None:
+    skip_dangerous_actions: bool,
+    suppress_form_submit_actions: bool,
+    block_non_idempotent_interactive_replay: bool,
+) -> list[dict]:
     """Breadth-first exploration of safe client-side states beneath one URL page."""
-    pending: deque[tuple[list[dict], int, int]] = deque(
-        [([], root_page_id, root_depth)]
+    baseline = await _interactive_state_snapshot(page, capture_screenshot=False)
+    if baseline:
+        async with shared.lock:
+            # Every credential may render different record data on the same URL.
+            # Map each credential-neutral baseline back to the canonical URL node.
+            shared.state_keys[baseline["key"]] = root_page_id
+
+    pending: deque[tuple[list[dict], int, int, dict]] = deque(
+        [([], root_page_id, 0, (baseline or {}).get("identity") or {})]
     )
     seen_recipes: set[str] = set()
+    discoveries: list[dict] = []
+    states_created = 0
+    replay_attempts = 0
+    exploration_deadline = time.monotonic() + _INTERACTIVE_MAX_SECONDS
     while pending and run_id not in _stop_requested:
-        steps, parent_id, state_depth = pending.popleft()
+        steps, parent_id, interaction_depth, parent_identity = pending.popleft()
+        expand_form_choices = True
         if steps:
+            if replay_attempts >= _INTERACTIVE_MAX_ATTEMPTS:
+                _crawl_log(
+                    run_id,
+                    "crawl_workflow",
+                    "info",
+                    f"Stopped interactive exploration after {replay_attempts} replay attempts",
+                    page_url=root_url,
+                )
+                break
+            if time.monotonic() >= exploration_deadline:
+                _crawl_log(
+                    run_id,
+                    "crawl_workflow",
+                    "info",
+                    f"Stopped interactive exploration after {_INTERACTIVE_MAX_SECONDS:.0f}s "
+                    "time budget (page has many candidate controls)",
+                    page_url=root_url,
+                )
+                break
+            replay_attempts += 1
             try:
                 await page.goto(root_url, wait_until="domcontentloaded", timeout=15_000)
             except Exception:
                 continue
-            if not await _replay_interactive_steps(page, steps):
+            # A document-ready SPA may still be running its authenticated
+            # bootstrap. Replaying controls before that finishes lets the later
+            # bootstrap overwrite the requested view (for example, Profile
+            # briefly opens and is then replaced by Dashboard). This is a
+            # best-effort settle only — apps with SSE/polling/analytics never
+            # go network-idle, so a long timeout here just burns wall-clock
+            # time on every one of up to _INTERACTIVE_MAX_ATTEMPTS reloads.
+            try:
+                await page.wait_for_load_state("networkidle", timeout=600)
+            except Exception:
+                pass
+            replay_root = await _interactive_state_snapshot(
+                page, capture_screenshot=False
+            )
+            if not replay_root:
+                continue
+            try:
+                existing_page_ids = {id(open_page) for open_page in page.context.pages}
+            except Exception:
+                existing_page_ids = set()
+            replay = await _replay_interactive_steps(
+                page,
+                steps,
+                block_non_idempotent_interactive_replay=block_non_idempotent_interactive_replay,
+            )
+            if replay["blocked_requests"]:
+                blocked = replay["blocked_requests"][-1]
+                action = steps[-1]
+                _crawl_log(
+                    run_id,
+                    "crawl_workflow",
+                    "info",
+                    f"Could not safely advance via “{action['name']}” — "
+                    f"blocked {blocked['method']} request",
+                    page_url=root_url,
+                    data={
+                        "action": action["name"],
+                        "blocked_request": blocked,
+                    },
+                )
+            if not replay["ok"]:
+                continue
+            action = steps[-1]
+            try:
+                new_pages = [
+                    open_page
+                    for open_page in page.context.pages
+                    if id(open_page) not in existing_page_ids and open_page is not page
+                ]
+            except Exception:
+                new_pages = []
+            for popup in new_pages:
+                try:
+                    await popup.wait_for_load_state("domcontentloaded", timeout=2_000)
+                except Exception:
+                    pass
+                popup_url = str(getattr(popup, "url", "") or "")
+                if (
+                    popup_url
+                    and _same_domain(popup_url, base_netloc)
+                    and not _is_session_ending_url(popup_url, action["name"])
+                ):
+                    discoveries.append(
+                        {
+                            "url": popup_url,
+                            "source_page_id": parent_id,
+                            "link_text": action["name"],
+                            "action_kind": "popup",
+                            "action_data": {"replay_steps": steps},
+                        }
+                    )
+                try:
+                    await popup.close()
+                except Exception:
+                    pass
+            if _norm(page.url) != _norm(root_url) and _same_domain(
+                page.url, base_netloc
+            ):
+                discoveries.append(
+                    {
+                        "url": page.url,
+                        "source_page_id": parent_id,
+                        "link_text": action["name"],
+                        "action_kind": "click",
+                        "action_data": {"replay_steps": steps},
+                    }
+                )
+                continue
+            if not replay["changed"]:
                 continue
             snapshot = await _interactive_state_snapshot(page)
             if not snapshot or not _same_domain(page.url, base_netloc):
@@ -1275,22 +2067,42 @@ async def _explore_interactive_states(
             async with shared.lock:
                 page_id = shared.state_keys.get(snapshot["key"])
                 is_new = page_id is None
+                choice_without_new_form_surface = (
+                    _interactive_action_is_form_choice(action)
+                    and bool(parent_identity)
+                    and bool(snapshot.get("identity"))
+                    and not _interactive_form_surface_grew(
+                        parent_identity, snapshot["identity"]
+                    )
+                )
+                if choice_without_new_form_surface:
+                    expand_form_choices = False
+                if is_new and choice_without_new_form_surface:
+                    page_id = parent_id
+                    shared.state_keys[snapshot["key"]] = page_id
+                    is_new = False
                 if is_new:
-                    if shared.pages_done >= max_pages:
+                    if (
+                        shared.pages_done >= max_pages
+                        or states_created >= _INTERACTIVE_MAX_STATES
+                    ):
                         continue
-                    page_id = _save_page_placeholder(run_id, page.url, state_depth)
+                    page_id = _save_page_placeholder(
+                        run_id, page.url, root_depth + interaction_depth
+                    )
                     shared.state_keys[snapshot["key"]] = page_id
                     shared.pages_done += 1
-            action = steps[-1]
-            _save_link(
-                run_id,
-                parent_id,
-                page_id,
-                page.url,
-                link_text=action["name"],
-                action_kind="click",
-                action_data={"replay_steps": steps},
-            )
+                    states_created += 1
+            if page_id != parent_id:
+                _save_link(
+                    run_id,
+                    parent_id,
+                    page_id,
+                    page.url,
+                    link_text=action["name"],
+                    action_kind="click",
+                    action_data={"replay_steps": steps},
+                )
             if is_new:
                 context = "[Interactive SPA state reached by replay]"
                 cats = {
@@ -1318,13 +2130,15 @@ async def _explore_interactive_states(
                     state_key=snapshot["key"],
                     state_label=page_label,
                     state_kind="interactive",
-                    replay_steps_json=json.dumps(steps),
+                    replay_steps_json=json.dumps(
+                        {"root_url": root_url, "steps": steps}
+                    ),
                     title=snapshot["title"],
                     page_text=snapshot["text"][:10_000],
                     screenshot_b64=snapshot["screenshot_b64"],
                     llm_context=context,
                     status="crawled",
-                    depth=state_depth,
+                    depth=root_depth + interaction_depth,
                     req_auth=cats.get("req_auth"),
                     takes_input=cats.get("takes_input"),
                     has_object_ref=cats.get("has_object_ref"),
@@ -1345,7 +2159,7 @@ async def _explore_interactive_states(
                             "state_label": page_label,
                             "state_kind": "interactive",
                             "title": snapshot["title"],
-                            "depth": state_depth,
+                            "depth": root_depth + interaction_depth,
                             "status": "crawled",
                             "context": context,
                             "in_scope": True,
@@ -1372,18 +2186,57 @@ async def _explore_interactive_states(
                 {},
             )
             _update_accessible_by(page_id, credential_id)
+            if (
+                not is_new
+                and page_id == parent_id
+                and not choice_without_new_form_surface
+            ):
+                continue
             current_id = page_id
+            current_identity = snapshot.get("identity") or {}
+            for link in snapshot["links"]:
+                link_url = str(link.get("href") or "")
+                link_text = str(link.get("text") or "")
+                if (
+                    link_url
+                    and _same_domain(link_url, base_netloc)
+                    and not _is_session_ending_url(link_url, link_text)
+                ):
+                    discoveries.append(
+                        {
+                            "url": link_url,
+                            "source_page_id": current_id,
+                            "link_text": link_text,
+                            "action_kind": "navigate",
+                            "action_data": {"replay_steps": steps},
+                        }
+                    )
         else:
             current_id = root_page_id
+            current_identity = (baseline or {}).get("identity") or {}
 
-        if state_depth >= max_depth:
+        if interaction_depth >= _INTERACTIVE_MAX_STEPS:
             continue
-        for action in await _interactive_controls(page):
+        for action in await _interactive_controls(
+            page,
+            skip_dangerous_actions=skip_dangerous_actions,
+            suppress_form_submit_actions=suppress_form_submit_actions,
+        ):
+            if not expand_form_choices and _interactive_action_is_form_choice(action):
+                continue
             recipe = steps + [action]
             recipe_key = json.dumps(recipe, sort_keys=True)
             if recipe_key not in seen_recipes:
                 seen_recipes.add(recipe_key)
-                pending.append((recipe, current_id, state_depth + 1))
+                pending.append(
+                    (
+                        recipe,
+                        current_id,
+                        interaction_depth + 1,
+                        current_identity,
+                    )
+                )
+    return discoveries
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -1601,7 +2454,8 @@ async def _record_page_intelligence(
     raw_links: list[dict],
     base_netloc: str,
     username: Optional[str],
-) -> None:
+    js_endpoint_discovery_enabled: bool,
+) -> list[dict]:
     """Extract durable target inventory facts from a rendered page."""
     for item in _extract_ids_from_text(text):
         _save_intel_item(
@@ -1711,13 +2565,15 @@ async def _record_page_intelligence(
             metadata={"username": username},
         )
 
-    await _mine_script_intelligence(
+    js_endpoint_calls = await _mine_script_intelligence(
         run_id=run_id,
         page=page,
         page_url=page_url,
         script_urls=dom["scripts"],
         base_netloc=base_netloc,
+        collect_js_endpoint_calls=js_endpoint_discovery_enabled,
     )
+    return js_endpoint_calls
 
 
 async def _extract_dom_intelligence(page) -> dict:
@@ -1769,7 +2625,9 @@ async def _mine_script_intelligence(
     page_url: str,
     script_urls: list[str],
     base_netloc: str,
-) -> None:
+    collect_js_endpoint_calls: bool = False,
+) -> list[dict]:
+    discovered_calls: list[dict] = []
     seen: set[str] = set()
     for script_url in script_urls[:20]:
         if (
@@ -1787,12 +2645,16 @@ async def _mine_script_intelligence(
         except Exception as exc:
             log.debug("Script mining failed for %s: %s", script_url, exc)
             continue
-        _mine_asset_text(
-            run_id=run_id,
-            asset_url=script_url,
-            body=body,
-            source="js_asset",
-            page_url=page_url,
+        discovered_calls.extend(
+            _mine_asset_text(
+                run_id=run_id,
+                asset_url=script_url,
+                body=body,
+                source="js_asset",
+                page_url=page_url,
+                collect_js_endpoint_calls=collect_js_endpoint_calls,
+                base_netloc=base_netloc,
+            )
         )
         for sourcemap_url in _extract_sourcemap_urls(script_url, body)[:3]:
             if not _same_domain(sourcemap_url, base_netloc):
@@ -1816,13 +2678,18 @@ async def _mine_script_intelligence(
                 confidence=0.8,
                 metadata={"page_url": page_url},
             )
-            _mine_asset_text(
-                run_id=run_id,
-                asset_url=sourcemap_url,
-                body=sm_body,
-                source="sourcemap",
-                page_url=page_url,
+            discovered_calls.extend(
+                _mine_asset_text(
+                    run_id=run_id,
+                    asset_url=sourcemap_url,
+                    body=sm_body,
+                    source="sourcemap",
+                    page_url=page_url,
+                    collect_js_endpoint_calls=collect_js_endpoint_calls,
+                    base_netloc=base_netloc,
+                )
             )
+    return _dedupe_api_calls(discovered_calls)
 
 
 async def _mine_public_assets(
@@ -1874,7 +2741,10 @@ def _mine_asset_text(
     body: str,
     source: str,
     page_url: str,
-) -> None:
+    collect_js_endpoint_calls: bool = False,
+    base_netloc: str | None = None,
+) -> list[dict]:
+    discovered_calls: list[dict] = []
     for endpoint in _extract_endpoint_strings(body)[:150]:
         resolved = _resolve_asset_reference(asset_url, endpoint)
         _save_intel_item(
@@ -1906,6 +2776,27 @@ def _mine_asset_text(
                 **call.get("metadata", {}),
             },
         )
+        if (not base_netloc or _same_domain(resolved, base_netloc)) and (
+            collect_js_endpoint_calls
+        ):
+            discovered_calls.append(
+                {
+                    "url": resolved,
+                    "method": call.get("method") or "GET",
+                    "request_headers": {},
+                    "request_body": "",
+                    "status": None,
+                    "content_type": "application/javascript",
+                    "response_headers": {},
+                    "body": "",
+                    "page_url": page_url,
+                    "metadata": {
+                        "source": source,
+                        "asset_url": asset_url,
+                        "discovery": "js_api_call",
+                    },
+                }
+            )
         for field in call.get("body_fields", [])[:30]:
             _save_intel_item(
                 run_id=run_id,
@@ -2031,6 +2922,7 @@ def _mine_asset_text(
             evidence=field["evidence"],
             metadata={"page_url": page_url},
         )
+    return discovered_calls
 
 
 def _record_api_intelligence(
@@ -2757,6 +3649,7 @@ async def _persist_recon_session(run_id: int, cred, page) -> None:
     try:
         raw_cookies = await page.context.cookies()
         cookies = {c["name"]: c["value"] for c in raw_cookies}
+        storage_by_origin = await _capture_scoped_browser_storage(page.context, page)
         token = None
         for key in (
             "access_token",
@@ -2790,6 +3683,10 @@ async def _persist_recon_session(run_id: int, cred, page) -> None:
             credential_id=cred.id,
             source="reconcile_login",
             cookies=cookies,
+            metadata={
+                "browser_cookies": _scoped_browser_cookies(raw_cookies),
+                "storage_by_origin": storage_by_origin,
+            },
             extra_headers={"Authorization": f"Bearer {token}"} if token else None,
         )
     except Exception as exc:
@@ -3039,7 +3936,7 @@ async def _direct_load_accessible(
     if await _page_requires_login(page, login_url):
         return False, "", "", None
 
-    await page.wait_for_timeout(800)
+    await _wait_for_content_settle(page)
     try:
         title = await page.title()
     except Exception:
@@ -3523,6 +4420,19 @@ async def _page_requires_login(page, login_url: str) -> bool:  # noqa: ARG001
             return True
     except Exception:
         pass
+    # Passwordless and identifier-based forms often contain only text inputs.
+    # Treat a visible form on the configured login URL as a login wall without
+    # assuming that any input has type=password.
+    try:
+        if _same_url_without_fragment(page.url, login_url):
+            visible_inputs = page.locator("form input:visible")
+            submit_controls = page.locator(
+                "form button[type='submit']:visible, form input[type='submit']:visible"
+            )
+            if await visible_inputs.count() > 0 and await submit_controls.count() > 0:
+                return True
+    except Exception:
+        pass
     try:
         text = await page.evaluate("() => document.body.innerText")
     except Exception:
@@ -3549,8 +4459,17 @@ async def _goto_with_auth_recovery(
         try:
             # networkidle is unreliable on apps with polling/analytics/websockets
             # (never goes idle → full timeout burned). Keep it short — it's a
-            # best-effort settle, not a correctness gate.
-            await page.wait_for_load_state("networkidle", timeout=3_000)
+            # best-effort settle, not a correctness gate. This runs on every
+            # single page navigation in the crawl, so a long timeout here
+            # multiplies directly into total crawl duration.
+            await page.wait_for_load_state("networkidle", timeout=600)
+        except Exception:
+            pass
+        try:
+            # A blocking modal (welcome tour, consent wall, upsell) can appear
+            # on any navigation, not just right after login — clear it so the
+            # crawler can keep reading/clicking the underlying page.
+            await _dismiss_blocking_modal(page)
         except Exception:
             pass
         if not requires_auth or credential is None or not login_url:
@@ -3686,7 +4605,7 @@ async def _auth_check_still_authenticated(
             snapshot["url"], wait_until="domcontentloaded", timeout=15_000
         )
         try:
-            await check_page.wait_for_load_state("networkidle", timeout=5_000)
+            await check_page.wait_for_load_state("networkidle", timeout=2_000)
         except Exception:
             pass
         if _response_suggests_session_dropped(response) or await _page_requires_login(
@@ -3762,6 +4681,84 @@ def _meaningful_text_tokens(text: str) -> set[str]:
 # ── Authentication ────────────────────────────────────────────────────────────
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+_MODAL_CONTAINER_SELECTOR = "[role='dialog'], [aria-modal='true']"
+
+# Close controls tried inside a detected dialog/overlay first, then as a
+# page-wide fallback for non-semantic "big popup" interstitials (welcome
+# tours, consent walls, post-login upsells) that block the whole screen.
+_MODAL_CLOSE_SELECTORS = [
+    "button[aria-label*='close' i]",
+    "[aria-label*='close' i]",
+    "[class*='close' i]",
+    "[data-dismiss='modal']",
+    "[data-testid*='close' i]",
+    "button:has-text('×')",
+    "button:has-text('✕')",
+    "button:has-text('Close')",
+    "button:has-text('Got it')",
+    "button:has-text('No thanks')",
+    "button:has-text('Skip')",
+    "button:has-text('Maybe later')",
+    "button:has-text('Dismiss')",
+    "button:has-text('Not now')",
+]
+
+
+async def _dismiss_blocking_modal(page, max_attempts: int = 3) -> bool:
+    """Best-effort close of a full-screen modal/overlay that blocks the page.
+
+    Some apps show a "click X to close" interstitial (welcome tour, consent
+    wall, post-login upsell) that isn't a login form but still prevents the
+    crawler from clicking/reading anything underneath it. Try to detect a
+    visible ``role=dialog``/``aria-modal`` container (or another element with
+    a modal/overlay-ish class) and click a close control inside it, falling
+    back to a page-wide close-button search. Returns True if a modal was
+    dismissed at least once.
+    """
+    dismissed_any = False
+    for _ in range(max_attempts):
+        container = None
+        try:
+            root = page.locator(_MODAL_CONTAINER_SELECTOR)
+            count = await root.count()
+            for idx in range(min(count, 5)):
+                loc = root.nth(idx)
+                if await loc.is_visible():
+                    container = loc
+                    break
+        except Exception:
+            container = None
+
+        if container is None:
+            try:
+                loc = page.locator("[class*='modal' i], [class*='overlay' i]").first
+                if await loc.count() > 0 and await loc.is_visible():
+                    container = loc
+            except Exception:
+                container = None
+
+        if container is None:
+            break
+
+        closed = False
+        for sel in _MODAL_CLOSE_SELECTORS:
+            try:
+                close_loc = container.locator(sel).first
+                if await close_loc.count() > 0 and await close_loc.is_visible():
+                    await close_loc.click(timeout=3_000)
+                    closed = True
+                    break
+            except Exception:
+                continue
+        if not closed:
+            closed = await _click_first_visible(page, _MODAL_CLOSE_SELECTORS)
+        if not closed:
+            break
+        dismissed_any = True
+        await page.wait_for_timeout(400)
+    return dismissed_any
 
 
 async def _detect_mfa_prompt(page) -> bool:
@@ -3853,11 +4850,241 @@ async def _fill_totp_if_prompted(page, credential) -> None:
             pass
 
     try:
-        await page.wait_for_load_state("networkidle", timeout=12_000)
+        await page.wait_for_load_state("networkidle", timeout=4_000)
     except Exception:
         pass
     await page.wait_for_timeout(1000)
     log.info("  _fill_totp: TOTP code filled and submitted for %s", credential.username)
+
+
+def _extract_email_otp(text: str) -> str | None:
+    compact = " ".join((text or "").split())
+    for pattern in [
+        r"(?:one[- ]time|verification|security|login|otp)\s+code\D{0,40}(\d{4,8})\b",
+        r"\b(\d{4,8})\D{0,40}(?:one[- ]time|verification|security|login|otp)\s+code",
+        r"\bOTP\D{0,20}(\d{4,8})\b",
+    ]:
+        match = re.search(pattern, compact, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    match = re.search(r"\b(\d{6})\b", compact)
+    return match.group(1) if match else None
+
+
+def _collect_json_strings(obj, out: list[str]) -> None:
+    """Recursively collect every string leaf from a parsed JSON structure."""
+    if isinstance(obj, str):
+        out.append(obj)
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _collect_json_strings(value, out)
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            _collect_json_strings(item, out)
+
+
+def _extract_email_otp_from_script_blob(raw_text: str) -> str | None:
+    """Extract an OTP from a hydration/state ``<script>`` JSON blob.
+
+    The raw ``textContent`` of a ``<script type="application/json">`` element
+    is JSON source, not rendered text: HTML inside string values is encoded
+    as literal ``\\u003c``/``\\u003e`` escapes glued directly to surrounding
+    characters with no word boundary, so running ``_extract_email_otp``
+    against it directly can silently fail to match anything (including the
+    ``\\d{6}`` fallback). Parse the JSON, decode each string leaf (which
+    resolves the escapes and unescapes normally), strip any HTML tags, and
+    run extraction against the readable result.
+    """
+    try:
+        parsed = json.loads(raw_text)
+    except Exception:
+        return None
+    strings: list[str] = []
+    _collect_json_strings(parsed, strings)
+    for value in strings:
+        if len(value) < 4:
+            continue
+        readable = re.sub(r"<[^>]+>", " ", value)
+        code = _extract_email_otp(readable)
+        if code:
+            return code
+    return None
+
+
+async def _mailbox_page_otp(mailbox_page, mailbox_url: str) -> str | None:
+    await mailbox_page.goto(mailbox_url, wait_until="domcontentloaded", timeout=15_000)
+    try:
+        text = await mailbox_page.locator("body").inner_text(timeout=5_000)
+    except Exception:
+        text = ""
+    code = _extract_email_otp(text)
+    if code:
+        return code
+
+    # Some inbox UIs (e.g. mailsac) only show sender/subject/date in the
+    # visible list and render the message body via client-side JS after a
+    # click, but ship the full message content (subject + body HTML) inline
+    # in a hydration/state <script type="application/json"> blob. The blob's
+    # textContent is raw JSON source (HTML entities appear as literal
+    # "\u003c"/"\u003e" escapes glued to surrounding text with no word
+    # boundary), so it must be parsed and decoded before extraction — plain
+    # regex against the raw text can silently match nothing at all.
+    try:
+        script_texts = await mailbox_page.locator(
+            "script[type='application/json'], script#__NEXT_DATA__"
+        ).evaluate_all("(els) => els.map(el => el.textContent || '')")
+    except Exception:
+        script_texts = []
+    for script_text in script_texts:
+        code = _extract_email_otp_from_script_blob(script_text)
+        if code:
+            return code
+
+    parsed = urlparse(mailbox_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    try:
+        links = await mailbox_page.locator("a[href]").evaluate_all(
+            "(els) => els.map(a => a.href)"
+        )
+    except Exception:
+        links = []
+    candidates = [
+        href
+        for href in links
+        if isinstance(href, str)
+        and href.startswith(origin)
+        and re.search(r"(?:mail|message|inbox)", href, re.IGNORECASE)
+    ][:10]
+    for href in candidates:
+        try:
+            await mailbox_page.goto(href, wait_until="domcontentloaded", timeout=10_000)
+            text = await mailbox_page.locator("body").inner_text(timeout=5_000)
+        except Exception:
+            continue
+        code = _extract_email_otp(text)
+        if code:
+            return code
+
+    # Fallback for inbox UIs with no anchor-based navigation at all (mailsac's
+    # message rows are plain <tr> elements driven by onClick handlers, not
+    # <a href> links) — click the first message row/list item to open it and
+    # re-scan the now-rendered detail view.
+    try:
+        row = await _visible_locator(
+            mailbox_page,
+            "table tbody tr, [role='row'], li[class*='message' i], "
+            "li[class*='mail' i], [class*='message-item' i], [class*='mail-item' i]",
+        )
+        if row is not None:
+            await row.click(timeout=3_000)
+            await mailbox_page.wait_for_timeout(800)
+            text = await mailbox_page.locator("body").inner_text(timeout=5_000)
+            code = _extract_email_otp(text)
+            if code:
+                return code
+    except Exception:
+        pass
+
+    return None
+
+
+async def _fill_email_otp_if_prompted(page, credential) -> None:
+    mailbox_url = (getattr(credential, "test_mailbox_url", None) or "").strip()
+    if not mailbox_url:
+        log.warning("  _fill_email_otp: no test mailbox URL configured")
+        return
+    for _ in range(20):
+        if await _detect_mfa_prompt(page):
+            break
+        await page.wait_for_timeout(500)
+    else:
+        log.warning(
+            "  _fill_email_otp: no OTP prompt appeared for %s", credential.username
+        )
+        return
+
+    mailbox_page = await page.context.new_page()
+    try:
+        deadline = asyncio.get_running_loop().time() + 90
+        while asyncio.get_running_loop().time() < deadline:
+            code = await _mailbox_page_otp(mailbox_page, mailbox_url)
+            if code:
+                for selector in [
+                    "input[autocomplete='one-time-code']",
+                    "input[name*='otp' i]",
+                    "input[id*='otp' i]",
+                    "input[name*='code' i]",
+                    "input[id*='code' i]",
+                    "input[name*='mfa' i]",
+                    "input[id*='mfa' i]",
+                ]:
+                    loc = await _visible_locator(page, selector)
+                    if loc is not None:
+                        await loc.fill(code)
+                        await _click_first_visible(
+                            page,
+                            [
+                                "button[type='submit']",
+                                "input[type='submit']",
+                                "button:has-text('Verify')",
+                                "button:has-text('Submit')",
+                                "button:has-text('Next')",
+                            ],
+                        )
+                        # Submitting the code kicks off a redirect (often a
+                        # cross-domain SSO handoff back to the app) that hasn't
+                        # happened yet the instant the click resolves. Returning
+                        # immediately here made the caller capture page.url and
+                        # declare "logged in" mid-flight — on an intermediate SSO
+                        # page rather than the final authenticated app page — so
+                        # the crawl's seed URL was wrong and it never actually
+                        # entered the authenticated site. Give the redirect a
+                        # chance to land, and keep waiting a little longer while
+                        # the OTP field is still visible (wrong/stale code, or a
+                        # slow multi-hop SSO redirect).
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=6_000)
+                        except Exception:
+                            pass
+                        await page.wait_for_timeout(1000)
+                        for _ in range(10):
+                            if not await _detect_mfa_prompt(page):
+                                break
+                            await page.wait_for_timeout(1000)
+                        log.info(
+                            "  _fill_email_otp: mailbox code filled for %s (page.url=%s)",
+                            credential.username,
+                            page.url,
+                        )
+                        return
+                return
+            await asyncio.sleep(2)
+    finally:
+        await mailbox_page.close()
+    log.warning("  _fill_email_otp: timed out waiting for %s", credential.username)
+
+
+async def _resolve_mfa_prompt_if_present(page, credential) -> bool:
+    """If an MFA/OTP field is visible, resolve it and report whether it did.
+
+    Used by the LLM-driven login fallback (``_authenticate_smart``), which
+    otherwise only checks "is the login form gone" for success — a check that
+    is blind to an unresolved MFA/OTP prompt (no password field, no denial
+    text) and would declare victory while the user is still stuck on a
+    "enter verification code" screen.
+    """
+    try:
+        if not await _detect_mfa_prompt(page):
+            return False
+    except Exception:
+        return False
+    if (getattr(credential, "totp_seed", None) or "").strip():
+        await _fill_totp_if_prompted(page, credential)
+        return True
+    if (getattr(credential, "test_mailbox_url", None) or "").strip():
+        await _fill_email_otp_if_prompted(page, credential)
+        return True
+    return False
 
 
 _BEARER_STORAGE_KEYS = [
@@ -3878,7 +5105,9 @@ async def _capture_browser_storage(page) -> tuple[dict[str, str], dict[str, str]
     session_storage: dict[str, str] = {}
     try:
         local_storage = (
-            await page.evaluate("() => Object.fromEntries(Object.entries(localStorage))")
+            await page.evaluate(
+                "() => Object.fromEntries(Object.entries(localStorage))"
+            )
             or {}
         )
     except Exception:
@@ -3908,13 +5137,100 @@ def _infer_bearer_header_from_storage(
             return
     if not captured_headers.get("Authorization"):
         for value in all_storage.values():
-            if isinstance(value, str) and value.startswith("eyJ") and value.count(".") >= 2:
+            if (
+                isinstance(value, str)
+                and value.startswith("eyJ")
+                and value.count(".") >= 2
+            ):
                 captured_headers["Authorization"] = f"Bearer {value}"
                 return
 
 
 def _cookie_dict(cookies: list[dict]) -> dict[str, str]:
     return {c["name"]: c["value"] for c in cookies if "name" in c and "value" in c}
+
+
+def _scoped_browser_cookies(cookies: list[dict]) -> list[dict]:
+    result: list[dict] = []
+    for cookie in cookies:
+        if not cookie.get("name") or "value" not in cookie:
+            continue
+        scoped = {"name": cookie["name"], "value": cookie["value"]}
+        if cookie.get("domain"):
+            scoped["domain"] = cookie["domain"]
+            scoped["path"] = cookie.get("path") or "/"
+        elif cookie.get("url"):
+            scoped["url"] = cookie["url"]
+        else:
+            continue
+        for key in ("httpOnly", "secure"):
+            if key in cookie:
+                scoped[key] = cookie[key]
+        if cookie.get("sameSite") in {"Strict", "Lax", "None"}:
+            scoped["sameSite"] = cookie["sameSite"]
+        expires = cookie.get("expires")
+        if isinstance(expires, (int, float)) and expires > 0:
+            scoped["expires"] = expires
+        result.append(scoped)
+    return result
+
+
+async def _capture_scoped_browser_storage(
+    context, fallback_page=None
+) -> dict[str, dict[str, dict]]:
+    storage: dict[str, dict[str, dict]] = {}
+    if hasattr(context, "storage_state"):
+        try:
+            state = await context.storage_state()
+        except Exception:
+            state = {}
+        for origin_state in state.get("origins") or []:
+            origin = origin_state.get("origin")
+            if not origin:
+                continue
+            storage[origin] = {
+                "local": {
+                    item["name"]: item["value"]
+                    for item in origin_state.get("localStorage") or []
+                    if item.get("name") is not None and item.get("value") is not None
+                },
+                "session": {},
+            }
+    pages = getattr(context, "pages", None) or (
+        [fallback_page] if fallback_page else []
+    )
+    for current_page in pages:
+        parsed = urlparse(current_page.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        local, session = await _capture_browser_storage(current_page)
+        current = storage.setdefault(origin, {"local": {}, "session": {}})
+        current["local"].update(local)
+        current["session"].update(session)
+    return storage
+
+
+async def _restore_scoped_browser_storage(
+    context, page, storage_by_origin: dict
+) -> None:
+    if not storage_by_origin:
+        return
+    payload = json.dumps(storage_by_origin).replace("</", "<\\/")
+    if hasattr(context, "add_init_script"):
+        await context.add_init_script(
+            f"""(() => {{
+                const state = {payload}[location.origin];
+                if (!state) return;
+                for (const [k, v] of Object.entries(state.local || {{}})) localStorage.setItem(k, v);
+                for (const [k, v] of Object.entries(state.session || {{}})) sessionStorage.setItem(k, v);
+            }})()"""
+        )
+    parsed = urlparse(page.url)
+    current = storage_by_origin.get(f"{parsed.scheme}://{parsed.netloc}", {})
+    await _restore_browser_storage(
+        page, current.get("local") or {}, current.get("session") or {}
+    )
 
 
 async def _restore_browser_storage(
@@ -4039,7 +5355,11 @@ def _entra_text_requests_totp(text: str) -> bool:
 
 
 def _entra_notification_number(text: str) -> str | None:
-    if "authenticator" not in text and "approve" not in text and "sign in request" not in text:
+    if (
+        "authenticator" not in text
+        and "approve" not in text
+        and "sign in request" not in text
+    ):
         return None
     has_number_matching_hint = any(
         marker in text
@@ -4167,9 +5487,7 @@ def _emit_entra_notification_prompt(
     run_id: int, credential_id: int | None, username: str, number: str | None
 ) -> None:
     if number:
-        message = (
-            f"Attempting Entra login as {username} - open Authenticator and enter {number}"
-        )
+        message = f"Attempting Entra login as {username} - open Authenticator and enter {number}"
     else:
         message = (
             f"Attempting Entra login as {username} - open Authenticator and approve "
@@ -4377,7 +5695,9 @@ async def _authenticate_entra_id(page, login_url: str, credential, run_id: int) 
     except Exception:
         pass
 
-    _crawl_log(run_id, "auth", "start", f"Authenticating with Entra ID as {username}...")
+    _crawl_log(
+        run_id, "auth", "start", f"Authenticating with Entra ID as {username}..."
+    )
     try:
         await page.goto(login_url, wait_until="domcontentloaded", timeout=20_000)
     except Exception as exc:
@@ -4411,10 +5731,13 @@ async def _authenticate_entra_id(page, login_url: str, credential, run_id: int) 
         has_sso_provider_control = False
         if not _is_entra_auth_url(page.url) and _entra_text_offers_sso_provider(text):
             has_sso_provider_control = await _entra_page_has_sso_provider_control(page)
-        if target_host and current_host == target_host and not _is_entra_auth_url(page.url):
-            if (
-                not has_sso_provider_control
-                and not await _page_requires_login(page, login_url)
+        if (
+            target_host
+            and current_host == target_host
+            and not _is_entra_auth_url(page.url)
+        ):
+            if not has_sso_provider_control and not await _page_requires_login(
+                page, login_url
             ):
                 completed = True
                 break
@@ -4435,7 +5758,10 @@ async def _authenticate_entra_id(page, login_url: str, credential, run_id: int) 
                 )
             acted = True
         retryable_failure = _entra_text_has_retryable_authenticator_failure(text)
-        if retryable_failure and asyncio.get_running_loop().time() < retry_failure_grace_until:
+        if (
+            retryable_failure
+            and asyncio.get_running_loop().time() < retry_failure_grace_until
+        ):
             acted = True
         if not acted and retryable_failure:
             retry_clicked = await _wait_for_entra_authenticator_retry(
@@ -4486,9 +5812,7 @@ async def _authenticate_entra_id(page, login_url: str, credential, run_id: int) 
                 if not notified_waiting_for_approval:
                     notified_waiting_for_approval = True
                     authenticator_prompted = True
-                    authenticator_wait_until = (
-                        asyncio.get_running_loop().time() + 300.0
-                    )
+                    authenticator_wait_until = asyncio.get_running_loop().time() + 300.0
                     _emit_entra_notification_prompt(
                         run_id,
                         getattr(credential, "id", None),
@@ -4506,7 +5830,9 @@ async def _authenticate_entra_id(page, login_url: str, credential, run_id: int) 
             acted = await _entra_fill_totp_if_prompted(page, credential, run_id)
             if not acted and not (getattr(credential, "totp_seed", None) or "").strip():
                 needs_guided = True
-                needs_guided_reason = "a TOTP seed or interactive authenticator approval"
+                needs_guided_reason = (
+                    "a TOTP seed or interactive authenticator approval"
+                )
                 break
         if not acted and has_sso_provider_control:
             acted = await _click_first_visible(
@@ -4699,15 +6025,18 @@ async def _authenticate_entra_id(page, login_url: str, credential, run_id: int) 
         cookies = await page.context.cookies()
     except Exception:
         pass
-    local_storage, session_storage = await _capture_browser_storage(page)
+    storage_by_origin = await _capture_scoped_browser_storage(page.context, page)
+    origin = f"{urlparse(page.url).scheme}://{urlparse(page.url).netloc}"
+    local_storage = storage_by_origin.get(origin, {}).get("local") or {}
+    session_storage = storage_by_origin.get(origin, {}).get("session") or {}
     _infer_bearer_header_from_storage(local_storage, session_storage, captured_headers)
 
     if completed:
         _guided_session_cache[(run_id, credential.id)] = {
             "cookies": _cookie_dict(cookies),
+            "browser_cookies": _scoped_browser_cookies(cookies),
             "headers": captured_headers,
-            "local_storage": local_storage,
-            "session_storage": session_storage,
+            "storage_by_origin": storage_by_origin,
             "provider": "entra_id",
             "landing_url": page.url,
             "completed": True,
@@ -4730,6 +6059,10 @@ async def _authenticate_entra_id(page, login_url: str, credential, run_id: int) 
                     "login_url": login_url,
                     "landing_url": page.url,
                     "completed": True,
+                    "browser_cookies": _guided_session_cache[(run_id, credential.id)][
+                        "browser_cookies"
+                    ],
+                    "storage_by_origin": storage_by_origin,
                 },
             )
         except Exception as exc:
@@ -4873,6 +6206,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
 
         captured_cookies: list = []
         captured_headers: dict[str, str] = {}
+        captured_storage_by_origin: dict[str, dict[str, dict]] = {}
 
         from playwright.async_api import async_playwright
 
@@ -4920,29 +6254,13 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                     credential.username,
                 )
 
-                # Capture ALL localStorage and sessionStorage from every open page
-                # in the context (not just known key names) so SPAs that store tokens
-                # under arbitrary keys are handled correctly.
-                captured_local_storage: dict[str, str] = {}
-                captured_session_storage: dict[str, str] = {}
-                try:
-                    captured_local_storage = (
-                        await guided_page.evaluate(
-                            "() => Object.fromEntries(Object.entries(localStorage))"
-                        )
-                        or {}
-                    )
-                except Exception:
-                    pass
-                try:
-                    captured_session_storage = (
-                        await guided_page.evaluate(
-                            "() => Object.fromEntries(Object.entries(sessionStorage))"
-                        )
-                        or {}
-                    )
-                except Exception:
-                    pass
+                captured_storage_by_origin = await _capture_scoped_browser_storage(ctx)
+                landing = urlparse(guided_page.url)
+                landing_storage = captured_storage_by_origin.get(
+                    f"{landing.scheme}://{landing.netloc}", {}
+                )
+                captured_local_storage = landing_storage.get("local") or {}
+                captured_session_storage = landing_storage.get("session") or {}
                 log.info(
                     "  _authenticate_guided: captured %d localStorage + %d sessionStorage "
                     "entries for %s",
@@ -4999,28 +6317,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
         # We always write to the cache so subsequent _authenticate calls for this
         # credential don't open another window (even if capture failed).
         #
-        # Normalisation is critical: Playwright's ctx.cookies() returns fields that
-        # add_cookies rejects — leading-dot domains (".localhost"), expires=-1 for
-        # session cookies, and sameSite values outside {"Strict","Lax","None"}.
-        # Using "url" instead of "domain"+"path" is the most reliable injection form.
-        injectable = []
-        _valid_samesite = {"Strict", "Lax", "None"}
-        for c in captured_cookies:
-            if not isinstance(c, dict) or not c.get("name") or "value" not in c:
-                continue
-            entry: dict = {"name": c["name"], "value": c["value"], "url": login_url}
-            # Optional fields — only include when they are valid
-            if c.get("httpOnly"):
-                entry["httpOnly"] = True
-            if c.get("secure"):
-                entry["secure"] = True
-            ss = c.get("sameSite")
-            if ss in _valid_samesite:
-                entry["sameSite"] = ss
-            exp = c.get("expires")
-            if exp is not None and isinstance(exp, (int, float)) and exp > 0:
-                entry["expires"] = int(exp)
-            injectable.append(entry)
+        injectable = _scoped_browser_cookies(captured_cookies)
         log.info(
             "  _authenticate_guided: built %d injectable cookie(s) from %d captured for %s",
             len(injectable),
@@ -5086,45 +6383,14 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                     "  _authenticate_guided: could not set extra headers: %s", exc
                 )
 
-        # Reload so the headless context picks up the injected cookies,
-        # then restore localStorage and sessionStorage from the headed session.
+        await _restore_scoped_browser_storage(
+            page.context, page, captured_storage_by_origin
+        )
         try:
             await page.reload(wait_until="domcontentloaded", timeout=12_000)
-            await page.wait_for_load_state("networkidle", timeout=8_000)
+            await page.wait_for_load_state("networkidle", timeout=3_000)
         except Exception:
             pass
-        if captured_local_storage:
-            try:
-                await page.evaluate(
-                    "(entries) => { for (const [k,v] of Object.entries(entries)) "
-                    "localStorage.setItem(k, v); }",
-                    captured_local_storage,
-                )
-                log.info(
-                    "  _authenticate_guided: restored %d localStorage entries for %s",
-                    len(captured_local_storage),
-                    credential.username,
-                )
-            except Exception as exc:
-                log.warning(
-                    "  _authenticate_guided: localStorage restore failed: %s", exc
-                )
-        if captured_session_storage:
-            try:
-                await page.evaluate(
-                    "(entries) => { for (const [k,v] of Object.entries(entries)) "
-                    "sessionStorage.setItem(k, v); }",
-                    captured_session_storage,
-                )
-                log.info(
-                    "  _authenticate_guided: restored %d sessionStorage entries for %s",
-                    len(captured_session_storage),
-                    credential.username,
-                )
-            except Exception as exc:
-                log.warning(
-                    "  _authenticate_guided: sessionStorage restore failed: %s", exc
-                )
 
         events_svc.emit(
             run_id,
@@ -5137,15 +6403,10 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
         )
         # Cache the captured session so reconcile and the dynamic scan can reuse it without a second window
         _guided_session_cache[(run_id, credential.id)] = {
-            "cookies": {
-                c["name"]: c["value"]
-                for c in captured_cookies
-                if "name" in c and "value" in c
-            },
+            "cookies": _cookie_dict(captured_cookies),
+            "browser_cookies": injectable,
             "headers": captured_headers,
-            "injectable": injectable,
-            "local_storage": captured_local_storage,
-            "session_storage": captured_session_storage,
+            "storage_by_origin": captured_storage_by_origin,
         }
         # Persist to session vault DB so the dynamic scan phase can load it via load_session_vault()
         try:
@@ -5161,6 +6422,10 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 source="guided_login",
                 cookies=_guided_session_cache[(run_id, credential.id)]["cookies"],
                 extra_headers=captured_headers or None,
+                metadata={
+                    "browser_cookies": injectable,
+                    "storage_by_origin": captured_storage_by_origin,
+                },
             )
         except Exception as _vs_exc:
             log.warning(
@@ -5201,13 +6466,12 @@ async def _authenticate(
                 credential.username,
                 credential.id,
             )
-            # Re-build from the flat cookies dict using url-based format (most reliable)
             cookies_dict = cached.get("cookies") or {}
-            if cookies_dict:
-                cookie_list = [
-                    {"name": k, "value": v, "url": login_url}
-                    for k, v in cookies_dict.items()
-                ]
+            cookie_list = cached.get("browser_cookies") or [
+                {"name": k, "value": v, "url": login_url}
+                for k, v in cookies_dict.items()
+            ]
+            if cookie_list:
                 try:
                     await page.context.add_cookies(cookie_list)
                     log.info(
@@ -5228,39 +6492,24 @@ async def _authenticate(
                     )
             try:
                 await page.reload(wait_until="domcontentloaded", timeout=12_000)
-                await page.wait_for_load_state("networkidle", timeout=8_000)
+                await page.wait_for_load_state("networkidle", timeout=3_000)
             except Exception:
                 pass
-            # Restore localStorage and sessionStorage
-            if cached.get("local_storage"):
-                try:
-                    await page.evaluate(
-                        "(entries) => { for (const [k,v] of Object.entries(entries)) "
-                        "localStorage.setItem(k, v); }",
-                        cached["local_storage"],
-                    )
-                except Exception as exc:
-                    log.warning("  _authenticate: localStorage restore failed: %s", exc)
-            if cached.get("session_storage"):
-                try:
-                    await page.evaluate(
-                        "(entries) => { for (const [k,v] of Object.entries(entries)) "
-                        "sessionStorage.setItem(k, v); }",
-                        cached["session_storage"],
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "  _authenticate: sessionStorage restore failed: %s", exc
-                    )
+            await _restore_scoped_browser_storage(
+                page.context, page, cached.get("storage_by_origin") or {}
+            )
             return
 
     username = getattr(credential, "username", "?")
-    if mode in (AuthMode.auto, AuthMode.totp, AuthMode.entra_id):
+    if mode in (AuthMode.auto, AuthMode.totp, AuthMode.email_otp, AuthMode.entra_id):
         _crawl_log(run_id, "auth", "start", f"Authenticating as {username}…")
 
     if mode == AuthMode.totp:
         await _authenticate_auto(page, login_url, credential)
         await _fill_totp_if_prompted(page, credential)
+    elif mode == AuthMode.email_otp:
+        await _authenticate_auto(page, login_url, credential)
+        await _fill_email_otp_if_prompted(page, credential)
     elif mode == AuthMode.entra_id:
         await _authenticate_entra_id(page, login_url, credential, run_id)
         return
@@ -5269,6 +6518,18 @@ async def _authenticate(
         return
     else:
         await _authenticate_auto(page, login_url, credential)
+
+    # Some apps show a full-screen "welcome"/consent/upsell interstitial right
+    # after login that isn't a login form but blocks every subsequent click,
+    # so the crawler stalls after a "successful" login. Close it if present.
+    try:
+        if await _dismiss_blocking_modal(page):
+            log.info(
+                "  _authenticate: dismissed a post-login blocking modal for %s",
+                username,
+            )
+    except Exception as exc:
+        log.warning("  _authenticate: modal dismissal failed for %s: %s", username, exc)
 
     # Smart fallback: if the deterministic heuristic failed to clear the login
     # form, let the LLM figure the login out (modal/no-route, odd fields, multi-step).
@@ -5281,7 +6542,7 @@ async def _authenticate(
             await _authenticate_smart(page, login_url, credential, run_id, llm_cfg)
 
     # Report the auth outcome to the Activity Log.
-    if mode in (AuthMode.auto, AuthMode.totp):
+    if mode in (AuthMode.auto, AuthMode.totp, AuthMode.email_otp):
         try:
             blocked = await _page_requires_login(page, login_url)
         except Exception:
@@ -5354,60 +6615,70 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
             log.warning("  _authenticate: no <input> visible at %s", login_url)
         await page.wait_for_timeout(300)
 
-        # Fill username
-        username_filled = False
-        for sel in [
-            "input[autocomplete='username']",
-            "input[autocomplete='email']",
-            "input[type='email']",
-            "input[name*='user' i]",
-            "input[name*='email' i]",
-            "input[id*='user' i]",
-            "input[id*='email' i]",
-            "input[type='text']",
-        ]:
-            try:
-                loc = page.locator(sel).first
-                if await loc.count() > 0 and await loc.is_visible():
-                    await loc.fill(credential.username)
-                    username_filled = True
-                    break
-            except Exception:
-                pass
-
-        if not username_filled:
-            log.warning("  _authenticate: could not find username field")
-            return
-
-        # Reveal password field if hidden
-        pass_loc = page.locator("input[type='password']").first
-        if not (
-            await pass_loc.count() > 0
-            and await _locator_is_exposed(pass_loc, actionable=True)
-        ):
+        if getattr(credential, "login_fields_json", None):
+            configured = _credential_login_fields(credential)
+            filled = await _fill_configured_login_fields(page, configured)
+            if filled < len(configured):
+                log.warning(
+                    "  _authenticate: filled %d of %d configured login fields",
+                    filled,
+                    len(configured),
+                )
+        else:
+            # Preserve the established username/password path for every existing
+            # credential row. No existing data is rewritten by the migration.
+            username_filled = False
             for sel in [
-                "button:has-text('Next')",
-                "button:has-text('Continue')",
-                "button[type='submit']",
+                "input[autocomplete='username']",
+                "input[autocomplete='email']",
+                "input[type='email']",
+                "input[name*='user' i]",
+                "input[name*='email' i]",
+                "input[id*='user' i]",
+                "input[id*='email' i]",
+                "input[type='text']",
             ]:
                 try:
                     loc = page.locator(sel).first
                     if await loc.count() > 0 and await loc.is_visible():
-                        await loc.click()
-                        await page.wait_for_timeout(800)
+                        await loc.fill(credential.username)
+                        username_filled = True
                         break
                 except Exception:
                     pass
 
-        # Fill password
-        try:
+            if not username_filled:
+                log.warning("  _authenticate: could not find username field")
+                return
+
+            # Reveal password field if hidden.
             pass_loc = page.locator("input[type='password']").first
-            if await pass_loc.count() > 0 and await _locator_is_exposed(
-                pass_loc, actionable=True
+            if not (
+                await pass_loc.count() > 0
+                and await _locator_is_exposed(pass_loc, actionable=True)
             ):
-                await pass_loc.fill(credential.password)
-        except Exception:
-            pass
+                for sel in [
+                    "button:has-text('Next')",
+                    "button:has-text('Continue')",
+                    "button[type='submit']",
+                ]:
+                    try:
+                        loc = page.locator(sel).first
+                        if await loc.count() > 0 and await loc.is_visible():
+                            await loc.click()
+                            await page.wait_for_timeout(800)
+                            break
+                    except Exception:
+                        pass
+
+            try:
+                pass_loc = page.locator("input[type='password']").first
+                if await pass_loc.count() > 0 and await _locator_is_exposed(
+                    pass_loc, actionable=True
+                ):
+                    await pass_loc.fill(credential.password)
+            except Exception:
+                pass
 
         # Submit
         submitted = False
@@ -5433,7 +6704,7 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
             log.warning("  _authenticate: could not find submit button")
 
         try:
-            await page.wait_for_load_state("networkidle", timeout=12_000)
+            await page.wait_for_load_state("networkidle", timeout=4_000)
         except Exception:
             pass
         await page.wait_for_timeout(1500)
@@ -5468,6 +6739,94 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
 # flows that the hardcoded selector lists cannot.
 
 _SMART_LOGIN_MAX_STEPS = 6
+
+
+def _credential_login_fields(credential) -> list[dict]:
+    """Return named login fields, synthesising them for untouched legacy rows."""
+    raw = getattr(credential, "login_fields_json", None)
+    try:
+        fields = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        fields = []
+    if isinstance(fields, list) and fields:
+        return [field for field in fields if isinstance(field, dict)]
+    return [
+        {
+            "key": "username",
+            "label": "Username",
+            "value": getattr(credential, "username", "") or "",
+            "sensitive": False,
+        },
+        {
+            "key": "password",
+            "label": "Password",
+            "value": getattr(credential, "password", "") or "",
+            "sensitive": True,
+        },
+    ]
+
+
+def _normalise_login_hint(value: str) -> str:
+    return "".join(ch for ch in (value or "").lower() if ch.isalnum())
+
+
+async def _find_configured_login_input(page, field: dict, used: set[int]):
+    selector = str(field.get("selector") or "").strip()
+    label = str(field.get("label") or field.get("key") or "").strip()
+    if selector:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return loc, -1
+        except Exception:
+            pass
+    for factory in (
+        lambda: page.get_by_label(label, exact=False).first,
+        lambda: page.get_by_placeholder(label, exact=False).first,
+    ):
+        try:
+            loc = factory()
+            if await loc.count() > 0 and await loc.is_visible():
+                return loc, -1
+        except Exception:
+            pass
+
+    wanted = {
+        _normalise_login_hint(label),
+        _normalise_login_hint(str(field.get("key") or "")),
+    } - {""}
+    try:
+        inputs = page.locator("input:visible")
+        for index in range(await inputs.count()):
+            if index in used:
+                continue
+            loc = inputs.nth(index)
+            hints = {
+                _normalise_login_hint(await loc.get_attribute(attr) or "")
+                for attr in ("name", "id", "placeholder", "aria-label", "autocomplete")
+            } - {""}
+            if any(a == b or a in b or b in a for a in wanted for b in hints):
+                return loc, index
+    except Exception:
+        pass
+    return None, -1
+
+
+async def _fill_configured_login_fields(page, fields: list[dict]) -> int:
+    used: set[int] = set()
+    filled = 0
+    for field in fields:
+        loc, index = await _find_configured_login_input(page, field, used)
+        if loc is None:
+            continue
+        try:
+            await loc.fill(str(field.get("value") or ""))
+            filled += 1
+            if index >= 0:
+                used.add(index)
+        except Exception:
+            pass
+    return filled
 
 
 async def _build_login_observation(page) -> str:
@@ -5531,7 +6890,13 @@ async def _build_login_observation(page) -> str:
 
 
 async def _apply_login_substitutions(value: str, credential) -> str:
-    """Replace {{username}}/{{password}} tokens with the real credential locally."""
+    """Replace configured placeholder tokens with values locally."""
+    for field in _credential_login_fields(credential):
+        key = str(field.get("key") or "")
+        value = value.replace(
+            "{{credential." + key + "}}", str(field.get("value") or "")
+        )
+    # Accept the former tokens for saved checkpoints and older mocked actions.
     value = value.replace("{{username}}", credential.username or "")
     value = value.replace("{{password}}", credential.password or "")
     return value
@@ -5616,7 +6981,10 @@ async def _authenticate_smart(
                 llm_cfg,
                 url=page.url,
                 observation=observation,
-                username_hint=credential.username,
+                credential_fields=[
+                    {"key": field["key"], "label": field["label"]}
+                    for field in _credential_login_fields(credential)
+                ],
                 history=history,
                 screenshot_b64=screenshot_b64,
             )
@@ -5668,12 +7036,14 @@ async def _authenticate_smart(
                     )
                     await target.fill(value)
                     # Record which credential token was used, never the value.
-                    token = (
-                        "username"
-                        if "{{username}}" in (action.get("value") or "")
-                        else "password"
-                        if "{{password}}" in (action.get("value") or "")
-                        else "text"
+                    raw_value = action.get("value") or ""
+                    token = next(
+                        (
+                            field["key"]
+                            for field in _credential_login_fields(credential)
+                            if "{{credential." + field["key"] + "}}" in raw_value
+                        ),
+                        "credential" if "{{" in raw_value else "text",
                     )
                     history.append(f"filled {token} field ({reason})")
         except Exception as exc:
@@ -5685,14 +7055,26 @@ async def _authenticate_smart(
         except Exception:
             pass
 
-        # Success check: login form gone.
+        # Success check: login form gone. `_page_requires_login` only detects
+        # password walls/denial text — it has no idea an MFA/OTP prompt is
+        # still sitting there unfilled, so a page like "enter verification
+        # code" (no password field, no denial text) reads as "logged in"
+        # here even though nothing has actually verified the user yet. Give
+        # the deterministic OTP/TOTP fillers a chance before trusting that.
         try:
             if not await _page_requires_login(page, login_url):
-                log.info(
-                    "  _authenticate_smart: success — login form gone. page.url=%s",
-                    page.url,
-                )
-                return
+                if await _resolve_mfa_prompt_if_present(page, credential):
+                    history.append(
+                        "resolved an MFA/OTP prompt after login form cleared"
+                    )
+                if not await _page_requires_login(
+                    page, login_url
+                ) and not await _detect_mfa_prompt(page):
+                    log.info(
+                        "  _authenticate_smart: success — login form gone. page.url=%s",
+                        page.url,
+                    )
+                    return
         except Exception:
             pass
 

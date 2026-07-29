@@ -17,6 +17,7 @@ def _utcnow() -> datetime:
 class AuthMode(str, Enum):
     auto = "auto"  # existing single-page Playwright form fill
     totp = "totp"  # auto + TOTP 2FA code from stored seed
+    email_otp = "email_otp"  # auto + OTP read from a test mailbox page
     entra_id = "entra_id"  # Microsoft Entra ID multi-page browser flow
     guided = "guided"  # open headed browser, user logs in manually
 
@@ -48,6 +49,10 @@ class Credential(SQLModel, table=True):
     site_id: int = Field(foreign_key="site.id", index=True)
     username: str
     password: str  # plaintext — local pentesting tool
+    # Optional JSON list of named login fields.  ``NULL`` means this is a legacy
+    # username/password credential; the API presents those two columns as fields
+    # without rewriting existing rows.
+    login_fields_json: Optional[str] = Field(default=None)
     label: Optional[str] = Field(default=None)
     login_url: Optional[str] = Field(default=None)
     # ── Advanced auth fields ──────────────────────────────────────────────────
@@ -55,6 +60,7 @@ class Credential(SQLModel, table=True):
     totp_seed: Optional[str] = Field(
         default=None
     )  # base32 TOTP secret (write-only; not returned by API)
+    test_mailbox_url: Optional[str] = Field(default=None)
 
     site: Optional[Site] = Relationship(back_populates="credentials")
 
@@ -200,11 +206,25 @@ class ApiTestRun(SQLModel, table=True):
     error_message: Optional[str] = Field(default=None)
     recon_summary_json: Optional[str] = Field(default=None)
     token_usage_json: Optional[str] = Field(default=None)
+    phase: str = Field(
+        default="created",
+        sa_column=Column(String, nullable=False, server_default=text("'created'")),
+    )  # created|crawling|crawled|scanning|reporting|validating|finished
+    outcome: Optional[str] = Field(
+        default=None
+    )  # complete|incomplete|failed|stopped|null
+    terminal_reason: Optional[str] = Field(
+        default=None
+    )  # coverage_complete|model_done_rejected|stagnation|non_tool_loop|provider_error|user_stop|coverage_budget_exhausted
     # Legacy soft back-reference retained for imported databases; new API runs
     # use explicit run-owned ScanLead imports instead.
     sast_run_id: Optional[int] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+    # Passive WAF/bot-manager fingerprint — see TestRun.waf_provider.
+    waf_provider: Optional[str] = Field(default=None)
+    waf_confidence: Optional[str] = Field(default=None)
+    waf_evidence: Optional[str] = Field(default=None)
 
 
 # ── API Endpoint Test (coverage matrix cell) ──────────────────────────────────
@@ -236,6 +256,7 @@ class ApiEndpointTest(SQLModel, table=True):
 
 class LLMProviderAPI(str, Enum):
     anthropic = "anthropic"
+    factory_droid = "factory_droid"
     github_copilot = "github_copilot"
     openai = "openai"
     openai_compatible = "openai_compatible"
@@ -326,6 +347,9 @@ class ScannerPolicy(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     execution_monitor_enabled: bool = Field(default=False)
+    disable_deterministic_checks: bool = Field(default=False)
+    max_consecutive_text_turns: int = Field(default=0)
+    enforce_full_coverage_obligations: bool = Field(default=False)
     scan_mode: str = Field(default="aggressive")
     max_probes_per_page: int = Field(default=50)
     thinking_max_steps: int = Field(default=120)
@@ -341,6 +365,20 @@ class ScannerPolicy(SQLModel, table=True):
     follow_redirects: bool = Field(default=True)
     allow_subdomains: bool = Field(default=True)
     require_approval_for_destructive: bool = Field(default=True)
+    strict_locator_enforcement: bool = Field(default=True)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class CrawlerConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for crawler behavior settings."""
+
+    __tablename__ = "crawler_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    js_endpoint_discovery_enabled: bool = Field(default=False)
+    skip_dangerous_actions: bool = Field(default=True)
+    suppress_form_submit_actions: bool = Field(default=True)
+    block_non_idempotent_interactive_replay: bool = Field(default=True)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -430,11 +468,15 @@ class AdversarialValidatorConfig(SQLModel, table=True):
 
 
 class GlobalHttpHeaderConfig(SQLModel, table=True):
-    """Singleton row (id always = 1) for a global extra HTTP header added to all scanner/crawler requests."""
+    """Singleton row (id always = 1) for global headers sent by scanners and crawlers."""
 
     __tablename__ = "global_http_header_config"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    # JSON array of {"header_name": "...", "header_value": "..."}. The two
+    # legacy columns remain so existing databases can be upgraded without losing
+    # their configured header.
+    headers_json: str = Field(default="[]")
     header_name: Optional[str] = Field(default=None, max_length=200)
     header_value: Optional[str] = Field(default=None, max_length=2000)
     updated_at: datetime = Field(default_factory=_utcnow)
@@ -490,7 +532,7 @@ class TestRun(SQLModel, table=True):
     max_depth: int = Field(default=3)
     max_pages: int = Field(default=500)
     # ``url`` preserves the legacy link-following crawler. ``interactive`` also
-    # records safe, reproducible client-side browser states (tabs, dialogs, etc.).
+    # records safe, reproducible browser states and conditional workflows.
     crawler_mode: str = Field(
         default="url",
         sa_column=Column(String, nullable=False, server_default=text("'url'")),
@@ -515,10 +557,39 @@ class TestRun(SQLModel, table=True):
     recon_summary: Optional[str] = Field(default=None)
     # Persisted token usage: {model: {input, output, cache_read, cache_write}}
     token_usage_json: Optional[str] = Field(default=None)
+    # Reproducibility metadata captured when the dynamic scan starts. Secrets and
+    # provider connection details are intentionally excluded.
+    execution_snapshot_json: Optional[str] = Field(default=None)
+    # Compact operational metrics used to compare scanner architecture versions.
+    scan_metrics_json: Optional[str] = Field(default=None)
     # Coverage mode: "track" (observe) or "enforce" (drive every cell to terminal)
     coverage_mode: str = Field(
         default="track",
         sa_column=Column(String, nullable=False, server_default=text("'track'")),
+    )
+    phase: str = Field(
+        default="created",
+        sa_column=Column(String, nullable=False, server_default=text("'created'")),
+    )  # created|crawling|crawled|scanning|reporting|validating|finished
+    outcome: Optional[str] = Field(
+        default=None
+    )  # complete|incomplete|failed|stopped|null
+    terminal_reason: Optional[str] = Field(
+        default=None
+    )  # coverage_complete|model_done_rejected|stagnation|non_tool_loop|provider_error|user_stop|coverage_budget_exhausted
+    # Passive WAF/bot-manager fingerprint (see services/waf_detect.py), set the
+    # first time a response carries an identifiable marker (e.g. Akamai's
+    # bm_sz cookie or edge denial page). Surfaced on the Attack Surface tab and
+    # used by the scan loop to route http_request calls through the browser
+    # context instead of a raw httpx client, since a bare TLS client can never
+    # pass a JS-based bot challenge.
+    waf_provider: Optional[str] = Field(default=None)
+    waf_confidence: Optional[str] = Field(default=None)  # "high" | "medium"
+    waf_evidence: Optional[str] = Field(default=None)
+    # When set, the crawl runs as this single credential only (no anon phase,
+    # no other credentials).  NULL = crawl all phases (default behaviour).
+    crawl_credential_id: Optional[int] = Field(
+        default=None, foreign_key="credential.id"
     )
 
 
@@ -658,6 +729,13 @@ class ScannerSession(SQLModel, table=True):
     extra_headers_json: str = Field(default="{}")
     session_metadata: str = Field(default="{}")
     token_hint: Optional[str] = Field(default=None)
+    token_fingerprint: Optional[str] = Field(default=None, index=True)
+    lifecycle_state: str = Field(
+        default="candidate", index=True
+    )  # candidate | verified | active | invalid
+    validation_url: Optional[str] = Field(default=None)
+    last_status: Optional[int] = Field(default=None)
+    last_validated_at: Optional[datetime] = Field(default=None)
     is_active: bool = Field(default=True, index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
@@ -961,3 +1039,82 @@ class AgentLog(SQLModel, table=True):
     status: str  # active | complete | failed
     current_task: str = Field(default="")
     outcome: Optional[str] = Field(default=None)
+
+
+# ── Phase Checkpoint & Obligation / Evidence Ledger ─────────────────────────
+
+
+class PhaseCheckpoint(SQLModel, table=True):
+    """Granular phase checkpoint with idempotency key for scan resume safety."""
+
+    __tablename__ = "phase_checkpoint"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_kind: str = Field(default="web", index=True)  # web | api
+    run_id: int = Field(index=True)
+    phase: str = Field(
+        index=True
+    )  # crawl | recon | obligations | dynamic_scan | reporting | validation
+    idempotency_key: str = Field(index=True)
+    data_json: Optional[str] = Field(default=None)
+    completed_at: datetime = Field(default_factory=_utcnow)
+
+
+class ScanObligation(SQLModel, table=True):
+    """A required or exploratory security test obligation."""
+
+    __tablename__ = "scan_obligation"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_kind: str = Field(default="web", index=True)  # web | api
+    run_id: int = Field(index=True)
+    scan_mode: str = Field(default="quick")  # quick | full
+    owasp_catalog: str = Field(default="web_2025")  # web_2025 | api_2023
+    owasp_category: str = Field(index=True)  # A01..A10 or API1..API10
+    vulnerability_technique: str = Field(index=True)  # sqli, idor, etc.
+    route_template: str = Field(index=True)
+    http_method: str = Field(default="GET")
+    parameter: Optional[str] = Field(default=None)
+    required_identity_comparison: Optional[str] = Field(default=None)
+    status: str = Field(
+        default="not_planned", index=True
+    )  # not_planned|queued|attempted|evaluated|passed|finding|inconclusive|not_applicable|blocked
+    exemption_reason: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ProbeExecution(SQLModel, table=True):
+    """An executed probe linked to a ScanObligation."""
+
+    __tablename__ = "probe_execution"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_kind: str = Field(default="web", index=True)  # web | api
+    run_id: int = Field(index=True)
+    obligation_id: int = Field(foreign_key="scan_obligation.id", index=True)
+    traffic_id: Optional[int] = Field(
+        default=None, foreign_key="traffic_entry.id", index=True
+    )
+    session_identity: Optional[str] = Field(default=None)
+    payload_preview: Optional[str] = Field(default=None)  # redacted max 512 bytes
+    status_code: Optional[int] = Field(default=None)
+    response_time_ms: Optional[float] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class CoverageEvidence(SQLModel, table=True):
+    """Proof of test result for a ProbeExecution."""
+
+    __tablename__ = "coverage_evidence"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    execution_id: int = Field(foreign_key="probe_execution.id", index=True)
+    expected_behavior: Optional[str] = Field(default=None)
+    observed_behavior: Optional[str] = Field(default=None)
+    evaluation_oracle: str = Field(default="default_oracle")
+    outcome: str = Field(
+        default="inconclusive"
+    )  # passed|finding|inconclusive|not_applicable|blocked
+    evidence_hash: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)

@@ -61,13 +61,14 @@ Key service entry points:
 
 ## Database & migrations (important)
 
-SQLite via SQLModel, single file `aespa.db` (gitignored, ~480MB locally — do not read or commit it). **There is no Alembic.** All schema evolution is hand-rolled in `db.py::_migrate()`, run on every startup:
-- New columns are added idempotently via `_ensure_column(engine, table, column, col_def)`.
-- New tables are `CREATE TABLE IF NOT EXISTS` blocks inline in `_migrate()`.
-- Changing a constraint (e.g. making a column nullable) on SQLite requires a full table rebuild — see the `_ensure_*_nullable` helpers as the pattern to copy.
-- All migration steps must be **idempotent and best-effort** (wrapped to never block startup).
+SQLite via SQLModel, single file `aespa.db` (gitignored, ~480MB locally — do not read or commit it). Schema evolution is managed via **Alembic**.
 
-When adding a field: update the SQLModel in `models.py`, add a matching `_ensure_column(...)` line in `_migrate()`, and update `schemas.py` if it crosses the API boundary.
+When making schema changes:
+1. Update SQLModel definitions in `models.py`.
+2. Autogenerate an Alembic revision: `uv run alembic revision --autogenerate -m "describe_change"`.
+3. Inspect the created script in `alembic/versions/`.
+4. Update `schemas.py` if the change crosses the API boundary.
+5. `init_db()` in `db.py` automatically runs `command.upgrade` on startup. Legacy DBs without `alembic_version` are automatically stamped on boot.
 
 **Run-id collision gotcha:** web `TestRun.id` and `ApiTestRun.id` come from independent autoincrement sequences and *collide in the same integer space*. Tables shared across both run kinds (`agent_log`, `scan_log`, `scanner_session`, `alice_chat_session`) carry a `run_kind` (`'web'`/`'api'`) column you MUST filter on, and `scan_finding` keys API findings on `api_test_run_id` (nullable `test_run_id`). Never assume a run_id alone identifies a row's kind. See memory `aespa-run-id-collision`.
 

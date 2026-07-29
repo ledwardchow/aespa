@@ -141,6 +141,13 @@ def test_migrate_keeps_ensure_column_separate_and_adds_credential_login_url():
                 SELECT id, site_id, username, password, label FROM credential_old
             """)
             )
+            conn.execute(
+                text(
+                    "INSERT INTO credential "
+                    "(id, site_id, username, password, label) "
+                    "VALUES (987, 1, 'legacy-user', 'legacy-pass', 'Legacy')"
+                )
+            )
             conn.execute(text("DROP TABLE credential_old"))
             conn.commit()
 
@@ -150,8 +157,17 @@ def test_migrate_keeps_ensure_column_separate_and_adds_credential_login_url():
             columns = {
                 row[1] for row in conn.execute(text("PRAGMA table_info(credential)"))
             }
+            preserved = conn.execute(
+                text(
+                    "SELECT username, password, login_fields_json "
+                    "FROM credential ORDER BY id LIMIT 1"
+                )
+            ).first()
 
         assert "login_url" in columns
+        assert "login_fields_json" in columns
+        assert "test_mailbox_url" in columns
+        assert preserved == ("legacy-user", "legacy-pass", None)
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -660,5 +676,35 @@ def test_ensure_scan_finding_test_run_id_nullable_decouples_api_findings():
         with engine.connect() as conn:
             count = next(conn.execute(text("SELECT count(*) FROM scan_finding")))[0]
             assert count == 2
+    finally:
+        engine.dispose()
+
+
+def test_alembic_migration_creates_version_table_and_stamps_legacy():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        db.run_migrations(engine)
+
+        with engine.connect() as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar()
+
+        assert "alembic_version" in tables
+        assert "site" in tables
+        assert "test_run" in tables
+        assert version == "0044cbef2700"
     finally:
         engine.dispose()

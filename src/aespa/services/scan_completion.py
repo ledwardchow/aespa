@@ -30,7 +30,10 @@ class ScanCompletionPolicy:
     stagnation_warning_calls: int = 40
     stagnation_stop_calls: int = 50
     max_session_challenges: int = 1
-    max_coverage_rounds: int = 2
+    # One bounded challenge is enough to tell the Test Lead about the most useful
+    # remaining gaps. A second rejection with unchanged workprogram state caused
+    # models to spend hundreds of calls trying to satisfy malformed obligations.
+    max_coverage_rounds: int = 1
     max_total_rejections: int = 3
     sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
     probe_outcomes: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -119,7 +122,13 @@ class ScanCompletionPolicy:
         self.progress_generation += 1
         return True
 
-    def session_created(self, label: str | None) -> None:
+    def session_created(
+        self,
+        label: str | None,
+        *,
+        lifecycle_state: str = "candidate",
+        challenge_eligible: bool = False,
+    ) -> None:
         if not label:
             return
         label = str(label)
@@ -127,6 +136,8 @@ class ScanCompletionPolicy:
             "active": True,
             "attempted": False,
             "last_status": None,
+            "lifecycle_state": lifecycle_state,
+            "challenge_eligible": bool(challenge_eligible),
         }
 
     def session_attempted(self, label: str | None, status: int) -> None:
@@ -134,13 +145,25 @@ class ScanCompletionPolicy:
             return
         label = str(label)
         state = self.sessions.setdefault(
-            label, {"active": True, "attempted": False, "last_status": None}
+            label,
+            {
+                "active": True,
+                "attempted": False,
+                "last_status": None,
+                "lifecycle_state": "candidate",
+                "challenge_eligible": False,
+            },
         )
         first_attempt = not bool(state.get("attempted"))
         state["attempted"] = True
         state["last_status"] = int(status or 0)
-        if status in (0, 401, 403):
+        if status in (401, 419, 440):
             state["active"] = False
+            state["lifecycle_state"] = "invalid"
+        elif 200 <= int(status or 0) < 500:
+            # A 403 can prove that authentication was accepted even though the
+            # identity is not authorised for this particular resource.
+            state["lifecycle_state"] = "verified"
         if first_attempt:
             self.record_progress(f"session-attempt:{label}")
 
@@ -154,7 +177,10 @@ class ScanCompletionPolicy:
         return sorted(
             label
             for label, state in self.sessions.items()
-            if state.get("active") and not state.get("attempted")
+            if state.get("active")
+            and state.get("challenge_eligible")
+            and state.get("lifecycle_state") in {"verified", "active"}
+            and not state.get("attempted")
         )
 
     @staticmethod

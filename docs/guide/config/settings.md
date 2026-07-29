@@ -10,6 +10,8 @@ Copy `.env.example` to `.env` and adjust as needed — all are optional, prefixe
 | `AESPA_DATABASE_URL` | `sqlite:///./aespa.db` | SQLite connection string |
 | `AESPA_HOST` | `127.0.0.1` | Bind address for the server |
 | `AESPA_PORT` | `8000` | Bind port |
+| `AESPA_WEB_DIR` | `./src/aespa/web` | Path to static web UI assets |
+| `AESPA_DATA_DIR` | `./aespa_data` | Path to persistent uploads and temporary storage |
 
 If you front AESPA with a Cloudflare Access reverse proxy, the app automatically verifies the `Cf-Access-Jwt-Assertion` header against Cloudflare's JWKS and shows the authenticated username — no extra config needed. There's no built-in auth otherwise; AESPA is designed to run on localhost.
 
