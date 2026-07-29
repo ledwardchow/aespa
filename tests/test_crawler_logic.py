@@ -297,12 +297,14 @@ def test_mine_asset_text_promotes_typed_js_leads(monkeypatch):
     const flags = { 'featureExports': true };
     """
 
-    crawler._mine_asset_text(
+    promoted_calls = crawler._mine_asset_text(
         run_id=1,
         asset_url="https://target.local/static/app.js",
         body=js,
         source="js_asset",
         page_url="https://target.local/",
+        collect_js_endpoint_calls=True,
+        base_netloc="target.local",
     )
 
     endpoints = [item for item in saved if item["kind"] == "endpoint"]
@@ -323,6 +325,11 @@ def test_mine_asset_text_promotes_typed_js_leads(monkeypatch):
     assert {item["key"] for item in inputs} >= {"email", "password"}
     assert any(item["key"] == "auth_token" for item in storage_keys)
     assert any(item["key"] == "featureExports" for item in feature_flags)
+    assert any(
+        call["url"] == "https://target.local/api/users/register"
+        and call["method"] == "POST"
+        for call in promoted_calls
+    )
 
 
 def test_page_requires_login_ignores_login_url_without_login_ui():

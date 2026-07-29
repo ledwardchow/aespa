@@ -368,6 +368,16 @@ class ScannerPolicy(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class CrawlerConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for crawler behavior settings."""
+
+    __tablename__ = "crawler_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    js_endpoint_discovery_enabled: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class BurpRestApiConfig(SQLModel, table=True):
     """Singleton row (id always = 1) for Burp Suite REST API integration settings."""
 

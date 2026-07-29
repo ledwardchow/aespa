@@ -13,6 +13,8 @@ from aespa.schemas import (
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
+    CrawlerConfigIn,
+    CrawlerConfigOut,
     GlobalHttpHeaderConfigIn,
     GlobalHttpHeaderConfigOut,
     LLMConfigExport,
@@ -286,6 +288,19 @@ def upsert_scanner_policy(
     session: Session = Depends(get_session),
 ) -> ScannerPolicyOut:
     return settings_service.upsert_scanner_policy(session, payload)
+
+
+@router.get("/crawler-config", response_model=CrawlerConfigOut)
+def get_crawler_config(session: Session = Depends(get_session)) -> CrawlerConfigOut:
+    return settings_service.get_crawler_config(session)
+
+
+@router.put("/crawler-config", response_model=CrawlerConfigOut)
+def upsert_crawler_config(
+    payload: CrawlerConfigIn,
+    session: Session = Depends(get_session),
+) -> CrawlerConfigOut:
+    return settings_service.upsert_crawler_config(session, payload)
 
 
 @router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)
