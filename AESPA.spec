@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('src\\aespa\\web', 'aespa\\web'), ('THIRD_PARTY_LICENSES.txt', '.'), ('LICENSE', '.')]
+datas = [('src\\aespa\\web', 'aespa\\web'), ('alembic.ini', '.'), ('alembic', 'alembic'), ('THIRD_PARTY_LICENSES.txt', '.'), ('LICENSE', '.')]
 binaries = []
 hiddenimports = []
 hiddenimports += collect_submodules('pystray')
@@ -10,6 +10,10 @@ hiddenimports += collect_submodules('aespa')
 tmp_ret = collect_all('playwright')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('webview')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('alembic')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('uvicorn')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
