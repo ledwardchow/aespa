@@ -48,9 +48,13 @@ echo "==> Building app bundle with PyInstaller"
     --icon "$ICNS" \
     --osx-bundle-identifier com.aespa.app \
     --add-data "src/aespa/web:aespa/web" \
+    --add-data "alembic.ini:." \
+    --add-data "alembic:alembic" \
     --add-data "THIRD_PARTY_LICENSES.txt:." \
     --add-data "LICENSE:." \
     --collect-all playwright \
+    --collect-all alembic \
+    --collect-all uvicorn \
     --collect-submodules aespa \
     src/aespa/desktop.py
 
