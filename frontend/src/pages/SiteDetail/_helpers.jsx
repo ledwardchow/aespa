@@ -86,6 +86,32 @@ export const workflowBadge = (run, opts = {}) => {
   return <span className={"badge " + st.key}>{st.label}</span>;
 };
 
+// Human-readable labels for the raw `phase` / `terminal_reason` enums stored on
+// TestRun/ApiTestRun, used by the run header badges (shared by the web and API
+// run detail pages).
+const PHASE_LABELS = {
+  created: "created",
+  crawling: "crawling",
+  crawled: "crawled",
+  scanning: "scanning",
+  reporting: "generating report",
+  validating: "validating findings",
+  finished: "finished"
+};
+export const formatPhase = phase => PHASE_LABELS[phase] || (phase ? phase.replace(/_/g, " ") : phase);
+
+const TERMINAL_REASON_LABELS = {
+  coverage_complete: "all planned tests completed",
+  coverage_budget_exhausted: "step budget exhausted before full coverage",
+  user_stop: "stopped by user",
+  provider_error: "LLM provider refused/errored",
+  model_done_rejected: "model reported done but was overruled",
+  stagnation: "no progress detected, stopped automatically",
+  non_tool_loop: "model stopped issuing tool calls",
+  error: "unexpected error"
+};
+export const formatTerminalReason = reason => TERMINAL_REASON_LABELS[reason] || (reason ? reason.replace(/_/g, " ") : reason);
+
 // ── Column resize hook ────────────────────────────────────────────────────────
 export function useColResize(storageKey, defaults) {
   const [widths, setWidths] = useState(() => {

@@ -2,20 +2,39 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from pathlib import Path
 
+from alembic.config import Config
+from sqlalchemy import event, inspect
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, create_engine
 
 from aespa.config import Settings, get_settings
+from alembic import command
 
 _engine: Engine | None = None
 
 
 def _build_engine(settings: Settings) -> Engine:
     connect_args: dict[str, object] = {}
-    if settings.database_url.startswith("sqlite"):
+    is_sqlite = settings.database_url.startswith("sqlite")
+    if is_sqlite:
         connect_args["check_same_thread"] = False
-    return create_engine(settings.database_url, echo=False, connect_args=connect_args)
+        connect_args["timeout"] = 30
+    engine = create_engine(settings.database_url, echo=False, connect_args=connect_args)
+    if is_sqlite and ":memory:" not in settings.database_url:
+
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+            finally:
+                cursor.close()
+
+    return engine
 
 
 def get_engine() -> Engine:
@@ -31,12 +50,39 @@ def set_engine(engine: Engine) -> None:
     _engine = engine
 
 
+def _get_alembic_config(engine: Engine) -> Config:
+    repo_root = Path(__file__).resolve().parents[2]
+    ini_path = repo_root / "alembic.ini"
+    cfg = Config(str(ini_path))
+    cfg.set_main_option("script_location", str(repo_root / "alembic"))
+    cfg.attributes["connection"] = engine
+    return cfg
+
+
+def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> None:
+    """If the DB has existing domain tables but lacks alembic_version, stamp with head."""
+    try:
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        if ("site" in tables or "test_run" in tables) and "alembic_version" not in tables:
+            command.stamp(alembic_cfg, "head")
+    except Exception:
+        pass
+
+
+def run_migrations(engine: Engine | None = None) -> None:
+    if engine is None:
+        engine = get_engine()
+    alembic_cfg = _get_alembic_config(engine)
+    _stamp_legacy_db_if_needed(engine, alembic_cfg)
+    command.upgrade(alembic_cfg, "head")
+
+
 def init_db() -> None:
     # Importing models registers them with SQLModel.metadata.
     from aespa import models  # noqa: F401
 
     engine = get_engine()
-    SQLModel.metadata.create_all(engine)
     _migrate(engine)
 
 
@@ -136,6 +182,66 @@ def _reset_orphaned_validating_findings(engine: Engine) -> None:
                     "WHERE validation_status='validating'"
                 )
             )
+            conn.commit()
+    except Exception:
+        pass  # never block startup on a best-effort cleanup
+
+
+def _reset_orphaned_running_runs(engine: Engine) -> None:
+    """Fail out crawl/scan runs left stuck in a "running" state.
+
+    ``TestRun.status``, ``ApiTestRun.status`` and ``SastRun.status`` are only
+    ever driven to a running value by an in-memory asyncio task (crawler,
+    thinking-scan, api-scanner, sast-scanner). A fresh process has none of
+    those tasks yet, so any run still showing "running"/"scanning" at startup
+    is an orphan from a previous process that was killed or crashed mid-run —
+    never a run that is genuinely resuming. Left alone, the UI polls the
+    stale status forever and looks like the crawl/scan restarted itself on
+    every ``uv run aespa``. Idempotent and best-effort.
+    """
+    from sqlalchemy import text as _text
+
+    try:
+        with engine.connect() as conn:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    _text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+            note = "Interrupted by a server restart; mark as failed."
+            if "test_run" in tables:
+                conn.execute(
+                    _text(
+                        "UPDATE test_run "
+                        "SET status='failed', phase='finished', outcome='failed', "
+                        "    terminal_reason='interrupted', "
+                        "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
+                        "WHERE status='running'"
+                    ),
+                    {"note": note},
+                )
+            if "api_test_run" in tables:
+                conn.execute(
+                    _text(
+                        "UPDATE api_test_run "
+                        "SET status='failed', phase='finished', outcome='failed', "
+                        "    terminal_reason='interrupted', "
+                        "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
+                        "WHERE status='running'"
+                    ),
+                    {"note": note},
+                )
+            if "sast_run" in tables:
+                conn.execute(
+                    _text(
+                        "UPDATE sast_run "
+                        "SET status='failed', "
+                        "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
+                        "WHERE status='scanning'"
+                    ),
+                    {"note": note},
+                )
             conn.commit()
     except Exception:
         pass  # never block startup on a best-effort cleanup
@@ -249,7 +355,8 @@ def _cleanup_orphaned_sast_extractions() -> None:
 
 
 def _migrate(engine: Engine) -> None:
-    """Apply any missing columns that were added after the initial schema creation."""
+    """Apply Alembic migrations and runtime startup backfills."""
+    run_migrations(engine)
     _ensure_column(
         engine,
         "global_http_header_config",
@@ -404,6 +511,12 @@ def _migrate(engine: Engine) -> None:
         "BOOLEAN NOT NULL DEFAULT 0",
     )
     _ensure_column(
+        engine,
+        "scanner_policy",
+        "strict_locator_enforcement",
+        "BOOLEAN NOT NULL DEFAULT 1",
+    )
+    _ensure_column(
         engine, "scan_checkpoint", "completion_state_json", "TEXT NOT NULL DEFAULT '{}'"
     )
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
@@ -424,6 +537,7 @@ def _migrate(engine: Engine) -> None:
     _backfill_run_kind(engine)
     _backfill_scanner_session_account_labels(engine)
     _reset_orphaned_validating_findings(engine)
+    _reset_orphaned_running_runs(engine)
     _normalize_threshold_skipped_findings(engine)
     with engine.connect() as conn:
         conn.execute(
@@ -1110,6 +1224,39 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "api_test_run", "llm_profile_id", "INTEGER")
     _ensure_column(engine, "sast_run", "llm_profile_id", "INTEGER")
     _ensure_default_llm_profile(engine)
+    # Crawler behavior toggles.
+    with engine.connect() as conn:
+        conn.execute(
+            __import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS crawler_config (
+                id INTEGER PRIMARY KEY,
+                js_endpoint_discovery_enabled INTEGER NOT NULL DEFAULT 0,
+                skip_dangerous_actions INTEGER NOT NULL DEFAULT 1,
+                suppress_form_submit_actions INTEGER NOT NULL DEFAULT 1,
+                block_non_idempotent_interactive_replay INTEGER NOT NULL DEFAULT 1,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        )
+        conn.commit()
+    _ensure_column(
+        engine,
+        "crawler_config",
+        "skip_dangerous_actions",
+        "BOOLEAN NOT NULL DEFAULT 1",
+    )
+    _ensure_column(
+        engine,
+        "crawler_config",
+        "suppress_form_submit_actions",
+        "BOOLEAN NOT NULL DEFAULT 1",
+    )
+    _ensure_column(
+        engine,
+        "crawler_config",
+        "block_non_idempotent_interactive_replay",
+        "BOOLEAN NOT NULL DEFAULT 1",
+    )
     # Cloudflare Access: optional AUD to verify on the proxy-injected JWT.
     with engine.connect() as conn:
         conn.execute(
@@ -1122,6 +1269,17 @@ def _migrate(engine: Engine) -> None:
         """)
         )
         conn.commit()
+
+    # Passive WAF/bot-manager fingerprint (services/waf_detect.py), surfaced on
+    # the Attack Surface tab and used to route http_request through the browser
+    # context once a WAF is detected for the run.
+    _ensure_column(engine, "test_run", "waf_provider", "TEXT")
+    _ensure_column(engine, "test_run", "waf_confidence", "TEXT")
+    _ensure_column(engine, "test_run", "waf_evidence", "TEXT")
+    _ensure_column(engine, "test_run", "crawl_credential_id", "INTEGER")
+    _ensure_column(engine, "api_test_run", "waf_provider", "TEXT")
+    _ensure_column(engine, "api_test_run", "waf_confidence", "TEXT")
+    _ensure_column(engine, "api_test_run", "waf_evidence", "TEXT")
 
     # Orphan-extraction sweep last: it queries SastRun via the ORM, so it must
     # run only after every SastRun column above has been added — otherwise the

@@ -184,6 +184,12 @@
 .traffic-filter:focus { outline:none; border-color:var(--accent); }
 .traffic-count-label { font-size:11px; color:var(--muted); white-space:nowrap; }
 .traffic-autoscroll { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--text-2); cursor:pointer; white-space:nowrap; }
+.traffic-filter-panel { display:flex; align-items:center; gap:12px; padding:8px 14px; border-bottom:1px solid var(--border); background:var(--bg-2,var(--panel)); flex-wrap:wrap; }
+.traffic-filter-panel-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; color:var(--muted); }
+.traffic-filter-panel-controls { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.traffic-filter-ext { display:flex; align-items:center; gap:8px; color:var(--text-2); font-size:12px; }
+.traffic-filter-ext .traffic-filter { max-width:260px; }
+.traffic-scope-only { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-2); cursor:pointer; white-space:nowrap; }
 /* Table section: takes exactly half the panel when detail is open; full height when not */
 .traffic-table-wrap { flex:1; overflow-y:auto; overflow-x:auto; min-height:0; }
 .traffic-table { border-collapse:collapse; font-size:12px; min-width:860px; width:100%; table-layout:fixed; }
@@ -290,6 +296,13 @@
 
 .run-status-badge.running {
   animation: status-pulse 1.6s ease-in-out infinite;
+}
+
+.run-agent-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
 }
 
 /* Per-credential crawl progress */
@@ -839,6 +852,9 @@
 .surface-signal-type { border-radius:4px; background:rgba(91,141,239,.18); color:#93c5fd; padding:2px 6px; font-size:9px; font-weight:700; text-transform:uppercase; }
 .surface-signal-evidence { color:var(--text-2); font-size:11px; line-height:1.4; }
 .surface-callout { border-left:3px solid #f59e0b; background:rgba(245,158,11,.08); border-radius:4px; padding:8px 10px; color:var(--text-2); font-size:11px; }
+.surface-callout-warning { border-left-color:#ef4444; background:rgba(239,68,68,.1); margin-bottom:10px; }
+.surface-callout-warning strong { color:#fca5a5; }
+.surface-chip-waf { border-color:#ef4444; background:rgba(239,68,68,.14); color:#fca5a5; font-weight:700; }
 @media (max-width:900px) { .surface-summary-grid { grid-template-columns:repeat(2,1fr); } .surface-signal-grid { grid-template-columns:1fr; } .surface-coverage-row { grid-template-columns:42px 1fr 80px; } .surface-coverage-row .surface-progress,.surface-coverage-row .subtle { display:none; } }
 .scope-hosts-panel {
   padding: 10px 14px;

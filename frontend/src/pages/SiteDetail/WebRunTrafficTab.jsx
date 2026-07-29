@@ -1,14 +1,47 @@
-import React, { useCallback, useEffect, useState, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { api } from "../../lib/api";
 import { usePolling } from "../../hooks/usePolling";
 import { useColResize } from "./_helpers";
 import { TrafficDetail, TrafficTable } from "../../components/TrafficView";
 
-export function WebRunTrafficTab({ runId, active, captureActive, runStatus, onTotalChange }) {
+function parseExcludedExtensions(value) {
+  return new Set(
+    value
+      .split(",")
+      .map(part => part.trim().toLowerCase())
+      .filter(Boolean)
+      .map(part => part.startsWith(".") ? part : `.${part}`)
+  );
+}
+
+function extractUrlHostname(url) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function extractUrlExtension(url) {
+  try {
+    const pathname = new URL(url).pathname || "";
+    const slash = pathname.lastIndexOf("/");
+    const segment = slash >= 0 ? pathname.slice(slash + 1) : pathname;
+    const dot = segment.lastIndexOf(".");
+    if (dot <= 0 || dot === segment.length - 1) return "";
+    return segment.slice(dot).toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+export function WebRunTrafficTab({ runId, graph, active, captureActive, runStatus, onTotalChange }) {
   const [traffic, setTraffic] = useState([]);
   const [trafficTotal, setTrafficTotal] = useState(0);
   const [selectedTraffic, setSelectedTraffic] = useState(null);
   const [trafficFilter, setTrafficFilter] = useState("");
+  const [excludedExtensionsInput, setExcludedExtensionsInput] = useState(".js, .css");
+  const [showInScopeOnly, setShowInScopeOnly] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
   const [trafficSort, setTrafficSort] = useState({
     field: "_seq",
@@ -57,9 +90,29 @@ export function WebRunTrafficTab({ runId, active, captureActive, runStatus, onTo
     intervalMs: 2000
   });
 
-    // ── Traffic helpers ────────────────────────────────────────────────────────
+  const excludedExtensions = useMemo(() => parseExcludedExtensions(excludedExtensionsInput), [excludedExtensionsInput]);
+  const inScopeHosts = useMemo(() => {
+    const hosts = new Set();
+    for (const node of graph?.nodes || []) {
+      if (node?.in_scope === false || !node?.url) continue;
+      const host = extractUrlHostname(node.url);
+      if (host) hosts.add(host);
+    }
+    return hosts;
+  }, [graph]);
+
+  // ── Traffic helpers ────────────────────────────────────────────────────────
   const filteredTraffic = (() => {
     let list = trafficFilter ? traffic.filter(e => e.url.toLowerCase().includes(trafficFilter.toLowerCase()) || (e.method || "").toLowerCase().includes(trafficFilter.toLowerCase()) || String(e.status || "").includes(trafficFilter) || (e.source || "").toLowerCase().includes(trafficFilter.toLowerCase())) : traffic;
+    if (excludedExtensions.size > 0) {
+      list = list.filter(entry => {
+        const ext = extractUrlExtension(entry.url);
+        return !ext || !excludedExtensions.has(ext);
+      });
+    }
+    if (showInScopeOnly && inScopeHosts.size > 0) {
+      list = list.filter(entry => inScopeHosts.has(extractUrlHostname(entry.url)));
+    }
     const {
       field,
       dir
@@ -103,6 +156,19 @@ export function WebRunTrafficTab({ runId, active, captureActive, runStatus, onTo
             setSelectedTraffic(null);
             updateTotal(0);
           }}>Clear</button>
+          </div>
+          <div className="traffic-filter-panel">
+            <div className="traffic-filter-panel-title">Filter</div>
+            <div className="traffic-filter-panel-controls">
+              <label className="traffic-filter-ext">
+                <span>Exclude extensions</span>
+                <input className="traffic-filter" type="text" placeholder=".js, .css, .png" value={excludedExtensionsInput} onInput={e => setExcludedExtensionsInput(e.target.value)} />
+              </label>
+              <label className="traffic-scope-only">
+                <input type="checkbox" checked={showInScopeOnly} onChange={e => setShowInScopeOnly(e.target.checked)} />
+                Show in-scope traffic only
+              </label>
+            </div>
           </div>
 
           <div className="traffic-table-wrap" ref={trafficTableRef}>

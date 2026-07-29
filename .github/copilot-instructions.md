@@ -50,15 +50,14 @@ Prompt templates for every agent live in `services/prompts/`.
 
 ## Database & Migrations
 
-SQLite via SQLModel, single file `aespa.db` (gitignored). **No Alembic.** All migrations are hand-rolled in `db.py::_migrate()`, run on every startup.
+SQLite via SQLModel, single file `aespa.db` (gitignored). Schema evolution is managed via **Alembic**.
 
-Rules:
-- New columns: `_ensure_column(engine, table, column, col_def)` — idempotent.
-- New tables: `CREATE TABLE IF NOT EXISTS` inline in `_migrate()`.
-- Making a column nullable on SQLite requires a full table rebuild — copy the `_ensure_*_nullable` helper pattern.
-- All migration steps must be idempotent and best-effort (never block startup).
-
-**When adding a field:** update SQLModel in `models.py` + add `_ensure_column(...)` in `_migrate()` + update `schemas.py` if it crosses the API boundary.
+**When changing the database schema:**
+1. Update SQLModel definitions in `models.py`.
+2. Generate an Alembic migration script: `uv run alembic revision --autogenerate -m "describe_change"`.
+3. Verify the generated revision file in `alembic/versions/`.
+4. Update `schemas.py` if the change crosses the API boundary.
+5. `init_db()` in `db.py` automatically applies `alembic` migrations (`command.upgrade`) on startup. Legacy DBs are automatically stamped on boot.
 
 ## Critical Gotcha: Run-ID Collision
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { api } from "../../lib/api";
 import { nav } from "../../lib/router";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -17,6 +17,43 @@ export function ApiCollectionDetail({
   const [refreshing, setRefreshing] = useState(false);
   const [assessing, setAssessing] = useState(false);
   const [purging, setPurging] = useState(false);
+  const [sortField, setSortField] = useState("created_at");
+  const [sortDir, setSortDir] = useState("desc");
+
+  const toggleSort = (field) => {
+    if (sortField === field) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDir("asc");
+    }
+  };
+
+  const sortArrow = (field) => {
+    if (sortField !== field) return null;
+    return <span style={{ marginLeft: "4px", fontSize: "10px", opacity: 0.85 }}>{sortDir === "asc" ? "▲" : "▼"}</span>;
+  };
+
+  const sortedApiRuns = useMemo(() => {
+    if (!apiRuns) return [];
+    return [...apiRuns].sort((a, b) => {
+      let valA = a[sortField];
+      let valB = b[sortField];
+
+      if (sortField === "created_at") {
+        valA = a.created_at ? new Date(a.created_at).getTime() : 0;
+        valB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      }
+
+      if (valA == null) valA = "";
+      if (valB == null) valB = "";
+
+      let cmp = typeof valA === "number" && typeof valB === "number"
+        ? valA - valB
+        : String(valA).localeCompare(String(valB), undefined, { sensitivity: "base", numeric: true });
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [apiRuns, sortField, sortDir]);
   const load = useCallback(async () => {
     try {
       const [c, eps, rd, runs, creds] = await Promise.all([api.getApiCollection(collectionId), api.listApiEndpoints(collectionId), api.getApiReadiness(collectionId), api.listApiRuns(collectionId), api.listApiCredentials(collectionId)]);
@@ -397,10 +434,16 @@ export function ApiCollectionDetail({
           {apiRuns !== null && apiRuns.length > 0 && <table style={{
             width: "100%"
           }}>
-              <thead><tr>
-                <th>Name</th><th>Status</th><th>Coverage</th><th>Created</th><th></th>
-              </tr></thead>
-              <tbody>{apiRuns.map(r => <tr key={r.id}>
+              <thead>
+                <tr>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("name")}>Name {sortArrow("name")}</th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("status")}>Status {sortArrow("status")}</th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("coverage_mode")}>Coverage {sortArrow("coverage_mode")}</th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("created_at")}>Created {sortArrow("created_at")}</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>{sortedApiRuns.map(r => <tr key={r.id}>
                   <td><a href={`#/api-runs/${r.id}/status`} style={{
                     fontWeight: 600
                   }}>{r.name}</a></td>
