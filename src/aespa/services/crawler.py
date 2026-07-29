@@ -315,6 +315,11 @@ async def _do_crawl_inner(run_id: int) -> None:
     crawler_mode = (
         run.crawler_mode if run.crawler_mode in {"url", "interactive"} else "url"
     )
+    skip_dangerous_actions = bool(crawler_cfg.skip_dangerous_actions)
+    suppress_form_submit_actions = bool(crawler_cfg.suppress_form_submit_actions)
+    block_non_idempotent_interactive_replay = bool(
+        crawler_cfg.block_non_idempotent_interactive_replay
+    )
     _parsed = urlparse(base_url)
     base_netloc = _parsed.netloc
     _bp = _parsed.path
@@ -418,6 +423,9 @@ async def _do_crawl_inner(run_id: int) -> None:
                 js_endpoint_discovery_enabled=(
                     crawler_cfg.js_endpoint_discovery_enabled
                 ),
+                skip_dangerous_actions=skip_dangerous_actions,
+                suppress_form_submit_actions=suppress_form_submit_actions,
+                block_non_idempotent_interactive_replay=block_non_idempotent_interactive_replay,
             ),
             name=f"crawl-{run_id}-cred{idx}",
         )
@@ -533,6 +541,9 @@ async def _crawl_as_credential(
     pw_proxy: dict,
     global_http_header: dict[str, str],
     js_endpoint_discovery_enabled: bool,
+    skip_dangerous_actions: bool,
+    suppress_form_submit_actions: bool,
+    block_non_idempotent_interactive_replay: bool,
 ) -> None:
     from playwright.async_api import async_playwright
 
@@ -1052,6 +1063,9 @@ async def _crawl_as_credential(
                     username=username,
                     llm_cfg=llm_cfg,
                     base_netloc=base_netloc,
+                    skip_dangerous_actions=skip_dangerous_actions,
+                    suppress_form_submit_actions=suppress_form_submit_actions,
+                    block_non_idempotent_interactive_replay=block_non_idempotent_interactive_replay,
                 )
 
             if depth < max_depth:
@@ -1344,7 +1358,12 @@ async def _locator_is_exposed(locator, *, actionable: bool = False) -> bool:
             return False
 
 
-async def _interactive_controls(page) -> list[dict]:
+async def _interactive_controls(
+    page,
+    *,
+    skip_dangerous_actions: bool,
+    suppress_form_submit_actions: bool,
+) -> list[dict]:
     """Return safe workflow controls with replayable locators.
 
     Selecting a choice is safe to explore. Buttons inside forms are included,
@@ -1445,12 +1464,15 @@ async def _interactive_controls(page) -> list[dict]:
         input_type = str(control.get("input_type") or "")
         tag = str(control.get("tag") or "")
         checked = bool(control.get("checked"))
-        if not name or _INTERACTIVE_DANGER_RE.search(name):
+        if not name:
+            continue
+        if skip_dangerous_actions and _INTERACTIVE_DANGER_RE.search(name):
             continue
         if input_type == "radio" and checked:
             continue
         if (
-            control.get("inside_form")
+            suppress_form_submit_actions
+            and control.get("inside_form")
             and control.get("button_type") == "submit"
             and not re.search(r"\b(?:next|continue|back|previous)\b", name, re.I)
         ):
@@ -1600,10 +1622,18 @@ async def _settle_interactive_action(page, before_signature: str) -> bool:
     return changed
 
 
-async def _perform_interactive_action(page, step: dict) -> dict:
+async def _perform_interactive_action(
+    page,
+    step: dict,
+    *,
+    block_non_idempotent_interactive_replay: bool,
+) -> dict:
     blocked_requests: list[dict] = []
 
     async def _safe_route(route) -> None:
+        if not block_non_idempotent_interactive_replay:
+            await route.continue_()
+            return
         request = route.request
         method = str(request.method or "GET").upper()
         if method not in {"GET", "HEAD", "OPTIONS"}:
@@ -1735,11 +1765,20 @@ async def _wait_for_content_settle(page, *, max_wait_ms: int = 3000) -> None:
         elapsed += poll_ms
 
 
-async def _replay_interactive_steps(page, steps: list[dict]) -> dict:
+async def _replay_interactive_steps(
+    page,
+    steps: list[dict],
+    *,
+    block_non_idempotent_interactive_replay: bool,
+) -> dict:
     changed = False
     blocked_requests: list[dict] = []
     for step in steps:
-        result = await _perform_interactive_action(page, step)
+        result = await _perform_interactive_action(
+            page,
+            step,
+            block_non_idempotent_interactive_replay=block_non_idempotent_interactive_replay,
+        )
         changed = changed or result["changed"]
         blocked_requests.extend(result["blocked_requests"])
         if not result["ok"]:
@@ -1884,6 +1923,9 @@ async def _explore_interactive_states(
     username: Optional[str],
     llm_cfg,
     base_netloc: str,
+    skip_dangerous_actions: bool,
+    suppress_form_submit_actions: bool,
+    block_non_idempotent_interactive_replay: bool,
 ) -> list[dict]:
     """Breadth-first exploration of safe client-side states beneath one URL page."""
     baseline = await _interactive_state_snapshot(page, capture_screenshot=False)
@@ -1949,7 +1991,11 @@ async def _explore_interactive_states(
                 existing_page_ids = {id(open_page) for open_page in page.context.pages}
             except Exception:
                 existing_page_ids = set()
-            replay = await _replay_interactive_steps(page, steps)
+            replay = await _replay_interactive_steps(
+                page,
+                steps,
+                block_non_idempotent_interactive_replay=block_non_idempotent_interactive_replay,
+            )
             if replay["blocked_requests"]:
                 blocked = replay["blocked_requests"][-1]
                 action = steps[-1]
@@ -2171,7 +2217,11 @@ async def _explore_interactive_states(
 
         if interaction_depth >= _INTERACTIVE_MAX_STEPS:
             continue
-        for action in await _interactive_controls(page):
+        for action in await _interactive_controls(
+            page,
+            skip_dangerous_actions=skip_dangerous_actions,
+            suppress_form_submit_actions=suppress_form_submit_actions,
+        ):
             if not expand_form_choices and _interactive_action_is_form_choice(action):
                 continue
             recipe = steps + [action]
@@ -4938,7 +4988,6 @@ async def _mailbox_page_otp(mailbox_page, mailbox_url: str) -> str | None:
     return None
 
 
-
 async def _fill_email_otp_if_prompted(page, credential) -> None:
     mailbox_url = (getattr(credential, "test_mailbox_url", None) or "").strip()
     if not mailbox_url:
@@ -4994,9 +5043,7 @@ async def _fill_email_otp_if_prompted(page, credential) -> None:
                         # the OTP field is still visible (wrong/stale code, or a
                         # slow multi-hop SSO redirect).
                         try:
-                            await page.wait_for_load_state(
-                                "networkidle", timeout=6_000
-                            )
+                            await page.wait_for_load_state("networkidle", timeout=6_000)
                         except Exception:
                             pass
                         await page.wait_for_timeout(1000)
@@ -6477,7 +6524,10 @@ async def _authenticate(
     # so the crawler stalls after a "successful" login. Close it if present.
     try:
         if await _dismiss_blocking_modal(page):
-            log.info("  _authenticate: dismissed a post-login blocking modal for %s", username)
+            log.info(
+                "  _authenticate: dismissed a post-login blocking modal for %s",
+                username,
+            )
     except Exception as exc:
         log.warning("  _authenticate: modal dismissal failed for %s: %s", username, exc)
 
@@ -7014,7 +7064,9 @@ async def _authenticate_smart(
         try:
             if not await _page_requires_login(page, login_url):
                 if await _resolve_mfa_prompt_if_present(page, credential):
-                    history.append("resolved an MFA/OTP prompt after login form cleared")
+                    history.append(
+                        "resolved an MFA/OTP prompt after login form cleared"
+                    )
                 if not await _page_requires_login(
                     page, login_url
                 ) and not await _detect_mfa_prompt(page):
