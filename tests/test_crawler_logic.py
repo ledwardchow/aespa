@@ -297,12 +297,14 @@ def test_mine_asset_text_promotes_typed_js_leads(monkeypatch):
     const flags = { 'featureExports': true };
     """
 
-    crawler._mine_asset_text(
+    promoted_calls = crawler._mine_asset_text(
         run_id=1,
         asset_url="https://target.local/static/app.js",
         body=js,
         source="js_asset",
         page_url="https://target.local/",
+        collect_js_endpoint_calls=True,
+        base_netloc="target.local",
     )
 
     endpoints = [item for item in saved if item["kind"] == "endpoint"]
@@ -323,6 +325,11 @@ def test_mine_asset_text_promotes_typed_js_leads(monkeypatch):
     assert {item["key"] for item in inputs} >= {"email", "password"}
     assert any(item["key"] == "auth_token" for item in storage_keys)
     assert any(item["key"] == "featureExports" for item in feature_flags)
+    assert any(
+        call["url"] == "https://target.local/api/users/register"
+        and call["method"] == "POST"
+        for call in promoted_calls
+    )
 
 
 def test_page_requires_login_ignores_login_url_without_login_ui():
@@ -444,7 +451,13 @@ class _InteractiveControlsPage:
 def test_interactive_controls_include_replayable_non_navigation_links():
     page = _InteractiveControlsPage()
 
-    controls = asyncio.run(crawler._interactive_controls(page))
+    controls = asyncio.run(
+        crawler._interactive_controls(
+            page,
+            skip_dangerous_actions=True,
+            suppress_form_submit_actions=True,
+        )
+    )
 
     assert 'a[href="#"]' in page.script
     assert controls == [
@@ -521,7 +534,13 @@ class _WorkflowControlsPage:
 
 
 def test_interactive_controls_include_safe_form_choices_and_next_button():
-    controls = asyncio.run(crawler._interactive_controls(_WorkflowControlsPage()))
+    controls = asyncio.run(
+        crawler._interactive_controls(
+            _WorkflowControlsPage(),
+            skip_dangerous_actions=True,
+            suppress_form_submit_actions=True,
+        )
+    )
 
     assert [(control["kind"], control["name"]) for control in controls] == [
         ("click", "Yes"),
@@ -791,6 +810,7 @@ def test_interactive_action_blocks_and_redacts_mutating_request():
                 "name": "Next",
                 "selector": "#next",
             },
+            block_non_idempotent_interactive_replay=True,
         )
     )
 
@@ -820,10 +840,10 @@ def test_interactive_workflow_returns_link_revealed_by_form_choice(monkeypatch):
         "selector": "#sauce-yes",
     }
 
-    async def fake_controls(page):  # noqa: ARG001
+    async def fake_controls(page, **_kwargs):  # noqa: ARG001
         return [yes_action]
 
-    async def fake_replay(page, steps):  # noqa: ARG001
+    async def fake_replay(page, steps, **_kwargs):  # noqa: ARG001
         return {"ok": True, "changed": True, "blocked_requests": []}
 
     snapshot_calls = 0
@@ -878,6 +898,9 @@ def test_interactive_workflow_returns_link_revealed_by_form_choice(monkeypatch):
             username=None,
             llm_cfg=object(),
             base_netloc="target.local",
+            skip_dangerous_actions=True,
+            suppress_form_submit_actions=True,
+            block_non_idempotent_interactive_replay=True,
         )
     )
 
@@ -902,12 +925,12 @@ def test_interactive_workflow_maps_noop_back_to_canonical_url_node(monkeypatch):
     control_calls = 0
     saved_links = []
 
-    async def fake_controls(page):  # noqa: ARG001
+    async def fake_controls(page, **_kwargs):  # noqa: ARG001
         nonlocal control_calls
         control_calls += 1
         return [dashboard_action]
 
-    async def fake_replay(page, steps):  # noqa: ARG001
+    async def fake_replay(page, steps, **_kwargs):  # noqa: ARG001
         return {"ok": True, "changed": True, "blocked_requests": []}
 
     async def fake_snapshot(page, **kwargs):  # noqa: ARG001
@@ -951,6 +974,9 @@ def test_interactive_workflow_maps_noop_back_to_canonical_url_node(monkeypatch):
             username=None,
             llm_cfg=object(),
             base_netloc="target.local",
+            skip_dangerous_actions=True,
+            suppress_form_submit_actions=True,
+            block_non_idempotent_interactive_replay=True,
         )
     )
 
@@ -969,10 +995,10 @@ def test_interactive_workflow_caps_replay_attempts(monkeypatch):
     }
     replayed = []
 
-    async def fake_controls(page):  # noqa: ARG001
+    async def fake_controls(page, **_kwargs):  # noqa: ARG001
         return [action]
 
-    async def fake_replay(page, steps):  # noqa: ARG001
+    async def fake_replay(page, steps, **_kwargs):  # noqa: ARG001
         replayed.append(steps)
         return {"ok": True, "changed": True, "blocked_requests": []}
 
@@ -1027,6 +1053,9 @@ def test_interactive_workflow_caps_replay_attempts(monkeypatch):
             username=None,
             llm_cfg=object(),
             base_netloc="target.local",
+            skip_dangerous_actions=True,
+            suppress_form_submit_actions=True,
+            block_non_idempotent_interactive_replay=True,
         )
     )
 
@@ -1063,7 +1092,7 @@ def test_selection_only_state_is_reused_but_enabled_next_is_explored(monkeypatch
     created = []
     replayed = []
 
-    async def fake_controls(page):
+    async def fake_controls(page, **_kwargs):
         if page.view == "quote":
             return [select_action]
         if page.view == "selected":
@@ -1077,7 +1106,7 @@ def test_selection_only_state_is_reused_but_enabled_next_is_explored(monkeypatch
             ]
         return []
 
-    async def fake_replay(page, steps):
+    async def fake_replay(page, steps, **_kwargs):
         replayed.append(steps)
         if steps[-1]["kind"] == "select_option":
             page.view = "selected"
@@ -1126,6 +1155,9 @@ def test_selection_only_state_is_reused_but_enabled_next_is_explored(monkeypatch
             username=None,
             llm_cfg=object(),
             base_netloc="target.local",
+            skip_dangerous_actions=True,
+            suppress_form_submit_actions=True,
+            block_non_idempotent_interactive_replay=True,
         )
     )
 
@@ -1170,10 +1202,10 @@ def test_interactive_replay_waits_for_spa_bootstrap(monkeypatch):
     }
     created = []
 
-    async def fake_controls(page):
+    async def fake_controls(page, **_kwargs):
         return [profile_action] if page.view == "dashboard" else []
 
-    async def fake_replay(page, steps):  # noqa: ARG001
+    async def fake_replay(page, steps, **_kwargs):  # noqa: ARG001
         assert page.root_ready is True
         page.view = "profile"
         return {"ok": True, "changed": True, "blocked_requests": []}
@@ -1221,6 +1253,9 @@ def test_interactive_replay_waits_for_spa_bootstrap(monkeypatch):
             username=None,
             llm_cfg=object(),
             base_netloc="target.local",
+            skip_dangerous_actions=True,
+            suppress_form_submit_actions=True,
+            block_non_idempotent_interactive_replay=True,
         )
     )
 
@@ -1238,12 +1273,12 @@ def test_interactive_workflow_detects_javascript_url_navigation(monkeypatch):
 
     calls = 0
 
-    async def fake_controls(page):  # noqa: ARG001
+    async def fake_controls(page, **_kwargs):  # noqa: ARG001
         nonlocal calls
         calls += 1
         return [next_action] if calls == 1 else []
 
-    async def fake_replay(page, steps):  # noqa: ARG001
+    async def fake_replay(page, steps, **_kwargs):  # noqa: ARG001
         page.url = "https://target.local/product/step-2"
         return {"ok": True, "changed": True, "blocked_requests": []}
 
@@ -1274,6 +1309,9 @@ def test_interactive_workflow_detects_javascript_url_navigation(monkeypatch):
             username=None,
             llm_cfg=object(),
             base_netloc="target.local",
+            skip_dangerous_actions=True,
+            suppress_form_submit_actions=True,
+            block_non_idempotent_interactive_replay=True,
         )
     )
 
@@ -1312,12 +1350,12 @@ def test_interactive_workflow_detects_same_origin_popup(monkeypatch):
     popup = _PopupPage()
     calls = 0
 
-    async def fake_controls(page):  # noqa: ARG001
+    async def fake_controls(page, **_kwargs):  # noqa: ARG001
         nonlocal calls
         calls += 1
         return [help_action] if calls == 1 else []
 
-    async def fake_replay(page, steps):  # noqa: ARG001
+    async def fake_replay(page, steps, **_kwargs):  # noqa: ARG001
         page.context.pages.append(popup)
         return {"ok": True, "changed": False, "blocked_requests": []}
 
@@ -1348,6 +1386,9 @@ def test_interactive_workflow_detects_same_origin_popup(monkeypatch):
             username=None,
             llm_cfg=object(),
             base_netloc="target.local",
+            skip_dangerous_actions=True,
+            suppress_form_submit_actions=True,
+            block_non_idempotent_interactive_replay=True,
         )
     )
 

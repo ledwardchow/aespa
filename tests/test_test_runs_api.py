@@ -65,7 +65,9 @@ def test_run_summary_exposes_safe_auth_mode_metadata(client: TestClient):
     run = _make_run(client, site["id"]).json()
     detail = client.get(f"/api/test-runs/{run['id']}").json()
 
-    credentials = {credential["username"]: credential for credential in detail["credentials"]}
+    credentials = {
+        credential["username"]: credential for credential in detail["credentials"]
+    }
     assert credentials["push@example.com"]["auth_mode"] == "entra_id"
     assert credentials["push@example.com"]["has_totp_seed"] is False
     assert credentials["code@example.com"]["auth_mode"] == "entra_id"
@@ -511,9 +513,7 @@ def test_validate_scanner_sessions_route(client: TestClient, monkeypatch):
         }
 
     monkeypatch.setattr(scanner_sessions, "validate_active_sessions", validate)
-    response = client.post(
-        f"/api/test-runs/{run['id']}/scanner-sessions/validate"
-    )
+    response = client.post(f"/api/test-runs/{run['id']}/scanner-sessions/validate")
 
     assert response.status_code == 200
     assert response.json()["evicted"] == 1
@@ -1047,3 +1047,61 @@ def test_deleting_site_cleans_up_runs(client: TestClient):
     client.delete(f"/api/sites/{site['id']}")
     r = client.get(f"/api/test-runs/{run['id']}")
     assert r.status_code == 404
+
+
+def test_get_graph_inferred_parent_links():
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import CrawledPage, Site, TestRun
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="http://192.168.3.101")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(site_id=site.id, name="Run Graph Test")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            root_page = CrawledPage(
+                test_run_id=run.id,
+                url="http://192.168.3.101/",
+                depth=0,
+            )
+            parent_page = CrawledPage(
+                test_run_id=run.id,
+                url="http://192.168.3.101/admin/#/customers",
+                depth=1,
+                state_label="Admin Customer Management",
+            )
+            child_page = CrawledPage(
+                test_run_id=run.id,
+                url="http://192.168.3.101/admin/#/customers/33",
+                depth=2,
+            )
+            session.add(root_page)
+            session.add(parent_page)
+            session.add(child_page)
+            session.commit()
+            session.refresh(parent_page)
+            session.refresh(child_page)
+
+            graph = test_runs_api.get_graph(run.id, session=session)
+            inferred_links = [
+                link for link in graph.links if link.action_kind == "inferred"
+            ]
+            assert len(inferred_links) == 1
+            assert inferred_links[0].source == parent_page.id
+            assert inferred_links[0].target == child_page.id
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()

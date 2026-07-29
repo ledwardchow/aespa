@@ -22,12 +22,41 @@ export function LLMProviderForm({
       ...p
     }));
   };
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [loadMessage, setLoadMessage] = useState(null);
+
+  const onLoadModels = async () => {
+    setLoadingModels(true);
+    setLoadMessage(null);
+    try {
+      const fetched = await api.discoverModels({
+        api_format: form.api_format,
+        api_key: form.api_key,
+        base_url: form.base_url,
+        username: form.username
+      });
+      if (fetched && fetched.length > 0) {
+        upd({ models: fetched.join("\n") });
+        setLoadMessage(`Loaded ${fetched.length} model(s) from API.`);
+      } else {
+        setLoadMessage("No models returned for this provider.");
+      }
+    } catch (e) {
+      setLoadMessage(`Failed to load models: ${e.message}`);
+    } finally {
+      setLoadingModels(false);
+    }
+  };
+
   const onFormatChange = async api_format => {
     upd({ api_format });
-    if (api_format !== "factory_droid" || form.models.trim()) return;
+    if (form.models.trim()) return;
     try {
       const defaults = await api.getDefaultModels();
-      upd({ api_format, models: (defaults.factory_droid || []).join("\n") });
+      const fetched = defaults[api_format] || [];
+      if (fetched.length > 0) {
+        upd({ api_format, models: fetched.join("\n") });
+      }
     } catch (e) {
       setError(e.message);
     }
@@ -95,10 +124,23 @@ export function LLMProviderForm({
         })} />
         <div className="field-hint">Enter a login from Copilot CLI's <code>/user</code> list. Leave blank to use its selected default account.</div>
       </div>}
-      <div className="field"><label>Model names</label>
+      <div className="field">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+          <label style={{ margin: 0 }}>Model names</label>
+          <button
+            type="button"
+            className="btn secondary sm"
+            disabled={loadingModels}
+            onClick={onLoadModels}
+            title="Fetch available model names from API and overwrite current list"
+          >
+            {loadingModels ? "Loading models…" : "Load models from API"}
+          </button>
+        </div>
         <textarea rows="5" value={form.models} placeholder={PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""} onChange={e => upd({
           models: e.target.value
         })}></textarea>
+        {loadMessage && <div className="field-hint" style={{ color: "var(--accent)", marginBottom: "4px" }}>{loadMessage}</div>}
         <div className="field-hint">Enter one model per line, or separate models with commas. Leave blank to use the models shown in the placeholder.</div>
       </div>
       {form.api_format !== "factory_droid" && <div className="field">

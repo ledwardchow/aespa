@@ -3,7 +3,7 @@ import { api } from "../../lib/api";
 import { truncUrl } from "../../lib/utilities";
 
 /** Displays crawl metadata and owns editing the run's crawl limits. */
-export function WebRunSitemapMeta({ run, crawlUsername, profiles, onRunUpdate, onError }) {
+export function WebRunSitemapMeta({ run, crawlUsername, profiles, onRunUpdate, onError, crawlCredentialId, onCrawlCredentialChange }) {
   const [editing, setEditing] = useState(false);
   const [depth, setDepth] = useState("");
   const [pages, setPages] = useState("");
@@ -11,6 +11,7 @@ export function WebRunSitemapMeta({ run, crawlUsername, profiles, onRunUpdate, o
   const [crawlerMode, setCrawlerMode] = useState("url");
   const profile = profiles.find(item => item.id === run.llm_profile_id);
   const multiUser = run.credentials?.length > 1;
+  const credentials = run.credentials || [];
 
   const edit = () => {
     setDepth(String(run.max_depth));
@@ -72,6 +73,24 @@ export function WebRunSitemapMeta({ run, crawlUsername, profiles, onRunUpdate, o
       {crawlUsername && <div className="run-stat"><span className="run-stat-lbl">Crawling as</span><span className="run-stat-val" style={{ fontSize: 14 }}>{crawlUsername}</span></div>}
       {run.current_url && <div className="run-stat run-stat-url"><span className="run-stat-lbl">Current URL</span><span className="mono run-stat-url-val">{truncUrl(run.current_url, 50)}</span></div>}
     </>}
+    {credentials.length > 0 && run.status !== "running" && (
+      <div className="run-stat" style={{ flexDirection: "column", gap: 2 }}>
+        <span className="run-stat-lbl">Next crawl as</span>
+        <select
+          className="select"
+          style={{ fontSize: 12 }}
+          value={crawlCredentialId || ""}
+          onChange={e => onCrawlCredentialChange && onCrawlCredentialChange(e.target.value ? Number(e.target.value) : null)}
+        >
+          <option value="">All users</option>
+          {credentials.map(c => (
+            <option key={c.id} value={c.id}>
+              {c.label ? `${c.label} (${c.username})` : c.username}
+            </option>
+          ))}
+        </select>
+      </div>
+    )}
     {run.error_message && <div style={{ color: "var(--danger)", fontSize: 12, flex: 1 }}>{run.error_message}</div>}
   </div>;
 }
