@@ -30,6 +30,7 @@ from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.settings import (
+    get_crawler_config,
     get_global_http_header_config,
     get_llm_config_for_role,
     get_upstream_proxy_config,
@@ -294,6 +295,7 @@ async def _do_crawl_inner(run_id: int) -> None:
             )
         creds = list(site.credentials)
         upstream_proxy = get_upstream_proxy_config(s)
+        crawler_cfg = get_crawler_config(s)
         crawl_proxy_url = (
             upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
         )
@@ -413,6 +415,9 @@ async def _do_crawl_inner(run_id: int) -> None:
                 total_phases=len(phases),
                 pw_proxy=_pw_proxy,
                 global_http_header=_global_http_header,
+                js_endpoint_discovery_enabled=(
+                    crawler_cfg.js_endpoint_discovery_enabled
+                ),
             ),
             name=f"crawl-{run_id}-cred{idx}",
         )
@@ -527,6 +532,7 @@ async def _crawl_as_credential(
     total_phases: int,
     pw_proxy: dict,
     global_http_header: dict[str, str],
+    js_endpoint_discovery_enabled: bool,
 ) -> None:
     from playwright.async_api import async_playwright
 
@@ -834,7 +840,7 @@ async def _crawl_as_credential(
                 for r in raw_links
                 if _same_domain(r["href"], base_netloc)
             ]
-            await _record_page_intelligence(
+            js_endpoint_calls = await _record_page_intelligence(
                 run_id=run_id,
                 page=page,
                 page_url=final_url,
@@ -842,7 +848,20 @@ async def _crawl_as_credential(
                 raw_links=raw_links,
                 base_netloc=base_netloc,
                 username=username,
+                js_endpoint_discovery_enabled=js_endpoint_discovery_enabled,
             )
+            if js_endpoint_discovery_enabled and js_endpoint_calls:
+                await _promote_api_calls(
+                    run_id=run_id,
+                    calls=js_endpoint_calls,
+                    source_page_id=page_id,
+                    source_depth=depth,
+                    shared=shared,
+                    max_pages=max_pages,
+                    credential_id=credential_id,
+                    username=username,
+                    llm_cfg=llm_cfg,
+                )
 
             # ── LLM analysis ──────────────────────────────────────────────────
             cats: dict = {
@@ -2385,7 +2404,8 @@ async def _record_page_intelligence(
     raw_links: list[dict],
     base_netloc: str,
     username: Optional[str],
-) -> None:
+    js_endpoint_discovery_enabled: bool,
+) -> list[dict]:
     """Extract durable target inventory facts from a rendered page."""
     for item in _extract_ids_from_text(text):
         _save_intel_item(
@@ -2495,13 +2515,15 @@ async def _record_page_intelligence(
             metadata={"username": username},
         )
 
-    await _mine_script_intelligence(
+    js_endpoint_calls = await _mine_script_intelligence(
         run_id=run_id,
         page=page,
         page_url=page_url,
         script_urls=dom["scripts"],
         base_netloc=base_netloc,
+        collect_js_endpoint_calls=js_endpoint_discovery_enabled,
     )
+    return js_endpoint_calls
 
 
 async def _extract_dom_intelligence(page) -> dict:
@@ -2553,7 +2575,9 @@ async def _mine_script_intelligence(
     page_url: str,
     script_urls: list[str],
     base_netloc: str,
-) -> None:
+    collect_js_endpoint_calls: bool = False,
+) -> list[dict]:
+    discovered_calls: list[dict] = []
     seen: set[str] = set()
     for script_url in script_urls[:20]:
         if (
@@ -2571,12 +2595,16 @@ async def _mine_script_intelligence(
         except Exception as exc:
             log.debug("Script mining failed for %s: %s", script_url, exc)
             continue
-        _mine_asset_text(
-            run_id=run_id,
-            asset_url=script_url,
-            body=body,
-            source="js_asset",
-            page_url=page_url,
+        discovered_calls.extend(
+            _mine_asset_text(
+                run_id=run_id,
+                asset_url=script_url,
+                body=body,
+                source="js_asset",
+                page_url=page_url,
+                collect_js_endpoint_calls=collect_js_endpoint_calls,
+                base_netloc=base_netloc,
+            )
         )
         for sourcemap_url in _extract_sourcemap_urls(script_url, body)[:3]:
             if not _same_domain(sourcemap_url, base_netloc):
@@ -2600,13 +2628,18 @@ async def _mine_script_intelligence(
                 confidence=0.8,
                 metadata={"page_url": page_url},
             )
-            _mine_asset_text(
-                run_id=run_id,
-                asset_url=sourcemap_url,
-                body=sm_body,
-                source="sourcemap",
-                page_url=page_url,
+            discovered_calls.extend(
+                _mine_asset_text(
+                    run_id=run_id,
+                    asset_url=sourcemap_url,
+                    body=sm_body,
+                    source="sourcemap",
+                    page_url=page_url,
+                    collect_js_endpoint_calls=collect_js_endpoint_calls,
+                    base_netloc=base_netloc,
+                )
             )
+    return _dedupe_api_calls(discovered_calls)
 
 
 async def _mine_public_assets(
@@ -2658,7 +2691,10 @@ def _mine_asset_text(
     body: str,
     source: str,
     page_url: str,
-) -> None:
+    collect_js_endpoint_calls: bool = False,
+    base_netloc: str | None = None,
+) -> list[dict]:
+    discovered_calls: list[dict] = []
     for endpoint in _extract_endpoint_strings(body)[:150]:
         resolved = _resolve_asset_reference(asset_url, endpoint)
         _save_intel_item(
@@ -2690,6 +2726,27 @@ def _mine_asset_text(
                 **call.get("metadata", {}),
             },
         )
+        if (not base_netloc or _same_domain(resolved, base_netloc)) and (
+            collect_js_endpoint_calls
+        ):
+            discovered_calls.append(
+                {
+                    "url": resolved,
+                    "method": call.get("method") or "GET",
+                    "request_headers": {},
+                    "request_body": "",
+                    "status": None,
+                    "content_type": "application/javascript",
+                    "response_headers": {},
+                    "body": "",
+                    "page_url": page_url,
+                    "metadata": {
+                        "source": source,
+                        "asset_url": asset_url,
+                        "discovery": "js_api_call",
+                    },
+                }
+            )
         for field in call.get("body_fields", [])[:30]:
             _save_intel_item(
                 run_id=run_id,
@@ -2815,6 +2872,7 @@ def _mine_asset_text(
             evidence=field["evidence"],
             metadata={"page_url": page_url},
         )
+    return discovered_calls
 
 
 def _record_api_intelligence(

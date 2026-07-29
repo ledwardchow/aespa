@@ -1137,6 +1137,49 @@ def test_static_asset_check_still_flags_real_endpoints():
     )
 
 
+def test_explicitly_public_endpoints_are_not_flagged_by_auth_matrix():
+    # Endpoints whose URL path contains a segment that signals intentional public
+    # access must never be classified as "requires auth or sensitive", even when
+    # the crawl tagged them req_auth=True because they were discovered during an
+    # authenticated session (classify_http_exchange sets req_auth=authenticated).
+    public_urls = [
+        "http://app.local/api/public-config",
+        "http://app.local/api/public-holidays?start=2026-01-01",
+        "http://app.local/public/data",
+        "http://app.local/health",
+        "http://app.local/healthz",
+        "http://app.local/health-check",
+        "http://app.local/api/health",
+        "http://app.local/ping",
+        "http://app.local/status",
+        "http://app.local/version",
+        "http://app.local/ready",
+        "http://app.local/readyz",
+        "http://app.local/liveness",
+    ]
+    for url in public_urls:
+        # req_auth=True simulates what classify_http_exchange sets for endpoints
+        # discovered during an authenticated crawl phase.
+        assert scanner._target_requires_auth_or_sensitive(
+            {"url": url, "req_auth": True}
+        ) is False, f"Expected {url} to be excluded as explicitly public"
+
+
+def test_explicitly_public_check_does_not_suppress_protected_endpoints():
+    # Protected endpoints that happen to have non-public-sounding names must
+    # still be flagged.
+    for url in (
+        "http://app.local/api/users",
+        "http://app.local/api/admin/settings",
+        "http://app.local/api/config",          # /config marker
+        "http://app.local/api/dashboard",
+        "http://app.local/api/publications",    # 'publications' ≠ 'public'
+    ):
+        assert scanner._target_requires_auth_or_sensitive(
+            {"url": url, "req_auth": True}
+        ) is True, f"Expected {url} to still be treated as sensitive"
+
+
 def test_deterministic_result_analysis_detects_sql_error():
     findings = scanner._deterministic_findings_from_results(
         run_id=1,

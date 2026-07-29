@@ -849,6 +849,7 @@ export function TestRunDetail({
 
       <WebRunTrafficTab
         runId={runId}
+        graph={graph}
         active={activeTab === "traffic"}
         captureActive={run?.status === "running" || isDynamicScanActive(thinkingStatus?.status) || crawlStopRequested || thinkingStopRequested}
         runStatus={run?.status}

@@ -255,6 +255,41 @@ def _session_request_headers(
     return merged
 
 
+def _anonymous_session_stub() -> dict[str, Any]:
+    """Synthetic no-auth session used to avoid credential leakage on label mismatch."""
+    return {
+        "label": "anonymous",
+        "kind": "anonymous",
+        "cookies": {},
+        "extra_headers": {},
+        "metadata": {"description": "Synthetic anonymous fallback"},
+    }
+
+
+def _resolve_requested_scan_session(
+    session_vault: dict[str, dict], requested_label: str | None
+) -> tuple[str | None, dict | None, str | None]:
+    """Resolve ``use_session`` safely.
+
+    If the model explicitly requested a session label but it is missing, never
+    fall back to the default authenticated session.  Instead, force an explicit
+    anonymous (no-auth) session and surface a note for logs/evidence.
+    """
+    if not isinstance(requested_label, str):
+        return None, None, None
+    label = requested_label.strip()
+    if not label:
+        return None, None, None
+    selected = session_vault.get(label)
+    if selected is not None:
+        return label, selected, None
+    note = (
+        f"Requested session '{label}' was not available; forced anonymous "
+        "no-auth session to prevent credential leakage."
+    )
+    return label, _anonymous_session_stub(), note
+
+
 def _sent_request_auth_summary(headers) -> str:
     """Describe authentication actually sent without exposing credential values."""
     normalised = {str(key).lower(): str(value) for key, value in headers.items()}
@@ -4379,8 +4414,8 @@ async def _run_specialist_agent(
                 if isinstance(tool_input.get("use_session"), str)
                 else None
             )
-            selected_session = (
-                session_vault.get(use_session_label) if use_session_label else None
+            use_session_label, selected_session, _session_resolution_note = (
+                _resolve_requested_scan_session(session_vault, use_session_label)
             )
             req_cookies = (
                 (selected_session.get("cookies") or {})
@@ -4417,6 +4452,8 @@ async def _run_specialist_agent(
                         _hx, method, url, site_id=site_id, run_id=run_id, **kwargs
                     )
                     resp_body = resp.text[:BODY_READ_LIMIT]
+                    if _session_resolution_note:
+                        resp_body = f"{_session_resolution_note}\n\n{resp_body}"
                     _sp_canary_fp = _ssrf_canary.get(run_id)
                     _sp_canary_alert = (
                         (
@@ -5831,6 +5868,13 @@ async def _do_thinking_scan(run_id: int) -> None:
     progressive_findings_count = 0
     session_svc.ensure_anonymous_session(run_id, source="dynamic_scan")
     session_vault: dict[str, dict] = session_svc.load_session_vault(run_id)
+    if "configured_primary" not in session_vault and creds:
+        for _sess in session_vault.values():
+            if _sess.get("kind") == "anonymous":
+                continue
+            if _sess.get("credential_id") == creds[0].id:
+                session_vault["configured_primary"] = _sess
+                break
     consecutive_context_tools = 0
     failed_url_counts: dict[
         str, int
@@ -5982,6 +6026,14 @@ async def _do_thinking_scan(run_id: int) -> None:
             and creds
             and (cookie_jar or _authorization_header(extra_headers))
         ):
+            configured_primary_label = (
+                str((_primary_vault_session or {}).get("label") or "").strip()
+                or session_svc.credential_label(
+                    creds[0].username,
+                    primary=True,
+                    existing=set(session_vault.keys()),
+                )
+            )
             browser_metadata = {
                 "login_url": _login_url_for_credential(login_url, creds[0]),
                 "storage_key": auth_storage_key,
@@ -5989,7 +6041,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "storage_by_origin": storage_by_origin,
             }
             configured_primary = {
-                "label": "configured_primary",
+                "label": configured_primary_label,
                 "kind": _session_kind(cookie_jar, extra_headers),
                 "account_label": creds[0].label,
                 "username": creds[0].username,
@@ -6002,7 +6054,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             session_vault["configured_primary"] = configured_primary
             _record_session(
                 run_id,
-                label="configured_primary",
+                label=configured_primary_label,
                 session_data=configured_primary,
                 source="dynamic_scan_auth_bootstrap",
                 credential_id=creds[0].id,
@@ -6365,8 +6417,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     steps = action.get("steps") or []
                     use_session = action.get("use_session") or action.get("as_session")
                     use_session = use_session if isinstance(use_session, str) else None
-                    selected_session = (
-                        session_vault.get(use_session) if use_session else None
+                    use_session, selected_session, _ = (
+                        _resolve_requested_scan_session(session_vault, use_session)
                     )
                     payload_summary = _thinking_browser_payload_summary(steps)
                     action_message = _thinking_action_log_message(
@@ -6804,8 +6856,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     )
                     use_session = action.get("use_session") or action.get("as_session")
                     use_session = use_session if isinstance(use_session, str) else None
-                    selected_session = (
-                        session_vault.get(use_session) if use_session else None
+                    use_session, selected_session, _ = (
+                        _resolve_requested_scan_session(session_vault, use_session)
                     )
                     body_format = str(action.get("body_format") or "json").lower()
                     action_message = _thinking_action_log_message(
@@ -6963,8 +7015,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     body = action.get("body")
                     use_session = action.get("use_session") or action.get("as_session")
                     use_session = use_session if isinstance(use_session, str) else None
-                    selected_session = (
-                        session_vault.get(use_session) if use_session else None
+                    use_session, selected_session, _ = (
+                        _resolve_requested_scan_session(session_vault, use_session)
                     )
                     action_message = _thinking_action_log_message(
                         step, method, url, action
@@ -7705,8 +7757,17 @@ async def _do_agentic_thinking_loop(
             # Refresh session vault
             if new_cookies:
                 prev = session_vault.get("configured_primary") or {}
+                configured_primary_label = (
+                    str(prev.get("label") or "").strip()
+                    or session_svc.credential_label(
+                        creds[0].username,
+                        primary=True,
+                        existing=set(session_vault.keys()),
+                    )
+                )
                 session_vault["configured_primary"] = {
                     **prev,
+                    "label": configured_primary_label,
                     "cookies": new_cookies,
                     "metadata": {
                         "login_url": _cred_login_url,
@@ -7716,7 +7777,7 @@ async def _do_agentic_thinking_loop(
                 }
                 _record_session(
                     run_id,
-                    label="configured_primary",
+                    label=configured_primary_label,
                     session_data=session_vault["configured_primary"],
                     source="dynamic_scan_reauth",
                     credential_id=creds[0].id,
@@ -7812,7 +7873,7 @@ async def _do_agentic_thinking_loop(
             except Exception as exc:
                 log.debug("Could not persist session probe result: %s", exc)
         if label and was_unattempted:
-            invalid = status in (401, 419, 440)
+            invalid = status in (401, 419, 440) and str(label).lower() != "anonymous"
             if invalid:
                 _emit_session_validator_log(
                     run_id,
@@ -8231,8 +8292,8 @@ async def _do_agentic_thinking_loop(
                 if isinstance(tool_input.get("use_session"), str)
                 else None
             )
-            selected_session = (
-                session_vault.get(use_session_label) if use_session_label else None
+            use_session_label, selected_session, _br_session_resolution_note = (
+                _resolve_requested_scan_session(session_vault, use_session_label)
             )
             payload_summary = _thinking_browser_payload_summary(steps_list)
             action_message = _thinking_action_log_message(
@@ -8299,6 +8360,8 @@ async def _do_agentic_thinking_loop(
                 scanner_policy=scanner_policy,
             )
             resp_body = str(br_result.get("body") or "")[:BODY_READ_LIMIT]
+            if _br_session_resolution_note:
+                resp_body = f"{_br_session_resolution_note}\n\n{resp_body}"
             resp_status = br_result.get("status") or 0
             resp_headers = br_result.get("headers") or {}
             final_url = br_result.get("url") or br_url
@@ -8421,6 +8484,7 @@ async def _do_agentic_thinking_loop(
             if (
                 resp_status in (401, 419, 440)
                 and use_session_label
+                and use_session_label.lower() != "anonymous"
                 and use_session_label in session_vault
             ):
                 del session_vault[use_session_label]
@@ -8842,8 +8906,8 @@ async def _do_agentic_thinking_loop(
                 if isinstance(tool_input.get("use_session"), str)
                 else None
             )
-            ra_sel_session = (
-                session_vault.get(ra_use_session) if ra_use_session else None
+            ra_use_session, ra_sel_session, _ra_session_resolution_note = (
+                _resolve_requested_scan_session(session_vault, ra_use_session)
             )
             events_svc.emit(
                 run_id,
@@ -8913,6 +8977,8 @@ async def _do_agentic_thinking_loop(
                 ra_resp_hdrs = dict(ra_r.headers)
                 ra_raw = ra_r.text[:BODY_READ_LIMIT]
                 ra_resp_body = _redact_sensitive_text(ra_raw)
+                if _ra_session_resolution_note:
+                    ra_resp_body = f"{_ra_session_resolution_note}\n\n{ra_resp_body}"
                 ra_ok = ra_r.status_code in ra_ok_statuses
                 ra_token = _extract_bearer_token_from_body(ra_raw) if ra_ok else None
                 ra_resp_cookies = (
@@ -9209,7 +9275,9 @@ async def _do_agentic_thinking_loop(
                 status="warning",
             )
             return _repeat_message
-        hr_sel_session = session_vault.get(hr_use_session) if hr_use_session else None
+        hr_use_session, hr_sel_session, _hr_session_resolution_note = (
+            _resolve_requested_scan_session(session_vault, hr_use_session)
+        )
         events_svc.emit(
             run_id,
             {
@@ -9351,6 +9419,11 @@ async def _do_agentic_thinking_loop(
             f"use_session: {hr_use_session or '(default)'}  "
             f"{_sent_request_auth_summary(hr_sent_headers)}\n"
             f"{json.dumps(hr_headers, sort_keys=True)}\n{hr_req_body_str}"
+            + (
+                f"\nSESSION_NOTE: {_hr_session_resolution_note}"
+                if _hr_session_resolution_note
+                else ""
+            )
         )
         hr_resp_ev = _response_evidence(
             f"Status: {hr_resp_status}\n"
@@ -9488,6 +9561,7 @@ async def _do_agentic_thinking_loop(
         if (
             hr_resp_status in (401, 419, 440)
             and hr_use_session
+            and hr_use_session.lower() != "anonymous"
             and hr_use_session in session_vault
         ):
             del session_vault[hr_use_session]
@@ -10546,15 +10620,59 @@ def _idor_matrix_finding(
 # /static/js/user-profile.js matching the "/user" marker below).
 _STATIC_ASSET_EXTENSIONS: tuple[str, ...] = _BROWSER_SKIP_EXTENSIONS + (".js", ".mjs")
 
+# Path segments that signal an endpoint is intentionally public.  An endpoint
+# discovered during an authenticated crawl is tagged req_auth=True by
+# classify_http_exchange (because the exchange was observed while authenticated),
+# but that flag is not proof the server enforces auth.  Endpoints whose URL path
+# contains a "public" segment or one of the well-known health/monitoring names are
+# explicitly designed for anonymous access and must never be flagged as
+# "unauthenticated access to a protected endpoint".
+# Examples: /api/public-config, /api/public-holidays, /health, /healthz, /ping.
+_EXPLICITLY_PUBLIC_INFRA_PREFIXES: tuple[str, ...] = (
+    "health",   # /health, /healthz, /health-check
+    "ping",
+    "status",
+    "version",
+    "ready",    # /ready, /readyz
+    "liveness",
+)
+
 
 def _is_static_asset_url(url: str) -> bool:
     path = urlparse(str(url or "")).path.lower()
     return path.endswith(_STATIC_ASSET_EXTENSIONS)
 
 
+def _is_explicitly_public_url(url: str) -> bool:
+    """Return True when the URL path contains a segment that signals the endpoint
+    is intentionally anonymous-accessible (e.g. /api/public-config, /health).
+
+    Matching rules for a path segment ``seg``:
+    * ``seg`` is exactly ``"public"``, or starts with ``"public-"`` /
+      ``"public_"`` — catches /public-config, /public-holidays, /public/…
+      but NOT /publications or /publisher.
+    * ``seg`` starts with a well-known infrastructure/health prefix.
+    """
+    path = urlparse(str(url or "")).path.lower()
+    for seg in path.split("/"):
+        if not seg:
+            continue
+        # "public" with a word-boundary separator, or the bare word itself
+        if seg == "public" or seg.startswith(("public-", "public_")):
+            return True
+        for prefix in _EXPLICITLY_PUBLIC_INFRA_PREFIXES:
+            if seg.startswith(prefix):
+                return True
+    return False
+
+
 def _target_requires_auth_or_sensitive(target: dict) -> bool:
     url = str(target.get("url") or "").lower()
     if _is_static_asset_url(url):
+        return False
+    # Endpoints explicitly designed for public access are never a finding,
+    # regardless of how req_auth was set during the crawl.
+    if _is_explicitly_public_url(url):
         return False
     if target.get("req_auth") is True:
         return True

@@ -589,6 +589,23 @@ def test_upsert_scanner_policy_invalid_method(client: TestClient):
     assert r.status_code == 422
 
 
+def test_crawler_config_defaults_and_upsert(client: TestClient):
+    initial = client.get("/api/settings/crawler-config")
+    assert initial.status_code == 200
+    assert initial.json()["js_endpoint_discovery_enabled"] is False
+
+    updated = client.put(
+        "/api/settings/crawler-config",
+        json={"js_endpoint_discovery_enabled": True},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["js_endpoint_discovery_enabled"] is True
+
+    persisted = client.get("/api/settings/crawler-config")
+    assert persisted.status_code == 200
+    assert persisted.json()["js_endpoint_discovery_enabled"] is True
+
+
 def test_import_llm_config_rejects_duplicate_names(client: TestClient):
     # Duplicate provider names
     payload_dup_provider = {
