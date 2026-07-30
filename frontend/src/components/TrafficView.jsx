@@ -25,5 +25,5 @@ export function TrafficTable({ entries, selected, onSelect, sequenceFor, sortabl
 
 export function TrafficDetail({ entry, onClose }) {
   if (!entry) return null;
-  return <div className="traffic-detail"><div className="traffic-pane"><div className="traffic-pane-label">REQUEST — {entry.method} {entry.url}<button className="btn ghost sm" onClick={onClose}>✕</button></div><pre className="traffic-raw">{rawRequest(entry)}</pre></div><div className="traffic-pane"><div className="traffic-pane-label">RESPONSE — {entry.status ?? '-'} {entry.duration_ms != null ? '(' + entry.duration_ms + 'ms)' : ''}</div><pre className="traffic-raw">{rawResponse(entry)}</pre></div></div>;
+  return <div className="traffic-detail"><div className="traffic-pane"><div className="traffic-pane-label">REQUEST — {entry.method} {entry.url}</div><pre className="traffic-raw">{rawRequest(entry)}</pre></div><div className="traffic-pane"><div className="traffic-pane-label"><span>RESPONSE — {entry.status ?? '-'} {entry.duration_ms != null ? '(' + entry.duration_ms + 'ms)' : ''}</span><button className="btn ghost sm" onClick={onClose} style={{marginLeft:'auto', paddingRight:'8px'}}>✕</button></div><pre className="traffic-raw">{rawResponse(entry)}</pre></div></div>;
 }
