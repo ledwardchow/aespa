@@ -478,6 +478,56 @@ def test_interactive_controls_include_replayable_non_navigation_links():
     ]
 
 
+class _DangerousControlsPage:
+    async def evaluate(self, script):  # noqa: ARG002
+        return [
+            {
+                "tag": "button",
+                "role": "button",
+                "name": "Pay now",
+                "testid": None,
+                "id": None,
+                "input_type": "",
+                "inside_form": False,
+                "button_type": None,
+            },
+            {
+                "tag": "a",
+                "role": "link",
+                "name": "View details",
+                "testid": None,
+                "id": None,
+                "input_type": "",
+                "inside_form": False,
+                "button_type": None,
+            },
+        ]
+
+
+def test_interactive_controls_skip_dangerous_actions_when_enabled():
+    controls = asyncio.run(
+        crawler._interactive_controls(
+            _DangerousControlsPage(),
+            skip_dangerous_actions=True,
+            suppress_form_submit_actions=True,
+        )
+    )
+
+    assert [control["name"] for control in controls] == ["View details"]
+
+
+def test_interactive_controls_allow_dangerous_actions_when_disabled():
+    controls = asyncio.run(
+        crawler._interactive_controls(
+            _DangerousControlsPage(),
+            skip_dangerous_actions=False,
+            suppress_form_submit_actions=True,
+        )
+    )
+
+    assert [control["name"] for control in controls] == ["Pay now", "View details"]
+
+
 class _WorkflowControlsPage:
     async def evaluate(self, script):  # noqa: ARG002
         return [
@@ -1181,15 +1231,31 @@ class _DelayedBootstrapPage:
         self.url = "https://target.local/account"
         self.root_ready = True
         self.view = "dashboard"
+        self._evaluate_calls = 0
 
     async def goto(self, url, **kwargs):  # noqa: ARG002
         self.url = url
         self.root_ready = False
         self.view = "dashboard"
+        self._evaluate_calls = 0
 
     async def wait_for_load_state(self, state, timeout):  # noqa: ARG002
-        if state == "networkidle":
-            self.root_ready = True
+        # kept for compatibility; the real settle path now uses evaluate
+        pass
+
+    async def wait_for_timeout(self, ms):  # noqa: ARG002
+        pass
+
+    async def evaluate(self, script, **kwargs):  # noqa: ARG002
+        # First call: simulate still-loading (busy marker present).
+        # Subsequent calls: settled, no busy markers — _wait_for_content_settle
+        # needs two identical samples to declare stable and return.
+        self._evaluate_calls += 1
+        if self._evaluate_calls <= 1:
+            return [10, 1, 20]  # busyVisible=1 → still loading
+        # settled
+        self.root_ready = True
+        return [100, 0, 50]  # stable, no busy markers
 
 
 def test_interactive_replay_waits_for_spa_bootstrap(monkeypatch):
