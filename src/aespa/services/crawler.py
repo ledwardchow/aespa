@@ -229,6 +229,11 @@ class _CrawlShared:
         )
         self.lock: asyncio.Lock = asyncio.Lock()
         self.pages_done: int = pages_done
+        # Absolute JS asset URLs already fetched+mined for endpoint/API-call
+        # intelligence, shared across every phase/credential in this run so a
+        # bundle referenced on every page (or repeatedly dynamically imported)
+        # is only downloaded and regex-scanned once per crawl.
+        self.mined_script_urls: set[str] = set()
 
 
 # ── Progress logging ──────────────────────────────────────────────────────────
@@ -590,6 +595,7 @@ async def _crawl_as_credential(
         traffic_svc.setup_playwright_logging(ctx, run_id, username=username)
         page = await ctx.new_page()
         observed_api_calls: list[dict] = []
+        observed_script_bodies: list[dict] = []
         auth_check_snapshot: dict | None = None
         authenticated_landing_url: str | None = None
 
@@ -604,6 +610,34 @@ async def _crawl_as_credential(
                     return
                 resource_type = response.request.resource_type
                 content_type = response.headers.get("content-type", "")
+                # Module Federation / dynamically-imported chunks (e.g. a
+                # micro-frontend's remoteEntry.js and its own lazy sub-chunks)
+                # are fetched by the app at runtime and never appear as a
+                # <script src> DOM element, so the DOM-based script harvester
+                # never sees them. Capture the body directly off the real
+                # network response here instead — cheaper and more reliable
+                # than a follow-up page.request.get() (which can hit bot
+                # protection differently than the browser's own request).
+                # No "already captured this URL" guard here: ``observed_script_
+                # bodies`` gets cleared both after the pre-load/auth phase and
+                # after every page snapshot, so a script fetched once during
+                # pre-load (then discarded by that clear) would otherwise never
+                # get a second chance to land in a live snapshot — a per-worker
+                # "seen" set would silently and permanently drop it. Redundant
+                # re-mining of the same URL across pages is already deduped by
+                # ``shared.mined_script_urls`` inside ``_mine_script_intelligence``.
+                if resource_type == "script":
+                    try:
+                        script_body = (await response.text())[:500_000]
+                    except Exception:
+                        script_body = ""
+                    observed_script_bodies.append(
+                        {
+                            "url": response.url,
+                            "body": script_body,
+                            "page_url": page_url,
+                        }
+                    )
                 if not _is_api_response_candidate(
                     response.url, resource_type, content_type
                 ):
@@ -682,6 +716,7 @@ async def _crawl_as_credential(
                     await _persist_recon_session(run_id, cred, page)
 
         observed_api_calls.clear()
+        observed_script_bodies.clear()
 
         seed_urls = _crawl_seed_urls(
             base_url,
@@ -851,7 +886,9 @@ async def _crawl_as_credential(
                 for r in raw_links
                 if _same_domain(r["href"], base_netloc)
             ]
-            js_endpoint_calls = await _record_page_intelligence(
+            page_scripts = observed_script_bodies[:]
+            observed_script_bodies.clear()
+            js_endpoint_calls, js_nav_urls = await _record_page_intelligence(
                 run_id=run_id,
                 page=page,
                 page_url=final_url,
@@ -860,6 +897,8 @@ async def _crawl_as_credential(
                 base_netloc=base_netloc,
                 username=username,
                 js_endpoint_discovery_enabled=js_endpoint_discovery_enabled,
+                extra_scripts=page_scripts,
+                shared=shared,
             )
             if js_endpoint_discovery_enabled and js_endpoint_calls:
                 await _promote_api_calls(
@@ -873,6 +912,20 @@ async def _crawl_as_credential(
                     username=username,
                     llm_cfg=llm_cfg,
                 )
+            # Enqueue JS-discovered frontend routes (React Router etc.) for real
+            # browser navigation so the crawler actually visits them rather than
+            # only saving them as intel items.  Respects the same depth/page-cap
+            # guards as same_domain_links below.
+            if js_endpoint_discovery_enabled and depth < max_depth:
+                for nav_url in js_nav_urls:
+                    n = _norm(nav_url)
+                    if (
+                        n not in queued
+                        and _same_domain(nav_url, base_netloc)
+                        and not _is_session_ending_url(nav_url)
+                    ):
+                        queued.add(n)
+                        queue.append((nav_url, depth + 1, page_id, {"link_text": "JS route", "action_kind": "navigate"}))
 
             # ── LLM analysis ──────────────────────────────────────────────────
             cats: dict = {
@@ -1717,7 +1770,9 @@ async def _perform_interactive_action(
                 pass
 
 
-async def _wait_for_content_settle(page, *, max_wait_ms: int = 3000) -> None:
+async def _wait_for_content_settle(
+    page, *, max_wait_ms: int = 3000, busy_grace_ms: int = 30_000
+) -> None:
     """Wait past initial async paint before a snapshot is taken.
 
     Static chrome (header/footer, nav links) often satisfies a naive
@@ -1728,20 +1783,44 @@ async def _wait_for_content_settle(page, *, max_wait_ms: int = 3000) -> None:
     DOM node count — until it stops changing and no busy markers remain, so
     we snapshot (and continue crawling from) the settled page. Capped at
     ``max_wait_ms`` so pages with perpetual animations don't stall the crawl.
+
+    If a busy marker (spinner/skeleton) is *still visible* when that cap is
+    reached, that's a strong positive signal real content is genuinely still
+    loading (as opposed to a page that's simply idle) — e.g. a slow
+    micro-frontend chunk plus a backend round-trip on a payment-lookup page.
+    In that case only, extend the wait once by up to ``busy_grace_ms`` so we
+    don't snapshot/crawl-onward from a page that's mid-spinner. Measured
+    against a real Module-Federation payment page: it resolved anywhere from
+    ~15s to still-spinning-past-20s across repeated live loads (third-party
+    analytics/feature-flag chunk failures add jitter) — hence the generous
+    default grace, applied only to pages proven to still be actively busy.
     """
     poll_ms = 150
     stable_needed = 2  # ~300ms of no change once busy markers have cleared
     previous: list | None = None
     stable_count = 0
     elapsed = 0
-    while elapsed < max_wait_ms:
+    deadline = max_wait_ms
+    grace_applied = False
+    while elapsed < deadline:
         try:
             signature = await page.evaluate(
                 """() => {
-                  const busySelectors = '[aria-busy="true"], [class*="spinner" i],'
-                    + ' [class*="skeleton" i], [class*="loading" i]';
+                  // Class-name sniffing alone misses component libraries that
+                  // ship hashed/obfuscated class names (CSS modules, styled-
+                  // components) — catch those via semantic ARIA roles and the
+                  // near-universal "ring/arc" SVG spinner markup too.
+                  const busySelectors = '[aria-busy="true"], [role="progressbar"],'
+                    + ' [role="status"], [class*="spinner" i], [class*="skeleton" i],'
+                    + ' [class*="loading" i], [class*="loader" i]';
                   let busyVisible = 0;
                   document.querySelectorAll(busySelectors).forEach(el => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) busyVisible += 1;
+                  });
+                  document.querySelectorAll(
+                    'svg circle[stroke-dasharray], svg circle[stroke-dashoffset]'
+                  ).forEach(el => {
                     const r = el.getBoundingClientRect();
                     if (r.width > 0 && r.height > 0) busyVisible += 1;
                   });
@@ -1763,6 +1842,14 @@ async def _wait_for_content_settle(page, *, max_wait_ms: int = 3000) -> None:
         except Exception:
             return
         elapsed += poll_ms
+        if (
+            not grace_applied
+            and elapsed >= deadline
+            and signature is not None
+            and signature[1] > 0
+        ):
+            grace_applied = True
+            deadline += busy_grace_ms
 
 
 async def _replay_interactive_steps(
@@ -1971,17 +2058,15 @@ async def _explore_interactive_states(
                 await page.goto(root_url, wait_until="domcontentloaded", timeout=15_000)
             except Exception:
                 continue
-            # A document-ready SPA may still be running its authenticated
-            # bootstrap. Replaying controls before that finishes lets the later
-            # bootstrap overwrite the requested view (for example, Profile
-            # briefly opens and is then replaced by Dashboard). This is a
-            # best-effort settle only — apps with SSE/polling/analytics never
-            # go network-idle, so a long timeout here just burns wall-clock
-            # time on every one of up to _INTERACTIVE_MAX_ATTEMPTS reloads.
-            try:
-                await page.wait_for_load_state("networkidle", timeout=600)
-            except Exception:
-                pass
+            # Use the same busy-spinner-aware settle check as the main BFS loop
+            # so that slow SPAs (e.g. Module-Federation payment pages that take
+            # 15-30 s to fully hydrate) are given enough time to render their
+            # controls before the interactive snapshot is taken.  Use a tighter
+            # busy_grace_ms than the main loop's 30 s default so the 90 s
+            # _INTERACTIVE_MAX_SECONDS budget isn't consumed by a single replay.
+            await _wait_for_content_settle(
+                page, max_wait_ms=3_000, busy_grace_ms=12_000
+            )
             replay_root = await _interactive_state_snapshot(
                 page, capture_screenshot=False
             )
@@ -2328,6 +2413,45 @@ def _save_credential_view(
 
 # ── Target intelligence collection ───────────────────────────────────────────
 
+# Extensions whose URLs should NOT be enqueued as navigable pages in the BFS
+# crawl queue, even if JS mining discovers them as same-domain endpoint strings.
+_NAV_SKIP_EXTS: frozenset[str] = frozenset(
+    {
+        "js", "mjs", "cjs", "ts", "jsx", "tsx",
+        "css", "map",
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "avif",
+        "woff", "woff2", "ttf", "eot", "otf",
+        "pdf", "zip", "gz", "tar", "wasm",
+        "mp4", "mp3", "webm", "ogg",
+        "txt", "xml", "json",
+    }
+)
+
+
+def _is_nav_url(url: str) -> bool:
+    """Return True if *url* looks like a navigable HTML page rather than a
+    static asset or a route template.  Used to gate which JS-discovered URLs
+    get fed into the BFS crawl queue.
+
+    Rejects:
+    * Static asset extensions (.js, .css, images, fonts, etc.)
+    * Backslash characters anywhere in the URL (parsing artefacts from minified
+      JS string concatenation, e.g. ``'/payment/' + '\\'``)
+    * Unresolved template-literal placeholders (``${...}``)
+    * Route-template path segments starting with ``:`` (React Router / Express
+      params like ``/one/:two/three``) or containing ``*`` wildcards
+    """
+    if "\\" in url or "${" in url or "*" in url:
+        return False
+    path = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    # Reject route-template segments: any segment that starts with ":" is a
+    # named param placeholder, not a real value (e.g. /:id, /:slug?).
+    if any(seg.startswith(":") for seg in path.split("/") if seg):
+        return False
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
+    return ext not in _NAV_SKIP_EXTS
+
+
 _ENDPOINT_RE = re.compile(
     r"""(?P<quote>['"`])(?P<path>(?:https?://[^'"`\s<>]+|/(?:api|admin|auth|graphql|v\d+|[\w.-]+/)[^'"`\s<>]*))(?P=quote)"""
 )
@@ -2455,6 +2579,8 @@ async def _record_page_intelligence(
     base_netloc: str,
     username: Optional[str],
     js_endpoint_discovery_enabled: bool,
+    extra_scripts: list[dict] | None = None,
+    shared: "_CrawlShared | None" = None,
 ) -> list[dict]:
     """Extract durable target inventory facts from a rendered page."""
     for item in _extract_ids_from_text(text):
@@ -2565,15 +2691,17 @@ async def _record_page_intelligence(
             metadata={"username": username},
         )
 
-    js_endpoint_calls = await _mine_script_intelligence(
+    js_endpoint_calls, js_nav_urls = await _mine_script_intelligence(
         run_id=run_id,
         page=page,
         page_url=page_url,
         script_urls=dom["scripts"],
         base_netloc=base_netloc,
         collect_js_endpoint_calls=js_endpoint_discovery_enabled,
+        extra_scripts=extra_scripts,
+        shared=shared,
     )
-    return js_endpoint_calls
+    return js_endpoint_calls, js_nav_urls
 
 
 async def _extract_dom_intelligence(page) -> dict:
@@ -2626,10 +2754,41 @@ async def _mine_script_intelligence(
     script_urls: list[str],
     base_netloc: str,
     collect_js_endpoint_calls: bool = False,
+    extra_scripts: list[dict] | None = None,
+    shared: "_CrawlShared | None" = None,
 ) -> list[dict]:
+    """Fetch and regex-mine same-domain JS bundles for endpoints/API calls.
+
+    Two sources feed the queue:
+      1. ``script_urls`` — <script src> DOM elements (the classic case).
+      2. ``extra_scripts`` — bodies already captured off real network
+         responses (see the ``_record_api_response`` listener). This matters
+         for micro-frontends: a Module Federation remoteEntry.js and its own
+         lazily-imported sub-chunks are fetched by the app at runtime via
+         dynamic import()/container.get(), and never leave a <script src> DOM
+         element behind — so #1 alone misses them entirely even once the
+         crawler has actually navigated to the page that loads them.
+    A bundle can also *reference* another same-domain .js file purely as a
+    string literal (e.g. the shell app's main bundle names its lazily-loaded
+    remote entry by path) without ever causing it to load on this particular
+    visit. ``_follow_up_budget`` lets us chase a bounded number of those
+    references too, so a JS file we never observed loading can still be
+    discovered and mined from a plain string reference alone.
+
+    ``shared.mined_script_urls`` (when provided) dedupes across the whole
+    crawl run so a bundle referenced on every page is only downloaded and
+    scanned once, not once per page visited.
+    """
     discovered_calls: list[dict] = []
     seen: set[str] = set()
-    for script_url in script_urls[:20]:
+    pending: list[tuple[str, str | None]] = [(url, None) for url in script_urls[:20]]
+    for item in (extra_scripts or [])[:20]:
+        pending.append((str(item.get("url") or ""), item.get("body")))
+
+    follow_up_budget = 5  # bounded: string-referenced .js files not yet fetched
+    nav_urls: list[str] = []  # same-domain frontend routes to feed into the BFS queue
+    while pending:
+        script_url, prefetched_body = pending.pop(0)
         if (
             not script_url
             or script_url in seen
@@ -2637,14 +2796,28 @@ async def _mine_script_intelligence(
         ):
             continue
         seen.add(script_url)
-        try:
-            resp = await page.request.get(script_url, timeout=10_000)
-            if not resp.ok:
+        if shared is not None:
+            async with shared.lock:
+                if script_url in shared.mined_script_urls:
+                    continue
+                shared.mined_script_urls.add(script_url)
+        if prefetched_body:
+            # Falsy also covers a captured-but-empty body: the network
+            # listener's ``response.text()`` read can race a competing reader
+            # (the traffic logger also reads every response body) or hit a
+            # body the browser has already evicted from memory, silently
+            # producing "". Re-fetch explicitly rather than "mining" nothing
+            # and permanently marking the URL as done in ``mined_script_urls``.
+            body = prefetched_body[:500_000]
+        else:
+            try:
+                resp = await page.request.get(script_url, timeout=10_000)
+                if not resp.ok:
+                    continue
+                body = (await resp.text())[:500_000]
+            except Exception as exc:
+                log.debug("Script mining failed for %s: %s", script_url, exc)
                 continue
-            body = (await resp.text())[:500_000]
-        except Exception as exc:
-            log.debug("Script mining failed for %s: %s", script_url, exc)
-            continue
         discovered_calls.extend(
             _mine_asset_text(
                 run_id=run_id,
@@ -2654,6 +2827,7 @@ async def _mine_script_intelligence(
                 page_url=page_url,
                 collect_js_endpoint_calls=collect_js_endpoint_calls,
                 base_netloc=base_netloc,
+                nav_urls=nav_urls,
             )
         )
         for sourcemap_url in _extract_sourcemap_urls(script_url, body)[:3]:
@@ -2687,9 +2861,25 @@ async def _mine_script_intelligence(
                     page_url=page_url,
                     collect_js_endpoint_calls=collect_js_endpoint_calls,
                     base_netloc=base_netloc,
+                    # nav_urls intentionally not passed for sourcemap calls:
+                    # sourcemaps contain library source + test fixtures (e.g.
+                    # React Router's own /one/:two/three examples) that should
+                    # not be enqueued as real navigable pages.
                 )
             )
-    return _dedupe_api_calls(discovered_calls)
+        if follow_up_budget <= 0:
+            continue
+        for endpoint in _extract_endpoint_strings(body):
+            if not endpoint.split("?", 1)[0].lower().endswith(".js"):
+                continue
+            resolved = _resolve_asset_reference(script_url, endpoint)
+            if resolved in seen or not _same_domain(resolved, base_netloc):
+                continue
+            pending.append((resolved, None))
+            follow_up_budget -= 1
+            if follow_up_budget <= 0:
+                break
+    return _dedupe_api_calls(discovered_calls), nav_urls
 
 
 async def _mine_public_assets(
@@ -2743,6 +2933,7 @@ def _mine_asset_text(
     page_url: str,
     collect_js_endpoint_calls: bool = False,
     base_netloc: str | None = None,
+    nav_urls: list[str] | None = None,
 ) -> list[dict]:
     discovered_calls: list[dict] = []
     for endpoint in _extract_endpoint_strings(body)[:150]:
@@ -2758,6 +2949,10 @@ def _mine_asset_text(
             evidence=endpoint,
             metadata={"page_url": page_url},
         )
+        # _extract_endpoint_strings is a broad regex over string literals and
+        # also fires on third-party SDK paths (e.g. LaunchDarkly /eval/, /ping/)
+        # that are not real app routes.  We do NOT add those to nav_urls; the
+        # more precise _extract_js_route_paths below handles real route literals.
     for call in _extract_js_api_calls(body)[:150]:
         resolved = _resolve_asset_reference(asset_url, call["url"])
         _save_intel_item(
@@ -2831,6 +3026,8 @@ def _mine_asset_text(
                 "category": route.get("category"),
             },
         )
+        if nav_urls is not None and base_netloc and _same_domain(resolved, base_netloc) and _is_nav_url(resolved):
+            nav_urls.append(resolved)
     for lead in _extract_js_path_leads(body)[:120]:
         resolved = _resolve_asset_reference(asset_url, lead["path"])
         _save_intel_item(
@@ -2849,6 +3046,8 @@ def _mine_asset_text(
                 "category": lead.get("category"),
             },
         )
+        if nav_urls is not None and base_netloc and _same_domain(resolved, base_netloc) and _is_nav_url(resolved):
+            nav_urls.append(resolved)
     for endpoint in _extract_sitemap_locations(body)[:200]:
         _save_intel_item(
             run_id=run_id,
