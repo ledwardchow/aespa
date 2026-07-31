@@ -686,6 +686,7 @@ def get_crawler_config(session: Session) -> CrawlerConfigOut:
         skip_dangerous_actions=cfg.skip_dangerous_actions,
         suppress_form_submit_actions=cfg.suppress_form_submit_actions,
         block_non_idempotent_interactive_replay=cfg.block_non_idempotent_interactive_replay,
+        enable_access_reconciliation=cfg.enable_access_reconciliation,
         updated_at=cfg.updated_at,
     )
 
@@ -702,6 +703,7 @@ def upsert_crawler_config(
     cfg.block_non_idempotent_interactive_replay = (
         payload.block_non_idempotent_interactive_replay
     )
+    cfg.enable_access_reconciliation = payload.enable_access_reconciliation
     cfg.updated_at = _utcnow()
     session.add(cfg)
     session.commit()
