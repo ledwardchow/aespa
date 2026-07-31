@@ -28,7 +28,8 @@ export function CrawlerSettings() {
         js_endpoint_discovery_enabled: !!form.js_endpoint_discovery_enabled,
         skip_dangerous_actions: !!form.skip_dangerous_actions,
         suppress_form_submit_actions: !!form.suppress_form_submit_actions,
-        block_non_idempotent_interactive_replay: !!form.block_non_idempotent_interactive_replay
+        block_non_idempotent_interactive_replay: !!form.block_non_idempotent_interactive_replay,
+        enable_access_reconciliation: !!form.enable_access_reconciliation
       });
       setForm(updated);
       setSaved(true);
@@ -83,6 +84,16 @@ export function CrawlerSettings() {
           }));
         }} />
           <span>Block non-idempotent requests (POST/PUT/PATCH/DELETE) during interactive replay</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked={!!form.enable_access_reconciliation} onChange={e => {
+          setSaved(false);
+          setForm(f => ({
+            ...f,
+            enable_access_reconciliation: e.target.checked
+          }));
+        }} />
+          <span>Enable access reconciliation (recheck known pages with each credential)</span>
         </label>
         <div className="divider" />
         <div className="row spread">

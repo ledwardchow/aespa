@@ -614,16 +614,21 @@ def test_crawler_config_defaults_and_upsert(client: TestClient):
     assert initial.json()["skip_dangerous_actions"] is True
     assert initial.json()["suppress_form_submit_actions"] is True
     assert initial.json()["block_non_idempotent_interactive_replay"] is True
+    assert initial.json()["enable_access_reconciliation"] is False
 
     updated = client.put(
         "/api/settings/crawler-config",
-        json={"js_endpoint_discovery_enabled": True},
+        json={
+            "js_endpoint_discovery_enabled": True,
+            "enable_access_reconciliation": True,
+        },
     )
     assert updated.status_code == 200
     assert updated.json()["js_endpoint_discovery_enabled"] is True
     assert updated.json()["skip_dangerous_actions"] is True
     assert updated.json()["suppress_form_submit_actions"] is True
     assert updated.json()["block_non_idempotent_interactive_replay"] is True
+    assert updated.json()["enable_access_reconciliation"] is True
 
     persisted = client.get("/api/settings/crawler-config")
     assert persisted.status_code == 200
@@ -631,6 +636,7 @@ def test_crawler_config_defaults_and_upsert(client: TestClient):
     assert persisted.json()["skip_dangerous_actions"] is True
     assert persisted.json()["suppress_form_submit_actions"] is True
     assert persisted.json()["block_non_idempotent_interactive_replay"] is True
+    assert persisted.json()["enable_access_reconciliation"] is True
 
 
 def test_import_llm_config_rejects_duplicate_names(client: TestClient):

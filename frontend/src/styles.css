@@ -459,6 +459,10 @@ form.card {
   gap: 18px;
   max-width: 680px;
 }
+.global-http-headers-card {
+  max-width: 680px;
+  margin-top: 14px;
+}
 
 .form-section-title {
   font-size: 11px;

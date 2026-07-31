@@ -15,11 +15,6 @@ export function DebugPage({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
-  const [hdrCfg, setHdrCfg] = useState(null);
-  const [hdrForm, setHdrForm] = useState([]);
-  const [hdrSaving, setHdrSaving] = useState(false);
-  const [hdrSaved, setHdrSaved] = useState(false);
-  const [hdrError, setHdrError] = useState(null);
   const [browserCfg, setBrowserCfg] = useState(null);
   const [browserSaving, setBrowserSaving] = useState(false);
   const [browserSaved, setBrowserSaved] = useState(false);
@@ -38,15 +33,6 @@ export function DebugPage({
         setCfg(await api.getSpecialistAgentConfig());
       } catch (e) {
         setError(e.message);
-      }
-    })();
-    (async () => {
-      try {
-        const h = await api.getGlobalHttpHeader();
-        setHdrCfg(h);
-        setHdrForm(h.headers || []);
-      } catch (e) {
-        setHdrError(e.message);
       }
     })();
     (async () => {
@@ -105,29 +91,6 @@ export function DebugPage({
       setSaving(false);
     }
   };
-  const saveHeader = async e => {
-    e.preventDefault();
-    setHdrSaved(false);
-    setHdrSaving(true);
-    setHdrError(null);
-    try {
-      const updated = await api.upsertGlobalHttpHeader({
-        headers: hdrForm
-          .filter(header => header.header_name.trim() || header.header_value.trim())
-          .map(header => ({
-            header_name: header.header_name.trim(),
-            header_value: header.header_value.trim()
-          }))
-      });
-      setHdrCfg(updated);
-      setHdrForm(updated.headers || []);
-      setHdrSaved(true);
-    } catch (e) {
-      setHdrError(e.message);
-    } finally {
-      setHdrSaving(false);
-    }
-  };
   const toggleReportingDebug = async patch => {
     const base = reportingDebugCfg || {
       capture_enabled: false,
@@ -175,64 +138,7 @@ export function DebugPage({
       <div className="topbar-title">Debug</div>
     </div>
     <div className="content scroll-content">
-      {!cfg && !hdrCfg && !browserCfg && !error && !hdrError && !browserError && <div className="subtle">Loading…</div>}
-
-      <div className="card">
-        <div className="form-section-title">Global Extra HTTP Headers</div>
-        <div className="field-hint" style={{
-          marginBottom: 12
-        }}>
-          Add headers to every request made by the scanner and crawler (Playwright and HTTPX).
-          These do not affect requests sent to LLMs.
-        </div>
-        {hdrError && <div className="alert error">{hdrError}</div>}
-        {hdrCfg !== null && <form onSubmit={saveHeader}>
-            <div className="table-wrap global-header-table-wrap">
-              <table className="global-header-table">
-                <colgroup>
-                  <col style={{ width: "34%" }} />
-                  <col />
-                  <col style={{ width: 48 }} />
-                </colgroup>
-                <thead>
-                  <tr><th>Header name</th><th>Header value</th><th aria-label="Actions" /></tr>
-                </thead>
-                <tbody>
-                  {hdrForm.length === 0 && <tr><td colSpan="3" className="subtle global-header-empty">No headers configured.</td></tr>}
-                  {hdrForm.map((header, index) => <tr key={index}>
-                    <td><input className="form-input" type="text" placeholder="e.g. X-Debug-Token" value={header.header_name} disabled={hdrSaving} onInput={e => {
-                      setHdrSaved(false);
-                      setHdrForm(headers => headers.map((item, itemIndex) => itemIndex === index ? { ...item, header_name: e.target.value } : item));
-                    }} /></td>
-                    <td><input className="form-input" type="text" placeholder="e.g. my-secret-value" value={header.header_value} disabled={hdrSaving} onInput={e => {
-                      setHdrSaved(false);
-                      setHdrForm(headers => headers.map((item, itemIndex) => itemIndex === index ? { ...item, header_value: e.target.value } : item));
-                    }} /></td>
-                    <td><button className="btn ghost sm" type="button" aria-label="Delete header" title="Delete header" disabled={hdrSaving} onClick={() => {
-                      setHdrSaved(false);
-                      setHdrForm(headers => headers.filter((_, itemIndex) => itemIndex !== index));
-                    }}>×</button></td>
-                  </tr>)}
-                </tbody>
-              </table>
-            </div>
-            <button className="btn ghost sm" type="button" disabled={hdrSaving} style={{ marginTop: 10 }} onClick={() => {
-              setHdrSaved(false);
-              setHdrForm(headers => [...headers, { header_name: "", header_value: "" }]);
-            }}>Add header</button>
-            <div style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            marginTop: 8
-          }}>
-              <button className="btn btn-primary" type="submit" disabled={hdrSaving}>
-                {hdrSaving ? "Saving…" : "Save"}
-              </button>
-              {hdrSaved && <span className="save-confirm"><IconCheck /> Saved</span>}
-            </div>
-          </form>}
-      </div>
+      {!cfg && !browserCfg && !error && !browserError && <div className="subtle">Loading…</div>}
 
       <div className="card" style={{ marginTop: 16 }}>
         <div className="form-section-title">Browser</div>

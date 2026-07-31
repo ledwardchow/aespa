@@ -379,6 +379,7 @@ class CrawlerConfig(SQLModel, table=True):
     skip_dangerous_actions: bool = Field(default=True)
     suppress_form_submit_actions: bool = Field(default=True)
     block_non_idempotent_interactive_replay: bool = Field(default=True)
+    enable_access_reconciliation: bool = Field(default=False)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 

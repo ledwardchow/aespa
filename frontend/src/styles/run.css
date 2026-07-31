@@ -731,6 +731,7 @@
 .coverage-sub-tab-btn { padding-inline:16px; }
 .activity-sub-tab-btn:hover { color:var(--text); }
 .activity-sub-tab-btn.active { color:var(--text); border-bottom-color:var(--accent,#5b8def); }
+.global-policy-sub-tab-bar { margin:0 0 0 -16px; }
 
 .agents-panel { flex:1; overflow-y:auto; padding:8px 0 16px; display:flex; flex-direction:column; }
 .agents-divider { height:1px; background:var(--border); margin:6px 16px; flex-shrink:0; }

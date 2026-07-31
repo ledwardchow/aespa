@@ -782,6 +782,7 @@ class CrawlerConfigBase(BaseModel):
     skip_dangerous_actions: bool = True
     suppress_form_submit_actions: bool = True
     block_non_idempotent_interactive_replay: bool = True
+    enable_access_reconciliation: bool = False
 
 
 class CrawlerConfigIn(CrawlerConfigBase):

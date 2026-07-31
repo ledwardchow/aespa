@@ -458,12 +458,13 @@ the credential in use, the phase number, the URL, and the current step: opening
 the page, checking access, analyzing content and links, or moving to the next
 URL. Navigation errors and login-blocked pages are recorded too.
 
-For authenticated sites with multiple credentials, crawling is followed by a
-separate **cross-user access check**. AESPA loads known pages again for each
-credential to detect authorization differences. The UI labels this as access
-verification, shows progress such as `Access check 12/168`, and keeps each page
-check in the activity log. This is verification of known pages, not new page
-discovery.
+For authenticated sites with multiple credentials, an optional **cross-user
+access check** can follow the crawl. AESPA loads known pages again for each
+credential to detect authorization differences. This is disabled by default and
+can be enabled with the Crawler setting **Enable access reconciliation**. When
+enabled, the UI labels this as access verification, shows progress such as
+`Access check 12/168`, and keeps each page check in the activity log. This is
+verification of known pages, not new page discovery.
 
 The unauthenticated phase is always run first so the crawler maps the public attack surface before logging in. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
 
