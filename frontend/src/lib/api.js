@@ -39,6 +39,17 @@ export const api = {
   startApiAliceRun:    (id,b)     => req(`/api/api-test-runs/${id}/alice/run`,      { method:"POST", body:b }),
   stopApiAliceRun:     (id)       => req(`/api/api-test-runs/${id}/alice/run`,      { method:"DELETE" }),
   getApiAgentLog:      (id)       => req(`/api/api-test-runs/${id}/agent-log`),
+  getApiAgentLogPage:  (id, { limit = 200, beforeId } = {}) => {
+    const query = new URLSearchParams({ limit: String(Math.min(limit + 1, 1001)) });
+    if (beforeId != null) query.set("before_id", String(beforeId));
+    return req(`/api/api-test-runs/${id}/agent-log?${query.toString()}`).then(entries => {
+      const hasMore = entries.length > limit;
+      return {
+        entries: hasMore ? entries.slice(-limit) : entries,
+        hasMore
+      };
+    });
+  },
   clearApiAgentLog:    (id)       => req(`/api/api-test-runs/${id}/agent-log`,     { method:"DELETE" }),
   startApiScan:        (id, coverageMode) => req(`/api/api-test-runs/${id}/scan/start`, { method:"POST", body: coverageMode ? { coverage_mode: coverageMode } : undefined }),
   stopApiScan:         (id)       => req(`/api/api-test-runs/${id}/scan/stop`,     { method:"POST" }),
