@@ -20,6 +20,10 @@ export function DebugPage({
   const [hdrSaving, setHdrSaving] = useState(false);
   const [hdrSaved, setHdrSaved] = useState(false);
   const [hdrError, setHdrError] = useState(null);
+  const [browserCfg, setBrowserCfg] = useState(null);
+  const [browserSaving, setBrowserSaving] = useState(false);
+  const [browserSaved, setBrowserSaved] = useState(false);
+  const [browserError, setBrowserError] = useState(null);
   const [repSaving, setRepSaving] = useState(false);
   const [repSaved, setRepSaved] = useState(false);
   const [repError, setRepError] = useState(null);
@@ -43,6 +47,13 @@ export function DebugPage({
         setHdrForm(h.headers || []);
       } catch (e) {
         setHdrError(e.message);
+      }
+    })();
+    (async () => {
+      try {
+        setBrowserCfg(await api.getBrowserDebugConfig());
+      } catch (e) {
+        setBrowserError(e.message);
       }
     })();
     (async () => {
@@ -138,12 +149,33 @@ export function DebugPage({
       setRepSaving(false);
     }
   };
+  const toggleBrowserDebug = async patch => {
+    const base = browserCfg || {
+      browser_engine: "playwright_chromium",
+      browser_visible: false
+    };
+    setBrowserSaving(true);
+    setBrowserSaved(false);
+    setBrowserError(null);
+    try {
+      const updated = await api.upsertBrowserDebugConfig({
+        ...base,
+        ...patch
+      });
+      setBrowserCfg(updated);
+      setBrowserSaved(true);
+    } catch (e) {
+      setBrowserError(e.message);
+    } finally {
+      setBrowserSaving(false);
+    }
+  };
   return <>
     <div className="topbar">
       <div className="topbar-title">Debug</div>
     </div>
     <div className="content scroll-content">
-      {!cfg && !hdrCfg && !error && !hdrError && <div className="subtle">Loading…</div>}
+      {!cfg && !hdrCfg && !browserCfg && !error && !hdrError && !browserError && <div className="subtle">Loading…</div>}
 
       <div className="card">
         <div className="form-section-title">Global Extra HTTP Headers</div>
@@ -200,6 +232,46 @@ export function DebugPage({
               {hdrSaved && <span className="save-confirm"><IconCheck /> Saved</span>}
             </div>
           </form>}
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="form-section-title">Browser</div>
+        <div className="field-hint" style={{ marginBottom: 12 }}>
+          Choose which Chromium build powers crawls, scans, and browser-based testing.
+          The bundled Playwright Chromium build is the default. System Chrome uses the
+          stable Google Chrome installation on the machine running AESPA.
+        </div>
+        {browserError && <div className="alert error">{browserError}</div>}
+        {browserCfg && <>
+          <div className="form-row">
+            <label className="form-label" htmlFor="browser-engine">Browser engine</label>
+            <select
+              id="browser-engine"
+              className="form-input"
+              value={browserCfg.browser_engine}
+              disabled={browserSaving}
+              onChange={e => toggleBrowserDebug({ browser_engine: e.target.value })}
+            >
+              <option value="playwright_chromium">Bundled Playwright Chromium (default)</option>
+              <option value="system_chrome">System installed Google Chrome</option>
+            </select>
+          </div>
+          <label className="toggle-row" style={{ marginTop: 12 }}>
+            <input
+              type="checkbox"
+              checked={browserCfg.browser_visible ?? false}
+              disabled={browserSaving}
+              onChange={e => toggleBrowserDebug({ browser_visible: e.target.checked })}
+            />
+            <span>Make browser visible to user</span>
+          </label>
+          <div className="field-hint" style={{ marginTop: 8 }}>
+            Leave this off for normal headless operation. Turn it on when AESPA is
+            running on a desktop with a graphical display and you need to watch browser activity.
+            Guided login remains visible when it needs user interaction.
+          </div>
+          {browserSaved && <div className="save-confirm" style={{ marginTop: 8 }}><IconCheck /> Saved</div>}
+        </>}
       </div>
 
       {error && <div className="alert error">{error}</div>}

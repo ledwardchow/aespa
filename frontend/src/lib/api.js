@@ -121,6 +121,8 @@ export const api = {
   upsertGlobalHttpHeader: (b)     => req("/api/settings/global-http-header", { method:"PUT", body:b }),
   getReportingDebugConfig: ()     => req("/api/settings/reporting-debug"),
   upsertReportingDebugConfig:(b)  => req("/api/settings/reporting-debug", { method:"PUT", body:b }),
+  getBrowserDebugConfig: ()        => req("/api/settings/browser-debug"),
+  upsertBrowserDebugConfig:(b)     => req("/api/settings/browser-debug", { method:"PUT", body:b }),
   getCloudflareAccessConfig: ()   => req("/api/settings/cloudflare-access"),
   upsertCloudflareAccessConfig:(b)=> req("/api/settings/cloudflare-access", { method:"PUT", body:b }),
   getReportingDebugPrompt: (key)  => req(`/api/reporting-debug/prompt${key?`?key=${encodeURIComponent(key)}`:""}`),

@@ -494,6 +494,17 @@ class ReportingDebugConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class BrowserDebugConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for Playwright browser debug settings."""
+
+    __tablename__ = "browser_debug_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    browser_engine: str = Field(default="playwright_chromium")
+    browser_visible: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class CloudflareAccessConfig(SQLModel, table=True):
     """Singleton row (id always = 1) for Cloudflare Access JWT verification.
 

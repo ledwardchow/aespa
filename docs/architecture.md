@@ -284,6 +284,16 @@ Singleton row (id = 1). Routes scanner and/or LLM traffic through an upstream HT
 | `proxy_scanner` | `false` | Route scanner HTTP and Playwright traffic through proxy |
 | `proxy_llm` | `false` | Route LLM API calls through proxy |
 
+### Browser Debug Config (`BrowserDebugConfig` model)
+
+Singleton row (id = 1). Controls which Chromium build Playwright uses and
+whether normal browser sessions are visible on the machine running AESPA.
+
+| Field | Default | Description |
+|---|---|---|
+| `browser_engine` | `playwright_chromium` | Use the regular bundled Playwright Chromium build, or select `system_chrome` to use installed stable Google Chrome |
+| `browser_visible` | `false` | Run normal crawl, scan, and ALICE browser sessions with a visible window instead of headless mode; on macOS, AESPA restores the user's previous app after opening an automation page |
+
 ### Specialist Agent Config (`SpecialistAgentConfig` model)
 
 Singleton row (id = 1). Controls when and how Specialist Agents are dispatched during a dynamic scan.
@@ -442,6 +452,18 @@ start_crawl(run_id)
        3. Extract TargetIntelItems (endpoints, forms, inputs, IDs, scripts, JWT hints)
        4. Update TestRun status → crawled
 ```
+
+The run view reports the crawl in plain-language stages. Each page event includes
+the credential in use, the phase number, the URL, and the current step: opening
+the page, checking access, analyzing content and links, or moving to the next
+URL. Navigation errors and login-blocked pages are recorded too.
+
+For authenticated sites with multiple credentials, crawling is followed by a
+separate **cross-user access check**. AESPA loads known pages again for each
+credential to detect authorization differences. The UI labels this as access
+verification, shows progress such as `Access check 12/168`, and keeps each page
+check in the activity log. This is verification of known pages, not new page
+discovery.
 
 The unauthenticated phase is always run first so the crawler maps the public attack surface before logging in. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
 
@@ -656,6 +678,40 @@ never reject `done` indefinitely.
 | `agent_dispatch` | Dispatch a Specialist Agent to deep-dive on a high-confidence lead (see §8) |
 | `tool` | Call a read-only context tool (see below) |
 | `done` | Finish the scan with a summary |
+
+### WAF detection and request transport
+
+WAF detection is passive. The traffic logger looks at normal response headers,
+cookies, and block pages, then records the provider and a provider-specific
+strategy in the recon summary.
+
+The browser strategy uses JavaScript running in a real Playwright page. This is
+different from Playwright's `APIRequestContext`: that API shares cookies with a
+browser context, but it does not run the page's challenge scripts. The scanner
+also keeps WAF clearance cookies when it swaps between the primary, anonymous,
+and named sessions, so a named session does not silently fall back to raw HTTP.
+
+Browser contexts do not set a stale, hand-written user-agent. Debug settings
+choose the regular bundled Playwright Chromium build by default, or the
+installed stable Chrome channel when `system_chrome` is selected. If selected
+Chrome is unavailable, AESPA falls back to Playwright Chromium. The context
+user-agent is derived from the live browser version and removes only the
+`HeadlessChrome` product token; Playwright still generates the other Client
+Hints from the engine that is actually running. Browser automation signals
+such as `navigator.webdriver` are not changed. The visible-browser setting is
+off by default; guided login remains visible when it requires user interaction.
+
+| Detected provider | Scanner strategy |
+|---|---|
+| Akamai Bot Manager | Real page requests, retain `_abck`/`bm_sz`/`ak_bmsc`, and use normal pacing. Persistent blocks remain evidence. |
+| Cloudflare | Real page requests, let JavaScript or a managed challenge run, and retain `cf_clearance`/`__cf_bm`. Interactive CAPTCHA is reported as a blocker. |
+| Imperva / Incapsula | Real page requests, let the browser challenge settle, and retain the provider's challenge cookies. |
+| AWS WAF | Use the page to acquire a Challenge token when `x-amzn-waf-action` indicates one. A normal Block action is still a valid WAF block; CAPTCHA needs an operator. |
+| F5 BIG-IP ASM | Use the page only for a client-integrity challenge. A signature block is not changed into a pass by browser routing. |
+| Sucuri CloudProxy | Keep the original request on direct HTTP with configured pacing. It is a reverse-proxy/IPS block, so browser routing is not assumed to help. |
+
+The scanner follows same-scope redirects one hop at a time. It does not retry a
+blocked request with payload mutations just to obtain a successful status.
 
 ### Context tools (read-only reconnaissance)
 

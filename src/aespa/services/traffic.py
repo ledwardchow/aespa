@@ -26,13 +26,39 @@ SKIP_RESOURCE_TYPES = {"image", "font", "media"}  # noisy, rarely useful
 # the DB columns (TestRun/ApiTestRun.waf_*) are the durable copy used by the
 # UI and across process restarts.
 _waf_cache: dict[tuple[str, int], dict] = {}
+_waf_cache_hydrated: set[tuple[str, int]] = set()
 
 
 def get_cached_waf(run_id: int, *, api_run_id: Optional[int] = None) -> Optional[dict]:
-    """Return the cached WAF detection for a run, if any (see ``_waf_cache``)."""
-    if api_run_id is not None:
-        return _waf_cache.get(("api", api_run_id))
-    return _waf_cache.get(("web", run_id))
+    """Return the WAF detection, hydrating it from the run row when needed."""
+    cache_key = ("api", api_run_id) if api_run_id is not None else ("web", run_id)
+    cached = _waf_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    if cache_key in _waf_cache_hydrated:
+        return None
+    _waf_cache_hydrated.add(cache_key)
+
+    try:
+        from aespa.models import ApiTestRun, TestRun
+        from aespa.services.waf_detect import strategy_for_provider
+
+        with Session(get_engine()) as session:
+            model = ApiTestRun if api_run_id is not None else TestRun
+            run = session.get(model, api_run_id if api_run_id is not None else run_id)
+            if run is None or not run.waf_provider:
+                return None
+            detection = {
+                "provider": run.waf_provider,
+                "confidence": run.waf_confidence or "medium",
+                "evidence": run.waf_evidence or "",
+                "strategy": strategy_for_provider(run.waf_provider),
+            }
+            _waf_cache[cache_key] = detection
+            return detection
+    except Exception:
+        # Routing is best-effort. A failed hydration must not break a scan.
+        return None
 
 
 def _utcnow() -> datetime:
@@ -189,8 +215,11 @@ def _maybe_record_waf(
                     return
 
             if run.waf_provider == detection["provider"]:
+                _waf_cache[cache_key] = detection
+                _waf_cache_hydrated.add(cache_key)
                 return
             _waf_cache[cache_key] = detection
+            _waf_cache_hydrated.add(cache_key)
             run.waf_provider = detection["provider"]
             run.waf_confidence = detection["confidence"]
             run.waf_evidence = detection["evidence"][:500]

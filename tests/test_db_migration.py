@@ -705,6 +705,6 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "alembic_version" in tables
         assert "site" in tables
         assert "test_run" in tables
-        assert version == "0044cbef2700"
+        assert version == "6f50c4a9c1e8"
     finally:
         engine.dispose()

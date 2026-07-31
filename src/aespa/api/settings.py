@@ -9,6 +9,8 @@ from aespa.db import get_session
 from aespa.models import LLMProviderConfig
 from aespa.schemas import (
     PROVIDER_DEFAULT_MODELS,
+    BrowserDebugConfigIn,
+    BrowserDebugConfigOut,
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
@@ -400,6 +402,21 @@ def upsert_reporting_debug_config(
     session: Session = Depends(get_session),
 ) -> ReportingDebugConfigOut:
     return settings_service.upsert_reporting_debug_config(session, payload)
+
+
+@router.get("/browser-debug", response_model=BrowserDebugConfigOut)
+def get_browser_debug_config(
+    session: Session = Depends(get_session),
+) -> BrowserDebugConfigOut:
+    return settings_service.get_browser_debug_config(session)
+
+
+@router.put("/browser-debug", response_model=BrowserDebugConfigOut)
+def upsert_browser_debug_config(
+    payload: BrowserDebugConfigIn,
+    session: Session = Depends(get_session),
+) -> BrowserDebugConfigOut:
+    return settings_service.upsert_browser_debug_config(session, payload)
 
 
 @router.get("/cloudflare-access", response_model=CloudflareAccessConfigOut)

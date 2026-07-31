@@ -533,9 +533,9 @@ export function WebRunActivityTab(props) {
                         {a.id === "crawler" && crawlEvents.length > 0 ? <>
                           {crawlEvents.slice().reverse().map((h, i) => <div key={i} className="agent-history-entry agent-history-entry--crawl">
                               <span className="activity-ts">{h.ts}</span>
-                              <span className="agent-history-user">{h.username || "anonymous"}</span>
+                              <span className="agent-history-user">{h.username || "crawler"}</span>
                               <span className="agent-history-task mono" title={h.url || ""}>
-                                {h.done ? `Finished (${h.pagesVisited || 0} pg)` : truncUrl(h.url || "", 112)}
+                                {h.task || (h.done ? `Finished (${h.pagesVisited || 0} pg)` : `${h.stageLabel || "Crawling"} · ${truncUrl(h.url || "", 112)}`)}
                               </span>
                             </div>)}
                         </> : <>

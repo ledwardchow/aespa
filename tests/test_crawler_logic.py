@@ -2184,6 +2184,38 @@ def test_crawl_log_emits_scanner_phase_event(monkeypatch):
     assert evt["page_url"] == "https://t.local/"
 
 
+def test_crawl_progress_includes_user_phase_and_stage(monkeypatch):
+    captured: list[tuple[int, dict]] = []
+    monkeypatch.setattr(
+        crawler.events_svc, "emit", lambda rid, evt: captured.append((rid, evt))
+    )
+
+    crawler._crawl_progress(
+        7,
+        username="admin@example.com",
+        current_url="https://t.local/admin",
+        pages_visited=4,
+        stage="page_analysis",
+        stage_label="Analyzing page and discovering links",
+        phase_index=2,
+        phase_total=4,
+    )
+
+    run_id, evt = captured[0]
+    assert run_id == 7
+    assert evt == {
+        "type": "crawl_progress",
+        "username": "admin@example.com",
+        "pages_visited": 4,
+        "current_url": "https://t.local/admin",
+        "stage": "page_analysis",
+        "stage_label": "Analyzing page and discovering links",
+        "phase_index": 2,
+        "phase_total": 4,
+        "done": False,
+    }
+
+
 def test_crawl_log_noop_for_zero_run_id(monkeypatch):
     captured: list = []
     monkeypatch.setattr(

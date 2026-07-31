@@ -671,6 +671,8 @@ export function TestRunDetail({
     }
   };
   const effectiveThinkingStatus = thinkingStatus?.status || "idle";
+  const crawlerAgent = agents.find(agent => agent.id === "crawler");
+  const crawlerTask = crawlerAgent ? agentCurrentTask(crawlerAgent) : null;
   
   const crawlerActive = run?.status === "running" || crawlStopRequested;
   const testLeadActive = isDynamicScanActive(effectiveThinkingStatus) || thinkingStopRequested;
@@ -762,7 +764,7 @@ export function TestRunDetail({
       <WebRunNavigation
         activeTab={activeTab}
         onSelect={tab => { setActiveTab(tab); nav("#/runs/" + runId + "/" + tab); }}
-        activityLive={isDynamicScanActive(thinkingStatus?.status) && activityLog.length > 0}
+        activityLive={(run?.status === "running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length > 0}
         counts={{ attack: attackSurfaceTotal, sessions: sessionsTotal, findings: findings.length, traffic: trafficTotal }}
         canClearCrawl={canClearCrawl}
         onClearCrawl={onClearCrawl}
@@ -774,7 +776,7 @@ export function TestRunDetail({
       {activeTab === "sitemap" && run && <>
         <WebRunSitemapMeta run={run} crawlUsername={crawlUsername} profiles={runProfiles} onRunUpdate={setRun} onError={setError} crawlCredentialId={crawlCredentialId} onCrawlCredentialChange={setCrawlCredentialId} />
         {activeTab === "sitemap" && run && <ScopeHostsPanel siteId={run.site_id} hosts={scopeHosts} onChange={setScopeHosts} />}
-        <WebRunCrawlProgress run={run} /></>}
+        <WebRunCrawlProgress run={run} crawlerTask={crawlerTask} /></>}
 
       <WebRunSitemapGraph
         runId={runId}
