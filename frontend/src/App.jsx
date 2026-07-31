@@ -28,6 +28,7 @@ const SiteDetail = lazyNamed(loadSitePages, "SiteDetail");
 const SiteForm = lazyNamed(loadSitePages, "SiteForm");
 const TestRunDetail = lazyNamed(loadSitePages, "TestRunDetail");
 const TestRunForm = lazyNamed(loadSitePages, "TestRunForm");
+const AliceChatPopout = lazyNamed(loadSitePages, "AliceChatPopout");
 const SettingsPage = lazyNamed(loadSettingsPages, "SettingsPage");
 const ScanPolicyPage = lazyNamed(loadSettingsPages, "ScanPolicyPage");
 const ExternalIntegrationsPage = lazyNamed(loadSettingsPages, "ExternalIntegrationsPage");
@@ -67,6 +68,11 @@ function App() {
     }).catch(() => {});
     api.getReportingDebugConfig().then(setReportingDebugCfg).catch(() => {});
   }, []);
+  if (route.name === "alice-popout") {
+    return <React.Suspense fallback={<div className="alice-popout-page"><div className="subtle">Loading A.L.I.C.E.…</div></div>}>
+      <AliceChatPopout runId={route.id} />
+    </React.Suspense>;
+  }
   return <div className={"shell" + (collapsed ? " sidebar-collapsed" : "")}>
       <aside className={"sidebar" + (collapsed ? " sidebar--collapsed" : "")}>
         <div className="sidebar-brand">

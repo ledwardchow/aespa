@@ -28,6 +28,25 @@ SKIP_RESOURCE_TYPES = {"image", "font", "media"}  # noisy, rarely useful
 _waf_cache: dict[tuple[str, int], dict] = {}
 _waf_cache_hydrated: set[tuple[str, int]] = set()
 
+# The active browser target is tagged on the context while one self-contained
+# browser action runs.  This lets asynchronous Playwright listeners persist the
+# originating SPA page without depending on Playwright object internals.
+_browser_context_tags: dict[int, tuple[Optional[int], Optional[str]]] = {}
+
+
+def set_browser_context_tag(
+    ctx, page_id: Optional[int], session_label: Optional[str]
+) -> None:
+    _browser_context_tags[id(ctx)] = (page_id, session_label)
+
+
+def clear_browser_context_tag(ctx) -> None:
+    _browser_context_tags.pop(id(ctx), None)
+
+
+def _browser_context_tag(ctx) -> tuple[Optional[int], Optional[str]]:
+    return _browser_context_tags.get(id(ctx), (None, None))
+
 
 def get_cached_waf(run_id: int, *, api_run_id: Optional[int] = None) -> Optional[dict]:
     """Return the WAF detection, hydrating it from the run row when needed."""
@@ -124,6 +143,8 @@ def _write(
     duration_ms: Optional[int],
     username: Optional[str] = None,
     api_run_id: Optional[int] = None,
+    page_id: Optional[int] = None,
+    session_label: Optional[str] = None,
 ) -> None:
     from aespa.models import TrafficEntry
 
@@ -142,6 +163,8 @@ def _write(
             response_body=(response_body or "")[:BODY_LIMIT] or None,
             duration_ms=duration_ms,
             username=username,
+            page_id=page_id,
+            session_label=session_label,
         )
         s.add(entry)
         s.commit()
@@ -276,6 +299,8 @@ def get_traffic(
                 "response_body": e.response_body,
                 "duration_ms": e.duration_ms,
                 "username": e.username,
+                "page_id": e.page_id,
+                "session_label": e.session_label,
             }
             for e in entries
         ]
@@ -312,11 +337,15 @@ class LoggingAsyncClient(httpx.AsyncClient):
         run_id: Optional[int] = None,
         username: Optional[str] = None,
         api_run_id: Optional[int] = None,
+        page_id: Optional[int] = None,
+        session_label: Optional[str] = None,
         **kwargs,
     ):
         self.run_id = run_id
         self.api_run_id = api_run_id
         self.username = username
+        self.page_id = page_id
+        self.session_label = session_label
         kwargs.pop("event_hooks", None)
         super().__init__(*args, **kwargs)
 
@@ -363,6 +392,8 @@ class LoggingAsyncClient(httpx.AsyncClient):
                 duration_ms,
                 self.username,
                 self.api_run_id,
+                self.page_id,
+                self.session_label,
             )
             # Fire any registered coverage-tracking callback for API runs.
             if self.api_run_id is not None:
@@ -393,6 +424,8 @@ class LoggingAsyncClient(httpx.AsyncClient):
                 duration_ms,
                 self.username,
                 self.api_run_id,
+                self.page_id,
+                self.session_label,
             )
             raise exc
 
@@ -559,6 +592,7 @@ def setup_playwright_logging(
             duration_ms,
             username,
             api_run_id,
+            *_browser_context_tag(ctx),
         )
 
     async def on_request_failed(request) -> None:
@@ -600,6 +634,7 @@ def setup_playwright_logging(
             duration_ms,
             username,
             api_run_id,
+            *_browser_context_tag(ctx),
         )
 
     ctx.on("request", on_request)

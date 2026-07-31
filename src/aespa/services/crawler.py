@@ -163,6 +163,8 @@ def _crawl_seed_urls(
     result: list[str] = []
     seen: set[str] = set()
     for url in candidates:
+        if _is_session_ending_url(url):
+            continue
         norm = _norm(url)
         if norm not in seen:
             seen.add(norm)
@@ -686,8 +688,7 @@ async def _crawl_as_credential(
             "role": "Crawler",
             "status": "active",
             "current_task": (
-                f"Phase {phase_idx + 1}/{total_phases} — "
-                f"preparing crawl as {username}"
+                f"Phase {phase_idx + 1}/{total_phases} — preparing crawl as {username}"
             ),
             "outcome": None,
             "_persist": True,
@@ -860,7 +861,7 @@ async def _crawl_as_credential(
             if mode in (AuthMode.auto, AuthMode.totp, AuthMode.email_otp):
                 try:
                     still_on_login = await _page_requires_login(
-                        page, credential_login_url
+                        page, credential_login_url, settle_ms=1_500
                     )
                 except Exception:
                     still_on_login = False
@@ -889,7 +890,7 @@ async def _crawl_as_credential(
             url, depth, parent_id, incoming_action = queue.popleft()
             norm = _norm(url)
 
-            if requires_auth and _is_session_ending_url(url):
+            if _is_session_ending_url(url):
                 log.info("Skipping session-ending URL during crawl: %s", url)
                 continue
 
@@ -1074,7 +1075,13 @@ async def _crawl_as_credential(
             )
 
             # ── DOM-based accessibility check (login form = not accessible) ───
-            on_login = await _page_requires_login(page, credential_login_url)
+            # SPAs often keep their login form in the initial HTML and hide it
+            # only after the app shell mounts. Give that transition a short
+            # grace period; otherwise a protected hash route is misclassified
+            # as a login wall before its API request can render the page.
+            on_login = await _page_requires_login(
+                page, credential_login_url, settle_ms=1_500
+            )
 
             if on_login:
                 if is_first:
@@ -1217,7 +1224,14 @@ async def _crawl_as_credential(
                         and not _is_session_ending_url(nav_url)
                     ):
                         queued.add(n)
-                        queue.append((nav_url, depth + 1, page_id, {"link_text": "JS route", "action_kind": "navigate"}))
+                        queue.append(
+                            (
+                                nav_url,
+                                depth + 1,
+                                page_id,
+                                {"link_text": "JS route", "action_kind": "navigate"},
+                            )
+                        )
 
             # ── LLM analysis ──────────────────────────────────────────────────
             cats: dict = {
@@ -1266,23 +1280,45 @@ async def _crawl_as_credential(
                 first_success = cp is not None and cp.status == "processing"
 
             if is_first or fill_main:
-                _update_page(
-                    page_id,
-                    url=final_url,
-                    state_label=_page_function_label(cats.get("page_label")),
-                    title=title,
-                    page_text=text[:10_000],
-                    screenshot_b64=screenshot_b64,
-                    llm_context=context,
-                    status="crawled",
-                    depth=depth,
-                    req_auth=cats["req_auth"],
-                    takes_input=cats["takes_input"],
-                    has_object_ref=cats["has_object_ref"],
-                    has_business_logic=cats["has_business_logic"],
-                    owasp_applicable_json=json.dumps(
+                _page_update = {
+                    "url": final_url,
+                    "state_label": _page_function_label(cats.get("page_label")),
+                    "title": title,
+                    "page_text": text[:10_000],
+                    "screenshot_b64": screenshot_b64,
+                    "llm_context": context,
+                    "status": "crawled",
+                    "depth": depth,
+                    "req_auth": cats["req_auth"],
+                    "takes_input": cats["takes_input"],
+                    "has_object_ref": cats["has_object_ref"],
+                    "has_business_logic": cats["has_business_logic"],
+                    "owasp_applicable_json": json.dumps(
                         cats.get("owasp_applicable") or {}
                     ),
+                }
+                _action_data = (incoming_action or {}).get("action_data") or {}
+                if isinstance(_action_data, dict) and _action_data.get("replay_steps"):
+                    _replay_root = _action_data.get("root_url")
+                    if not _replay_root:
+                        if parent_id is not None:
+                            with Session(get_engine()) as _replay_session:
+                                _parent_page = _replay_session.get(
+                                    CrawledPage, parent_id
+                                )
+                                _replay_root = (
+                                    _parent_page.url if _parent_page else None
+                                ) or url
+                    _page_update["replay_steps_json"] = json.dumps(
+                        {
+                            "root_url": _replay_root,
+                            "steps": _action_data.get("replay_steps") or [],
+                        }
+                    )
+                    _page_update["replay_credential_id"] = credential_id
+                _update_page(
+                    page_id,
+                    **_page_update,
                 )
             _save_link(
                 run_id,
@@ -1868,6 +1904,11 @@ async def _interactive_controls(
         checked = bool(control.get("checked"))
         if not name:
             continue
+        # Signing out destroys the credential phase's session and cannot
+        # reveal a useful application state. Never replay it, regardless of
+        # the broader dangerous-action setting.
+        if _is_session_ending_url("", name):
+            continue
         if skip_dangerous_actions and _INTERACTIVE_DANGER_RE.search(name):
             continue
         if input_type == "radio" and checked:
@@ -2030,6 +2071,13 @@ async def _perform_interactive_action(
     *,
     block_non_idempotent_interactive_replay: bool,
 ) -> dict:
+    action_identity = " ".join(
+        str(step.get(key) or "")
+        for key in ("name", "selector", "testid", "element_id")
+    )
+    if _is_session_ending_url("", action_identity):
+        return {"ok": False, "changed": False, "blocked_requests": []}
+
     blocked_requests: list[dict] = []
 
     async def _safe_route(route) -> None:
@@ -2567,6 +2615,7 @@ async def _explore_interactive_states(
                     replay_steps_json=json.dumps(
                         {"root_url": root_url, "steps": steps}
                     ),
+                    replay_credential_id=credential_id,
                     title=snapshot["title"],
                     page_text=snapshot["text"][:10_000],
                     screenshot_b64=snapshot["screenshot_b64"],
@@ -2766,13 +2815,39 @@ def _save_credential_view(
 # crawl queue, even if JS mining discovers them as same-domain endpoint strings.
 _NAV_SKIP_EXTS: frozenset[str] = frozenset(
     {
-        "js", "mjs", "cjs", "ts", "jsx", "tsx",
-        "css", "map",
-        "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "avif",
-        "woff", "woff2", "ttf", "eot", "otf",
-        "pdf", "zip", "gz", "tar", "wasm",
-        "mp4", "mp3", "webm", "ogg",
-        "txt", "xml", "json",
+        "js",
+        "mjs",
+        "cjs",
+        "ts",
+        "jsx",
+        "tsx",
+        "css",
+        "map",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "webp",
+        "svg",
+        "ico",
+        "avif",
+        "woff",
+        "woff2",
+        "ttf",
+        "eot",
+        "otf",
+        "pdf",
+        "zip",
+        "gz",
+        "tar",
+        "wasm",
+        "mp4",
+        "mp3",
+        "webm",
+        "ogg",
+        "txt",
+        "xml",
+        "json",
     }
 )
 
@@ -2877,6 +2952,7 @@ def _save_intel_item(
     confidence: float = 1.0,
     evidence: str = "",
     metadata: dict | None = None,
+    page_id: int | None = None,
 ) -> None:
     key = str(key or "")[:500]
     value = str(value or "")[:2000]
@@ -2898,6 +2974,8 @@ def _save_intel_item(
         query = query.where(TargetIntelItem.method == method).where(
             TargetIntelItem.source == source
         )
+        if page_id is not None:
+            query = query.where(TargetIntelItem.page_id == page_id)
         existing = s.exec(query).first()
         if existing:
             return
@@ -2913,6 +2991,7 @@ def _save_intel_item(
                 confidence=max(0.0, min(1.0, float(confidence))),
                 evidence=evidence,
                 item_metadata=metadata_text,
+                page_id=page_id,
             )
         )
         s.commit()
@@ -3375,7 +3454,12 @@ def _mine_asset_text(
                 "category": route.get("category"),
             },
         )
-        if nav_urls is not None and base_netloc and _same_domain(resolved, base_netloc) and _is_nav_url(resolved):
+        if (
+            nav_urls is not None
+            and base_netloc
+            and _same_domain(resolved, base_netloc)
+            and _is_nav_url(resolved)
+        ):
             nav_urls.append(resolved)
     for lead in _extract_js_path_leads(body)[:120]:
         resolved = _resolve_asset_reference(asset_url, lead["path"])
@@ -3395,7 +3479,12 @@ def _mine_asset_text(
                 "category": lead.get("category"),
             },
         )
-        if nav_urls is not None and base_netloc and _same_domain(resolved, base_netloc) and _is_nav_url(resolved):
+        if (
+            nav_urls is not None
+            and base_netloc
+            and _same_domain(resolved, base_netloc)
+            and _is_nav_url(resolved)
+        ):
             nav_urls.append(resolved)
     for endpoint in _extract_sitemap_locations(body)[:200]:
         _save_intel_item(
@@ -3922,7 +4011,7 @@ async def _promote_api_calls(
 ) -> None:
     for call in _dedupe_api_calls(calls):
         url = call.get("url") or ""
-        if not url:
+        if not url or _is_session_ending_url(url):
             continue
         api_title, api_context, api_categories = await _analyse_api_call(
             llm_cfg, call, credential_id
@@ -4300,8 +4389,7 @@ async def _reconcile_direct_access(
             "role": "Crawler",
             "status": "active",
             "current_task": (
-                "Verifying page access for each user "
-                f"(0/{total_checks})…"
+                f"Verifying page access for each user (0/{total_checks})…"
             ),
             "outcome": None,
             "_persist": True,
@@ -4347,7 +4435,8 @@ async def _reconcile_direct_access(
                 )
                 ctx = await browser.new_context(
                     user_agent=playwright_user_agent(browser),
-                    ignore_https_errors=True, **pw_proxy
+                    ignore_https_errors=True,
+                    **pw_proxy,
                 )
                 protect_playwright_context(browser, ctx)
                 if global_http_header:
@@ -4530,7 +4619,7 @@ async def _direct_load_accessible(
     if resp is not None and resp.status >= 400:
         return False, "", "", None
 
-    if await _page_requires_login(page, login_url):
+    if await _page_requires_login(page, login_url, settle_ms=1_500):
         return False, "", "", None
 
     await _wait_for_content_settle(page)
@@ -5012,24 +5101,66 @@ def _same_url_without_fragment(left: str, right: str) -> bool:
         return False
 
 
+def _same_login_route(left: str, right: str) -> bool:
+    """Compare login routes without collapsing distinct SPA hash routes."""
+    if not _same_url_without_fragment(left, right):
+        return False
+    try:
+        lhs = urlparse(left)
+        rhs = urlparse(right)
+        if lhs.fragment or rhs.fragment:
+            return lhs.fragment == rhs.fragment
+    except Exception:
+        return False
+    return True
+
+
 def _response_suggests_session_dropped(resp) -> bool:
     return resp is not None and resp.status in (401, 419, 440)
 
 
-async def _page_requires_login(page, login_url: str) -> bool:  # noqa: ARG001
+async def _page_requires_login(
+    page, login_url: str, *, settle_ms: int = 0
+) -> bool:  # noqa: ARG001
+    """Return whether the page is blocked by a login wall.
+
+    Some SPAs ship the login form in the initial HTML and hide it only after
+    the authenticated app shell mounts. When ``settle_ms`` is set, a password
+    field that is initially exposed must remain exposed through that short
+    window before it is treated as a real login wall. Explicit login URLs and
+    denial text still return immediately.
+    """
     try:
         pw_loc = page.locator("input[type='password']").first
         if (await pw_loc.count() > 0) and await _locator_is_exposed(
             pw_loc, actionable=True
         ):
-            return True
+            if _same_login_route(page.url, login_url) or settle_ms <= 0:
+                return True
+            remaining_ms = max(0, int(settle_ms))
+            while remaining_ms > 0:
+                wait_ms = min(100, remaining_ms)
+                try:
+                    await page.wait_for_timeout(wait_ms)
+                except Exception:
+                    # If the page double/browser cannot wait, fail closed and
+                    # preserve the old detection behavior.
+                    return True
+                remaining_ms -= wait_ms
+                try:
+                    if not await _locator_is_exposed(pw_loc, actionable=True):
+                        break
+                except Exception:
+                    return True
+            else:
+                return True
     except Exception:
         pass
     # Passwordless and identifier-based forms often contain only text inputs.
     # Treat a visible form on the configured login URL as a login wall without
     # assuming that any input has type=password.
     try:
-        if _same_url_without_fragment(page.url, login_url):
+        if _same_login_route(page.url, login_url):
             visible_inputs = page.locator("form input:visible")
             submit_controls = page.locator(
                 "form button[type='submit']:visible, form input[type='submit']:visible"
@@ -5081,7 +5212,7 @@ async def _goto_with_auth_recovery(
             return response
         session_dropped = _response_suggests_session_dropped(
             response
-        ) or await _page_requires_login(page, login_url)
+        ) or await _page_requires_login(page, login_url, settle_ms=1_500)
         if not session_dropped:
             return response
         if attempt == 0:
@@ -5174,7 +5305,7 @@ def _api_response_should_not_reauth(url: str, response) -> bool:
 
 async def _capture_auth_check_snapshot(page, login_url: str) -> dict | None:
     try:
-        if await _page_requires_login(page, login_url):
+        if await _page_requires_login(page, login_url, settle_ms=1_500):
             return None
     except Exception:
         return None
@@ -5213,9 +5344,9 @@ async def _auth_check_still_authenticated(
             await check_page.wait_for_load_state("networkidle", timeout=2_000)
         except Exception:
             pass
-        if _response_suggests_session_dropped(response) or await _page_requires_login(
-            check_page, login_url
-        ):
+        if _response_suggests_session_dropped(
+            response
+        ) or await _page_requires_login(check_page, login_url, settle_ms=1_500):
             return False
         try:
             title = await check_page.title()
@@ -6824,8 +6955,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
             )
             try:
                 ctx = await browser.new_context(
-                    user_agent=playwright_user_agent(browser),
-                    ignore_https_errors=True
+                    user_agent=playwright_user_agent(browser), ignore_https_errors=True
                 )
                 protect_playwright_context(browser, ctx)
 

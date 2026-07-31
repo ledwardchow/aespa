@@ -46,6 +46,9 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
 
 class _StartScanBody(BaseModel):
     coverage_mode: Optional[str] = None  # "track" | "enforce"
+    target_page_id: Optional[int] = None
+    target_page_ids: Optional[list[int]] = None
+    use_session: Optional[str] = None
 
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/start")
@@ -64,6 +67,20 @@ async def start_thinking_scan(
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     if body and body.coverage_mode in ("track", "enforce"):
         run.coverage_mode = body.coverage_mode
+    if body:
+        target_ids = body.target_page_ids or (
+            [body.target_page_id] if body.target_page_id is not None else None
+        )
+        if target_ids is not None:
+            pages = session.exec(
+                select(CrawledPage)
+                .where(CrawledPage.test_run_id == run_id)
+                .where(CrawledPage.id.in_(target_ids))
+            ).all()
+            if len(pages) != len(set(target_ids)):
+                raise HTTPException(status_code=404, detail="Target page not found")
+            run.target_page_ids_json = json.dumps(sorted(set(target_ids)))
+            run.target_session_label = body.use_session or None
         session.add(run)
         session.commit()
     # Seed workprogram synchronously so it's populated before the response returns.
@@ -75,6 +92,46 @@ async def start_thinking_scan(
         pass  # non-fatal
     await scanner_svc.start_thinking_scan(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
+
+
+@router.post("/api/test-runs/{run_id}/pages/{page_id}/test")
+async def test_page_state(
+    run_id: int,
+    page_id: int,
+    body: Optional[_StartScanBody] = None,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Queue a focused Test Lead scan for one persisted URL/SPA page state."""
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running and not scanner_svc.is_thinking_running(
+        run_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Crawl is still running — wait for the page state to persist",
+        )
+    page = session.get(CrawledPage, page_id)
+    if page is None or page.test_run_id != run_id:
+        raise HTTPException(status_code=404, detail="Page not found")
+    run.target_page_ids_json = json.dumps([page_id])
+    if body and body.use_session:
+        run.target_session_label = body.use_session
+    session.add(run)
+    session.commit()
+    if scanner_svc.is_thinking_running(run_id):
+        return {
+            "status": "queued",
+            "run_id": run_id,
+            "page_id": page_id,
+            "message": "The state was persisted as the next focused target. The current Test Lead will pick it up on its next context refresh.",
+        }
+    await scanner_svc.start_thinking_scan(run_id)
+    return {
+        **scanner_svc.get_thinking_scan_status(run_id),
+        "run_id": run_id,
+        "page_id": page_id,
+        "status": "started",
+    }
 
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/stop")
