@@ -1,6 +1,14 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { api } from "../../lib/api";
 import { usePolling } from "../../hooks/usePolling";
+
+const LOG_PAGE_SIZE = 200;
+
+function mergeLogEntries(current, incoming) {
+  const byId = new Map(current.map(entry => [entry.id, entry]));
+  for (const entry of incoming) byId.set(entry.id, entry);
+  return [...byId.values()].sort((a, b) => a.id - b.id);
+}
 
 
 export function ApiRunLogTab({
@@ -8,10 +16,43 @@ export function ApiRunLogTab({
   scanRunning
 }) {
   const [log, setLog] = useState([]);
+  const [hasEarlier, setHasEarlier] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [clearBusy, setClearBusy] = useState(false);
   const [error, setError] = useState(null);
-  const load = useCallback(() => api.getApiAgentLog(runId).then(setLog).catch(e => setError(e.message)), [runId]);
+  const pageLoadedRef = useRef(false);
+  useEffect(() => {
+    setLog([]);
+    setHasEarlier(false);
+    setError(null);
+    pageLoadedRef.current = false;
+  }, [runId]);
+  const load = useCallback(() => api.getApiAgentLogPage(runId, { limit: LOG_PAGE_SIZE }).then(page => {
+    setLog(previous => mergeLogEntries(previous, page.entries));
+    if (!pageLoadedRef.current && page.entries.length > 0) {
+      setHasEarlier(page.hasMore);
+      pageLoadedRef.current = true;
+    }
+  }).catch(e => setError(e.message)), [runId]);
   usePolling(load, { enabled: scanRunning, intervalMs: 4000 });
+  const loadEarlier = async () => {
+    const firstId = log[0]?.id;
+    if (loadingEarlier || firstId == null) return;
+    setLoadingEarlier(true);
+    setError(null);
+    try {
+      const page = await api.getApiAgentLogPage(runId, {
+        limit: LOG_PAGE_SIZE,
+        beforeId: firstId
+      });
+      setLog(previous => mergeLogEntries(page.entries, previous));
+      setHasEarlier(page.hasMore);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoadingEarlier(false);
+    }
+  };
   const onClear = async () => {
     if (!confirm("Clear all agent log entries for this run?")) return;
     setClearBusy(true);
@@ -19,6 +60,8 @@ export function ApiRunLogTab({
     try {
       await api.clearApiAgentLog(runId);
       setLog([]);
+      setHasEarlier(false);
+      pageLoadedRef.current = false;
     } catch (e) {
       setError(e.message);
     } finally {
@@ -30,7 +73,7 @@ export function ApiRunLogTab({
     margin: 0
   }}>
       <div className="activity-log-toolbar">
-        <span className="activity-count-label">{log.length} entr{log.length !== 1 ? "ies" : "y"}</span>
+        <span className="activity-count-label">{log.length}{hasEarlier ? "+" : ""} entr{log.length !== 1 ? "ies" : "y"}</span>
         {scanRunning && <span className="activity-mode-badge">Scan running</span>}
         <a className="btn ghost sm" href={`/api/api-test-runs/${runId}/agent-log/export`} download>Export log ↓</a>
         {log.length > 0 && <button className="btn danger-outline sm" disabled={clearBusy} onClick={onClear}>{clearBusy ? "Clearing…" : "Clear"}</button>}
@@ -44,6 +87,11 @@ export function ApiRunLogTab({
     }}>
                  {scanRunning ? "Scan in progress — agent activity will appear here." : "No agent log entries yet."}
                </div> : <div className="activity-feed">
+          {hasEarlier && <div style={{ padding: "4px 16px 10px", textAlign: "center" }}>
+            <button className="btn ghost sm" disabled={loadingEarlier} onClick={loadEarlier}>
+              {loadingEarlier ? "Loading older entries…" : "Load older entries"}
+            </button>
+          </div>}
           {log.map(r => {
         const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString("en-US", {
           hour12: false,
