@@ -39,6 +39,7 @@ export function useWebRunEvents(options) {
         setRun(prev => prev ? {
           ...prev,
           status: evt.status ?? prev.status,
+          phase: evt.phase ?? prev.phase,
           pages_discovered: evt.pages_discovered ?? prev.pages_discovered
         } : prev);
         if (evt.status && evt.status !== "running") setCrawlStopRequested(false);
@@ -57,12 +58,19 @@ export function useWebRunEvents(options) {
             username,
             url: evt.current_url || "",
             pagesVisited: evt.pages_visited || 0,
-            done: !!evt.done
+            done: !!evt.done,
+            stage: evt.stage || (evt.done ? "phase_complete" : "page_visit"),
+            stageLabel: evt.stage_label || (evt.done ? "Credential phase complete" : "Opening page"),
+            phaseIndex: evt.phase_index,
+            phaseTotal: evt.phase_total
           };
           const idx = prev.findIndex(a => a.id === "crawler");
           const existingEvents = idx >= 0 ? prev[idx].crawlEvents || [] : [];
           const crawlEvents = [...existingEvents, crawlEvent].slice(-200);
-          const currentTask = evt.done ? `Completed crawl as ${username} (${evt.pages_visited || 0} pg)` : `Crawling ${truncUrl(evt.current_url || "", 88)} as ${username}`;
+          const phaseLabel = evt.phase_index && evt.phase_total ? `Phase ${evt.phase_index}/${evt.phase_total} · ` : "";
+          const currentTask = evt.done
+            ? `${phaseLabel}Completed crawl as ${username} (${evt.pages_visited || 0} pg)`
+            : `${phaseLabel}${evt.stage_label || "Opening page"} · ${username}: ${truncUrl(evt.current_url || "", 88)}`;
           return upsertAgent(prev, {
             id: "crawler",
             role: "Crawler",

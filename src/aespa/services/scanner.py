@@ -23,11 +23,16 @@ import time
 from contextvars import ContextVar as _ContextVar
 from datetime import datetime, timezone
 from typing import Any, Optional
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 from sqlmodel import Session, select
 
+from aespa.browser import (
+    launch_playwright_browser,
+    playwright_user_agent,
+    protect_playwright_context,
+)
 from aespa.db import get_engine
 from aespa.models import (
     CrawledPage,
@@ -65,6 +70,7 @@ from aespa.services.prompts.test_lead import (
 from aespa.services.scan_completion import ScanCompletionPolicy
 from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import (
+    get_browser_debug_config,
     get_burp_rest_api_config_model,
     get_global_http_header_config,
     get_llm_config_for_role,
@@ -409,20 +415,334 @@ class _BrowserRequestEcho:
 
 
 class _BrowserApiResponse:
-    """Adapts a Playwright ``APIResponse`` to the small subset of the
+    """Adapts a browser-page fetch result to the small subset of the
     ``httpx.Response`` interface the agentic loop's http_request handling
     reads (``.text``, ``.status_code``, ``.headers``, ``.request.headers``).
-
-    Lets ``_dispatch_http_request`` swap the transport (raw httpx vs. the
-    browser context's cookie-sharing APIRequestContext) without touching the
-    much larger block of response-handling code that follows it.
     """
 
-    def __init__(self, status_code: int, headers: dict, text: str, sent_headers: dict):
+    def __init__(
+        self,
+        status_code: int,
+        headers: dict,
+        text: str,
+        sent_headers: dict,
+        *,
+        url: str = "",
+        redirect_blocked: tuple[str, str] | None = None,
+        cookies: dict[str, str] | None = None,
+    ):
         self.status_code = status_code
         self.headers = headers
         self.text = text
         self.request = _BrowserRequestEcho(sent_headers)
+        self.url = url
+        self.redirect_blocked = redirect_blocked
+        self.cookies = cookies or {}
+
+
+def _waf_strategy_for_run(run_id: int) -> dict | None:
+    detection = traffic_svc.get_cached_waf(run_id)
+    if detection is None:
+        return None
+    strategy = detection.get("strategy")
+    if isinstance(strategy, dict):
+        return strategy
+    from aespa.services.waf_detect import strategy_for_provider
+
+    return strategy_for_provider(detection.get("provider"))
+
+
+def _header_value(headers: dict[str, str], name: str) -> str | None:
+    wanted = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == wanted:
+            return str(value)
+    return None
+
+
+def _cookie_header_values(value: str | None) -> dict[str, str]:
+    if not value:
+        return {}
+    result: dict[str, str] = {}
+    for part in value.split(";"):
+        if "=" not in part:
+            continue
+        name, cookie_value = part.split("=", 1)
+        name = name.strip()
+        if name:
+            result[name] = cookie_value.strip()
+    return result
+
+
+def _session_browser_cookies(
+    session: dict | None,
+    url: str,
+    fallback: list[dict] | None,
+) -> list[dict]:
+    if session is not None:
+        metadata_cookies = (session.get("metadata") or {}).get("browser_cookies")
+        if isinstance(metadata_cookies, list):
+            return [dict(cookie) for cookie in metadata_cookies if isinstance(cookie, dict)]
+        cookies = session.get("cookies") or {}
+        if isinstance(cookies, dict):
+            return [
+                {"name": str(name), "value": str(value), "url": url}
+                for name, value in cookies.items()
+            ]
+    return [dict(cookie) for cookie in (fallback or []) if isinstance(cookie, dict)]
+
+
+def _merge_browser_cookies(
+    base: list[dict], extra: list[dict], url: str, prefixes: tuple[str, ...]
+) -> list[dict]:
+    """Keep WAF clearance cookies while replacing auth cookies for a session."""
+    merged: dict[str, dict] = {}
+    for cookie in base:
+        name = str(cookie.get("name") or "")
+        if name:
+            merged[name] = dict(cookie)
+    for cookie in extra:
+        name = str(cookie.get("name") or "")
+        if name:
+            merged[name] = dict(cookie)
+    return [
+        {
+            **cookie,
+            "url": cookie.get("url") or url,
+        }
+        for cookie in merged.values()
+        if cookie.get("name")
+    ]
+
+
+async def _prepare_browser_request_session(
+    browser_ctx,
+    url: str,
+    headers: dict[str, str],
+    *,
+    selected_session: dict | None,
+    primary_session: dict | None,
+    primary_browser_cookies: list[dict] | None,
+    strategy: dict,
+) -> dict[str, str]:
+    """Install exactly the request identity into the shared browser context."""
+    prefixes = tuple(str(item).lower() for item in strategy.get("preserve_cookie_prefixes") or [])
+    primary_cookies = _merge_browser_cookies(
+        primary_browser_cookies or [],
+        _session_browser_cookies(primary_session, url, None),
+        url,
+        prefixes,
+    )
+    if selected_session is None:
+        cookies = primary_cookies
+    else:
+        selected_cookies = _session_browser_cookies(selected_session, url, None)
+        clearance = [
+            cookie
+            for cookie in primary_cookies
+            if any(
+                str(cookie.get("name") or "").lower().startswith(prefix)
+                for prefix in prefixes
+            )
+        ]
+        cookies = _merge_browser_cookies(clearance, selected_cookies, url, prefixes)
+
+    cookie_override = _cookie_header_values(_header_value(headers, "cookie"))
+    if cookie_override:
+        clearance = [
+            cookie
+            for cookie in primary_cookies
+            if any(
+                str(cookie.get("name") or "").lower().startswith(prefix)
+                for prefix in prefixes
+            )
+        ]
+        override = [
+            {"name": name, "value": value, "url": url}
+            for name, value in cookie_override.items()
+        ]
+        cookies = _merge_browser_cookies(clearance, override, url, prefixes)
+
+    await browser_ctx.clear_cookies()
+    if cookies:
+        await browser_ctx.add_cookies(cookies)
+    identity = selected_session if selected_session is not None else primary_session
+    await browser_ctx.set_extra_http_headers(
+        _playwright_global_headers((identity or {}).get("extra_headers") or {})
+    )
+    sent_headers = dict(headers)
+    if cookies:
+        # Keep evidence honest without copying cookie values into the model trace.
+        sent_headers["Cookie"] = "; ".join(
+            f"{cookie['name']}=<browser>" for cookie in cookies if cookie.get("name")
+        )
+    return sent_headers
+
+
+def _browser_fetch_headers(headers: dict[str, str]) -> dict[str, str]:
+    # Browsers own these headers. In particular, JavaScript cannot set Cookie;
+    # the context cookie jar installed above is authoritative instead.
+    forbidden = {
+        "accept-encoding",
+        "connection",
+        "content-length",
+        "cookie",
+        "host",
+        "proxy-authorization",
+        "user-agent",
+    }
+    return {
+        str(key): str(value)
+        for key, value in headers.items()
+        if str(key).lower() not in forbidden and not str(key).lower().startswith("sec-")
+    }
+
+
+async def _browser_page_fetch_once(
+    browser_page,
+    url: str,
+    method: str,
+    headers: dict[str, str],
+    body,
+) -> dict:
+    body_value = None
+    if isinstance(body, dict):
+        body_value = json.dumps(body, separators=(",", ":"))
+    elif isinstance(body, str) and body:
+        body_value = body
+    return await browser_page.evaluate(
+        """
+        async ({url, method, headers, body}) => {
+          const response = await fetch(url, {
+            method,
+            headers,
+            body,
+            credentials: "include",
+            redirect: "manual"
+          });
+          const responseHeaders = {};
+          response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+          let text = "";
+          try { text = await response.text(); } catch (_) { /* opaque response */ }
+          return {
+            status: response.status,
+            url: response.url || url,
+            type: response.type,
+            headers: responseHeaders,
+            text
+          };
+        }
+        """,
+        {
+            "url": url,
+            "method": method,
+            "headers": _browser_fetch_headers(headers),
+            "body": body_value,
+        },
+    )
+
+
+def _response_is_waf_challenge(result: dict, strategy: dict) -> bool:
+    body = str(result.get("text") or "")[:4000].lower()
+    headers = {
+        str(key).lower(): str(value).lower()
+        for key, value in (result.get("headers") or {}).items()
+    }
+    for name, value in strategy.get("challenge_headers") or []:
+        if value in headers.get(str(name).lower(), ""):
+            return True
+    markers = [str(marker).lower() for marker in strategy.get("challenge_markers") or []]
+    return bool(markers and any(marker in body for marker in markers))
+
+
+async def _browser_page_request(
+    browser_page,
+    url: str,
+    method: str,
+    headers: dict[str, str],
+    body,
+    *,
+    strategy: dict,
+    scope_check=None,
+    max_redirects: int = 10,
+) -> _BrowserApiResponse:
+    """Issue a request from page JavaScript and follow safe redirects."""
+    target_origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    try:
+        current_origin = await browser_page.evaluate("location.origin")
+    except Exception:
+        current_origin = ""
+    if current_origin != target_origin:
+        await browser_page.goto(
+            f"{target_origin}/", wait_until="domcontentloaded", timeout=20_000
+        )
+
+    warmup_ms = int(strategy.get("warmup_ms") or 0)
+    if warmup_ms:
+        await browser_page.wait_for_timeout(warmup_ms)
+
+    current_url = url
+    current_method = method.upper()
+    current_body = body
+    current_headers = dict(headers)
+    last_result: dict = {}
+    redirect_blocked = None
+    challenge_retried = False
+
+    for _ in range(max_redirects):
+        last_result = await _browser_page_fetch_once(
+            browser_page,
+            current_url,
+            current_method,
+            current_headers,
+            current_body,
+        )
+        if (
+            not challenge_retried
+            and _response_is_waf_challenge(last_result, strategy)
+        ):
+            # Fetching an interstitial only downloads it. Navigate the real page
+            # once so its JavaScript can establish the vendor token/cookie.
+            challenge_retried = True
+            await browser_page.goto(
+                current_url, wait_until="domcontentloaded", timeout=20_000
+            )
+            await browser_page.wait_for_timeout(warmup_ms or 1000)
+            continue
+
+        status = int(last_result.get("status") or 0)
+        if status not in _REDIRECT_STATUS:
+            break
+        location = (last_result.get("headers") or {}).get("location")
+        if not location:
+            break
+        next_url = urljoin(current_url, str(location))
+        if scope_check is not None:
+            scope_error = scope_check(next_url)
+            if scope_error:
+                redirect_blocked = (next_url, scope_error)
+                break
+        if status == 303 or (
+            status in (301, 302) and current_method not in ("GET", "HEAD")
+        ):
+            current_method = "GET"
+            current_body = None
+        current_url = next_url
+        current_headers = dict(headers)
+
+    if last_result.get("type") == "opaqueredirect":
+        redirect_blocked = (
+            current_url,
+            "browser did not expose a cross-origin redirect; it was not followed",
+        )
+    return _BrowserApiResponse(
+        status_code=int(last_result.get("status") or 0),
+        headers=dict(last_result.get("headers") or {}),
+        text=str(last_result.get("text") or ""),
+        sent_headers=headers,
+        url=str(last_result.get("url") or current_url),
+        redirect_blocked=redirect_blocked,
+    )
 
 
 async def _dispatch_http_request(
@@ -435,29 +755,19 @@ async def _dispatch_http_request(
     body,
     *,
     selected_session: dict | None,
+    primary_session: dict | None = None,
+    primary_browser_cookies: list[dict] | None = None,
+    browser_page=None,
+    scope_check=None,
+    follow_redirects: bool = True,
 ):
-    """Issue one http_request tool call, transparently routing it through the
-    browser context's APIRequestContext (``browser_ctx.request``) instead of
-    the raw httpx client whenever a WAF/bot-manager has been fingerprinted for
-    this run (see ``services/waf_detect.py``).
-
-    A bare TLS client can never satisfy a JS-based bot challenge (no sensor
-    script runs, no `_abck`/`bm_sz`-style cookie is ever minted), so once we
-    know a WAF is present, every request must go through the real browser
-    context that already holds those cookies — otherwise every http_request
-    call is a guaranteed 403 regardless of payload. See docs/architecture.md.
-
-    Only the default/primary session is eligible for browser routing:
-    ``browser_ctx`` has one shared cookie jar, so an explicit anonymous/
-    other-session request (``selected_session`` set) cannot be faithfully
-    represented through it without a second isolated context. Those requests
-    keep using httpx even under a detected WAF — they'll still 403, but that
-    result stays honest rather than silently reusing the primary session.
-    """
-    from aespa.services import traffic as traffic_svc
-
+    """Issue one request using the provider-specific WAF transport strategy."""
+    strategy = _waf_strategy_for_run(run_id)
     use_browser = (
-        selected_session is None and traffic_svc.get_cached_waf(run_id) is not None
+        bool(strategy)
+        and strategy.get("transport") == "browser_page"
+        and browser_ctx is not None
+        and browser_page is not None
     )
     if not use_browser:
         if isinstance(body, dict):
@@ -469,29 +779,37 @@ async def _dispatch_http_request(
             resp = await hx.request(method, url, headers=headers)
         return resp
 
-    data = None
+    sent_headers = await _prepare_browser_request_session(
+        browser_ctx,
+        url,
+        headers,
+        selected_session=selected_session,
+        primary_session=primary_session,
+        primary_browser_cookies=primary_browser_cookies,
+        strategy=strategy or {},
+    )
     if isinstance(body, dict):
         headers.setdefault("Content-Type", "application/json")
-        data = body  # dict values are auto-serialized as JSON by Playwright
-    elif isinstance(body, str) and body:
-        data = body
-    api_resp = await browser_ctx.request.fetch(
+    response = await _browser_page_request(
+        browser_page,
         url,
         method=method,
         headers=headers,
-        data=data,
-        max_redirects=0 if method.upper() == "HEAD" else 20,
+        body=body,
+        strategy=strategy or {},
+        scope_check=scope_check,
+        max_redirects=10 if follow_redirects else 1,
     )
-    text = await api_resp.text()
-    # APIRequestContext requests still flow through browser_ctx's own
-    # request/response listeners (registered via setup_playwright_logging), so
-    # no separate traffic-log write is needed here.
-    return _BrowserApiResponse(
-        status_code=api_resp.status,
-        headers=dict(api_resp.headers),
-        text=text,
-        sent_headers=dict(headers),
-    )
+    try:
+        response.cookies = {
+            str(cookie.get("name")): str(cookie.get("value"))
+            for cookie in await browser_ctx.cookies(url)
+            if cookie.get("name")
+        }
+    except Exception:
+        response.cookies = {}
+    response.request = _BrowserRequestEcho(sent_headers)
+    return response
 
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -1659,9 +1977,10 @@ def _build_thinking_context_from_recon_summary(
                 )
                 + (
                     f"\nWAF detected: {waf['provider']} (confidence: {waf['confidence']}). "
-                    "http_request calls are being transparently routed through the "
-                    "authenticated browser context so cookies/JS-challenge state carry "
-                    "over; you do not need to change tool usage."
+                    f"Strategy: {(waf.get('strategy') or {}).get('label', 'direct HTTP')}. "
+                    f"{(waf.get('strategy') or {}).get('summary', '')} "
+                    "Keep blocked responses as evidence; do not blindly retry the same "
+                    "request or mutate payloads just to get a 2xx."
                     if waf
                     else ""
                 )
@@ -4979,18 +5298,25 @@ async def _export_cred_session(
     from playwright.async_api import async_playwright
 
     from aespa.services.crawler import _authenticate
+    from aespa.services.settings import get_browser_debug_config
 
     resolved_login_url = _login_url_for_credential(login_url, credential)
+    with Session(get_engine()) as s:
+        browser_debug_cfg = get_browser_debug_config(s)
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            headless=True, args=_playwright_launch_args()
+        browser = await launch_playwright_browser(
+            playwright,
+            browser_engine=browser_debug_cfg.browser_engine,
+            headless=not browser_debug_cfg.browser_visible,
+            args=_playwright_launch_args(),
         )
         try:
             context = await browser.new_context(
-                user_agent=_UA,
+                user_agent=playwright_user_agent(browser),
                 ignore_https_errors=True,
                 **_playwright_proxy(),
             )
+            protect_playwright_context(browser, context)
             try:
                 page = await context.new_page()
                 try:
@@ -5666,6 +5992,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
         specialist_cfg = get_specialist_agent_config(s)
         global_header_cfg = get_global_http_header_config(s)
+        browser_debug_cfg = get_browser_debug_config(s)
 
         site_id = site.id  # captured before expunge for scope checks
         for obj in [*creds, site, llm_cfg, run]:
@@ -5674,6 +6001,8 @@ async def _do_thinking_scan(run_id: int) -> None:
     global_http_header = {
         header.header_name: header.header_value for header in global_header_cfg.headers
     }
+    browser_engine = browser_debug_cfg.browser_engine
+    browser_visible = bool(browser_debug_cfg.browser_visible)
 
     _scanner_proxy_var.set(scanner_proxy_url)
     _scanner_global_header_var.set(global_http_header)
@@ -5892,10 +6221,18 @@ async def _do_thinking_scan(run_id: int) -> None:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=_playwright_launch_args())
-        browser_ctx = await browser.new_context(
-            user_agent=_UA, ignore_https_errors=True, **_playwright_proxy()
+        browser = await launch_playwright_browser(
+            p,
+            browser_engine=browser_engine,
+            headless=not browser_visible,
+            args=_playwright_launch_args(),
         )
+        browser_ctx = await browser.new_context(
+            user_agent=playwright_user_agent(browser),
+            ignore_https_errors=True,
+            **_playwright_proxy(),
+        )
+        protect_playwright_context(browser, browser_ctx)
         initial_headers = _playwright_global_headers()
         if initial_headers:
             await browser_ctx.set_extra_http_headers(initial_headers)
@@ -6134,6 +6471,11 @@ async def _do_thinking_scan(run_id: int) -> None:
                 run_id=run_id,
                 base_url=base_url,
                 cred_sessions=deterministic_sessions,
+                site_id=site_id,
+                primary_session=session_vault.get("configured_primary"),
+                browser_ctx=browser_ctx,
+                browser_page=pw_page,
+                primary_browser_cookies=_primary_browser_cookies,
                 scanner_policy=scanner_policy,
             )
 
@@ -6167,6 +6509,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     hx=hx,
                     browser_ctx=browser_ctx,
                     pw_page=pw_page,
+                    primary_browser_cookies=_primary_browser_cookies,
                     history=history,
                     all_results=all_results,
                     resume_from=_resume_checkpoint,
@@ -6447,6 +6790,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     )
 
                     try:
+                        _br_waf_strategy = _waf_strategy_for_run(run_id) or {}
                         # Isolate the browser session per step: clear the shared
                         # context cookies so a prior authenticated step can't leak
                         # into an anonymous/other-user navigation, then install
@@ -6462,6 +6806,28 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     selected_session.get("cookies") or {}
                                 ).items()
                             ]
+                            if _br_waf_strategy.get("transport") == "browser_page":
+                                cookie_list = _merge_browser_cookies(
+                                    [
+                                        cookie
+                                        for cookie in _primary_browser_cookies
+                                        if any(
+                                            str(cookie.get("name") or "")
+                                            .lower()
+                                            .startswith(prefix)
+                                            for prefix in _br_waf_strategy.get(
+                                                "preserve_cookie_prefixes", []
+                                            )
+                                        )
+                                    ],
+                                    cookie_list,
+                                    url,
+                                    tuple(
+                                        _br_waf_strategy.get(
+                                            "preserve_cookie_prefixes", []
+                                        )
+                                    ),
+                                )
                         else:
                             cookie_list = _primary_browser_cookies
                         if cookie_list:
@@ -6733,12 +7099,37 @@ async def _do_thinking_scan(run_id: int) -> None:
                             with _client_session_cookies(
                                 hx, {"cookies": {}, "extra_headers": {}}
                             ):
-                                resp = await hx.request(
-                                    str(action.get("method") or "POST").upper(),
-                                    url,
-                                    json=body,
-                                    headers=merged_headers,
-                                )
+                                if (
+                                    _waf_strategy_for_run(run_id) or {}
+                                ).get("transport") == "browser_page":
+                                    resp = await _dispatch_http_request(
+                                        hx,
+                                        browser_ctx,
+                                        run_id,
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        merged_headers,
+                                        body,
+                                        selected_session={
+                                            "cookies": {},
+                                            "extra_headers": {},
+                                        },
+                                        primary_session=session_vault.get(
+                                            "configured_primary"
+                                        ),
+                                        primary_browser_cookies=_primary_browser_cookies,
+                                        browser_page=pw_page,
+                                        scope_check=lambda next_url: check_scope(
+                                            next_url, site_id, run_id
+                                        ),
+                                    )
+                                else:
+                                    resp = await hx.request(
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        json=body,
+                                        headers=merged_headers,
+                                    )
                             resp_status = resp.status_code
                             resp_headers = dict(resp.headers)
                             response_excerpt = resp.text[:800]
@@ -6890,6 +7281,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     resp_body = ""
                     created_label = None
                     duration_ms: int | None = None
+                    register_redirect_blocked = None
                     try:
                         merged_headers = _session_request_headers(
                             hx.headers,
@@ -6904,28 +7296,92 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     "application/x-www-form-urlencoded",
                                 )
                                 started = time.perf_counter()
-                                resp = await hx.request(
-                                    str(action.get("method") or "POST").upper(),
-                                    url,
-                                    data=body,
-                                    headers=merged_headers,
-                                )
+                                if (
+                                    (_waf_strategy_for_run(run_id) or {}).get(
+                                        "transport"
+                                    )
+                                    == "browser_page"
+                                    and pw_page is not None
+                                ):
+                                    resp = await _dispatch_http_request(
+                                        hx,
+                                        browser_ctx,
+                                        run_id,
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        merged_headers,
+                                        urlencode(body),
+                                        selected_session=selected_session,
+                                        primary_session=session_vault.get(
+                                            "configured_primary"
+                                        ),
+                                        primary_browser_cookies=_primary_browser_cookies,
+                                        browser_page=pw_page,
+                                        scope_check=lambda next_url: check_scope(
+                                            next_url, site_id, run_id
+                                        ),
+                                    )
+                                    register_redirect_blocked = getattr(
+                                        resp, "redirect_blocked", None
+                                    )
+                                else:
+                                    resp = await hx.request(
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        data=body,
+                                        headers=merged_headers,
+                                    )
                             else:
                                 merged_headers.setdefault(
                                     "Content-Type", "application/json"
                                 )
                                 started = time.perf_counter()
-                                resp = await hx.request(
-                                    str(action.get("method") or "POST").upper(),
-                                    url,
-                                    json=body,
-                                    headers=merged_headers,
-                                )
+                                if (
+                                    (_waf_strategy_for_run(run_id) or {}).get(
+                                        "transport"
+                                    )
+                                    == "browser_page"
+                                    and pw_page is not None
+                                ):
+                                    resp = await _dispatch_http_request(
+                                        hx,
+                                        browser_ctx,
+                                        run_id,
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        merged_headers,
+                                        body,
+                                        selected_session=selected_session,
+                                        primary_session=session_vault.get(
+                                            "configured_primary"
+                                        ),
+                                        primary_browser_cookies=_primary_browser_cookies,
+                                        browser_page=pw_page,
+                                        scope_check=lambda next_url: check_scope(
+                                            next_url, site_id, run_id
+                                        ),
+                                    )
+                                    register_redirect_blocked = getattr(
+                                        resp, "redirect_blocked", None
+                                    )
+                                else:
+                                    resp = await hx.request(
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        json=body,
+                                        headers=merged_headers,
+                                    )
                         duration_ms = int((time.perf_counter() - started) * 1000)
                         resp_status = resp.status_code
                         resp_headers = dict(resp.headers)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
                         resp_body = _redact_sensitive_text(raw_resp_body)
+                        if register_redirect_blocked:
+                            resp_body = (
+                                f"[SCOPE BLOCK] Redirect to "
+                                f"{register_redirect_blocked[0]!r} was not followed: "
+                                f"{register_redirect_blocked[1]}\n\n{resp_body}"
+                            )
                         success = resp.status_code in success_statuses
                         token = (
                             _extract_bearer_token_from_body(raw_resp_body)
@@ -7080,6 +7536,12 @@ async def _do_thinking_scan(run_id: int) -> None:
                                 merged_headers,
                                 body,
                                 selected_session=selected_session,
+                                primary_session=session_vault.get("configured_primary"),
+                                primary_browser_cookies=_primary_browser_cookies,
+                                browser_page=pw_page,
+                                scope_check=lambda next_url: check_scope(
+                                    next_url, site_id, run_id
+                                ),
                             )
                             duration_ms = int((time.perf_counter() - started) * 1000)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
@@ -7629,6 +8091,7 @@ async def _do_agentic_thinking_loop(
     hx,
     browser_ctx,
     pw_page,
+    primary_browser_cookies: list[dict] | None = None,
     history: list[dict],
     all_results: list[dict],
     resume_from: dict | None = None,
@@ -7703,8 +8166,8 @@ async def _do_agentic_thinking_loop(
     # Snapshot the primary (default) browser-session cookies so anonymous or
     # other-user browser steps can be isolated and default steps restored without
     # one step's session leaking into the next. Kept fresh by _try_reauth below.
-    _primary_browser_cookies: list[dict] = []
-    if browser_ctx is not None:
+    _primary_browser_cookies: list[dict] = primary_browser_cookies or []
+    if browser_ctx is not None and primary_browser_cookies is None:
         try:
             _primary_browser_cookies = await browser_ctx.cookies()
         except Exception:
@@ -8319,6 +8782,7 @@ async def _do_agentic_thinking_loop(
                 },
             )
             try:
+                _br_waf_strategy = _waf_strategy_for_run(run_id) or {}
                 # Isolate the browser session per step: clear the shared context's
                 # cookies first so a prior authenticated step can't leak into an
                 # anonymous/other-user navigation, then install exactly the selected
@@ -8331,6 +8795,26 @@ async def _do_agentic_thinking_loop(
                         {"name": k, "value": v, "url": br_url}
                         for k, v in (selected_session.get("cookies") or {}).items()
                     ]
+                    if _br_waf_strategy.get("transport") == "browser_page":
+                        cookie_list = _merge_browser_cookies(
+                            [
+                                cookie
+                                for cookie in _primary_browser_cookies
+                                if any(
+                                    str(cookie.get("name") or "")
+                                    .lower()
+                                    .startswith(prefix)
+                                    for prefix in _br_waf_strategy.get(
+                                        "preserve_cookie_prefixes", []
+                                    )
+                                )
+                            ],
+                            cookie_list,
+                            br_url,
+                            tuple(
+                                _br_waf_strategy.get("preserve_cookie_prefixes", [])
+                            ),
+                        )
                 else:
                     cookie_list = _primary_browser_cookies
                 if cookie_list:
@@ -8746,12 +9230,33 @@ async def _do_agentic_thinking_loop(
                     with _client_session_cookies(
                         hx, {"cookies": {}, "extra_headers": {}}
                     ):
-                        cc_r = await hx.request(
-                            str(tool_input.get("method") or "POST").upper(),
-                            cc_url,
-                            json=cc_body,
-                            headers=cc_merged,
-                        )
+                        if (
+                            _waf_strategy_for_run(run_id) or {}
+                        ).get("transport") == "browser_page" and pw_page is not None:
+                            cc_r = await _dispatch_http_request(
+                                hx,
+                                browser_ctx,
+                                run_id,
+                                str(tool_input.get("method") or "POST").upper(),
+                                cc_url,
+                                cc_merged,
+                                cc_body,
+                                selected_session={
+                                    "cookies": {},
+                                    "extra_headers": {},
+                                },
+                                primary_session=session_vault.get("configured_primary"),
+                                primary_browser_cookies=_primary_browser_cookies,
+                                browser_page=pw_page,
+                                scope_check=_active_scope_check,
+                            )
+                        else:
+                            cc_r = await hx.request(
+                                str(tool_input.get("method") or "POST").upper(),
+                                cc_url,
+                                json=cc_body,
+                                headers=cc_merged,
+                            )
                     cc_resp_status = cc_r.status_code
                     cc_resp_headers = dict(cc_r.headers)
                     cc_excerpt = cc_r.text[:800]
@@ -8945,28 +9450,70 @@ async def _do_agentic_thinking_loop(
                         ra_merged.setdefault(
                             "Content-Type", "application/x-www-form-urlencoded"
                         )
-                        ra_r, ra_redirect_blocked = await _request_scope_checked(
-                            hx,
-                            ra_method,
-                            ra_url,
-                            site_id=site_id,
-                            run_id=run_id,
-                            scope_check=scope_check_fn,
-                            data=ra_body,
-                            headers=ra_merged,
-                        )
+                        if (
+                            _waf_strategy_for_run(run_id) or {}
+                        ).get("transport") == "browser_page" and pw_page is not None:
+                            ra_r = await _dispatch_http_request(
+                                hx,
+                                browser_ctx,
+                                run_id,
+                                ra_method,
+                                ra_url,
+                                ra_merged,
+                                urlencode(ra_body),
+                                selected_session=ra_sel_session,
+                                primary_session=session_vault.get("configured_primary"),
+                                primary_browser_cookies=_primary_browser_cookies,
+                                browser_page=pw_page,
+                                scope_check=_active_scope_check,
+                            )
+                            ra_redirect_blocked = getattr(
+                                ra_r, "redirect_blocked", None
+                            )
+                        else:
+                            ra_r, ra_redirect_blocked = await _request_scope_checked(
+                                hx,
+                                ra_method,
+                                ra_url,
+                                site_id=site_id,
+                                run_id=run_id,
+                                scope_check=scope_check_fn,
+                                data=ra_body,
+                                headers=ra_merged,
+                            )
                     else:
                         ra_merged.setdefault("Content-Type", "application/json")
-                        ra_r, ra_redirect_blocked = await _request_scope_checked(
-                            hx,
-                            ra_method,
-                            ra_url,
-                            site_id=site_id,
-                            run_id=run_id,
-                            scope_check=scope_check_fn,
-                            json=ra_body,
-                            headers=ra_merged,
-                        )
+                        if (
+                            _waf_strategy_for_run(run_id) or {}
+                        ).get("transport") == "browser_page" and pw_page is not None:
+                            ra_r = await _dispatch_http_request(
+                                hx,
+                                browser_ctx,
+                                run_id,
+                                ra_method,
+                                ra_url,
+                                ra_merged,
+                                ra_body,
+                                selected_session=ra_sel_session,
+                                primary_session=session_vault.get("configured_primary"),
+                                primary_browser_cookies=_primary_browser_cookies,
+                                browser_page=pw_page,
+                                scope_check=_active_scope_check,
+                            )
+                            ra_redirect_blocked = getattr(
+                                ra_r, "redirect_blocked", None
+                            )
+                        else:
+                            ra_r, ra_redirect_blocked = await _request_scope_checked(
+                                hx,
+                                ra_method,
+                                ra_url,
+                                site_id=site_id,
+                                run_id=run_id,
+                                scope_check=scope_check_fn,
+                                json=ra_body,
+                                headers=ra_merged,
+                            )
                 if ra_redirect_blocked is not None:
                     return (
                         f"[SCOPE BLOCK] register_account redirected to "
@@ -9335,15 +9882,34 @@ async def _do_agentic_thinking_loop(
             # Swap the shared client jar to exactly the selected session so an
             # "anonymous"/other-user probe is not silently authenticated.
             with _client_session_cookies(hx, hr_sel_session):
-                hr_r, hr_redirect_blocked = await _request_scope_checked(
-                    hx,
-                    hr_method,
-                    hr_url,
-                    site_id=site_id,
-                    run_id=run_id,
-                    scope_check=scope_check_fn,
-                    **hr_req_kwargs,
-                )
+                if (
+                    _waf_strategy_for_run(run_id or 0) or {}
+                ).get("transport") == "browser_page" and pw_page is not None:
+                    hr_r = await _dispatch_http_request(
+                        hx,
+                        browser_ctx,
+                        run_id,
+                        hr_method,
+                        hr_url,
+                        hr_merged,
+                        hr_body,
+                        selected_session=hr_sel_session,
+                        primary_session=session_vault.get("configured_primary"),
+                        primary_browser_cookies=_primary_browser_cookies,
+                        browser_page=pw_page,
+                        scope_check=_active_scope_check,
+                    )
+                    hr_redirect_blocked = getattr(hr_r, "redirect_blocked", None)
+                else:
+                    hr_r, hr_redirect_blocked = await _request_scope_checked(
+                        hx,
+                        hr_method,
+                        hr_url,
+                        site_id=site_id,
+                        run_id=run_id,
+                        scope_check=scope_check_fn,
+                        **hr_req_kwargs,
+                    )
             hr_duration_ms = int((time.perf_counter() - hr_started) * 1000)
             hr_raw = hr_r.text[:BODY_READ_LIMIT]
             hr_token = _extract_bearer_token_from_body(hr_raw)
@@ -10098,6 +10664,11 @@ async def _run_deterministic_site_modules(
     run_id: int,
     base_url: str,
     cred_sessions: dict[int, dict],
+    site_id: int = 0,
+    primary_session: dict | None = None,
+    browser_ctx=None,
+    browser_page=None,
+    primary_browser_cookies: list[dict] | None = None,
     scanner_policy=None,
 ) -> None:
     """Run deterministic site-level modules that do not require LLM reasoning."""
@@ -10125,6 +10696,11 @@ async def _run_deterministic_site_modules(
             run_id=run_id,
             base_url=base_url,
             cred_sessions=cred_sessions,
+            site_id=site_id,
+            primary_session=primary_session,
+            browser_ctx=browser_ctx,
+            browser_page=browser_page,
+            primary_browser_cookies=primary_browser_cookies,
             scanner_policy=scanner_policy,
         )
     )
@@ -10132,6 +10708,11 @@ async def _run_deterministic_site_modules(
         await _run_idor_matrix_module(
             run_id=run_id,
             cred_sessions=cred_sessions,
+            site_id=site_id,
+            primary_session=primary_session,
+            browser_ctx=browser_ctx,
+            browser_page=browser_page,
+            primary_browser_cookies=primary_browser_cookies,
             scanner_policy=scanner_policy,
         )
     )
@@ -10155,6 +10736,11 @@ async def _run_auth_matrix_module(
     run_id: int,
     base_url: str,
     cred_sessions: dict[int, dict],
+    site_id: int = 0,
+    primary_session: dict | None = None,
+    browser_ctx=None,
+    browser_page=None,
+    primary_browser_cookies: list[dict] | None = None,
     scanner_policy=None,
 ) -> list[ScanFinding]:
     """Check high-value endpoints anonymously and across available sessions."""
@@ -10179,8 +10765,14 @@ async def _run_auth_matrix_module(
             run_id,
             url,
             method=method,
+            site_id=site_id,
             timeout=timeout,
             follow_redirects=follow_redirects,
+            primary_session=primary_session,
+            browser_ctx=browser_ctx,
+            browser_page=browser_page,
+            primary_browser_cookies=primary_browser_cookies,
+            selected_session={"cookies": {}, "extra_headers": {}},
         )
         if not anon_result:
             continue
@@ -10229,9 +10821,14 @@ async def _run_auth_matrix_module(
                 run_id,
                 url,
                 method=method,
+                site_id=site_id,
                 session=session,
                 timeout=timeout,
                 follow_redirects=follow_redirects,
+                primary_session=primary_session,
+                browser_ctx=browser_ctx,
+                browser_page=browser_page,
+                primary_browser_cookies=primary_browser_cookies,
             )
             if (
                 result
@@ -10261,6 +10858,11 @@ async def _run_idor_matrix_module(
     *,
     run_id: int,
     cred_sessions: dict[int, dict],
+    site_id: int = 0,
+    primary_session: dict | None = None,
+    browser_ctx=None,
+    browser_page=None,
+    primary_browser_cookies: list[dict] | None = None,
     scanner_policy=None,
 ) -> list[ScanFinding]:
     """Compare object-reference pages across users using crawled ground truth."""
@@ -10309,9 +10911,14 @@ async def _run_idor_matrix_module(
                 run_id,
                 page.url,
                 method="GET",
+                site_id=site_id,
                 session=session,
                 timeout=timeout,
                 follow_redirects=follow_redirects,
+                primary_session=primary_session,
+                browser_ctx=browser_ctx,
+                browser_page=browser_page,
+                primary_browser_cookies=primary_browser_cookies,
             )
             if not result or not _is_successful_access(result):
                 continue
@@ -10446,7 +11053,13 @@ async def _fetch_matrix_url(
     url: str,
     *,
     method: str = "GET",
+    site_id: int = 0,
     session: dict | None = None,
+    selected_session: dict | None = None,
+    primary_session: dict | None = None,
+    browser_ctx=None,
+    browser_page=None,
+    primary_browser_cookies: list[dict] | None = None,
     timeout: float = REQUEST_TIMEOUT,
     follow_redirects: bool = True,
 ) -> dict | None:
@@ -10467,7 +11080,37 @@ async def _fetch_matrix_url(
             verify=False,
             timeout=timeout,
         ) as client:
-            resp = await client.request(method, url)
+            if (
+                (_waf_strategy_for_run(run_id) or {}).get("transport")
+                == "browser_page"
+                and browser_ctx is not None
+                and browser_page is not None
+            ):
+                resp = await _dispatch_http_request(
+                    client,
+                    browser_ctx,
+                    run_id,
+                    method,
+                    url,
+                    headers,
+                    None,
+                    selected_session=(
+                        selected_session
+                        if selected_session is not None
+                        else session
+                    ),
+                    primary_session=primary_session,
+                    primary_browser_cookies=primary_browser_cookies,
+                    browser_page=browser_page,
+                    scope_check=lambda next_url: check_scope(
+                        next_url, site_id, run_id
+                    ),
+                    follow_redirects=follow_redirects,
+                )
+            else:
+                resp = await client.request(
+                    method, url, follow_redirects=follow_redirects
+                )
         # Build evidence from the *actual* request headers that went on the wire
         # (after any redirect/Set-Cookie replay or configured global header) rather
         # than fabricating "Authorization: none" — so an anonymous probe that was

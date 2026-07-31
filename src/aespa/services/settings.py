@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 
 from aespa.models import (
     AdversarialValidatorConfig,
+    BrowserDebugConfig,
     BurpRestApiConfig,
     CloudflareAccessConfig,
     CrawlerConfig,
@@ -26,6 +27,8 @@ from aespa.models import (
     UpstreamProxyConfig,
 )
 from aespa.schemas import (
+    BrowserDebugConfigIn,
+    BrowserDebugConfigOut,
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
@@ -968,6 +971,35 @@ def upsert_reporting_debug_config(
     session.commit()
     session.refresh(cfg)
     return get_reporting_debug_config(session)
+
+
+def get_browser_debug_config(session: Session) -> BrowserDebugConfigOut:
+    cfg = session.get(BrowserDebugConfig, _SINGLETON_ID)
+    if cfg is None:
+        return BrowserDebugConfigOut(
+            **BrowserDebugConfigIn().model_dump(),
+            updated_at=_utcnow(),
+        )
+    return BrowserDebugConfigOut(
+        browser_engine=cfg.browser_engine,
+        browser_visible=cfg.browser_visible,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_browser_debug_config(
+    session: Session, payload: BrowserDebugConfigIn
+) -> BrowserDebugConfigOut:
+    cfg = session.get(BrowserDebugConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = BrowserDebugConfig(id=_SINGLETON_ID)
+    cfg.browser_engine = payload.browser_engine
+    cfg.browser_visible = payload.browser_visible
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_browser_debug_config(session)
 
 
 def get_cloudflare_access_config(session: Session) -> CloudflareAccessConfigOut:

@@ -100,6 +100,21 @@ def test_cloudflare_access_config_round_trip(client: TestClient):
     assert r.json()["audience"] is None
 
 
+def test_browser_debug_config_round_trip(client: TestClient):
+    initial = client.get("/api/settings/browser-debug")
+    assert initial.status_code == 200
+    assert initial.json()["browser_engine"] == "playwright_chromium"
+    assert initial.json()["browser_visible"] is False
+
+    updated = client.put(
+        "/api/settings/browser-debug",
+        json={"browser_engine": "system_chrome", "browser_visible": True},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["browser_engine"] == "system_chrome"
+    assert updated.json()["browser_visible"] is True
+
+
 def test_global_http_headers_round_trip(client: TestClient):
     initial = client.get("/api/settings/global-http-header")
     assert initial.status_code == 200

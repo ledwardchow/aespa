@@ -190,7 +190,7 @@
 .traffic-filter-ext { display:flex; align-items:center; gap:8px; color:var(--text-2); font-size:12px; }
 .traffic-filter-ext .traffic-filter { max-width:260px; }
 .traffic-scope-only { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-2); cursor:pointer; white-space:nowrap; }
-/* Table section: takes exactly half the panel when detail is open; full height when not */
+/* Table section: fills the remaining height when detail is open; full height when not */
 .traffic-table-wrap { flex:1; overflow-y:auto; overflow-x:auto; min-height:0; }
 .traffic-table { border-collapse:collapse; font-size:12px; min-width:860px; width:100%; table-layout:fixed; }
 .traffic-table th { text-align:left; padding:6px 10px; font-size:10px; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--panel); z-index:2; white-space:nowrap; user-select:none; }
@@ -215,10 +215,16 @@
 .src-badge { font-size:10px; font-weight:700; padding:1px 6px; border-radius:4px; text-transform:uppercase; letter-spacing:0.3px; }
 .src-httpx      { background:rgba(99,102,241,0.15); color:#818cf8; }
 .src-playwright { background:rgba(16,185,129,0.15); color:#34d399; }
-/* Detail section: takes exactly half the panel */
-.traffic-detail { display:flex; flex-direction:row; flex:1; min-height:0; border-top:2px solid var(--border); }
-.traffic-pane { flex:1; display:flex; flex-direction:column; min-width:0; border-right:1px solid var(--border); }
-.traffic-pane:last-child { border-right:none; }
+/* Detail section: both the overall height and the request/response split can be dragged. */
+.traffic-detail-wrap { display:flex; flex-direction:column; flex:1 1 0; min-height:0; }
+.traffic-detail-resizer { position:relative; z-index:3; flex:0 0 9px; display:flex; align-items:center; justify-content:center; border-top:2px solid var(--border); background:var(--panel); cursor:row-resize; touch-action:none; }
+.traffic-detail-resizer:hover, .traffic-detail-resizer:focus-visible { background:var(--hover); outline:none; }
+.traffic-detail-resizer .traffic-resizer-grip { width:42px; height:3px; border-radius:2px; background:var(--muted); opacity:0.7; }
+.traffic-detail { display:grid; flex:1; min-height:0; }
+.traffic-pane { display:flex; flex-direction:column; min-width:0; min-height:0; }
+.traffic-pane-divider { position:relative; z-index:3; display:flex; align-items:center; justify-content:center; background:var(--panel); border-left:1px solid var(--border); border-right:1px solid var(--border); cursor:col-resize; touch-action:none; }
+.traffic-pane-divider:hover, .traffic-pane-divider:focus-visible { background:var(--hover); outline:none; }
+.traffic-pane-divider .traffic-resizer-grip { width:3px; height:42px; border-radius:2px; background:var(--muted); opacity:0.7; }
 .traffic-pane-label { display:flex; align-items:center; min-height:32px; padding:6px 12px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); border-bottom:1px solid var(--border); background:var(--panel); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex-shrink:0; }
 .traffic-raw { margin:0; padding:10px 14px; font-family:monospace; font-size:11px; line-height:1.55; color:var(--text); white-space:pre-wrap; word-break:break-all; overflow-y:auto; flex:1; background:var(--bg); }
 
@@ -381,6 +387,34 @@
   background: var(--warn);
   border-radius: 2px;
   transition: width 1s ease;
+}
+
+.crawl-stage-strip {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 28px 4px;
+  margin: 0 -28px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.crawl-stage-label {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .45px;
+  text-transform: uppercase;
+}
+.crawl-stage-text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Scan progress strip ────────────────────────────────────── */
