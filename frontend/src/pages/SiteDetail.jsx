@@ -25,6 +25,7 @@ import { WebRunSastLeadsTab } from "./SiteDetail/WebRunSastLeadsTab";
 import { isDynamicScanActive, workflowBadge } from "./SiteDetail/_helpers";
 export { SiteForm } from "./SiteDetail/SiteForm";
 export { TestRunForm } from "./SiteDetail/TestRunForm";
+export { AliceChatPopout } from "./SiteDetail/AliceChatPopout";
 // ── Site detail ───────────────────────────────────────────────────────────────
 
 export function SiteDetail({
@@ -379,6 +380,7 @@ export function TestRunDetail({
     aliceExpandedThinkIds,
     setAliceExpandedThinkIds,
     aliceMessages,
+    setAliceChats,
     createAliceTab,
     deleteAliceTab,
     startAliceResize,
@@ -393,6 +395,38 @@ export function TestRunDetail({
       return next;
     })
   });
+  useEffect(() => {
+    const reopenAlicePanel = () => {
+      setCollapsedAgentIds(prev => {
+        if (!prev.has("alice")) return prev;
+        const next = new Set(prev);
+        next.delete("alice");
+        return next;
+      });
+    };
+    const applyAlicePopoutState = data => {
+      if (Array.isArray(data?.chats)) setAliceChats(data.chats);
+      if (data?.active_tab_id) setActiveAliceTabId(data.active_tab_id);
+      reopenAlicePanel();
+    };
+    const handleAlicePopoutClose = event => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type !== "aespa-alice-popout-close" || Number(event.data.runId) !== runId) return;
+      applyAlicePopoutState(event.data);
+    };
+    const handleAlicePopoutStorage = event => {
+      if (event.key !== `aespa-alice-popout-close:${runId}`) return;
+      try {
+        applyAlicePopoutState(JSON.parse(event.newValue || "null"));
+      } catch {}
+    };
+    window.addEventListener("message", handleAlicePopoutClose);
+    window.addEventListener("storage", handleAlicePopoutStorage);
+    return () => {
+      window.removeEventListener("message", handleAlicePopoutClose);
+      window.removeEventListener("storage", handleAlicePopoutStorage);
+    };
+  }, [runId, setActiveAliceTabId, setAliceChats]);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState(null);
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);

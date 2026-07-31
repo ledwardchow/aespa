@@ -20,7 +20,7 @@ You can also talk to the ALICE bot; you can think of ALICE as a Test Lead you ca
 
 ALICE is separate to the built-in Test Lead, you can use it concurrently if you like. 
 
-ALICE has access to [all tools](../agent-tool-reference.md) that any other agent has, so you can ask it to do things like:
+ALICE has a focused interactive subset of the [agent tools](../agent-tool-reference.md). It can make scoped HTTP requests, drive a real browser, inspect crawl and coverage context, refresh an expired configured login, and record or remove findings. In web Enforce mode it can also record a well-justified coverage skip. For API chats, it uses API inventory and safe request-analysis context instead of web-only tools. You can ask it to do things like:
 - Can you perform a penetration test of the admin section of this app only?
 - Can you tell me what findings affect the customer section of the app?
 - The are 3 SQL injection findings that look like duplicates. Can you go through all the findings, check whether they are duplicated, and merge/remove them as necessary?
@@ -28,6 +28,11 @@ ALICE has access to [all tools](../agent-tool-reference.md) that any other agent
 - The rating on the Information Disclosure finding looks a bit high - can you review all issues and reconsider the ratings? 
 
 You can also use ALICE to "unstick" the automated pentester if it gets stuck - try giving it a fetch/curl command for a login function that's not well-exposed by the site:
+
+For an interactive page from the crawl, tell ALICE which page/state to test. It can pass that
+state's `page_id` to a request or browser action, and use the saved replay recipe when the page
+depends on earlier navigation or form steps. The resulting traffic remains linked to that page
+and the session used to reach it.
 ![alt text](scans/images/aliceprompting.png)
 
 ## Working with Findings

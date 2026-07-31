@@ -1223,7 +1223,7 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 1. Load run/site config; verify scope of the user's instruction
 2. Emit [A.L.I.C.E. Initializing] + scope-check status chunks
 3. Convert chat history → Anthropic messages format
-4. Loop (max ALICE_MAX_STEPS = 40):
+4. Loop (max ALICE_MAX_STEPS = 300):
      a. Emit [Step N] Calling LLM... thinking chunk
      b. Call LLM with tools (ALICE tool set — see below)
      c. Stream thinking blocks → thinking_chunk SSE events
@@ -1240,15 +1240,27 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 | Tool | Description |
 |---|---|
 | `http_request` | Issue arbitrary HTTP requests; scope-checked; traffic logged |
-| `browser` | Simple page fetch via httpx with browser-like headers |
-| `context_tool` | Read-only access to crawl data (site map, page details, traffic) |
+| `browser` | Drive a live Playwright browser. `page_id` and `replay=true` restore a saved crawler state and preserve page/session traffic provenance |
+| `context_tool` | Read-only access to crawl data, request history, traffic, coverage gaps, response comparisons, and bounded mutation suggestions |
+| `reauthenticate` | Re-run the configured web login flow, including supported TOTP or email-OTP steps, and refresh the primary session |
+| `skip_coverage` | In web Enforce mode, record a justified inapplicable or technically blocked coverage obligation |
 | `write_finding` | Persist a confirmed vulnerability directly to `ScanFinding`; **skips `normalize_finding_titles`** to prevent false deduplication |
+| `remove_finding` | Remove a finding from the active web or API run when it was written in error or is a confirmed duplicate |
+| `update_lead` | Record the outcome of investigating an imported SAST lead against the active run kind |
 | `forge_jwt` | Sign an HS256 JWT from a discovered secret; stores result in session vault |
 | `decode_jwt` | Decode a JWT's header and payload |
 | `credential_check` | Test a login URL with a list of candidate credential pairs |
 | `register_account` | Create a test account and store the resulting session |
 | `agent_dispatch` | Dispatch a Specialist Agent (see below) |
 | `done` | End the turn with a summary |
+
+On API runs, ALICE keeps the API inventory commands (`collection_info`,
+`endpoint_list`, `endpoint_detail`, `finding_list`, `lead_list`,
+`report_finding`, `coverage_matrix`, and `set_coverage`) and adds the safe shared
+analysis commands (`history_search`, `traffic_search`, `compare_responses`,
+`mutate_request`, and `extract_entities`). API traffic is filtered by
+`api_test_run_id`; it is never read through the colliding web `TestRun` id. API
+ALICE does not get `reauthenticate`, `skip_coverage`, or Specialist dispatch.
 
 #### `write_finding` deduplication
 
@@ -1368,7 +1380,8 @@ _api_scan_task(api_run_id)
             • get_api_test_lead_tools supplies only API-aware top-level tools; browser,
               remove_finding, and agent_dispatch are withheld
             • _api_context_tool_fn routes endpoint_list / endpoint_detail / collection_info / finding_list
-              to API-specific handlers and a strict safe subset to the shared handler; all other
+              to API-specific handlers and history_search / traffic_search / compare_responses /
+              mutate_request / extract_entities to the shared safe analysis handler; all other
               commands are rejected, including web-crawl target_inventory / search_assets
             • _api_check_scope is applied to every target request and redirect hop
             • _make_post_probe_fn updates the coverage matrix cell for each probe (endpoint, category)
@@ -1385,10 +1398,12 @@ _api_scan_task(api_run_id)
 ### ALICE on API runs
 
 API test runs expose the same `/alice/*` endpoints as web test runs. API ALICE routes
-`collection_info`, `endpoint_list`, and `endpoint_detail` to API-specific handlers and
-persists captured sessions under `run_kind="api"`. Specialist dispatch is withheld in API
-mode until the Specialist executor is fully API-aware. The API system prompt includes
-OWASP API Top-10 category descriptions and API context tool documentation.
+`collection_info`, `endpoint_list`, `endpoint_detail`, `finding_list`, and `lead_list` to
+API-specific handlers, and routes safe request-analysis commands through the API traffic
+store. It persists captured sessions under `run_kind="api"`. Specialist dispatch is withheld
+in API mode until the Specialist executor is fully API-aware. The API system prompt includes
+OWASP API Top-10 category descriptions and both API inventory and shared context tool
+documentation.
 
 ---
 

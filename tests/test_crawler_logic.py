@@ -160,6 +160,17 @@ def test_same_url_without_fragment_ignores_fragment_only():
     )
 
 
+def test_same_login_route_distinguishes_spa_hash_routes():
+    assert crawler._same_login_route(
+        "https://target.local/admin/#/login",
+        "https://target.local/admin/#/login",
+    )
+    assert not crawler._same_login_route(
+        "https://target.local/admin/#/customers/15",
+        "https://target.local/admin/#/login",
+    )
+
+
 class _CredWithLogin:
     login_url = "https://target.local/admin/login"
 
@@ -358,6 +369,52 @@ def test_page_requires_login_detects_visible_password_field():
     )
 
 
+class _TransientPasswordLocator:
+    def __init__(self, page):
+        self.page = page
+
+    async def count(self):
+        return 1
+
+    async def is_visible(self):
+        return True
+
+    async def evaluate(self, script, actionable):  # noqa: ARG002
+        self.page.exposure_checks += 1
+        return self.page.exposure_checks < 3
+
+
+class _TransientSpaPage:
+    url = "https://target.local/admin/#/customers/15"
+
+    def __init__(self):
+        self.exposure_checks = 0
+        self._password = _TransientPasswordLocator(self)
+
+    def locator(self, selector):  # noqa: ARG002
+        return _FakeLocatorRoot(self._password)
+
+    async def wait_for_timeout(self, ms):  # noqa: ARG002
+        return None
+
+    async def evaluate(self, script):  # noqa: ARG002
+        return "Customer details"
+
+
+def test_page_requires_login_waits_for_spa_login_form_to_be_hidden():
+    page = _TransientSpaPage()
+
+    assert (
+        asyncio.run(
+            crawler._page_requires_login(
+                page, "https://target.local/admin/#/login", settle_ms=300
+            )
+        )
+        is False
+    )
+    assert page.exposure_checks >= 3
+
+
 def test_page_requires_login_detects_explicit_login_wall_text():
     page = _FakePage(
         "https://target.local/account",
@@ -526,6 +583,55 @@ def test_interactive_controls_allow_dangerous_actions_when_disabled():
     )
 
     assert [control["name"] for control in controls] == ["Pay now", "View details"]
+
+
+class _SessionEndingControlsPage:
+    async def evaluate(self, script):  # noqa: ARG002
+        return [
+            {
+                "tag": "button",
+                "role": "button",
+                "name": "Sign Out",
+                "testid": None,
+                "id": "sign-out",
+                "input_type": "",
+                "inside_form": False,
+                "button_type": None,
+            },
+            {
+                "tag": "button",
+                "role": "button",
+                "name": "End Session",
+                "testid": None,
+                "id": "end-session",
+                "input_type": "",
+                "inside_form": False,
+                "button_type": None,
+            },
+            {
+                "tag": "button",
+                "role": "button",
+                "name": "Open settings",
+                "testid": None,
+                "id": "settings",
+                "input_type": "",
+                "inside_form": False,
+                "button_type": None,
+            },
+        ]
+
+
+def test_interactive_controls_always_skip_session_ending_actions():
+    for skip_dangerous_actions in (True, False):
+        controls = asyncio.run(
+            crawler._interactive_controls(
+                _SessionEndingControlsPage(),
+                skip_dangerous_actions=skip_dangerous_actions,
+                suppress_form_submit_actions=False,
+            )
+        )
+
+        assert [control["name"] for control in controls] == ["Open settings"]
 
 
 class _WorkflowControlsPage:
@@ -871,6 +977,52 @@ def test_interactive_action_blocks_and_redacts_mutating_request():
             {"method": "POST", "url": "https://target.local/orders/draft"}
         ],
     }
+
+
+def test_interactive_replay_rejects_session_ending_action_even_when_allowed():
+    result = asyncio.run(
+        crawler._perform_interactive_action(
+            _MutationPage(),
+            {
+                "kind": "click",
+                "name": "Sign Out",
+                "selector": "#sign-out",
+            },
+            block_non_idempotent_interactive_replay=False,
+        )
+    )
+
+    assert result == {"ok": False, "changed": False, "blocked_requests": []}
+
+
+def test_api_promotion_skips_session_ending_endpoint(monkeypatch):
+    analysed = []
+
+    async def fake_analyse(*args, **kwargs):  # noqa: ARG001
+        analysed.append(True)
+        return "", "", {}
+
+    monkeypatch.setattr(crawler, "_analyse_api_call", fake_analyse)
+    asyncio.run(
+        crawler._promote_api_calls(
+            run_id=1,
+            calls=[
+                {
+                    "url": "https://target.local/api/auth/logout",
+                    "method": "POST",
+                }
+            ],
+            source_page_id=1,
+            source_depth=0,
+            shared=None,
+            max_pages=10,
+            credential_id=None,
+            username=None,
+            llm_cfg=None,
+        )
+    )
+
+    assert analysed == []
 
 
 class _WorkflowExplorePage:
@@ -1489,6 +1641,24 @@ def test_crawl_seed_urls_reject_external_authenticated_landing():
         "target.local",
         "/app/",
     ) == ["https://target.local/app/"]
+
+
+def test_crawl_seed_urls_skip_session_ending_urls():
+    assert crawler._crawl_seed_urls(
+        "https://target.local/app/",
+        "https://target.local/app/logout",
+        "target.local",
+        "/app/",
+    ) == ["https://target.local/app/"]
+    assert (
+        crawler._crawl_seed_urls(
+            "https://target.local/logout",
+            None,
+            "target.local",
+            "/",
+        )
+        == []
+    )
 
 
 def test_auth_check_matches_similar_post_login_page():
