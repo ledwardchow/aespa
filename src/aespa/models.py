@@ -603,6 +603,19 @@ class TestRun(SQLModel, table=True):
     crawl_credential_id: Optional[int] = Field(
         default=None, foreign_key="credential.id"
     )
+    # JSON list of page IDs for a deliberate state-focused scan. Empty/NULL
+    # means the normal full-site scan. This is persisted so a queued sitemap
+    # action survives a worker restart and is visible to the Test Lead.
+    target_page_ids_json: Optional[str] = Field(default=None)
+    target_session_label: Optional[str] = Field(default=None)
+
+    @property
+    def target_page_ids(self) -> list[int]:
+        try:
+            values = json.loads(self.target_page_ids_json or "[]")
+            return [int(value) for value in values if str(value).isdigit()]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
 
 
 class CrawledPage(SQLModel, table=True):
@@ -617,6 +630,11 @@ class CrawledPage(SQLModel, table=True):
     state_label: Optional[str] = Field(default=None)
     state_kind: str = Field(default="url")  # url | interactive | api
     replay_steps_json: str = Field(default="[]")
+    # Credential that first reached this state.  Replay uses this identity by
+    # default and never silently substitutes another user.
+    replay_credential_id: Optional[int] = Field(
+        default=None, foreign_key="credential.id", index=True
+    )
     title: Optional[str] = Field(default=None)
     page_text: Optional[str] = Field(default=None)  # truncated ~10k chars
     screenshot_b64: Optional[str] = Field(default=None)
@@ -712,6 +730,14 @@ class TrafficEntry(SQLModel, table=True):
     username: Optional[str] = Field(
         default=None
     )  # credential username that made the request
+    # Optional page/session provenance.  URL matching remains a legacy fallback,
+    # but interactive states sharing one URL need these explicit associations.
+    page_id: Optional[int] = Field(
+        default=None,
+        foreign_key="crawled_page.id",
+        index=True,
+    )
+    session_label: Optional[str] = Field(default=None, index=True)
 
 
 class ScannerSession(SQLModel, table=True):
@@ -795,6 +821,9 @@ class TargetIntelItem(SQLModel, table=True):
     confidence: float = Field(default=1.0)
     evidence: str = Field(default="")
     item_metadata: str = Field(default="{}")
+    page_id: Optional[int] = Field(
+        default=None, foreign_key="crawled_page.id", index=True
+    )
     discovered_at: datetime = Field(default_factory=_utcnow)
 
 

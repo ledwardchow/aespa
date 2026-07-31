@@ -705,6 +705,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "alembic_version" in tables
         assert "site" in tables
         assert "test_run" in tables
-        assert version == "6f50c4a9c1e8"
+        # The migration chain now includes replay/session provenance fields.
+        assert version == "1f4e7a2c9b10"
     finally:
         engine.dispose()

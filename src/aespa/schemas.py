@@ -1133,6 +1133,8 @@ class TestRunSummary(BaseModel):
     per_user_progress: dict = Field(default_factory=dict)
     scope_hosts: list[str] = Field(default_factory=list)
     crawl_credential_id: int | None = None
+    target_page_ids: list[int] = Field(default_factory=list)
+    target_session_label: str | None = None
 
     @field_validator("per_user_progress", mode="before")
     @classmethod
@@ -1144,6 +1146,21 @@ class TestRunSummary(BaseModel):
         if isinstance(v, str):
             return _json.loads(v)
         return v
+
+    @field_validator("target_page_ids", mode="before")
+    @classmethod
+    def _coerce_target_page_ids(cls, v):
+        import json as _json
+
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            try:
+                parsed = _json.loads(v)
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return []
+        return v if isinstance(v, list) else []
 
 
 class ActiveJobSummary(BaseModel):
@@ -1178,6 +1195,7 @@ class CrawledPageOut(BaseModel):
     state_key: str | None = None
     state_label: str | None = None
     state_kind: str = "url"
+    replay_credential_id: int | None = None
     title: str | None
     llm_context: str | None
     depth: int
@@ -1197,6 +1215,9 @@ class CrawledPageDetail(CrawledPageOut):
     page_text: str | None
     screenshot_b64: str | None
     replay_steps_json: str = "[]"
+    browser_replay: dict | None = None
+    traffic: list[dict] = []
+    object_references: list[dict] = []
 
 
 class GraphNode(BaseModel):
@@ -1204,6 +1225,8 @@ class GraphNode(BaseModel):
     url: str
     state_label: str | None = None
     state_kind: str = "url"
+    replay_available: bool = False
+    replay_credential_id: int | None = None
     title: str | None
     depth: int
     status: str
@@ -1240,6 +1263,7 @@ class TargetIntelItemOut(BaseModel):
     confidence: float
     evidence: str
     item_metadata: dict = Field(default_factory=dict)
+    page_id: int | None = None
     discovered_at: datetime
 
     @field_validator("item_metadata", mode="before")

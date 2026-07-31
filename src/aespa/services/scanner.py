@@ -482,7 +482,9 @@ def _session_browser_cookies(
     if session is not None:
         metadata_cookies = (session.get("metadata") or {}).get("browser_cookies")
         if isinstance(metadata_cookies, list):
-            return [dict(cookie) for cookie in metadata_cookies if isinstance(cookie, dict)]
+            return [
+                dict(cookie) for cookie in metadata_cookies if isinstance(cookie, dict)
+            ]
         cookies = session.get("cookies") or {}
         if isinstance(cookies, dict):
             return [
@@ -526,7 +528,9 @@ async def _prepare_browser_request_session(
     strategy: dict,
 ) -> dict[str, str]:
     """Install exactly the request identity into the shared browser context."""
-    prefixes = tuple(str(item).lower() for item in strategy.get("preserve_cookie_prefixes") or [])
+    prefixes = tuple(
+        str(item).lower() for item in strategy.get("preserve_cookie_prefixes") or []
+    )
     primary_cookies = _merge_browser_cookies(
         primary_browser_cookies or [],
         _session_browser_cookies(primary_session, url, None),
@@ -651,7 +655,9 @@ def _response_is_waf_challenge(result: dict, strategy: dict) -> bool:
     for name, value in strategy.get("challenge_headers") or []:
         if value in headers.get(str(name).lower(), ""):
             return True
-    markers = [str(marker).lower() for marker in strategy.get("challenge_markers") or []]
+    markers = [
+        str(marker).lower() for marker in strategy.get("challenge_markers") or []
+    ]
     return bool(markers and any(marker in body for marker in markers))
 
 
@@ -697,10 +703,7 @@ async def _browser_page_request(
             current_headers,
             current_body,
         )
-        if (
-            not challenge_retried
-            and _response_is_waf_challenge(last_result, strategy)
-        ):
+        if not challenge_retried and _response_is_waf_challenge(last_result, strategy):
             # Fetching an interstitial only downloads it. Navigate the real page
             # once so its JavaScript can establish the vendor token/cookie.
             challenge_retried = True
@@ -2262,6 +2265,7 @@ def _run_thinking_context_tool(
     history: list[dict[str, Any]],
     run_id: int | None = None,
     base_url: str = "",
+    api_run_id: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(args, dict):
         args = {}
@@ -2272,6 +2276,72 @@ def _run_thinking_context_tool(
     tool_name = (tool_name or "").strip()
     search = str(args.get("search") or args.get("filter") or "").lower()
     search_tokens = search.replace("-", "_").split()
+
+    if tool_name == "run_status":
+        if run_id is None:
+            return {"tool": "run_status", "error": "run_id unavailable"}
+
+        with Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            if run is None:
+                return {"tool": "run_status", "error": "test run not found"}
+            pages = list(
+                s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id))
+            )
+            findings_count = len(
+                s.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all()
+            )
+
+        try:
+            per_user_progress = json.loads(run.per_user_progress or "{}")
+            if not isinstance(per_user_progress, dict):
+                per_user_progress = {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            per_user_progress = {}
+
+        if run.phase == "crawling":
+            crawl_status = "running"
+        elif run.phase in {"crawled", "scanning", "reporting", "validating", "finished"}:
+            crawl_status = "complete"
+        elif run.status == "failed":
+            crawl_status = "failed"
+        elif run.status == "stopped":
+            crawl_status = "stopped"
+        else:
+            crawl_status = "not_started"
+
+        scan_status = (
+            _thinking_scan_status.get(run_id, "running")
+            if is_thinking_running(run_id)
+            else _thinking_scan_status.get(run_id, "idle")
+        )
+        return {
+            "tool": "run_status",
+            "run_kind": "web",
+            "run_id": run_id,
+            "name": run.name,
+            "status": run.status,
+            "phase": run.phase,
+            "outcome": run.outcome,
+            "terminal_reason": run.terminal_reason,
+            "crawl": {
+                "status": crawl_status,
+                "pages_discovered": run.pages_discovered,
+                "pages_crawled": sum(1 for page in pages if page.status == "crawled"),
+                "pages_failed": sum(1 for page in pages if page.status == "failed"),
+                "max_pages": run.max_pages,
+                "max_depth": run.max_depth,
+                "current_url": run.current_url,
+                "per_user_progress": per_user_progress,
+                "started_at": run.started_at,
+                "completed_at": run.completed_at,
+            },
+            "scan": {
+                "status": scan_status,
+                "phase": run.phase,
+                "findings_count": findings_count,
+            },
+        }
 
     if tool_name == "site_map":
         route_type = str(args.get("type") or "").lower()
@@ -2296,6 +2366,27 @@ def _run_thinking_context_tool(
             if search_tokens and not all(token in haystack for token in search_tokens):
                 continue
             pages.append(page)
+        if run_id is not None:
+            try:
+                with Session(get_engine()) as _target_session:
+                    _target_run = _target_session.get(TestRun, run_id)
+                    _target_ids = {
+                        int(value)
+                        for value in json.loads(
+                            (_target_run.target_page_ids_json if _target_run else None)
+                            or "[]"
+                        )
+                        if str(value).isdigit()
+                    }
+                if _target_ids:
+                    pages.sort(
+                        key=lambda item: (
+                            0 if item.get("id") in _target_ids else 1,
+                            str(item.get("url") or ""),
+                        )
+                    )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
         return {
             "tool": "site_map",
             "count": len(pages),
@@ -2347,6 +2438,7 @@ def _run_thinking_context_tool(
             "kind": _thinking_page_kind(page),
             "state_label": page.get("state_label") or "",
             "state_kind": page.get("state_kind") or "url",
+            "replay_credential_id": page.get("replay_credential_id"),
         }
         if page.get("replay_steps_json") and page.get("replay_steps_json") != "[]":
             try:
@@ -2380,6 +2472,56 @@ def _run_thinking_context_tool(
                         if isinstance(step, dict)
                     ],
                 }
+        if run_id is not None and (
+            not include_set
+            or "traffic" in include_set
+            or "object_references" in include_set
+            or page.get("state_kind") == "interactive"
+        ):
+            with Session(get_engine()) as s:
+                traffic_rows = s.exec(
+                    select(TrafficEntry)
+                    .where(TrafficEntry.test_run_id == run_id)
+                    .where(TrafficEntry.page_id == page["id"])
+                    .order_by(TrafficEntry.id.desc())
+                    .limit(30)
+                ).all()
+                intel_rows = s.exec(
+                    select(TargetIntelItem)
+                    .where(TargetIntelItem.test_run_id == run_id)
+                    .where(TargetIntelItem.page_id == page["id"])
+                    .where(TargetIntelItem.kind == "object_reference")
+                    .order_by(TargetIntelItem.id.desc())
+                    .limit(50)
+                ).all()
+            if "traffic" in include_set or page.get("state_kind") == "interactive":
+                detail["traffic"] = [
+                    {
+                        "id": row.id,
+                        "method": row.method,
+                        "url": row.url,
+                        "status": row.status,
+                        "source": row.source,
+                        "session_label": row.session_label,
+                    }
+                    for row in traffic_rows
+                ]
+            if (
+                "object_references" in include_set
+                or page.get("state_kind") == "interactive"
+            ):
+                detail["object_references"] = [
+                    {
+                        "id": row.id,
+                        "key": row.key,
+                        "value": row.value,
+                        "url": row.url,
+                        "method": row.method,
+                        "confidence": row.confidence,
+                        "metadata": _loads_json_dict(row.item_metadata),
+                    }
+                    for row in intel_rows
+                ]
         if "title" in include_set:
             detail["title"] = page.get("title") or ""
         if "flags" in include_set:
@@ -2505,7 +2647,13 @@ def _run_thinking_context_tool(
     if tool_name == "traffic_search":
         if run_id is None:
             return {"tool": tool_name, "error": "run_id unavailable"}
-        return _thinking_tool_traffic_search(run_id, args, limit, search_tokens)
+        return _thinking_tool_traffic_search(
+            run_id,
+            args,
+            limit,
+            search_tokens,
+            api_run_id=api_run_id,
+        )
 
     if tool_name == "endpoint_detail":
         if run_id is None:
@@ -2547,6 +2695,7 @@ def _run_thinking_context_tool(
         "available_tools": [
             "site_map",
             "page_detail",
+            "run_status",
             "history_search",
             "finding_list",
             "target_inventory",
@@ -2570,12 +2719,18 @@ def _thinking_tool_target_inventory(
 ) -> dict[str, Any]:
     kind = str(args.get("kind") or "").strip()
     source = str(args.get("source") or "").strip()
+    page_id = args.get("page_id")
     with Session(get_engine()) as s:
         query = select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
         if kind:
             query = query.where(TargetIntelItem.kind == kind)
         if source:
             query = query.where(TargetIntelItem.source == source)
+        if page_id is not None:
+            try:
+                query = query.where(TargetIntelItem.page_id == int(page_id))
+            except (TypeError, ValueError):
+                return {"tool": "target_inventory", "count": 0, "items": []}
         items = list(
             s.exec(
                 query.order_by(
@@ -2598,6 +2753,7 @@ def _thinking_tool_target_inventory(
                 "value": _compact_log_value(item.value, 300),
                 "url": item.url,
                 "method": item.method,
+                "page_id": item.page_id,
                 "source": item.source,
                 "confidence": item.confidence,
                 "evidence": _compact_log_value(item.evidence, 300),
@@ -2618,19 +2774,34 @@ def _thinking_tool_traffic_search(
     args: dict[str, Any],
     limit: int,
     search_tokens: list[str],
+    *,
+    api_run_id: int | None = None,
 ) -> dict[str, Any]:
     method = str(args.get("method") or "").upper()
+    page_id = args.get("page_id")
+    session_label = str(args.get("session_label") or "").strip()
     status = args.get("status")
     try:
         status_int = int(status) if status not in (None, "") else None
     except (TypeError, ValueError):
         status_int = None
     with Session(get_engine()) as s:
-        query = select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
+        query = select(TrafficEntry)
+        if api_run_id is not None:
+            query = query.where(TrafficEntry.api_test_run_id == api_run_id)
+        else:
+            query = query.where(TrafficEntry.test_run_id == run_id)
         if method:
             query = query.where(TrafficEntry.method == method)
         if status_int is not None:
             query = query.where(TrafficEntry.status == status_int)
+        if page_id is not None:
+            try:
+                query = query.where(TrafficEntry.page_id == int(page_id))
+            except (TypeError, ValueError):
+                return {"tool": "traffic_search", "count": 0, "entries": []}
+        if session_label:
+            query = query.where(TrafficEntry.session_label == session_label)
         entries = list(s.exec(query.order_by(TrafficEntry.id.desc()).limit(1000)))
     matches = []
     for entry in entries:
@@ -2657,6 +2828,8 @@ def _thinking_tool_traffic_search(
                 "status": entry.status,
                 "duration_ms": entry.duration_ms,
                 "username": entry.username,
+                "page_id": entry.page_id,
+                "session_label": entry.session_label,
                 "request_headers": _safe_json_excerpt(entry.request_headers, 800),
                 "request_body": _compact_log_value(entry.request_body, 1000),
                 "response_headers": _safe_json_excerpt(entry.response_headers, 800),
@@ -4507,6 +4680,8 @@ async def _run_specialist_agent(
     max_steps: int,
     site_id: int,
     is_api_run: bool = False,
+    target_page_id: int | None = None,
+    target_session_label: str | None = None,
 ) -> None:
     """Run a focused specialist agent for a specific vulnerability lead."""
     # The specialist role may be assigned a different Model than the Test Lead
@@ -4546,20 +4721,35 @@ async def _run_specialist_agent(
             "The tool executor will flag canary matches automatically with [SSRF CANARY MATCH].\n"
         )
 
-    initial_message = (
-        f"Target: {base_url}\n"
-        f"Your mission: investigate the {attack_class} vulnerability lead below.\n"
-        f"Focus URL: {target_url}\n"
-        f"Lead rationale: {rationale}\n"
-        f"{recon_block}"
-        f"{canary_block}\n"
-        f"You have a budget of {max_steps} steps. Begin immediately."
+    initial_message = "".join(
+        [
+            f"Target: {base_url}\n",
+            f"Your mission: investigate the {attack_class} vulnerability lead below.\n",
+            f"Focus URL: {target_url}\n",
+            (
+                f"Focus page_id: {target_page_id}. Use browser replay=true and preserve this page/state.\n"
+                if target_page_id
+                else ""
+            ),
+            f"Use session: {target_session_label}\n" if target_session_label else "",
+            f"Lead rationale: {rationale}\n",
+            f"{recon_block}",
+            f"{canary_block}\n",
+            f"You have a budget of {max_steps} steps. Begin immediately.",
+        ]
     )
 
     findings_written = [0]
 
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         step_count[0] = step
+        if target_page_id is not None and tool_name in {"browser", "http_request"}:
+            tool_input = dict(tool_input)
+            tool_input.setdefault("page_id", target_page_id)
+            if tool_name == "browser":
+                tool_input.setdefault("replay", True)
+            if target_session_label:
+                tool_input.setdefault("use_session", target_session_label)
         note = _infer_step_note(tool_name, tool_input, step)
 
         # Emit specialist_step as scanner_phase so it persists to scan_log
@@ -4760,6 +4950,9 @@ async def _run_specialist_agent(
                 verify=False,
                 event_hooks=traffic_svc.make_httpx_hooks(run_id, username="specialist"),
             ) as _hx:
+                if isinstance(_hx, traffic_svc.LoggingAsyncClient):
+                    _hx.page_id = target_page_id
+                    _hx.session_label = use_session_label
                 try:
                     kwargs: dict = {}
                     if body is not None:
@@ -4799,6 +4992,108 @@ async def _run_specialist_agent(
                     )
                 except Exception as exc:
                     return f"Request failed: {exc}"
+
+        if tool_name == "browser":
+            browser_page_id = tool_input.get("page_id") or target_page_id
+            try:
+                browser_page_id = (
+                    int(browser_page_id) if browser_page_id is not None else None
+                )
+            except (TypeError, ValueError):
+                browser_page_id = None
+            browser_action = dict(tool_input)
+            browser_session_label = (
+                tool_input.get("use_session") or target_session_label
+            )
+            browser_session_label, browser_session, browser_note = (
+                _resolve_requested_scan_session(session_vault, browser_session_label)
+            )
+            if browser_page_id is not None and tool_input.get("replay"):
+                with Session(get_engine()) as _page_session:
+                    replay_page = _page_session.get(CrawledPage, browser_page_id)
+                if replay_page is not None:
+                    try:
+                        replay_data = json.loads(replay_page.replay_steps_json or "[]")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        replay_data = []
+                    if isinstance(replay_data, dict):
+                        replay_root = replay_data.get("root_url") or replay_page.url
+                        replay_items = replay_data.get("steps") or []
+                    else:
+                        replay_root = replay_page.url
+                        replay_items = (
+                            replay_data if isinstance(replay_data, list) else []
+                        )
+                    replay_steps = [{"op": "goto", "url": replay_root}] + [
+                        {
+                            key: value
+                            for key, value in {
+                                "op": item.get("kind") or item.get("op") or "click",
+                                "selector": item.get("selector"),
+                                "testid": item.get("testid"),
+                                "role": item.get("role"),
+                                "name": item.get("name"),
+                                "value": item.get("value"),
+                            }.items()
+                            if value not in (None, "")
+                        }
+                        for item in replay_items
+                        if isinstance(item, dict)
+                    ]
+                    browser_action["steps"] = replay_steps + [
+                        step
+                        for step in (tool_input.get("steps") or [])
+                        if isinstance(step, dict)
+                    ]
+            try:
+                from playwright.async_api import async_playwright
+
+                async with async_playwright() as _pw:
+                    _browser = await _pw.chromium.launch(headless=True)
+                    _ctx = await _browser.new_context(ignore_https_errors=True)
+                    if browser_session:
+                        cookies_to_add = [
+                            {
+                                "name": name,
+                                "value": value,
+                                "url": browser_action.get("url") or base_url,
+                            }
+                            for name, value in (
+                                browser_session.get("cookies") or {}
+                            ).items()
+                        ]
+                        if cookies_to_add:
+                            await _ctx.add_cookies(cookies_to_add)
+                    traffic_svc.setup_playwright_logging(
+                        _ctx, run_id, username="specialist"
+                    )
+                    traffic_svc.set_browser_context_tag(
+                        _ctx, browser_page_id, browser_session_label
+                    )
+                    _page = await _ctx.new_page()
+                    try:
+                        browser_result = await _run_thinking_browser_action(
+                            _page,
+                            browser_action,
+                            default_url=base_url,
+                            scanner_policy=scanner_policy,
+                        )
+                    finally:
+                        traffic_svc.clear_browser_context_tag(_ctx)
+                        await _browser.close()
+                _persist_browser_object_references(
+                    run_id,
+                    browser_page_id,
+                    browser_result.get("captured_traffic"),
+                    browser_session_label,
+                )
+                return (
+                    (f"{browser_note}\n\n" if browser_note else "")
+                    + f"Browser {browser_result.get('url')} → {browser_result.get('status')}\n"
+                    + str(browser_result.get("body") or "")[:12000]
+                )
+            except Exception as exc:
+                return f"Browser action failed: {exc}"
 
         if tool_name == "context_tool":
             ctx_tool = str(tool_input.get("tool") or "")
@@ -4932,6 +5227,15 @@ def _schedule_specialist_agent(
     priority = int(dispatch.get("priority") or 0)
     target_url = str(dispatch.get("target_url") or base_url)
     rationale = str(dispatch.get("rationale") or "")
+    try:
+        target_page_id = (
+            int(dispatch.get("page_id"))
+            if dispatch.get("page_id") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        target_page_id = None
+    target_session_label = str(dispatch.get("use_session") or "").strip() or None
 
     if not _should_dispatch_specialist(attack_class, priority, specialist_config):
         return None
@@ -4963,6 +5267,8 @@ def _schedule_specialist_agent(
                 max_steps=max_steps,
                 site_id=site_id,
                 is_api_run=is_api_run,
+                target_page_id=target_page_id,
+                target_session_label=target_session_label,
             ),
             name=f"specialist-{run_id}-{agent_id}",
         )
@@ -4986,6 +5292,8 @@ def dispatch_specialist_agent(
     target_url: str,
     rationale: str,
     priority: int = 7,
+    page_id: int | None = None,
+    use_session: str | None = None,
 ) -> str | None:
     """Public entry-point for dispatching a specialist agent from ALICE or other callers.
 
@@ -5018,6 +5326,10 @@ def dispatch_specialist_agent(
         "rationale": rationale,
         "priority": priority,
     }
+    if page_id is not None:
+        dispatch["page_id"] = page_id
+    if use_session:
+        dispatch["use_session"] = use_session
 
     return _schedule_specialist_agent(
         run_id=run_id,
@@ -5287,6 +5599,8 @@ async def _export_cred_session(
     base_url: str,
     login_url: str | None,
     credential: Credential,
+    run_id: int = 0,
+    llm_cfg=None,
 ) -> tuple[dict[str, str], str | None]:
     """Authenticate one configured user and return reusable cookie/token material.
 
@@ -5325,32 +5639,20 @@ async def _export_cred_session(
                     )
                 except Exception:
                     pass
-                await _authenticate(page, resolved_login_url, credential)
+                await _authenticate(
+                    page,
+                    resolved_login_url,
+                    credential,
+                    run_id=run_id,
+                    llm_cfg=llm_cfg,
+                )
 
                 cookies = {
                     cookie["name"]: cookie["value"]
                     for cookie in await context.cookies()
                     if cookie.get("name") and cookie.get("value") is not None
                 }
-                token = None
-                for key in (
-                    "access_token",
-                    "token",
-                    "jwt",
-                    "auth_token",
-                    "id_token",
-                    "authToken",
-                    "accessToken",
-                ):
-                    try:
-                        token = await page.evaluate(
-                            "(k) => localStorage.getItem(k) || sessionStorage.getItem(k)",
-                            key,
-                        )
-                    except Exception:
-                        token = None
-                    if token:
-                        break
+                token, _token_key = await _read_browser_auth_token(page)
                 if not cookies and not token:
                     raise RuntimeError(
                         "Authentication did not produce cookies or a bearer token"
@@ -5926,6 +6228,15 @@ async def _do_thinking_scan(run_id: int) -> None:
         creds = list(site.credentials)
         guidance = (site.scan_guidance or "").strip()
         coverage_mode = getattr(run, "coverage_mode", "track") or "track"
+        try:
+            target_page_ids = {
+                int(value)
+                for value in json.loads(run.target_page_ids_json or "[]")
+                if str(value).isdigit()
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            target_page_ids = set()
+        target_session_label = (run.target_session_label or "").strip() or None
 
         # Crawled pages — used for context and for resolving page_id on findings.
         all_pages = s.exec(
@@ -5933,6 +6244,8 @@ async def _do_thinking_scan(run_id: int) -> None:
             .where(CrawledPage.test_run_id == run_id)
             .where(CrawledPage.in_scope != False)  # noqa: E712
         ).all()
+        if target_page_ids:
+            all_pages = [page for page in all_pages if page.id in target_page_ids]
         pages_snapshot = [
             {
                 "id": p.id,
@@ -5941,6 +6254,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "state_label": p.state_label or "",
                 "state_kind": p.state_kind,
                 "replay_steps_json": p.replay_steps_json,
+                "replay_credential_id": p.replay_credential_id,
+                "target_session_label": target_session_label,
                 "title": p.title or "",
                 "context": p.llm_context or "",
                 "page_text": p.page_text or "",
@@ -7099,9 +7414,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                             with _client_session_cookies(
                                 hx, {"cookies": {}, "extra_headers": {}}
                             ):
-                                if (
-                                    _waf_strategy_for_run(run_id) or {}
-                                ).get("transport") == "browser_page":
+                                if (_waf_strategy_for_run(run_id) or {}).get(
+                                    "transport"
+                                ) == "browser_page":
                                     resp = await _dispatch_http_request(
                                         hx,
                                         browser_ctx,
@@ -7296,13 +7611,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     "application/x-www-form-urlencoded",
                                 )
                                 started = time.perf_counter()
-                                if (
-                                    (_waf_strategy_for_run(run_id) or {}).get(
-                                        "transport"
-                                    )
-                                    == "browser_page"
-                                    and pw_page is not None
-                                ):
+                                if (_waf_strategy_for_run(run_id) or {}).get(
+                                    "transport"
+                                ) == "browser_page" and pw_page is not None:
                                     resp = await _dispatch_http_request(
                                         hx,
                                         browser_ctx,
@@ -7336,13 +7647,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     "Content-Type", "application/json"
                                 )
                                 started = time.perf_counter()
-                                if (
-                                    (_waf_strategy_for_run(run_id) or {}).get(
-                                        "transport"
-                                    )
-                                    == "browser_page"
-                                    and pw_page is not None
-                                ):
+                                if (_waf_strategy_for_run(run_id) or {}).get(
+                                    "transport"
+                                ) == "browser_page" and pw_page is not None:
                                     resp = await _dispatch_http_request(
                                         hx,
                                         browser_ctx,
@@ -8743,17 +9050,119 @@ async def _do_agentic_thinking_loop(
         # ── browser ───────────────────────────────────────────────────────────
         if tool_name == "browser":
             br_url = (tool_input.get("url") or base_url).strip()
+            try:
+                br_page_id = (
+                    int(tool_input.get("page_id"))
+                    if tool_input.get("page_id") is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                br_page_id = None
+            br_target_page = next(
+                (page for page in pages_snapshot if page.get("id") == br_page_id),
+                None,
+            )
+            br_replay_requested = bool(tool_input.get("replay"))
+            br_action = dict(tool_input)
+            br_fallback_steps: list[dict] = []
+            br_followup_steps: list[dict] = []
+            if br_target_page and br_replay_requested:
+                try:
+                    replay_data = json.loads(
+                        br_target_page.get("replay_steps_json") or "[]"
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    replay_data = []
+                if isinstance(replay_data, dict):
+                    replay_root = str(
+                        replay_data.get("root_url")
+                        or br_target_page.get("url")
+                        or br_url
+                    )
+                    replay_steps = replay_data.get("steps") or []
+                else:
+                    replay_root = str(br_target_page.get("url") or br_url)
+                    replay_steps = replay_data if isinstance(replay_data, list) else []
+                br_fallback_steps = [{"op": "goto", "url": replay_root}] + [
+                    {
+                        key: value
+                        for key, value in {
+                            "op": item.get("kind") or item.get("op") or "click",
+                            "selector": item.get("selector"),
+                            "testid": item.get("testid"),
+                            "role": item.get("role"),
+                            "name": item.get("name"),
+                            "value": item.get("value"),
+                        }.items()
+                        if value not in (None, "")
+                    }
+                    for item in replay_steps
+                    if isinstance(item, dict)
+                ]
+                if br_target_page.get("state_kind") == "interactive":
+                    br_action["steps"] = br_fallback_steps + [
+                        step
+                        for step in (tool_input.get("steps") or [])
+                        if isinstance(step, dict)
+                    ]
+                    br_url = replay_root
+                elif not tool_input.get("steps"):
+                    # URL-addressable pages are tried directly first. If the URL
+                    # is session/token-dependent, the deterministic recipe below
+                    # is used as a fallback after the direct result is inspected.
+                    br_action["steps"] = [
+                        {"op": "goto", "url": br_target_page.get("url") or br_url},
+                        {"op": "snapshot"},
+                    ]
+                    br_url = str(br_target_page.get("url") or br_url)
+                else:
+                    br_followup_steps = [
+                        step
+                        for step in (tool_input.get("steps") or [])
+                        if isinstance(step, dict)
+                    ]
+                    br_action["steps"] = [
+                        {"op": "goto", "url": br_target_page.get("url") or br_url},
+                        {"op": "snapshot"},
+                    ]
+                    br_url = str(br_target_page.get("url") or br_url)
             br_owasp = str(tool_input.get("owasp_category") or "").strip().upper()
             br_test_class = str(tool_input.get("test_class") or "").strip()
             _scope_err = _active_scope_check(br_url)
             if _scope_err:
                 return f"[SCOPE BLOCK] {_scope_err}"
-            steps_list = tool_input.get("steps") or []
+            steps_list = (br_action.get("steps") or []) + br_followup_steps
             use_session_label = (
                 tool_input.get("use_session")
                 if isinstance(tool_input.get("use_session"), str)
                 else None
             )
+            if (
+                use_session_label is None
+                and br_replay_requested
+                and br_target_page
+                and br_target_page.get("target_session_label")
+            ):
+                use_session_label = str(br_target_page["target_session_label"])
+            if (
+                use_session_label is None
+                and br_replay_requested
+                and br_target_page
+                and br_target_page.get("replay_credential_id") is not None
+            ):
+                replay_credential_id = br_target_page.get("replay_credential_id")
+                replay_session_found = False
+                for label, candidate_session in session_vault.items():
+                    if candidate_session.get("credential_id") == replay_credential_id:
+                        use_session_label = label
+                        replay_session_found = True
+                        break
+                if not replay_session_found and br_target_page.get("req_auth"):
+                    return (
+                        "The requested page state was discovered with a credential "
+                        f"that has no authenticated replay session (credential_id={replay_credential_id}). "
+                        "Select an explicit valid session or re-authenticate; no other identity was substituted."
+                    )
             use_session_label, selected_session, _br_session_resolution_note = (
                 _resolve_requested_scan_session(session_vault, use_session_label)
             )
@@ -8811,9 +9220,7 @@ async def _do_agentic_thinking_loop(
                             ],
                             cookie_list,
                             br_url,
-                            tuple(
-                                _br_waf_strategy.get("preserve_cookie_prefixes", [])
-                            ),
+                            tuple(_br_waf_strategy.get("preserve_cookie_prefixes", [])),
                         )
                 else:
                     cookie_list = _primary_browser_cookies
@@ -8836,11 +9243,57 @@ async def _do_agentic_thinking_loop(
                 )
             except Exception:
                 pass
-            br_result = await _run_thinking_browser_action(
-                pw_page,
-                tool_input,
-                default_url=base_url,
-                scanner_policy=scanner_policy,
+            traffic_svc.set_browser_context_tag(
+                browser_ctx, br_page_id, use_session_label
+            )
+            try:
+                br_result = await _run_thinking_browser_action(
+                    pw_page,
+                    br_action,
+                    default_url=base_url,
+                    scanner_policy=scanner_policy,
+                )
+                if (
+                    br_target_page
+                    and br_replay_requested
+                    and br_target_page.get("state_kind") != "interactive"
+                    and br_fallback_steps
+                    and (
+                        not br_target_page.get("req_auth")
+                        or br_target_page.get("replay_credential_id") is not None
+                        or selected_session is not None
+                    )
+                    and not _browser_page_target_matches(br_result, br_target_page)
+                ):
+                    fallback_action = dict(br_action)
+                    fallback_action["steps"] = br_fallback_steps + [
+                        step
+                        for step in (tool_input.get("steps") or [])
+                        if isinstance(step, dict)
+                    ]
+                    br_result = await _run_thinking_browser_action(
+                        pw_page,
+                        fallback_action,
+                        default_url=base_url,
+                        scanner_policy=scanner_policy,
+                    )
+                    br_result["replay_fallback_used"] = True
+                elif br_followup_steps:
+                    followup_action = dict(br_action)
+                    followup_action["steps"] = br_followup_steps
+                    br_result = await _run_thinking_browser_action(
+                        pw_page,
+                        followup_action,
+                        default_url=base_url,
+                        scanner_policy=scanner_policy,
+                    )
+            finally:
+                traffic_svc.clear_browser_context_tag(browser_ctx)
+            _persist_browser_object_references(
+                run_id,
+                br_page_id,
+                br_result.get("captured_traffic"),
+                use_session_label,
             )
             resp_body = str(br_result.get("body") or "")[:BODY_READ_LIMIT]
             if _br_session_resolution_note:
@@ -8931,6 +9384,7 @@ async def _do_agentic_thinking_loop(
                             br_owasp,
                             br_test_class or None,
                             resp_status,
+                            br_page_id,
                         )
                     except Exception as exc:
                         log.debug("browser post_probe_fn error: %s", exc)
@@ -9230,9 +9684,9 @@ async def _do_agentic_thinking_loop(
                     with _client_session_cookies(
                         hx, {"cookies": {}, "extra_headers": {}}
                     ):
-                        if (
-                            _waf_strategy_for_run(run_id) or {}
-                        ).get("transport") == "browser_page" and pw_page is not None:
+                        if (_waf_strategy_for_run(run_id) or {}).get(
+                            "transport"
+                        ) == "browser_page" and pw_page is not None:
                             cc_r = await _dispatch_http_request(
                                 hx,
                                 browser_ctx,
@@ -9450,9 +9904,9 @@ async def _do_agentic_thinking_loop(
                         ra_merged.setdefault(
                             "Content-Type", "application/x-www-form-urlencoded"
                         )
-                        if (
-                            _waf_strategy_for_run(run_id) or {}
-                        ).get("transport") == "browser_page" and pw_page is not None:
+                        if (_waf_strategy_for_run(run_id) or {}).get(
+                            "transport"
+                        ) == "browser_page" and pw_page is not None:
                             ra_r = await _dispatch_http_request(
                                 hx,
                                 browser_ctx,
@@ -9483,9 +9937,9 @@ async def _do_agentic_thinking_loop(
                             )
                     else:
                         ra_merged.setdefault("Content-Type", "application/json")
-                        if (
-                            _waf_strategy_for_run(run_id) or {}
-                        ).get("transport") == "browser_page" and pw_page is not None:
+                        if (_waf_strategy_for_run(run_id) or {}).get(
+                            "transport"
+                        ) == "browser_page" and pw_page is not None:
                             ra_r = await _dispatch_http_request(
                                 hx,
                                 browser_ctx,
@@ -9775,6 +10229,14 @@ async def _do_agentic_thinking_loop(
         # ── http_request (default) ────────────────────────────────────────────
         hr_method = str(tool_input.get("method") or "GET").upper()
         hr_url = str(tool_input.get("url") or "").strip()
+        try:
+            hr_page_id = (
+                int(tool_input.get("page_id"))
+                if tool_input.get("page_id") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            hr_page_id = None
         if not hr_url:
             return "http_request: missing URL"
         _scope_err = _active_scope_check(hr_url)
@@ -9824,6 +10286,9 @@ async def _do_agentic_thinking_loop(
         hr_use_session, hr_sel_session, _hr_session_resolution_note = (
             _resolve_requested_scan_session(session_vault, hr_use_session)
         )
+        if isinstance(hx, traffic_svc.LoggingAsyncClient):
+            hx.page_id = hr_page_id
+            hx.session_label = hr_use_session
         events_svc.emit(
             run_id,
             {
@@ -9882,9 +10347,9 @@ async def _do_agentic_thinking_loop(
             # Swap the shared client jar to exactly the selected session so an
             # "anonymous"/other-user probe is not silently authenticated.
             with _client_session_cookies(hx, hr_sel_session):
-                if (
-                    _waf_strategy_for_run(run_id or 0) or {}
-                ).get("transport") == "browser_page" and pw_page is not None:
+                if (_waf_strategy_for_run(run_id or 0) or {}).get(
+                    "transport"
+                ) == "browser_page" and pw_page is not None:
                     hr_r = await _dispatch_http_request(
                         hx,
                         browser_ctx,
@@ -9977,6 +10442,10 @@ async def _do_agentic_thinking_loop(
         except Exception as exc:
             log.warning("Agentic loop HTTP error (%s %s): %s", hr_method, hr_url, exc)
             hr_resp_body = f"Request failed: {exc}"
+        finally:
+            if isinstance(hx, traffic_svc.LoggingAsyncClient):
+                hx.page_id = None
+                hx.session_label = None
 
         hr_sent_headers = hr_r.request.headers if hr_resp_status else {}
         hr_req_ev = _request_evidence(
@@ -10118,6 +10587,7 @@ async def _do_agentic_thinking_loop(
                             _hr_owasp,
                             _hr_test_class or None,
                             hr_resp_status,
+                            hr_page_id,
                         )
                 except Exception as _pp_exc:
                     log.debug("post_probe_fn error: %s", _pp_exc)
@@ -11081,8 +11551,7 @@ async def _fetch_matrix_url(
             timeout=timeout,
         ) as client:
             if (
-                (_waf_strategy_for_run(run_id) or {}).get("transport")
-                == "browser_page"
+                (_waf_strategy_for_run(run_id) or {}).get("transport") == "browser_page"
                 and browser_ctx is not None
                 and browser_page is not None
             ):
@@ -11095,16 +11564,12 @@ async def _fetch_matrix_url(
                     headers,
                     None,
                     selected_session=(
-                        selected_session
-                        if selected_session is not None
-                        else session
+                        selected_session if selected_session is not None else session
                     ),
                     primary_session=primary_session,
                     primary_browser_cookies=primary_browser_cookies,
                     browser_page=browser_page,
-                    scope_check=lambda next_url: check_scope(
-                        next_url, site_id, run_id
-                    ),
+                    scope_check=lambda next_url: check_scope(next_url, site_id, run_id),
                     follow_redirects=follow_redirects,
                 )
             else:
@@ -11725,6 +12190,72 @@ def _looks_like_json_or_api(result: dict) -> bool:
     url = str(result.get("url") or "").lower()
     body = str(result.get("body") or "").lstrip()
     return "json" in content_type or "/api/" in url or body.startswith(("{", "["))
+
+
+def _persist_browser_object_references(
+    run_id: int,
+    page_id: int | None,
+    captured_traffic: list[dict] | None,
+    session_label: str | None,
+) -> None:
+    """Persist object IDs observed while testing a specific page/state.
+
+    These are intelligence atoms, not findings. Values are intentionally limited
+    to identifier-shaped fields and are redacted from credentials/tokens.
+    """
+    if page_id is None or not captured_traffic:
+        return
+    from aespa.services.crawler import _save_intel_item
+
+    field_re = re.compile(
+        r"[\"']?([A-Za-z][A-Za-z0-9_]*(?:id|uuid|identifier))[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_-]{2,96})",
+        re.IGNORECASE,
+    )
+    seen: set[tuple[str, str, str]] = set()
+    for traffic in captured_traffic[:80]:
+        body = str(traffic.get("response_body") or "")[:8000]
+        for field, value in field_re.findall(body):
+            if value.lower() in {"null", "true", "false", "undefined"}:
+                continue
+            key = (field.lower(), value, str(traffic.get("url") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            _save_intel_item(
+                run_id=run_id,
+                kind="object_reference",
+                key=field,
+                value=value,
+                url=traffic.get("url"),
+                method=traffic.get("method"),
+                source="browser_replay",
+                confidence=0.85,
+                evidence=f"Observed in browser response from {traffic.get('url')}",
+                metadata={
+                    "page_id": page_id,
+                    "location": "response_body",
+                    "field": field,
+                    "session": session_label,
+                    "confidence": "observed",
+                },
+                page_id=page_id,
+            )
+
+
+def _browser_page_target_matches(result: dict, page: dict) -> bool:
+    """Lightweight replay validation that ignores dynamic record text."""
+    status = result.get("status")
+    if status is not None and int(status or 0) in (401, 403, 404, 419, 440):
+        return False
+    body = str(result.get("body") or "").lower()
+    title = str(page.get("title") or "").strip().lower()
+    label = str(page.get("state_label") or "").strip().lower()
+    if any(
+        marker in body for marker in ("sign in", "log in", "password", "access denied")
+    ):
+        return False
+    markers = [marker for marker in (title, label) if len(marker) >= 4]
+    return not markers or any(marker in body for marker in markers)
 
 
 # ── Passive checks ────────────────────────────────────────────────────────────

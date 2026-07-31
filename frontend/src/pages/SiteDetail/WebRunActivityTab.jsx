@@ -1,11 +1,9 @@
-import React from "react";
-import { IconSend } from "../../components/Icons";
 import { TokenUsageBar } from "../../components/TokenUsageBar";
 import { api } from "../../lib/api";
 import { truncUrl } from "../../lib/utilities";
-import { renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox, renderAliceBlocks } from "../../lib/aliceRender";
+import { AliceChatPanel } from "./AliceChatPanel";
 export function WebRunActivityTab(props) {
-  const { activityLog, tokenUsage, setTokenExpanded, tokenExpanded, activitySubTab, setActivitySubTab, agents, normalizeAgentForRun, activityFeedRef, runId, clearBusy, setClearBusy, setClearError, setActivityLog, setSitePlanData, setTokenUsage, sitePlanData, expandedLogIds, toggleLogId, collapsedAgentIds, toggleAgentId, defaultAgentRoster, representsAgent, aliceChats, activeAliceTabId, setActiveAliceTabId, deleteAliceTab, createAliceTab, aliceChatHeight, aliceMessages, aliceExpandedThinkIds, setAliceExpandedThinkIds, aliceThinkingTabId, startAliceResize, aliceInputText, aliceIsThinking, handleAliceSend, setAliceInputText, handleAliceStop, agentRoleLabel, agentCurrentTask, agentCrawlEvents, agentTaskHistory, agentStatusLabel } = props;
+  const { activityLog, tokenUsage, setTokenExpanded, tokenExpanded, activitySubTab, setActivitySubTab, agents, normalizeAgentForRun, activityFeedRef, runId, clearBusy, setClearBusy, setClearError, setActivityLog, setSitePlanData, setTokenUsage, sitePlanData, expandedLogIds, toggleLogId, collapsedAgentIds, toggleAgentId, defaultAgentRoster, representsAgent, aliceChats, activeAliceTabId, setActiveAliceTabId, deleteAliceTab, createAliceTab, aliceChatHeight, aliceMessages, aliceExpandedThinkIds, setAliceExpandedThinkIds, aliceThinkingTabId, aliceIsThinking, startAliceResize, aliceInputText, handleAliceSend, setAliceInputText, handleAliceStop, agentRoleLabel, agentCurrentTask, agentCrawlEvents, agentTaskHistory, agentStatusLabel } = props;
   return (
     <>
       <div className="activity-panel">
@@ -424,92 +422,26 @@ export function WebRunActivityTab(props) {
                       </span>
                       <span className="agent-current-task" title={currentTask}>{currentTask}</span>
                       <span className="activity-expand-chevron">{isExpanded ? "▲" : "▼"}</span>
-                      {isExpanded && <div className="alice-chat-container" onClick={e => e.stopPropagation()}>
-                          <div className="alice-chat-tabs-bar">
-                            {aliceChats.map(tab => {
-                        const isActiveTab = tab.id === activeAliceTabId;
-                        return <div key={tab.id} className={"alice-chat-tab-pill" + (isActiveTab ? " alice-chat-tab-pill--active" : "")} onClick={() => setActiveAliceTabId(tab.id)}>
-                                  <span>{tab.title}</span>
-                                  <span className="alice-chat-tab-close" onClick={e => deleteAliceTab(tab.id, e)} title="Close Session">
-                                    ×
-                                  </span>
-                                </div>;
-                      })}
-                            <button className="alice-chat-add-tab-btn" onClick={createAliceTab} title="New Session">
-                              +
-                            </button>
-                          </div>
-                          <div className="alice-chat-history" style={{
-                      height: `${aliceChatHeight}px`
-                    }} ref={el => {
-                      if (el) {
-                        el.scrollTop = el.scrollHeight;
-                      }
-                    }}>
-                            {aliceMessages.map((msg, _msgIdx) => {
-                        // The thinking message renders as an ordered run of
-                        // collapsed trace boxes and chat bubbles; commentary
-                        // breaks the trace into box-above / box-below.
-                        if (msg.type === "thinking") {
-                          if (!msg.text) return null;
-                          const segs = parseAliceTurnSegments(msg.text);
-                          return <React.Fragment key={msg.id}>{segs.map((seg, si) => {
-                            if (seg.kind === "message") {
-                              return <div key={msg.id + ":m" + si} className="alice-msg-row alice-msg-row--alice">
-                                        <div className="alice-msg-bubble alice-msg-bubble--alice">
-                                          <div>{renderMarkdown(seg.text)}</div>
-                                        </div>
-                                      </div>;
-                            }
-                            const segKey = msg.id + ":t" + si;
-                            return renderAliceTraceBox(segKey, seg.text, msg.stepData || {}, aliceExpandedThinkIds.has(segKey), () => setAliceExpandedThinkIds(prev => {
-                              const next = new Set(prev);
-                              if (next.has(segKey)) next.delete(segKey);
-                              else next.add(segKey);
-                              return next;
-                            }));
-                          })}</React.Fragment>;
-                        }
-                        const isUser = msg.sender === "user";
-                        if (!isUser && !msg.text) return null;
-                        return <div key={msg.id} className={"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
-                                  <div className={"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
-                                    <div>
-                                      {isUser ? renderMarkdown(msg.text) : renderAliceBlocks(msg.text, false, msg.stepData || {})}
-                                    </div>
-                                    <div className="alice-msg-meta">
-                                      <span>{msg.ts}</span>
-                                    </div>
-                                  </div>
-                                </div>;
-                      })}
-                            {aliceThinkingTabId === activeAliceTabId && <div className="alice-msg-row alice-msg-row--alice">
-                                <div className="alice-typing-bubble">
-                                  <div className="alice-typing-dot"></div>
-                                  <div className="alice-typing-dot"></div>
-                                  <div className="alice-typing-dot"></div>
-                                </div>
-                              </div>}
-                          </div>
-                          
-                          <div className="alice-chat-resizer" onMouseDown={startAliceResize}></div>
-                          
-                          <div className="alice-chat-input-bar">
-                            <input className="alice-chat-input" placeholder="Direct A.L.I.C.E. on what to test..." value={aliceInputText} disabled={aliceIsThinking} onKeyDown={e => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          handleAliceSend();
-                        }
-                      }} onInput={e => setAliceInputText(e.target.value)} />
-                            {aliceIsThinking ? <button className="alice-chat-stop-btn" onClick={handleAliceStop} title="Stop Generation">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                                  <rect x="4" y="4" width="16" height="16" rx="1" ry="1"></rect>
-                                </svg>
-                              </button> : <button className="alice-chat-input-btn" disabled={!aliceInputText.trim()} onClick={handleAliceSend} title="Send Instruction">
-                                <IconSend />
-                              </button>}
-                          </div>
-                        </div>}
+                      {isExpanded && <AliceChatPanel
+                        runId={runId}
+                        aliceChats={aliceChats}
+                        activeAliceTabId={activeAliceTabId}
+                        setActiveAliceTabId={setActiveAliceTabId}
+                        deleteAliceTab={deleteAliceTab}
+                        createAliceTab={createAliceTab}
+                        aliceChatHeight={aliceChatHeight}
+                        aliceMessages={aliceMessages}
+                        aliceExpandedThinkIds={aliceExpandedThinkIds}
+                        setAliceExpandedThinkIds={setAliceExpandedThinkIds}
+                        startAliceResize={startAliceResize}
+                        aliceInputText={aliceInputText}
+                        setAliceInputText={setAliceInputText}
+                        isActiveThinking={aliceThinkingTabId === activeAliceTabId}
+                        aliceIsThinking={aliceIsThinking}
+                        handleAliceSend={handleAliceSend}
+                        handleAliceStop={handleAliceStop}
+                        onPopOut={() => toggleAgentId("alice")}
+                      />}
                     </div>;
               }
               const isActive = a.status === "active";

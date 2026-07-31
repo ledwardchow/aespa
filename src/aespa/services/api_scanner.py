@@ -923,6 +923,7 @@ def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
                 history=history or [],
                 run_id=run_id,
                 base_url=base_url,
+                api_run_id=api_run_id,
             )
 
         return {

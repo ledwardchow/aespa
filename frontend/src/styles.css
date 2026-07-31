@@ -1734,6 +1734,70 @@ legend {
   transform: scale(0.92);
 }
 
+.alice-chat-popout-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-2);
+  border-radius: 50%;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+.alice-chat-popout-btn:hover {
+  background: rgba(192, 132, 252, 0.1);
+  border-color: #c084fc;
+  color: #ffffff;
+  box-shadow: 0 0 6px rgba(192, 132, 252, 0.15);
+}
+.alice-chat-popout-btn:active {
+  transform: scale(0.92);
+}
+
+.alice-popout-page {
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  background: var(--bg);
+  color: var(--text);
+}
+.alice-popout-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-shrink: 0;
+}
+.alice-popout-title {
+  color: #d8b4fe;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.alice-popout-subtitle {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.alice-chat-container--popout {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+}
+.alice-chat-container--popout .alice-chat-history {
+  height: auto;
+  min-height: 0;
+  flex: 1;
+}
+
 .alice-chat-stop-btn {
   background: #ef4444;
   color: #ffffff;
