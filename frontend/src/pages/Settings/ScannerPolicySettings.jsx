@@ -131,6 +131,100 @@ function GlobalPolicyFields({ form, upd }) {
   </>;
 }
 
+function GlobalHttpHeadersSettings() {
+  const [hdrCfg, setHdrCfg] = useState(null);
+  const [hdrForm, setHdrForm] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const config = await api.getGlobalHttpHeader();
+        setHdrCfg(config);
+        setHdrForm(config.headers || []);
+      } catch (e) {
+        setError(e.message);
+      }
+    })();
+  }, []);
+
+  const saveHeader = async e => {
+    e.preventDefault();
+    setSaved(false);
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await api.upsertGlobalHttpHeader({
+        headers: hdrForm
+          .filter(header => header.header_name.trim() || header.header_value.trim())
+          .map(header => ({
+            header_name: header.header_name.trim(),
+            header_value: header.header_value.trim()
+          }))
+      });
+      setHdrCfg(updated);
+      setHdrForm(updated.headers || []);
+      setSaved(true);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <section className="card global-http-headers-card">
+    <div className="form-section-title">Global Extra HTTP Headers</div>
+    <div className="field-hint" style={{ marginBottom: 12 }}>
+      Add headers to every request made by the scanner and crawler (Playwright and HTTPX).
+      These do not affect requests sent to LLMs.
+    </div>
+    {error && <div className="alert error">{error}</div>}
+    {hdrCfg !== null && <form onSubmit={saveHeader}>
+        <div className="table-wrap global-header-table-wrap">
+          <table className="global-header-table">
+            <colgroup>
+              <col style={{ width: "34%" }} />
+              <col />
+              <col style={{ width: 48 }} />
+            </colgroup>
+            <thead>
+              <tr><th>Header name</th><th>Header value</th><th aria-label="Actions" /></tr>
+            </thead>
+            <tbody>
+              {hdrForm.length === 0 && <tr><td colSpan="3" className="subtle global-header-empty">No headers configured.</td></tr>}
+              {hdrForm.map((header, index) => <tr key={index}>
+                <td><input className="form-input" type="text" placeholder="e.g. X-Debug-Token" value={header.header_name} disabled={saving} onInput={e => {
+                  setSaved(false);
+                  setHdrForm(headers => headers.map((item, itemIndex) => itemIndex === index ? { ...item, header_name: e.target.value } : item));
+                }} /></td>
+                <td><input className="form-input" type="text" placeholder="e.g. my-secret-value" value={header.header_value} disabled={saving} onInput={e => {
+                  setSaved(false);
+                  setHdrForm(headers => headers.map((item, itemIndex) => itemIndex === index ? { ...item, header_value: e.target.value } : item));
+                }} /></td>
+                <td><button className="btn ghost sm" type="button" aria-label="Delete header" title="Delete header" disabled={saving} onClick={() => {
+                  setSaved(false);
+                  setHdrForm(headers => headers.filter((_, itemIndex) => itemIndex !== index));
+                }}>×</button></td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+        <button className="btn ghost sm" type="button" disabled={saving} style={{ marginTop: 10 }} onClick={() => {
+          setSaved(false);
+          setHdrForm(headers => [...headers, { header_name: "", header_value: "" }]);
+        }}>Add header</button>
+        <div className="row" style={{ marginTop: 8 }}>
+          <button className="btn btn-primary" type="submit" disabled={saving}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+          {saved && <span className="save-confirm"><IconCheck /> Saved</span>}
+        </div>
+      </form>}
+  </section>;
+}
+
 function PolicySettings({ Fields }) {
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -180,8 +274,38 @@ function PolicySettings({ Fields }) {
       </form>}</>;
 }
 
-export function GlobalPolicySettings() {
-  return <PolicySettings Fields={GlobalPolicyFields} />;
+export function GlobalPolicySubTabs({ tab, setTab }) {
+  return <div className="activity-sub-tab-bar coverage-sub-tab-bar global-policy-sub-tab-bar" role="tablist" aria-label="Global agent settings">
+      <button
+        type="button"
+        role="tab"
+        id="global-scan-behaviour-tab"
+        aria-selected={tab === "scan-behaviour"}
+        aria-controls="global-scan-behaviour-panel"
+        className={"activity-sub-tab-btn" + (tab === "scan-behaviour" ? " active" : "")}
+        onClick={() => setTab("scan-behaviour")}
+      >Scan Behaviour</button>
+      <button
+        type="button"
+        role="tab"
+        id="global-headers-tab"
+        aria-selected={tab === "headers"}
+        aria-controls="global-headers-panel"
+        className={"activity-sub-tab-btn" + (tab === "headers" ? " active" : "")}
+        onClick={() => setTab("headers")}
+      >HTTP Headers</button>
+  </div>;
+}
+
+export function GlobalPolicySettings({ tab = "scan-behaviour" }) {
+  return <>
+    {tab === "scan-behaviour" && <div id="global-scan-behaviour-panel" role="tabpanel" aria-labelledby="global-scan-behaviour-tab">
+      <PolicySettings Fields={GlobalPolicyFields} />
+    </div>}
+    {tab === "headers" && <div id="global-headers-panel" role="tabpanel" aria-labelledby="global-headers-tab">
+      <GlobalHttpHeadersSettings />
+    </div>}
+  </>;
 }
 
 export function ScannerPolicySettings() {

@@ -355,6 +355,7 @@ async def _do_crawl_inner(run_id: int) -> None:
     block_non_idempotent_interactive_replay = bool(
         crawler_cfg.block_non_idempotent_interactive_replay
     )
+    enable_access_reconciliation = bool(crawler_cfg.enable_access_reconciliation)
     browser_engine = browser_debug_cfg.browser_engine
     browser_visible = bool(browser_debug_cfg.browser_visible)
     _parsed = urlparse(base_url)
@@ -482,29 +483,41 @@ async def _do_crawl_inner(run_id: int) -> None:
         if isinstance(r, Exception):
             log.error("Crawl task raised: %s", r)
 
-    _update_run(run_id, phase="reconciling", current_url=None)
-    events_svc.emit(
-        run_id,
-        {
-            "type": "run_update",
-            "status": "running",
-            "phase": "reconciling",
-            "current_url": None,
-            "pages_discovered": shared.pages_done,
-        },
-    )
-    await _reconcile_direct_access(
-        run_id=run_id,
-        creds=creds,
-        base_url=base_url,
-        login_url=login_url,
-        requires_auth=requires_auth,
-        llm_cfg=llm_cfg,
-        pw_proxy=_pw_proxy,
-        global_http_header=_global_http_header,
-        browser_engine=browser_engine,
-        browser_visible=browser_visible,
-    )
+    if enable_access_reconciliation:
+        _update_run(run_id, phase="reconciling", current_url=None)
+        events_svc.emit(
+            run_id,
+            {
+                "type": "run_update",
+                "status": "running",
+                "phase": "reconciling",
+                "current_url": None,
+                "pages_discovered": shared.pages_done,
+            },
+        )
+        await _reconcile_direct_access(
+            run_id=run_id,
+            creds=creds,
+            base_url=base_url,
+            login_url=login_url,
+            requires_auth=requires_auth,
+            llm_cfg=llm_cfg,
+            pw_proxy=_pw_proxy,
+            global_http_header=_global_http_header,
+            browser_engine=browser_engine,
+            browser_visible=browser_visible,
+        )
+    else:
+        _crawl_log(
+            run_id,
+            "reconcile",
+            "info",
+            "Access reconciliation is disabled — skipping cross-user access checks",
+            data={
+                "stage": "reconcile_skipped",
+                "stage_label": "Access reconciliation skipped",
+            },
+        )
 
     # OR-merge page categories from all credential views into each CrawledPage.
     _update_run(run_id, phase="finalizing")
