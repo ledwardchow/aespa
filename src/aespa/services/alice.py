@@ -10,6 +10,11 @@ from urllib.parse import urlparse
 
 from sqlmodel import Session, select
 
+from aespa.browser import (
+    launch_playwright_browser,
+    playwright_user_agent,
+    protect_playwright_context,
+)
 from aespa.db import get_engine
 from aespa.models import CrawledPage, LLMConfig, Site, TestRun
 from aespa.services import events as events_svc
@@ -17,6 +22,7 @@ from aespa.services import llm as llm_svc
 from aespa.services.prompts.alice import ALICE_API_SYSTEM_PROMPT, ALICE_SYSTEM_PROMPT
 from aespa.services.scope import check_scope
 from aespa.services.settings import (
+    get_browser_debug_config,
     get_llm_config_for_role,
     get_scanner_policy,
 )
@@ -99,17 +105,21 @@ async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
     from playwright.async_api import async_playwright
 
     from aespa.services import traffic as traffic_svc
-    from aespa.services.scanner import (
-        _UA,
-        _playwright_global_headers,
-        _playwright_proxy,
-    )
+    from aespa.services.scanner import _playwright_global_headers, _playwright_proxy
 
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=True)
-    ctx = await browser.new_context(
-        user_agent=_UA, ignore_https_errors=True, **_playwright_proxy()
+    with Session(get_engine()) as s:
+        browser_debug_cfg = get_browser_debug_config(s)
+    browser = await launch_playwright_browser(
+        pw,
+        browser_engine=browser_debug_cfg.browser_engine,
+        headless=not browser_debug_cfg.browser_visible,
     )
+    ctx = await browser.new_context(
+        user_agent=playwright_user_agent(browser),
+        ignore_https_errors=True, **_playwright_proxy()
+    )
+    protect_playwright_context(browser, ctx)
     headers = _playwright_global_headers()
     if headers:
         await ctx.set_extra_http_headers(headers)

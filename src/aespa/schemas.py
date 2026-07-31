@@ -981,6 +981,24 @@ class ReportingDebugConfigOut(ReportingDebugConfigBase):
     updated_at: datetime
 
 
+# ── Browser debug config schemas ─────────────────────────────────────────────
+
+
+class BrowserDebugConfigBase(BaseModel):
+    browser_engine: Literal["playwright_chromium", "system_chrome"] = (
+        "playwright_chromium"
+    )
+    browser_visible: bool = False
+
+
+class BrowserDebugConfigIn(BrowserDebugConfigBase):
+    pass
+
+
+class BrowserDebugConfigOut(BrowserDebugConfigBase):
+    updated_at: datetime
+
+
 # ── Cloudflare Access config schemas ─────────────────────────────────────────
 
 

@@ -16,6 +16,11 @@ from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 from sqlmodel import Session, select
 
+from aespa.browser import (
+    launch_playwright_browser,
+    playwright_user_agent,
+    protect_playwright_context,
+)
 from aespa.db import get_engine
 from aespa.models import (
     AuthMode,
@@ -30,6 +35,7 @@ from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.settings import (
+    get_browser_debug_config,
     get_crawler_config,
     get_global_http_header_config,
     get_llm_config_for_role,
@@ -72,13 +78,6 @@ def _drop_cached_browser_session(run_id: int, credential) -> None:
     key = _credential_cache_key(run_id, credential)
     if key is not None:
         _guided_session_cache.pop(key, None)
-
-
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
 
 
 def request_stop(run_id: int) -> None:
@@ -252,9 +251,10 @@ def _crawl_log(
 
     These are persisted to ``scan_log`` (events.py) and rendered in the Activity
     Log panel, so the user can follow crawl/auth progress live and after page
-    navigation. ``status`` drives the badge suffix in the UI: ``start`` → "…",
-    ``complete`` → "✓", ``error`` → "✗"; anything else renders plain.
-    Best-effort: never raises. No-op when ``run_id`` is falsy.
+    navigation. ``data.stage`` identifies the crawler stage and ``data.username``
+    identifies the credential in use. ``status`` drives the badge suffix in the
+    UI: ``start`` → "…", ``complete`` → "✓", ``error`` → "✗"; anything else
+    renders plain. Best-effort: never raises. No-op when ``run_id`` is falsy.
     """
     if not run_id:
         return
@@ -272,6 +272,35 @@ def _crawl_log(
         events_svc.emit(run_id, evt)
     except Exception:
         pass
+
+
+def _crawl_progress(
+    run_id: int,
+    *,
+    username: str,
+    current_url: str | None,
+    pages_visited: int,
+    stage: str,
+    stage_label: str,
+    phase_index: int,
+    phase_total: int,
+    done: bool = False,
+) -> None:
+    """Emit live per-user progress with enough context for the Agents panel."""
+    events_svc.emit(
+        run_id,
+        {
+            "type": "crawl_progress",
+            "username": username,
+            "pages_visited": pages_visited,
+            "current_url": current_url,
+            "stage": stage,
+            "stage_label": stage_label,
+            "phase_index": phase_index,
+            "phase_total": phase_total,
+            "done": done,
+        },
+    )
 
 
 # ── Core orchestrator ─────────────────────────────────────────────────────────
@@ -301,6 +330,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         creds = list(site.credentials)
         upstream_proxy = get_upstream_proxy_config(s)
         crawler_cfg = get_crawler_config(s)
+        browser_debug_cfg = get_browser_debug_config(s)
         crawl_proxy_url = (
             upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
         )
@@ -325,6 +355,8 @@ async def _do_crawl_inner(run_id: int) -> None:
     block_non_idempotent_interactive_replay = bool(
         crawler_cfg.block_non_idempotent_interactive_replay
     )
+    browser_engine = browser_debug_cfg.browser_engine
+    browser_visible = bool(browser_debug_cfg.browser_visible)
     _parsed = urlparse(base_url)
     base_netloc = _parsed.netloc
     _bp = _parsed.path
@@ -356,6 +388,7 @@ async def _do_crawl_inner(run_id: int) -> None:
     _update_run(
         run_id,
         status=TestRunStatus.running,
+        phase="crawling",
         started_at=_utcnow(),
         completed_at=None,
         error_message=None,
@@ -382,6 +415,11 @@ async def _do_crawl_inner(run_id: int) -> None:
         f"Crawl started — {base_url} "
         f"(max {max_pages} pages, depth {max_depth}, {len(creds)} credential(s))",
         page_url=base_url,
+        data={
+            "stage": "crawl_start",
+            "stage_label": "Preparing crawl",
+            "credential_count": len(creds),
+        },
     )
 
     phases = ([None] + list(creds)) if (requires_auth and creds) else [None]
@@ -425,6 +463,8 @@ async def _do_crawl_inner(run_id: int) -> None:
                 total_phases=len(phases),
                 pw_proxy=_pw_proxy,
                 global_http_header=_global_http_header,
+                browser_engine=browser_engine,
+                browser_visible=browser_visible,
                 js_endpoint_discovery_enabled=(
                     crawler_cfg.js_endpoint_discovery_enabled
                 ),
@@ -442,6 +482,17 @@ async def _do_crawl_inner(run_id: int) -> None:
         if isinstance(r, Exception):
             log.error("Crawl task raised: %s", r)
 
+    _update_run(run_id, phase="reconciling", current_url=None)
+    events_svc.emit(
+        run_id,
+        {
+            "type": "run_update",
+            "status": "running",
+            "phase": "reconciling",
+            "current_url": None,
+            "pages_discovered": shared.pages_done,
+        },
+    )
     await _reconcile_direct_access(
         run_id=run_id,
         creds=creds,
@@ -451,9 +502,35 @@ async def _do_crawl_inner(run_id: int) -> None:
         llm_cfg=llm_cfg,
         pw_proxy=_pw_proxy,
         global_http_header=_global_http_header,
+        browser_engine=browser_engine,
+        browser_visible=browser_visible,
     )
 
     # OR-merge page categories from all credential views into each CrawledPage.
+    _update_run(run_id, phase="finalizing")
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "crawler",
+            "role": "Crawler",
+            "status": "active",
+            "current_task": "Finalizing crawl results",
+            "outcome": None,
+            "_persist": True,
+        },
+    )
+    _crawl_log(
+        run_id,
+        "crawl",
+        "info",
+        "Finalizing crawl — merging credential views and preparing the attack surface",
+        data={
+            "stage": "finalizing",
+            "stage_label": "Finalizing crawl",
+            "pages_discovered": shared.pages_done,
+        },
+    )
     _merge_all_categories(run_id)
 
     # Seed the workprogram now that we have the full page list + OWASP categories.
@@ -484,6 +561,7 @@ async def _do_crawl_inner(run_id: int) -> None:
     _update_run(
         run_id,
         status=final_status,
+        phase="crawled",
         completed_at=_utcnow(),
         current_url=None,
         pages_discovered=shared.pages_done,
@@ -506,6 +584,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         {
             "type": "run_update",
             "status": final_status,
+            "phase": "crawled",
             "pages_discovered": shared.pages_done,
             "current_url": None,
         },
@@ -545,6 +624,8 @@ async def _crawl_as_credential(
     total_phases: int,
     pw_proxy: dict,
     global_http_header: dict[str, str],
+    browser_engine: str,
+    browser_visible: bool,
     js_endpoint_discovery_enabled: bool,
     skip_dangerous_actions: bool,
     suppress_form_submit_actions: bool,
@@ -576,6 +657,28 @@ async def _crawl_as_credential(
         "crawl",
         "info",
         f"Phase {phase_idx + 1}/{total_phases}: crawling as {username}",
+        data={
+            "stage": "phase_start",
+            "stage_label": "Starting credential phase",
+            "username": username,
+            "phase_index": phase_idx + 1,
+            "phase_total": total_phases,
+        },
+    )
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "crawler",
+            "role": "Crawler",
+            "status": "active",
+            "current_task": (
+                f"Phase {phase_idx + 1}/{total_phases} — "
+                f"preparing crawl as {username}"
+            ),
+            "outcome": None,
+            "_persist": True,
+        },
     )
 
     local_pages = 0  # pages actually navigated to by this credential
@@ -584,12 +687,18 @@ async def _crawl_as_credential(
         # <-loopback> removes Chromium's default proxy bypass for localhost so
         # loopback-target traffic reaches Burp/ZAP when a proxy is configured.
         _args = ["--proxy-bypass-list=<-loopback>"] if pw_proxy else []
-        browser = await p.chromium.launch(headless=True, args=_args)
+        browser = await launch_playwright_browser(
+            p,
+            browser_engine=browser_engine,
+            headless=not browser_visible,
+            args=_args,
+        )
         ctx = await browser.new_context(
-            user_agent=_UA,
+            user_agent=playwright_user_agent(browser),
             ignore_https_errors=True,
             **pw_proxy,
         )
+        protect_playwright_context(browser, ctx)
         if global_http_header:
             await ctx.set_extra_http_headers(global_http_header)
         traffic_svc.setup_playwright_logging(ctx, run_id, username=username)
@@ -685,10 +794,40 @@ async def _crawl_as_credential(
 
         if requires_auth and cred:
             log.info("Authenticating as %s at %s", cred.username, credential_login_url)
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "crawler",
+                    "role": "Crawler",
+                    "status": "active",
+                    "current_task": (
+                        f"Phase {phase_idx + 1}/{total_phases} — "
+                        f"authenticating as {username}"
+                    ),
+                    "outcome": None,
+                    "_persist": True,
+                },
+            )
             await _authenticate(
                 page, credential_login_url, cred, run_id, llm_cfg=llm_cfg
             )
             authenticated_landing_url = page.url
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "crawler",
+                    "role": "Crawler",
+                    "status": "active",
+                    "current_task": (
+                        f"Phase {phase_idx + 1}/{total_phases} — "
+                        f"authenticated as {username}; starting page crawl"
+                    ),
+                    "outcome": None,
+                    "_persist": True,
+                },
+            )
             auth_check_snapshot = await _capture_auth_check_snapshot(
                 page, credential_login_url
             )
@@ -767,14 +906,40 @@ async def _crawl_as_credential(
             _update_run(run_id, current_url=url, pages_discovered=shared.pages_done)
             # Write the intended URL into per_user_progress immediately so the
             # polling API response reflects what the crawler is currently visiting.
-            _update_credential_progress(run_id, username, url, local_pages)
-            events_svc.emit(
+            _update_credential_progress(
                 run_id,
-                {
-                    "type": "crawl_progress",
+                username,
+                url,
+                local_pages,
+                stage="page_visit",
+                stage_label="Opening page",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_progress(
+                run_id,
+                username=username,
+                pages_visited=local_pages,
+                current_url=url,
+                stage="page_visit",
+                stage_label="Opening page",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_log(
+                run_id,
+                "crawl",
+                "info",
+                f"Phase {phase_idx + 1}/{total_phases} — {username}: opening {url}",
+                page_url=url,
+                data={
+                    "stage": "page_visit",
+                    "stage_label": "Opening page",
                     "username": username,
+                    "phase_index": phase_idx + 1,
+                    "phase_total": total_phases,
                     "pages_visited": local_pages,
-                    "current_url": url,
+                    "pages_discovered": shared.pages_done,
                 },
             )
 
@@ -796,6 +961,21 @@ async def _crawl_as_credential(
                     _update_page(
                         page_id, status="failed", error_message=str(nav_err)[:500]
                     )
+                _crawl_log(
+                    run_id,
+                    "crawl",
+                    "error",
+                    f"Phase {phase_idx + 1}/{total_phases} — {username}: could not open {url}",
+                    page_url=url,
+                    data={
+                        "stage": "page_error",
+                        "stage_label": "Page navigation failed",
+                        "username": username,
+                        "phase_index": phase_idx + 1,
+                        "phase_total": total_phases,
+                        "error": str(nav_err)[:500],
+                    },
+                )
                 continue
 
             if resp is not None and resp.status >= 400:
@@ -803,6 +983,21 @@ async def _crawl_as_credential(
                     _update_page(
                         page_id, status="failed", error_message=f"HTTP {resp.status}"
                     )
+                _crawl_log(
+                    run_id,
+                    "crawl",
+                    "warning",
+                    f"Phase {phase_idx + 1}/{total_phases} — {username}: page returned HTTP {resp.status}",
+                    page_url=url,
+                    data={
+                        "stage": "page_error",
+                        "stage_label": "Page returned an error",
+                        "username": username,
+                        "phase_index": phase_idx + 1,
+                        "phase_total": total_phases,
+                        "http_status": resp.status,
+                    },
+                )
                 continue
 
             # ── SPA URL guard + redirect deduplication ────────────────────────
@@ -829,6 +1024,42 @@ async def _crawl_as_credential(
                         _update_page(page_id, url=final_url)
                         shared.crawled_norms[norm_final] = page_id
 
+            _update_credential_progress(
+                run_id,
+                username,
+                final_url,
+                local_pages,
+                stage="page_loaded",
+                stage_label="Page loaded; checking access",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_progress(
+                run_id,
+                username=username,
+                pages_visited=local_pages,
+                current_url=final_url,
+                stage="page_loaded",
+                stage_label="Page loaded; checking access",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_log(
+                run_id,
+                "crawl",
+                "info",
+                f"Phase {phase_idx + 1}/{total_phases} — {username}: page loaded; checking access",
+                page_url=final_url,
+                data={
+                    "stage": "page_loaded",
+                    "stage_label": "Page loaded; checking access",
+                    "username": username,
+                    "phase_index": phase_idx + 1,
+                    "phase_total": total_phases,
+                    "pages_visited": local_pages,
+                },
+            )
+
             # ── DOM-based accessibility check (login form = not accessible) ───
             on_login = await _page_requires_login(page, credential_login_url)
 
@@ -837,6 +1068,20 @@ async def _crawl_as_credential(
                     _update_page(page_id, status="crawled")
                 log.debug(
                     "  Login form for %s (user=%s) — inaccessible", final_url, username
+                )
+                _crawl_log(
+                    run_id,
+                    "crawl",
+                    "info",
+                    f"Phase {phase_idx + 1}/{total_phases} — {username}: access requires login",
+                    page_url=final_url,
+                    data={
+                        "stage": "access_blocked",
+                        "stage_label": "Access requires login",
+                        "username": username,
+                        "phase_index": phase_idx + 1,
+                        "phase_total": total_phases,
+                    },
                 )
                 continue
 
@@ -886,6 +1131,40 @@ async def _crawl_as_credential(
                 for r in raw_links
                 if _same_domain(r["href"], base_netloc)
             ]
+            _update_credential_progress(
+                run_id,
+                username,
+                final_url,
+                local_pages,
+                stage="page_analysis",
+                stage_label="Analyzing page and discovering links",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_progress(
+                run_id,
+                username=username,
+                pages_visited=local_pages,
+                current_url=final_url,
+                stage="page_analysis",
+                stage_label="Analyzing page and discovering links",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_log(
+                run_id,
+                "crawl",
+                "info",
+                f"Phase {phase_idx + 1}/{total_phases} — {username}: analyzing page and discovering links",
+                page_url=final_url,
+                data={
+                    "stage": "page_analysis",
+                    "stage_label": "Analyzing page and discovering links",
+                    "username": username,
+                    "phase_index": phase_idx + 1,
+                    "phase_total": total_phases,
+                },
+            )
             page_scripts = observed_script_bodies[:]
             observed_script_bodies.clear()
             js_endpoint_calls, js_nav_urls = await _record_page_intelligence(
@@ -1192,24 +1471,81 @@ async def _crawl_as_credential(
                             )
                         )
 
+            _update_credential_progress(
+                run_id,
+                username,
+                final_url,
+                local_pages,
+                stage="page_complete",
+                stage_label="Page complete; moving to next URL",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_progress(
+                run_id,
+                username=username,
+                pages_visited=local_pages,
+                current_url=final_url,
+                stage="page_complete",
+                stage_label="Page complete; moving to next URL",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_log(
+                run_id,
+                "crawl",
+                "info",
+                f"Phase {phase_idx + 1}/{total_phases} — {username}: completed {final_url}; {len(queue)} URL(s) queued",
+                page_url=final_url,
+                data={
+                    "stage": "page_complete",
+                    "stage_label": "Page complete; moving to next URL",
+                    "username": username,
+                    "phase_index": phase_idx + 1,
+                    "phase_total": total_phases,
+                    "pages_visited": local_pages,
+                    "pages_discovered": shared.pages_done,
+                    "queued_urls": len(queue),
+                },
+            )
+
         await browser.close()
 
-    _update_credential_progress(run_id, username, None, local_pages, done=True)
-    events_svc.emit(
+    _update_credential_progress(
         run_id,
-        {
-            "type": "crawl_progress",
-            "username": username,
-            "pages_visited": local_pages,
-            "current_url": None,
-            "done": True,
-        },
+        username,
+        None,
+        local_pages,
+        done=True,
+        stage="phase_complete",
+        stage_label="Credential phase complete",
+        phase_index=phase_idx + 1,
+        phase_total=total_phases,
+    )
+    _crawl_progress(
+        run_id,
+        username=username,
+        pages_visited=local_pages,
+        current_url=None,
+        stage="phase_complete",
+        stage_label="Credential phase complete",
+        phase_index=phase_idx + 1,
+        phase_total=total_phases,
+        done=True,
     )
     _crawl_log(
         run_id,
         "crawl",
         "complete",
         f"Finished crawling as {username} — {local_pages} page(s)",
+        data={
+            "stage": "phase_complete",
+            "stage_label": "Credential phase complete",
+            "username": username,
+            "phase_index": phase_idx + 1,
+            "phase_total": total_phases,
+            "pages_visited": local_pages,
+        },
     )
 
 
@@ -3906,6 +4242,8 @@ async def _reconcile_direct_access(
     llm_cfg,
     pw_proxy: dict,
     global_http_header: dict[str, str],
+    browser_engine: str,
+    browser_visible: bool,
 ) -> None:
     """Mark pages as accessible when a credential can load a known URL directly.
 
@@ -3948,7 +4286,10 @@ async def _reconcile_direct_access(
             "agent_id": "crawler",
             "role": "Crawler",
             "status": "active",
-            "current_task": f"Verifying cross-user access (0/{total_checks})…",
+            "current_task": (
+                "Verifying page access for each user "
+                f"(0/{total_checks})…"
+            ),
             "outcome": None,
             "_persist": True,
         },
@@ -3959,18 +4300,43 @@ async def _reconcile_direct_access(
         "start",
         f"Verifying cross-user page access — {total_checks} check(s) across "
         f"{len(creds)} credential(s)",
+        data={
+            "stage": "access_reconciliation",
+            "stage_label": "Verifying page access for each user",
+            "total_checks": total_checks,
+            "credential_count": len(creds),
+            "page_count": len(page_rows),
+        },
     )
     async with async_playwright() as p:
         _args = ["--proxy-bypass-list=<-loopback>"] if pw_proxy else []
-        browser = await p.chromium.launch(headless=True, args=_args)
+        browser = await launch_playwright_browser(
+            p,
+            browser_engine=browser_engine,
+            headless=not browser_visible,
+            args=_args,
+        )
         try:
             for cred in creds:
                 if run_id in _stop_requested:
                     break
                 credential_login_url = _login_url_for_credential(login_url, cred)
-                ctx = await browser.new_context(
-                    user_agent=_UA, ignore_https_errors=True, **pw_proxy
+                _crawl_log(
+                    run_id,
+                    "reconcile",
+                    "info",
+                    f"Access verification — signing in as {cred.username}",
+                    data={
+                        "stage": "reconcile_auth",
+                        "stage_label": "Signing in for access verification",
+                        "username": cred.username,
+                    },
                 )
+                ctx = await browser.new_context(
+                    user_agent=playwright_user_agent(browser),
+                    ignore_https_errors=True, **pw_proxy
+                )
+                protect_playwright_context(browser, ctx)
                 if global_http_header:
                     await ctx.set_extra_http_headers(global_http_header)
                 traffic_svc.setup_playwright_logging(
@@ -4015,11 +4381,25 @@ async def _reconcile_direct_access(
                                 "role": "Crawler",
                                 "status": "active",
                                 "current_task": (
-                                    f"Verifying cross-user access "
-                                    f"({checks_done}/{total_checks})…"
+                                    f"Access check {checks_done}/{total_checks} — "
+                                    f"{cred.username}: {page_url}"
                                 ),
                                 "outcome": None,
                                 "_persist": True,
+                            },
+                        )
+                        _crawl_log(
+                            run_id,
+                            "reconcile",
+                            "info",
+                            f"Access check {checks_done}/{total_checks} — {cred.username}: {page_url}",
+                            page_url=page_url,
+                            data={
+                                "stage": "access_check",
+                                "stage_label": "Checking direct page access",
+                                "username": cred.username,
+                                "check_index": checks_done,
+                                "check_total": total_checks,
                             },
                         )
                         if cred.id in accessible_by:
@@ -4097,6 +4477,11 @@ async def _reconcile_direct_access(
         "reconcile",
         "complete",
         "Cross-user access verification complete",
+        data={
+            "stage": "access_reconciliation_complete",
+            "stage_label": "Access verification complete",
+            "total_checks": total_checks,
+        },
     )
 
 
@@ -4379,6 +4764,10 @@ def _update_credential_progress(
     pages_visited: int,
     *,
     done: bool = False,
+    stage: str = "crawling",
+    stage_label: str = "Crawling",
+    phase_index: int = 1,
+    phase_total: int = 1,
 ) -> None:
     """Persist per-credential crawl progress so the UI can read it on load/refresh."""
     if not username:
@@ -4392,6 +4781,10 @@ def _update_credential_progress(
             "current_url": current_url,
             "pages_visited": pages_visited,
             "done": done,
+            "stage": stage,
+            "stage_label": stage_label,
+            "phase_index": phase_index,
+            "phase_total": phase_total,
             "updated_at": _utcnow().isoformat(),
         }
         run.per_user_progress = json.dumps(progress)
@@ -6409,12 +6802,19 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
 
         from playwright.async_api import async_playwright
 
+        with Session(get_engine()) as s:
+            browser_engine = get_browser_debug_config(s).browser_engine
+
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=False)
+            browser = await launch_playwright_browser(
+                pw, browser_engine=browser_engine, headless=False
+            )
             try:
                 ctx = await browser.new_context(
-                    user_agent=_UA, ignore_https_errors=True
+                    user_agent=playwright_user_agent(browser),
+                    ignore_https_errors=True
                 )
+                protect_playwright_context(browser, ctx)
 
                 # Capture any Authorization headers sent during navigation
                 async def _capture_auth_header(request) -> None:
