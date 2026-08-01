@@ -388,11 +388,20 @@ class SastRunSummary(BaseModel):
     llm_config_id: int | None
     llm_profile_id: int | None = None
     leads_count: int
+    phase_state_json: str | None = None
+    coverage_json: str | None = None
+    report_json: str | None = None
     error_message: str | None
     started_at: datetime | None
     completed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class SastRunUpdate(BaseModel):
+    """Mutable SAST settings. A null profile follows the globally active profile."""
+
+    llm_profile_id: int | None = None
 
 
 class ScanLeadOut(BaseModel):
@@ -410,6 +419,17 @@ class ScanLeadOut(BaseModel):
     description: str
     location: str
     evidence: str
+    fingerprint: str = ""
+    suggested_endpoint: str = ""
+    source_trace_json: str = "{}"
+    control_trace_json: str = "[]"
+    sink_trace_json: str = "{}"
+    counterevidence_json: str = "[]"
+    proof_gaps_json: str = "[]"
+    validation_status: str = "pending"
+    validation_reasoning: str = ""
+    attack_path_json: str = "{}"
+    reportable: bool = True
     note: str
     status: str
     investigated_by_run_type: str | None
