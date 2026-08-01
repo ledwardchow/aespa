@@ -240,6 +240,41 @@ def test_confirm_without_run_id_does_not_promote(engine):
     assert count == 0
 
 
+def test_owner_scoped_update_rejects_a_lead_from_another_run(engine):
+    """Dynamic agents may only mutate copies imported into their own run."""
+    lead_id = _make_lead(
+        engine,
+        imported_into_run_type="web",
+        imported_into_run_id=7,
+    )
+
+    rejected = update_lead(
+        lead_id,
+        status="dismissed",
+        owner_run_type="api",
+        owner_run_id=7,
+        investigated_by_run_type="api",
+        investigated_by_run_id=7,
+    )
+    assert rejected is None
+
+    with Session(engine) as s:
+        lead = s.get(ScanLead, lead_id)
+    assert lead.status == "open"
+    assert lead.investigated_by_run_id is None
+
+    accepted = update_lead(
+        lead_id,
+        status="dismissed",
+        owner_run_type="web",
+        owner_run_id=7,
+        investigated_by_run_type="web",
+        investigated_by_run_id=7,
+    )
+    assert accepted is not None
+    assert accepted.status == "dismissed"
+
+
 # ── Copy-into-web-run model ─────────────────────────────────────────────────────
 
 

@@ -61,7 +61,12 @@ function App() {
       return true;
     }
   });
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 700);
+  useEffect(() => {
+    const onResize = () => { if (window.innerWidth <= 700) setCollapsed(true); };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const [reportingDebugCfg, setReportingDebugCfg] = useState(null);
   useEffect(() => {
     api.getVersion().then(d => {

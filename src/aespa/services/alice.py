@@ -1476,6 +1476,8 @@ async def _execute_alice_tool(
                 int(lead_id),
                 status=status,
                 note=note,
+                owner_run_type="api" if api_run_id is not None else "web",
+                owner_run_id=run_id,
                 investigated_by_run_type="api" if api_run_id is not None else "web",
                 investigated_by_run_id=run_id,
                 linked_finding_id=int(finding_id) if finding_id is not None else None,
