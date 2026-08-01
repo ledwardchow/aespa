@@ -299,6 +299,34 @@ a:hover { color: var(--accent-hover); }
 .content.scroll-content.no-padding {
   padding: 0;
 }
+
+.page-body { display: flex; flex-direction: column; gap: 16px; }
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+}
+.panel-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.panel-header h2 { margin: 0; font-size: 14px; font-weight: 650; }
+.stats-month-controls { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.stats-month-controls select { min-width: 150px; }
+.stats-price-meta { margin-left: 2px; }
+.stats-summary-meta { margin-left: auto; }
+.stats-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+.stat-card { background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.stat-card span { color: var(--muted); font-size: 11px; }
+.stat-card strong { color: var(--text); font-size: 18px; font-weight: 650; }
+.stat-card small { color: var(--muted); font-size: 10px; }
+.form-grid.two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.form-grid.two label { display: flex; flex-direction: column; gap: 5px; }
+.form-grid.two input { width: 100%; }
+.checkbox-row { display: flex; align-items: center; gap: 7px; margin-top: 12px; }
+.form-actions { display: flex; gap: 8px; margin-top: 12px; }
+.error-text, .error-banner { color: #ffb0b0; font-size: 12px; }
+.error-banner { padding: 10px 12px; border: 1px solid rgba(224,92,92,0.35); border-radius: 7px; background: var(--danger-bg); }
+@media (max-width: 1100px) { .stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 650px) { .stats-grid, .form-grid.two { grid-template-columns: 1fr; } }
 /* Tab content that manages its own internal scroll (e.g. Status sub-tabs) */
 .content.flex-fill-noscroll {
   overflow: hidden;
@@ -380,6 +408,24 @@ table {
   table-layout: fixed;     /* honour explicit column widths; prevents starvation */
   min-width: 480px;        /* never compress below this before scrolling kicks in */
 }
+.stats-table { min-width: 1050px; }
+.stats-table .stats-provider-col { width: 25%; }
+.stats-table .stats-calls-col { width: 6%; }
+.stats-table .stats-token-col { width: 7%; }
+.stats-table .stats-credit-col { width: 10%; }
+.stats-table .stats-cost-col { width: 8%; }
+.stats-table .stats-action-col { width: 7%; }
+.stats-table th,
+.stats-table td { padding-left: 10px; padding-right: 10px; }
+.stats-table th:last-child,
+.stats-table td:last-child { width: 7%; }
+.stats-table th:first-child,
+.stats-table td:first-child {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.stats-table td:first-child > div:first-child { color: var(--text); }
+.stats-base-url { font-size: 10px; overflow-wrap: anywhere; }
 th, td {
   padding: 11px 16px;
   text-align: left;

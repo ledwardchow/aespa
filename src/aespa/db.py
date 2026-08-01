@@ -1286,10 +1286,31 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "api_test_run", "waf_confidence", "TEXT")
     _ensure_column(engine, "api_test_run", "waf_evidence", "TEXT")
 
+    # Older installations are stamped directly at the current Alembic head,
+    # so they do not replay new table-creation revisions. Keep the independent
+    # statistics tables available on those databases as well.
+    _ensure_llm_statistics_tables(engine)
+
     # Orphan-extraction sweep last: it queries SastRun via the ORM, so it must
     # run only after every SastRun column above has been added — otherwise the
     # first post-upgrade startup raises "no such column" and silently skips.
     _cleanup_orphaned_sast_extractions()
+
+
+def _ensure_llm_statistics_tables(engine: Engine) -> None:
+    from sqlmodel import SQLModel
+
+    from aespa.models import LLMPriceCatalog, LLMPriceFeed, LLMUsageMonth
+
+    SQLModel.metadata.create_all(
+        engine,
+        tables=[
+            LLMUsageMonth.__table__,
+            LLMPriceCatalog.__table__,
+            LLMPriceFeed.__table__,
+        ],
+    )
+    _ensure_column(engine, "llm_usage_month", "base_url", "TEXT")
 
 
 def _ensure_llm_provider_config_migration(engine: Engine) -> None:

@@ -211,6 +211,10 @@ export const api = {
   clearScanLog:         (id)       => req(`/api/test-runs/${id}/scan-log`,              { method:"DELETE" }),
   clearTargetIntel:     (id)       => req(`/api/test-runs/${id}/target-intelligence`,   { method:"DELETE" }),
   getVersion:       ()            => req("/api/version"),
+  getLLMStatistics: (month)       => req(`/api/statistics/llm${month ? `?month=${encodeURIComponent(month)}` : ""}`),
+  refreshLLMPrices: ()            => req("/api/statistics/llm/prices/refresh", { method:"POST" }),
+  updateLLMPrices:  (b)           => req("/api/statistics/llm/prices", { method:"PUT", body:b }),
+  resetLLMStatistics:()           => req("/api/statistics/llm", { method:"DELETE" }),
 };
 
 export async function req(url, opts = {}) {

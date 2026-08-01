@@ -223,6 +223,115 @@ def test_severity_threshold_skip_is_not_an_unconfirmed_verdict(monkeypatch):
     assert persisted[0][0][3].startswith("Not validated:")
 
 
+def test_inline_validation_refreshes_rows_before_detaching(monkeypatch, isolated_db_engine):
+    with Session(isolated_db_engine) as session:
+        site = Site(
+            name="Inline validation target",
+            base_url="https://target.local",
+            requires_auth=True,
+            login_url="https://target.local/login",
+        )
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        credential = Credential(
+            site_id=site.id,
+            username="reviewer",
+            password="secret",
+            label="Reviewer",
+        )
+        run = RunModel(site_id=site.id, name="Inline validation run")
+        session.add(credential)
+        session.add(run)
+        session.commit()
+        session.refresh(credential)
+        session.refresh(run)
+        finding = ScanFinding(
+            test_run_id=run.id,
+            owasp_category="A01",
+            severity="high",
+            title="Authorization bypass",
+            description="A protected route may be exposed.",
+            affected_url="https://target.local/admin",
+        )
+        session.add(finding)
+        session.commit()
+        session.refresh(finding)
+        run_id = run.id
+        finding_id = finding.id
+        credential_id = credential.id
+
+    observed = {}
+
+    async def fake_sessions(run_id_arg, base_url, login_url, creds, requires_auth):
+        observed["session_args"] = (
+            run_id_arg,
+            base_url,
+            login_url,
+            [(cred.id, cred.username, cred.label) for cred in creds],
+            requires_auth,
+        )
+        return {}
+
+    async def fake_validate_one(run_id_arg, finding_arg, llm_cfg, *_args, **_kwargs):
+        observed["finding"] = (run_id_arg, finding_arg.id, finding_arg.title)
+        observed["llm_cfg"] = llm_cfg
+
+    llm_cfg = SimpleNamespace(model="test-model")
+    policy = SimpleNamespace(follow_redirects=True)
+    monkeypatch.setattr(validator, "_get_or_create_sessions", fake_sessions)
+    monkeypatch.setattr(validator, "_validate_one", fake_validate_one)
+    monkeypatch.setattr(
+        validator,
+        "get_adversarial_validator_config",
+        lambda _session: SimpleNamespace(enabled=True),
+    )
+    monkeypatch.setattr(validator.events_svc, "emit", lambda *_args, **_kwargs: None)
+
+    asyncio.run(
+        validator.validate_finding_inline(
+            run_id,
+            finding_id,
+            llm_cfg=llm_cfg,
+            scanner_policy=policy,
+        )
+    )
+
+    assert observed["session_args"] == (
+        run_id,
+        "https://target.local",
+        "https://target.local/login",
+        [(credential_id, "reviewer", "Reviewer")],
+        True,
+    )
+    assert observed["finding"] == (run_id, finding_id, "Authorization bypass")
+    assert observed["llm_cfg"] is llm_cfg
+
+    with Session(isolated_db_engine) as session:
+        saved = session.get(ScanFinding, finding_id)
+        assert saved.validation_status == "validating"
+        assert saved.validation_note == "Validation running."
+
+
+def test_inline_validation_records_unexpected_background_failure(monkeypatch):
+    persisted = []
+
+    async def fail_inline(*_args, **_kwargs):
+        raise RuntimeError("session bootstrap failed")
+
+    async def fake_persist(*args, **kwargs):
+        persisted.append((args, kwargs))
+
+    monkeypatch.setattr(validator, "_validate_finding_inline", fail_inline)
+    monkeypatch.setattr(validator, "_persist_verdict", fake_persist)
+
+    asyncio.run(validator.validate_finding_inline(4, 12))
+
+    assert persisted[0][0][:3] == (4, 12, "unconfirmed")
+    assert "session bootstrap failed" in persisted[0][0][3]
+    assert persisted[0][1]["source"] == "validation_error"
+
+
 def test_validation_batch_respects_concurrency_limit():
     active = 0
     peak = 0
