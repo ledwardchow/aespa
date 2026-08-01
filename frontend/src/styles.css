@@ -263,6 +263,7 @@ a:hover { color: var(--accent-hover); }
 
 .topbar {
   height: var(--topbar-h);
+  flex-shrink: 0;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   display: flex;
@@ -283,6 +284,31 @@ a:hover { color: var(--accent-hover); }
 }
 .topbar-title .breadcrumb-sep { color: var(--muted); font-weight: 400; }
 .topbar-actions { display: flex; gap: 8px; }
+
+@media (max-width: 560px) {
+  .topbar {
+    height: auto;
+    min-height: var(--topbar-h);
+    padding: 7px 10px;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .topbar-title {
+    min-width: 0;
+    flex: 1 0 100%;
+    gap: 5px;
+    overflow-wrap: anywhere;
+  }
+  .topbar-actions {
+    min-width: 0;
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .topbar-actions .btn { padding: 6px 8px; }
+  .sast-header-title > a,
+  .sast-header-title .breadcrumb-sep { display: none; }
+}
 
 .content {
   padding: 28px;

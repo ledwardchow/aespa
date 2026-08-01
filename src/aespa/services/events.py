@@ -11,8 +11,9 @@ import contextvars
 import json
 from typing import AsyncGenerator, Iterator
 
-# run_id → list of subscriber queues
-_queues: dict[int, list[asyncio.Queue]] = {}
+# (run_kind, run_id) → list of subscriber queues.  Web, API, and SAST runs use
+# independent integer sequences, so run_id alone is not a safe event-bus key.
+_queues: dict[tuple[str, int], list[asyncio.Queue]] = {}
 
 # web TestRun, ApiTestRun and SastRun ids come from independent counters and
 # collide (id 1 can be all three at once), so the shared agent_log / scan_log
@@ -60,7 +61,8 @@ def emit(run_id: int, event: dict) -> None:
     scanner_phase events are also persisted to the scan_log table so the
     activity log survives page navigation.
     """
-    for q in _queues.get(run_id, []):
+    run_kind = _run_kind_for(run_id, event)
+    for q in _queues.get((run_kind, run_id), []):
         try:
             q.put_nowait(event)
         except asyncio.QueueFull:
@@ -122,10 +124,13 @@ def _persist_agent_status_event(run_id: int, event: dict) -> None:
         pass  # never let persistence failures break the scan
 
 
-async def stream(run_id: int) -> AsyncGenerator[str, None]:
-    """Yield SSE-formatted strings for the given run until the client disconnects."""
+async def stream(
+    run_id: int, run_kind: str = "web"
+) -> AsyncGenerator[str, None]:
+    """Yield events for ``(run_kind, run_id)`` until the client disconnects."""
     q: asyncio.Queue = asyncio.Queue(maxsize=500)
-    _queues.setdefault(run_id, []).append(q)
+    key = (run_kind, run_id)
+    _queues.setdefault(key, []).append(q)
     try:
         while True:
             try:
@@ -135,8 +140,8 @@ async def stream(run_id: int) -> AsyncGenerator[str, None]:
                 yield ": heartbeat\n\n"  # keep the connection alive
     finally:
         try:
-            _queues[run_id].remove(q)
+            _queues[key].remove(q)
         except (KeyError, ValueError):
             pass
-        if run_id in _queues and not _queues[run_id]:
-            del _queues[run_id]
+        if key in _queues and not _queues[key]:
+            del _queues[key]
