@@ -239,7 +239,7 @@ def stream_events(
     from aespa.services import events as events_svc
 
     return StreamingResponse(
-        events_svc.stream(run_id),
+        events_svc.stream(run_id, run_kind="api"),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

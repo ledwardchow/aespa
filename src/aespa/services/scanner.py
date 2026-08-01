@@ -8895,6 +8895,8 @@ async def _do_agentic_thinking_loop(
                     int(lead_id),
                     status=lead_status,
                     note=lead_note,
+                    owner_run_type="api" if is_api_run else "web",
+                    owner_run_id=run_id,
                     investigated_by_run_type="api" if is_api_run else "web",
                     investigated_by_run_id=run_id,
                     linked_finding_id=int(finding_id) if finding_id else None,
