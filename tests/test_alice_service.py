@@ -245,6 +245,54 @@ async def test_alice_turn_includes_live_status_for_operational_questions(
 
 
 @pytest.mark.anyio
+async def test_alice_operational_answer_with_done_tool_stays_visible(
+    db_session, test_data
+):
+    """A final text answer must not be swallowed when the model also calls done."""
+    run = test_data["run"]
+    captured = {"calls": 0}
+
+    async def mock_call_with_tools(*args, **kwargs):  # noqa: ARG001
+        captured["calls"] += 1
+        blocks = [
+            {"type": "text", "text": "The crawl is complete."},
+            {"type": "tool_use", "id": "done-1", "name": "done", "input": {}},
+        ]
+        return blocks, "tool_use", blocks
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        response = await run_alice_turn(run.id, "What is the crawl progress?", [])
+
+    assert captured["calls"] == 1
+    assert "The crawl is complete." in response["message"]
+
+
+@pytest.mark.anyio
+async def test_alice_operational_reasoning_stays_out_of_visible_answer(
+    db_session, test_data
+):
+    """Structured reasoning stays private while the text block reaches the reply."""
+    run = test_data["run"]
+    captured = {"calls": 0}
+
+    async def mock_call_with_tools(*args, **kwargs):  # noqa: ARG001
+        captured["calls"] += 1
+        blocks = [
+            {"type": "thinking", "thinking": "The user asked about AESPA status."},
+            {"type": "text", "text": "The crawl is complete."},
+        ]
+        return blocks, "end_turn", blocks
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        response = await run_alice_turn(run.id, "What is the crawl progress?", [])
+
+    assert captured["calls"] == 1
+    assert "The crawl is complete." in response["message"]
+    assert "AESPA status" not in response["message"]
+    assert "AESPA status" in response["thought_process"]
+
+
+@pytest.mark.anyio
 async def test_run_alice_turn_stream_yields_correct_chunks(db_session, test_data):
     """Verify that run_alice_turn_stream yields properly structured SSE events."""
     run = test_data["run"]

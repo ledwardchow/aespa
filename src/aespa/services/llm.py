@@ -593,32 +593,79 @@ _THINKING_CONTEXT_TOOL_ARG_KEYS = {
 _THINKING_CONTEXT_TOOLS = frozenset(_THINKING_CONTEXT_TOOL_ARG_KEYS)
 
 
+_THINKING_TAG_RE = re.compile(
+    r"<(think|thinking|reasoning|thought)\b[^>]*>(.*?)</\1\s*>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+_OPEN_THINKING_TAG_RE = re.compile(
+    r"<(think|thinking|reasoning|thought)\b[^>]*>", flags=re.IGNORECASE
+)
+_CLOSING_THINKING_TAG_RE = re.compile(
+    r"</(?:think|thinking|reasoning|thought)\s*>", flags=re.IGNORECASE
+)
+
+
+def _split_thinking_text(raw: str) -> tuple[str, str]:
+    """Return ``(reasoning, visible_text)`` for tagged model output.
+
+    OpenAI-compatible reasoning models do not all expose the same wire shape.
+    Some put ``<think>...</think>`` in ``message.content``; this helper turns
+    that representation into the same two channels used by structured
+    reasoning responses.  An unclosed block remains private unless the model
+    explicitly labels a later section as its final answer.
+    """
+    if not raw:
+        return "", ""
+
+    reasoning_parts: list[str] = []
+    visible_parts: list[str] = []
+    cursor = 0
+    for match in _THINKING_TAG_RE.finditer(raw):
+        before = raw[cursor : match.start()].strip()
+        if before:
+            visible_parts.append(before)
+        inner = match.group(2).strip()
+        if inner:
+            reasoning_parts.append(inner)
+        cursor = match.end()
+
+    tail = raw[cursor:]
+    open_match = _OPEN_THINKING_TAG_RE.search(tail)
+    if open_match:
+        before = tail[: open_match.start()].strip()
+        if before:
+            visible_parts.append(before)
+        private_tail = tail[open_match.end() :]
+        marker = re.search(
+            r"(?is)(?:final\s+(?:output|answer|json)|output|result)\s*:?\s*",
+            private_tail,
+        )
+        if marker:
+            private = private_tail[: marker.start()].strip()
+            final = private_tail[marker.end() :].strip()
+            if private:
+                reasoning_parts.append(private)
+            if final:
+                visible_parts.append(final)
+        elif private_tail.strip():
+            reasoning_parts.append(private_tail.strip())
+    else:
+        tail = _CLOSING_THINKING_TAG_RE.sub("", tail).strip()
+        if tail:
+            visible_parts.append(tail)
+
+    return "\n\n".join(reasoning_parts), "\n\n".join(visible_parts)
+
+
 def _strip_thinking_blocks(raw: str) -> str:
     """Remove visible model reasoning wrappers while keeping the final answer."""
-    text = raw
-    block_tags = ("think", "thinking", "reasoning", "thought")
-    for tag in block_tags:
-        text = re.sub(
-            rf"<{tag}\b[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE
-        )
-        # Handle unclosed reasoning tags (e.g. <think> without matching </think>)
-        if re.search(rf"<{tag}\b[^>]*>", text, flags=re.IGNORECASE):
-            # If an explicit final output marker exists after the tag, strip up to the marker
-            m_marker = re.search(
-                r"(?is)(?:final\s+(?:output|answer|json)|output|result)\s*:?\s*",
-                text,
-            )
-            if m_marker:
-                text = text[m_marker.end() :]
-            else:
-                text = re.sub(rf"<{tag}\b[^>]*>", "", text, flags=re.IGNORECASE)
+    _, text = _split_thinking_text(raw)
 
     # Some local/OpenRouter reasoning models emit pseudo-markup blocks without a
     # closing tag when they are interrupted near the final JSON.
-    text = re.sub(
+    return re.sub(
         r"(?is)^\s*(?:reasoning|thinking|thought)\s*:\s*.*?(?=[\[{])", "", text
     )
-    return text
 
 
 def _extract_json(raw: str, expect: type = list) -> Any:
@@ -1243,6 +1290,8 @@ async def stream_chat_completion(
             "messages": formatted_messages,
             "stream": True,
         }
+        if _openai_reasoning_split_enabled(config):
+            call_kwargs["extra_body"] = {"reasoning_split": True}
 
         try:
             response = await client.chat.completions.create(**call_kwargs)
@@ -1283,6 +1332,124 @@ def _content_part_text(part: Any) -> str:
     if isinstance(content, str):
         return content
     return ""
+
+
+def _field(value: Any, name: str, default: Any = None) -> Any:
+    """Read a field from an SDK object or a dictionary response."""
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _nested_text(value: Any) -> str:
+    """Extract text from provider reasoning fields without exposing metadata."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "\n".join(filter(None, (_nested_text(item) for item in value)))
+    if isinstance(value, dict):
+        for key in ("text", "content", "thinking", "reasoning_content", "reasoning"):
+            if key in value:
+                text = _nested_text(value[key])
+                if text:
+                    return text
+        return ""
+    for key in ("text", "content", "thinking", "reasoning_content", "reasoning"):
+        text = _nested_text(getattr(value, key, None))
+        if text:
+            return text
+    return ""
+
+
+def _openai_reasoning_split_enabled(config: LLMConfig) -> bool:
+    """Return whether this OpenAI endpoint supports separated reasoning fields.
+
+    This capability belongs at the provider adapter boundary.  MiniMax exposes
+    its OpenAI-compatible endpoint through the generic ``openai`` provider, so
+    the endpoint/model identity is the only capability signal available here.
+    Keeping the compatibility decision in one helper avoids scattering
+    MiniMax-specific branches through the agent loops.
+    """
+    identity = f"{config.base_url or ''} {config.model or ''}".lower()
+    return config.provider == "openai" and "minimax" in identity
+
+
+def _openai_reasoning_text(message: Any) -> tuple[str, Any]:
+    """Return structured reasoning text and its native detail payload."""
+    reasoning_content = _field(message, "reasoning_content")
+    reasoning = _field(message, "reasoning")
+    reasoning_details = _field(message, "reasoning_details")
+    raw_reasoning = _nested_text(reasoning_content or reasoning)
+    if not raw_reasoning:
+        raw_reasoning = _nested_text(reasoning_details)
+    return raw_reasoning.strip(), reasoning_details
+
+
+def _normalize_openai_message(message: Any) -> list[dict[str, Any]]:
+    """Normalize an OpenAI-style assistant message into AESPA content blocks.
+
+    The normalized form is provider-neutral: ``thinking`` is private trace
+    text, ``text`` is the visible answer, and ``tool_use`` is an executable
+    tool request.  The complete normalized block list is also used to rebuild
+    the next provider request, so reasoning is not silently discarded between
+    tool turns.
+    """
+    content = _field(message, "content")
+    reasoning, reasoning_details = _openai_reasoning_text(message)
+    visible = ""
+
+    if isinstance(content, str):
+        inline_reasoning, visible = _split_thinking_text(content)
+        if inline_reasoning:
+            reasoning = "\n\n".join(filter(None, (reasoning, inline_reasoning))).strip()
+    elif isinstance(content, list):
+        visible_parts: list[str] = []
+        for part in content:
+            part_type = str(_field(part, "type", "") or "").lower()
+            if part_type in {"reasoning", "reasoning_content", "thinking", "thought"}:
+                part_reasoning = _nested_text(
+                    _field(part, "thinking")
+                    or _field(part, "reasoning_content")
+                    or _field(part, "text")
+                    or _field(part, "content")
+                )
+                if part_reasoning:
+                    reasoning = "\n\n".join(
+                        filter(None, (reasoning, part_reasoning))
+                    ).strip()
+            else:
+                part_text = _content_part_text(part)
+                if part_text:
+                    inline_reasoning, part_visible = _split_thinking_text(part_text)
+                    if inline_reasoning:
+                        reasoning = "\n\n".join(
+                            filter(None, (reasoning, inline_reasoning))
+                        ).strip()
+                    if part_visible:
+                        visible_parts.append(part_visible)
+        visible = "\n".join(visible_parts).strip()
+    elif content is None:
+        visible = str(_field(message, "output_text") or _field(message, "text") or "")
+
+    blocks: list[dict[str, Any]] = []
+    if reasoning:
+        block: dict[str, Any] = {"type": "thinking", "thinking": reasoning}
+        if reasoning_details is not None:
+            block["reasoning_details"] = reasoning_details
+        blocks.append(block)
+    if visible:
+        blocks.append(
+            {
+                "type": "text",
+                "id": None,
+                "name": None,
+                "input": None,
+                "text": visible,
+            }
+        )
+    return blocks
 
 
 def _extract_message_text(message: Any) -> str:
@@ -1367,6 +1534,11 @@ def _chat_completion_kwargs(
 
     if not uses_reasoning_params and config.temperature is not None:
         kwargs["temperature"] = config.temperature
+    if _openai_reasoning_split_enabled(config):
+        # MiniMax keeps thinking enabled but can return it separately from the
+        # final answer.  That lets the caller preserve reasoning for tool-turn
+        # continuity without rendering it as user-facing Markdown.
+        kwargs["extra_body"] = {"reasoning_split": True}
     return kwargs
 
 
@@ -3409,6 +3581,7 @@ async def _call_with_tools_impl(
                 "name": getattr(b, "name", None),
                 "input": getattr(b, "input", None),
                 "text": getattr(b, "text", None),
+                "thinking": getattr(b, "thinking", None),
             }
             for b in (resp.content or [])
         ]
@@ -3461,6 +3634,7 @@ async def _call_with_tools_impl(
                 "name": b.get("name"),
                 "input": b.get("input"),
                 "text": b.get("text"),
+                "thinking": b.get("thinking"),
             }
             for b in content
         ]
@@ -3824,6 +3998,16 @@ async def _call_with_tools_impl(
             role = msg["role"]
             content = msg["content"]
             if isinstance(content, str):
+                if role == "assistant" and _openai_reasoning_split_enabled(config):
+                    reasoning, visible = _split_thinking_text(content)
+                    assistant_message: dict[str, Any] = {
+                        "role": role,
+                        "content": visible or None,
+                    }
+                    if reasoning:
+                        assistant_message["reasoning_content"] = reasoning
+                    result.append(assistant_message)
+                    continue
                 result.append({"role": role, "content": content})
                 continue
             if role == "user":
@@ -3852,11 +4036,31 @@ async def _call_with_tools_impl(
                 text_parts = [
                     b.get("text", "") for b in content if b.get("type") == "text"
                 ]
+                thinking_blocks = [
+                    b
+                    for b in content
+                    if b.get("type") == "thinking" and b.get("thinking")
+                ]
                 tool_use_blks = [b for b in content if b.get("type") == "tool_use"]
                 oai_msg: dict = {
                     "role": "assistant",
                     "content": " ".join(filter(None, text_parts)) or None,
                 }
+                if thinking_blocks and _openai_reasoning_split_enabled(config):
+                    reasoning = "\n\n".join(
+                        str(b.get("thinking") or "")
+                        for b in thinking_blocks
+                        if b.get("thinking")
+                    )
+                    if reasoning:
+                        oai_msg["reasoning_content"] = reasoning
+                    details = [
+                        b.get("reasoning_details")
+                        for b in thinking_blocks
+                        if b.get("reasoning_details") is not None
+                    ]
+                    if details:
+                        oai_msg["reasoning_details"] = details[-1]
                 if tool_use_blks:
                     oai_msg["tool_calls"] = [
                         {
@@ -3931,17 +4135,7 @@ async def _call_with_tools_impl(
         if refusal:
             raise LLMRefusalError(f"LLM provider refusal: {refusal}")
         finish = getattr(choice, "finish_reason", None) or "stop"
-        blocks = []
-        if msg.content:
-            blocks.append(
-                {
-                    "type": "text",
-                    "id": None,
-                    "name": None,
-                    "input": None,
-                    "text": msg.content,
-                }
-            )
+        blocks = _normalize_openai_message(msg)
         for tc in getattr(msg, "tool_calls", None) or []:
             try:
                 inp = json.loads(tc.function.arguments)
