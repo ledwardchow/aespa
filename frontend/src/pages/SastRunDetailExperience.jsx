@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { nav } from "../lib/router";
+import { downloadTextFile, sastCandidatesToMarkdown, sastReportFilename } from "../lib/utilities";
 import { PageHeader, Crumb, Sep } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { TokenUsageBar } from "../components/TokenUsageBar";
@@ -10,10 +11,10 @@ const PHASES = [
   { key: "discovery", label: "Discovery", short: "Source-to-sink candidates", view: "candidates" },
   { key: "validation", label: "Validation", short: "Controls and counterevidence", view: "candidates" },
   { key: "attack_path", label: "Attack paths", short: "Reachability and severity", view: "candidates" },
-  { key: "report", label: "Report", short: "Findings and coverage", view: "overview" },
+  { key: "report", label: "Report", short: "Findings and coverage", view: "coverage" },
 ];
 
-const TAB_ALIASES = { progress: "overview", leads: "candidates" };
+const TAB_ALIASES = { overview: "coverage", progress: "coverage", leads: "candidates" };
 const CANDIDATE_COLUMN_WIDTHS_KEY = "sast-candidate-columns:v1";
 const CANDIDATE_SPLIT_KEY = "sast-candidate-split:v1";
 const DEFAULT_CANDIDATE_COLUMN_WIDTHS = [88, null, 96, 132];
@@ -34,7 +35,7 @@ function readStoredValue(key, fallback, validate) {
 
 function normaliseTab(tab) {
   const candidate = TAB_ALIASES[tab] || tab;
-  return ["overview", "candidates", "coverage", "activity"].includes(candidate) ? candidate : "overview";
+  return ["coverage", "candidates", "activity"].includes(candidate) ? candidate : "coverage";
 }
 
 function jsonValue(value, fallback) {
@@ -160,7 +161,7 @@ function CandidateTable({ leads, selectedId, onSelect }) {
   </div>;
 }
 
-function CandidatesView({ leads, selectedLead, onSelect, targets, onQueue, queueBusy, reportableCount }) {
+function CandidatesView({ leads, selectedLead, onSelect, targets, onQueue, queueBusy, reportableCount, onExport }) {
   const [ledgerWidth, setLedgerWidth] = useState(() => readStoredValue(
     CANDIDATE_SPLIT_KEY,
     DEFAULT_CANDIDATE_SPLIT,
@@ -207,7 +208,7 @@ function CandidatesView({ leads, selectedLead, onSelect, targets, onQueue, queue
   };
 
   return <div className="sast-candidates-layout" ref={layoutRef} style={{ "--sast-ledger-width": `${ledgerWidth}%` }}>
-    <section className="sast-panel sast-candidate-ledger"><div className="sast-panel-header"><div><div className="sast-panel-title">Candidate ledger</div><div className="sast-panel-sub">Discovery hypotheses with independent validation outcomes</div></div><span className="sast-state sast-state-open">{reportableCount} reportable</span></div><CandidateTable leads={leads} selectedId={selectedLead?.id} onSelect={onSelect} /></section>
+    <section className="sast-panel sast-candidate-ledger"><div className="sast-panel-header"><div><div className="sast-panel-title">Candidate ledger</div><div className="sast-panel-sub">Discovery hypotheses with independent validation outcomes</div></div><div className="row"><span className="sast-state sast-state-open">{reportableCount} reportable</span><button className="btn ghost sm" disabled={!leads.length} onClick={onExport}>Export report ↓</button></div></div><CandidateTable leads={leads} selectedId={selectedLead?.id} onSelect={onSelect} /></section>
     <div className="sast-layout-resizer" role="separator" aria-label="Resize candidate ledger and evidence chain" aria-orientation="vertical" aria-valuemin={MIN_CANDIDATE_SPLIT} aria-valuemax={MAX_CANDIDATE_SPLIT} aria-valuenow={Math.round(ledgerWidth)} tabIndex="0" onPointerDown={startSplitResize} onKeyDown={resizeSplitWithKeyboard}><span aria-hidden="true" /></div>
     <LeadEvidence lead={selectedLead} targets={targets} onQueue={onQueue} queueBusy={queueBusy} />
   </div>;
@@ -255,7 +256,7 @@ function LeadEvidence({ lead, targets, onQueue, queueBusy }) {
   </aside>;
 }
 
-function CoverageView({ coverage }) {
+function CoverageView({ coverage, phases, statuses, onPhaseSelect }) {
   const summary = coverage?.summary || {};
   const files = coverage?.files || [];
   const total = summary.files_total || 0;
@@ -263,6 +264,10 @@ function CoverageView({ coverage }) {
   const percent = total ? Math.round(reviewed / total * 100) : 0;
   const languages = Object.entries(summary.languages || {}).sort((a, b) => b[1].total - a[1].total);
   return <div className="sast-coverage-layout">
+    <section className="sast-panel sast-coverage-phases">
+      <div className="sast-panel-header"><div><div className="sast-panel-title">Phase evidence</div><div className="sast-panel-sub">Authoritative persisted phase state</div></div><span className="sast-state sast-state-open">{Object.values(statuses).filter(status => status === "complete").length} / {PHASES.length} complete</span></div>
+      <div className="sast-phase-evidence-list">{PHASES.map(phase => <button key={phase.key} onClick={() => onPhaseSelect(phase.key)}>{statuses[phase.key] === "running" ? <span className="agent-dot agent-dot--active sast-evidence-running-dot" aria-label="running" /> : <span className={`sast-evidence-status status-${statuses[phase.key]}`}>{phaseIcon(statuses[phase.key]) || "·"}</span>}<span><strong>{phase.label}</strong><small>{phases?.[phase.key]?.message || phase.short}</small></span><em>{statuses[phase.key]}</em></button>)}</div>
+    </section>
     <section className="sast-panel">
       <div className="sast-panel-header"><div><div className="sast-panel-title">File review coverage</div><div className="sast-panel-sub">Deterministic inventory plus actual read and search receipts</div></div><span className="sast-state sast-state-confirmed">{reviewed} / {total} reviewed</span></div>
       <div className="sast-coverage-grid">
@@ -335,6 +340,7 @@ export function SastRunDetailExperience({ runId, initialTab }) {
   const onStop = async () => { try { await api.stopSastScan(runId); await loadData(); } catch (err) { setError(err.message); } };
   const onDelete = async () => { if (!confirm("Delete this SAST run and all its leads?")) return; try { const collId = run?.collection_id; await api.deleteSastRun(runId); nav(collId ? `#/apis/${collId}/files` : "#/sast-runs"); } catch (err) { setError(err.message); } };
   const onQueue = async (lead, target) => { setQueueBusy(true); setError(null); setNotice(null); try { const result = await api.handoffSastLead(runId, lead.id, { run_type: target.run_type, run_id: target.run_id }); setNotice(`Lead #${lead.id} queued as dynamic lead #${result.lead_id} in ${target.run_type.toUpperCase()} run #${target.run_id}.`); } catch (err) { setError(err.message); } finally { setQueueBusy(false); } };
+  const onExportReport = () => downloadTextFile(sastReportFilename(run?.name, runId), sastCandidatesToMarkdown(leads, { runName: run?.name, generatedAt: new Date() }), "text/markdown;charset=utf-8");
   const onProfileChange = async llmProfileId => { setProfileBusy(true); setError(null); setNotice(null); try { const updated = await api.updateSastRun(runId, { llm_profile_id: llmProfileId }); setRun(updated); const selected = profiles.find(profile => profile.id === llmProfileId); setNotice(llmProfileId ? `Model profile changed to ${profileLabel(selected)}. It will be used by the next scan.` : "This run now follows the globally active model profile for its next scan."); } catch (err) { setError(err.message); } finally { setProfileBusy(false); } };
   const canStart = run && !scanRunning && ["pending", "completed", "failed", "cancelled"].includes(run.status);
 
@@ -344,14 +350,13 @@ export function SastRunDetailExperience({ runId, initialTab }) {
     <PageHeader title={<span className="sast-header-title"><Crumb href="#/sast-runs">SAST</Crumb><Sep /><span className="sast-header-name">{run.name}</span><StatusBadge status={scanRunning ? "scanning" : run.status} /></span>} actions={<><SastModelSelector run={run} profiles={profiles} disabled={scanRunning} saving={profileBusy} onChange={onProfileChange} />{canStart && <button className="btn" disabled={startBusy} onClick={onStart}>{startBusy ? "Starting…" : "Start SAST Scan"}</button>}{scanRunning && <button className="btn danger-outline" onClick={onStop}>Stop</button>}<button className="btn danger-outline" onClick={onDelete}>Delete</button></>} />
     <div className="sast-run-shell">
       <div className="sast-phase-rail" role="tablist" aria-label="SAST scan phases">{PHASES.map((phase, index) => <button key={phase.key} className={`sast-phase-step ${displayedPhase === phase.key ? "active" : ""} status-${statuses[phase.key]}`} onClick={() => { setActivePhase(phase.key); goTab(phase.view); }} role="tab" aria-selected={displayedPhase === phase.key}>{statuses[phase.key] === "running" ? <span className="agent-dot agent-dot--active sast-phase-running-dot" aria-label="running" /> : <span className="sast-phase-marker">{phaseIcon(statuses[phase.key]) || index + 1}</span>}<span className="sast-phase-label">{phase.label}</span><span className="sast-phase-meta">{statuses[phase.key] === "pending" ? phase.short : statuses[phase.key]}</span></button>)}</div>
-      <div className="sast-view-tabs" role="tablist" aria-label="SAST run views">{[{ key: "overview", label: "Overview" }, { key: "candidates", label: `Candidates ${leads.length}` }, { key: "coverage", label: "Coverage" }, { key: "activity", label: "Activity" }].map(item => <button key={item.key} className={tab === item.key ? "active" : ""} onClick={() => goTab(item.key)} role="tab" aria-selected={tab === item.key}>{item.label}</button>)}</div>
+      <div className="sast-view-tabs" role="tablist" aria-label="SAST run views">{[{ key: "coverage", label: "Coverage" }, { key: "candidates", label: `Candidates ${leads.length}` }, { key: "activity", label: "Activity" }].map(item => <button key={item.key} className={tab === item.key ? "active" : ""} onClick={() => goTab(item.key)} role="tab" aria-selected={tab === item.key}>{item.label}</button>)}</div>
       <div className="sast-run-content">
         {error && <div className="alert error">{error}</div>}{notice && <div className="alert info sast-inline-notice">{notice}</div>}
         <div className="sast-phase-banner"><div><strong>{PHASES.find(item => item.key === displayedPhase)?.label}</strong><span>{phaseEntry.message || "This phase has not started."}</span></div><span className="sast-phase-banner-status">{statuses[displayedPhase]}</span></div>
         <div className="sast-summary-grid"><div><span>Files reviewed</span><strong>{analysis.coverage?.summary?.files_reviewed || 0}/{analysis.coverage?.summary?.files_total || 0}</strong><small>deterministic receipts</small></div><div><span>Candidates</span><strong>{leads.length}</strong><small>persisted hypotheses</small></div><div><span>Reportable</span><strong>{reportableCount}</strong><small>independently confirmed</small></div><div><span>Proof gaps</span><strong>{proofGapCount}</strong><small>unresolved evidence</small></div></div>
-        {tab === "overview" && <div className="sast-overview-grid"><section className="sast-panel"><div className="sast-panel-header"><div><div className="sast-panel-title">Phase evidence</div><div className="sast-panel-sub">Authoritative persisted phase state</div></div><span className="sast-state sast-state-open">{Object.values(statuses).filter(status => status === "complete").length} / {PHASES.length} complete</span></div><div className="sast-phase-evidence-list">{PHASES.map(phase => <button key={phase.key} onClick={() => setActivePhase(phase.key)}>{statuses[phase.key] === "running" ? <span className="agent-dot agent-dot--active sast-evidence-running-dot" aria-label="running" /> : <span className={`sast-evidence-status status-${statuses[phase.key]}`}>{phaseIcon(statuses[phase.key]) || "·"}</span>}<span><strong>{phase.label}</strong><small>{analysis.phases?.[phase.key]?.message || phase.short}</small></span><em>{statuses[phase.key]}</em></button>)}</div></section><LeadEvidence lead={selectedLead} targets={targets} onQueue={onQueue} queueBusy={queueBusy} /></div>}
-        {tab === "candidates" && <CandidatesView leads={leads} selectedLead={selectedLead} onSelect={setSelectedLeadId} targets={targets} onQueue={onQueue} queueBusy={queueBusy} reportableCount={reportableCount} />}
-        {tab === "coverage" && <CoverageView coverage={analysis.coverage} />}
+        {tab === "candidates" && <CandidatesView leads={leads} selectedLead={selectedLead} onSelect={setSelectedLeadId} targets={targets} onQueue={onQueue} queueBusy={queueBusy} reportableCount={reportableCount} onExport={onExportReport} />}
+        {tab === "coverage" && <CoverageView coverage={analysis.coverage} phases={analysis.phases} statuses={statuses} onPhaseSelect={setActivePhase} />}
         {tab === "activity" && <ActivityView logs={logs} agentLog={agentLog} scanRunning={scanRunning} tokenUsage={tokenUsage} tokenExpanded={tokenExpanded} setTokenExpanded={setTokenExpanded} runId={runId} />}
         <div ref={bottomRef} />
       </div>
