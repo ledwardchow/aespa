@@ -1853,7 +1853,12 @@ async def run_alice_turn_stream(
             # markers in the thinking stream) so it breaks the collapsed trace
             # into a box-above / box-below. The final tool-less turn's text and
             # the done summary become the prominent reply bubble.
-            has_tools = bool(tool_use_blocks)
+            # A read-only answer may arrive alongside the terminal ``done``
+            # tool. It is still the user's answer, not intermediate reasoning.
+            has_tools = bool(tool_use_blocks) and not (
+                intent == "operational"
+                and any(block.get("name") == "done" for block in tool_use_blocks)
+            )
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -2956,7 +2961,12 @@ async def run_api_alice_turn_stream(
             # Stream text blocks. Commentary on a step that also calls a tool is
             # "intermediate" — emit it as a chat bubble (wrapped in [[ALICE_SAY]]
             # markers in the thinking stream) so it breaks the collapsed trace.
-            has_tools = bool(tool_use_blocks)
+            # A read-only answer may arrive alongside the terminal ``done``
+            # tool. It is still the user's answer, not intermediate reasoning.
+            has_tools = bool(tool_use_blocks) and not (
+                intent == "operational"
+                and any(block.get("name") == "done" for block in tool_use_blocks)
+            )
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
