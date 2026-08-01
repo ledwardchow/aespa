@@ -117,3 +117,44 @@ def test_statistics_api_includes_lifetime_cost(client):
     assert lifetime["months"] == 2
     assert lifetime["factory_credits"] == 1_500_000
     assert lifetime["estimated_total_cost_usd"] == 10.5
+
+
+def test_missing_prices_count_as_zero_in_monthly_and_lifetime_costs(
+    client, isolated_db_engine
+):
+    statistics.record_usage(
+        "openai",
+        "priced-model",
+        input_tokens=1_000_000,
+        month="2026-08",
+    )
+    statistics.record_usage(
+        "openai",
+        "unpriced-model",
+        input_tokens=1_000_000,
+        month="2026-08",
+    )
+    with Session(isolated_db_engine) as session:
+        statistics.set_prices(
+            session,
+            {
+                "month": "2026-08",
+                "provider": "openai",
+                "model": "priced-model",
+                "input_price_usd_per_million": 2,
+                "output_price_usd_per_million": 0,
+                "cache_read_price_usd_per_million": 0,
+                "cache_write_price_usd_per_million": 0,
+            },
+        )
+    stats = client.get("/api/statistics/llm?month=2026-08").json()
+    rows = {row["model"]: row for row in stats["rows"]}
+    assert rows["priced-model"]["estimated_credit_cost_usd"] == 0
+    assert rows["unpriced-model"]["estimated_token_cost_usd"] == 0
+    assert rows["unpriced-model"]["estimated_total_cost_usd"] == 0
+    assert stats["totals"]["estimated_token_cost_usd"] == 2
+    assert stats["totals"]["estimated_credit_cost_usd"] == 0
+    assert stats["totals"]["estimated_total_cost_usd"] == 2
+    assert stats["lifetime"]["estimated_token_cost_usd"] == 2
+    assert stats["lifetime"]["estimated_credit_cost_usd"] == 0
+    assert stats["lifetime"]["estimated_total_cost_usd"] == 2
