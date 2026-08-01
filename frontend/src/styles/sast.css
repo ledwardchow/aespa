@@ -36,7 +36,6 @@
 .sast-summary-grid span { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .35px; text-transform: uppercase; }
 .sast-summary-grid strong { overflow: hidden; margin-top: 4px; color: var(--text); font-size: 18px; line-height: 1.1; text-overflow: ellipsis; white-space: nowrap; }
 .sast-summary-grid small { overflow: hidden; margin-top: 3px; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.sast-overview-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(265px, .75fr); gap: 10px; align-items: start; }
 .sast-candidates-layout { display: grid; grid-template-columns: minmax(0, var(--sast-ledger-width, 54%)) 8px minmax(0, 1fr); align-items: start; }
 .sast-candidate-ledger { overflow: hidden; }
 .sast-layout-resizer { align-self: stretch; display: flex; align-items: center; justify-content: center; min-height: 120px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); background: var(--panel); cursor: col-resize; touch-action: none; }
@@ -104,6 +103,7 @@
 .sast-handoff-box select { width: 100%; min-width: 0; }
 .sast-handoff-box .btn { align-self: flex-start; }
 .sast-coverage-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(245px, .75fr); gap: 10px; align-items: start; }
+.sast-coverage-phases { grid-column: 1 / -1; }
 .sast-coverage-grid { display: flex; flex-direction: column; gap: 11px; padding: 14px 12px 12px; }
 .sast-coverage-row { display: grid; grid-template-columns: 94px minmax(80px, 1fr) 80px; align-items: center; gap: 10px; font-size: 11px; }
 .sast-coverage-name { color: var(--text-2); }
@@ -130,5 +130,5 @@
 .sast-activity-entry time { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; }
 .sast-activity-phase { overflow: hidden; color: var(--accent-hover); font-size: 10px; font-weight: 700; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 .sast-activity-message { min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
-@media (max-width: 900px) { .sast-phase-rail { grid-template-columns: repeat(5, minmax(112px, 1fr)); overflow-x: auto; } .sast-phase-step { min-width: 112px; } .sast-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sast-overview-grid, .sast-candidates-layout, .sast-coverage-layout { grid-template-columns: 1fr; gap: 10px; } .sast-layout-resizer { display: none; } }
+@media (max-width: 900px) { .sast-phase-rail { grid-template-columns: repeat(5, minmax(112px, 1fr)); overflow-x: auto; } .sast-phase-step { min-width: 112px; } .sast-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sast-candidates-layout, .sast-coverage-layout { grid-template-columns: 1fr; gap: 10px; } .sast-layout-resizer { display: none; } }
 @media (max-width: 560px) { .sast-model-selector { width: 100%; } .sast-model-selector .select { flex: 1; width: auto; } .sast-run-content { padding: 10px; overflow-x: hidden; } .sast-view-tabs { gap: 14px; overflow-x: auto; } .sast-view-tabs button { flex: 0 0 auto; white-space: nowrap; } .sast-phase-banner { align-items: flex-start; flex-direction: column; } .sast-summary-grid { grid-template-columns: 1fr 1fr; gap: 6px; } .sast-summary-grid > div { padding: 8px; } .sast-activity-toolbar { align-items: flex-start; flex-wrap: wrap; } .sast-activity-tabs { width: 100%; } .sast-activity-entry { grid-template-columns: 58px minmax(0, 1fr); gap: 4px 8px; } .sast-activity-phase { grid-column: 2; } .sast-activity-message { grid-column: 2; } .sast-candidate-table { min-width: 520px; } .sast-coverage-row { grid-template-columns: 76px minmax(60px, 1fr) 54px; gap: 7px; } }
