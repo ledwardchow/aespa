@@ -33,8 +33,8 @@ These are the top-level tools the LLM invokes by name.
 
 | Tool | What it does |
 |---|---|
-| `http_request` | Issue one arbitrary HTTP request (method, URL, headers, body, `use_session`, `owasp_category`). The workhorse for APIs, raw assets, header checks, and direct endpoint testing |
-| `browser` | Drive a real Playwright browser through ordered steps — `goto`, `fill`, `type`, `click`, `press`, `wait`, `snapshot`. Used when JS execution, hash routes, form interaction, or DOM rendering is required |
+| `http_request` | Issue one arbitrary HTTP request (method, URL, headers, body, `use_session`, `page_id`, `owasp_category`). Traffic keeps the selected page and session provenance |
+| `browser` | Drive a real Playwright browser through ordered steps — `goto`, `fill`, `type`, `click`, `press`, `wait`, `snapshot`, and `dom_check`. `page_id` plus `replay` can restore a saved crawler state before the steps run |
 | `context_tool` | Read-only reconnaissance against collected crawl/scan data — see [Context tools](#context-tools) below |
 | `write_finding` | Record a confirmed finding (title, severity, affected URL, evidence, CVSS, OWASP category). Only with concrete prior evidence |
 | `remove_finding` | Delete a previously recorded finding by `finding_id` (written in error, confirmed duplicate, or invalidated) |
@@ -43,6 +43,8 @@ These are the top-level tools the LLM invokes by name.
 | `decode_jwt` | Decode a JWT's header and payload; optionally verify the HS256 signature against a known secret |
 | `credential_check` | Test a small explicit list of credentials (≤ 20) against a login endpoint; stores successful tokens as sessions |
 | `register_account` | Create one disposable account via a discovered registration endpoint and store the resulting session |
+| `reauthenticate` | Re-run the configured web login flow, including supported TOTP or email-OTP steps, and refresh the primary session |
+| `skip_coverage` | In web Enforce/Full mode, record a justified inapplicable or technically blocked coverage obligation |
 | `agent_dispatch` | Dispatch a Specialist Agent to deep-dive on a strong, specific lead (`attack_class`, `target_url`, `rationale`, `priority`). Runs concurrently |
 | `done` | End the run with a summary. For the validator, instead returns a structured `verdict` + `reasoning` (+ optional PoC) |
 
@@ -61,17 +63,19 @@ next action).
 | `history_search` | Excerpts from prior request/response history matching a query |
 | `finding_list` | Findings already written this session, filterable by severity/category |
 | `target_inventory` | Normalised endpoints, forms, inputs, scripts, storage keys, IDs, and pre-identified `xss_sink` items extracted from crawl intelligence |
-| `traffic_search` | Captured HTTP request/response log from crawl and scan phases |
+| `traffic_search` | Captured HTTP request/response log from crawl and scan phases; API ALICE searches API-run traffic |
 | `endpoint_detail` | Consolidated page + intel + traffic + history for one specific URL |
 | `compare_responses` | Status, length, similarity, and term deltas between two history steps |
 | `mutate_request` | Proposes HTTP probe objects from a prior step via `input_validation`, `idor`, or `business_logic` mutations |
 | `auth_matrix` | Endpoints worth testing across anonymous/user/role boundaries |
 | `extract_entities` | URLs, paths, IDs, UUIDs, emails, JWT hints, error/debug lines from text or a prior step |
+| `coverage_gaps` | Web coverage obligations that are still unresolved |
 
 **API-run sub-commands.** Automated API scans use a strict allowlist: API-specific
 inventory commands plus `history_search`, `traffic_search`, `compare_responses`,
 `mutate_request`, and `extract_entities`. Web-only or unknown names are rejected rather
-than falling through to the web handler. API ALICE uses the API-specific commands below.
+than falling through to the web handler. API ALICE uses the API-specific commands below
+plus the safe shared analysis commands listed after them.
 
 | Sub-command | Returns |
 |---|---|
@@ -81,6 +85,12 @@ than falling through to the web handler. API ALICE uses the API-specific command
 | `finding_list` | Findings written this API run |
 | `report_finding` | Persist a confirmed finding on an API run (the API-aware replacement for `write_finding`) |
 | `lead_list` *(ALICE)* | Open `ScanLead` copies explicitly imported into this API test run |
+
+API ALICE also gets the safe shared analysis commands: `history_search`,
+`traffic_search`, `compare_responses`, `mutate_request`, and `extract_entities`.
+These commands use API-run traffic and the current turn's request/response history;
+they do not probe the target. `coverage_matrix` and `set_coverage` remain API-specific
+commands for reviewing and updating the OWASP API work program.
 
 ### SAST file tools
 
@@ -115,9 +125,11 @@ The SAST scanner gets its own set instead of the web/API tools. All file tools a
 | `decode_jwt` | ✓ | ✓ | crypto only² | — | ✓ | — |
 | `credential_check` | ✓ | ✓ | — | — | ✓ | — |
 | `register_account` | ✓ | ✓ | — | — | ✓ | — |
+| `reauthenticate` | ✓ | — | — | — | ✓ (web) | — |
+| `skip_coverage` | ✓ (Enforce) | — | — | — | ✓ (web Enforce) | — |
 | `agent_dispatch` | ✓ | — | —³ | — | ✓⁶ | — |
 | `done` | ✓ | ✓ | ✓ | ✓⁴ | ✓ | ✓ |
-| `compare_responses` | — | — | — | ✓⁵ | — | — |
+| `compare_responses` | — | — | — | ✓⁵ | via `context_tool` | — |
 | SAST file tools | — | — | — | — | — | ✓ |
 
 **Notes**
@@ -127,6 +139,7 @@ The SAST scanner gets its own set instead of the web/API tools. All file tools a
 4. The validator's `done` returns a structured `verdict` (`confirmed` / `false_positive` / …) + `reasoning` + optional PoC, not a free-text summary.
 5. The validator gets `compare_responses` as a dedicated top-level tool (not just the `context_tool` sub-command) so it can diff a re-run probe against the original evidence.
 6. `agent_dispatch` is available to web ALICE only. API ALICE withholds it until the Specialist executor is fully API/run-kind aware.
+7. ALICE's `skip_coverage` tool is not offered in web Track mode, and is never offered on API runs.
 
 ---
 

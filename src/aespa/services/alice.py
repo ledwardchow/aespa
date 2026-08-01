@@ -3,20 +3,33 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
+import re
 from typing import Any, AsyncGenerator
 from urllib.parse import urlparse
 
 from sqlmodel import Session, select
 
+from aespa.browser import (
+    launch_playwright_browser,
+    playwright_user_agent,
+    protect_playwright_context,
+)
 from aespa.db import get_engine
-from aespa.models import CrawledPage, LLMConfig, Site, TestRun
+from aespa.models import CrawledPage, Credential, LLMConfig, Site, TestRun
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
-from aespa.services.prompts.alice import ALICE_API_SYSTEM_PROMPT, ALICE_SYSTEM_PROMPT
+from aespa.services.prompts.alice import (
+    ALICE_API_OPERATIONAL_SYSTEM_PROMPT,
+    ALICE_API_SYSTEM_PROMPT,
+    ALICE_OPERATIONAL_SYSTEM_PROMPT,
+    ALICE_SYSTEM_PROMPT,
+)
 from aespa.services.scope import check_scope
 from aespa.services.settings import (
+    get_browser_debug_config,
     get_llm_config_for_role,
     get_scanner_policy,
 )
@@ -64,12 +77,14 @@ _ALICE_TOOL_NAMES = {
     "http_request",
     "browser",
     "context_tool",
+    "skip_coverage",
     "write_finding",
     "update_lead",
     "forge_jwt",
     "decode_jwt",
     "credential_check",
     "register_account",
+    "reauthenticate",
     "agent_dispatch",
     "done",
     "remove_finding",
@@ -99,17 +114,21 @@ async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
     from playwright.async_api import async_playwright
 
     from aespa.services import traffic as traffic_svc
-    from aespa.services.scanner import (
-        _UA,
-        _playwright_global_headers,
-        _playwright_proxy,
-    )
+    from aespa.services.scanner import _playwright_global_headers, _playwright_proxy
 
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=True)
-    ctx = await browser.new_context(
-        user_agent=_UA, ignore_https_errors=True, **_playwright_proxy()
+    with Session(get_engine()) as s:
+        browser_debug_cfg = get_browser_debug_config(s)
+    browser = await launch_playwright_browser(
+        pw,
+        browser_engine=browser_debug_cfg.browser_engine,
+        headless=not browser_debug_cfg.browser_visible,
     )
+    ctx = await browser.new_context(
+        user_agent=playwright_user_agent(browser),
+        ignore_https_errors=True, **_playwright_proxy()
+    )
+    protect_playwright_context(browser, ctx)
     headers = _playwright_global_headers()
     if headers:
         await ctx.set_extra_http_headers(headers)
@@ -146,6 +165,80 @@ def _extract_user_directive(history: list[dict]) -> str:
         if item.get("sender") == "user" and item.get("text"):
             return str(item["text"]).strip()
     return "Prioritize general penetration testing."
+
+
+def _is_alice_operational_question(instruction: str) -> bool:
+    """Identify AESPA/run questions that must stay read-only.
+
+    ALICE receives the full pentesting tool set for explicit test requests. For
+    questions about AESPA's own state, limiting the available tools in code is
+    safer than relying on prompt instructions alone.
+    """
+    text = re.sub(r"\s+", " ", str(instruction or "").strip().casefold())
+    if not text:
+        return False
+
+    operational_markers = (
+        "aespa",
+        "crawl",
+        "crawling",
+        "crawl progress",
+        "crawl status",
+        "scan progress",
+        "scan status",
+        "scan phase",
+        "run status",
+        "current run",
+        "test run",
+        "test run status",
+        "coverage",
+        "findings",
+        "agent activity",
+    )
+    if not any(marker in text for marker in operational_markers):
+        return False
+
+    # "test run status" is an operational phrase. Remove it before checking
+    # for explicit testing language so it is not mistaken for "test" + run.
+    security_request = text.replace("test run", "")
+    explicit_test_markers = (
+        "test",
+        "probe",
+        "exploit",
+        "attack",
+        "fuzz",
+        "inject",
+        "brute force",
+        "enumerate",
+        "payload",
+        "sqli",
+        "sql injection",
+        "xss",
+        "idor",
+        "ssrf",
+        "csrf",
+    )
+    return not any(marker in security_request for marker in explicit_test_markers)
+
+
+def _classify_alice_intent(instruction: str) -> str:
+    """Classify a turn before selecting ALICE's prompt and tools."""
+    return "operational" if _is_alice_operational_question(instruction) else "testing"
+
+
+def _get_web_alice_run_status(run_id: int, base_url: str) -> dict:
+    """Return the live AESPA run state used to orient ALICE before a turn."""
+    from aespa.services.scanner import _run_thinking_context_tool
+
+    return _run_thinking_context_tool(
+        "run_status",
+        {},
+        pages_snapshot=[],
+        findings_snapshot=[],
+        history=[],
+        run_id=run_id,
+        base_url=base_url,
+    )
 
 
 def _split_visible_and_thinking_text(text: str) -> tuple[list[str], str]:
@@ -222,10 +315,126 @@ def _select_session(
     primary = session_vault.get("configured_primary")
     if primary is not None:
         return primary
-    for session in session_vault.values():
+    for label, session in session_vault.items():
+        if str(label).startswith("__"):
+            continue
         if session.get("kind") != "anonymous":
             return session
     return None
+
+
+def _invoke_post_probe(
+    callback,
+    url: str,
+    method: str,
+    owasp_category: str,
+    *,
+    test_class: str | None = None,
+    response_status: int | None = None,
+    page_id: int | None = None,
+) -> None:
+    """Call web/API coverage hooks while retaining old three-argument hooks."""
+    try:
+        inspect.signature(callback).bind(
+            url,
+            method,
+            owasp_category,
+            test_class,
+            response_status,
+            page_id,
+        )
+    except (TypeError, ValueError):
+        callback(url, method, owasp_category)
+    else:
+        callback(
+            url,
+            method,
+            owasp_category,
+            test_class,
+            response_status,
+            page_id,
+        )
+
+
+def _invoke_context_tool(
+    callback,
+    tool_name: str,
+    args: dict,
+    *,
+    pages_snapshot: list[dict],
+    findings_snapshot: list[dict],
+    history: list[dict],
+    run_id: int,
+    base_url: str,
+) -> dict:
+    """Call a context adapter with rich state, falling back for old callbacks."""
+    kwargs = {
+        "pages_snapshot": pages_snapshot,
+        "findings_snapshot": findings_snapshot,
+        "history": history,
+        "run_id": run_id,
+        "base_url": base_url,
+    }
+    try:
+        inspect.signature(callback).bind(tool_name, args, **kwargs)
+    except (TypeError, ValueError):
+        return callback(tool_name, args)
+    return callback(tool_name, args, **kwargs)
+
+
+def _redact_history_value(value: Any, *, key: str = "") -> Any:
+    """Keep useful comparison data without copying credentials into context history."""
+    sensitive = (
+        "authorization",
+        "cookie",
+        "password",
+        "secret",
+        "token",
+        "api-key",
+        "apikey",
+    )
+    if any(part in key.casefold() for part in sensitive):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            str(k): _redact_history_value(v, key=str(k))
+            for k, v in list(value.items())[:100]
+        }
+    if isinstance(value, list):
+        return [_redact_history_value(item, key=key) for item in value[:100]]
+    if isinstance(value, str):
+        return value[:8192]
+    return value
+
+
+def _append_alice_history(
+    history: list[dict] | None,
+    *,
+    step: int,
+    note: str,
+    method: str,
+    url: str,
+    request_headers: dict | None,
+    request_body: Any,
+    response_status: int,
+    response_headers: dict | None,
+    response_body: str,
+) -> None:
+    if history is None:
+        return
+    history.append(
+        {
+            "step": step,
+            "note": note,
+            "method": method,
+            "url": url,
+            "request_headers": _redact_history_value(request_headers or {}),
+            "request_body": _redact_history_value(request_body),
+            "response_status": response_status,
+            "response_headers": _redact_history_value(response_headers or {}),
+            "response_body": response_body[:8192],
+        }
+    )
 
 
 async def _execute_alice_tool(
@@ -240,6 +449,8 @@ async def _execute_alice_tool(
     scope_check_fn=None,  # Optional override: scope_check_fn(url) -> str | None
     context_tool_fn=None,  # Optional override: context_tool_fn(tool_name, args) -> dict
     post_probe_fn=None,  # Optional: post_probe_fn(url, method, owasp_category) -> None (API runs)
+    context_history: list[dict] | None = None,
+    reauth_attempts: list[int] | None = None,
     # Set for API-collection runs (then run_id is the ApiTestRun.id).
     api_run_id: int | None = None,
 ) -> str:
@@ -248,6 +459,8 @@ async def _execute_alice_tool(
     # here — e.g. an interactive modal login — propagate to later tool calls.
     if session_vault is None:
         session_vault = {}
+    if reauth_attempts is None:
+        reauth_attempts = [0]
 
     # Traffic keying: for API runs the traffic table is keyed on the API column,
     # with test_run_id left NULL (web/API run ids share an int space and would
@@ -305,6 +518,9 @@ async def _execute_alice_tool(
             ),
         ) as hx:
             try:
+                if isinstance(hx, traffic_svc.LoggingAsyncClient):
+                    hx.page_id = tool_input.get("page_id")
+                    hx.session_label = use_session_label
                 kwargs: dict = {}
                 if body is not None:
                     if isinstance(body, dict):
@@ -332,9 +548,34 @@ async def _execute_alice_tool(
                     _owasp = str(tool_input.get("owasp_category") or "").strip()
                     if _owasp:
                         try:
-                            post_probe_fn(_url, method, _owasp)
+                            _invoke_post_probe(
+                                post_probe_fn,
+                                _url,
+                                method,
+                                _owasp,
+                                test_class=str(tool_input.get("test_class") or "")
+                                or None,
+                                response_status=resp.status_code,
+                                page_id=(
+                                    int(tool_input["page_id"])
+                                    if str(tool_input.get("page_id") or "").isdigit()
+                                    else None
+                                ),
+                            )
                         except Exception as _pp_exc:
                             log.debug("ALICE post_probe_fn error: %s", _pp_exc)
+                _append_alice_history(
+                    context_history,
+                    step=step,
+                    note=str(tool_input.get("note") or ""),
+                    method=method,
+                    url=_url,
+                    request_headers=headers,
+                    request_body=body,
+                    response_status=resp.status_code,
+                    response_headers=dict(resp.headers),
+                    response_body=resp_body,
+                )
                 return (
                     f"HTTP {resp.status_code} {method} {_url}\n"
                     f"Response Headers: {dict(resp.headers)}\n"
@@ -350,25 +591,41 @@ async def _execute_alice_tool(
             tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
         )
         try:
-            if context_tool_fn is not None:
-                output = context_tool_fn(ctx_tool, ctx_args)
-            else:
-                from aespa.services.scanner import (
-                    _load_findings_snapshot,
-                    _run_thinking_context_tool,
-                )
-
+            if api_run_id is None:
                 with Session(get_engine()) as s:
                     pages = s.exec(
                         select(CrawledPage).where(CrawledPage.test_run_id == run_id)
                     ).all()
                     pages_snapshot = [p.model_dump() for p in pages]
+            else:
+                pages_snapshot = []
+            from aespa.services.scanner import _load_findings_snapshot
+
+            findings_snapshot = _load_findings_snapshot(
+                run_id, is_api_run=api_run_id is not None
+            )
+            if context_tool_fn is not None:
+                output = _invoke_context_tool(
+                    context_tool_fn,
+                    ctx_tool,
+                    ctx_args,
+                    pages_snapshot=pages_snapshot,
+                    findings_snapshot=findings_snapshot,
+                    history=context_history or [],
+                    run_id=run_id,
+                    base_url=base_url,
+                    api_run_id=api_run_id,
+                )
+            else:
+                from aespa.services.scanner import (
+                    _run_thinking_context_tool,
+                )
                 output = _run_thinking_context_tool(
                     ctx_tool,
                     ctx_args,
                     pages_snapshot=pages_snapshot,
-                    findings_snapshot=_load_findings_snapshot(run_id),
-                    history=[],
+                    findings_snapshot=findings_snapshot,
+                    history=context_history or [],
                     run_id=run_id,
                     base_url=base_url,
                 )
@@ -376,6 +633,138 @@ async def _execute_alice_tool(
             return result[:30000]
         except Exception as exc:
             return f"Context tool error: {exc}"
+
+    # ── skip_coverage ────────────────────────────────────────────────────────
+    if tool_name == "skip_coverage":
+        if api_run_id is not None:
+            return "skip_coverage is available only for web Full mode."
+        with Session(get_engine()) as s:
+            active_run = s.get(TestRun, run_id)
+            coverage_mode = getattr(active_run, "coverage_mode", "track") or "track"
+        if coverage_mode != "enforce":
+            return "skip_coverage is available only for web Full mode."
+        try:
+            from aespa.services.web_workprogram import skip_web_coverage_obligation
+
+            detail = skip_web_coverage_obligation(
+                run_id,
+                url=str(tool_input.get("url") or ""),
+                owasp_category=str(tool_input.get("owasp_category") or ""),
+                test_class=str(tool_input.get("test_class") or "") or None,
+                disposition=str(tool_input.get("disposition") or ""),
+                reason=str(tool_input.get("reason") or ""),
+                evidence=str(tool_input.get("evidence") or ""),
+            )
+            return f"Coverage obligation skipped with justification: {detail}"
+        except Exception as exc:
+            return f"skip_coverage rejected: {exc}"
+
+    # ── reauthenticate ───────────────────────────────────────────────────────
+    if tool_name == "reauthenticate":
+        if api_run_id is not None:
+            return "reauthenticate is available only for web runs with configured site credentials."
+        reason = str(tool_input.get("reason") or "").strip()
+        if reauth_attempts[0] >= 2:
+            return (
+                "reauthenticate: re-authentication attempts are exhausted for this turn. "
+                "Do not retry the login form manually; continue with reachable surface "
+                "or justify blocked coverage."
+            )
+        with Session(get_engine()) as s:
+            configured = session_vault.get("configured_primary") or {}
+            credential_id = configured.get("credential_id")
+            credential = (
+                s.get(Credential, int(credential_id))
+                if str(credential_id or "").isdigit()
+                else None
+            )
+            if credential is None:
+                credential = s.exec(
+                    select(Credential)
+                    .where(Credential.site_id == site_id)
+                    .order_by(Credential.id)
+                ).first()
+        if credential is None:
+            return (
+                "reauthenticate: this site has no configured credential, so there is "
+                "no login flow to re-run. Continue testing the anonymous surface."
+            )
+        reauth_attempts[0] += 1
+        try:
+            from aespa.services import scanner_sessions as session_svc
+            from aespa.services.scanner import _export_cred_session
+
+            cookies, token = await _export_cred_session(
+                base_url=base_url,
+                login_url=credential.login_url,
+                credential=credential,
+                run_id=run_id,
+                llm_cfg=llm_cfg,
+            )
+            label = str(configured.get("label") or "configured_primary")
+            extra_headers = {"Authorization": f"Bearer {token}"} if token else {}
+            session_data = {
+                "label": label,
+                "kind": "bearer" if token else "cookie",
+                "account_label": credential.label or credential.username,
+                "username": credential.username,
+                "credential_id": credential.id,
+                "source": "alice_reauthenticate",
+                "cookies": cookies,
+                "extra_headers": extra_headers,
+            }
+            record = session_svc.upsert_session(
+                run_id,
+                label=label,
+                kind=session_data["kind"],
+                account_label=session_data["account_label"],
+                username=credential.username,
+                credential_id=credential.id,
+                source="alice_reauthenticate",
+                cookies=cookies,
+                extra_headers=extra_headers,
+                run_kind="web",
+            )
+            session_vault["configured_primary"] = {
+                **session_data,
+                "label": record.label,
+            }
+            _append_alice_history(
+                context_history,
+                step=step,
+                note=reason,
+                method="REAUTHENTICATE",
+                url=credential.login_url or base_url,
+                request_headers={},
+                request_body={"reason": reason},
+                response_status=200,
+                response_headers={},
+                response_body="succeeded",
+            )
+            return (
+                "reauthenticate: succeeded. The configured login flow produced a fresh "
+                "configured_primary session; continue using the default session."
+            )
+        except Exception as exc:
+            log.warning("ALICE reauthentication failed: %s", exc)
+            _append_alice_history(
+                context_history,
+                step=step,
+                note=reason,
+                method="REAUTHENTICATE",
+                url=credential.login_url or base_url,
+                request_headers={},
+                request_body={"reason": reason},
+                response_status=0,
+                response_headers={},
+                response_body="failed",
+            )
+            if reauth_attempts[0] >= 2:
+                return (
+                    "reauthenticate: re-authentication attempts are exhausted. The "
+                    f"configured login flow failed: {exc}"
+                )
+            return f"reauthenticate: the configured login flow failed: {exc}"
 
     # ── write_finding ─────────────────────────────────────────────────────────
     if tool_name == "write_finding":
@@ -806,6 +1195,16 @@ async def _execute_alice_tool(
         target_url = str(tool_input.get("target_url") or base_url)
         rationale = str(tool_input.get("rationale") or "")
         priority = int(tool_input.get("priority") or 7)
+        page_id = tool_input.get("page_id")
+        try:
+            page_id = int(page_id) if page_id is not None else None
+        except (TypeError, ValueError):
+            page_id = None
+        use_session = (
+            tool_input.get("use_session")
+            if isinstance(tool_input.get("use_session"), str)
+            else None
+        )
 
         try:
             agent_id = dispatch_specialist_agent(
@@ -814,6 +1213,8 @@ async def _execute_alice_tool(
                 target_url=target_url,
                 rationale=rationale,
                 priority=priority,
+                page_id=page_id,
+                use_session=use_session,
             )
             if agent_id:
                 return f"Specialist agent {agent_id} dispatched for {attack_class} on {target_url}."
@@ -824,12 +1225,64 @@ async def _execute_alice_tool(
     # ── browser ───────────────────────────────────────────────────────────────
     if tool_name == "browser":
         from aespa.services import scanner_sessions as session_svc
+        from aespa.services import traffic as traffic_svc
         from aespa.services.scanner import (
             _playwright_global_headers,
             _run_thinking_browser_action,
         )
 
         url = str(tool_input.get("url") or base_url)
+        browser_page_id = tool_input.get("page_id")
+        try:
+            browser_page_id = (
+                int(browser_page_id) if browser_page_id is not None else None
+            )
+        except (TypeError, ValueError):
+            browser_page_id = None
+        browser_action = dict(tool_input)
+        if browser_page_id is not None:
+            with Session(get_engine()) as _page_session:
+                replay_page = _page_session.get(CrawledPage, browser_page_id)
+            if replay_page is None or replay_page.test_run_id != run_id:
+                return f"browser: page_id {browser_page_id} is not part of this run."
+            if not replay_page.in_scope:
+                return f"browser: page_id {browser_page_id} is outside the configured scope."
+            if tool_input.get("replay"):
+                try:
+                    replay_data = json.loads(replay_page.replay_steps_json or "[]")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    replay_data = []
+                if isinstance(replay_data, dict):
+                    replay_root = str(
+                        replay_data.get("root_url") or replay_page.url or url
+                    )
+                    replay_items = replay_data.get("steps") or []
+                else:
+                    replay_root = str(replay_page.url or url)
+                    replay_items = replay_data if isinstance(replay_data, list) else []
+                replay_steps = [{"op": "goto", "url": replay_root}] + [
+                    {
+                        key: value
+                        for key, value in {
+                            "op": item.get("kind") or item.get("op") or "click",
+                            "selector": item.get("selector"),
+                            "testid": item.get("testid"),
+                            "role": item.get("role"),
+                            "name": item.get("name"),
+                            "value": item.get("value"),
+                        }.items()
+                        if value not in (None, "")
+                    }
+                    for item in replay_items
+                    if isinstance(item, dict)
+                ]
+                browser_action["steps"] = replay_steps + [
+                    step
+                    for step in (tool_input.get("steps") or [])
+                    if isinstance(step, dict)
+                ]
+                url = replay_root
+                browser_action["url"] = replay_root
 
         # Scope-check the entry url and every goto step before driving the browser.
         _alice_scope = (
@@ -839,7 +1292,7 @@ async def _execute_alice_tool(
         )
         candidate_urls = [url] + [
             str(s.get("url"))
-            for s in (tool_input.get("steps") or [])
+            for s in (browser_action.get("steps") or [])
             if isinstance(s, dict) and s.get("op") == "goto" and s.get("url")
         ]
         for _u in candidate_urls:
@@ -853,6 +1306,30 @@ async def _execute_alice_tool(
             else None
         )
         selected = _select_session(session_vault, use_session_label)
+        replay_credential_id = (
+            getattr(replay_page, "replay_credential_id", None)
+            if browser_page_id is not None
+            else None
+        )
+        if replay_credential_id is not None:
+            matching_label = next(
+                (
+                    label
+                    for label, session in session_vault.items()
+                    if not str(label).startswith("__")
+                    and session.get("credential_id") == replay_credential_id
+                ),
+                None,
+            )
+            if use_session_label is None and matching_label:
+                use_session_label = matching_label
+                selected = session_vault.get(matching_label)
+            elif selected and selected.get("credential_id") != replay_credential_id:
+                return (
+                    "browser: this saved state belongs to credential "
+                    f"{replay_credential_id}. Select the matching use_session or "
+                    "reauthenticate before replaying it; no other identity was substituted."
+                )
 
         try:
             page, ctx = await _get_alice_browser(run_id, api_run_id=api_run_id)
@@ -860,7 +1337,13 @@ async def _execute_alice_tool(
             return f"Browser launch failed: {exc}"
 
         # Carry the selected session's cookies/headers onto the live context.
+        call_headers = (
+            tool_input.get("headers")
+            if isinstance(tool_input.get("headers"), dict)
+            else {}
+        )
         try:
+            await ctx.clear_cookies()
             if selected and selected.get("cookies"):
                 await ctx.add_cookies(
                     [
@@ -869,16 +1352,28 @@ async def _execute_alice_tool(
                     ]
                 )
             await ctx.set_extra_http_headers(
-                _playwright_global_headers((selected or {}).get("extra_headers") or {})
+                _playwright_global_headers(
+                    {
+                        **((selected or {}).get("extra_headers") or {}),
+                        **call_headers,
+                    }
+                )
             )
         except Exception:
             pass
 
         with Session(get_engine()) as _s:
             scanner_policy = get_scanner_policy(_s)
-        result = await _run_thinking_browser_action(
-            page, tool_input, default_url=base_url, scanner_policy=scanner_policy
-        )
+        traffic_svc.set_browser_context_tag(ctx, browser_page_id, use_session_label)
+        try:
+            result = await _run_thinking_browser_action(
+                page,
+                browser_action,
+                default_url=base_url,
+                scanner_policy=scanner_policy,
+            )
+        finally:
+            traffic_svc.clear_browser_context_tag(ctx)
         # The navigation targets were scope-checked, but the page may have
         # redirected onward. Refuse to surface / capture an off-scope final page.
         _final_url = result.get("url") or url
@@ -890,6 +1385,18 @@ async def _execute_alice_tool(
                 "page content was not loaded into context."
             )
         body = str(result.get("body") or "")
+        _append_alice_history(
+            context_history,
+            step=step,
+            note=str(tool_input.get("note") or ""),
+            method="BROWSER",
+            url=_final_url,
+            request_headers=call_headers,
+            request_body={"steps": browser_action.get("steps") or []},
+            response_status=int(result.get("status") or 0),
+            response_headers=result.get("headers") or {},
+            response_body=body,
+        )
 
         # Persist the (now possibly authenticated) browser state into the vault so
         # http_request and later browser calls reuse it. Handles modal logins with
@@ -969,7 +1476,7 @@ async def _execute_alice_tool(
                 int(lead_id),
                 status=status,
                 note=note,
-                investigated_by_run_type="api",
+                investigated_by_run_type="api" if api_run_id is not None else "web",
                 investigated_by_run_id=run_id,
                 linked_finding_id=int(finding_id) if finding_id is not None else None,
             )
@@ -1160,6 +1667,7 @@ async def run_alice_turn_stream(
 
         site_id = site.id
         base_url = str(site.base_url or "").strip()
+        coverage_mode = getattr(run, "coverage_mode", "track") or "track"
         _apply_upstream_proxy(s)
 
     # Load the per-run session vault so ALICE carries stored authenticated
@@ -1219,14 +1727,34 @@ async def run_alice_turn_stream(
             except Exception:
                 pass
 
-    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': 'Scope compliance verified. Starting agentic assessment loop...\n'})}\n\n"
+    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': 'Scope compliance check passed\n'})}\n\n"
     await asyncio.sleep(0.01)
 
-    # 3. Build system prompt and initial message list
-    system_message = ALICE_SYSTEM_PROMPT.format(
-        user_directive=user_instruction,
-        base_url=base_url,
+    # 3. Classify intent before selecting ALICE's system prompt and tools.
+    # Operational turns must not inherit the pentest playbook.
+    intent = _classify_alice_intent(user_instruction)
+    log.info("ALICE intent for run_id=%s: %s", run_id, intent)
+
+    # Give ALICE live product/run context before it interprets the user's words.
+    # This is especially important for questions such as "what is the progress
+    # of the crawl?": those are AESPA operational questions, not test requests.
+    run_status = _get_web_alice_run_status(run_id, base_url)
+    run_status_block = (
+        "CURRENT AESPA RUN STATUS (read-only operational context; captured at the "
+        "start of this turn):\n"
+        + json.dumps(run_status, default=str, indent=2)
     )
+
+    if intent == "operational":
+        system_message = ALICE_OPERATIONAL_SYSTEM_PROMPT.format(
+            user_directive=user_instruction,
+            base_url=base_url,
+        )
+    else:
+        system_message = ALICE_SYSTEM_PROMPT.format(
+            user_directive=user_instruction,
+            base_url=base_url,
+        )
 
     # Convert conversation history to Anthropic-format messages.
     # History items from the chat UI have sender/text; convert to role/content.
@@ -1247,19 +1775,27 @@ async def run_alice_turn_stream(
     except Exception:
         pass
 
-    # Append the current instruction as the latest user message, with the leads
-    # block prepended so ALICE sees the investigation targets in context.
-    if leads_block:
-        messages.append(
-            {"role": "user", "content": f"{leads_block}\n\n{user_instruction}"}
-        )
-    else:
-        messages.append({"role": "user", "content": user_instruction})
+    # Do not inject pentest leads into an operational turn. They are useful
+    # testing context, but would unnecessarily steer a status answer back toward
+    # the target.
+    initial_parts = [run_status_block]
+    if intent != "operational" and leads_block:
+        initial_parts.append(leads_block)
+    initial_parts.append(user_instruction)
+    messages.append({"role": "user", "content": "\n\n".join(initial_parts)})
 
-    alice_tools = _get_alice_tools()
+    alice_tools = _get_alice_tools(
+        exclude=set() if coverage_mode == "enforce" else {"skip_coverage"}
+    )
+    if intent == "operational":
+        alice_tools = [
+            tool for tool in alice_tools if tool["name"] in {"context_tool", "done"}
+        ]
 
     accumulated_thought = ""
     accumulated_message = ""
+    context_history: list[dict] = []
+    reauth_attempts = [0]
     step_count = 0
     consecutive_text_only = 0
 
@@ -1317,7 +1853,12 @@ async def run_alice_turn_stream(
             # markers in the thinking stream) so it breaks the collapsed trace
             # into a box-above / box-below. The final tool-less turn's text and
             # the done summary become the prominent reply bubble.
-            has_tools = bool(tool_use_blocks)
+            # A read-only answer may arrive alongside the terminal ``done``
+            # tool. It is still the user's answer, not intermediate reasoning.
+            has_tools = bool(tool_use_blocks) and not (
+                intent == "operational"
+                and any(block.get("name") == "done" for block in tool_use_blocks)
+            )
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -1350,6 +1891,12 @@ async def run_alice_turn_stream(
 
             # Handle no tool use (text-only turn)
             if not tool_use_blocks:
+                if intent == "operational":
+                    log.info(
+                        "ALICE operational turn completed with text at step %d",
+                        step_count,
+                    )
+                    break
                 consecutive_text_only += 1
                 if consecutive_text_only >= 3:
                     log.warning(
@@ -1426,6 +1973,8 @@ async def run_alice_turn_stream(
                         step=step_count,
                         session_vault=session_vault,
                         post_probe_fn=_web_post_probe_fn,
+                        context_history=context_history,
+                        reauth_attempts=reauth_attempts,
                     )
                 except Exception as exc:
                     log.warning(
@@ -1589,6 +2138,54 @@ def _run_api_context_tool(
     except (TypeError, ValueError):
         limit = 50
     search = str(args.get("search") or "").lower()
+
+    # ── run_status ────────────────────────────────────────────────────────────
+    if tool_name == "run_status":
+        from aespa.models import ApiEndpointTest, ApiTestRun, ScanFinding
+
+        with Session(get_engine()) as s:
+            run = s.get(ApiTestRun, run_id)
+            if run is None or run.collection_id != collection_id:
+                return {"tool": "run_status", "error": "API test run not found"}
+            endpoints = list(
+                s.exec(
+                    _sel(ApiEndpoint)
+                    .where(ApiEndpoint.collection_id == collection_id)
+                    .where(ApiEndpoint.in_scope == True)  # noqa: E712
+                ).all()
+            )
+            cells = list(
+                s.exec(
+                    _sel(ApiEndpointTest).where(
+                        ApiEndpointTest.api_test_run_id == run_id
+                    )
+                ).all()
+            )
+            findings_count = len(
+                s.exec(
+                    _sel(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
+                ).all()
+            )
+
+        coverage: dict[str, int] = {}
+        for cell in cells:
+            coverage[cell.status] = coverage.get(cell.status, 0) + 1
+        return {
+            "tool": "run_status",
+            "run_kind": "api",
+            "run_id": run_id,
+            "name": run.name,
+            "status": run.status,
+            "phase": run.phase,
+            "outcome": run.outcome,
+            "terminal_reason": run.terminal_reason,
+            "collection_id": collection_id,
+            "endpoints_in_scope": len(endpoints),
+            "coverage": coverage,
+            "scan": {"findings_count": findings_count},
+            "started_at": run.started_at,
+            "completed_at": run.completed_at,
+        }
 
     # ── endpoint_list ─────────────────────────────────────────────────────────
     if tool_name == "endpoint_list":
@@ -2047,6 +2644,7 @@ def _run_api_context_tool(
         "available_tools": [
             "endpoint_list",
             "endpoint_detail",
+            "run_status",
             "collection_info",
             "finding_list",
             "report_finding",
@@ -2184,8 +2782,9 @@ async def run_api_alice_turn_stream(
     def _scope_fn(url):
         return _check_api_scope(url, _coll_proxy)
 
-    def _ctx_fn(tool_name, args):
-        return _run_api_context_tool(collection_id, api_run_id, tool_name, args)
+    from aespa.services.api_scanner import _make_api_context_tool_fn
+
+    _ctx_fn = _make_api_context_tool_fn(collection_id, api_run_id)
 
     def _post_probe_fn(url: str, method: str, owasp_category: str) -> None:
         """Flip the endpoint × category work-program cell to in_progress when
@@ -2217,12 +2816,22 @@ async def run_api_alice_turn_stream(
     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. API Mode] Loading API collection endpoint inventory...\n'})}\n\n"
     await asyncio.sleep(0.01)
 
-    # Build the system prompt.
-    system_message = ALICE_API_SYSTEM_PROMPT.format(
-        collection_name=collection_name,
-        base_url=base_url,
-        user_directive=user_instruction,
-    )
+    # Classify intent before selecting ALICE's prompt and tools. Operational
+    # turns must not inherit the API pentest playbook.
+    intent = _classify_alice_intent(user_instruction)
+    log.info("ALICE API intent for run_id=%s: %s", api_run_id, intent)
+    if intent == "operational":
+        system_message = ALICE_API_OPERATIONAL_SYSTEM_PROMPT.format(
+            collection_name=collection_name,
+            base_url=base_url,
+            user_directive=user_instruction,
+        )
+    else:
+        system_message = ALICE_API_SYSTEM_PROMPT.format(
+            collection_name=collection_name,
+            base_url=base_url,
+            user_directive=user_instruction,
+        )
 
     # Build login-credential block so ALICE knows how to authenticate.
     creds_text = ""
@@ -2254,6 +2863,13 @@ async def run_api_alice_turn_stream(
                 + "\n".join(s_lines)
             )
 
+    run_status = _run_api_context_tool(collection_id, api_run_id, "run_status", {})
+    run_status_block = (
+        "CURRENT AESPA API RUN STATUS (read-only operational context; captured at the "
+        "start of this turn):\n"
+        + json.dumps(run_status, default=str, indent=2)
+    )
+
     # Inject this API run's independent SAST-lead copies.
     leads_block = ""
     try:
@@ -2264,16 +2880,12 @@ async def run_api_alice_turn_stream(
         pass
 
     # Build the initial user message, mirroring the scanner's pattern.
-    initial_parts = filter(
-        None,
-        [
-            f"Target: {base_url}",
-            creds_text,
-            sessions_text,
-            leads_block,
-            user_instruction,
-        ],
-    )
+    initial_parts = [f"Target: {base_url}", run_status_block]
+    if intent != "operational":
+        initial_parts.extend(
+            part for part in (creds_text, sessions_text, leads_block) if part
+        )
+    initial_parts.append(user_instruction)
     initial_user_message = "\n\n".join(initial_parts)
 
     # Convert history to Anthropic-format messages.
@@ -2290,9 +2902,16 @@ async def run_api_alice_turn_stream(
     # Withhold the site-oriented write_finding tool, which would persist the
     # finding against the TestRun/Site tables and trigger the site validator with
     # an ApiTestRun id (wrong/colliding cross-table lookup → stuck validation).
-    alice_tools = _get_alice_tools(exclude={"write_finding", "agent_dispatch"})
+    alice_tools = _get_alice_tools(
+        exclude={"write_finding", "agent_dispatch", "reauthenticate", "skip_coverage"}
+    )
+    if intent == "operational":
+        alice_tools = [
+            tool for tool in alice_tools if tool["name"] in {"context_tool", "done"}
+        ]
     accumulated_thought = ""
     accumulated_message = ""
+    context_history: list[dict] = []
     step_count = 0
     consecutive_text_only = 0
 
@@ -2342,7 +2961,12 @@ async def run_api_alice_turn_stream(
             # Stream text blocks. Commentary on a step that also calls a tool is
             # "intermediate" — emit it as a chat bubble (wrapped in [[ALICE_SAY]]
             # markers in the thinking stream) so it breaks the collapsed trace.
-            has_tools = bool(tool_use_blocks)
+            # A read-only answer may arrive alongside the terminal ``done``
+            # tool. It is still the user's answer, not intermediate reasoning.
+            has_tools = bool(tool_use_blocks) and not (
+                intent == "operational"
+                and any(block.get("name") == "done" for block in tool_use_blocks)
+            )
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -2371,6 +2995,12 @@ async def run_api_alice_turn_stream(
                 await asyncio.sleep(0)
 
             if not tool_use_blocks:
+                if intent == "operational":
+                    log.info(
+                        "ALICE API operational turn completed with text at step %d",
+                        step_count,
+                    )
+                    break
                 consecutive_text_only += 1
                 if consecutive_text_only >= 3:
                     log.warning(
@@ -2448,6 +3078,7 @@ async def run_api_alice_turn_stream(
                         context_tool_fn=_ctx_fn,
                         post_probe_fn=_post_probe_fn,
                         api_run_id=api_run_id,
+                        context_history=context_history,
                     )
                 except Exception as exc:
                     log.warning(

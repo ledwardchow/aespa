@@ -70,8 +70,8 @@ export function AttackSurfacePanel({ summary }) {
     <Section id="meta" title="Observed Technologies" detail={`${technologies.length} detected`} expanded={expanded.meta} onToggle={toggle}>
       {summary.waf ? <div className="surface-callout surface-callout-warning">
         <strong>⚠ WAF/bot-management detected: {summary.waf.provider}</strong> ({summary.waf.confidence} confidence)
-        <div className="subtle">{summary.waf.evidence}. Raw HTTP requests may be blocked (403) even with valid payloads/sessions —
-          the scanner routes http_request calls through the authenticated browser context to work around this automatically.</div>
+        <div className="subtle">{summary.waf.evidence}. {summary.waf.strategy?.summary || "The scanner keeps the original request and records persistent blocks as evidence."}</div>
+        {summary.waf.strategy?.operator_note ? <div className="subtle">{summary.waf.strategy.operator_note}</div> : null}
       </div> : null}
       <div className="surface-profile-list">{technologies.map(item => <span key={item.name} className={`surface-chip${item.category === "waf" ? " surface-chip-waf" : ""}`}>{item.name} <span className="subtle">via {item.source}</span></span>)}</div>
     </Section>

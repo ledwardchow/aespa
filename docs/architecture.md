@@ -284,6 +284,16 @@ Singleton row (id = 1). Routes scanner and/or LLM traffic through an upstream HT
 | `proxy_scanner` | `false` | Route scanner HTTP and Playwright traffic through proxy |
 | `proxy_llm` | `false` | Route LLM API calls through proxy |
 
+### Browser Debug Config (`BrowserDebugConfig` model)
+
+Singleton row (id = 1). Controls which Chromium build Playwright uses and
+whether normal browser sessions are visible on the machine running AESPA.
+
+| Field | Default | Description |
+|---|---|---|
+| `browser_engine` | `playwright_chromium` | Use the regular bundled Playwright Chromium build, or select `system_chrome` to use installed stable Google Chrome |
+| `browser_visible` | `false` | Run normal crawl, scan, and ALICE browser sessions with a visible window instead of headless mode; on macOS, AESPA restores the user's previous app after opening an automation page |
+
 ### Specialist Agent Config (`SpecialistAgentConfig` model)
 
 Singleton row (id = 1). Controls when and how Specialist Agents are dispatched during a dynamic scan.
@@ -442,6 +452,19 @@ start_crawl(run_id)
        3. Extract TargetIntelItems (endpoints, forms, inputs, IDs, scripts, JWT hints)
        4. Update TestRun status → crawled
 ```
+
+The run view reports the crawl in plain-language stages. Each page event includes
+the credential in use, the phase number, the URL, and the current step: opening
+the page, checking access, analyzing content and links, or moving to the next
+URL. Navigation errors and login-blocked pages are recorded too.
+
+For authenticated sites with multiple credentials, an optional **cross-user
+access check** can follow the crawl. AESPA loads known pages again for each
+credential to detect authorization differences. This is disabled by default and
+can be enabled with the Crawler setting **Enable access reconciliation**. When
+enabled, the UI labels this as access verification, shows progress such as
+`Access check 12/168`, and keeps each page check in the activity log. This is
+verification of known pages, not new page discovery.
 
 The unauthenticated phase is always run first so the crawler maps the public attack surface before logging in. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
 
@@ -657,6 +680,40 @@ never reject `done` indefinitely.
 | `tool` | Call a read-only context tool (see below) |
 | `done` | Finish the scan with a summary |
 
+### WAF detection and request transport
+
+WAF detection is passive. The traffic logger looks at normal response headers,
+cookies, and block pages, then records the provider and a provider-specific
+strategy in the recon summary.
+
+The browser strategy uses JavaScript running in a real Playwright page. This is
+different from Playwright's `APIRequestContext`: that API shares cookies with a
+browser context, but it does not run the page's challenge scripts. The scanner
+also keeps WAF clearance cookies when it swaps between the primary, anonymous,
+and named sessions, so a named session does not silently fall back to raw HTTP.
+
+Browser contexts do not set a stale, hand-written user-agent. Debug settings
+choose the regular bundled Playwright Chromium build by default, or the
+installed stable Chrome channel when `system_chrome` is selected. If selected
+Chrome is unavailable, AESPA falls back to Playwright Chromium. The context
+user-agent is derived from the live browser version and removes only the
+`HeadlessChrome` product token; Playwright still generates the other Client
+Hints from the engine that is actually running. Browser automation signals
+such as `navigator.webdriver` are not changed. The visible-browser setting is
+off by default; guided login remains visible when it requires user interaction.
+
+| Detected provider | Scanner strategy |
+|---|---|
+| Akamai Bot Manager | Real page requests, retain `_abck`/`bm_sz`/`ak_bmsc`, and use normal pacing. Persistent blocks remain evidence. |
+| Cloudflare | Real page requests, let JavaScript or a managed challenge run, and retain `cf_clearance`/`__cf_bm`. Interactive CAPTCHA is reported as a blocker. |
+| Imperva / Incapsula | Real page requests, let the browser challenge settle, and retain the provider's challenge cookies. |
+| AWS WAF | Use the page to acquire a Challenge token when `x-amzn-waf-action` indicates one. A normal Block action is still a valid WAF block; CAPTCHA needs an operator. |
+| F5 BIG-IP ASM | Use the page only for a client-integrity challenge. A signature block is not changed into a pass by browser routing. |
+| Sucuri CloudProxy | Keep the original request on direct HTTP with configured pacing. It is a reverse-proxy/IPS block, so browser routing is not assumed to help. |
+
+The scanner follows same-scope redirects one hop at a time. It does not retry a
+blocked request with payload mutations just to obtain a successful status.
+
 ### Context tools (read-only reconnaissance)
 
 These use an adaptive checkpoint. After 3 consecutive context calls, the LLM should
@@ -825,6 +882,10 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 When both the provider token and username are blank, the GitHub Copilot SDK reads Copilot CLI's real home directory and uses the account selected there. A configured username resolves that account's stored Copilot CLI credential, while an explicit provider token takes precedence over both choices. Named-account and explicit-token sessions get a temporary Copilot home. Every path keeps scans isolated: they use a temporary working directory, remove Copilot's repository environment from the prompt, disable instructions, skills, memory, hooks, embeddings, telemetry, host Git operations, and session storage, and expose only the custom tools AESPA explicitly registers. One Copilot session stays alive for the full AESPA agent conversation, allowing the provider to reuse conversation state and prompt caches. When Copilot requests a tool, its SDK handler pauses while AESPA applies the existing scope checks, execution monitoring, checkpointing, and tool-result limits. AESPA returns the real result to that handler and the same Copilot session continues.
 
 Copilot usage events arrive through the SDK's background JSON-RPC callback, so each callback is bound explicitly to the AESPA run that created the session. AESPA records AI credits, model-call counts, token/cache details, and legacy premium requests when GitHub supplies them. The latest available Copilot allowance percentage and reset date are also included in the run telemetry. AESPA waits briefly for the ephemeral usage event before returning or closing a model turn so final-call usage is not lost.
+
+### Independent monthly statistics
+
+In addition to the run-level `token_usage_json`, `services/statistics.py` records every provider usage event in an independent monthly ledger. Rows are grouped by the local calendar month, canonical transport provider, and exact model string, while also retaining the endpoint base URL captured at call time. This means deleting a scan or changing a model setting cannot remove historical usage. An OpenRouter endpoint configured through the OpenAI-compatible adapter is labelled as OpenRouter. Input is normalized to mean uncached input; provider adapters subtract cached subsets only for APIs whose input counter includes them. The Statistics page can download the LiteLLM model price map, edit monthly prices, and estimate token and native-credit costs. Statistics reset deletes usage rows but keeps downloaded and manual price data.
 
 Factory Droid uses the installed CLI's encrypted login state; AESPA never reads or stores its credential. The settings endpoint opens a short SDK session and uses `initialize_session().available_models` as the account-specific model catalog, including custom models. Each active AESPA message list owns an isolated persistent Droid session. All sessions use the same empty `aespa-droid-workspace` temporary directory so Factory groups them under one UI project instead of creating a project per loop. The child receives only an environment allowlist needed for CLI authentication, networking, and locale; built-in skills and non-AESPA tools are denied.
 
@@ -997,6 +1058,10 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
 | `/api/sast-runs/{id}/leads` | `sast_runs.py` | List the *original* `ScanLead` rows for a SAST run (imported copies excluded) |
 | `/api/sast-runs/{id}/agent-log` | `sast_runs.py` | SAST agent activity log |
+| `/api/statistics/llm` | `statistics.py` | Monthly, provider/model-grouped LLM token and native-credit usage |
+| `/api/statistics/llm/prices/refresh` | `statistics.py` | Download the latest LiteLLM price map |
+| `/api/statistics/llm/prices` | `statistics.py` | Save a monthly or future price override |
+| `/api/statistics/llm` (`DELETE`) | `statistics.py` | Reset all usage months while retaining price data |
 
 ---
 
@@ -1009,6 +1074,8 @@ The web UI is a **single-page application** served from `src/aespa/web/`. It com
 ### Telemetry rendering (`TokenUsageBar`)
 
 Detail views for Web runs, API runs, and SAST runs embed the `TokenUsageBar` component. For API-key providers it renders per-model input, output, and prompt-cache tokens. Factory Droid adds Droid credits and model-call counts while retaining token/cache details. GitHub Copilot adds AI credits or legacy premium requests, model-call counts, and available allowance information. The data is persisted in `token_usage_json`.
+
+The sidebar's **Stats → Usage** page is independent of those detail views. It shows one month at a time, with totals and a provider/model table for uncached input, output, cache reads, cache writes, native credits, and estimated USD cost. It uses the operating system's local month boundary and asks for confirmation before clearing all usage months.
 
 ### WebSocket event types (emitted by `services/events.py`)
 
@@ -1166,7 +1233,7 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 1. Load run/site config; verify scope of the user's instruction
 2. Emit [A.L.I.C.E. Initializing] + scope-check status chunks
 3. Convert chat history → Anthropic messages format
-4. Loop (max ALICE_MAX_STEPS = 40):
+4. Loop (max ALICE_MAX_STEPS = 300):
      a. Emit [Step N] Calling LLM... thinking chunk
      b. Call LLM with tools (ALICE tool set — see below)
      c. Stream thinking blocks → thinking_chunk SSE events
@@ -1183,15 +1250,27 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 | Tool | Description |
 |---|---|
 | `http_request` | Issue arbitrary HTTP requests; scope-checked; traffic logged |
-| `browser` | Simple page fetch via httpx with browser-like headers |
-| `context_tool` | Read-only access to crawl data (site map, page details, traffic) |
+| `browser` | Drive a live Playwright browser. `page_id` and `replay=true` restore a saved crawler state and preserve page/session traffic provenance |
+| `context_tool` | Read-only access to crawl data, request history, traffic, coverage gaps, response comparisons, and bounded mutation suggestions |
+| `reauthenticate` | Re-run the configured web login flow, including supported TOTP or email-OTP steps, and refresh the primary session |
+| `skip_coverage` | In web Enforce mode, record a justified inapplicable or technically blocked coverage obligation |
 | `write_finding` | Persist a confirmed vulnerability directly to `ScanFinding`; **skips `normalize_finding_titles`** to prevent false deduplication |
+| `remove_finding` | Remove a finding from the active web or API run when it was written in error or is a confirmed duplicate |
+| `update_lead` | Record the outcome of investigating an imported SAST lead against the active run kind |
 | `forge_jwt` | Sign an HS256 JWT from a discovered secret; stores result in session vault |
 | `decode_jwt` | Decode a JWT's header and payload |
 | `credential_check` | Test a login URL with a list of candidate credential pairs |
 | `register_account` | Create a test account and store the resulting session |
 | `agent_dispatch` | Dispatch a Specialist Agent (see below) |
 | `done` | End the turn with a summary |
+
+On API runs, ALICE keeps the API inventory commands (`collection_info`,
+`endpoint_list`, `endpoint_detail`, `finding_list`, `lead_list`,
+`report_finding`, `coverage_matrix`, and `set_coverage`) and adds the safe shared
+analysis commands (`history_search`, `traffic_search`, `compare_responses`,
+`mutate_request`, and `extract_entities`). API traffic is filtered by
+`api_test_run_id`; it is never read through the colliding web `TestRun` id. API
+ALICE does not get `reauthenticate`, `skip_coverage`, or Specialist dispatch.
 
 #### `write_finding` deduplication
 
@@ -1311,7 +1390,8 @@ _api_scan_task(api_run_id)
             • get_api_test_lead_tools supplies only API-aware top-level tools; browser,
               remove_finding, and agent_dispatch are withheld
             • _api_context_tool_fn routes endpoint_list / endpoint_detail / collection_info / finding_list
-              to API-specific handlers and a strict safe subset to the shared handler; all other
+              to API-specific handlers and history_search / traffic_search / compare_responses /
+              mutate_request / extract_entities to the shared safe analysis handler; all other
               commands are rejected, including web-crawl target_inventory / search_assets
             • _api_check_scope is applied to every target request and redirect hop
             • _make_post_probe_fn updates the coverage matrix cell for each probe (endpoint, category)
@@ -1328,10 +1408,12 @@ _api_scan_task(api_run_id)
 ### ALICE on API runs
 
 API test runs expose the same `/alice/*` endpoints as web test runs. API ALICE routes
-`collection_info`, `endpoint_list`, and `endpoint_detail` to API-specific handlers and
-persists captured sessions under `run_kind="api"`. Specialist dispatch is withheld in API
-mode until the Specialist executor is fully API-aware. The API system prompt includes
-OWASP API Top-10 category descriptions and API context tool documentation.
+`collection_info`, `endpoint_list`, `endpoint_detail`, `finding_list`, and `lead_list` to
+API-specific handlers, and routes safe request-analysis commands through the API traffic
+store. It persists captured sessions under `run_kind="api"`. Specialist dispatch is withheld
+in API mode until the Specialist executor is fully API-aware. The API system prompt includes
+OWASP API Top-10 category descriptions and both API inventory and shared context tool
+documentation.
 
 ---
 

@@ -84,22 +84,37 @@ def _free_port() -> int:
     return port
 
 
-def _serve(port: int) -> None:
-    import uvicorn
+_server_error: Exception | None = None
 
-    uvicorn.Server(
-        uvicorn.Config("aespa.main:app", host="127.0.0.1", port=port, log_level="info")
-    ).run()
+
+def _serve(port: int) -> None:
+    global _server_error
+    try:
+        import uvicorn
+
+        from aespa.main import app
+
+        uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
+        ).run()
+    except Exception as exc:
+        _server_error = exc
+        raise
 
 
 def _wait_port(port: int, timeout: float = 20.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if _server_error is not None:
+            raise RuntimeError(f"Backend server failed to start: {_server_error}") from _server_error
         try:
             with socket.create_connection(("127.0.0.1", port), 0.25):
                 return
         except OSError:
             time.sleep(0.1)
+    if _server_error is not None:
+        raise RuntimeError(f"Backend server failed to start: {_server_error}") from _server_error
+    raise TimeoutError(f"Backend server failed to bind to port {port} within {timeout}s")
 
 
 def _check_for_update() -> str | None:
@@ -484,7 +499,17 @@ def main() -> None:
     # is up, so the "Downloading browser…" indicator can reflect it.
     port = _free_port()
     threading.Thread(target=_serve, args=(port,), daemon=True).start()
-    _wait_port(port)
+    try:
+        _wait_port(port)
+    except Exception as exc:
+        import sys
+        print(f"[AESPA Startup Error] {exc}", file=sys.stderr)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("AESPA Launch Error")
+        alert.setInformativeText_(f"Failed to start local server:\n{exc}")
+        alert.addButtonWithTitle_("Quit")
+        alert.runModal()
+        sys.exit(1)
 
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
