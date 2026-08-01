@@ -31,6 +31,7 @@ export function useRoute() {
   if ((m = hash.match(/^#\/runs\/(\d+)\/([a-z]+)$/)))   return { name: "run-detail",  id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
   if (hash === "#/active-jobs")                          return { name: "active-jobs" };
+  if (hash === "#/stats" || hash === "#/stats/usage")    return { name: "stats" };
   if (hash === "#/settings")                             return { name: "settings" };
   if (hash === "#/scan-policy")                          return { name: "scan-policy" };
   if (hash === "#/external-integrations")                return { name: "external-integrations" };

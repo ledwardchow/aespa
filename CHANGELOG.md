@@ -2,6 +2,10 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## August 1, 2026
+
+- **Independent monthly LLM statistics** (`services/statistics.py`, `api/statistics.py`, frontend Stats page): Added a scan-independent monthly ledger for uncached input, output, cache reads/writes, provider-native credits, and price estimates. Usage survives scan deletion and model changes, supports LiteLLM price refreshes and manual monthly overrides, and can be reset with confirmation. OpenRouter endpoints configured through the OpenAI-compatible adapter are labelled as OpenRouter in the ledger, each row retains its endpoint base URL, and the breakdown table gives the provider/model column the most room.
+
 ---
 
 ## [PR #252] July 29 Update — Alembic migrations, WAF detection, Factory Droid provider, and crawler safety

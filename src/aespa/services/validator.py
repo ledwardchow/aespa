@@ -185,6 +185,36 @@ async def validate_finding_inline(
     cred_sessions: dict[int, dict] | None = None,
     scanner_policy=None,
 ) -> None:
+    """Validate a new finding without leaking failures from its background task."""
+    try:
+        await _validate_finding_inline(
+            run_id,
+            finding_id,
+            llm_cfg=llm_cfg,
+            cred_sessions=cred_sessions,
+            scanner_policy=scanner_policy,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.exception("Inline validation failed for finding id=%s", finding_id)
+        await _persist_verdict(
+            run_id,
+            finding_id,
+            "unconfirmed",
+            f"Validation failed before a verdict: {exc}",
+            validation_results=[],
+            source="validation_error",
+        )
+
+
+async def _validate_finding_inline(
+    run_id: int,
+    finding_id: int,
+    llm_cfg=None,
+    cred_sessions: dict[int, dict] | None = None,
+    scanner_policy=None,
+) -> None:
     """Validate a newly-created finding while a scan is still running."""
     loaded_llm_cfg = llm_cfg is None
     with Session(get_engine()) as s:
@@ -214,14 +244,19 @@ async def validate_finding_inline(
         finding.validation_status = "validating"
         finding.validation_note = "Validation running."
         s.add(finding)
-        s.commit()
-        s.refresh(finding)
-        loaded_objs = [finding, *creds, site, run]
+        # Session.commit() expires every ORM row still attached to the session.
+        # Detach the read-only inputs first so their fields remain available to
+        # the background validator. This also preserves provider fields resolved
+        # onto llm_cfg in memory by get_llm_config_for_role().
+        readonly_objs = [*creds, site, run]
         if loaded_llm_cfg:
-            loaded_objs.append(llm_cfg)
-        for obj in loaded_objs:
+            readonly_objs.append(llm_cfg)
+        for obj in readonly_objs:
             if obj is not None:
                 s.expunge(obj)
+        s.commit()
+        s.refresh(finding)
+        s.expunge(finding)
 
     events_svc.emit(
         run_id,

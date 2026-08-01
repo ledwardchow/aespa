@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-from sqlalchemy import Column, ForeignKey, Integer, String, text
+from sqlalchemy import Column, ForeignKey, Integer, String, UniqueConstraint, text
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -289,6 +289,80 @@ class LLMProviderConfig(SQLModel, table=True):
     max_tpm: Optional[int] = Field(default=None, nullable=True)
     max_rpm: Optional[int] = Field(default=None, nullable=True)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class LLMUsageMonth(SQLModel, table=True):
+    """Independent monthly LLM usage ledger.
+
+    This table deliberately has no foreign keys to runs or provider settings:
+    usage must survive scan deletion and model/provider configuration changes.
+    ``month`` is a local-calendar ``YYYY-MM`` key, chosen when the provider
+    reports usage.
+    """
+
+    __tablename__ = "llm_usage_month"
+    __table_args__ = (
+        UniqueConstraint("month", "provider", "model", name="uq_llm_usage_month_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    month: str = Field(index=True)
+    provider: str = Field(index=True)
+    model: str = Field(index=True)
+    base_url: Optional[str] = Field(default=None, nullable=True)
+    requests: int = Field(default=0)
+    input_tokens: int = Field(default=0)
+    output_tokens: int = Field(default=0)
+    cache_read_tokens: int = Field(default=0)
+    cache_write_tokens: int = Field(default=0)
+    ai_credits: float = Field(default=0.0)
+    factory_credits: float = Field(default=0.0)
+    input_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    output_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    cache_read_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    cache_write_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    credit_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    credit_unit: Optional[str] = Field(default=None, nullable=True)
+    price_source: Optional[str] = Field(default=None, nullable=True)
+    price_confidence: Optional[str] = Field(default=None, nullable=True)
+    manual_override: bool = Field(default=False)
+    price_updated_at: Optional[datetime] = Field(default=None, nullable=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class LLMPriceCatalog(SQLModel, table=True):
+    """Latest reusable price data for future monthly usage rows."""
+
+    __tablename__ = "llm_price_catalog"
+    __table_args__ = (
+        UniqueConstraint("provider", "model", name="uq_llm_price_catalog_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    provider: str = Field(index=True)
+    model: str = Field(index=True)
+    input_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    output_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    cache_read_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    cache_write_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    credit_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    credit_unit: Optional[str] = Field(default=None, nullable=True)
+    price_source: Optional[str] = Field(default=None, nullable=True)
+    price_confidence: Optional[str] = Field(default=None, nullable=True)
+    manual_override: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class LLMPriceFeed(SQLModel, table=True):
+    """The last downloaded raw price map, retained for offline matching."""
+
+    __tablename__ = "llm_price_feed"
+
+    id: Optional[int] = Field(default=1, primary_key=True)
+    source_url: str
+    payload_json: str
+    fetched_at: datetime = Field(default_factory=_utcnow)
 
 
 class LLMConfig(SQLModel, table=True):

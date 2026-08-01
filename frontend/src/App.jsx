@@ -5,7 +5,7 @@ import React, { useEffect, useState } from "react";
 
 import { api } from "./lib/api";
 import { useRoute } from "./lib/router";
-import { IconSites, IconApis, IconSettings, IconPlay, IconShield, IconChevronLeft, IconChevronRight, IconBug } from "./components/Icons";
+import { IconSites, IconApis, IconSettings, IconPlay, IconShield, IconChevronLeft, IconChevronRight, IconBug, IconChart } from "./components/Icons";
 
 const lazyNamed = (loader, name) => React.lazy(() => loader().then(module => ({
   default: module[name]
@@ -35,6 +35,7 @@ const ExternalIntegrationsPage = lazyNamed(loadSettingsPages, "ExternalIntegrati
 const DebugPage = lazyNamed(loadSettingsPages, "DebugPage");
 const ReportingDebugPage = lazyNamed(loadSettingsPages, "ReportingDebugPage");
 const ActiveJobsPage = lazyNamed(() => import("./pages/ActiveJobs"), "ActiveJobsPage");
+const StatisticsPage = lazyNamed(() => import("./pages/Statistics"), "StatisticsPage");
 
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
@@ -49,6 +50,7 @@ function App() {
   const onSast = ["sast-list", "sast-run-detail", "sast-run-new"].includes(route.name);
   const onDebug = route.name === "debug";
   const onReportingDebug = route.name === "reporting-debug";
+  const onStats = route.name === "stats";
   const [appVersion, setAppVersion] = useState("");
   const [username, setUsername] = useState("");
   const [showUsername, setShowUsername] = useState(() => {
@@ -130,6 +132,10 @@ function App() {
           <a href="#/active-jobs" className={"nav-item" + (onActiveJobs ? " active" : "")} title="Active Jobs">
             <span className="nav-icon"><IconPlay /></span>{!collapsed && " Active Jobs"}
           </a>
+          {!collapsed && <div className="nav-section-label" style={{ marginTop: 8 }}>Stats</div>}
+          <a href="#/stats/usage" className={"nav-item" + (onStats ? " active" : "")} title="Usage statistics">
+            <span className="nav-icon"><IconChart /></span>{!collapsed && " Usage"}
+          </a>
           {!collapsed && <div className="nav-section-label" style={{
           marginTop: 8
         }}>Configuration</div>}
@@ -173,6 +179,7 @@ function App() {
           {route.name === "sast-run-new" && <SastRunForm key="sast-new" />}
           {route.name === "sast-run-detail" && <SastRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
           {route.name === "active-jobs" && <ActiveJobsPage />}
+          {route.name === "stats" && <StatisticsPage />}
           {route.name === "run-new" && <TestRunForm key={route.siteId} siteId={route.siteId} />}
           {route.name === "run-detail" && <TestRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
           {route.name === "settings" && <SettingsPage />}

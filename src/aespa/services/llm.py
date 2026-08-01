@@ -98,9 +98,39 @@ _llm_proxy_var: ContextVar[str | None] = ContextVar("_llm_proxy", default=None)
 _run_id_var: ContextVar[int | None] = ContextVar("_run_id", default=None)
 _run_kind_var: ContextVar[str] = ContextVar("_run_kind", default="web")
 _emit_fn_var: ContextVar[Any | None] = ContextVar("_emit_fn", default=None)
+_provider_var: ContextVar[str | None] = ContextVar("_provider", default=None)
+_base_url_var: ContextVar[str | None] = ContextVar("_base_url", default=None)
 _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
+
+
+def _usage_provider(config: LLMConfig) -> str:
+    """Return the transport provider to use for independent usage stats.
+
+    OpenRouter exposes an OpenAI-compatible endpoint, so older profiles may
+    have ``provider=openai`` while still sending requests to OpenRouter. The
+    endpoint is the reliable signal in that case; keeping this normalization
+    in one place prevents those calls from being labelled as OpenAI.
+    """
+
+    provider_value = getattr(config.provider, "value", config.provider)
+    provider = str(provider_value or "unknown")
+    base_url = str(config.base_url or "").lower()
+    if provider in {"openai", "openai_compatible"} and "openrouter.ai" in base_url:
+        return "openrouter"
+    return provider
+
+
+def _usage_base_url(config: LLMConfig) -> str | None:
+    """Return the endpoint base captured alongside a usage row."""
+
+    if _usage_provider(config) == "openrouter":
+        return "https://openrouter.ai/api/v1"
+    configured = str(config.base_url or "").strip()
+    if configured:
+        return configured
+    return None
 
 # Per-run usage accumulator. Copilot entries also carry AI-credit/request data.
 _run_token_usage: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
@@ -399,17 +429,53 @@ def _record_usage(
     *,
     usage_context: _UsageContext | None = None,
     provider: str | None = None,
+    base_url: str | None = None,
     ai_credits: float = 0,
     factory_credits: float = 0,
     premium_requests: float = 0,
     requests: int = 0,
     copilot_quota: dict[str, Any] | None = None,
 ) -> None:
-    """Accumulate provider usage for a run and fire a live update."""
+    """Accumulate provider usage for a run and the independent monthly ledger."""
     _last_call_tokens_var.set(
         {"input": input_tokens + cache_read_tokens, "output": output_tokens}
     )
     context = usage_context or _capture_usage_context()
+    usage_provider = provider or _provider_var.get() or "unknown"
+    usage_base_url = base_url if base_url is not None else _base_url_var.get()
+    inclusive_input_providers = {
+        "openai",
+        "openai_compatible",
+        "openrouter",
+        "azure_openai",
+        "azure_foundry",
+        "azure_foundry_openai",
+        "bedrock_mantle",
+        "google",
+    }
+    normalized_input = max(0, input_tokens)
+    if usage_provider in inclusive_input_providers:
+        normalized_input = max(
+            0, input_tokens - cache_read_tokens - cache_write_tokens
+        )
+    try:
+        from aespa.services import statistics as statistics_service
+
+        statistics_service.record_usage(
+            usage_provider,
+            model,
+            base_url=usage_base_url,
+            input_tokens=normalized_input,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            ai_credits=ai_credits,
+            factory_credits=factory_credits,
+            requests=requests or 1,
+        )
+    except Exception:
+        # Usage telemetry must never make an otherwise successful LLM response fail.
+        log.debug("Failed to record global LLM statistics", exc_info=True)
     run_id = context.run_id
     if run_id is None:
         return
@@ -986,6 +1052,8 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
 
 
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    _provider_var.set(_usage_provider(config))
+    _base_url_var.set(_usage_base_url(config))
     limiter = get_limiter_for_config(config)
     if limiter is None:
         if config.provider == "factory_droid":
@@ -1079,6 +1147,8 @@ async def stream_chat_completion(
     messages: list[dict],
 ) -> AsyncGenerator[str, None]:
     """Stream a chat completion from the configured LLM provider in real-time."""
+    _provider_var.set(_usage_provider(config))
+    _base_url_var.set(_usage_base_url(config))
     if config.provider in ("factory_droid", "github_copilot"):
         # Copilot's full response still travels through the same provider adapter.
         # Yielding it as one chunk preserves this public generator contract.
@@ -3527,6 +3597,8 @@ async def _call_with_tools_impl(
     and raw_content_for_history is appended as the assistant message (always in
     Anthropic-format so the growing messages list stays consistent).
     """
+    _provider_var.set(_usage_provider(config))
+    _base_url_var.set(_usage_base_url(config))
     _active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
     if config.provider == "factory_droid":
         from aespa.services import droid_provider
