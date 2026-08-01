@@ -21,7 +21,7 @@ async def sse_stream(
     if session.get(TestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="Test run not found")
     return StreamingResponse(
-        events_svc.stream(run_id),
+        events_svc.stream(run_id, run_kind="web"),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

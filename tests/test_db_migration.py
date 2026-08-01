@@ -706,6 +706,126 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "site" in tables
         assert "test_run" in tables
         # The migration chain now includes replay/session provenance fields.
-        assert version == "a7c8e9f0b1d2"
+        assert version == "d2f9a6b1c340"
     finally:
+        engine.dispose()
+
+
+def test_replay_provenance_repair_migration_handles_existing_c4_database():
+    """Databases already at c4 may never have executed the retroactive 1f4 DDL."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as conn:
+            for statement in (
+                "CREATE TABLE test_run (id INTEGER PRIMARY KEY)",
+                "CREATE TABLE credential (id INTEGER PRIMARY KEY)",
+                "CREATE TABLE crawled_page (id INTEGER PRIMARY KEY)",
+                "CREATE TABLE traffic_entry (id INTEGER PRIMARY KEY)",
+                "CREATE TABLE target_intel_item (id INTEGER PRIMARY KEY)",
+                "CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)",
+                "INSERT INTO alembic_version VALUES ('c4e8b7a2d901')",
+            ):
+                conn.execute(text(statement))
+            conn.commit()
+
+        db.run_migrations(engine)
+
+        with engine.connect() as conn:
+            columns = {
+                table: {
+                    row[1]
+                    for row in conn.execute(text(f"PRAGMA table_info({table})"))
+                }
+                for table in (
+                    "test_run",
+                    "crawled_page",
+                    "traffic_entry",
+                    "target_intel_item",
+                )
+            }
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+
+        assert {"target_page_ids_json", "target_session_label"} <= columns["test_run"]
+        assert "replay_credential_id" in columns["crawled_page"]
+        assert {"page_id", "session_label"} <= columns["traffic_entry"]
+        assert "page_id" in columns["target_intel_item"]
+        assert version == "d2f9a6b1c340"
+    finally:
+        engine.dispose()
+
+
+def test_runtime_replay_provenance_backfill_is_idempotent():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as conn:
+            for table in (
+                "test_run",
+                "crawled_page",
+                "traffic_entry",
+                "target_intel_item",
+            ):
+                conn.execute(text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
+            conn.commit()
+
+        db._ensure_interactive_replay_provenance(engine)
+        db._ensure_interactive_replay_provenance(engine)
+
+        with engine.connect() as conn:
+            test_run_columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(test_run)"))
+            }
+            indexes = {
+                row[0]
+                for row in conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='index'")
+                )
+            }
+
+        assert {"target_page_ids_json", "target_session_label"} <= test_run_columns
+        assert {
+            "ix_crawled_page_replay_credential_id",
+            "ix_traffic_entry_page_id",
+            "ix_traffic_entry_session_label",
+            "ix_target_intel_item_page_id",
+        } <= indexes
+    finally:
+        engine.dispose()
+
+
+def test_migrate_creates_browser_debug_config_for_legacy_db_missing_table():
+    """Legacy databases stamped at head still receive newer singleton tables."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        with engine.connect() as conn:
+            conn.execute(text("DROP TABLE browser_debug_config"))
+            conn.commit()
+
+        db._migrate(engine)
+
+        with engine.connect() as conn:
+            columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(browser_debug_config)"))
+            }
+
+        assert {"id", "browser_engine", "browser_visible", "updated_at"} <= columns
+    finally:
+        SQLModel.metadata.drop_all(engine)
         engine.dispose()

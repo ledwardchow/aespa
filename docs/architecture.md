@@ -394,8 +394,8 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `ApiCredential` | A parsed credential row tied to a collection (scheme, label, auth endpoint) |
 | `ApiTestRun` | A single API scan session; linked to an `ApiCollection`; carries `coverage_mode` and `sast_run_id` |
 | `ApiEndpointTest` | One cell in the OWASP API Top-10 coverage matrix (endpoint × category, status, finding IDs) |
-| `SastRun` | A standalone static-analysis scan over a source ZIP; tracks `leads_count` and carries its archive via `source_archive_path` / `source_filename`. Legacy collection linkage fields remain nullable for compatibility. |
-| `ScanLead` | A high-confidence SAST lead. Keyed to its producing `SastRun` (`producer_run_id`). An *original* lead leaves `imported_into_run_id` NULL; a *copy* imported into a dynamic run sets `imported_into_run_type`/`imported_into_run_id` to that run. Web and API scans both consume independent run-owned copies. |
+| `SastRun` | A standalone static-analysis scan over a source ZIP; tracks reportable `leads_count`, persisted semantic phase state, deterministic file coverage receipts, and the final report summary. It carries its archive via `source_archive_path` / `source_filename`. |
+| `ScanLead` | A persisted SAST candidate with a stable fingerprint, structured source/control/sink/counterevidence/proof-gap evidence, an independent validation verdict, attack-path data, and a `reportable` decision. Only reportable originals may be copied into dynamic runs. |
 
 ### `CrawledPage` flags (set by LLM during crawl)
 
@@ -1431,16 +1431,20 @@ start_sast_scan(sast_run_id)
        1. Load SastRun and resolve its standalone `source_archive_path`.
        2. _safe_unzip - extract archive into a deterministic per-run
           directory at `<data_dir>/sast_extract/<id>/` (path-jailed:
-          entries that would escape the root are rejected). A startup
-          sweep (db._cleanup_orphaned_sast_extractions) reconciles any
-          dirs leaked by a previous hard crash.
-       3. _build_initial_message — construct LLM opening context; the agent
-          discovers entry points itself with the file tools
-       4. _make_tool_executor — build the tool executor with path-jailed file tools
-       5. llm.thinking_agentic_loop with read-only file tools + write_lead / filter_lead / done
-       6. _flush_unfiltered_candidates — persist any remaining candidates
-          at scan end regardless of filter score
-       7. Cleanup temp directory
+          entries that would escape the root are rejected). The worker holds
+          a cross-process workspace lease while the directory is live. A
+          startup sweep (`db._cleanup_orphaned_sast_extractions`) skips leased
+          workspaces and reconciles only dirs leaked by a previous hard crash.
+       3. Build and persist a deterministic file/language inventory.
+       4. Discovery loop — trace sources to sinks and record candidate hypotheses.
+       5. Independent validation loop — a separate adversarial prompt/model role
+          re-reads evidence, records controls/counterevidence/proof gaps, and
+          returns confirmed/dismissed/inconclusive verdicts.
+       6. Attack-path loop — for confirmed candidates, record ordered external
+          reachability, impact, severity reasoning, and a dynamic-test objective.
+       7. Upsert every candidate by stable fingerprint; only independently
+          confirmed candidates above the confidence threshold are reportable.
+       8. Persist final report and file-review coverage; cleanup temp directory.
 ```
 
 ### File tools (all path-jailed to the extraction root)
@@ -1455,16 +1459,15 @@ start_sast_scan(sast_run_id)
 ### Lead lifecycle
 
 ```
-Agent calls write_lead(title, description, category, severity, confidence, location, evidence)
-  └─ Appended to _candidates[sast_run_id] in memory
-
-Agent calls filter_lead(candidate_id, confidence_override?)
-  └─ If confidence ≥ CONFIDENCE_THRESHOLD (0.7):
-       create_lead() → ScanLead row persisted, status="open"
-  └─ If below threshold: candidate discarded
-
-At scan end:
-  _flush_unfiltered_candidates() — any unfiltered candidate above threshold is persisted
+Discovery calls write_lead(...) and filter_lead(...)
+  └─ Candidate remains a hypothesis regardless of discovery self-score
+Independent validator calls validate_candidate(...)
+  ├─ confirmed + confidence ≥ 0.7 → reportable
+  ├─ dismissed → retained with counterevidence, not reportable
+  └─ inconclusive → retained with explicit proof gaps, not reportable
+Attack-path analyst calls record_attack_path(...) for reportable candidates
+  └─ Ordered nodes, impact, severity reasoning, and dynamic-test objective persisted
+Final sync upserts candidates by stable fingerprint, preventing rerun duplicates
 ```
 
 ### ScanLead entity (`services/scan_leads.py`)
@@ -1481,6 +1484,12 @@ At scan end:
 | `confidence` | 0.0–1.0; only leads ≥ 0.7 (`CONFIDENCE_THRESHOLD`) are persisted |
 | `location` | Source file path and line reference |
 | `evidence` | Code snippet or supporting text |
+| `fingerprint` | Stable category/title/location hash used to upsert reruns |
+| `source_trace_json` / `control_trace_json` / `sink_trace_json` | Structured source-to-sink evidence |
+| `counterevidence_json` / `proof_gaps_json` | Adversarial evidence and unresolved proof obligations |
+| `validation_status` / `validation_reasoning` | Independent confirmed/dismissed/inconclusive verdict |
+| `attack_path_json` | Ordered reachability, impact, severity reasoning, and dynamic-test objective |
+| `reportable` | Whether this original may be handed to a dynamic run |
 | `status` | `open` · `investigating` · `confirmed` · `dismissed` · `inconclusive` |
 | `investigated_by_run_type` / `investigated_by_run_id` | The dynamic run that recorded the outcome via `update_lead` |
 | `linked_finding_id` | Set when a confirmed lead is promoted to a `ScanFinding` |
@@ -1493,6 +1502,12 @@ The dynamic loop investigates leads via the shared `update_lead` action, which s
 - **Web scans** consume *copies*: the user picks a completed SAST run on the **SAST Leads** tab and `copy_leads_to_run(sast_run_id, "web", run_id)` duplicates its originals into new rows tagged `imported_into_*` (idempotent per source run; originals stay `open`). At scan start `scanner._do_thinking_scan` injects them via `format_leads_for_run("web", run_id)`. Because copies are independent, investigating them never mutates the source SAST run's leads, and deleting a SAST run leaves the copies intact (only `imported_into_run_id IS NULL` originals are cascade-deleted).
 
 Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import.
+
+The SAST workspace reads `GET /api/sast-runs/{id}/analysis` for authoritative
+phase state and deterministic coverage receipts. `GET .../handoff-targets` lists
+eligible web/API runs, and `POST .../leads/{lead_id}/handoff` idempotently copies
+one reportable lead into the selected run. The UI never reports a queued live
+test unless that persisted copy succeeds.
 
 ### Concurrency
 

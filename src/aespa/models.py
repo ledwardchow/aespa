@@ -1070,6 +1070,12 @@ class SastRun(SQLModel, table=True):
     # Per-run model-mixing profile (null = use the globally active profile).
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
     leads_count: int = Field(default=0)
+    # Persisted semantic phase state and deterministic file-review telemetry.
+    # JSON keeps the run model compact while allowing the phase contract to
+    # evolve without another table for every counter.
+    phase_state_json: Optional[str] = Field(default=None)
+    coverage_json: Optional[str] = Field(default=None)
+    report_json: Optional[str] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
     token_usage_json: Optional[str] = Field(default=None)
     started_at: Optional[datetime] = Field(default=None)
@@ -1097,6 +1103,17 @@ class ScanLead(SQLModel, table=True):
     description: str = Field(default="")
     location: str = Field(default="")  # file:line / endpoint hint
     evidence: str = Field(default="")  # code snippet + data-flow note (from SAST)
+    fingerprint: str = Field(default="", index=True)
+    suggested_endpoint: str = Field(default="")
+    source_trace_json: str = Field(default="{}")
+    control_trace_json: str = Field(default="[]")
+    sink_trace_json: str = Field(default="{}")
+    counterevidence_json: str = Field(default="[]")
+    proof_gaps_json: str = Field(default="[]")
+    validation_status: str = Field(default="pending", index=True)
+    validation_reasoning: str = Field(default="")
+    attack_path_json: str = Field(default="{}")
+    reportable: bool = Field(default=True, index=True)
     note: str = Field(default="")  # agent investigation outcome note (update_lead)
     status: str = Field(
         default="open", index=True
