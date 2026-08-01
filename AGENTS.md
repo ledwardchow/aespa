@@ -52,6 +52,12 @@ Frontend refactoring notes:
 - Vite 8 uses `oxc` for transformations. Do not add ignored `esbuild` configuration blocks to `vite.config.js`; use the appropriate Rollup output options instead.
 - `package.json` lives in `frontend/`, so run npm commands from that directory or with `--prefix frontend`.
 
+### Frontend layout and visual QA
+
+- Reusable tab bars depend on their parent layout. For example, Attack Surface and Coverage use `.activity-sub-tab-bar` with `.coverage-sub-tab-bar` inside a full-width wrapper. Do not copy only the child tab classes into a padded container.
+- The Agent Settings page has padded content: its scroll area has 16px top padding and the content column has 16px left padding. A full-width inner tab bar must be a sibling above the overflowed scroll area, or live inside a wrapper that owns the full-bleed layout. Negative margins inside `.scroll-content` do not work because its `overflow-x: hidden` clips the bar. Otherwise dark gutters appear along the top or left edge.
+- When changing a nested tab bar or panel, inspect the computed bounds of the bar and its parent after the build. Check the real route in a screenshot at desktop width and confirm that the bar reaches the same edges as its surrounding panel before finishing.
+
 ## Configuration
 
 - Runtime config is env-only via `pydantic-settings`, prefix `AESPA_` (see `config.py`): `AESPA_DATABASE_URL`, `AESPA_HOST`, `AESPA_PORT`. Copy `.env.example` to `.env`.
@@ -123,6 +129,14 @@ Tables shared across both run kinds, such as `agent_log`, `scan_log`, `scanner_s
 - No external network or live LLM calls in tests. Stub or mock LLM clients.
 - The app intentionally has no auth and is localhost-only by design. Optional Cloudflare Access JWT verification in `main.py` is only for users who front it with a reverse proxy. Do not add features assuming a trusted multi-user deployment.
 - When interacting with GitHub, use the `gh` command, because the repo may be on a different account than the authenticated GitHub Copilot session.
+
+## Desktop Launchers & PyInstaller Builds
+
+When adding new runtime dependencies, backend frameworks, data assets, or modifying desktop launchers (`src/aespa/desktop.py`, `src/aespa/desktop_win.py`) and PyInstaller scripts (`build_mac.sh`, `build_win.ps1`, `AESPA.spec`):
+
+1. **Dynamic Runtime Assets & Migration Configs**: Any runtime configuration files, database migration directories (e.g. `alembic.ini`, `alembic/`), static assets, templates, or non-Python files read by the app must be explicitly bundled in PyInstaller scripts (`build_mac.sh`, `build_win.ps1`, `AESPA.spec`) via `--add-data`. All backend path resolvers (e.g. `_get_alembic_config` in `src/aespa/db.py`) must check `sys.frozen` / `sys._MEIPASS` when frozen before falling back to repo-relative paths (`Path(__file__).resolve().parents[...]`).
+2. **Framework & Dynamic Import Collection**: Any third-party package loaded via dynamic string imports, reflection, plugin systems, or ASGI/WSGI servers (e.g. `alembic`, `uvicorn`, `playwright`, `webview`) must be explicitly bundled using `--collect-all <package>` or `--collect-submodules <package>`. In desktop launcher scripts (`desktop.py`, `desktop_win.py`), avoid string-based target resolution (e.g. `"aespa.main:app"`) and pass explicit module/object references (e.g. `uvicorn.Config(app, ...)`).
+3. **Fail-Fast Thread & Port Verification**: Background server threads (`_serve()`) must trap startup exceptions into a shared variable, and port polling functions (`_wait_port()`) must re-raise thread errors immediately or raise `TimeoutError` on deadline. Never allow `_wait_port()` to return cleanly when backend startup fails, as launching webviews on dead ports causes silent white screens.
 
 ## Versioning
 

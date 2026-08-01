@@ -116,13 +116,16 @@ export function SastRunForm() {
 // ── SastRunsListPage ──────────────────────────────────────────────────────────
 export function SastRunsListPage() {
   const [runs, setRuns] = useState(null);
+  const [profiles, setProfiles] = useState([]);
   const [error, setError] = useState(null);
   const [sortField, setSortField] = useState("started_at");
   const [sortDir, setSortDir] = useState("desc");
 
   const load = useCallback(async () => {
     try {
-      setRuns(await api.listAllSastRuns());
+      const [r, p] = await Promise.all([api.listAllSastRuns(), api.listLLMProfiles()]);
+      setRuns(r);
+      setProfiles(p || []);
     } catch (e) {
       setError(e.message);
     }
@@ -213,9 +216,18 @@ export function SastRunsListPage() {
               </tr>
             </thead>
             <tbody>{sortedRuns.map(r => <tr key={r.id}>
-                <td><a href={`#/sast-runs/${r.id}/progress`} style={{
-                  fontWeight: 600
-                }}>{r.name}</a></td>
+                <td>
+                  <a href={`#/sast-runs/${r.id}/progress`} style={{
+                    fontWeight: 600
+                  }}>{r.name}</a>
+                  {r.llm_profile_id && <div style={{
+                    fontSize: 11,
+                    color: "var(--muted)",
+                    marginTop: 2
+                  }}>{(profiles.find(p => p.id === r.llm_profile_id) || {
+                      name: "Profile #" + r.llm_profile_id
+                    }).name}</div>}
+                </td>
                 <td><StatusBadge status={r.status} /></td>
                 <td>{r.leads_count}</td>
                 <td>{r.triggered_by_run_id ? <a href={`#/api-runs/${r.triggered_by_run_id}/status`}>API run #{r.triggered_by_run_id}</a> : <span className="subtle">{r.source_filename || "standalone"}</span>}</td>

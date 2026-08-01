@@ -828,6 +828,12 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
     "attack surface.\n"
     "- If a browser fill/click fails, immediately fall back to http_request with POST body.\n"
+    "- When testing a crawled page/state, pass its page_id. Set replay=true for an\n"
+    "  interactive state or when a URL may depend on a prior workflow; the backend\n"
+    "  restores the crawler-approved deterministic recipe and attributes traffic to\n"
+    "  that exact state. It tries a URL directly first for URL-addressable pages and\n"
+    "  only uses the saved recipe when the functional state does not load. Never use\n"
+    "  replay to execute a mutating crawler recipe.\n"
     "\n"
     "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
     "so the Work Program matrix fills accurately. Probe each applicable page × category pair\n"
@@ -852,6 +858,10 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "properties": {
                 "method": {"type": "string"},
                 "url": {"type": "string"},
+                "page_id": {
+                    "type": "integer",
+                    "description": "Optional crawled page ID. Keeps this request attributed to the exact URL/SPA state.",
+                },
                 "headers": {"type": "object"},
                 "body": {},
                 "use_session": {
@@ -922,6 +932,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "type": "object",
             "properties": {
                 "url": {"type": "string"},
+                "page_id": {
+                    "type": "integer",
+                    "description": "Crawled page/state to test. The backend can replay its saved state before the steps.",
+                },
+                "replay": {
+                    "type": "boolean",
+                    "description": "Replay the saved deterministic page recipe before executing these steps (recommended for interactive states).",
+                },
                 "use_session": {"type": "string"},
                 "headers": {
                     "type": "object",
@@ -1276,6 +1294,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "string",
                     "description": "The specific URL the specialist should focus on.",
                 },
+                "page_id": {
+                    "type": "integer",
+                    "description": "Optional crawled page/state ID. Preserves the exact SPA state and originating session.",
+                },
+                "use_session": {
+                    "type": "string",
+                    "description": "Optional explicit session label for this specialist; otherwise use the session that discovered page_id.",
+                },
                 "rationale": {
                     "type": "string",
                     "description": (
@@ -1469,7 +1495,7 @@ To fetch targeted scanner context without issuing a target request:
 Context tools:
 - site_map: args may include filter/search/type ("api" or "page"), flags (array of
   req_auth/takes_input/has_object_ref/has_business_logic), and limit.
-- page_detail: args may include page_id or url and include (array of context/page_text/title/flags).
+- page_detail: args may include page_id or url and include (array of context/page_text/title/flags/traffic/object_references). It returns the saved replay recipe, originating session, and captured traffic for interactive states.
 - history_search: args may include query and limit. Uses EXACT substring matching — use short
   code patterns ("fetch(", "/api/", "axios.post", a URL fragment, or a field name), NOT English
   descriptions. The query must appear verbatim in the stored request/response text.
@@ -1477,10 +1503,10 @@ Context tools:
   `category` to filter by vulnerability class with the usual slugs (sqli, xss, cmdi, idor,
   auth_bypass, auth_robustness, sessions, ssrf, csrf, cors, headers, workflow, file_upload);
   `owasp_category` filters by exact OWASP code (e.g. A03); `search` is free-text substring.
-- target_inventory: args may include kind, source, search/filter, and limit; returns normalized
+- target_inventory: args may include page_id, kind, source, search/filter, and limit; returns normalized
   endpoints, forms, inputs, scripts, storage keys, IDs, and response fields from crawl intelligence.
 - search_assets: alias of target_inventory, useful with source/kind/search for JS/public asset leads.
-- traffic_search: args may include method, status, search/filter, and limit; returns captured HTTP
+- traffic_search: args may include page_id, session_label, method, status, search/filter, and limit; returns captured HTTP
   request/response excerpts from crawl and scans.
 - endpoint_detail: args may include url or page_id and limit; returns page, intel, traffic, history,
   and extracted entities for that endpoint.

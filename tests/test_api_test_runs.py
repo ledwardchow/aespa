@@ -350,6 +350,86 @@ def test_agent_log_404(client):
     assert r.status_code == 404
 
 
+def test_agent_log_pagination_returns_newest_page_and_loads_older_rows():
+    """The status log can page through every row without a huge response."""
+    from aespa import db as db_mod
+    from aespa import models
+    from aespa.db import get_session, set_engine
+
+    previous_engine = db_mod._engine
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            collection = models.ApiCollection(
+                name="C", base_url="https://example.com"
+            )
+            session.add(collection)
+            session.commit()
+            session.refresh(collection)
+            run = models.ApiTestRun(collection_id=collection.id, name="run")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            session.add_all(
+                [
+                    models.AgentLog(
+                        test_run_id=run.id,
+                        run_kind="api",
+                        agent_id="scanner",
+                        role="Test Lead",
+                        status="active",
+                        current_task=f"Step {index}",
+                    )
+                    for index in range(450)
+                ]
+            )
+            session.commit()
+            run_id = run.id
+
+        set_engine(engine)
+        app = create_app()
+
+        def _override_session():
+            with Session(engine) as session:
+                yield session
+
+        app.dependency_overrides[get_session] = _override_session
+        with TestClient(app, raise_server_exceptions=True) as client:
+            all_rows = client.get(f"/api/api-test-runs/{run_id}/agent-log")
+            newest = client.get(
+                f"/api/api-test-runs/{run_id}/agent-log?limit=200"
+            )
+            older = client.get(
+                f"/api/api-test-runs/{run_id}/agent-log"
+                f"?limit=200&before_id={newest.json()[0]['id']}"
+            )
+            oldest = client.get(
+                f"/api/api-test-runs/{run_id}/agent-log"
+                f"?limit=200&before_id={older.json()[0]['id']}"
+            )
+
+        assert all_rows.status_code == 200
+        assert len(all_rows.json()) == 450
+        assert [row["current_task"] for row in newest.json()] == [
+            f"Step {index}" for index in range(250, 450)
+        ]
+        assert [row["current_task"] for row in older.json()] == [
+            f"Step {index}" for index in range(50, 250)
+        ]
+        assert [row["current_task"] for row in oldest.json()] == [
+            f"Step {index}" for index in range(0, 50)
+        ]
+    finally:
+        set_engine(previous_engine)
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 # ── Events alias (streaming) ───────────────────────────────────────────────────
 
 

@@ -705,10 +705,13 @@ def _build_waf_summary(run: TestRun | None) -> dict | None:
     """
     if run is None or not run.waf_provider:
         return None
+    from aespa.services.waf_detect import strategy_for_provider
+
     return {
         "provider": run.waf_provider,
         "confidence": run.waf_confidence or "medium",
         "evidence": run.waf_evidence or "",
+        "strategy": strategy_for_provider(run.waf_provider),
     }
 
 
