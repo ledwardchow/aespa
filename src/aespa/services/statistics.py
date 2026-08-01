@@ -192,30 +192,24 @@ def _rates_for(
     return resolved
 
 
-def _cost(row: LLMUsageMonth) -> tuple[float | None, float | None, float | None]:
-    token_rates = (
-        row.input_price_usd_per_million,
-        row.output_price_usd_per_million,
-        row.cache_read_price_usd_per_million,
-        row.cache_write_price_usd_per_million,
-    )
-    if any(rate is None for rate in token_rates):
-        token_cost = None
-    else:
-        token_cost = (
-            row.input_tokens * (token_rates[0] or 0)
-            + row.output_tokens * (token_rates[1] or 0)
-            + row.cache_read_tokens * (token_rates[2] or 0)
-            + row.cache_write_tokens * (token_rates[3] or 0)
-        ) / 1_000_000
-    credit_cost = None
-    if row.credit_price_usd_per_million is not None:
-        credit_count = (
-            row.ai_credits if row.provider == "github_copilot" else row.factory_credits
-        )
-        credit_cost = credit_count * row.credit_price_usd_per_million / 1_000_000
-    total = None if token_cost is None and credit_cost is None else (token_cost or 0) + (credit_cost or 0)
-    return token_cost, credit_cost, total
+def _cost(row: LLMUsageMonth) -> tuple[float, float, float]:
+    """Return token, native-credit, and combined cost estimates.
+
+    A missing price means that component cannot be estimated, but it should
+    not make the totals for the other components disappear. Treating missing
+    prices as zero keeps monthly and lifetime totals useful when a provider's
+    price feed does not include every model or credit type.
+    """
+
+    token_cost = (
+        row.input_tokens * (row.input_price_usd_per_million or 0)
+        + row.output_tokens * (row.output_price_usd_per_million or 0)
+        + row.cache_read_tokens * (row.cache_read_price_usd_per_million or 0)
+        + row.cache_write_tokens * (row.cache_write_price_usd_per_million or 0)
+    ) / 1_000_000
+    credit_count = row.ai_credits if row.provider == "github_copilot" else row.factory_credits
+    credit_cost = credit_count * (row.credit_price_usd_per_million or 0) / 1_000_000
+    return token_cost, credit_cost, token_cost + credit_cost
 
 
 def _row_dict(row: LLMUsageMonth) -> dict[str, Any]:
@@ -340,31 +334,13 @@ def get_statistics(session: Session, month: str | None = None) -> dict[str, Any]
         _cost(row)
         for row in rows
     ]
-    totals["estimated_token_cost_usd"] = (
-        sum(cost[0] for cost in costs if cost[0] is not None) if costs and all(cost[0] is not None for cost in costs) else None
-    )
-    totals["estimated_credit_cost_usd"] = (
-        sum(cost[1] for cost in costs if cost[1] is not None) if costs and all(cost[1] is not None for cost in costs) else None
-    )
-    totals["estimated_total_cost_usd"] = (
-        (totals["estimated_token_cost_usd"] or 0) + (totals["estimated_credit_cost_usd"] or 0)
-        if totals["estimated_token_cost_usd"] is not None or totals["estimated_credit_cost_usd"] is not None
-        else None
-    )
+    totals["estimated_token_cost_usd"] = sum(cost[0] for cost in costs) if costs else None
+    totals["estimated_credit_cost_usd"] = sum(cost[1] for cost in costs) if costs else None
+    totals["estimated_total_cost_usd"] = sum(cost[2] for cost in costs) if costs else None
     all_rows = list(session.exec(select(LLMUsageMonth)))
     lifetime_costs = [_cost(row) for row in all_rows]
-    lifetime_token_values = [cost[0] for cost in lifetime_costs]
-    lifetime_credit_values = [cost[1] for cost in lifetime_costs]
-    lifetime_token_cost = (
-        sum(lifetime_token_values)
-        if lifetime_costs and all(value is not None for value in lifetime_token_values)
-        else None
-    )
-    lifetime_credit_cost = (
-        sum(lifetime_credit_values)
-        if lifetime_costs and all(value is not None for value in lifetime_credit_values)
-        else None
-    )
+    lifetime_token_cost = sum(cost[0] for cost in lifetime_costs) if lifetime_costs else None
+    lifetime_credit_cost = sum(cost[1] for cost in lifetime_costs) if lifetime_costs else None
     lifetime = {
         "months": len({row.month for row in all_rows}),
         "requests": sum(row.requests for row in all_rows),
@@ -378,9 +354,7 @@ def get_statistics(session: Session, month: str | None = None) -> dict[str, Any]
         "estimated_credit_cost_usd": lifetime_credit_cost,
     }
     lifetime["estimated_total_cost_usd"] = (
-        (lifetime_token_cost or 0) + (lifetime_credit_cost or 0)
-        if lifetime_token_cost is not None or lifetime_credit_cost is not None
-        else None
+        sum(cost[2] for cost in lifetime_costs) if lifetime_costs else None
     )
     months = list(
         session.exec(select(LLMUsageMonth.month).distinct().order_by(LLMUsageMonth.month.desc()))
