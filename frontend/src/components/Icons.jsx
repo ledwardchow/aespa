@@ -41,6 +41,10 @@ export const IconBug = () => <svg width="16" height="16" viewBox="0 0 16 16" fil
   <path d="M6 5.5C6 4.4 6.9 3.5 8 3.5s2 .9 2 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
   <path d="M4 7H2M12 7h2M4 10H2M12 10h2M5 13l-1.5 1.5M11 13l1.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
 </svg>;
+export const IconChart = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <path d="M2 13.5V2.5M2 13.5h12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+  <path d="M4.5 11V7.5M8 11V4.5M11.5 11V2.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+</svg>;
 export const IconMessageSquare = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
 </svg>;

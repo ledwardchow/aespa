@@ -883,6 +883,10 @@ When both the provider token and username are blank, the GitHub Copilot SDK read
 
 Copilot usage events arrive through the SDK's background JSON-RPC callback, so each callback is bound explicitly to the AESPA run that created the session. AESPA records AI credits, model-call counts, token/cache details, and legacy premium requests when GitHub supplies them. The latest available Copilot allowance percentage and reset date are also included in the run telemetry. AESPA waits briefly for the ephemeral usage event before returning or closing a model turn so final-call usage is not lost.
 
+### Independent monthly statistics
+
+In addition to the run-level `token_usage_json`, `services/statistics.py` records every provider usage event in an independent monthly ledger. Rows are grouped by the local calendar month, canonical transport provider, and exact model string, while also retaining the endpoint base URL captured at call time. This means deleting a scan or changing a model setting cannot remove historical usage. An OpenRouter endpoint configured through the OpenAI-compatible adapter is labelled as OpenRouter. Input is normalized to mean uncached input; provider adapters subtract cached subsets only for APIs whose input counter includes them. The Statistics page can download the LiteLLM model price map, edit monthly prices, and estimate token and native-credit costs. Statistics reset deletes usage rows but keeps downloaded and manual price data.
+
 Factory Droid uses the installed CLI's encrypted login state; AESPA never reads or stores its credential. The settings endpoint opens a short SDK session and uses `initialize_session().available_models` as the account-specific model catalog, including custom models. Each active AESPA message list owns an isolated persistent Droid session. All sessions use the same empty `aespa-droid-workspace` temporary directory so Factory groups them under one UI project instead of creating a project per loop. The child receives only an environment allowlist needed for CLI authentication, networking, and locale; built-in skills and non-AESPA tools are denied.
 
 Droid tool calls pass through a minimal authenticated loopback MCP relay. The relay advertises only the current AESPA tool schemas and suspends each call while AESPA performs its existing validation, scope checks, execution, checkpointing, and result truncation. Supplying the canonical `tool_result` resumes the same Droid session. A checkpoint restored into a new process starts a fresh session seeded from the canonical message history. Factory-reported input, output, cache-read, cache-write, and Droid credit counters feed normal AESPA telemetry. AESPA records per-turn deltas from Droid's cumulative session counters, so persistent sessions preserve prompt-cache reporting without double-counting tokens or credits.
@@ -1054,6 +1058,10 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
 | `/api/sast-runs/{id}/leads` | `sast_runs.py` | List the *original* `ScanLead` rows for a SAST run (imported copies excluded) |
 | `/api/sast-runs/{id}/agent-log` | `sast_runs.py` | SAST agent activity log |
+| `/api/statistics/llm` | `statistics.py` | Monthly, provider/model-grouped LLM token and native-credit usage |
+| `/api/statistics/llm/prices/refresh` | `statistics.py` | Download the latest LiteLLM price map |
+| `/api/statistics/llm/prices` | `statistics.py` | Save a monthly or future price override |
+| `/api/statistics/llm` (`DELETE`) | `statistics.py` | Reset all usage months while retaining price data |
 
 ---
 
@@ -1066,6 +1074,8 @@ The web UI is a **single-page application** served from `src/aespa/web/`. It com
 ### Telemetry rendering (`TokenUsageBar`)
 
 Detail views for Web runs, API runs, and SAST runs embed the `TokenUsageBar` component. For API-key providers it renders per-model input, output, and prompt-cache tokens. Factory Droid adds Droid credits and model-call counts while retaining token/cache details. GitHub Copilot adds AI credits or legacy premium requests, model-call counts, and available allowance information. The data is persisted in `token_usage_json`.
+
+The sidebar's **Stats → Usage** page is independent of those detail views. It shows one month at a time, with totals and a provider/model table for uncached input, output, cache reads, cache writes, native credits, and estimated USD cost. It uses the operating system's local month boundary and asks for confirmation before clearing all usage months.
 
 ### WebSocket event types (emitted by `services/events.py`)
 
