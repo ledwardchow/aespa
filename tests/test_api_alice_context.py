@@ -115,6 +115,57 @@ def test_context_tool_collection_info_no_endpoints(db_session):
     assert isinstance(result["credentials"], list)
 
 
+def test_context_tool_run_status_reports_api_progress(db_session):
+    """API ALICE can answer run-status questions without sending a request."""
+    import aespa.db as db_mod
+    from aespa.models import ApiCollection, ApiEndpoint, ApiEndpointTest, ApiTestRun
+    from aespa.services.alice import _run_api_context_tool
+
+    coll = ApiCollection(name="Widget API", base_url="https://api.example.com")
+    db_session.add(coll)
+    db_session.commit()
+    db_session.refresh(coll)
+    endpoint = ApiEndpoint(
+        collection_id=coll.id,
+        method="GET",
+        path="/widgets",
+        in_scope=True,
+    )
+    db_session.add(endpoint)
+    db_session.commit()
+    db_session.refresh(endpoint)
+    run = ApiTestRun(
+        collection_id=coll.id,
+        name="API run",
+        status="running",
+        phase="scanning",
+    )
+    db_session.add(run)
+    db_session.commit()
+    db_session.refresh(run)
+    db_session.add(
+        ApiEndpointTest(
+            api_test_run_id=run.id,
+            endpoint_id=endpoint.id,
+            owasp_api_category="API2",
+            status="in_progress",
+        )
+    )
+    db_session.commit()
+
+    original_engine = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        result = _run_api_context_tool(coll.id, run.id, "run_status", {})
+    finally:
+        db_mod._engine = original_engine
+
+    assert result["run_kind"] == "api"
+    assert result["phase"] == "scanning"
+    assert result["endpoints_in_scope"] == 1
+    assert result["coverage"] == {"in_progress": 1}
+
+
 def test_context_tool_endpoint_list_and_detail(db_session):
     """endpoint_list and endpoint_detail return expected fields."""
     import aespa.db as db_mod
@@ -962,6 +1013,105 @@ def test_api_system_prompt_contains_context_tool_commands():
 
     for cmd in ["endpoint_list", "endpoint_detail", "collection_info", "finding_list"]:
         assert cmd in ALICE_API_SYSTEM_PROMPT
+
+    for cmd in [
+        "history_search",
+        "traffic_search",
+        "compare_responses",
+        "mutate_request",
+        "extract_entities",
+    ]:
+        assert cmd in ALICE_API_SYSTEM_PROMPT
+
+
+def test_api_alice_shared_context_uses_current_request_history(db_session):
+    import aespa.db as db_mod
+    from aespa.services.api_scanner import _make_api_context_tool_fn
+
+    orig_engine = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        context_fn = _make_api_context_tool_fn(collection_id=99, api_run_id=7)
+        result = context_fn(
+            "compare_responses",
+            {"left_step": 1, "right_step": 2},
+            history=[
+                {
+                    "step": 1,
+                    "url": "https://api.example.com/items/1",
+                    "response_status": 200,
+                    "response_body": "owner=alice",
+                },
+                {
+                    "step": 2,
+                    "url": "https://api.example.com/items/2",
+                    "response_status": 403,
+                    "response_body": "forbidden",
+                },
+            ],
+            run_id=7,
+            base_url="https://api.example.com",
+        )
+    finally:
+        db_mod._engine = orig_engine
+
+    assert result["tool"] == "compare_responses"
+    assert result["status_changed"] is True
+    assert result["left"]["status"] == 200
+    assert result["right"]["status"] == 403
+
+
+def test_api_alice_traffic_context_filters_api_run_id(db_session):
+    import aespa.db as db_mod
+    from aespa.models import ApiCollection, ApiTestRun, Site, TestRun, TrafficEntry
+    from aespa.services.api_scanner import _make_api_context_tool_fn
+
+    site = Site(name="Web", base_url="https://web.example.com")
+    db_session.add(site)
+    db_session.commit()
+    db_session.refresh(site)
+    web_run = TestRun(site_id=site.id, name="web")
+    collection = ApiCollection(name="API", base_url="https://api.example.com")
+    db_session.add(web_run)
+    db_session.add(collection)
+    db_session.commit()
+    db_session.refresh(web_run)
+    db_session.refresh(collection)
+    api_run = ApiTestRun(collection_id=collection.id, name="api")
+    db_session.add(api_run)
+    db_session.commit()
+    db_session.refresh(api_run)
+
+    db_session.add(
+        TrafficEntry(
+            test_run_id=web_run.id,
+            source="httpx",
+            method="GET",
+            url="https://web.example.com/wrong-run",
+        )
+    )
+    db_session.add(
+        TrafficEntry(
+            test_run_id=web_run.id,
+            api_test_run_id=api_run.id,
+            source="httpx",
+            method="GET",
+            url="https://api.example.com/right-run",
+        )
+    )
+    db_session.commit()
+
+    orig_engine = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        result = _make_api_context_tool_fn(collection.id, api_run.id)(
+            "traffic_search", {"limit": 20}, run_id=api_run.id
+        )
+    finally:
+        db_mod._engine = orig_engine
+
+    assert result["count"] == 1
+    assert result["entries"][0]["url"] == "https://api.example.com/right-run"
 
 
 def test_api_alice_withholds_web_only_dispatch_and_write_tools():

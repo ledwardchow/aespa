@@ -150,6 +150,7 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
         "state_label",
         "state_kind",
         "replay_steps_json",
+        "replay_credential_id",
         "title",
         "page_text",
         "screenshot_b64",
@@ -227,18 +228,18 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
             ],
             "target_intelligence": [
                 {
-                    field: getattr(item, field)
-                    for field in (
-                        "kind",
-                        "key",
-                        "value",
-                        "url",
-                        "method",
-                        "source",
-                        "confidence",
-                        "evidence",
-                        "item_metadata",
-                    )
+                    "kind": item.kind,
+                    "key": item.key,
+                    "value": item.value,
+                    "url": item.url,
+                    "method": item.method,
+                    "source": item.source,
+                    "confidence": item.confidence,
+                    "evidence": item.evidence,
+                    "item_metadata": item.item_metadata,
+                    "page_id": item.page_id,
+                    "page_url": page_urls.get(item.page_id),
+                    "page_state_key": page_state_keys.get(item.page_id),
                 }
                 for item in session.exec(
                     select(TargetIntelItem).where(TargetIntelItem.test_run_id == run.id)
@@ -266,6 +267,9 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
                     "response_body": entry.response_body,
                     "duration_ms": entry.duration_ms,
                     "username": entry.username,
+                    "page_id": entry.page_id,
+                    "page_url": page_urls.get(entry.page_id),
+                    "page_state_key": page_state_keys.get(entry.page_id),
                 }
                 for entry in session.exec(
                     select(TrafficEntry).where(TrafficEntry.test_run_id == run.id)
@@ -1068,6 +1072,7 @@ async def import_test_run_crawl(
         "state_label",
         "state_kind",
         "replay_steps_json",
+        "replay_credential_id",
         "title",
         "page_text",
         "screenshot_b64",
@@ -1172,6 +1177,9 @@ async def import_test_run_crawl(
         for item in crawl.get("target_intelligence", []):
             if not isinstance(item, dict) or not isinstance(item.get("kind"), str):
                 continue
+            intel_page = pages_by_identity.get(
+                item.get("page_state_key")
+            ) or pages_by_url.get(item.get("page_url"))
             session.add(
                 TargetIntelItem(
                     test_run_id=run_id,
@@ -1189,6 +1197,7 @@ async def import_test_run_crawl(
                             "item_metadata",
                         )
                     },
+                    page_id=intel_page.id if intel_page else None,
                 )
             )
         for item in crawl.get("traffic", []):
@@ -1216,6 +1225,18 @@ async def import_test_run_crawl(
                             "username",
                         )
                     },
+                    page_id=(
+                        (
+                            pages_by_identity.get(item.get("page_state_key"))
+                            or pages_by_url.get(item.get("page_url"))
+                        ).id
+                        if (
+                            pages_by_identity.get(item.get("page_state_key"))
+                            or pages_by_url.get(item.get("page_url"))
+                        )
+                        else None
+                    ),
+                    session_label=item.get("session_label"),
                 )
             )
         for item in crawl.get("scanner_sessions", []):
@@ -1399,7 +1420,79 @@ def get_page(
     page = session.get(CrawledPage, page_id)
     if page is None or page.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Page not found")
-    return CrawledPageDetail.model_validate(page)
+    detail = CrawledPageDetail.model_validate(page)
+    try:
+        replay = json.loads(page.replay_steps_json or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        replay = []
+    if isinstance(replay, dict):
+        root_url = str(replay.get("root_url") or page.url)
+        steps = replay.get("steps") or []
+    else:
+        root_url = page.url
+        steps = replay if isinstance(replay, list) else []
+    if steps:
+        detail.browser_replay = {
+            "url": root_url,
+            "steps": [{"op": "goto", "url": root_url}]
+            + [
+                {
+                    key: value
+                    for key, value in {
+                        "op": step.get("kind") or step.get("op") or "click",
+                        "selector": step.get("selector"),
+                        "testid": step.get("testid"),
+                        "role": step.get("role"),
+                        "name": step.get("name"),
+                        "value": step.get("value"),
+                    }.items()
+                    if value not in (None, "")
+                }
+                for step in steps
+                if isinstance(step, dict)
+            ],
+        }
+    traffic_rows = session.exec(
+        select(TrafficEntry)
+        .where(TrafficEntry.test_run_id == run_id)
+        .where(TrafficEntry.page_id == page_id)
+        .order_by(TrafficEntry.id.desc())
+        .limit(100)
+    ).all()
+    detail.traffic = [
+        {
+            "id": row.id,
+            "source": row.source,
+            "method": row.method,
+            "url": row.url,
+            "status": row.status,
+            "duration_ms": row.duration_ms,
+            "username": row.username,
+            "session_label": row.session_label,
+        }
+        for row in traffic_rows
+    ]
+    intel_rows = session.exec(
+        select(TargetIntelItem)
+        .where(TargetIntelItem.test_run_id == run_id)
+        .where(TargetIntelItem.page_id == page_id)
+        .where(TargetIntelItem.kind == "object_reference")
+        .order_by(TargetIntelItem.id.desc())
+        .limit(100)
+    ).all()
+    detail.object_references = [
+        {
+            "id": row.id,
+            "key": row.key,
+            "value": row.value,
+            "url": row.url,
+            "method": row.method,
+            "confidence": row.confidence,
+            "metadata": _redacted_metadata(_json_dict(row.item_metadata)),
+        }
+        for row in intel_rows
+    ]
+    return detail
 
 
 @router.get(
@@ -1497,6 +1590,8 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
             scan_status=p.scan_status,
             accessible_by=json.loads(p.accessible_by or "[]"),
             accessible_anonymously=p.id in anonymously_accessible_page_ids,
+            replay_available=bool(p.replay_steps_json and p.replay_steps_json != "[]"),
+            replay_credential_id=p.replay_credential_id,
         )
         for p in pages
     ]
@@ -1566,6 +1661,7 @@ def clear_target_intelligence(
 def get_target_intelligence(
     run_id: int,
     kind: str | None = None,
+    page_id: int | None = None,
     limit: int = 500,
     session: Session = Depends(get_session),
 ) -> TargetIntelSummary:
@@ -1581,6 +1677,8 @@ def get_target_intelligence(
     query = select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
     if kind:
         query = query.where(TargetIntelItem.kind == kind)
+    if page_id is not None:
+        query = query.where(TargetIntelItem.page_id == page_id)
     items = session.exec(
         query.order_by(
             TargetIntelItem.kind, TargetIntelItem.discovered_at.desc()

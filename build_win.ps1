@@ -51,10 +51,14 @@ if (Test-Path "dist\AESPA") { Remove-Item -Recurse -Force "dist\AESPA" }
     --distpath "dist\AESPA" `
     --icon $Ico `
     --add-data "src\aespa\web;aespa\web" `
+    --add-data "alembic.ini;." `
+    --add-data "alembic;alembic" `
     --add-data "THIRD_PARTY_LICENSES.txt;." `
     --add-data "LICENSE;." `
     --collect-all playwright `
     --collect-all webview `
+    --collect-all alembic `
+    --collect-all uvicorn `
     --collect-submodules pystray `
     --collect-submodules aespa `
     src\aespa\desktop_win.py

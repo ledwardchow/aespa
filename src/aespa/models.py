@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-from sqlalchemy import Column, ForeignKey, Integer, String, text
+from sqlalchemy import Column, ForeignKey, Integer, String, UniqueConstraint, text
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -291,6 +291,80 @@ class LLMProviderConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class LLMUsageMonth(SQLModel, table=True):
+    """Independent monthly LLM usage ledger.
+
+    This table deliberately has no foreign keys to runs or provider settings:
+    usage must survive scan deletion and model/provider configuration changes.
+    ``month`` is a local-calendar ``YYYY-MM`` key, chosen when the provider
+    reports usage.
+    """
+
+    __tablename__ = "llm_usage_month"
+    __table_args__ = (
+        UniqueConstraint("month", "provider", "model", name="uq_llm_usage_month_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    month: str = Field(index=True)
+    provider: str = Field(index=True)
+    model: str = Field(index=True)
+    base_url: Optional[str] = Field(default=None, nullable=True)
+    requests: int = Field(default=0)
+    input_tokens: int = Field(default=0)
+    output_tokens: int = Field(default=0)
+    cache_read_tokens: int = Field(default=0)
+    cache_write_tokens: int = Field(default=0)
+    ai_credits: float = Field(default=0.0)
+    factory_credits: float = Field(default=0.0)
+    input_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    output_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    cache_read_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    cache_write_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    credit_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    credit_unit: Optional[str] = Field(default=None, nullable=True)
+    price_source: Optional[str] = Field(default=None, nullable=True)
+    price_confidence: Optional[str] = Field(default=None, nullable=True)
+    manual_override: bool = Field(default=False)
+    price_updated_at: Optional[datetime] = Field(default=None, nullable=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class LLMPriceCatalog(SQLModel, table=True):
+    """Latest reusable price data for future monthly usage rows."""
+
+    __tablename__ = "llm_price_catalog"
+    __table_args__ = (
+        UniqueConstraint("provider", "model", name="uq_llm_price_catalog_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    provider: str = Field(index=True)
+    model: str = Field(index=True)
+    input_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    output_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    cache_read_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    cache_write_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    credit_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    credit_unit: Optional[str] = Field(default=None, nullable=True)
+    price_source: Optional[str] = Field(default=None, nullable=True)
+    price_confidence: Optional[str] = Field(default=None, nullable=True)
+    manual_override: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class LLMPriceFeed(SQLModel, table=True):
+    """The last downloaded raw price map, retained for offline matching."""
+
+    __tablename__ = "llm_price_feed"
+
+    id: Optional[int] = Field(default=1, primary_key=True)
+    source_url: str
+    payload_json: str
+    fetched_at: datetime = Field(default_factory=_utcnow)
+
+
 class LLMConfig(SQLModel, table=True):
     """Saved LLM settings profile."""
 
@@ -379,6 +453,7 @@ class CrawlerConfig(SQLModel, table=True):
     skip_dangerous_actions: bool = Field(default=True)
     suppress_form_submit_actions: bool = Field(default=True)
     block_non_idempotent_interactive_replay: bool = Field(default=True)
+    enable_access_reconciliation: bool = Field(default=False)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -494,6 +569,17 @@ class ReportingDebugConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class BrowserDebugConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for Playwright browser debug settings."""
+
+    __tablename__ = "browser_debug_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    browser_engine: str = Field(default="playwright_chromium")
+    browser_visible: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class CloudflareAccessConfig(SQLModel, table=True):
     """Singleton row (id always = 1) for Cloudflare Access JWT verification.
 
@@ -591,6 +677,19 @@ class TestRun(SQLModel, table=True):
     crawl_credential_id: Optional[int] = Field(
         default=None, foreign_key="credential.id"
     )
+    # JSON list of page IDs for a deliberate state-focused scan. Empty/NULL
+    # means the normal full-site scan. This is persisted so a queued sitemap
+    # action survives a worker restart and is visible to the Test Lead.
+    target_page_ids_json: Optional[str] = Field(default=None)
+    target_session_label: Optional[str] = Field(default=None)
+
+    @property
+    def target_page_ids(self) -> list[int]:
+        try:
+            values = json.loads(self.target_page_ids_json or "[]")
+            return [int(value) for value in values if str(value).isdigit()]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
 
 
 class CrawledPage(SQLModel, table=True):
@@ -605,6 +704,11 @@ class CrawledPage(SQLModel, table=True):
     state_label: Optional[str] = Field(default=None)
     state_kind: str = Field(default="url")  # url | interactive | api
     replay_steps_json: str = Field(default="[]")
+    # Credential that first reached this state.  Replay uses this identity by
+    # default and never silently substitutes another user.
+    replay_credential_id: Optional[int] = Field(
+        default=None, foreign_key="credential.id", index=True
+    )
     title: Optional[str] = Field(default=None)
     page_text: Optional[str] = Field(default=None)  # truncated ~10k chars
     screenshot_b64: Optional[str] = Field(default=None)
@@ -700,6 +804,14 @@ class TrafficEntry(SQLModel, table=True):
     username: Optional[str] = Field(
         default=None
     )  # credential username that made the request
+    # Optional page/session provenance.  URL matching remains a legacy fallback,
+    # but interactive states sharing one URL need these explicit associations.
+    page_id: Optional[int] = Field(
+        default=None,
+        foreign_key="crawled_page.id",
+        index=True,
+    )
+    session_label: Optional[str] = Field(default=None, index=True)
 
 
 class ScannerSession(SQLModel, table=True):
@@ -783,6 +895,9 @@ class TargetIntelItem(SQLModel, table=True):
     confidence: float = Field(default=1.0)
     evidence: str = Field(default="")
     item_metadata: str = Field(default="{}")
+    page_id: Optional[int] = Field(
+        default=None, foreign_key="crawled_page.id", index=True
+    )
     discovered_at: datetime = Field(default_factory=_utcnow)
 
 

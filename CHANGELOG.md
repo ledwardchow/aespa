@@ -2,6 +2,42 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## August 1, 2026
+
+- **Independent monthly LLM statistics** (`services/statistics.py`, `api/statistics.py`, frontend Stats page): Added a scan-independent monthly ledger for uncached input, output, cache reads/writes, provider-native credits, and price estimates. Usage survives scan deletion and model changes, supports LiteLLM price refreshes and manual monthly overrides, and can be reset with confirmation. OpenRouter endpoints configured through the OpenAI-compatible adapter are labelled as OpenRouter in the ledger, each row retains its endpoint base URL, and the breakdown table gives the provider/model column the most room.
+
+---
+
+## [PR #252] July 29 Update — Alembic migrations, WAF detection, Factory Droid provider, and crawler safety
+
+**Branch:** `develop → main`
+
+### Alembic database migrations
+
+- **Standard schema evolution with Alembic** (`src/aespa/db.py`, `alembic/`, `pyproject.toml`): Database schema migrations are now managed via Alembic instead of hand-rolled startup scripts. Alembic autogenerates revision scripts based on `SQLModel` metadata changes and handles table rebuilds using SQLite batch migration mode.
+- **Backwards compatibility and legacy database stamping**: `init_db()` automatically stamps pre-existing database files (`aespa.db`) with the baseline revision (`0044cbef2700`) on startup, preventing table collision errors on existing installations.
+
+### WAF detection and 403 guidance
+
+- **Passive WAF and bot-manager detection** (`services/waf_detect.py`, `test_run` model, UI): Added passive WAF detection to identify WAF providers, confidence scores, and detection evidence. WAF information is displayed on the Attack Surface tab and automatically routes requests through browser contexts when a WAF is active.
+- **Contextual guidance on 403 Forbidden responses** (`services/prompts/test_lead.py`): Test Lead scan guidance is automatically injected into model prompt context when 403 Forbidden responses occur during scans.
+
+### Factory Droid provider and model discovery
+
+- **Factory Droid LLM provider** (`services/droid_provider.py`, `services/droid_mcp_relay.py`): Added support for Factory Droid as an LLM provider.
+- **Dynamic model discovery** (`services/model_discovery.py`, `GET /api/llm/models`): Endpoint `GET /api/llm/models` dynamically discovers available models from providers instead of requiring the user to enter model names. 
+
+### Crawler safety and authentication enhancements
+
+- **Crawler safety toggles** (`services/crawler.py`, `models.py`): Added `suppress_form_submit_actions` and `block_non_idempotent_interactive_replay` toggles; previously, it would not crawl forms that weren't idempotent (i.e. payment features). Use in test environments only!
+- **Email-based OTP authentication** (`services/crawler.py`, site credentials): Added support for email-based OTP login flows targeting test mailboxes (such as MailHog or Mailsac).
+- **Custom login fields and multiple HTTP headers**: Added support for defining named custom login fields per credential (for example, if you don't log in using username and password) and configuring multiple custom global HTTP request headers.
+
+### UI and platform compatibility fixes
+
+- **Interactive table header sorting**: Added column header click sorting to data tables across the frontend interface.
+- **Windows launcher and Copilot fixes** (`desktop_win.py`, `services/copilot_provider.py`): Fixed Copilot tool naming conflicts and Windows executable launcher issues related to Mark of the Web file attributes.
+
 ---
 
 ## July 19 Update — GitHub Copilot, usage reporting, and newer model defaults
