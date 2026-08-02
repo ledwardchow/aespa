@@ -8,6 +8,9 @@ No network access anywhere — ``correlate_campaign`` is called without an
 
 from __future__ import annotations
 
+import json
+
+import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
@@ -29,7 +32,9 @@ from aespa.models import (
 from aespa.services.correlation import (
     apply_review_decisions,
     copy_approved_mappings_for_target,
+    copy_explicit_component_leads_for_target,
     correlate_campaign,
+    correlate_campaign_with_llm,
 )
 
 
@@ -175,6 +180,55 @@ def test_correlate_campaign_builds_deterministic_connection(isolated_db_engine):
     assert connection.target_component_id == ctx["api_component_id"]
 
 
+@pytest.mark.anyio
+async def test_llm_correlation_persists_valid_ambiguous_match(
+    isolated_db_engine, monkeypatch
+):
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        call = session.get(ComponentFact, ctx["call_fact_id"])
+        route = session.get(ComponentFact, ctx["route_fact_id"])
+        call.path = "/v1/orders"
+        route.path = "/orders"
+        session.add(call)
+        session.add(route)
+        session.commit()
+
+    from aespa.services import component_mapper, llm, settings
+
+    monkeypatch.setattr(settings, "get_llm_config_for_role", lambda *_args: object())
+
+    async def fake_mapper(*_args, **_kwargs):
+        return None
+
+    async def fake_completion(*_args, **_kwargs):
+        return json.dumps(
+            [
+                {
+                    "call_id": ctx["call_fact_id"],
+                    "route_id": ctx["route_fact_id"],
+                    "confidence": 0.88,
+                    "rationale": "The versioned caller reaches the route service.",
+                    "evidence": {"source": "test"},
+                }
+            ]
+        )
+
+    monkeypatch.setattr(component_mapper, "map_campaign_component", fake_mapper)
+    monkeypatch.setattr(llm, "plain_completion", fake_completion)
+    result = await correlate_campaign_with_llm(ctx["campaign_id"])
+
+    assert result["connections"] == 1
+    with Session(isolated_db_engine) as session:
+        connection = session.exec(
+            select(ComponentConnection).where(
+                ComponentConnection.campaign_id == ctx["campaign_id"]
+            )
+        ).one()
+        assert connection.match_kind == "llm_assisted"
+        assert connection.confidence == 0.88
+
+
 def test_correlate_campaign_proposes_lead_target_mapping_via_endpoint_match(
     isolated_db_engine,
 ):
@@ -195,6 +249,44 @@ def test_correlate_campaign_proposes_lead_target_mapping_via_endpoint_match(
     assert mapping.target_id == ctx["target_id"]
     assert mapping.score > 0
     assert mapping.status == "proposed"
+
+
+def test_explicit_target_component_copies_its_own_sast_leads_without_review(
+    isolated_db_engine,
+):
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    with Session(isolated_db_engine) as s:
+        target = s.get(ApplicationTarget, ctx["target_id"])
+        target.component_id = ctx["ui_component_id"]
+        from aespa.models import ApiTestRun
+
+        target_run = ApiTestRun(collection_id=1, name="target run")
+        s.add(target_run)
+        s.commit()
+        s.refresh(target_run)
+        target_run_id = target_run.id
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as s:
+        own_mapping = s.exec(
+            select(LeadTargetMapping)
+            .where(LeadTargetMapping.campaign_id == ctx["campaign_id"])
+            .where(LeadTargetMapping.lead_id == ctx["source_lead_id"])
+        ).first()
+    assert own_mapping is None
+    copied = copy_explicit_component_leads_for_target(
+        ctx["campaign_id"], ctx["target_id"], "api", target_run_id
+    )
+    assert copied == 1
+
+    with Session(isolated_db_engine) as s:
+        copies = s.exec(
+            select(ScanLead)
+            .where(ScanLead.imported_into_run_type == "api")
+            .where(ScanLead.imported_into_run_id == target_run_id)
+        ).all()
+    assert len(copies) == 1
+    assert copies[0].producer_run_id == 9001
 
 
 def test_correlate_campaign_generates_cross_repo_lead_with_provenance(

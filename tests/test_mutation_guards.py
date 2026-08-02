@@ -1,7 +1,7 @@
-"""Standalone mutation endpoints must refuse to touch a run that a
-campaign's frozen manifest still owns — not just its delete route. Every
-lifecycle/settings/lead-bypass endpoint across SAST, web, and API runs is
-checked here; read-only endpoints are checked to confirm they still work.
+"""Standalone mutation endpoints must refuse unsafe changes to campaign-owned
+runs while allowing explicit SAST lead handoff/import operations. Lifecycle,
+settings, scan-control, and destructive run mutations remain guarded; the
+lead-copy exceptions are covered here alongside read-only endpoint checks.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from aespa.models import (
     CrawledPage,
     SastRun,
     ScanFinding,
+    ScanLead,
     Site,
     TestRun,
 )
@@ -148,6 +149,31 @@ def _seed_standalone_runs(engine) -> dict:
         }
 
 
+def _seed_reportable_sast_lead(engine, sast_run_id: int) -> int:
+    """Add one validated original lead to a completed SAST run."""
+    with Session(engine) as s:
+        run = s.get(SastRun, sast_run_id)
+        assert run is not None
+        run.leads_count = 1
+        lead = ScanLead(
+            producer_run_type="sast",
+            producer_run_id=sast_run_id,
+            title="Validated static lead",
+            description="A campaign lead that may be dynamically investigated.",
+            category="A01",
+            severity="high",
+            confidence=0.95,
+            location="app.py:10",
+            reportable=True,
+            validation_status="confirmed",
+            status="open",
+        )
+        s.add(lead)
+        s.commit()
+        s.refresh(lead)
+        return lead.id
+
+
 # ── SAST mutation endpoints ──────────────────────────────────────────────────
 
 
@@ -172,36 +198,46 @@ def test_sast_scan_stop_blocked_for_campaign_owned_run(client, isolated_db_engin
     assert resp.status_code == 409
 
 
-def test_sast_lead_handoff_blocked_for_campaign_owned_source(
+def test_sast_lead_handoff_allowed_for_campaign_owned_source(
     client, isolated_db_engine
 ):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     standalone = _seed_standalone_runs(isolated_db_engine)
+    lead_id = _seed_reportable_sast_lead(isolated_db_engine, ctx["sast_run_id"])
     resp = client.post(
-        f"/api/sast-runs/{ctx['sast_run_id']}/leads/1/handoff",
+        f"/api/sast-runs/{ctx['sast_run_id']}/leads/{lead_id}/handoff",
         json={"run_type": "web", "run_id": standalone["web_run_id"]},
     )
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    assert resp.json()["queued"] is True
 
 
-def test_api_import_leads_blocked_for_campaign_owned_target(client, isolated_db_engine):
+def test_api_import_leads_allowed_for_campaign_owned_target(
+    client, isolated_db_engine
+):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     standalone = _seed_standalone_runs(isolated_db_engine)
+    _seed_reportable_sast_lead(isolated_db_engine, standalone["sast_run_id"])
     resp = client.post(
         f"/api/api-test-runs/{ctx['api_run_id']}/import-leads",
         json={"sast_run_id": standalone["sast_run_id"]},
     )
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    assert resp.json() == {"imported": 1}
 
 
-def test_api_import_leads_blocked_for_campaign_owned_source(client, isolated_db_engine):
+def test_api_import_leads_allowed_for_campaign_owned_source(
+    client, isolated_db_engine
+):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     standalone = _seed_standalone_runs(isolated_db_engine)
+    _seed_reportable_sast_lead(isolated_db_engine, ctx["sast_run_id"])
     resp = client.post(
         f"/api/api-test-runs/{standalone['api_run_id']}/import-leads",
         json={"sast_run_id": ctx["sast_run_id"]},
     )
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    assert resp.json() == {"imported": 1}
 
 
 def test_clear_and_delete_api_run_leads_blocked_for_campaign_owned_run(
@@ -263,24 +299,32 @@ def test_web_stop_blocked_for_campaign_owned_run(client, isolated_db_engine):
     assert resp.status_code == 409
 
 
-def test_web_import_leads_blocked_for_campaign_owned_target(client, isolated_db_engine):
+def test_web_import_leads_allowed_for_campaign_owned_target(
+    client, isolated_db_engine
+):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     standalone = _seed_standalone_runs(isolated_db_engine)
+    _seed_reportable_sast_lead(isolated_db_engine, standalone["sast_run_id"])
     resp = client.post(
         f"/api/test-runs/{ctx['web_run_id']}/import-leads",
         json={"sast_run_id": standalone["sast_run_id"]},
     )
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    assert resp.json() == {"imported": 1}
 
 
-def test_web_import_leads_blocked_for_campaign_owned_source(client, isolated_db_engine):
+def test_web_import_leads_allowed_for_campaign_owned_source(
+    client, isolated_db_engine
+):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     standalone = _seed_standalone_runs(isolated_db_engine)
+    _seed_reportable_sast_lead(isolated_db_engine, ctx["sast_run_id"])
     resp = client.post(
         f"/api/test-runs/{standalone['web_run_id']}/import-leads",
         json={"sast_run_id": ctx["sast_run_id"]},
     )
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    assert resp.json() == {"imported": 1}
 
 
 def test_clear_and_delete_web_run_leads_blocked_for_campaign_owned_run(

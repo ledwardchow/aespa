@@ -7,10 +7,10 @@ import { IconPlus } from "../../components/Icons";
 
 // ── TargetsTab ───────────────────────────────────────────────────────────────
 // Attach/detach existing Sites and API Collections via a searchable
-// multi-select, plus optional component→target connection hints.
+// multi-select, plus optional component ownership links and connection hints.
 
 export function TargetsTab({ applicationId, components, onChanged }) {
-  const { targets, allSites, allApiCollections, error, setError, attachMany, detach } = useTargets(applicationId, onChanged);
+  const { targets, allSites, allApiCollections, error, setError, attachMany, detach, setComponent } = useTargets(applicationId, onChanged);
   const { hints, error: hintError, setError: setHintError, create: createHint, remove: removeHint } = useHints(applicationId, onChanged);
   const [picking, setPicking] = useState(false);
 
@@ -40,8 +40,24 @@ export function TargetsTab({ applicationId, components, onChanged }) {
       action={<button className="btn" onClick={() => setPicking(true)}><IconPlus /> Attach targets</button>} />}
     {targets && targets.length > 0 && <div className="app-target-list">
       {targets.map(t => <div key={t.id} className="app-target-row">
-        <span className="badge neutral">{t.target_type === "site" ? "Site" : "API collection"}</span>
-        <span style={{ fontWeight: 600, flex: 1 }}>{t.name || `#${t.target_id}`}</span>
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <div className="row" style={{ gap: 8 }}>
+            <span className="badge neutral">{t.target_type === "site" ? "Site" : "API collection"}</span>
+            <span style={{ fontWeight: 600 }}>{t.name || `#${t.target_id}`}</span>
+          </div>
+          <label className="subtle" style={{ display: "block", fontSize: 12, marginTop: 8 }}>
+            Code component <span style={{ fontWeight: 400 }}>(optional)</span>
+            <select
+              className="select"
+              value={t.component_id || ""}
+              onChange={e => setComponent(t.id, e.target.value ? +e.target.value : null).catch(err => setError(err.message))}
+              style={{ display: "block", marginTop: 4, maxWidth: 320 }}
+            >
+              <option value="">No explicit component</option>
+              {(components || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </label>
+        </div>
         <button className="btn danger-outline sm" onClick={() => {
           if (!confirm(`Detach "${t.name || t.target_id}" from this application?`)) return;
           detach(t.id).catch(e => setError(e.status === 409 ? "Cannot detach — it is still referenced by a campaign." : e.message));
@@ -51,7 +67,7 @@ export function TargetsTab({ applicationId, components, onChanged }) {
 
     <div className="form-section-title" style={{ marginTop: 28 }}>Connection hints <span className="subtle" style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></div>
     <div className="subtle" style={{ fontSize: 12, marginBottom: 10 }}>
-      A hint such as "checkout-ui calls orders-api" boosts correlation confidence but is never required for a campaign to run.
+      Use these for inferred component-to-component communication. An explicit code component selected above automatically routes that component's reportable SAST leads to the target; these hints remain advisory.
     </div>
     {hintError && <div className="alert error" style={{ marginBottom: 12 }}>{hintError}</div>}
     <HintsEditor

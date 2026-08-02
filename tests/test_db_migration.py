@@ -1013,7 +1013,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
         } <= tables_after
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "cc7896879130"
+        assert version == "b8e2f4a6c901"
     finally:
         engine.dispose()
 
@@ -1050,7 +1050,49 @@ def test_current_db_with_applications_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "cc7896879130"
+        assert version == "b8e2f4a6c901"
     finally:
         SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_explicit_target_component_migration_adds_nullable_column():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            for statement in (
+                "CREATE TABLE application (id INTEGER PRIMARY KEY)",
+                "CREATE TABLE application_component ("
+                "id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL)",
+                "CREATE TABLE application_target ("
+                "id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL,"
+                "target_type TEXT NOT NULL, target_id INTEGER NOT NULL,"
+                "created_at DATETIME NOT NULL)",
+                "CREATE TABLE component_target_hint ("
+                "id INTEGER PRIMARY KEY, target_id INTEGER NOT NULL "
+                "REFERENCES application_target(id))",
+                "CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)",
+                "INSERT INTO alembic_version VALUES ('cc7896879130')",
+            ):
+                conn.execute(text(statement))
+            conn.commit()
+
+        db.run_migrations(engine)
+
+        with engine.connect() as conn:
+            columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(application_target)"))
+            }
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+
+        assert "component_id" in columns
+        assert version == "b8e2f4a6c901"
+    finally:
         engine.dispose()

@@ -160,6 +160,60 @@ def test_agentic_loop_recovers_from_text_only_turn(monkeypatch):
     assert "did not call a tool" in correction_messages[-1]["content"][0]["text"]
 
 
+def test_agentic_loop_accepts_mapper_text_only_repair_message(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+    calls: list[list[dict]] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        calls.append(messages)
+        if len(calls) == 1:
+            block = {
+                "type": "text",
+                "id": None,
+                "name": None,
+                "input": None,
+                "text": "I will inspect the source.",
+            }
+            return [block], "end_turn", [block]
+        block = {
+            "type": "tool_use",
+            "id": "mapper_done",
+            "name": "done",
+            "input": {"summary": "Mapped."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="mapper",
+            initial_user_message="map",
+            tool_executor=lambda *_args: "ok",
+            text_only_repair_message="Call exactly one mapper tool now.",
+        )
+    )
+    repair_messages = [
+        message
+        for message in calls[1]
+        if message["role"] == "user"
+        and isinstance(message["content"], list)
+        and any(
+            isinstance(item, dict) and item.get("text") == "Call exactly one mapper tool now."
+            for item in message["content"]
+        )
+    ]
+    assert repair_messages
+
+
 def test_agentic_loop_can_reject_premature_done(monkeypatch):
     config = LLMConfig(
         provider="azure_foundry_openai",

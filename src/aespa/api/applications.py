@@ -45,6 +45,7 @@ from aespa.schemas import (
     ApplicationSummary,
     ApplicationTargetCreate,
     ApplicationTargetOut,
+    ApplicationTargetUpdate,
     ApplicationUpdate,
     CampaignActivityEntry,
     CampaignCreate,
@@ -220,6 +221,7 @@ def _to_target_out(
         application_id=application_id,
         target_type=target.target_type,
         target_id=target.target_id,
+        component_id=target.component_id,
         created_at=target.created_at,
         name=applications_svc.target_display_name(session, target),
     )
@@ -500,6 +502,27 @@ def attach_target(
         raise _not_found(exc) from exc
     except applications_svc.TargetNotFound as exc:
         raise _not_found(exc) from exc
+    return _to_target_out(session, application_id, target)
+
+
+@router.patch(
+    "/{application_id}/targets/{target_id}",
+    response_model=ApplicationTargetOut,
+)
+def update_target(
+    application_id: int,
+    target_id: int,
+    payload: ApplicationTargetUpdate,
+    session: Session = Depends(get_session),
+) -> ApplicationTargetOut:
+    try:
+        target = applications_svc.update_target(
+            session, application_id, target_id, payload
+        )
+    except applications_svc.TargetNotFound as exc:
+        raise _not_found(exc) from exc
+    except applications_svc.CrossApplicationReference as exc:
+        raise _bad_request(exc) from exc
     return _to_target_out(session, application_id, target)
 
 
@@ -848,6 +871,26 @@ def campaign_connections(
         )
     ).all()
     return [ComponentConnectionOut.model_validate(c) for c in connections]
+
+
+@router.post(
+    "/{application_id}/campaigns/{campaign_id}/connections/rebuild",
+    response_model=CampaignDetail,
+)
+async def rebuild_campaign_connections(
+    application_id: int, campaign_id: int, session: Session = Depends(get_session)
+) -> CampaignDetail:
+    """Rebuild the connection map from immutable snapshots without child scans."""
+    try:
+        campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
+        with events_svc.run_kind_scope("campaign"):
+            await campaigns_svc.rebuild_campaign_connections(campaign.id)
+    except campaigns_svc.CampaignNotFound as exc:
+        raise _not_found(exc) from exc
+    except campaigns_svc.InvalidCampaignState as exc:
+        raise _conflict(exc) from exc
+    session.refresh(campaign)
+    return _to_campaign_detail(session, campaign)
 
 
 @router.get(

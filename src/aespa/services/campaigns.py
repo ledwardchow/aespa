@@ -288,6 +288,33 @@ def _finish_campaign(
     )
 
 
+def _interrupt_campaign(campaign_id: int, *, error: str) -> None:
+    """Persist a retryable correlation interruption without losing results."""
+    with Session(get_engine()) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        if campaign is None:
+            return
+        campaign.status = "interrupted"
+        campaign.interrupted_stage = "correlating"
+        campaign.completed_at = None
+        campaign.error_message = error
+        campaign.updated_at = _utcnow()
+        s.add(campaign)
+        s.commit()
+    events_svc.emit(
+        campaign_id,
+        {
+            "type": "agent_status",
+            "agent_id": "campaign",
+            "role": "Campaign Orchestrator",
+            "status": "interrupted",
+            "current_task": "Correlation interrupted; retry is available",
+            "outcome": error,
+            "_persist": True,
+        },
+    )
+
+
 def _update_source_member_status(member_id: int, status: str) -> None:
     with Session(get_engine()) as s:
         member = s.get(CampaignSourceMember, member_id)
@@ -411,6 +438,49 @@ async def start_campaign(campaign_id: int) -> None:
     _campaign_tasks[campaign_id] = task
 
 
+async def rebuild_campaign_connections(campaign_id: int) -> dict:
+    """Re-map immutable source snapshots without rerunning child scans."""
+    with Session(get_engine()) as session:
+        campaign = session.get(AssessmentCampaign, campaign_id)
+        if campaign is None:
+            raise CampaignNotFound(f"Campaign id={campaign_id} does not exist")
+        if campaign.status in _ACTIVE_STATUSES:
+            raise InvalidCampaignState(
+                f"Cannot rebuild connections while campaign is '{campaign.status}'"
+            )
+        preserve_downstream = campaign.status in {
+            "awaiting_review",
+            "completed",
+            "stopped",
+        }
+        if not preserve_downstream:
+            campaign.status = "correlating"
+            campaign.error_message = None
+            campaign.updated_at = _utcnow()
+            session.add(campaign)
+            session.commit()
+
+    try:
+        result = await correlation_svc.correlate_campaign_with_llm(
+            campaign_id,
+            preserve_downstream=preserve_downstream,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        from aespa.services.component_mapper import CorrelationTransientError
+
+        if isinstance(exc, CorrelationTransientError):
+            _interrupt_campaign(campaign_id, error=str(exc))
+        else:
+            _finish_campaign(campaign_id, "failed", error=str(exc))
+        raise
+
+    if not preserve_downstream:
+        _set_campaign_status(campaign_id, "awaiting_review")
+    return result
+
+
 async def _run_campaign(campaign_id: int) -> None:
     try:
         await _run_sast_stage(campaign_id)
@@ -430,7 +500,10 @@ async def _run_campaign(campaign_id: int) -> None:
                 "_persist": True,
             },
         )
-        correlation_svc.correlate_campaign(campaign_id)
+        await correlation_svc.correlate_campaign_with_llm(
+            campaign_id,
+            stop_check=lambda: campaign_id in _campaign_stop_requested,
+        )
         if campaign_id in _campaign_stop_requested:
             _finish_campaign(campaign_id, "stopped")
             return
@@ -452,7 +525,12 @@ async def _run_campaign(campaign_id: int) -> None:
         raise
     except Exception as exc:
         log.exception("Campaign %s failed during SAST/correlation", campaign_id)
-        _finish_campaign(campaign_id, "failed", error=str(exc))
+        from aespa.services.component_mapper import CorrelationTransientError
+
+        if isinstance(exc, CorrelationTransientError):
+            _interrupt_campaign(campaign_id, error=str(exc))
+        else:
+            _finish_campaign(campaign_id, "failed", error=str(exc))
     finally:
         _campaign_stop_requested.discard(campaign_id)
 
@@ -784,6 +862,9 @@ async def _run_dast_stage(campaign_id: int) -> bool:
                     )
                     _update_target_member_status(member_id, "failed")
                     return
+                correlation_svc.copy_explicit_component_leads_for_target(
+                    campaign_id, target_id, "web", test_run_id
+                )
                 correlation_svc.copy_approved_mappings_for_target(
                     campaign_id, target_id, "web", test_run_id
                 )
@@ -808,6 +889,9 @@ async def _run_dast_stage(campaign_id: int) -> bool:
                     )
                     _update_target_member_status(member_id, "failed")
             else:
+                correlation_svc.copy_explicit_component_leads_for_target(
+                    campaign_id, target_id, "api", api_test_run_id
+                )
                 correlation_svc.copy_approved_mappings_for_target(
                     campaign_id, target_id, "api", api_test_run_id
                 )
