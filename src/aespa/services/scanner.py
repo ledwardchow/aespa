@@ -23,11 +23,16 @@ import time
 from contextvars import ContextVar as _ContextVar
 from datetime import datetime, timezone
 from typing import Any, Optional
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 from sqlmodel import Session, select
 
+from aespa.browser import (
+    launch_playwright_browser,
+    playwright_user_agent,
+    protect_playwright_context,
+)
 from aespa.db import get_engine
 from aespa.models import (
     CrawledPage,
@@ -65,6 +70,7 @@ from aespa.services.prompts.test_lead import (
 from aespa.services.scan_completion import ScanCompletionPolicy
 from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import (
+    get_browser_debug_config,
     get_burp_rest_api_config_model,
     get_global_http_header_config,
     get_llm_config_for_role,
@@ -409,20 +415,337 @@ class _BrowserRequestEcho:
 
 
 class _BrowserApiResponse:
-    """Adapts a Playwright ``APIResponse`` to the small subset of the
+    """Adapts a browser-page fetch result to the small subset of the
     ``httpx.Response`` interface the agentic loop's http_request handling
     reads (``.text``, ``.status_code``, ``.headers``, ``.request.headers``).
-
-    Lets ``_dispatch_http_request`` swap the transport (raw httpx vs. the
-    browser context's cookie-sharing APIRequestContext) without touching the
-    much larger block of response-handling code that follows it.
     """
 
-    def __init__(self, status_code: int, headers: dict, text: str, sent_headers: dict):
+    def __init__(
+        self,
+        status_code: int,
+        headers: dict,
+        text: str,
+        sent_headers: dict,
+        *,
+        url: str = "",
+        redirect_blocked: tuple[str, str] | None = None,
+        cookies: dict[str, str] | None = None,
+    ):
         self.status_code = status_code
         self.headers = headers
         self.text = text
         self.request = _BrowserRequestEcho(sent_headers)
+        self.url = url
+        self.redirect_blocked = redirect_blocked
+        self.cookies = cookies or {}
+
+
+def _waf_strategy_for_run(run_id: int) -> dict | None:
+    detection = traffic_svc.get_cached_waf(run_id)
+    if detection is None:
+        return None
+    strategy = detection.get("strategy")
+    if isinstance(strategy, dict):
+        return strategy
+    from aespa.services.waf_detect import strategy_for_provider
+
+    return strategy_for_provider(detection.get("provider"))
+
+
+def _header_value(headers: dict[str, str], name: str) -> str | None:
+    wanted = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == wanted:
+            return str(value)
+    return None
+
+
+def _cookie_header_values(value: str | None) -> dict[str, str]:
+    if not value:
+        return {}
+    result: dict[str, str] = {}
+    for part in value.split(";"):
+        if "=" not in part:
+            continue
+        name, cookie_value = part.split("=", 1)
+        name = name.strip()
+        if name:
+            result[name] = cookie_value.strip()
+    return result
+
+
+def _session_browser_cookies(
+    session: dict | None,
+    url: str,
+    fallback: list[dict] | None,
+) -> list[dict]:
+    if session is not None:
+        metadata_cookies = (session.get("metadata") or {}).get("browser_cookies")
+        if isinstance(metadata_cookies, list):
+            return [
+                dict(cookie) for cookie in metadata_cookies if isinstance(cookie, dict)
+            ]
+        cookies = session.get("cookies") or {}
+        if isinstance(cookies, dict):
+            return [
+                {"name": str(name), "value": str(value), "url": url}
+                for name, value in cookies.items()
+            ]
+    return [dict(cookie) for cookie in (fallback or []) if isinstance(cookie, dict)]
+
+
+def _merge_browser_cookies(
+    base: list[dict], extra: list[dict], url: str, prefixes: tuple[str, ...]
+) -> list[dict]:
+    """Keep WAF clearance cookies while replacing auth cookies for a session."""
+    merged: dict[str, dict] = {}
+    for cookie in base:
+        name = str(cookie.get("name") or "")
+        if name:
+            merged[name] = dict(cookie)
+    for cookie in extra:
+        name = str(cookie.get("name") or "")
+        if name:
+            merged[name] = dict(cookie)
+    return [
+        {
+            **cookie,
+            "url": cookie.get("url") or url,
+        }
+        for cookie in merged.values()
+        if cookie.get("name")
+    ]
+
+
+async def _prepare_browser_request_session(
+    browser_ctx,
+    url: str,
+    headers: dict[str, str],
+    *,
+    selected_session: dict | None,
+    primary_session: dict | None,
+    primary_browser_cookies: list[dict] | None,
+    strategy: dict,
+) -> dict[str, str]:
+    """Install exactly the request identity into the shared browser context."""
+    prefixes = tuple(
+        str(item).lower() for item in strategy.get("preserve_cookie_prefixes") or []
+    )
+    primary_cookies = _merge_browser_cookies(
+        primary_browser_cookies or [],
+        _session_browser_cookies(primary_session, url, None),
+        url,
+        prefixes,
+    )
+    if selected_session is None:
+        cookies = primary_cookies
+    else:
+        selected_cookies = _session_browser_cookies(selected_session, url, None)
+        clearance = [
+            cookie
+            for cookie in primary_cookies
+            if any(
+                str(cookie.get("name") or "").lower().startswith(prefix)
+                for prefix in prefixes
+            )
+        ]
+        cookies = _merge_browser_cookies(clearance, selected_cookies, url, prefixes)
+
+    cookie_override = _cookie_header_values(_header_value(headers, "cookie"))
+    if cookie_override:
+        clearance = [
+            cookie
+            for cookie in primary_cookies
+            if any(
+                str(cookie.get("name") or "").lower().startswith(prefix)
+                for prefix in prefixes
+            )
+        ]
+        override = [
+            {"name": name, "value": value, "url": url}
+            for name, value in cookie_override.items()
+        ]
+        cookies = _merge_browser_cookies(clearance, override, url, prefixes)
+
+    await browser_ctx.clear_cookies()
+    if cookies:
+        await browser_ctx.add_cookies(cookies)
+    identity = selected_session if selected_session is not None else primary_session
+    await browser_ctx.set_extra_http_headers(
+        _playwright_global_headers((identity or {}).get("extra_headers") or {})
+    )
+    sent_headers = dict(headers)
+    if cookies:
+        # Keep evidence honest without copying cookie values into the model trace.
+        sent_headers["Cookie"] = "; ".join(
+            f"{cookie['name']}=<browser>" for cookie in cookies if cookie.get("name")
+        )
+    return sent_headers
+
+
+def _browser_fetch_headers(headers: dict[str, str]) -> dict[str, str]:
+    # Browsers own these headers. In particular, JavaScript cannot set Cookie;
+    # the context cookie jar installed above is authoritative instead.
+    forbidden = {
+        "accept-encoding",
+        "connection",
+        "content-length",
+        "cookie",
+        "host",
+        "proxy-authorization",
+        "user-agent",
+    }
+    return {
+        str(key): str(value)
+        for key, value in headers.items()
+        if str(key).lower() not in forbidden and not str(key).lower().startswith("sec-")
+    }
+
+
+async def _browser_page_fetch_once(
+    browser_page,
+    url: str,
+    method: str,
+    headers: dict[str, str],
+    body,
+) -> dict:
+    body_value = None
+    if isinstance(body, dict):
+        body_value = json.dumps(body, separators=(",", ":"))
+    elif isinstance(body, str) and body:
+        body_value = body
+    return await browser_page.evaluate(
+        """
+        async ({url, method, headers, body}) => {
+          const response = await fetch(url, {
+            method,
+            headers,
+            body,
+            credentials: "include",
+            redirect: "manual"
+          });
+          const responseHeaders = {};
+          response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+          let text = "";
+          try { text = await response.text(); } catch (_) { /* opaque response */ }
+          return {
+            status: response.status,
+            url: response.url || url,
+            type: response.type,
+            headers: responseHeaders,
+            text
+          };
+        }
+        """,
+        {
+            "url": url,
+            "method": method,
+            "headers": _browser_fetch_headers(headers),
+            "body": body_value,
+        },
+    )
+
+
+def _response_is_waf_challenge(result: dict, strategy: dict) -> bool:
+    body = str(result.get("text") or "")[:4000].lower()
+    headers = {
+        str(key).lower(): str(value).lower()
+        for key, value in (result.get("headers") or {}).items()
+    }
+    for name, value in strategy.get("challenge_headers") or []:
+        if value in headers.get(str(name).lower(), ""):
+            return True
+    markers = [
+        str(marker).lower() for marker in strategy.get("challenge_markers") or []
+    ]
+    return bool(markers and any(marker in body for marker in markers))
+
+
+async def _browser_page_request(
+    browser_page,
+    url: str,
+    method: str,
+    headers: dict[str, str],
+    body,
+    *,
+    strategy: dict,
+    scope_check=None,
+    max_redirects: int = 10,
+) -> _BrowserApiResponse:
+    """Issue a request from page JavaScript and follow safe redirects."""
+    target_origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    try:
+        current_origin = await browser_page.evaluate("location.origin")
+    except Exception:
+        current_origin = ""
+    if current_origin != target_origin:
+        await browser_page.goto(
+            f"{target_origin}/", wait_until="domcontentloaded", timeout=20_000
+        )
+
+    warmup_ms = int(strategy.get("warmup_ms") or 0)
+    if warmup_ms:
+        await browser_page.wait_for_timeout(warmup_ms)
+
+    current_url = url
+    current_method = method.upper()
+    current_body = body
+    current_headers = dict(headers)
+    last_result: dict = {}
+    redirect_blocked = None
+    challenge_retried = False
+
+    for _ in range(max_redirects):
+        last_result = await _browser_page_fetch_once(
+            browser_page,
+            current_url,
+            current_method,
+            current_headers,
+            current_body,
+        )
+        if not challenge_retried and _response_is_waf_challenge(last_result, strategy):
+            # Fetching an interstitial only downloads it. Navigate the real page
+            # once so its JavaScript can establish the vendor token/cookie.
+            challenge_retried = True
+            await browser_page.goto(
+                current_url, wait_until="domcontentloaded", timeout=20_000
+            )
+            await browser_page.wait_for_timeout(warmup_ms or 1000)
+            continue
+
+        status = int(last_result.get("status") or 0)
+        if status not in _REDIRECT_STATUS:
+            break
+        location = (last_result.get("headers") or {}).get("location")
+        if not location:
+            break
+        next_url = urljoin(current_url, str(location))
+        if scope_check is not None:
+            scope_error = scope_check(next_url)
+            if scope_error:
+                redirect_blocked = (next_url, scope_error)
+                break
+        if status == 303 or (
+            status in (301, 302) and current_method not in ("GET", "HEAD")
+        ):
+            current_method = "GET"
+            current_body = None
+        current_url = next_url
+        current_headers = dict(headers)
+
+    if last_result.get("type") == "opaqueredirect":
+        redirect_blocked = (
+            current_url,
+            "browser did not expose a cross-origin redirect; it was not followed",
+        )
+    return _BrowserApiResponse(
+        status_code=int(last_result.get("status") or 0),
+        headers=dict(last_result.get("headers") or {}),
+        text=str(last_result.get("text") or ""),
+        sent_headers=headers,
+        url=str(last_result.get("url") or current_url),
+        redirect_blocked=redirect_blocked,
+    )
 
 
 async def _dispatch_http_request(
@@ -435,29 +758,19 @@ async def _dispatch_http_request(
     body,
     *,
     selected_session: dict | None,
+    primary_session: dict | None = None,
+    primary_browser_cookies: list[dict] | None = None,
+    browser_page=None,
+    scope_check=None,
+    follow_redirects: bool = True,
 ):
-    """Issue one http_request tool call, transparently routing it through the
-    browser context's APIRequestContext (``browser_ctx.request``) instead of
-    the raw httpx client whenever a WAF/bot-manager has been fingerprinted for
-    this run (see ``services/waf_detect.py``).
-
-    A bare TLS client can never satisfy a JS-based bot challenge (no sensor
-    script runs, no `_abck`/`bm_sz`-style cookie is ever minted), so once we
-    know a WAF is present, every request must go through the real browser
-    context that already holds those cookies — otherwise every http_request
-    call is a guaranteed 403 regardless of payload. See docs/architecture.md.
-
-    Only the default/primary session is eligible for browser routing:
-    ``browser_ctx`` has one shared cookie jar, so an explicit anonymous/
-    other-session request (``selected_session`` set) cannot be faithfully
-    represented through it without a second isolated context. Those requests
-    keep using httpx even under a detected WAF — they'll still 403, but that
-    result stays honest rather than silently reusing the primary session.
-    """
-    from aespa.services import traffic as traffic_svc
-
+    """Issue one request using the provider-specific WAF transport strategy."""
+    strategy = _waf_strategy_for_run(run_id)
     use_browser = (
-        selected_session is None and traffic_svc.get_cached_waf(run_id) is not None
+        bool(strategy)
+        and strategy.get("transport") == "browser_page"
+        and browser_ctx is not None
+        and browser_page is not None
     )
     if not use_browser:
         if isinstance(body, dict):
@@ -469,29 +782,37 @@ async def _dispatch_http_request(
             resp = await hx.request(method, url, headers=headers)
         return resp
 
-    data = None
+    sent_headers = await _prepare_browser_request_session(
+        browser_ctx,
+        url,
+        headers,
+        selected_session=selected_session,
+        primary_session=primary_session,
+        primary_browser_cookies=primary_browser_cookies,
+        strategy=strategy or {},
+    )
     if isinstance(body, dict):
         headers.setdefault("Content-Type", "application/json")
-        data = body  # dict values are auto-serialized as JSON by Playwright
-    elif isinstance(body, str) and body:
-        data = body
-    api_resp = await browser_ctx.request.fetch(
+    response = await _browser_page_request(
+        browser_page,
         url,
         method=method,
         headers=headers,
-        data=data,
-        max_redirects=0 if method.upper() == "HEAD" else 20,
+        body=body,
+        strategy=strategy or {},
+        scope_check=scope_check,
+        max_redirects=10 if follow_redirects else 1,
     )
-    text = await api_resp.text()
-    # APIRequestContext requests still flow through browser_ctx's own
-    # request/response listeners (registered via setup_playwright_logging), so
-    # no separate traffic-log write is needed here.
-    return _BrowserApiResponse(
-        status_code=api_resp.status,
-        headers=dict(api_resp.headers),
-        text=text,
-        sent_headers=dict(headers),
-    )
+    try:
+        response.cookies = {
+            str(cookie.get("name")): str(cookie.get("value"))
+            for cookie in await browser_ctx.cookies(url)
+            if cookie.get("name")
+        }
+    except Exception:
+        response.cookies = {}
+    response.request = _BrowserRequestEcho(sent_headers)
+    return response
 
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -1659,9 +1980,10 @@ def _build_thinking_context_from_recon_summary(
                 )
                 + (
                     f"\nWAF detected: {waf['provider']} (confidence: {waf['confidence']}). "
-                    "http_request calls are being transparently routed through the "
-                    "authenticated browser context so cookies/JS-challenge state carry "
-                    "over; you do not need to change tool usage."
+                    f"Strategy: {(waf.get('strategy') or {}).get('label', 'direct HTTP')}. "
+                    f"{(waf.get('strategy') or {}).get('summary', '')} "
+                    "Keep blocked responses as evidence; do not blindly retry the same "
+                    "request or mutate payloads just to get a 2xx."
                     if waf
                     else ""
                 )
@@ -1943,6 +2265,7 @@ def _run_thinking_context_tool(
     history: list[dict[str, Any]],
     run_id: int | None = None,
     base_url: str = "",
+    api_run_id: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(args, dict):
         args = {}
@@ -1953,6 +2276,80 @@ def _run_thinking_context_tool(
     tool_name = (tool_name or "").strip()
     search = str(args.get("search") or args.get("filter") or "").lower()
     search_tokens = search.replace("-", "_").split()
+
+    if tool_name == "run_status":
+        if run_id is None:
+            return {"tool": "run_status", "error": "run_id unavailable"}
+
+        with Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            if run is None:
+                return {"tool": "run_status", "error": "test run not found"}
+            pages = list(
+                s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id))
+            )
+            findings_count = len(
+                s.exec(
+                    select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+                ).all()
+            )
+
+        try:
+            per_user_progress = json.loads(run.per_user_progress or "{}")
+            if not isinstance(per_user_progress, dict):
+                per_user_progress = {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            per_user_progress = {}
+
+        if run.phase == "crawling":
+            crawl_status = "running"
+        elif run.phase in {
+            "crawled",
+            "scanning",
+            "reporting",
+            "validating",
+            "finished",
+        }:
+            crawl_status = "complete"
+        elif run.status == "failed":
+            crawl_status = "failed"
+        elif run.status == "stopped":
+            crawl_status = "stopped"
+        else:
+            crawl_status = "not_started"
+
+        scan_status = (
+            _thinking_scan_status.get(run_id, "running")
+            if is_thinking_running(run_id)
+            else _thinking_scan_status.get(run_id, "idle")
+        )
+        return {
+            "tool": "run_status",
+            "run_kind": "web",
+            "run_id": run_id,
+            "name": run.name,
+            "status": run.status,
+            "phase": run.phase,
+            "outcome": run.outcome,
+            "terminal_reason": run.terminal_reason,
+            "crawl": {
+                "status": crawl_status,
+                "pages_discovered": run.pages_discovered,
+                "pages_crawled": sum(1 for page in pages if page.status == "crawled"),
+                "pages_failed": sum(1 for page in pages if page.status == "failed"),
+                "max_pages": run.max_pages,
+                "max_depth": run.max_depth,
+                "current_url": run.current_url,
+                "per_user_progress": per_user_progress,
+                "started_at": run.started_at,
+                "completed_at": run.completed_at,
+            },
+            "scan": {
+                "status": scan_status,
+                "phase": run.phase,
+                "findings_count": findings_count,
+            },
+        }
 
     if tool_name == "site_map":
         route_type = str(args.get("type") or "").lower()
@@ -1977,6 +2374,27 @@ def _run_thinking_context_tool(
             if search_tokens and not all(token in haystack for token in search_tokens):
                 continue
             pages.append(page)
+        if run_id is not None:
+            try:
+                with Session(get_engine()) as _target_session:
+                    _target_run = _target_session.get(TestRun, run_id)
+                    _target_ids = {
+                        int(value)
+                        for value in json.loads(
+                            (_target_run.target_page_ids_json if _target_run else None)
+                            or "[]"
+                        )
+                        if str(value).isdigit()
+                    }
+                if _target_ids:
+                    pages.sort(
+                        key=lambda item: (
+                            0 if item.get("id") in _target_ids else 1,
+                            str(item.get("url") or ""),
+                        )
+                    )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
         return {
             "tool": "site_map",
             "count": len(pages),
@@ -2028,6 +2446,7 @@ def _run_thinking_context_tool(
             "kind": _thinking_page_kind(page),
             "state_label": page.get("state_label") or "",
             "state_kind": page.get("state_kind") or "url",
+            "replay_credential_id": page.get("replay_credential_id"),
         }
         if page.get("replay_steps_json") and page.get("replay_steps_json") != "[]":
             try:
@@ -2061,6 +2480,56 @@ def _run_thinking_context_tool(
                         if isinstance(step, dict)
                     ],
                 }
+        if run_id is not None and (
+            not include_set
+            or "traffic" in include_set
+            or "object_references" in include_set
+            or page.get("state_kind") == "interactive"
+        ):
+            with Session(get_engine()) as s:
+                traffic_rows = s.exec(
+                    select(TrafficEntry)
+                    .where(TrafficEntry.test_run_id == run_id)
+                    .where(TrafficEntry.page_id == page["id"])
+                    .order_by(TrafficEntry.id.desc())
+                    .limit(30)
+                ).all()
+                intel_rows = s.exec(
+                    select(TargetIntelItem)
+                    .where(TargetIntelItem.test_run_id == run_id)
+                    .where(TargetIntelItem.page_id == page["id"])
+                    .where(TargetIntelItem.kind == "object_reference")
+                    .order_by(TargetIntelItem.id.desc())
+                    .limit(50)
+                ).all()
+            if "traffic" in include_set or page.get("state_kind") == "interactive":
+                detail["traffic"] = [
+                    {
+                        "id": row.id,
+                        "method": row.method,
+                        "url": row.url,
+                        "status": row.status,
+                        "source": row.source,
+                        "session_label": row.session_label,
+                    }
+                    for row in traffic_rows
+                ]
+            if (
+                "object_references" in include_set
+                or page.get("state_kind") == "interactive"
+            ):
+                detail["object_references"] = [
+                    {
+                        "id": row.id,
+                        "key": row.key,
+                        "value": row.value,
+                        "url": row.url,
+                        "method": row.method,
+                        "confidence": row.confidence,
+                        "metadata": _loads_json_dict(row.item_metadata),
+                    }
+                    for row in intel_rows
+                ]
         if "title" in include_set:
             detail["title"] = page.get("title") or ""
         if "flags" in include_set:
@@ -2147,7 +2616,7 @@ def _run_thinking_context_tool(
     if tool_name == "lead_list":
         if run_id is None:
             return {"tool": "lead_list", "error": "run_id unavailable"}
-        from aespa.services.scan_leads import get_all_leads_for_run
+        from aespa.services.scan_leads import decode_attack_path, get_all_leads_for_run
 
         status_filter = str(args.get("status") or "").lower()
         all_leads = get_all_leads_for_run("web", run_id)
@@ -2173,6 +2642,7 @@ def _run_thinking_context_tool(
                     "status": ld.status or "open",
                     "note": ld.note or "",
                     "linked_finding_id": ld.linked_finding_id,
+                    "attack_path": decode_attack_path(ld.attack_path_json),
                 }
                 for ld in leads_out
             ],
@@ -2186,7 +2656,13 @@ def _run_thinking_context_tool(
     if tool_name == "traffic_search":
         if run_id is None:
             return {"tool": tool_name, "error": "run_id unavailable"}
-        return _thinking_tool_traffic_search(run_id, args, limit, search_tokens)
+        return _thinking_tool_traffic_search(
+            run_id,
+            args,
+            limit,
+            search_tokens,
+            api_run_id=api_run_id,
+        )
 
     if tool_name == "endpoint_detail":
         if run_id is None:
@@ -2228,6 +2704,7 @@ def _run_thinking_context_tool(
         "available_tools": [
             "site_map",
             "page_detail",
+            "run_status",
             "history_search",
             "finding_list",
             "target_inventory",
@@ -2251,12 +2728,18 @@ def _thinking_tool_target_inventory(
 ) -> dict[str, Any]:
     kind = str(args.get("kind") or "").strip()
     source = str(args.get("source") or "").strip()
+    page_id = args.get("page_id")
     with Session(get_engine()) as s:
         query = select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
         if kind:
             query = query.where(TargetIntelItem.kind == kind)
         if source:
             query = query.where(TargetIntelItem.source == source)
+        if page_id is not None:
+            try:
+                query = query.where(TargetIntelItem.page_id == int(page_id))
+            except (TypeError, ValueError):
+                return {"tool": "target_inventory", "count": 0, "items": []}
         items = list(
             s.exec(
                 query.order_by(
@@ -2279,6 +2762,7 @@ def _thinking_tool_target_inventory(
                 "value": _compact_log_value(item.value, 300),
                 "url": item.url,
                 "method": item.method,
+                "page_id": item.page_id,
                 "source": item.source,
                 "confidence": item.confidence,
                 "evidence": _compact_log_value(item.evidence, 300),
@@ -2299,19 +2783,34 @@ def _thinking_tool_traffic_search(
     args: dict[str, Any],
     limit: int,
     search_tokens: list[str],
+    *,
+    api_run_id: int | None = None,
 ) -> dict[str, Any]:
     method = str(args.get("method") or "").upper()
+    page_id = args.get("page_id")
+    session_label = str(args.get("session_label") or "").strip()
     status = args.get("status")
     try:
         status_int = int(status) if status not in (None, "") else None
     except (TypeError, ValueError):
         status_int = None
     with Session(get_engine()) as s:
-        query = select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
+        query = select(TrafficEntry)
+        if api_run_id is not None:
+            query = query.where(TrafficEntry.api_test_run_id == api_run_id)
+        else:
+            query = query.where(TrafficEntry.test_run_id == run_id)
         if method:
             query = query.where(TrafficEntry.method == method)
         if status_int is not None:
             query = query.where(TrafficEntry.status == status_int)
+        if page_id is not None:
+            try:
+                query = query.where(TrafficEntry.page_id == int(page_id))
+            except (TypeError, ValueError):
+                return {"tool": "traffic_search", "count": 0, "entries": []}
+        if session_label:
+            query = query.where(TrafficEntry.session_label == session_label)
         entries = list(s.exec(query.order_by(TrafficEntry.id.desc()).limit(1000)))
     matches = []
     for entry in entries:
@@ -2338,6 +2837,8 @@ def _thinking_tool_traffic_search(
                 "status": entry.status,
                 "duration_ms": entry.duration_ms,
                 "username": entry.username,
+                "page_id": entry.page_id,
+                "session_label": entry.session_label,
                 "request_headers": _safe_json_excerpt(entry.request_headers, 800),
                 "request_body": _compact_log_value(entry.request_body, 1000),
                 "response_headers": _safe_json_excerpt(entry.response_headers, 800),
@@ -4188,6 +4689,8 @@ async def _run_specialist_agent(
     max_steps: int,
     site_id: int,
     is_api_run: bool = False,
+    target_page_id: int | None = None,
+    target_session_label: str | None = None,
 ) -> None:
     """Run a focused specialist agent for a specific vulnerability lead."""
     # The specialist role may be assigned a different Model than the Test Lead
@@ -4227,20 +4730,35 @@ async def _run_specialist_agent(
             "The tool executor will flag canary matches automatically with [SSRF CANARY MATCH].\n"
         )
 
-    initial_message = (
-        f"Target: {base_url}\n"
-        f"Your mission: investigate the {attack_class} vulnerability lead below.\n"
-        f"Focus URL: {target_url}\n"
-        f"Lead rationale: {rationale}\n"
-        f"{recon_block}"
-        f"{canary_block}\n"
-        f"You have a budget of {max_steps} steps. Begin immediately."
+    initial_message = "".join(
+        [
+            f"Target: {base_url}\n",
+            f"Your mission: investigate the {attack_class} vulnerability lead below.\n",
+            f"Focus URL: {target_url}\n",
+            (
+                f"Focus page_id: {target_page_id}. Use browser replay=true and preserve this page/state.\n"
+                if target_page_id
+                else ""
+            ),
+            f"Use session: {target_session_label}\n" if target_session_label else "",
+            f"Lead rationale: {rationale}\n",
+            f"{recon_block}",
+            f"{canary_block}\n",
+            f"You have a budget of {max_steps} steps. Begin immediately.",
+        ]
     )
 
     findings_written = [0]
 
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         step_count[0] = step
+        if target_page_id is not None and tool_name in {"browser", "http_request"}:
+            tool_input = dict(tool_input)
+            tool_input.setdefault("page_id", target_page_id)
+            if tool_name == "browser":
+                tool_input.setdefault("replay", True)
+            if target_session_label:
+                tool_input.setdefault("use_session", target_session_label)
         note = _infer_step_note(tool_name, tool_input, step)
 
         # Emit specialist_step as scanner_phase so it persists to scan_log
@@ -4441,6 +4959,9 @@ async def _run_specialist_agent(
                 verify=False,
                 event_hooks=traffic_svc.make_httpx_hooks(run_id, username="specialist"),
             ) as _hx:
+                if isinstance(_hx, traffic_svc.LoggingAsyncClient):
+                    _hx.page_id = target_page_id
+                    _hx.session_label = use_session_label
                 try:
                     kwargs: dict = {}
                     if body is not None:
@@ -4480,6 +5001,108 @@ async def _run_specialist_agent(
                     )
                 except Exception as exc:
                     return f"Request failed: {exc}"
+
+        if tool_name == "browser":
+            browser_page_id = tool_input.get("page_id") or target_page_id
+            try:
+                browser_page_id = (
+                    int(browser_page_id) if browser_page_id is not None else None
+                )
+            except (TypeError, ValueError):
+                browser_page_id = None
+            browser_action = dict(tool_input)
+            browser_session_label = (
+                tool_input.get("use_session") or target_session_label
+            )
+            browser_session_label, browser_session, browser_note = (
+                _resolve_requested_scan_session(session_vault, browser_session_label)
+            )
+            if browser_page_id is not None and tool_input.get("replay"):
+                with Session(get_engine()) as _page_session:
+                    replay_page = _page_session.get(CrawledPage, browser_page_id)
+                if replay_page is not None:
+                    try:
+                        replay_data = json.loads(replay_page.replay_steps_json or "[]")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        replay_data = []
+                    if isinstance(replay_data, dict):
+                        replay_root = replay_data.get("root_url") or replay_page.url
+                        replay_items = replay_data.get("steps") or []
+                    else:
+                        replay_root = replay_page.url
+                        replay_items = (
+                            replay_data if isinstance(replay_data, list) else []
+                        )
+                    replay_steps = [{"op": "goto", "url": replay_root}] + [
+                        {
+                            key: value
+                            for key, value in {
+                                "op": item.get("kind") or item.get("op") or "click",
+                                "selector": item.get("selector"),
+                                "testid": item.get("testid"),
+                                "role": item.get("role"),
+                                "name": item.get("name"),
+                                "value": item.get("value"),
+                            }.items()
+                            if value not in (None, "")
+                        }
+                        for item in replay_items
+                        if isinstance(item, dict)
+                    ]
+                    browser_action["steps"] = replay_steps + [
+                        step
+                        for step in (tool_input.get("steps") or [])
+                        if isinstance(step, dict)
+                    ]
+            try:
+                from playwright.async_api import async_playwright
+
+                async with async_playwright() as _pw:
+                    _browser = await _pw.chromium.launch(headless=True)
+                    _ctx = await _browser.new_context(ignore_https_errors=True)
+                    if browser_session:
+                        cookies_to_add = [
+                            {
+                                "name": name,
+                                "value": value,
+                                "url": browser_action.get("url") or base_url,
+                            }
+                            for name, value in (
+                                browser_session.get("cookies") or {}
+                            ).items()
+                        ]
+                        if cookies_to_add:
+                            await _ctx.add_cookies(cookies_to_add)
+                    traffic_svc.setup_playwright_logging(
+                        _ctx, run_id, username="specialist"
+                    )
+                    traffic_svc.set_browser_context_tag(
+                        _ctx, browser_page_id, browser_session_label
+                    )
+                    _page = await _ctx.new_page()
+                    try:
+                        browser_result = await _run_thinking_browser_action(
+                            _page,
+                            browser_action,
+                            default_url=base_url,
+                            scanner_policy=scanner_policy,
+                        )
+                    finally:
+                        traffic_svc.clear_browser_context_tag(_ctx)
+                        await _browser.close()
+                _persist_browser_object_references(
+                    run_id,
+                    browser_page_id,
+                    browser_result.get("captured_traffic"),
+                    browser_session_label,
+                )
+                return (
+                    (f"{browser_note}\n\n" if browser_note else "")
+                    + f"Browser {browser_result.get('url')} → {browser_result.get('status')}\n"
+                    + str(browser_result.get("body") or "")[:12000]
+                )
+            except Exception as exc:
+                return f"Browser action failed: {exc}"
 
         if tool_name == "context_tool":
             ctx_tool = str(tool_input.get("tool") or "")
@@ -4613,6 +5236,15 @@ def _schedule_specialist_agent(
     priority = int(dispatch.get("priority") or 0)
     target_url = str(dispatch.get("target_url") or base_url)
     rationale = str(dispatch.get("rationale") or "")
+    try:
+        target_page_id = (
+            int(dispatch.get("page_id"))
+            if dispatch.get("page_id") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        target_page_id = None
+    target_session_label = str(dispatch.get("use_session") or "").strip() or None
 
     if not _should_dispatch_specialist(attack_class, priority, specialist_config):
         return None
@@ -4644,6 +5276,8 @@ def _schedule_specialist_agent(
                 max_steps=max_steps,
                 site_id=site_id,
                 is_api_run=is_api_run,
+                target_page_id=target_page_id,
+                target_session_label=target_session_label,
             ),
             name=f"specialist-{run_id}-{agent_id}",
         )
@@ -4667,6 +5301,8 @@ def dispatch_specialist_agent(
     target_url: str,
     rationale: str,
     priority: int = 7,
+    page_id: int | None = None,
+    use_session: str | None = None,
 ) -> str | None:
     """Public entry-point for dispatching a specialist agent from ALICE or other callers.
 
@@ -4699,6 +5335,10 @@ def dispatch_specialist_agent(
         "rationale": rationale,
         "priority": priority,
     }
+    if page_id is not None:
+        dispatch["page_id"] = page_id
+    if use_session:
+        dispatch["use_session"] = use_session
 
     return _schedule_specialist_agent(
         run_id=run_id,
@@ -4968,6 +5608,8 @@ async def _export_cred_session(
     base_url: str,
     login_url: str | None,
     credential: Credential,
+    run_id: int = 0,
+    llm_cfg=None,
 ) -> tuple[dict[str, str], str | None]:
     """Authenticate one configured user and return reusable cookie/token material.
 
@@ -4979,18 +5621,25 @@ async def _export_cred_session(
     from playwright.async_api import async_playwright
 
     from aespa.services.crawler import _authenticate
+    from aespa.services.settings import get_browser_debug_config
 
     resolved_login_url = _login_url_for_credential(login_url, credential)
+    with Session(get_engine()) as s:
+        browser_debug_cfg = get_browser_debug_config(s)
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            headless=True, args=_playwright_launch_args()
+        browser = await launch_playwright_browser(
+            playwright,
+            browser_engine=browser_debug_cfg.browser_engine,
+            headless=not browser_debug_cfg.browser_visible,
+            args=_playwright_launch_args(),
         )
         try:
             context = await browser.new_context(
-                user_agent=_UA,
+                user_agent=playwright_user_agent(browser),
                 ignore_https_errors=True,
                 **_playwright_proxy(),
             )
+            protect_playwright_context(browser, context)
             try:
                 page = await context.new_page()
                 try:
@@ -4999,32 +5648,20 @@ async def _export_cred_session(
                     )
                 except Exception:
                     pass
-                await _authenticate(page, resolved_login_url, credential)
+                await _authenticate(
+                    page,
+                    resolved_login_url,
+                    credential,
+                    run_id=run_id,
+                    llm_cfg=llm_cfg,
+                )
 
                 cookies = {
                     cookie["name"]: cookie["value"]
                     for cookie in await context.cookies()
                     if cookie.get("name") and cookie.get("value") is not None
                 }
-                token = None
-                for key in (
-                    "access_token",
-                    "token",
-                    "jwt",
-                    "auth_token",
-                    "id_token",
-                    "authToken",
-                    "accessToken",
-                ):
-                    try:
-                        token = await page.evaluate(
-                            "(k) => localStorage.getItem(k) || sessionStorage.getItem(k)",
-                            key,
-                        )
-                    except Exception:
-                        token = None
-                    if token:
-                        break
+                token, _token_key = await _read_browser_auth_token(page)
                 if not cookies and not token:
                     raise RuntimeError(
                         "Authentication did not produce cookies or a bearer token"
@@ -5066,6 +5703,17 @@ def request_thinking_stop(run_id: int) -> None:
             "message": "Stop requested — cancelling in-flight requests.",
         },
     )
+
+
+async def stop_thinking_and_wait(run_id: int, timeout: float = 5.0) -> bool:
+    """Cancel a dynamic scan and wait briefly for its cleanup handlers."""
+    task = _thinking_tasks.get(run_id)
+    if task is None:
+        return False
+    request_thinking_stop(run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return True
 
 
 async def await_specialist_barrier(run_id: int, timeout: float = 60.0) -> int:
@@ -5141,9 +5789,8 @@ async def start_thinking_scan(run_id: int) -> None:
         return
     # Clear any stale checkpoint so the scan starts fresh.
     checkpoint_svc.clear_checkpoint(run_id)
-    # Tag this run's events as run_kind='web'.  Run ids collide across
-    # web / api / sast, so the scope — snapshotted by create_task below — keeps
-    # web log rows correctly tagged even if the same id was registered as an API
+    # Tag this run's events as run_kind='web'.  The scope — snapshotted by
+    # create_task below — keeps web log rows correctly tagged for compatibility
     # run earlier in this process.
     with events_svc.run_kind_scope("web"):
         task = asyncio.create_task(
@@ -5600,6 +6247,15 @@ async def _do_thinking_scan(run_id: int) -> None:
         creds = list(site.credentials)
         guidance = (site.scan_guidance or "").strip()
         coverage_mode = getattr(run, "coverage_mode", "track") or "track"
+        try:
+            target_page_ids = {
+                int(value)
+                for value in json.loads(run.target_page_ids_json or "[]")
+                if str(value).isdigit()
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            target_page_ids = set()
+        target_session_label = (run.target_session_label or "").strip() or None
 
         # Crawled pages — used for context and for resolving page_id on findings.
         all_pages = s.exec(
@@ -5607,6 +6263,8 @@ async def _do_thinking_scan(run_id: int) -> None:
             .where(CrawledPage.test_run_id == run_id)
             .where(CrawledPage.in_scope != False)  # noqa: E712
         ).all()
+        if target_page_ids:
+            all_pages = [page for page in all_pages if page.id in target_page_ids]
         pages_snapshot = [
             {
                 "id": p.id,
@@ -5615,6 +6273,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "state_label": p.state_label or "",
                 "state_kind": p.state_kind,
                 "replay_steps_json": p.replay_steps_json,
+                "replay_credential_id": p.replay_credential_id,
+                "target_session_label": target_session_label,
                 "title": p.title or "",
                 "context": p.llm_context or "",
                 "page_text": p.page_text or "",
@@ -5666,6 +6326,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
         specialist_cfg = get_specialist_agent_config(s)
         global_header_cfg = get_global_http_header_config(s)
+        browser_debug_cfg = get_browser_debug_config(s)
 
         site_id = site.id  # captured before expunge for scope checks
         for obj in [*creds, site, llm_cfg, run]:
@@ -5674,6 +6335,8 @@ async def _do_thinking_scan(run_id: int) -> None:
     global_http_header = {
         header.header_name: header.header_value for header in global_header_cfg.headers
     }
+    browser_engine = browser_debug_cfg.browser_engine
+    browser_visible = bool(browser_debug_cfg.browser_visible)
 
     _scanner_proxy_var.set(scanner_proxy_url)
     _scanner_global_header_var.set(global_http_header)
@@ -5892,10 +6555,18 @@ async def _do_thinking_scan(run_id: int) -> None:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=_playwright_launch_args())
-        browser_ctx = await browser.new_context(
-            user_agent=_UA, ignore_https_errors=True, **_playwright_proxy()
+        browser = await launch_playwright_browser(
+            p,
+            browser_engine=browser_engine,
+            headless=not browser_visible,
+            args=_playwright_launch_args(),
         )
+        browser_ctx = await browser.new_context(
+            user_agent=playwright_user_agent(browser),
+            ignore_https_errors=True,
+            **_playwright_proxy(),
+        )
+        protect_playwright_context(browser, browser_ctx)
         initial_headers = _playwright_global_headers()
         if initial_headers:
             await browser_ctx.set_extra_http_headers(initial_headers)
@@ -6134,6 +6805,11 @@ async def _do_thinking_scan(run_id: int) -> None:
                 run_id=run_id,
                 base_url=base_url,
                 cred_sessions=deterministic_sessions,
+                site_id=site_id,
+                primary_session=session_vault.get("configured_primary"),
+                browser_ctx=browser_ctx,
+                browser_page=pw_page,
+                primary_browser_cookies=_primary_browser_cookies,
                 scanner_policy=scanner_policy,
             )
 
@@ -6167,6 +6843,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     hx=hx,
                     browser_ctx=browser_ctx,
                     pw_page=pw_page,
+                    primary_browser_cookies=_primary_browser_cookies,
                     history=history,
                     all_results=all_results,
                     resume_from=_resume_checkpoint,
@@ -6447,6 +7124,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     )
 
                     try:
+                        _br_waf_strategy = _waf_strategy_for_run(run_id) or {}
                         # Isolate the browser session per step: clear the shared
                         # context cookies so a prior authenticated step can't leak
                         # into an anonymous/other-user navigation, then install
@@ -6462,6 +7140,28 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     selected_session.get("cookies") or {}
                                 ).items()
                             ]
+                            if _br_waf_strategy.get("transport") == "browser_page":
+                                cookie_list = _merge_browser_cookies(
+                                    [
+                                        cookie
+                                        for cookie in _primary_browser_cookies
+                                        if any(
+                                            str(cookie.get("name") or "")
+                                            .lower()
+                                            .startswith(prefix)
+                                            for prefix in _br_waf_strategy.get(
+                                                "preserve_cookie_prefixes", []
+                                            )
+                                        )
+                                    ],
+                                    cookie_list,
+                                    url,
+                                    tuple(
+                                        _br_waf_strategy.get(
+                                            "preserve_cookie_prefixes", []
+                                        )
+                                    ),
+                                )
                         else:
                             cookie_list = _primary_browser_cookies
                         if cookie_list:
@@ -6733,12 +7433,37 @@ async def _do_thinking_scan(run_id: int) -> None:
                             with _client_session_cookies(
                                 hx, {"cookies": {}, "extra_headers": {}}
                             ):
-                                resp = await hx.request(
-                                    str(action.get("method") or "POST").upper(),
-                                    url,
-                                    json=body,
-                                    headers=merged_headers,
-                                )
+                                if (_waf_strategy_for_run(run_id) or {}).get(
+                                    "transport"
+                                ) == "browser_page":
+                                    resp = await _dispatch_http_request(
+                                        hx,
+                                        browser_ctx,
+                                        run_id,
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        merged_headers,
+                                        body,
+                                        selected_session={
+                                            "cookies": {},
+                                            "extra_headers": {},
+                                        },
+                                        primary_session=session_vault.get(
+                                            "configured_primary"
+                                        ),
+                                        primary_browser_cookies=_primary_browser_cookies,
+                                        browser_page=pw_page,
+                                        scope_check=lambda next_url: check_scope(
+                                            next_url, site_id, run_id
+                                        ),
+                                    )
+                                else:
+                                    resp = await hx.request(
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        json=body,
+                                        headers=merged_headers,
+                                    )
                             resp_status = resp.status_code
                             resp_headers = dict(resp.headers)
                             response_excerpt = resp.text[:800]
@@ -6890,6 +7615,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     resp_body = ""
                     created_label = None
                     duration_ms: int | None = None
+                    register_redirect_blocked = None
                     try:
                         merged_headers = _session_request_headers(
                             hx.headers,
@@ -6904,28 +7630,84 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     "application/x-www-form-urlencoded",
                                 )
                                 started = time.perf_counter()
-                                resp = await hx.request(
-                                    str(action.get("method") or "POST").upper(),
-                                    url,
-                                    data=body,
-                                    headers=merged_headers,
-                                )
+                                if (_waf_strategy_for_run(run_id) or {}).get(
+                                    "transport"
+                                ) == "browser_page" and pw_page is not None:
+                                    resp = await _dispatch_http_request(
+                                        hx,
+                                        browser_ctx,
+                                        run_id,
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        merged_headers,
+                                        urlencode(body),
+                                        selected_session=selected_session,
+                                        primary_session=session_vault.get(
+                                            "configured_primary"
+                                        ),
+                                        primary_browser_cookies=_primary_browser_cookies,
+                                        browser_page=pw_page,
+                                        scope_check=lambda next_url: check_scope(
+                                            next_url, site_id, run_id
+                                        ),
+                                    )
+                                    register_redirect_blocked = getattr(
+                                        resp, "redirect_blocked", None
+                                    )
+                                else:
+                                    resp = await hx.request(
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        data=body,
+                                        headers=merged_headers,
+                                    )
                             else:
                                 merged_headers.setdefault(
                                     "Content-Type", "application/json"
                                 )
                                 started = time.perf_counter()
-                                resp = await hx.request(
-                                    str(action.get("method") or "POST").upper(),
-                                    url,
-                                    json=body,
-                                    headers=merged_headers,
-                                )
+                                if (_waf_strategy_for_run(run_id) or {}).get(
+                                    "transport"
+                                ) == "browser_page" and pw_page is not None:
+                                    resp = await _dispatch_http_request(
+                                        hx,
+                                        browser_ctx,
+                                        run_id,
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        merged_headers,
+                                        body,
+                                        selected_session=selected_session,
+                                        primary_session=session_vault.get(
+                                            "configured_primary"
+                                        ),
+                                        primary_browser_cookies=_primary_browser_cookies,
+                                        browser_page=pw_page,
+                                        scope_check=lambda next_url: check_scope(
+                                            next_url, site_id, run_id
+                                        ),
+                                    )
+                                    register_redirect_blocked = getattr(
+                                        resp, "redirect_blocked", None
+                                    )
+                                else:
+                                    resp = await hx.request(
+                                        str(action.get("method") or "POST").upper(),
+                                        url,
+                                        json=body,
+                                        headers=merged_headers,
+                                    )
                         duration_ms = int((time.perf_counter() - started) * 1000)
                         resp_status = resp.status_code
                         resp_headers = dict(resp.headers)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
                         resp_body = _redact_sensitive_text(raw_resp_body)
+                        if register_redirect_blocked:
+                            resp_body = (
+                                f"[SCOPE BLOCK] Redirect to "
+                                f"{register_redirect_blocked[0]!r} was not followed: "
+                                f"{register_redirect_blocked[1]}\n\n{resp_body}"
+                            )
                         success = resp.status_code in success_statuses
                         token = (
                             _extract_bearer_token_from_body(raw_resp_body)
@@ -7080,6 +7862,12 @@ async def _do_thinking_scan(run_id: int) -> None:
                                 merged_headers,
                                 body,
                                 selected_session=selected_session,
+                                primary_session=session_vault.get("configured_primary"),
+                                primary_browser_cookies=_primary_browser_cookies,
+                                browser_page=pw_page,
+                                scope_check=lambda next_url: check_scope(
+                                    next_url, site_id, run_id
+                                ),
                             )
                             duration_ms = int((time.perf_counter() - started) * 1000)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
@@ -7629,6 +8417,7 @@ async def _do_agentic_thinking_loop(
     hx,
     browser_ctx,
     pw_page,
+    primary_browser_cookies: list[dict] | None = None,
     history: list[dict],
     all_results: list[dict],
     resume_from: dict | None = None,
@@ -7703,8 +8492,8 @@ async def _do_agentic_thinking_loop(
     # Snapshot the primary (default) browser-session cookies so anonymous or
     # other-user browser steps can be isolated and default steps restored without
     # one step's session leaking into the next. Kept fresh by _try_reauth below.
-    _primary_browser_cookies: list[dict] = []
-    if browser_ctx is not None:
+    _primary_browser_cookies: list[dict] = primary_browser_cookies or []
+    if browser_ctx is not None and primary_browser_cookies is None:
         try:
             _primary_browser_cookies = await browser_ctx.cookies()
         except Exception:
@@ -8125,6 +8914,8 @@ async def _do_agentic_thinking_loop(
                     int(lead_id),
                     status=lead_status,
                     note=lead_note,
+                    owner_run_type="api" if is_api_run else "web",
+                    owner_run_id=run_id,
                     investigated_by_run_type="api" if is_api_run else "web",
                     investigated_by_run_id=run_id,
                     linked_finding_id=int(finding_id) if finding_id else None,
@@ -8280,17 +9071,119 @@ async def _do_agentic_thinking_loop(
         # ── browser ───────────────────────────────────────────────────────────
         if tool_name == "browser":
             br_url = (tool_input.get("url") or base_url).strip()
+            try:
+                br_page_id = (
+                    int(tool_input.get("page_id"))
+                    if tool_input.get("page_id") is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                br_page_id = None
+            br_target_page = next(
+                (page for page in pages_snapshot if page.get("id") == br_page_id),
+                None,
+            )
+            br_replay_requested = bool(tool_input.get("replay"))
+            br_action = dict(tool_input)
+            br_fallback_steps: list[dict] = []
+            br_followup_steps: list[dict] = []
+            if br_target_page and br_replay_requested:
+                try:
+                    replay_data = json.loads(
+                        br_target_page.get("replay_steps_json") or "[]"
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    replay_data = []
+                if isinstance(replay_data, dict):
+                    replay_root = str(
+                        replay_data.get("root_url")
+                        or br_target_page.get("url")
+                        or br_url
+                    )
+                    replay_steps = replay_data.get("steps") or []
+                else:
+                    replay_root = str(br_target_page.get("url") or br_url)
+                    replay_steps = replay_data if isinstance(replay_data, list) else []
+                br_fallback_steps = [{"op": "goto", "url": replay_root}] + [
+                    {
+                        key: value
+                        for key, value in {
+                            "op": item.get("kind") or item.get("op") or "click",
+                            "selector": item.get("selector"),
+                            "testid": item.get("testid"),
+                            "role": item.get("role"),
+                            "name": item.get("name"),
+                            "value": item.get("value"),
+                        }.items()
+                        if value not in (None, "")
+                    }
+                    for item in replay_steps
+                    if isinstance(item, dict)
+                ]
+                if br_target_page.get("state_kind") == "interactive":
+                    br_action["steps"] = br_fallback_steps + [
+                        step
+                        for step in (tool_input.get("steps") or [])
+                        if isinstance(step, dict)
+                    ]
+                    br_url = replay_root
+                elif not tool_input.get("steps"):
+                    # URL-addressable pages are tried directly first. If the URL
+                    # is session/token-dependent, the deterministic recipe below
+                    # is used as a fallback after the direct result is inspected.
+                    br_action["steps"] = [
+                        {"op": "goto", "url": br_target_page.get("url") or br_url},
+                        {"op": "snapshot"},
+                    ]
+                    br_url = str(br_target_page.get("url") or br_url)
+                else:
+                    br_followup_steps = [
+                        step
+                        for step in (tool_input.get("steps") or [])
+                        if isinstance(step, dict)
+                    ]
+                    br_action["steps"] = [
+                        {"op": "goto", "url": br_target_page.get("url") or br_url},
+                        {"op": "snapshot"},
+                    ]
+                    br_url = str(br_target_page.get("url") or br_url)
             br_owasp = str(tool_input.get("owasp_category") or "").strip().upper()
             br_test_class = str(tool_input.get("test_class") or "").strip()
             _scope_err = _active_scope_check(br_url)
             if _scope_err:
                 return f"[SCOPE BLOCK] {_scope_err}"
-            steps_list = tool_input.get("steps") or []
+            steps_list = (br_action.get("steps") or []) + br_followup_steps
             use_session_label = (
                 tool_input.get("use_session")
                 if isinstance(tool_input.get("use_session"), str)
                 else None
             )
+            if (
+                use_session_label is None
+                and br_replay_requested
+                and br_target_page
+                and br_target_page.get("target_session_label")
+            ):
+                use_session_label = str(br_target_page["target_session_label"])
+            if (
+                use_session_label is None
+                and br_replay_requested
+                and br_target_page
+                and br_target_page.get("replay_credential_id") is not None
+            ):
+                replay_credential_id = br_target_page.get("replay_credential_id")
+                replay_session_found = False
+                for label, candidate_session in session_vault.items():
+                    if candidate_session.get("credential_id") == replay_credential_id:
+                        use_session_label = label
+                        replay_session_found = True
+                        break
+                if not replay_session_found and br_target_page.get("req_auth"):
+                    return (
+                        "The requested page state was discovered with a credential "
+                        f"that has no authenticated replay session (credential_id={replay_credential_id}). "
+                        "Select an explicit valid session or re-authenticate; no other identity was substituted."
+                    )
             use_session_label, selected_session, _br_session_resolution_note = (
                 _resolve_requested_scan_session(session_vault, use_session_label)
             )
@@ -8319,6 +9212,7 @@ async def _do_agentic_thinking_loop(
                 },
             )
             try:
+                _br_waf_strategy = _waf_strategy_for_run(run_id) or {}
                 # Isolate the browser session per step: clear the shared context's
                 # cookies first so a prior authenticated step can't leak into an
                 # anonymous/other-user navigation, then install exactly the selected
@@ -8331,6 +9225,24 @@ async def _do_agentic_thinking_loop(
                         {"name": k, "value": v, "url": br_url}
                         for k, v in (selected_session.get("cookies") or {}).items()
                     ]
+                    if _br_waf_strategy.get("transport") == "browser_page":
+                        cookie_list = _merge_browser_cookies(
+                            [
+                                cookie
+                                for cookie in _primary_browser_cookies
+                                if any(
+                                    str(cookie.get("name") or "")
+                                    .lower()
+                                    .startswith(prefix)
+                                    for prefix in _br_waf_strategy.get(
+                                        "preserve_cookie_prefixes", []
+                                    )
+                                )
+                            ],
+                            cookie_list,
+                            br_url,
+                            tuple(_br_waf_strategy.get("preserve_cookie_prefixes", [])),
+                        )
                 else:
                     cookie_list = _primary_browser_cookies
                 if cookie_list:
@@ -8352,11 +9264,57 @@ async def _do_agentic_thinking_loop(
                 )
             except Exception:
                 pass
-            br_result = await _run_thinking_browser_action(
-                pw_page,
-                tool_input,
-                default_url=base_url,
-                scanner_policy=scanner_policy,
+            traffic_svc.set_browser_context_tag(
+                browser_ctx, br_page_id, use_session_label
+            )
+            try:
+                br_result = await _run_thinking_browser_action(
+                    pw_page,
+                    br_action,
+                    default_url=base_url,
+                    scanner_policy=scanner_policy,
+                )
+                if (
+                    br_target_page
+                    and br_replay_requested
+                    and br_target_page.get("state_kind") != "interactive"
+                    and br_fallback_steps
+                    and (
+                        not br_target_page.get("req_auth")
+                        or br_target_page.get("replay_credential_id") is not None
+                        or selected_session is not None
+                    )
+                    and not _browser_page_target_matches(br_result, br_target_page)
+                ):
+                    fallback_action = dict(br_action)
+                    fallback_action["steps"] = br_fallback_steps + [
+                        step
+                        for step in (tool_input.get("steps") or [])
+                        if isinstance(step, dict)
+                    ]
+                    br_result = await _run_thinking_browser_action(
+                        pw_page,
+                        fallback_action,
+                        default_url=base_url,
+                        scanner_policy=scanner_policy,
+                    )
+                    br_result["replay_fallback_used"] = True
+                elif br_followup_steps:
+                    followup_action = dict(br_action)
+                    followup_action["steps"] = br_followup_steps
+                    br_result = await _run_thinking_browser_action(
+                        pw_page,
+                        followup_action,
+                        default_url=base_url,
+                        scanner_policy=scanner_policy,
+                    )
+            finally:
+                traffic_svc.clear_browser_context_tag(browser_ctx)
+            _persist_browser_object_references(
+                run_id,
+                br_page_id,
+                br_result.get("captured_traffic"),
+                use_session_label,
             )
             resp_body = str(br_result.get("body") or "")[:BODY_READ_LIMIT]
             if _br_session_resolution_note:
@@ -8447,6 +9405,7 @@ async def _do_agentic_thinking_loop(
                             br_owasp,
                             br_test_class or None,
                             resp_status,
+                            br_page_id,
                         )
                     except Exception as exc:
                         log.debug("browser post_probe_fn error: %s", exc)
@@ -8746,12 +9705,33 @@ async def _do_agentic_thinking_loop(
                     with _client_session_cookies(
                         hx, {"cookies": {}, "extra_headers": {}}
                     ):
-                        cc_r = await hx.request(
-                            str(tool_input.get("method") or "POST").upper(),
-                            cc_url,
-                            json=cc_body,
-                            headers=cc_merged,
-                        )
+                        if (_waf_strategy_for_run(run_id) or {}).get(
+                            "transport"
+                        ) == "browser_page" and pw_page is not None:
+                            cc_r = await _dispatch_http_request(
+                                hx,
+                                browser_ctx,
+                                run_id,
+                                str(tool_input.get("method") or "POST").upper(),
+                                cc_url,
+                                cc_merged,
+                                cc_body,
+                                selected_session={
+                                    "cookies": {},
+                                    "extra_headers": {},
+                                },
+                                primary_session=session_vault.get("configured_primary"),
+                                primary_browser_cookies=_primary_browser_cookies,
+                                browser_page=pw_page,
+                                scope_check=_active_scope_check,
+                            )
+                        else:
+                            cc_r = await hx.request(
+                                str(tool_input.get("method") or "POST").upper(),
+                                cc_url,
+                                json=cc_body,
+                                headers=cc_merged,
+                            )
                     cc_resp_status = cc_r.status_code
                     cc_resp_headers = dict(cc_r.headers)
                     cc_excerpt = cc_r.text[:800]
@@ -8945,28 +9925,70 @@ async def _do_agentic_thinking_loop(
                         ra_merged.setdefault(
                             "Content-Type", "application/x-www-form-urlencoded"
                         )
-                        ra_r, ra_redirect_blocked = await _request_scope_checked(
-                            hx,
-                            ra_method,
-                            ra_url,
-                            site_id=site_id,
-                            run_id=run_id,
-                            scope_check=scope_check_fn,
-                            data=ra_body,
-                            headers=ra_merged,
-                        )
+                        if (_waf_strategy_for_run(run_id) or {}).get(
+                            "transport"
+                        ) == "browser_page" and pw_page is not None:
+                            ra_r = await _dispatch_http_request(
+                                hx,
+                                browser_ctx,
+                                run_id,
+                                ra_method,
+                                ra_url,
+                                ra_merged,
+                                urlencode(ra_body),
+                                selected_session=ra_sel_session,
+                                primary_session=session_vault.get("configured_primary"),
+                                primary_browser_cookies=_primary_browser_cookies,
+                                browser_page=pw_page,
+                                scope_check=_active_scope_check,
+                            )
+                            ra_redirect_blocked = getattr(
+                                ra_r, "redirect_blocked", None
+                            )
+                        else:
+                            ra_r, ra_redirect_blocked = await _request_scope_checked(
+                                hx,
+                                ra_method,
+                                ra_url,
+                                site_id=site_id,
+                                run_id=run_id,
+                                scope_check=scope_check_fn,
+                                data=ra_body,
+                                headers=ra_merged,
+                            )
                     else:
                         ra_merged.setdefault("Content-Type", "application/json")
-                        ra_r, ra_redirect_blocked = await _request_scope_checked(
-                            hx,
-                            ra_method,
-                            ra_url,
-                            site_id=site_id,
-                            run_id=run_id,
-                            scope_check=scope_check_fn,
-                            json=ra_body,
-                            headers=ra_merged,
-                        )
+                        if (_waf_strategy_for_run(run_id) or {}).get(
+                            "transport"
+                        ) == "browser_page" and pw_page is not None:
+                            ra_r = await _dispatch_http_request(
+                                hx,
+                                browser_ctx,
+                                run_id,
+                                ra_method,
+                                ra_url,
+                                ra_merged,
+                                ra_body,
+                                selected_session=ra_sel_session,
+                                primary_session=session_vault.get("configured_primary"),
+                                primary_browser_cookies=_primary_browser_cookies,
+                                browser_page=pw_page,
+                                scope_check=_active_scope_check,
+                            )
+                            ra_redirect_blocked = getattr(
+                                ra_r, "redirect_blocked", None
+                            )
+                        else:
+                            ra_r, ra_redirect_blocked = await _request_scope_checked(
+                                hx,
+                                ra_method,
+                                ra_url,
+                                site_id=site_id,
+                                run_id=run_id,
+                                scope_check=scope_check_fn,
+                                json=ra_body,
+                                headers=ra_merged,
+                            )
                 if ra_redirect_blocked is not None:
                     return (
                         f"[SCOPE BLOCK] register_account redirected to "
@@ -9228,6 +10250,14 @@ async def _do_agentic_thinking_loop(
         # ── http_request (default) ────────────────────────────────────────────
         hr_method = str(tool_input.get("method") or "GET").upper()
         hr_url = str(tool_input.get("url") or "").strip()
+        try:
+            hr_page_id = (
+                int(tool_input.get("page_id"))
+                if tool_input.get("page_id") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            hr_page_id = None
         if not hr_url:
             return "http_request: missing URL"
         _scope_err = _active_scope_check(hr_url)
@@ -9277,6 +10307,9 @@ async def _do_agentic_thinking_loop(
         hr_use_session, hr_sel_session, _hr_session_resolution_note = (
             _resolve_requested_scan_session(session_vault, hr_use_session)
         )
+        if isinstance(hx, traffic_svc.LoggingAsyncClient):
+            hx.page_id = hr_page_id
+            hx.session_label = hr_use_session
         events_svc.emit(
             run_id,
             {
@@ -9335,15 +10368,34 @@ async def _do_agentic_thinking_loop(
             # Swap the shared client jar to exactly the selected session so an
             # "anonymous"/other-user probe is not silently authenticated.
             with _client_session_cookies(hx, hr_sel_session):
-                hr_r, hr_redirect_blocked = await _request_scope_checked(
-                    hx,
-                    hr_method,
-                    hr_url,
-                    site_id=site_id,
-                    run_id=run_id,
-                    scope_check=scope_check_fn,
-                    **hr_req_kwargs,
-                )
+                if (_waf_strategy_for_run(run_id or 0) or {}).get(
+                    "transport"
+                ) == "browser_page" and pw_page is not None:
+                    hr_r = await _dispatch_http_request(
+                        hx,
+                        browser_ctx,
+                        run_id,
+                        hr_method,
+                        hr_url,
+                        hr_merged,
+                        hr_body,
+                        selected_session=hr_sel_session,
+                        primary_session=session_vault.get("configured_primary"),
+                        primary_browser_cookies=_primary_browser_cookies,
+                        browser_page=pw_page,
+                        scope_check=_active_scope_check,
+                    )
+                    hr_redirect_blocked = getattr(hr_r, "redirect_blocked", None)
+                else:
+                    hr_r, hr_redirect_blocked = await _request_scope_checked(
+                        hx,
+                        hr_method,
+                        hr_url,
+                        site_id=site_id,
+                        run_id=run_id,
+                        scope_check=scope_check_fn,
+                        **hr_req_kwargs,
+                    )
             hr_duration_ms = int((time.perf_counter() - hr_started) * 1000)
             hr_raw = hr_r.text[:BODY_READ_LIMIT]
             hr_token = _extract_bearer_token_from_body(hr_raw)
@@ -9411,6 +10463,10 @@ async def _do_agentic_thinking_loop(
         except Exception as exc:
             log.warning("Agentic loop HTTP error (%s %s): %s", hr_method, hr_url, exc)
             hr_resp_body = f"Request failed: {exc}"
+        finally:
+            if isinstance(hx, traffic_svc.LoggingAsyncClient):
+                hx.page_id = None
+                hx.session_label = None
 
         hr_sent_headers = hr_r.request.headers if hr_resp_status else {}
         hr_req_ev = _request_evidence(
@@ -9552,6 +10608,7 @@ async def _do_agentic_thinking_loop(
                             _hr_owasp,
                             _hr_test_class or None,
                             hr_resp_status,
+                            hr_page_id,
                         )
                 except Exception as _pp_exc:
                     log.debug("post_probe_fn error: %s", _pp_exc)
@@ -9969,8 +11026,7 @@ def _tls_posture_finding(
 ) -> ScanFinding | None:
     """Build ONE consolidated A02 finding from a scan_tls result, or None if clean.
 
-    ``is_api_run`` keys the finding on ``api_test_run_id`` instead of ``test_run_id``
-    (web/API run ids share an int space — see the run-id-collision note in CLAUDE.md).
+    ``is_api_run`` keys the finding on ``api_test_run_id`` instead of ``test_run_id``.
     """
     issues = result.get("issues") or []
     if not issues:
@@ -10098,6 +11154,11 @@ async def _run_deterministic_site_modules(
     run_id: int,
     base_url: str,
     cred_sessions: dict[int, dict],
+    site_id: int = 0,
+    primary_session: dict | None = None,
+    browser_ctx=None,
+    browser_page=None,
+    primary_browser_cookies: list[dict] | None = None,
     scanner_policy=None,
 ) -> None:
     """Run deterministic site-level modules that do not require LLM reasoning."""
@@ -10125,6 +11186,11 @@ async def _run_deterministic_site_modules(
             run_id=run_id,
             base_url=base_url,
             cred_sessions=cred_sessions,
+            site_id=site_id,
+            primary_session=primary_session,
+            browser_ctx=browser_ctx,
+            browser_page=browser_page,
+            primary_browser_cookies=primary_browser_cookies,
             scanner_policy=scanner_policy,
         )
     )
@@ -10132,6 +11198,11 @@ async def _run_deterministic_site_modules(
         await _run_idor_matrix_module(
             run_id=run_id,
             cred_sessions=cred_sessions,
+            site_id=site_id,
+            primary_session=primary_session,
+            browser_ctx=browser_ctx,
+            browser_page=browser_page,
+            primary_browser_cookies=primary_browser_cookies,
             scanner_policy=scanner_policy,
         )
     )
@@ -10155,6 +11226,11 @@ async def _run_auth_matrix_module(
     run_id: int,
     base_url: str,
     cred_sessions: dict[int, dict],
+    site_id: int = 0,
+    primary_session: dict | None = None,
+    browser_ctx=None,
+    browser_page=None,
+    primary_browser_cookies: list[dict] | None = None,
     scanner_policy=None,
 ) -> list[ScanFinding]:
     """Check high-value endpoints anonymously and across available sessions."""
@@ -10179,8 +11255,14 @@ async def _run_auth_matrix_module(
             run_id,
             url,
             method=method,
+            site_id=site_id,
             timeout=timeout,
             follow_redirects=follow_redirects,
+            primary_session=primary_session,
+            browser_ctx=browser_ctx,
+            browser_page=browser_page,
+            primary_browser_cookies=primary_browser_cookies,
+            selected_session={"cookies": {}, "extra_headers": {}},
         )
         if not anon_result:
             continue
@@ -10229,9 +11311,14 @@ async def _run_auth_matrix_module(
                 run_id,
                 url,
                 method=method,
+                site_id=site_id,
                 session=session,
                 timeout=timeout,
                 follow_redirects=follow_redirects,
+                primary_session=primary_session,
+                browser_ctx=browser_ctx,
+                browser_page=browser_page,
+                primary_browser_cookies=primary_browser_cookies,
             )
             if (
                 result
@@ -10261,6 +11348,11 @@ async def _run_idor_matrix_module(
     *,
     run_id: int,
     cred_sessions: dict[int, dict],
+    site_id: int = 0,
+    primary_session: dict | None = None,
+    browser_ctx=None,
+    browser_page=None,
+    primary_browser_cookies: list[dict] | None = None,
     scanner_policy=None,
 ) -> list[ScanFinding]:
     """Compare object-reference pages across users using crawled ground truth."""
@@ -10309,9 +11401,14 @@ async def _run_idor_matrix_module(
                 run_id,
                 page.url,
                 method="GET",
+                site_id=site_id,
                 session=session,
                 timeout=timeout,
                 follow_redirects=follow_redirects,
+                primary_session=primary_session,
+                browser_ctx=browser_ctx,
+                browser_page=browser_page,
+                primary_browser_cookies=primary_browser_cookies,
             )
             if not result or not _is_successful_access(result):
                 continue
@@ -10446,7 +11543,13 @@ async def _fetch_matrix_url(
     url: str,
     *,
     method: str = "GET",
+    site_id: int = 0,
     session: dict | None = None,
+    selected_session: dict | None = None,
+    primary_session: dict | None = None,
+    browser_ctx=None,
+    browser_page=None,
+    primary_browser_cookies: list[dict] | None = None,
     timeout: float = REQUEST_TIMEOUT,
     follow_redirects: bool = True,
 ) -> dict | None:
@@ -10467,7 +11570,32 @@ async def _fetch_matrix_url(
             verify=False,
             timeout=timeout,
         ) as client:
-            resp = await client.request(method, url)
+            if (
+                (_waf_strategy_for_run(run_id) or {}).get("transport") == "browser_page"
+                and browser_ctx is not None
+                and browser_page is not None
+            ):
+                resp = await _dispatch_http_request(
+                    client,
+                    browser_ctx,
+                    run_id,
+                    method,
+                    url,
+                    headers,
+                    None,
+                    selected_session=(
+                        selected_session if selected_session is not None else session
+                    ),
+                    primary_session=primary_session,
+                    primary_browser_cookies=primary_browser_cookies,
+                    browser_page=browser_page,
+                    scope_check=lambda next_url: check_scope(next_url, site_id, run_id),
+                    follow_redirects=follow_redirects,
+                )
+            else:
+                resp = await client.request(
+                    method, url, follow_redirects=follow_redirects
+                )
         # Build evidence from the *actual* request headers that went on the wire
         # (after any redirect/Set-Cookie replay or configured global header) rather
         # than fabricating "Authorization: none" — so an anonymous probe that was
@@ -11082,6 +12210,72 @@ def _looks_like_json_or_api(result: dict) -> bool:
     url = str(result.get("url") or "").lower()
     body = str(result.get("body") or "").lstrip()
     return "json" in content_type or "/api/" in url or body.startswith(("{", "["))
+
+
+def _persist_browser_object_references(
+    run_id: int,
+    page_id: int | None,
+    captured_traffic: list[dict] | None,
+    session_label: str | None,
+) -> None:
+    """Persist object IDs observed while testing a specific page/state.
+
+    These are intelligence atoms, not findings. Values are intentionally limited
+    to identifier-shaped fields and are redacted from credentials/tokens.
+    """
+    if page_id is None or not captured_traffic:
+        return
+    from aespa.services.crawler import _save_intel_item
+
+    field_re = re.compile(
+        r"[\"']?([A-Za-z][A-Za-z0-9_]*(?:id|uuid|identifier))[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_-]{2,96})",
+        re.IGNORECASE,
+    )
+    seen: set[tuple[str, str, str]] = set()
+    for traffic in captured_traffic[:80]:
+        body = str(traffic.get("response_body") or "")[:8000]
+        for field, value in field_re.findall(body):
+            if value.lower() in {"null", "true", "false", "undefined"}:
+                continue
+            key = (field.lower(), value, str(traffic.get("url") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            _save_intel_item(
+                run_id=run_id,
+                kind="object_reference",
+                key=field,
+                value=value,
+                url=traffic.get("url"),
+                method=traffic.get("method"),
+                source="browser_replay",
+                confidence=0.85,
+                evidence=f"Observed in browser response from {traffic.get('url')}",
+                metadata={
+                    "page_id": page_id,
+                    "location": "response_body",
+                    "field": field,
+                    "session": session_label,
+                    "confidence": "observed",
+                },
+                page_id=page_id,
+            )
+
+
+def _browser_page_target_matches(result: dict, page: dict) -> bool:
+    """Lightweight replay validation that ignores dynamic record text."""
+    status = result.get("status")
+    if status is not None and int(status or 0) in (401, 403, 404, 419, 440):
+        return False
+    body = str(result.get("body") or "").lower()
+    title = str(page.get("title") or "").strip().lower()
+    label = str(page.get("state_label") or "").strip().lower()
+    if any(
+        marker in body for marker in ("sign in", "log in", "password", "access denied")
+    ):
+        return False
+    markers = [marker for marker in (title, label) if len(marker) >= 4]
+    return not markers or any(marker in body for marker in markers)
 
 
 # ── Passive checks ────────────────────────────────────────────────────────────

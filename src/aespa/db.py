@@ -22,12 +22,18 @@ def _build_engine(settings: Settings) -> Engine:
         connect_args["check_same_thread"] = False
         connect_args["timeout"] = 30
     engine = create_engine(settings.database_url, echo=False, connect_args=connect_args)
-    if is_sqlite and ":memory:" not in settings.database_url:
+    if is_sqlite:
+        engine._aespa_enforce_foreign_keys = True  # type: ignore[attr-defined]
 
         @event.listens_for(engine, "connect")
         def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
             cursor = dbapi_connection.cursor()
             try:
+                # Child run records point at the global identity row.  Keep
+                # SQLite's FK enforcement on for every runtime connection;
+                # the identity migration temporarily disables it while it
+                # rebuilds legacy tables.
+                cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA synchronous=NORMAL")
                 cursor.execute("PRAGMA busy_timeout=30000")
@@ -65,12 +71,23 @@ def _get_alembic_config(engine: Engine) -> Config:
 
 
 def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> None:
-    """If the DB has existing domain tables but lacks alembic_version, stamp with head."""
+    """Give an unversioned database a safe starting point.
+
+    A database that already contains ``run_identity`` was created by the new
+    schema and can be stamped at head.  Older databases must start immediately
+    before the global-run-identity revision so that their ids and child rows
+    are remapped instead of silently skipping that migration.
+    """
     try:
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
-        if ("site" in tables or "test_run" in tables) and "alembic_version" not in tables:
-            command.stamp(alembic_cfg, "head")
+        if (
+            "site" in tables or "test_run" in tables
+        ) and "alembic_version" not in tables:
+            command.stamp(
+                alembic_cfg,
+                "head" if "run_identity" in tables else "d2f9a6b1c340",
+            )
     except Exception:
         pass
 
@@ -81,6 +98,15 @@ def run_migrations(engine: Engine | None = None) -> None:
     alembic_cfg = _get_alembic_config(engine)
     _stamp_legacy_db_if_needed(engine, alembic_cfg)
     command.upgrade(alembic_cfg, "head")
+    if engine.dialect.name == "sqlite" and getattr(
+        engine, "_aespa_enforce_foreign_keys", False
+    ):
+        # The migration temporarily turns FK enforcement off while SQLite
+        # rebuilds tables.  Alembic may return the same pooled connection, so
+        # restore the runtime setting explicitly after its transaction ends.
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+            conn.commit()
 
 
 def init_db() -> None:
@@ -214,7 +240,9 @@ def _reset_orphaned_running_runs(engine: Engine) -> None:
                     _text("SELECT name FROM sqlite_master WHERE type='table'")
                 )
             }
-            note = "Interrupted by a server restart; mark as failed."
+            crawl_note = "Last crawl interrupted prior to completion"
+            legacy_crawl_note = "Interrupted by a server restart; mark as failed."
+            scan_note = legacy_crawl_note
             if "test_run" in tables:
                 conn.execute(
                     _text(
@@ -224,7 +252,17 @@ def _reset_orphaned_running_runs(engine: Engine) -> None:
                         "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
                         "WHERE status='running'"
                     ),
-                    {"note": note},
+                    {"note": crawl_note},
+                )
+                conn.execute(
+                    _text(
+                        "UPDATE test_run SET error_message=:crawl_note "
+                        "WHERE error_message=:legacy_crawl_note"
+                    ),
+                    {
+                        "crawl_note": crawl_note,
+                        "legacy_crawl_note": legacy_crawl_note,
+                    },
                 )
             if "api_test_run" in tables:
                 conn.execute(
@@ -235,7 +273,7 @@ def _reset_orphaned_running_runs(engine: Engine) -> None:
                         "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
                         "WHERE status='running'"
                     ),
-                    {"note": note},
+                    {"note": scan_note},
                 )
             if "sast_run" in tables:
                 conn.execute(
@@ -245,7 +283,7 @@ def _reset_orphaned_running_runs(engine: Engine) -> None:
                         "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
                         "WHERE status='scanning'"
                     ),
-                    {"note": note},
+                    {"note": scan_note},
                 )
             conn.commit()
     except Exception:
@@ -276,10 +314,11 @@ def _cleanup_orphaned_sast_extractions() -> None:
     """Reconcile leaked ``<data_dir>/sast_extract/<id>/`` dirs from crashed scans.
 
     SAST scans extract the uploaded archive into a deterministic per-run path
-    under ``<data_dir>/sast_extract/<id>/``. On a hard process crash the
-    coroutine's ``finally`` block does not run, so the dir leaks. The in-memory
-    task registry (``services.sast_scanner._sast_tasks``) is empty on a fresh
-    process, so any dir that survived a restart is orphaned.
+    under ``<data_dir>/sast_extract/<id>/`` and hold a cross-process workspace
+    lease while it is live. On a hard process crash the lease is released by
+    the OS but the coroutine's ``finally`` block does not run, so the dir leaks.
+    A workspace whose lease can be acquired is therefore safe to reconcile;
+    one owned by another process must not be touched.
 
     For each numeric subdir of ``<data_dir>/sast_extract/``:
       * no matching ``SastRun``                              → delete the dir
@@ -305,6 +344,7 @@ def _cleanup_orphaned_sast_extractions() -> None:
 
     from aespa.config import get_settings
     from aespa.models import SastRun
+    from aespa.sast_workspace import try_acquire_sast_workspace_lease
 
     _UTC = timezone.utc
     log = logging.getLogger(__name__)
@@ -322,46 +362,59 @@ def _cleanup_orphaned_sast_extractions() -> None:
                 run_id = int(entry.name)
             except ValueError:
                 continue  # non-numeric subdir (e.g. lost+found) — leave alone
-            with Session(engine) as s:
-                run = s.get(SastRun, run_id)
-                if run is None or run.status in terminal:
-                    shutil.rmtree(entry, ignore_errors=True)
-                    log.info(
-                        "sast_extract sweep: removed orphan dir %s "
-                        "(run id=%s status=%r)",
-                        entry,
-                        run_id,
-                        None if run is None else run.status,
-                    )
-                    continue
-                if run.status == "scanning":
-                    run.status = "failed"
-                    run.error_message = (
-                        "Process was interrupted while the SAST scan was running; "
-                        "extracted source tree has been cleaned up on startup. "
-                        "Re-start the scan to retry."
-                    )
-                    run.completed_at = run.completed_at or datetime.now(_UTC)
-                    run.updated_at = datetime.now(_UTC)
-                    s.add(run)
-                    s.commit()
-                    shutil.rmtree(entry, ignore_errors=True)
-                    log.warning(
-                        "sast_extract sweep: marked run id=%s 'failed' and removed %s "
-                        "(process was interrupted mid-scan)",
-                        run_id,
-                        entry,
-                    )
-                    continue
-                # status == 'pending' — user may still start the scan, leave the
-                # dir alone (and it should not exist yet anyway).
+            lease = try_acquire_sast_workspace_lease(
+                Path(get_settings().data_dir), run_id
+            )
+            if lease is None:
+                log.info(
+                    "sast_extract sweep: left live workspace %s untouched "
+                    "(run id=%s is owned by another process)",
+                    entry,
+                    run_id,
+                )
+                continue
+            try:
+                with Session(engine) as s:
+                    run = s.get(SastRun, run_id)
+                    if run is None or run.status in terminal:
+                        shutil.rmtree(entry, ignore_errors=True)
+                        log.info(
+                            "sast_extract sweep: removed orphan dir %s "
+                            "(run id=%s status=%r)",
+                            entry,
+                            run_id,
+                            None if run is None else run.status,
+                        )
+                        continue
+                    if run.status == "scanning":
+                        run.status = "failed"
+                        run.error_message = (
+                            "Process was interrupted while the SAST scan was running; "
+                            "extracted source tree has been cleaned up on startup. "
+                            "Re-start the scan to retry."
+                        )
+                        run.completed_at = run.completed_at or datetime.now(_UTC)
+                        run.updated_at = datetime.now(_UTC)
+                        s.add(run)
+                        s.commit()
+                        shutil.rmtree(entry, ignore_errors=True)
+                        log.warning(
+                            "sast_extract sweep: marked run id=%s 'failed' and removed %s "
+                            "(process was interrupted mid-scan)",
+                            run_id,
+                            entry,
+                        )
+                        continue
+                    # status == 'pending' — user may still start the scan, leave the
+                    # dir alone (and it should not exist yet anyway).
+            finally:
+                lease.release()
     except Exception:
         pass  # never block startup on a best-effort cleanup
 
 
-def _migrate(engine: Engine) -> None:
-    """Apply Alembic migrations and runtime startup backfills."""
-    run_migrations(engine)
+def _migrate_legacy_columns(engine: Engine) -> None:
+    """Apply runtime startup backfills after Alembic has run."""
     _ensure_column(
         engine,
         "global_http_header_config",
@@ -529,9 +582,8 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "llm_provider_config", "project_id", "TEXT")
     _ensure_column(engine, "llm_provider_config", "username", "TEXT")
     _ensure_column(engine, "llm_config", "username", "TEXT")
-    # agent_log / scan_log share the test_run_id column between web TestRuns and
-    # ApiTestRuns, whose ids come from independent counters and collide.  Tag each
-    # row with the run kind so the two panels stop reading each other's rows.
+    # agent_log / scan_log retain a shared test_run_id column and a run kind so
+    # the two panels continue to display their own surface's rows.
     _ensure_column(engine, "agent_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _ensure_column(engine, "scan_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _ensure_column(
@@ -942,6 +994,7 @@ def _migrate(engine: Engine) -> None:
             )
         )
         conn.commit()
+    _ensure_interactive_replay_provenance(engine)
     # scanner_session — durable scanner auth/session material with stable labels.
     with engine.connect() as conn:
         conn.execute(
@@ -1286,10 +1339,47 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "api_test_run", "waf_confidence", "TEXT")
     _ensure_column(engine, "api_test_run", "waf_evidence", "TEXT")
 
+    # Older installations are stamped directly at the current Alembic head,
+    # so they do not replay new table-creation revisions. Keep the independent
+    # settings/statistics tables available on those databases as well.
+    _ensure_browser_debug_config_table(engine)
+    _ensure_llm_statistics_tables(engine)
+
     # Orphan-extraction sweep last: it queries SastRun via the ORM, so it must
     # run only after every SastRun column above has been added — otherwise the
     # first post-upgrade startup raises "no such column" and silently skips.
     _cleanup_orphaned_sast_extractions()
+
+
+def _ensure_llm_statistics_tables(engine: Engine) -> None:
+    from sqlmodel import SQLModel
+
+    from aespa.models import LLMPriceCatalog, LLMPriceFeed, LLMUsageMonth
+
+    SQLModel.metadata.create_all(
+        engine,
+        tables=[
+            LLMUsageMonth.__table__,
+            LLMPriceCatalog.__table__,
+            LLMPriceFeed.__table__,
+        ],
+    )
+    _ensure_column(engine, "llm_usage_month", "base_url", "TEXT")
+
+
+def _ensure_browser_debug_config_table(engine: Engine) -> None:
+    """Create the browser debug settings table for databases stamped at head.
+
+    Pre-Alembic databases are stamped directly at the current revision, so
+    Alembic does not replay migrations that introduced later tables.  Keep
+    this singleton available for those databases just as we do for the LLM
+    statistics tables above.
+    """
+    from sqlmodel import SQLModel
+
+    from aespa.models import BrowserDebugConfig
+
+    SQLModel.metadata.create_all(engine, tables=[BrowserDebugConfig.__table__])
 
 
 def _ensure_llm_provider_config_migration(engine: Engine) -> None:
@@ -1499,6 +1589,45 @@ def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> Non
                 )
             )
             conn.commit()
+
+
+def _ensure_interactive_replay_provenance(engine: Engine) -> None:
+    """Repair replay provenance fields skipped by older Alembic histories.
+
+    Revision ``1f4e7a2c9b10`` was added behind revisions that some installations
+    had already recorded. Alembic correctly treats an ancestor as applied, but
+    those databases never executed its DDL. Keep startup compatible with those
+    databases and with pre-Alembic databases stamped directly at the latest head.
+    """
+    for table, columns in {
+        "test_run": (
+            ("target_page_ids_json", "TEXT"),
+            ("target_session_label", "TEXT"),
+        ),
+        "crawled_page": (("replay_credential_id", "INTEGER"),),
+        "traffic_entry": (
+            ("page_id", "INTEGER"),
+            ("session_label", "TEXT"),
+        ),
+        "target_intel_item": (("page_id", "INTEGER"),),
+    }.items():
+        for column, definition in columns:
+            _ensure_column(engine, table, column, definition)
+
+    with engine.connect() as conn:
+        sql = __import__("sqlalchemy").text
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_crawled_page_replay_credential_id "
+            "ON crawled_page (replay_credential_id)",
+            "CREATE INDEX IF NOT EXISTS ix_traffic_entry_page_id "
+            "ON traffic_entry (page_id)",
+            "CREATE INDEX IF NOT EXISTS ix_traffic_entry_session_label "
+            "ON traffic_entry (session_label)",
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_page_id "
+            "ON target_intel_item (page_id)",
+        ):
+            conn.execute(sql(statement))
+        conn.commit()
 
 
 def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
@@ -1878,6 +2007,25 @@ def _ensure_llm_config_temperature_nullable(engine: Engine) -> None:
             )
         )
         conn.commit()
+
+
+def _migrate(engine: Engine) -> None:
+    """Apply schema migrations and legacy startup repairs."""
+    run_migrations(engine)
+    enforce_foreign_keys = engine.dialect.name == "sqlite" and getattr(
+        engine, "_aespa_enforce_foreign_keys", False
+    )
+    if enforce_foreign_keys:
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            conn.commit()
+    try:
+        _migrate_legacy_columns(engine)
+    finally:
+        if enforce_foreign_keys:
+            with engine.connect() as conn:
+                conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+                conn.commit()
 
 
 def get_session() -> Iterator[Session]:

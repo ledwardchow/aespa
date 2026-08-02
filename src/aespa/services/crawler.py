@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -16,6 +17,11 @@ from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 from sqlmodel import Session, select
 
+from aespa.browser import (
+    launch_playwright_browser,
+    playwright_user_agent,
+    protect_playwright_context,
+)
 from aespa.db import get_engine
 from aespa.models import (
     AuthMode,
@@ -30,6 +36,7 @@ from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.settings import (
+    get_browser_debug_config,
     get_crawler_config,
     get_global_http_header_config,
     get_llm_config_for_role,
@@ -47,6 +54,8 @@ logging.basicConfig(
 
 _stop_requested: set[int] = set()
 _active_tasks: dict[int, asyncio.Task] = {}
+# Active _CrawlShared objects keyed by run_id, used to notify gate on limit change.
+_active_shared: dict[int, "_CrawlShared"] = {}
 
 # Guided login registry: credential_id -> asyncio.Event (set by the confirm endpoint)
 _guided_registry: dict[int, asyncio.Event] = {}
@@ -74,13 +83,6 @@ def _drop_cached_browser_session(run_id: int, credential) -> None:
         _guided_session_cache.pop(key, None)
 
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
-
-
 def request_stop(run_id: int) -> None:
     _stop_requested.add(run_id)
     task = _active_tasks.get(run_id)
@@ -88,8 +90,30 @@ def request_stop(run_id: int) -> None:
         task.cancel()
 
 
+async def stop_and_wait(run_id: int, timeout: float = 5.0) -> bool:
+    """Cancel a crawl and wait briefly for its cleanup handlers to finish."""
+    task = _active_tasks.get(run_id)
+    if task is None:
+        return False
+    request_stop(run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return True
+
+
 def is_running(run_id: int) -> bool:
     return run_id in _active_tasks
+
+
+async def notify_limit_change(run_id: int) -> None:
+    """Wake any LLM-analysis tasks waiting on the concurrency gate for *run_id*.
+
+    Call this whenever the user changes ``llm_max_concurrency`` so that tasks
+    blocked on the old limit immediately re-evaluate the new one.
+    """
+    shared = _active_shared.get(run_id)
+    if shared is not None:
+        await shared.llm_gate.notify()
 
 
 def _utcnow() -> datetime:
@@ -164,6 +188,8 @@ def _crawl_seed_urls(
     result: list[str] = []
     seen: set[str] = set()
     for url in candidates:
+        if _is_session_ending_url(url):
+            continue
         norm = _norm(url)
         if norm not in seen:
             seen.add(norm)
@@ -177,9 +203,8 @@ def _crawl_seed_urls(
 async def start_crawl(run_id: int) -> None:
     if run_id in _active_tasks:
         return
-    # Tag every event this crawl emits as run_kind='web'.  Run ids collide across
-    # web / api / sast, so the scope — snapshotted by create_task below into the
-    # crawl task and any worker it spawns — is the authoritative discriminator.
+    # Tag every event this crawl emits as run_kind='web'.  The scope is
+    # snapshotted by create_task into the crawl task and its workers.
     # Without it, an unscoped agent_status emit for an id that was also a SAST/API
     # run would be mis-tagged and leak into that run's Agents tab.
     with events_svc.run_kind_scope("web"):
@@ -216,19 +241,109 @@ async def _crawl_task(run_id: int) -> None:
                 s.commit()
     finally:
         _stop_requested.discard(run_id)
+        _active_shared.pop(run_id, None)
+
+
+
+# ── Dynamic LLM concurrency gate ─────────────────────────────────────────────
+
+
+def _read_effective_llm_concurrency(run_id: int) -> int | None:
+    """Return the current effective LLM concurrency cap for *run_id*.
+
+    Reads from the DB on every call so mid-run UI changes are picked up
+    immediately.  Per-run override (``TestRun.llm_max_concurrency``) wins;
+    falls back to the global crawler config.  Returns ``None`` if unlimited.
+    """
+    try:
+        with Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            cap = getattr(run, "llm_max_concurrency", None) if run else None
+            if cap is not None:
+                return cap if cap > 0 else None
+            cfg = get_crawler_config(s)
+            val = getattr(cfg, "llm_max_concurrency", None)
+            return val if val and val > 0 else None
+    except Exception:
+        return None
+
+
+class _DynamicConcurrencyGate:
+    """Async context manager that enforces a live-readable concurrency limit.
+
+    Unlike ``asyncio.Semaphore`` the limit is resolved by calling ``limit_fn``
+    on *every* acquire attempt.  This lets the operator change the cap mid-run
+    (e.g. via the UI) without restarting the crawl.
+
+    ``limit_fn()`` must return an ``int > 0`` to enforce a cap, or ``None`` /
+    ``0`` to allow unlimited concurrent callers.
+    """
+
+    def __init__(self, limit_fn) -> None:
+        self._limit_fn = limit_fn
+        self._active: int = 0
+        self._cond: asyncio.Condition = asyncio.Condition()
+
+    async def acquire(self) -> None:
+        async with self._cond:
+            while True:
+                limit = self._limit_fn()
+                if not limit or limit <= 0 or self._active < limit:
+                    self._active += 1
+                    return
+                await self._cond.wait()
+
+    async def release(self) -> None:
+        async with self._cond:
+            self._active = max(0, self._active - 1)
+            self._cond.notify_all()
+
+    async def notify(self) -> None:
+        """Wake all waiters so they re-evaluate the (possibly changed) limit."""
+        async with self._cond:
+            self._cond.notify_all()
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *_):
+        await self.release()
 
 
 # ── Shared state for parallel crawlers ───────────────────────────────────────
 
 
 class _CrawlShared:
-    def __init__(self, crawled_norms: dict, state_keys: dict, pages_done: int) -> None:
+    def __init__(
+        self,
+        crawled_norms: dict,
+        state_keys: dict,
+        pages_done: int,
+        run_id: int,
+    ) -> None:
         self.crawled_norms: dict[str, int] = crawled_norms  # norm_url → page_id
         self.state_keys: dict[str, int] = (
             state_keys  # SPA interaction fingerprint → page_id
         )
         self.lock: asyncio.Lock = asyncio.Lock()
         self.pages_done: int = pages_done
+        # Absolute JS asset URLs already fetched+mined for endpoint/API-call
+        # intelligence, shared across every phase/credential in this run so a
+        # bundle referenced on every page (or repeatedly dynamically imported)
+        # is only downloaded and regex-scanned once per crawl.
+        self.mined_script_urls: set[str] = set()
+        # Shared cache for LLM page analysis results keyed by (url, content_hash)
+        self.llm_analysis_cache: dict[
+            tuple[str, str], tuple[str, list[str], dict]
+        ] = {}
+        self.llm_pending_count: int = 0
+        self.llm_completed_count: int = 0
+        # Dynamic gate: re-reads the effective concurrency limit from the DB on
+        # every acquire so UI changes take effect immediately mid-crawl.
+        self.llm_gate: _DynamicConcurrencyGate = _DynamicConcurrencyGate(
+            lambda: _read_effective_llm_concurrency(run_id)
+        )
 
 
 # ── Progress logging ──────────────────────────────────────────────────────────
@@ -247,9 +362,10 @@ def _crawl_log(
 
     These are persisted to ``scan_log`` (events.py) and rendered in the Activity
     Log panel, so the user can follow crawl/auth progress live and after page
-    navigation. ``status`` drives the badge suffix in the UI: ``start`` → "…",
-    ``complete`` → "✓", ``error`` → "✗"; anything else renders plain.
-    Best-effort: never raises. No-op when ``run_id`` is falsy.
+    navigation. ``data.stage`` identifies the crawler stage and ``data.username``
+    identifies the credential in use. ``status`` drives the badge suffix in the
+    UI: ``start`` → "…", ``complete`` → "✓", ``error`` → "✗"; anything else
+    renders plain. Best-effort: never raises. No-op when ``run_id`` is falsy.
     """
     if not run_id:
         return
@@ -267,6 +383,38 @@ def _crawl_log(
         events_svc.emit(run_id, evt)
     except Exception:
         pass
+
+
+def _crawl_progress(
+    run_id: int,
+    *,
+    username: str,
+    current_url: str | None,
+    pages_visited: int,
+    stage: str,
+    stage_label: str,
+    phase_index: int,
+    phase_total: int,
+    done: bool = False,
+    llm_pending: int = 0,
+    llm_completed: int = 0,
+) -> None:
+    """Emit live per-user progress with enough context for the Agents panel."""
+    evt: dict = {
+        "type": "crawl_progress",
+        "username": username,
+        "pages_visited": pages_visited,
+        "current_url": current_url,
+        "stage": stage,
+        "stage_label": stage_label,
+        "phase_index": phase_index,
+        "phase_total": phase_total,
+        "done": done,
+    }
+    if llm_pending > 0 or llm_completed > 0:
+        evt["llm_pending"] = llm_pending
+        evt["llm_completed"] = llm_completed
+    events_svc.emit(run_id, evt)
 
 
 # ── Core orchestrator ─────────────────────────────────────────────────────────
@@ -296,6 +444,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         creds = list(site.credentials)
         upstream_proxy = get_upstream_proxy_config(s)
         crawler_cfg = get_crawler_config(s)
+        browser_debug_cfg = get_browser_debug_config(s)
         crawl_proxy_url = (
             upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
         )
@@ -320,6 +469,9 @@ async def _do_crawl_inner(run_id: int) -> None:
     block_non_idempotent_interactive_replay = bool(
         crawler_cfg.block_non_idempotent_interactive_replay
     )
+    enable_access_reconciliation = bool(crawler_cfg.enable_access_reconciliation)
+    browser_engine = browser_debug_cfg.browser_engine
+    browser_visible = bool(browser_debug_cfg.browser_visible)
     _parsed = urlparse(base_url)
     base_netloc = _parsed.netloc
     _bp = _parsed.path
@@ -346,11 +498,14 @@ async def _do_crawl_inner(run_id: int) -> None:
         crawled_norms={_norm(ep.url): ep.id for ep in existing},
         state_keys={ep.state_key: ep.id for ep in existing if ep.state_key},
         pages_done=len(existing),
+        run_id=run_id,
     )
+    _active_shared[run_id] = shared
 
     _update_run(
         run_id,
         status=TestRunStatus.running,
+        phase="crawling",
         started_at=_utcnow(),
         completed_at=None,
         error_message=None,
@@ -377,6 +532,11 @@ async def _do_crawl_inner(run_id: int) -> None:
         f"Crawl started — {base_url} "
         f"(max {max_pages} pages, depth {max_depth}, {len(creds)} credential(s))",
         page_url=base_url,
+        data={
+            "stage": "crawl_start",
+            "stage_label": "Preparing crawl",
+            "credential_count": len(creds),
+        },
     )
 
     phases = ([None] + list(creds)) if (requires_auth and creds) else [None]
@@ -420,6 +580,8 @@ async def _do_crawl_inner(run_id: int) -> None:
                 total_phases=len(phases),
                 pw_proxy=_pw_proxy,
                 global_http_header=_global_http_header,
+                browser_engine=browser_engine,
+                browser_visible=browser_visible,
                 js_endpoint_discovery_enabled=(
                     crawler_cfg.js_endpoint_discovery_enabled
                 ),
@@ -437,18 +599,67 @@ async def _do_crawl_inner(run_id: int) -> None:
         if isinstance(r, Exception):
             log.error("Crawl task raised: %s", r)
 
-    await _reconcile_direct_access(
-        run_id=run_id,
-        creds=creds,
-        base_url=base_url,
-        login_url=login_url,
-        requires_auth=requires_auth,
-        llm_cfg=llm_cfg,
-        pw_proxy=_pw_proxy,
-        global_http_header=_global_http_header,
-    )
+    if enable_access_reconciliation:
+        _update_run(run_id, phase="reconciling", current_url=None)
+        events_svc.emit(
+            run_id,
+            {
+                "type": "run_update",
+                "status": "running",
+                "phase": "reconciling",
+                "current_url": None,
+                "pages_discovered": shared.pages_done,
+            },
+        )
+        await _reconcile_direct_access(
+            run_id=run_id,
+            creds=creds,
+            base_url=base_url,
+            login_url=login_url,
+            requires_auth=requires_auth,
+            llm_cfg=llm_cfg,
+            pw_proxy=_pw_proxy,
+            global_http_header=_global_http_header,
+            browser_engine=browser_engine,
+            browser_visible=browser_visible,
+        )
+    else:
+        _crawl_log(
+            run_id,
+            "reconcile",
+            "info",
+            "Access reconciliation is disabled — skipping cross-user access checks",
+            data={
+                "stage": "reconcile_skipped",
+                "stage_label": "Access reconciliation skipped",
+            },
+        )
 
     # OR-merge page categories from all credential views into each CrawledPage.
+    _update_run(run_id, phase="finalizing")
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "crawler",
+            "role": "Crawler",
+            "status": "active",
+            "current_task": "Finalising crawl results",
+            "outcome": None,
+            "_persist": True,
+        },
+    )
+    _crawl_log(
+        run_id,
+        "crawl",
+        "info",
+        "Finalising crawl — merging credential views and preparing the attack surface",
+        data={
+            "stage": "finalizing",
+            "stage_label": "Finalising crawl",
+            "pages_discovered": shared.pages_done,
+        },
+    )
     _merge_all_categories(run_id)
 
     # Seed the workprogram now that we have the full page list + OWASP categories.
@@ -479,6 +690,7 @@ async def _do_crawl_inner(run_id: int) -> None:
     _update_run(
         run_id,
         status=final_status,
+        phase="crawled",
         completed_at=_utcnow(),
         current_url=None,
         pages_discovered=shared.pages_done,
@@ -501,6 +713,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         {
             "type": "run_update",
             "status": final_status,
+            "phase": "crawled",
             "pages_discovered": shared.pages_done,
             "current_url": None,
         },
@@ -517,6 +730,151 @@ async def _do_crawl_inner(run_id: int) -> None:
             "_persist": True,
         },
     )
+
+
+# ── Asynchronous LLM Page Analysis ───────────────────────────────────────────
+
+
+async def _async_analyse_and_update_page(
+    run_id: int,
+    page_id: int,
+    credential_id: int | None,
+    username: str,
+    final_url: str,
+    title: str,
+    text: str,
+    screenshot_b64: str | None,
+    llm_cfg,
+    shared: _CrawlShared,
+) -> None:
+    async with shared.lock:
+        shared.llm_pending_count += 1
+        pending = shared.llm_pending_count
+        completed = shared.llm_completed_count
+
+    events_svc.emit(
+        run_id,
+        {
+            "type": "llm_analysis_progress",
+            "page_id": page_id,
+            "url": final_url,
+            "username": username,
+            "status": "queued",
+            "pending_count": pending,
+            "completed_count": completed,
+        },
+    )
+
+    cats: dict = {
+        "req_auth": None,
+        "takes_input": None,
+        "has_object_ref": None,
+        "has_business_logic": None,
+    }
+    context = ""
+    suggested: list[str] = []
+
+    text_snippet = text or ""
+    content_hash = hashlib.sha256(text_snippet[:8000].encode()).hexdigest()
+    cache_key = (final_url, content_hash)
+
+    try:
+        cached = None
+        async with shared.lock:
+            if cache_key in shared.llm_analysis_cache:
+                cached = shared.llm_analysis_cache[cache_key]
+
+        if cached is not None:
+            context, suggested, cats = cached
+        elif _is_api_page(final_url, text_snippet):
+            context = "[API endpoint — LLM analysis skipped]"
+            cached = (context, suggested, cats)
+            async with shared.lock:
+                shared.llm_analysis_cache[cache_key] = cached
+        else:
+            try:
+                async with shared.llm_gate:
+                    events_svc.emit(
+                        run_id,
+                        {
+                            "type": "llm_analysis_progress",
+                            "page_id": page_id,
+                            "url": final_url,
+                            "username": username,
+                            "status": "analyzing",
+                            "pending_count": shared.llm_pending_count,
+                            "completed_count": shared.llm_completed_count,
+                        },
+                    )
+                    context, suggested, cats = await llm_svc.analyse_page(
+                        llm_cfg, final_url, title, text_snippet[:8000], screenshot_b64
+                    )
+                log.info("  LLM ok for %s (user=%s) cats=%s", final_url, username, cats)
+                cached = (context, suggested, cats)
+                async with shared.lock:
+                    shared.llm_analysis_cache[cache_key] = cached
+            except Exception as e:
+                log.warning("  LLM failed for %s: %s", final_url, e)
+                context = f"[LLM failed: {e}]"
+
+        _save_credential_view(
+            page_id,
+            run_id,
+            credential_id,
+            username,
+            screenshot_b64,
+            context,
+            text_snippet[:10_000],
+            cats,
+        )
+        state_label = _page_function_label(cats.get("page_label"))
+        _update_page(
+            page_id,
+            state_label=state_label,
+            llm_context=context,
+            req_auth=cats.get("req_auth"),
+            takes_input=cats.get("takes_input"),
+            has_object_ref=cats.get("has_object_ref"),
+            has_business_logic=cats.get("has_business_logic"),
+            owasp_applicable_json=json.dumps(cats.get("owasp_applicable") or {}),
+        )
+    finally:
+        async with shared.lock:
+            shared.llm_pending_count = max(0, shared.llm_pending_count - 1)
+            shared.llm_completed_count += 1
+            pending = shared.llm_pending_count
+            completed = shared.llm_completed_count
+
+        state_label = _page_function_label(cats.get("page_label"))
+        events_svc.emit(
+            run_id,
+            {
+                "type": "page_updated",
+                "page_id": page_id,
+                "url": final_url,
+                "username": username,
+                "state_label": state_label,
+                "llm_context": context,
+                "req_auth": cats.get("req_auth"),
+                "takes_input": cats.get("takes_input"),
+                "has_object_ref": cats.get("has_object_ref"),
+                "has_business_logic": cats.get("has_business_logic"),
+                "owasp_applicable": cats.get("owasp_applicable") or {},
+                "analysis_status": "complete",
+            },
+        )
+        events_svc.emit(
+            run_id,
+            {
+                "type": "llm_analysis_progress",
+                "page_id": page_id,
+                "url": final_url,
+                "username": username,
+                "status": "complete",
+                "pending_count": pending,
+                "completed_count": completed,
+            },
+        )
 
 
 # ── Per-credential BFS ────────────────────────────────────────────────────────
@@ -540,6 +898,8 @@ async def _crawl_as_credential(
     total_phases: int,
     pw_proxy: dict,
     global_http_header: dict[str, str],
+    browser_engine: str,
+    browser_visible: bool,
     js_endpoint_discovery_enabled: bool,
     skip_dangerous_actions: bool,
     suppress_form_submit_actions: bool,
@@ -571,25 +931,54 @@ async def _crawl_as_credential(
         "crawl",
         "info",
         f"Phase {phase_idx + 1}/{total_phases}: crawling as {username}",
+        data={
+            "stage": "phase_start",
+            "stage_label": "Starting credential phase",
+            "username": username,
+            "phase_index": phase_idx + 1,
+            "phase_total": total_phases,
+        },
+    )
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "crawler",
+            "role": "Crawler",
+            "status": "active",
+            "current_task": (
+                f"Phase {phase_idx + 1}/{total_phases} — preparing crawl as {username}"
+            ),
+            "outcome": None,
+            "_persist": True,
+        },
     )
 
     local_pages = 0  # pages actually navigated to by this credential
+    llm_tasks: list[asyncio.Task] = []
 
     async with async_playwright() as p:
         # <-loopback> removes Chromium's default proxy bypass for localhost so
         # loopback-target traffic reaches Burp/ZAP when a proxy is configured.
         _args = ["--proxy-bypass-list=<-loopback>"] if pw_proxy else []
-        browser = await p.chromium.launch(headless=True, args=_args)
+        browser = await launch_playwright_browser(
+            p,
+            browser_engine=browser_engine,
+            headless=not browser_visible,
+            args=_args,
+        )
         ctx = await browser.new_context(
-            user_agent=_UA,
+            user_agent=playwright_user_agent(browser),
             ignore_https_errors=True,
             **pw_proxy,
         )
+        protect_playwright_context(browser, ctx)
         if global_http_header:
             await ctx.set_extra_http_headers(global_http_header)
         traffic_svc.setup_playwright_logging(ctx, run_id, username=username)
         page = await ctx.new_page()
         observed_api_calls: list[dict] = []
+        observed_script_bodies: list[dict] = []
         auth_check_snapshot: dict | None = None
         authenticated_landing_url: str | None = None
 
@@ -604,6 +993,34 @@ async def _crawl_as_credential(
                     return
                 resource_type = response.request.resource_type
                 content_type = response.headers.get("content-type", "")
+                # Module Federation / dynamically-imported chunks (e.g. a
+                # micro-frontend's remoteEntry.js and its own lazy sub-chunks)
+                # are fetched by the app at runtime and never appear as a
+                # <script src> DOM element, so the DOM-based script harvester
+                # never sees them. Capture the body directly off the real
+                # network response here instead — cheaper and more reliable
+                # than a follow-up page.request.get() (which can hit bot
+                # protection differently than the browser's own request).
+                # No "already captured this URL" guard here: ``observed_script_
+                # bodies`` gets cleared both after the pre-load/auth phase and
+                # after every page snapshot, so a script fetched once during
+                # pre-load (then discarded by that clear) would otherwise never
+                # get a second chance to land in a live snapshot — a per-worker
+                # "seen" set would silently and permanently drop it. Redundant
+                # re-mining of the same URL across pages is already deduped by
+                # ``shared.mined_script_urls`` inside ``_mine_script_intelligence``.
+                if resource_type == "script":
+                    try:
+                        script_body = (await response.text())[:500_000]
+                    except Exception:
+                        script_body = ""
+                    observed_script_bodies.append(
+                        {
+                            "url": response.url,
+                            "body": script_body,
+                            "page_url": page_url,
+                        }
+                    )
                 if not _is_api_response_candidate(
                     response.url, resource_type, content_type
                 ):
@@ -651,10 +1068,40 @@ async def _crawl_as_credential(
 
         if requires_auth and cred:
             log.info("Authenticating as %s at %s", cred.username, credential_login_url)
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "crawler",
+                    "role": "Crawler",
+                    "status": "active",
+                    "current_task": (
+                        f"Phase {phase_idx + 1}/{total_phases} — "
+                        f"authenticating as {username}"
+                    ),
+                    "outcome": None,
+                    "_persist": True,
+                },
+            )
             await _authenticate(
                 page, credential_login_url, cred, run_id, llm_cfg=llm_cfg
             )
             authenticated_landing_url = page.url
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "crawler",
+                    "role": "Crawler",
+                    "status": "active",
+                    "current_task": (
+                        f"Phase {phase_idx + 1}/{total_phases} — "
+                        f"authenticated as {username}; starting page crawl"
+                    ),
+                    "outcome": None,
+                    "_persist": True,
+                },
+            )
             auth_check_snapshot = await _capture_auth_check_snapshot(
                 page, credential_login_url
             )
@@ -674,7 +1121,7 @@ async def _crawl_as_credential(
             if mode in (AuthMode.auto, AuthMode.totp, AuthMode.email_otp):
                 try:
                     still_on_login = await _page_requires_login(
-                        page, credential_login_url
+                        page, credential_login_url, settle_ms=1_500
                     )
                 except Exception:
                     still_on_login = False
@@ -682,6 +1129,7 @@ async def _crawl_as_credential(
                     await _persist_recon_session(run_id, cred, page)
 
         observed_api_calls.clear()
+        observed_script_bodies.clear()
 
         seed_urls = _crawl_seed_urls(
             base_url,
@@ -702,7 +1150,7 @@ async def _crawl_as_credential(
             url, depth, parent_id, incoming_action = queue.popleft()
             norm = _norm(url)
 
-            if requires_auth and _is_session_ending_url(url):
+            if _is_session_ending_url(url):
                 log.info("Skipping session-ending URL during crawl: %s", url)
                 continue
 
@@ -732,14 +1180,40 @@ async def _crawl_as_credential(
             _update_run(run_id, current_url=url, pages_discovered=shared.pages_done)
             # Write the intended URL into per_user_progress immediately so the
             # polling API response reflects what the crawler is currently visiting.
-            _update_credential_progress(run_id, username, url, local_pages)
-            events_svc.emit(
+            _update_credential_progress(
                 run_id,
-                {
-                    "type": "crawl_progress",
+                username,
+                url,
+                local_pages,
+                stage="page_visit",
+                stage_label="Opening page",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_progress(
+                run_id,
+                username=username,
+                pages_visited=local_pages,
+                current_url=url,
+                stage="page_visit",
+                stage_label="Opening page",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_log(
+                run_id,
+                "crawl",
+                "info",
+                f"Phase {phase_idx + 1}/{total_phases} — {username}: opening {url}",
+                page_url=url,
+                data={
+                    "stage": "page_visit",
+                    "stage_label": "Opening page",
                     "username": username,
+                    "phase_index": phase_idx + 1,
+                    "phase_total": total_phases,
                     "pages_visited": local_pages,
-                    "current_url": url,
+                    "pages_discovered": shared.pages_done,
                 },
             )
 
@@ -761,6 +1235,21 @@ async def _crawl_as_credential(
                     _update_page(
                         page_id, status="failed", error_message=str(nav_err)[:500]
                     )
+                _crawl_log(
+                    run_id,
+                    "crawl",
+                    "error",
+                    f"Phase {phase_idx + 1}/{total_phases} — {username}: could not open {url}",
+                    page_url=url,
+                    data={
+                        "stage": "page_error",
+                        "stage_label": "Page navigation failed",
+                        "username": username,
+                        "phase_index": phase_idx + 1,
+                        "phase_total": total_phases,
+                        "error": str(nav_err)[:500],
+                    },
+                )
                 continue
 
             if resp is not None and resp.status >= 400:
@@ -768,6 +1257,21 @@ async def _crawl_as_credential(
                     _update_page(
                         page_id, status="failed", error_message=f"HTTP {resp.status}"
                     )
+                _crawl_log(
+                    run_id,
+                    "crawl",
+                    "warning",
+                    f"Phase {phase_idx + 1}/{total_phases} — {username}: page returned HTTP {resp.status}",
+                    page_url=url,
+                    data={
+                        "stage": "page_error",
+                        "stage_label": "Page returned an error",
+                        "username": username,
+                        "phase_index": phase_idx + 1,
+                        "phase_total": total_phases,
+                        "http_status": resp.status,
+                    },
+                )
                 continue
 
             # ── SPA URL guard + redirect deduplication ────────────────────────
@@ -780,28 +1284,105 @@ async def _crawl_as_credential(
                 final_url = raw_final
 
             norm_final = _norm(final_url)
+            source_page_status = None
+            with Session(get_engine()) as s:
+                source_page = s.get(CrawledPage, page_id)
+                source_page_status = source_page.status if source_page else None
+
+            # A URL can redirect for an anonymous phase and load successfully
+            # for an authenticated phase. Promote the original placeholder
+            # back to a normal page when that happens.
+            if norm_final == norm and source_page_status == "redirect":
+                _update_page(page_id, status="crawled", error_message=None)
+
             if norm_final != norm:
                 async with shared.lock:
                     if norm_final in shared.crawled_norms:
                         existing_id = shared.crawled_norms[norm_final]
                         if is_first:
-                            _update_page(page_id, status="redirect")
-                            shared.crawled_norms[norm] = existing_id
-                            shared.pages_done -= 1
+                            _update_page(
+                                page_id,
+                                status="redirect",
+                                analysis_status="skipped",
+                            )
+                            # Keep the requested URL mapped to its own
+                            # placeholder. A redirect observed for one
+                            # credential must not make later authenticated
+                            # phases reuse the redirect target's page ID.
                         page_id = existing_id
                         is_first = False
                     elif is_first:
                         _update_page(page_id, url=final_url)
                         shared.crawled_norms[norm_final] = page_id
 
+            _update_credential_progress(
+                run_id,
+                username,
+                final_url,
+                local_pages,
+                stage="page_loaded",
+                stage_label="Page loaded; checking access",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_progress(
+                run_id,
+                username=username,
+                pages_visited=local_pages,
+                current_url=final_url,
+                stage="page_loaded",
+                stage_label="Page loaded; checking access",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_log(
+                run_id,
+                "crawl",
+                "info",
+                f"Phase {phase_idx + 1}/{total_phases} — {username}: page loaded; checking access",
+                page_url=final_url,
+                data={
+                    "stage": "page_loaded",
+                    "stage_label": "Page loaded; checking access",
+                    "username": username,
+                    "phase_index": phase_idx + 1,
+                    "phase_total": total_phases,
+                    "pages_visited": local_pages,
+                },
+            )
+
             # ── DOM-based accessibility check (login form = not accessible) ───
-            on_login = await _page_requires_login(page, credential_login_url)
+            # SPAs often keep their login form in the initial HTML and hide it
+            # only after the app shell mounts. Give that transition a short
+            # grace period; otherwise a protected hash route is misclassified
+            # as a login wall before its API request can render the page.
+            on_login = await _page_requires_login(
+                page, credential_login_url, settle_ms=1_500
+            )
 
             if on_login:
                 if is_first:
-                    _update_page(page_id, status="crawled")
+                    _update_page(
+                        page_id,
+                        status="crawled",
+                        analysis_status="skipped",
+                    )
                 log.debug(
                     "  Login form for %s (user=%s) — inaccessible", final_url, username
+                )
+                _crawl_log(
+                    run_id,
+                    "crawl",
+                    "info",
+                    f"Phase {phase_idx + 1}/{total_phases} — {username}: access requires login",
+                    page_url=final_url,
+                    data={
+                        "stage": "access_blocked",
+                        "stage_label": "Access requires login",
+                        "username": username,
+                        "phase_index": phase_idx + 1,
+                        "phase_total": total_phases,
+                    },
                 )
                 continue
 
@@ -851,7 +1432,43 @@ async def _crawl_as_credential(
                 for r in raw_links
                 if _same_domain(r["href"], base_netloc)
             ]
-            js_endpoint_calls = await _record_page_intelligence(
+            _update_credential_progress(
+                run_id,
+                username,
+                final_url,
+                local_pages,
+                stage="page_analysis",
+                stage_label="Analysing page and discovering links",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_progress(
+                run_id,
+                username=username,
+                pages_visited=local_pages,
+                current_url=final_url,
+                stage="page_analysis",
+                stage_label="Analysing page and discovering links",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_log(
+                run_id,
+                "crawl",
+                "info",
+                f"Phase {phase_idx + 1}/{total_phases} — {username}: analysing page and discovering links",
+                page_url=final_url,
+                data={
+                    "stage": "page_analysis",
+                    "stage_label": "Analysing page and discovering links",
+                    "username": username,
+                    "phase_index": phase_idx + 1,
+                    "phase_total": total_phases,
+                },
+            )
+            page_scripts = observed_script_bodies[:]
+            observed_script_bodies.clear()
+            js_endpoint_calls, js_nav_urls = await _record_page_intelligence(
                 run_id=run_id,
                 page=page,
                 page_url=final_url,
@@ -860,6 +1477,8 @@ async def _crawl_as_credential(
                 base_netloc=base_netloc,
                 username=username,
                 js_endpoint_discovery_enabled=js_endpoint_discovery_enabled,
+                extra_scripts=page_scripts,
+                shared=shared,
             )
             if js_endpoint_discovery_enabled and js_endpoint_calls:
                 await _promote_api_calls(
@@ -873,42 +1492,59 @@ async def _crawl_as_credential(
                     username=username,
                     llm_cfg=llm_cfg,
                 )
+            # Enqueue JS-discovered frontend routes (React Router etc.) for real
+            # browser navigation so the crawler actually visits them rather than
+            # only saving them as intel items.  Respects the same depth/page-cap
+            # guards as same_domain_links below.
+            if js_endpoint_discovery_enabled and depth < max_depth:
+                for nav_url in js_nav_urls:
+                    n = _norm(nav_url)
+                    if (
+                        n not in queued
+                        and _same_domain(nav_url, base_netloc)
+                        and not _is_session_ending_url(nav_url)
+                    ):
+                        queued.add(n)
+                        queue.append(
+                            (
+                                nav_url,
+                                depth + 1,
+                                page_id,
+                                {"link_text": "JS route", "action_kind": "navigate"},
+                            )
+                        )
 
-            # ── LLM analysis ──────────────────────────────────────────────────
-            cats: dict = {
-                "req_auth": None,
-                "takes_input": None,
-                "has_object_ref": None,
-                "has_business_logic": None,
-            }
-            context = ""
-            suggested: list[str] = []
-            if _is_api_page(final_url, text):
-                context = "[API endpoint — LLM analysis skipped]"
-            else:
-                try:
-                    context, suggested, cats = await llm_svc.analyse_page(
-                        llm_cfg, final_url, title, text[:8000], screenshot_b64
-                    )
-                    log.info(
-                        "  LLM ok for %s (user=%s) cats=%s", final_url, username, cats
-                    )
-                except Exception as e:
-                    log.warning("  LLM failed for %s: %s", final_url, e)
-                    context = f"[LLM failed: {e}]"
-
-            # ── Persist per-credential view ───────────────────────────────────
+            # ── Persist per-credential view & initial page record ─────────────
             _save_credential_view(
                 page_id,
                 run_id,
                 credential_id,
                 username,
                 screenshot_b64,
-                context,
+                "",
                 text[:10_000],
-                cats,
+                {},
             )
             _update_accessible_by(page_id, credential_id)
+
+            # Launch LLM page analysis asynchronously without blocking crawl navigation
+            llm_tasks.append(
+                asyncio.create_task(
+                    _async_analyse_and_update_page(
+                        run_id=run_id,
+                        page_id=page_id,
+                        credential_id=credential_id,
+                        username=username,
+                        final_url=final_url,
+                        title=title,
+                        text=text,
+                        screenshot_b64=screenshot_b64,
+                        llm_cfg=llm_cfg,
+                        shared=shared,
+                    ),
+                    name=f"llm-analyse-page-{page_id}",
+                )
+            )
 
             # ── Update main CrawledPage if first to fill it ───────────────────
             with Session(get_engine()) as s:
@@ -921,23 +1557,36 @@ async def _crawl_as_credential(
                 first_success = cp is not None and cp.status == "processing"
 
             if is_first or fill_main:
+                _page_update = {
+                    "url": final_url,
+                    "title": title,
+                    "page_text": text[:10_000],
+                    "screenshot_b64": screenshot_b64,
+                    "status": "crawled",
+                    "depth": depth,
+                }
+                _action_data = (incoming_action or {}).get("action_data") or {}
+                if isinstance(_action_data, dict) and _action_data.get("replay_steps"):
+                    _replay_root = _action_data.get("root_url")
+                    if not _replay_root:
+                        if parent_id is not None:
+                            with Session(get_engine()) as _replay_session:
+                                _parent_page = _replay_session.get(
+                                    CrawledPage, parent_id
+                                )
+                                _replay_root = (
+                                    _parent_page.url if _parent_page else None
+                                ) or url
+                    _page_update["replay_steps_json"] = json.dumps(
+                        {
+                            "root_url": _replay_root,
+                            "steps": _action_data.get("replay_steps") or [],
+                        }
+                    )
+                    _page_update["replay_credential_id"] = credential_id
                 _update_page(
                     page_id,
-                    url=final_url,
-                    state_label=_page_function_label(cats.get("page_label")),
-                    title=title,
-                    page_text=text[:10_000],
-                    screenshot_b64=screenshot_b64,
-                    llm_context=context,
-                    status="crawled",
-                    depth=depth,
-                    req_auth=cats["req_auth"],
-                    takes_input=cats["takes_input"],
-                    has_object_ref=cats["has_object_ref"],
-                    has_business_logic=cats["has_business_logic"],
-                    owasp_applicable_json=json.dumps(
-                        cats.get("owasp_applicable") or {}
-                    ),
+                    **_page_update,
                 )
             _save_link(
                 run_id,
@@ -974,11 +1623,11 @@ async def _crawl_as_credential(
                         "node": {
                             "id": page_id,
                             "url": final_url,
-                            "state_label": _page_function_label(cats.get("page_label")),
+                            "state_label": None,
                             "title": title,
                             "depth": depth,
                             "status": "crawled",
-                            "context": context,
+                            "context": "",
                             "in_scope": True,
                             "scan_status": "pending",
                             "accessible_by": ab,
@@ -1101,24 +1750,6 @@ async def _crawl_as_credential(
                                 discovery,
                             )
                         )
-                filtered_suggested = _filter_suggested_links(
-                    suggested, same_domain_links, base_netloc
-                )
-                if len(filtered_suggested) < len(suggested):
-                    log.info(
-                        "Dropped %d LLM-suggested crawl URL(s) that were not observed as page links for %s",
-                        len(suggested) - len(filtered_suggested),
-                        final_url,
-                    )
-                for sugg_url in reversed(filtered_suggested):
-                    n = _norm(sugg_url)
-                    if (
-                        n not in queued
-                        and _same_domain(sugg_url, base_netloc)
-                        and not _is_session_ending_url(sugg_url)
-                    ):
-                        queued.add(n)
-                        queue.appendleft((sugg_url, depth + 1, page_id, None))
                 for link_url, link_text in same_domain_links:
                     n = _norm(link_url)
                     if (
@@ -1139,24 +1770,83 @@ async def _crawl_as_credential(
                             )
                         )
 
+            _update_credential_progress(
+                run_id,
+                username,
+                final_url,
+                local_pages,
+                stage="page_complete",
+                stage_label="Page complete; moving to next URL",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_progress(
+                run_id,
+                username=username,
+                pages_visited=local_pages,
+                current_url=final_url,
+                stage="page_complete",
+                stage_label="Page complete; moving to next URL",
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+            )
+            _crawl_log(
+                run_id,
+                "crawl",
+                "info",
+                f"Phase {phase_idx + 1}/{total_phases} — {username}: completed {final_url}; {len(queue)} URL(s) queued",
+                page_url=final_url,
+                data={
+                    "stage": "page_complete",
+                    "stage_label": "Page complete; moving to next URL",
+                    "username": username,
+                    "phase_index": phase_idx + 1,
+                    "phase_total": total_phases,
+                    "pages_visited": local_pages,
+                    "pages_discovered": shared.pages_done,
+                    "queued_urls": len(queue),
+                },
+            )
+
+        if llm_tasks:
+            await asyncio.gather(*llm_tasks, return_exceptions=True)
         await browser.close()
 
-    _update_credential_progress(run_id, username, None, local_pages, done=True)
-    events_svc.emit(
+    _update_credential_progress(
         run_id,
-        {
-            "type": "crawl_progress",
-            "username": username,
-            "pages_visited": local_pages,
-            "current_url": None,
-            "done": True,
-        },
+        username,
+        None,
+        local_pages,
+        done=True,
+        stage="phase_complete",
+        stage_label="Credential phase complete",
+        phase_index=phase_idx + 1,
+        phase_total=total_phases,
+    )
+    _crawl_progress(
+        run_id,
+        username=username,
+        pages_visited=local_pages,
+        current_url=None,
+        stage="phase_complete",
+        stage_label="Credential phase complete",
+        phase_index=phase_idx + 1,
+        phase_total=total_phases,
+        done=True,
     )
     _crawl_log(
         run_id,
         "crawl",
         "complete",
         f"Finished crawling as {username} — {local_pages} page(s)",
+        data={
+            "stage": "phase_complete",
+            "stage_label": "Credential phase complete",
+            "username": username,
+            "phase_index": phase_idx + 1,
+            "phase_total": total_phases,
+            "pages_visited": local_pages,
+        },
     )
 
 
@@ -1466,6 +2156,11 @@ async def _interactive_controls(
         checked = bool(control.get("checked"))
         if not name:
             continue
+        # Signing out destroys the credential phase's session and cannot
+        # reveal a useful application state. Never replay it, regardless of
+        # the broader dangerous-action setting.
+        if _is_session_ending_url("", name):
+            continue
         if skip_dangerous_actions and _INTERACTIVE_DANGER_RE.search(name):
             continue
         if input_type == "radio" and checked:
@@ -1628,6 +2323,12 @@ async def _perform_interactive_action(
     *,
     block_non_idempotent_interactive_replay: bool,
 ) -> dict:
+    action_identity = " ".join(
+        str(step.get(key) or "") for key in ("name", "selector", "testid", "element_id")
+    )
+    if _is_session_ending_url("", action_identity):
+        return {"ok": False, "changed": False, "blocked_requests": []}
+
     blocked_requests: list[dict] = []
 
     async def _safe_route(route) -> None:
@@ -1717,7 +2418,9 @@ async def _perform_interactive_action(
                 pass
 
 
-async def _wait_for_content_settle(page, *, max_wait_ms: int = 3000) -> None:
+async def _wait_for_content_settle(
+    page, *, max_wait_ms: int = 3000, busy_grace_ms: int = 30_000
+) -> None:
     """Wait past initial async paint before a snapshot is taken.
 
     Static chrome (header/footer, nav links) often satisfies a naive
@@ -1728,20 +2431,44 @@ async def _wait_for_content_settle(page, *, max_wait_ms: int = 3000) -> None:
     DOM node count — until it stops changing and no busy markers remain, so
     we snapshot (and continue crawling from) the settled page. Capped at
     ``max_wait_ms`` so pages with perpetual animations don't stall the crawl.
+
+    If a busy marker (spinner/skeleton) is *still visible* when that cap is
+    reached, that's a strong positive signal real content is genuinely still
+    loading (as opposed to a page that's simply idle) — e.g. a slow
+    micro-frontend chunk plus a backend round-trip on a payment-lookup page.
+    In that case only, extend the wait once by up to ``busy_grace_ms`` so we
+    don't snapshot/crawl-onward from a page that's mid-spinner. Measured
+    against a real Module-Federation payment page: it resolved anywhere from
+    ~15s to still-spinning-past-20s across repeated live loads (third-party
+    analytics/feature-flag chunk failures add jitter) — hence the generous
+    default grace, applied only to pages proven to still be actively busy.
     """
     poll_ms = 150
     stable_needed = 2  # ~300ms of no change once busy markers have cleared
     previous: list | None = None
     stable_count = 0
     elapsed = 0
-    while elapsed < max_wait_ms:
+    deadline = max_wait_ms
+    grace_applied = False
+    while elapsed < deadline:
         try:
             signature = await page.evaluate(
                 """() => {
-                  const busySelectors = '[aria-busy="true"], [class*="spinner" i],'
-                    + ' [class*="skeleton" i], [class*="loading" i]';
+                  // Class-name sniffing alone misses component libraries that
+                  // ship hashed/obfuscated class names (CSS modules, styled-
+                  // components) — catch those via semantic ARIA roles and the
+                  // near-universal "ring/arc" SVG spinner markup too.
+                  const busySelectors = '[aria-busy="true"], [role="progressbar"],'
+                    + ' [role="status"], [class*="spinner" i], [class*="skeleton" i],'
+                    + ' [class*="loading" i], [class*="loader" i]';
                   let busyVisible = 0;
                   document.querySelectorAll(busySelectors).forEach(el => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) busyVisible += 1;
+                  });
+                  document.querySelectorAll(
+                    'svg circle[stroke-dasharray], svg circle[stroke-dashoffset]'
+                  ).forEach(el => {
                     const r = el.getBoundingClientRect();
                     if (r.width > 0 && r.height > 0) busyVisible += 1;
                   });
@@ -1763,6 +2490,14 @@ async def _wait_for_content_settle(page, *, max_wait_ms: int = 3000) -> None:
         except Exception:
             return
         elapsed += poll_ms
+        if (
+            not grace_applied
+            and elapsed >= deadline
+            and signature is not None
+            and signature[1] > 0
+        ):
+            grace_applied = True
+            deadline += busy_grace_ms
 
 
 async def _replay_interactive_steps(
@@ -1971,17 +2706,13 @@ async def _explore_interactive_states(
                 await page.goto(root_url, wait_until="domcontentloaded", timeout=15_000)
             except Exception:
                 continue
-            # A document-ready SPA may still be running its authenticated
-            # bootstrap. Replaying controls before that finishes lets the later
-            # bootstrap overwrite the requested view (for example, Profile
-            # briefly opens and is then replaced by Dashboard). This is a
-            # best-effort settle only — apps with SSE/polling/analytics never
-            # go network-idle, so a long timeout here just burns wall-clock
-            # time on every one of up to _INTERACTIVE_MAX_ATTEMPTS reloads.
-            try:
-                await page.wait_for_load_state("networkidle", timeout=600)
-            except Exception:
-                pass
+            # Use the same busy-spinner-aware settle check as the main BFS loop
+            # so that slow SPAs (e.g. Module-Federation payment pages that take
+            # 15-30 s to fully hydrate) are given enough time to render their
+            # controls before the interactive snapshot is taken.  Use a tighter
+            # busy_grace_ms than the main loop's 30 s default so the 90 s
+            # _INTERACTIVE_MAX_SECONDS budget isn't consumed by a single replay.
+            await _wait_for_content_settle(page, max_wait_ms=1_000, busy_grace_ms=3_000)
             replay_root = await _interactive_state_snapshot(
                 page, capture_screenshot=False
             )
@@ -2133,6 +2864,7 @@ async def _explore_interactive_states(
                     replay_steps_json=json.dumps(
                         {"root_url": root_url, "steps": steps}
                     ),
+                    replay_credential_id=credential_id,
                     title=snapshot["title"],
                     page_text=snapshot["text"][:10_000],
                     screenshot_b64=snapshot["screenshot_b64"],
@@ -2266,7 +2998,7 @@ def _save_page_placeholder(run_id: int, url: str, depth: int) -> int:
     return cp.id
 
 
-def _update_page(page_id: int, **kwargs) -> None:
+def _update_page(page_id: int, *, analysis_status: str | None = None, **kwargs) -> None:
     with Session(get_engine()) as s:
         cp = s.get(CrawledPage, page_id)
         if cp is None:
@@ -2275,6 +3007,27 @@ def _update_page(page_id: int, **kwargs) -> None:
             setattr(cp, k, v)
         s.add(cp)
         s.commit()
+        run_id = cp.test_run_id
+        status = cp.status
+        error_msg = cp.error_message
+
+    events_svc.emit(
+        run_id,
+        {
+            "type": "page_updated",
+            "page_id": page_id,
+            "status": status,
+            "error_message": error_msg,
+            "state_label": kwargs.get("state_label"),
+            "llm_context": kwargs.get("llm_context"),
+            "req_auth": kwargs.get("req_auth"),
+            "takes_input": kwargs.get("takes_input"),
+            "has_object_ref": kwargs.get("has_object_ref"),
+            "has_business_logic": kwargs.get("has_business_logic"),
+            "owasp_applicable": kwargs.get("owasp_applicable"),
+            "analysis_status": analysis_status,
+        },
+    )
 
 
 def _save_credential_view(
@@ -2327,6 +3080,71 @@ def _save_credential_view(
 
 
 # ── Target intelligence collection ───────────────────────────────────────────
+
+# Extensions whose URLs should NOT be enqueued as navigable pages in the BFS
+# crawl queue, even if JS mining discovers them as same-domain endpoint strings.
+_NAV_SKIP_EXTS: frozenset[str] = frozenset(
+    {
+        "js",
+        "mjs",
+        "cjs",
+        "ts",
+        "jsx",
+        "tsx",
+        "css",
+        "map",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "webp",
+        "svg",
+        "ico",
+        "avif",
+        "woff",
+        "woff2",
+        "ttf",
+        "eot",
+        "otf",
+        "pdf",
+        "zip",
+        "gz",
+        "tar",
+        "wasm",
+        "mp4",
+        "mp3",
+        "webm",
+        "ogg",
+        "txt",
+        "xml",
+        "json",
+    }
+)
+
+
+def _is_nav_url(url: str) -> bool:
+    """Return True if *url* looks like a navigable HTML page rather than a
+    static asset or a route template.  Used to gate which JS-discovered URLs
+    get fed into the BFS crawl queue.
+
+    Rejects:
+    * Static asset extensions (.js, .css, images, fonts, etc.)
+    * Backslash characters anywhere in the URL (parsing artefacts from minified
+      JS string concatenation, e.g. ``'/payment/' + '\\'``)
+    * Unresolved template-literal placeholders (``${...}``)
+    * Route-template path segments starting with ``:`` (React Router / Express
+      params like ``/one/:two/three``) or containing ``*`` wildcards
+    """
+    if "\\" in url or "${" in url or "*" in url:
+        return False
+    path = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    # Reject route-template segments: any segment that starts with ":" is a
+    # named param placeholder, not a real value (e.g. /:id, /:slug?).
+    if any(seg.startswith(":") for seg in path.split("/") if seg):
+        return False
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
+    return ext not in _NAV_SKIP_EXTS
+
 
 _ENDPOINT_RE = re.compile(
     r"""(?P<quote>['"`])(?P<path>(?:https?://[^'"`\s<>]+|/(?:api|admin|auth|graphql|v\d+|[\w.-]+/)[^'"`\s<>]*))(?P=quote)"""
@@ -2404,6 +3222,7 @@ def _save_intel_item(
     confidence: float = 1.0,
     evidence: str = "",
     metadata: dict | None = None,
+    page_id: int | None = None,
 ) -> None:
     key = str(key or "")[:500]
     value = str(value or "")[:2000]
@@ -2425,6 +3244,8 @@ def _save_intel_item(
         query = query.where(TargetIntelItem.method == method).where(
             TargetIntelItem.source == source
         )
+        if page_id is not None:
+            query = query.where(TargetIntelItem.page_id == page_id)
         existing = s.exec(query).first()
         if existing:
             return
@@ -2440,6 +3261,7 @@ def _save_intel_item(
                 confidence=max(0.0, min(1.0, float(confidence))),
                 evidence=evidence,
                 item_metadata=metadata_text,
+                page_id=page_id,
             )
         )
         s.commit()
@@ -2455,6 +3277,8 @@ async def _record_page_intelligence(
     base_netloc: str,
     username: Optional[str],
     js_endpoint_discovery_enabled: bool,
+    extra_scripts: list[dict] | None = None,
+    shared: "_CrawlShared | None" = None,
 ) -> list[dict]:
     """Extract durable target inventory facts from a rendered page."""
     for item in _extract_ids_from_text(text):
@@ -2565,15 +3389,17 @@ async def _record_page_intelligence(
             metadata={"username": username},
         )
 
-    js_endpoint_calls = await _mine_script_intelligence(
+    js_endpoint_calls, js_nav_urls = await _mine_script_intelligence(
         run_id=run_id,
         page=page,
         page_url=page_url,
         script_urls=dom["scripts"],
         base_netloc=base_netloc,
         collect_js_endpoint_calls=js_endpoint_discovery_enabled,
+        extra_scripts=extra_scripts,
+        shared=shared,
     )
-    return js_endpoint_calls
+    return js_endpoint_calls, js_nav_urls
 
 
 async def _extract_dom_intelligence(page) -> dict:
@@ -2626,10 +3452,41 @@ async def _mine_script_intelligence(
     script_urls: list[str],
     base_netloc: str,
     collect_js_endpoint_calls: bool = False,
+    extra_scripts: list[dict] | None = None,
+    shared: "_CrawlShared | None" = None,
 ) -> list[dict]:
+    """Fetch and regex-mine same-domain JS bundles for endpoints/API calls.
+
+    Two sources feed the queue:
+      1. ``script_urls`` — <script src> DOM elements (the classic case).
+      2. ``extra_scripts`` — bodies already captured off real network
+         responses (see the ``_record_api_response`` listener). This matters
+         for micro-frontends: a Module Federation remoteEntry.js and its own
+         lazily-imported sub-chunks are fetched by the app at runtime via
+         dynamic import()/container.get(), and never leave a <script src> DOM
+         element behind — so #1 alone misses them entirely even once the
+         crawler has actually navigated to the page that loads them.
+    A bundle can also *reference* another same-domain .js file purely as a
+    string literal (e.g. the shell app's main bundle names its lazily-loaded
+    remote entry by path) without ever causing it to load on this particular
+    visit. ``_follow_up_budget`` lets us chase a bounded number of those
+    references too, so a JS file we never observed loading can still be
+    discovered and mined from a plain string reference alone.
+
+    ``shared.mined_script_urls`` (when provided) dedupes across the whole
+    crawl run so a bundle referenced on every page is only downloaded and
+    scanned once, not once per page visited.
+    """
     discovered_calls: list[dict] = []
     seen: set[str] = set()
-    for script_url in script_urls[:20]:
+    pending: list[tuple[str, str | None]] = [(url, None) for url in script_urls[:20]]
+    for item in (extra_scripts or [])[:20]:
+        pending.append((str(item.get("url") or ""), item.get("body")))
+
+    follow_up_budget = 5  # bounded: string-referenced .js files not yet fetched
+    nav_urls: list[str] = []  # same-domain frontend routes to feed into the BFS queue
+    while pending:
+        script_url, prefetched_body = pending.pop(0)
         if (
             not script_url
             or script_url in seen
@@ -2637,14 +3494,28 @@ async def _mine_script_intelligence(
         ):
             continue
         seen.add(script_url)
-        try:
-            resp = await page.request.get(script_url, timeout=10_000)
-            if not resp.ok:
+        if shared is not None:
+            async with shared.lock:
+                if script_url in shared.mined_script_urls:
+                    continue
+                shared.mined_script_urls.add(script_url)
+        if prefetched_body:
+            # Falsy also covers a captured-but-empty body: the network
+            # listener's ``response.text()`` read can race a competing reader
+            # (the traffic logger also reads every response body) or hit a
+            # body the browser has already evicted from memory, silently
+            # producing "". Re-fetch explicitly rather than "mining" nothing
+            # and permanently marking the URL as done in ``mined_script_urls``.
+            body = prefetched_body[:500_000]
+        else:
+            try:
+                resp = await page.request.get(script_url, timeout=10_000)
+                if not resp.ok:
+                    continue
+                body = (await resp.text())[:500_000]
+            except Exception as exc:
+                log.debug("Script mining failed for %s: %s", script_url, exc)
                 continue
-            body = (await resp.text())[:500_000]
-        except Exception as exc:
-            log.debug("Script mining failed for %s: %s", script_url, exc)
-            continue
         discovered_calls.extend(
             _mine_asset_text(
                 run_id=run_id,
@@ -2654,6 +3525,7 @@ async def _mine_script_intelligence(
                 page_url=page_url,
                 collect_js_endpoint_calls=collect_js_endpoint_calls,
                 base_netloc=base_netloc,
+                nav_urls=nav_urls,
             )
         )
         for sourcemap_url in _extract_sourcemap_urls(script_url, body)[:3]:
@@ -2687,9 +3559,25 @@ async def _mine_script_intelligence(
                     page_url=page_url,
                     collect_js_endpoint_calls=collect_js_endpoint_calls,
                     base_netloc=base_netloc,
+                    # nav_urls intentionally not passed for sourcemap calls:
+                    # sourcemaps contain library source + test fixtures (e.g.
+                    # React Router's own /one/:two/three examples) that should
+                    # not be enqueued as real navigable pages.
                 )
             )
-    return _dedupe_api_calls(discovered_calls)
+        if follow_up_budget <= 0:
+            continue
+        for endpoint in _extract_endpoint_strings(body):
+            if not endpoint.split("?", 1)[0].lower().endswith(".js"):
+                continue
+            resolved = _resolve_asset_reference(script_url, endpoint)
+            if resolved in seen or not _same_domain(resolved, base_netloc):
+                continue
+            pending.append((resolved, None))
+            follow_up_budget -= 1
+            if follow_up_budget <= 0:
+                break
+    return _dedupe_api_calls(discovered_calls), nav_urls
 
 
 async def _mine_public_assets(
@@ -2743,6 +3631,7 @@ def _mine_asset_text(
     page_url: str,
     collect_js_endpoint_calls: bool = False,
     base_netloc: str | None = None,
+    nav_urls: list[str] | None = None,
 ) -> list[dict]:
     discovered_calls: list[dict] = []
     for endpoint in _extract_endpoint_strings(body)[:150]:
@@ -2758,6 +3647,10 @@ def _mine_asset_text(
             evidence=endpoint,
             metadata={"page_url": page_url},
         )
+        # _extract_endpoint_strings is a broad regex over string literals and
+        # also fires on third-party SDK paths (e.g. LaunchDarkly /eval/, /ping/)
+        # that are not real app routes.  We do NOT add those to nav_urls; the
+        # more precise _extract_js_route_paths below handles real route literals.
     for call in _extract_js_api_calls(body)[:150]:
         resolved = _resolve_asset_reference(asset_url, call["url"])
         _save_intel_item(
@@ -2831,6 +3724,13 @@ def _mine_asset_text(
                 "category": route.get("category"),
             },
         )
+        if (
+            nav_urls is not None
+            and base_netloc
+            and _same_domain(resolved, base_netloc)
+            and _is_nav_url(resolved)
+        ):
+            nav_urls.append(resolved)
     for lead in _extract_js_path_leads(body)[:120]:
         resolved = _resolve_asset_reference(asset_url, lead["path"])
         _save_intel_item(
@@ -2849,6 +3749,13 @@ def _mine_asset_text(
                 "category": lead.get("category"),
             },
         )
+        if (
+            nav_urls is not None
+            and base_netloc
+            and _same_domain(resolved, base_netloc)
+            and _is_nav_url(resolved)
+        ):
+            nav_urls.append(resolved)
     for endpoint in _extract_sitemap_locations(body)[:200]:
         _save_intel_item(
             run_id=run_id,
@@ -3374,7 +4281,7 @@ async def _promote_api_calls(
 ) -> None:
     for call in _dedupe_api_calls(calls):
         url = call.get("url") or ""
-        if not url:
+        if not url or _is_session_ending_url(url):
             continue
         api_title, api_context, api_categories = await _analyse_api_call(
             llm_cfg, call, credential_id
@@ -3707,6 +4614,8 @@ async def _reconcile_direct_access(
     llm_cfg,
     pw_proxy: dict,
     global_http_header: dict[str, str],
+    browser_engine: str,
+    browser_visible: bool,
 ) -> None:
     """Mark pages as accessible when a credential can load a known URL directly.
 
@@ -3749,7 +4658,9 @@ async def _reconcile_direct_access(
             "agent_id": "crawler",
             "role": "Crawler",
             "status": "active",
-            "current_task": f"Verifying cross-user access (0/{total_checks})…",
+            "current_task": (
+                f"Verifying page access for each user (0/{total_checks})…"
+            ),
             "outcome": None,
             "_persist": True,
         },
@@ -3760,18 +4671,44 @@ async def _reconcile_direct_access(
         "start",
         f"Verifying cross-user page access — {total_checks} check(s) across "
         f"{len(creds)} credential(s)",
+        data={
+            "stage": "access_reconciliation",
+            "stage_label": "Verifying page access for each user",
+            "total_checks": total_checks,
+            "credential_count": len(creds),
+            "page_count": len(page_rows),
+        },
     )
     async with async_playwright() as p:
         _args = ["--proxy-bypass-list=<-loopback>"] if pw_proxy else []
-        browser = await p.chromium.launch(headless=True, args=_args)
+        browser = await launch_playwright_browser(
+            p,
+            browser_engine=browser_engine,
+            headless=not browser_visible,
+            args=_args,
+        )
         try:
             for cred in creds:
                 if run_id in _stop_requested:
                     break
                 credential_login_url = _login_url_for_credential(login_url, cred)
-                ctx = await browser.new_context(
-                    user_agent=_UA, ignore_https_errors=True, **pw_proxy
+                _crawl_log(
+                    run_id,
+                    "reconcile",
+                    "info",
+                    f"Access verification — signing in as {cred.username}",
+                    data={
+                        "stage": "reconcile_auth",
+                        "stage_label": "Signing in for access verification",
+                        "username": cred.username,
+                    },
                 )
+                ctx = await browser.new_context(
+                    user_agent=playwright_user_agent(browser),
+                    ignore_https_errors=True,
+                    **pw_proxy,
+                )
+                protect_playwright_context(browser, ctx)
                 if global_http_header:
                     await ctx.set_extra_http_headers(global_http_header)
                 traffic_svc.setup_playwright_logging(
@@ -3816,11 +4753,25 @@ async def _reconcile_direct_access(
                                 "role": "Crawler",
                                 "status": "active",
                                 "current_task": (
-                                    f"Verifying cross-user access "
-                                    f"({checks_done}/{total_checks})…"
+                                    f"Access check {checks_done}/{total_checks} — "
+                                    f"{cred.username}: {page_url}"
                                 ),
                                 "outcome": None,
                                 "_persist": True,
+                            },
+                        )
+                        _crawl_log(
+                            run_id,
+                            "reconcile",
+                            "info",
+                            f"Access check {checks_done}/{total_checks} — {cred.username}: {page_url}",
+                            page_url=page_url,
+                            data={
+                                "stage": "access_check",
+                                "stage_label": "Checking direct page access",
+                                "username": cred.username,
+                                "check_index": checks_done,
+                                "check_total": total_checks,
                             },
                         )
                         if cred.id in accessible_by:
@@ -3898,6 +4849,11 @@ async def _reconcile_direct_access(
         "reconcile",
         "complete",
         "Cross-user access verification complete",
+        data={
+            "stage": "access_reconciliation_complete",
+            "stage_label": "Access verification complete",
+            "total_checks": total_checks,
+        },
     )
 
 
@@ -3933,7 +4889,7 @@ async def _direct_load_accessible(
     if resp is not None and resp.status >= 400:
         return False, "", "", None
 
-    if await _page_requires_login(page, login_url):
+    if await _page_requires_login(page, login_url, settle_ms=1_500):
         return False, "", "", None
 
     await _wait_for_content_settle(page)
@@ -3974,6 +4930,32 @@ async def _confirm_direct_page_access(
         )
     if not candidate_text.strip():
         return False, "The direct-load response did not contain meaningful page text."
+    if _looks_like_login_text(candidate_text):
+        return (
+            False,
+            "The direct-load response contains login or access denied indicators.",
+        )
+    cand_title_norm = (candidate_title or "").strip().lower()
+    orig_title_norm = (original_title or "").strip().lower()
+    if (
+        cand_title_norm
+        and orig_title_norm
+        and cand_title_norm == orig_title_norm
+        and len((candidate_text or "").strip()) > 100
+    ):
+        return (
+            True,
+            "Direct access confirmed (matching page title and content structure).",
+        )
+    orig_clean = (original_text or "").strip()
+    cand_clean = (candidate_text or "").strip()
+    if len(orig_clean) > 100 and len(cand_clean) > 100:
+        if (
+            orig_clean[:1000] == cand_clean[:1000]
+            or cand_clean[:3000] in orig_clean
+            or orig_clean[:3000] in cand_clean
+        ):
+            return True, "Direct access confirmed (matching page body text)."
     try:
         verdict = await llm_svc.judge_page_access(
             llm_cfg,
@@ -4180,6 +5162,10 @@ def _update_credential_progress(
     pages_visited: int,
     *,
     done: bool = False,
+    stage: str = "crawling",
+    stage_label: str = "Crawling",
+    phase_index: int = 1,
+    phase_total: int = 1,
 ) -> None:
     """Persist per-credential crawl progress so the UI can read it on load/refresh."""
     if not username:
@@ -4193,6 +5179,10 @@ def _update_credential_progress(
             "current_url": current_url,
             "pages_visited": pages_visited,
             "done": done,
+            "stage": stage,
+            "stage_label": stage_label,
+            "phase_index": phase_index,
+            "phase_total": phase_total,
             "updated_at": _utcnow().isoformat(),
         }
         run.per_user_progress = json.dumps(progress)
@@ -4407,24 +5397,64 @@ def _same_url_without_fragment(left: str, right: str) -> bool:
         return False
 
 
+def _same_login_route(left: str, right: str) -> bool:
+    """Compare login routes without collapsing distinct SPA hash routes."""
+    if not _same_url_without_fragment(left, right):
+        return False
+    try:
+        lhs = urlparse(left)
+        rhs = urlparse(right)
+        if lhs.fragment or rhs.fragment:
+            return lhs.fragment == rhs.fragment
+    except Exception:
+        return False
+    return True
+
+
 def _response_suggests_session_dropped(resp) -> bool:
     return resp is not None and resp.status in (401, 419, 440)
 
 
-async def _page_requires_login(page, login_url: str) -> bool:  # noqa: ARG001
+async def _page_requires_login(page, login_url: str, *, settle_ms: int = 0) -> bool:  # noqa: ARG001
+    """Return whether the page is blocked by a login wall.
+
+    Some SPAs ship the login form in the initial HTML and hide it only after
+    the authenticated app shell mounts. When ``settle_ms`` is set, a password
+    field that is initially exposed must remain exposed through that short
+    window before it is treated as a real login wall. Explicit login URLs and
+    denial text still return immediately.
+    """
     try:
         pw_loc = page.locator("input[type='password']").first
         if (await pw_loc.count() > 0) and await _locator_is_exposed(
             pw_loc, actionable=True
         ):
-            return True
+            if _same_login_route(page.url, login_url) or settle_ms <= 0:
+                return True
+            remaining_ms = max(0, int(settle_ms))
+            while remaining_ms > 0:
+                wait_ms = min(100, remaining_ms)
+                try:
+                    await page.wait_for_timeout(wait_ms)
+                except Exception:
+                    # If the page double/browser cannot wait, fail closed and
+                    # preserve the old detection behavior.
+                    return True
+                remaining_ms -= wait_ms
+                try:
+                    if not await _locator_is_exposed(pw_loc, actionable=True):
+                        break
+                except Exception:
+                    return True
+            else:
+                return True
     except Exception:
         pass
     # Passwordless and identifier-based forms often contain only text inputs.
     # Treat a visible form on the configured login URL as a login wall without
     # assuming that any input has type=password.
     try:
-        if _same_url_without_fragment(page.url, login_url):
+        if _same_login_route(page.url, login_url):
             visible_inputs = page.locator("form input:visible")
             submit_controls = page.locator(
                 "form button[type='submit']:visible, form input[type='submit']:visible"
@@ -4476,7 +5506,7 @@ async def _goto_with_auth_recovery(
             return response
         session_dropped = _response_suggests_session_dropped(
             response
-        ) or await _page_requires_login(page, login_url)
+        ) or await _page_requires_login(page, login_url, settle_ms=1_500)
         if not session_dropped:
             return response
         if attempt == 0:
@@ -4569,7 +5599,7 @@ def _api_response_should_not_reauth(url: str, response) -> bool:
 
 async def _capture_auth_check_snapshot(page, login_url: str) -> dict | None:
     try:
-        if await _page_requires_login(page, login_url):
+        if await _page_requires_login(page, login_url, settle_ms=1_500):
             return None
     except Exception:
         return None
@@ -4609,7 +5639,7 @@ async def _auth_check_still_authenticated(
         except Exception:
             pass
         if _response_suggests_session_dropped(response) or await _page_requires_login(
-            check_page, login_url
+            check_page, login_url, settle_ms=1_500
         ):
             return False
         try:
@@ -6210,12 +7240,18 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
 
         from playwright.async_api import async_playwright
 
+        with Session(get_engine()) as s:
+            browser_engine = get_browser_debug_config(s).browser_engine
+
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=False)
+            browser = await launch_playwright_browser(
+                pw, browser_engine=browser_engine, headless=False
+            )
             try:
                 ctx = await browser.new_context(
-                    user_agent=_UA, ignore_https_errors=True
+                    user_agent=playwright_user_agent(browser), ignore_https_errors=True
                 )
+                protect_playwright_context(browser, ctx)
 
                 # Capture any Authorization headers sent during navigation
                 async def _capture_auth_header(request) -> None:

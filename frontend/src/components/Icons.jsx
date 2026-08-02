@@ -41,12 +41,21 @@ export const IconBug = () => <svg width="16" height="16" viewBox="0 0 16 16" fil
   <path d="M6 5.5C6 4.4 6.9 3.5 8 3.5s2 .9 2 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
   <path d="M4 7H2M12 7h2M4 10H2M12 10h2M5 13l-1.5 1.5M11 13l1.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
 </svg>;
+export const IconChart = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <path d="M2 13.5V2.5M2 13.5h12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+  <path d="M4.5 11V7.5M8 11V4.5M11.5 11V2.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+</svg>;
 export const IconMessageSquare = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
 </svg>;
 export const IconSend = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
   <line x1="22" y1="2" x2="11" y2="13"></line>
   <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+</svg>;
+export const IconExternalLink = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <path d="M14 3h7v7"></path>
+  <path d="M10 14 21 3"></path>
+  <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"></path>
 </svg>;
 export const IconBrain = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
   <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1 0-3.12 3 3 0 0 1 0-3.88 2.5 2.5 0 0 1 0-3.12A2.5 2.5 0 0 1 9.5 2Z" />

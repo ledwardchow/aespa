@@ -9,21 +9,24 @@ The scan:
 1. Extracts the archive into a deterministic per-run directory
    (``<data_dir>/sast_extract/<id>/``) that a startup sweep can reconcile
    if the process crashes mid-scan.
-2. Builds an initial context from the collection's extracted ApiEndpoint rows.
-3. Drives ``llm.thinking_agentic_loop`` with read-only file tools + write_lead /
-   filter_lead / done.
-4. Persists high-confidence (≥ CONFIDENCE_THRESHOLD) candidates as ScanLead rows.
+2. Inventories source files and records deterministic inspection receipts.
+3. Runs separate discovery, independent validation, and attack-path agents.
+4. Persists structured evidence, explicit proof gaps, and reportability decisions.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
+import json
 import logging
 import os
 import re
 import shutil
+import stat
 import zipfile
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,9 +34,17 @@ from sqlmodel import Session, select
 
 from aespa.config import get_settings
 from aespa.db import get_engine
-from aespa.models import ApiCollection, ApiDocument, ApiEndpoint, SastRun
+from aespa.models import ApiCollection, ApiDocument, ApiEndpoint, SastRun, ScanLead
+from aespa.sast_workspace import (
+    SastWorkspaceLease,
+    try_acquire_sast_workspace_lease,
+)
 from aespa.services import events as events_svc
-from aespa.services.scan_leads import CONFIDENCE_THRESHOLD, create_lead
+from aespa.services.scan_leads import (
+    CONFIDENCE_THRESHOLD,
+    create_lead,
+    lead_fingerprint,
+)
 
 log = logging.getLogger(__name__)
 
@@ -42,18 +53,104 @@ _UTC = timezone.utc
 # ── In-memory state ────────────────────────────────────────────────────────────
 
 _sast_tasks: dict[int, asyncio.Task] = {}
+_sast_workspace_leases: dict[int, SastWorkspaceLease] = {}
 _sast_stop_requested: set[int] = set()
 
 # Candidates accumulated by write_lead within a single scan task.
 # sast_run_id → list of candidate dicts (awaiting filter_lead scoring).
 _candidates: dict[int, list[dict]] = {}
-# IDs already persisted as ScanLead rows (per run), to avoid double-write.
-_persisted: dict[int, set[int]] = {}
 
 # Max characters in a single read_file response.
 _READ_FILE_MAX_CHARS = 20_000
 # Max grep results.
 _GREP_MAX_RESULTS = 200
+# Keep archive extraction and source inspection bounded even when the uploaded
+# ZIP is small after compression.
+_MAX_ARCHIVE_ENTRIES = 10_000
+_MAX_ARCHIVE_UNCOMPRESSED_BYTES = 250 * 1024 * 1024
+_MAX_ARCHIVE_ENTRY_BYTES = 50 * 1024 * 1024
+_MAX_COMPRESSION_RATIO = 1_000
+_MAX_INSPECT_FILE_BYTES = 10 * 1024 * 1024
+_PHASES = ("scope", "discovery", "validation", "attack_path", "report")
+_SAST_VALIDATOR_MAX_CONCURRENT = 4
+
+
+def _empty_phase_state() -> dict[str, dict]:
+    return {
+        phase: {"status": "pending", "message": "", "data": {}} for phase in _PHASES
+    }
+
+
+def _set_phase(
+    sast_run_id: int,
+    phase: str,
+    status: str,
+    message: str,
+    data: dict | None = None,
+) -> None:
+    """Persist and emit authoritative semantic phase state."""
+    now = datetime.now(_UTC).isoformat()
+    with Session(get_engine()) as s:
+        run = s.get(SastRun, sast_run_id)
+        if run is not None:
+            try:
+                state = json.loads(run.phase_state_json or "{}")
+            except (TypeError, ValueError):
+                state = {}
+            if not state:
+                state = _empty_phase_state()
+            entry = state.setdefault(phase, {})
+            entry.update(
+                {
+                    "status": status,
+                    "message": message,
+                    "data": data or {},
+                    "updated_at": now,
+                }
+            )
+            if status == "running" and not entry.get("started_at"):
+                entry["started_at"] = now
+            if status in {"complete", "failed", "cancelled"}:
+                entry["completed_at"] = now
+            run.phase_state_json = json.dumps(state, ensure_ascii=False)
+            run.updated_at = datetime.now(_UTC)
+            s.add(run)
+            s.commit()
+    events_svc.emit(
+        sast_run_id,
+        {
+            "type": "scanner_phase",
+            "phase": phase,
+            "status": status,
+            "message": message,
+            "data": data or {},
+        },
+    )
+
+
+def _persist_coverage(sast_run_id: int, coverage: dict[str, dict]) -> None:
+    files = [coverage[path] for path in sorted(coverage)]
+    languages: dict[str, dict[str, int]] = {}
+    for item in files:
+        row = languages.setdefault(item["language"], {"total": 0, "reviewed": 0})
+        row["total"] += 1
+        row["reviewed"] += int(bool(item["reviewed"]))
+    payload = {
+        "files": files,
+        "summary": {
+            "files_total": len(files),
+            "files_reviewed": sum(bool(item["reviewed"]) for item in files),
+            "bytes_total": sum(item["size"] for item in files),
+            "languages": languages,
+        },
+    }
+    with Session(get_engine()) as s:
+        run = s.get(SastRun, sast_run_id)
+        if run is not None:
+            run.coverage_json = json.dumps(payload, ensure_ascii=False)
+            run.updated_at = datetime.now(_UTC)
+            s.add(run)
+            s.commit()
 
 
 # ── Safe archive extraction ────────────────────────────────────────────────────
@@ -63,7 +160,45 @@ def _safe_unzip(archive_path: str, target_dir: str) -> None:
     """Extract a zip archive, rejecting any entries that would escape target_dir."""
     target = Path(target_dir).resolve()
     with zipfile.ZipFile(archive_path, "r") as zf:
-        for member in zf.namelist():
+        members = zf.infolist()
+        if len(members) > _MAX_ARCHIVE_ENTRIES:
+            raise ValueError(
+                f"Archive contains too many entries (maximum {_MAX_ARCHIVE_ENTRIES})."
+            )
+
+        total_uncompressed = 0
+        for info in members:
+            if info.is_dir():
+                continue
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode == stat.S_IFLNK:
+                continue
+            if info.file_size > _MAX_ARCHIVE_ENTRY_BYTES:
+                raise ValueError(
+                    f"Archive entry {info.filename!r} exceeds the "
+                    f"{_MAX_ARCHIVE_ENTRY_BYTES // (1024 * 1024)} MiB limit."
+                )
+            total_uncompressed += info.file_size
+            if total_uncompressed > _MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                raise ValueError(
+                    "Archive exceeds the total uncompressed-size limit of "
+                    f"{_MAX_ARCHIVE_UNCOMPRESSED_BYTES // (1024 * 1024)} MiB."
+                )
+            if (
+                info.compress_size > 0
+                and info.file_size / info.compress_size > _MAX_COMPRESSION_RATIO
+            ):
+                raise ValueError(
+                    f"Archive entry {info.filename!r} has an unsafe compression ratio."
+                )
+
+        seen: set[Path] = set()
+        for info in members:
+            member = info.filename
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode == stat.S_IFLNK:
+                log.warning("_safe_unzip: skipping symlink entry %r", member)
+                continue
             dest = (target / member).resolve()
             # Use is_relative_to rather than string-prefix matching: a prefix
             # check treats ``…/extract/55`` as inside ``…/extract/5`` and lets a
@@ -71,77 +206,11 @@ def _safe_unzip(archive_path: str, target_dir: str) -> None:
             if dest != target and not dest.is_relative_to(target):
                 log.warning("_safe_unzip: skipping path-traversal entry %r", member)
                 continue
-            zf.extract(member, target_dir)
-
-
-# ── DB helpers ────────────────────────────────────────────────────────────────
-
-
-def _increment_sast_leads_count(sast_run_id: int) -> None:
-    """Increment SastRun.leads_count by 1 (best-effort, never raises)."""
-    try:
-        with Session(get_engine()) as s:
-            r = s.get(SastRun, sast_run_id)
-            if r is not None:
-                r.leads_count = (r.leads_count or 0) + 1
-                r.updated_at = datetime.now(_UTC)
-                s.add(r)
-                s.commit()
-    except Exception:
-        pass
-
-
-def _count_persisted_leads(sast_run_id: int) -> int:
-    """Return the number of ScanLead rows already persisted for this run."""
-    try:
-        from sqlmodel import func
-
-        with Session(get_engine()) as s:
-            from aespa.models import ScanLead
-
-            return s.exec(
-                select(func.count())
-                .select_from(ScanLead)
-                .where(ScanLead.producer_run_id == sast_run_id)
-            ).one()
-    except Exception:
-        return 0
-
-
-def _flush_unfiltered_candidates(sast_run_id: int, collection_id: int) -> int:
-    """Persist any write_lead candidates that never received a filter_lead call.
-
-    Returns the count of newly persisted leads.
-    """
-    candidates = _candidates.get(sast_run_id, [])
-    flushed = 0
-    for c in candidates:
-        cid = c["candidate_id"]
-        if cid in _persisted.get(sast_run_id, set()):
-            continue
-        if c.get("confidence") is not None and c["confidence"] < CONFIDENCE_THRESHOLD:
-            continue  # explicitly scored and rejected — don't save
-        # Unscored (filter_lead never called): save with confidence=0 so it's
-        # visible but clearly marked as unscored.
-        try:
-            create_lead(
-                producer_run_id=sast_run_id,
-                producer_run_type="sast",
-                collection_id=collection_id,
-                title=c["title"],
-                description=c["description"],
-                category=c.get("category", ""),
-                severity=c.get("severity", "medium"),
-                confidence=float(c.get("confidence") or 0.0),
-                location=c.get("location", ""),
-                evidence=c.get("evidence", ""),
-                source="sast",
-            )
-            _persisted.setdefault(sast_run_id, set()).add(cid)
-            flushed += 1
-        except Exception as exc:
-            log.warning("_flush_unfiltered_candidates: failed to persist: %s", exc)
-    return flushed
+            if dest in seen:
+                log.warning("_safe_unzip: skipping duplicate entry %r", member)
+                continue
+            seen.add(dest)
+            zf.extract(info, target_dir)
 
 
 # ── Path jail helpers ──────────────────────────────────────────────────────────
@@ -167,6 +236,8 @@ def _tool_list_files(root: Path, path: str = "", max_depth: int = 3) -> str:
         base = _jail(root, path)
     except ValueError as exc:
         return f"Error: {exc}"
+    if not base.is_dir():
+        return f"Error: not a directory: {path!r}"
     lines: list[str] = []
     try:
         for dirpath, dirnames, filenames in os.walk(base):
@@ -207,8 +278,13 @@ def _tool_read_file(
     if not target.is_file():
         return f"Error: not a file: {path!r}"
     try:
+        if target.stat().st_size > _MAX_INSPECT_FILE_BYTES:
+            return (
+                f"Error: file exceeds the {_MAX_INSPECT_FILE_BYTES // (1024 * 1024)} "
+                "MiB inspection limit. Use a narrower generated artifact or grep."
+            )
         text = target.read_text(encoding="utf-8", errors="replace")
-    except Exception as exc:
+    except OSError as exc:
         return f"Error reading file: {exc}"
     lines = text.splitlines(keepends=True)
     if start_line is not None or end_line is not None:
@@ -224,6 +300,10 @@ def _tool_read_file(
 def _tool_grep(
     root: Path, pattern: str, path: str = "", include_pattern: str = ""
 ) -> str:
+    if len(pattern) > 500 or re.search(r"\([^)]*[+*][^)]*\)[+*]", pattern):
+        return "Error: regex is too complex for safe repository scanning."
+    if pattern.count(".*") > 4:
+        return "Error: regex contains too many unbounded wildcards."
     try:
         base = _jail(root, path)
     except ValueError as exc:
@@ -240,6 +320,8 @@ def _tool_grep(
             fp = Path(dirpath) / fn
             try:
                 # Skip binary-looking files.
+                if fp.stat().st_size > _MAX_INSPECT_FILE_BYTES:
+                    continue
                 raw = fp.read_bytes()
                 if b"\x00" in raw[:512]:
                     continue
@@ -256,90 +338,170 @@ def _tool_grep(
     return "\n".join(results) if results else "(no matches)"
 
 
+def _count_source_files(root: Path) -> int:
+    """Count regular source files without following symlinked directories."""
+    count = 0
+    for _dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+        count += sum(
+            1
+            for filename in filenames
+            if (Path(_dirpath) / filename).is_file()
+            and not (Path(_dirpath) / filename).is_symlink()
+        )
+    return count
+
+
+_LANGUAGE_BY_SUFFIX = {
+    ".py": "Python",
+    ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".java": "Java",
+    ".kt": "Kotlin",
+    ".go": "Go",
+    ".rb": "Ruby",
+    ".php": "PHP",
+    ".cs": "C#",
+    ".c": "C/C++",
+    ".cc": "C/C++",
+    ".cpp": "C/C++",
+    ".h": "C/C++",
+    ".rs": "Rust",
+    ".swift": "Swift",
+    ".scala": "Scala",
+    ".sql": "SQL",
+    ".html": "HTML",
+    ".vue": "Vue",
+}
+
+
+def _build_source_inventory(root: Path) -> dict[str, dict]:
+    inventory: dict[str, dict] = {}
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames.sort()
+        for filename in sorted(filenames):
+            path = Path(dirpath) / filename
+            if not path.is_file() or path.is_symlink():
+                continue
+            rel = path.relative_to(root).as_posix()
+            inventory[rel] = {
+                "path": rel,
+                "size": path.stat().st_size,
+                "language": _LANGUAGE_BY_SUFFIX.get(path.suffix.lower(), "Other"),
+                "reviewed": False,
+                "read_count": 0,
+                "phases": [],
+            }
+    return inventory
+
+
+def _mark_reviewed(coverage: dict[str, dict], paths: list[str], phase: str) -> None:
+    for raw_path in paths:
+        path = raw_path.replace("\\", "/")
+        item = coverage.get(path)
+        if item is None:
+            continue
+        item["reviewed"] = True
+        item["read_count"] += 1
+        if phase not in item["phases"]:
+            item["phases"].append(phase)
+
+
+def _run_read_tool(
+    sast_run_id: int,
+    root: Path,
+    coverage: dict[str, dict],
+    phase: str,
+    tool_name: str,
+    tool_input: dict,
+) -> str | None:
+    """Execute one shared read-only file tool and record review receipts."""
+    if tool_name == "list_files":
+        path = tool_input.get("path", "") or "."
+        result = _tool_list_files(
+            root,
+            path=path if path != "." else "",
+            max_depth=int(tool_input.get("max_depth", 3)),
+        )
+    elif tool_name == "glob":
+        path = str(tool_input.get("pattern", ""))
+        result = _tool_glob(root, path)
+    elif tool_name == "read_file":
+        path = str(tool_input.get("path", ""))
+        result = _tool_read_file(
+            root,
+            path=path,
+            start_line=tool_input.get("start_line"),
+            end_line=tool_input.get("end_line"),
+        )
+        if not result.startswith("Error:"):
+            _mark_reviewed(coverage, [path], phase)
+    elif tool_name == "grep":
+        pattern = str(tool_input.get("pattern", ""))
+        path = str(tool_input.get("path", ""))
+        result = _tool_grep(
+            root,
+            pattern=pattern,
+            path=path,
+            include_pattern=str(tool_input.get("include_pattern", "")),
+        )
+        include_pattern = str(tool_input.get("include_pattern", ""))
+        try:
+            base = _jail(root, path)
+            inspected_paths = [
+                file.relative_to(root).as_posix()
+                for file in base.rglob("*")
+                if file.is_file()
+                and file.stat().st_size <= _MAX_INSPECT_FILE_BYTES
+                and (not include_pattern or fnmatch.fnmatch(file.name, include_pattern))
+            ]
+        except (OSError, ValueError):
+            inspected_paths = []
+        _mark_reviewed(coverage, inspected_paths, phase)
+    else:
+        return None
+    events_svc.emit(
+        sast_run_id,
+        {
+            "type": "scanner_phase",
+            "phase": phase,
+            "status": "running",
+            "message": f"{tool_name}: {path}",
+        },
+    )
+    return result
+
+
 # ── Tool executor factory ─────────────────────────────────────────────────────
 
 
-def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
+def _make_tool_executor(
+    sast_run_id: int,
+    root: Path,
+    collection_id: int | None,
+    coverage: dict[str, dict] | None = None,
+    on_candidate_ready: Callable[[dict], None] | None = None,
+):
     """Return an async tool_executor closure for the SAST agentic loop.
 
     Handles: list_files / glob / read_file / grep / write_lead / filter_lead / done.
-    Candidates are stored in _candidates[sast_run_id]; filter_lead updates
-    confidence and immediately persists high-confidence leads.
+    Candidates are stored in _candidates[sast_run_id]; filter_lead records the
+    discovery agent's confidence before independent validation.
     """
     _candidates[sast_run_id] = []
-    _persisted[sast_run_id] = set()
+    coverage = coverage if coverage is not None else _build_source_inventory(root)
     next_candidate_id: list[int] = [0]  # mutable int in closure
 
     async def tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         if sast_run_id in _sast_stop_requested:
             return "Scan stopped by user."
 
-        if tool_name == "list_files":
-            path = tool_input.get("path", "") or "."
-            events_svc.emit(
-                sast_run_id,
-                {
-                    "type": "scanner_phase",
-                    "phase": "sast_tool",
-                    "status": "running",
-                    "message": f"list_files: {path}",
-                },
-            )
-            return _tool_list_files(
-                root,
-                path=path if path != "." else "",
-                max_depth=int(tool_input.get("max_depth", 3)),
-            )
-
-        if tool_name == "glob":
-            pattern = tool_input.get("pattern", "")
-            events_svc.emit(
-                sast_run_id,
-                {
-                    "type": "scanner_phase",
-                    "phase": "sast_tool",
-                    "status": "running",
-                    "message": f"glob: {pattern}",
-                },
-            )
-            return _tool_glob(root, pattern)
-
-        if tool_name == "read_file":
-            path = str(tool_input.get("path", ""))
-            sl = tool_input.get("start_line")
-            el = tool_input.get("end_line")
-            line_note = f" (lines {sl}–{el})" if sl or el else ""
-            events_svc.emit(
-                sast_run_id,
-                {
-                    "type": "scanner_phase",
-                    "phase": "sast_tool",
-                    "status": "running",
-                    "message": f"read_file: {path}{line_note}",
-                },
-            )
-            return _tool_read_file(root, path=path, start_line=sl, end_line=el)
-
-        if tool_name == "grep":
-            pattern = str(tool_input.get("pattern", ""))
-            path = str(tool_input.get("path", "")) or "."
-            inc = str(tool_input.get("include_pattern", ""))
-            inc_note = f" [{inc}]" if inc else ""
-            events_svc.emit(
-                sast_run_id,
-                {
-                    "type": "scanner_phase",
-                    "phase": "sast_tool",
-                    "status": "running",
-                    "message": f"grep: {pattern!r} in {path}{inc_note}",
-                },
-            )
-            return _tool_grep(
-                root,
-                pattern=pattern,
-                path=str(tool_input.get("path", "")),
-                include_pattern=str(tool_input.get("include_pattern", "")),
-            )
+        read_result = _run_read_tool(
+            sast_run_id, root, coverage, "discovery", tool_name, tool_input
+        )
+        if read_result is not None:
+            return read_result
 
         if tool_name == "write_lead":
             cid = next_candidate_id[0]
@@ -353,9 +515,22 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
                 "description": str(tool_input.get("description", "")),
                 "evidence": str(tool_input.get("evidence", "")),
                 "suggested_endpoint": str(tool_input.get("suggested_endpoint", "")),
+                "source_trace": tool_input.get("source_trace") or {},
+                "controls": tool_input.get("controls") or [],
+                "sink_trace": tool_input.get("sink_trace") or {},
+                "proof_gaps": tool_input.get("proof_gaps") or [],
                 "confidence": None,  # set by filter_lead
+                "validation_status": "pending",
+                "validation_reasoning": "",
+                "counterevidence": [],
+                "attack_path": {},
+                "reportable": False,
             }
             _candidates[sast_run_id].append(candidate)
+            # The Candidates view reads from the database while discovery state
+            # lives in memory.  Persist immediately so the UI does not remain
+            # empty until the later validation phase completes.
+            _sync_candidates_to_db(sast_run_id, collection_id)
             events_svc.emit(
                 sast_run_id,
                 {
@@ -379,28 +554,8 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
                 return f"Error: no candidate #{cid} found."
             match["confidence"] = confidence
             match["filter_reasoning"] = reasoning
+            _sync_candidates_to_db(sast_run_id, collection_id)
             kept = confidence >= CONFIDENCE_THRESHOLD
-            # Persist immediately so leads survive early termination.
-            if kept and cid not in _persisted[sast_run_id]:
-                try:
-                    create_lead(
-                        producer_run_id=sast_run_id,
-                        producer_run_type="sast",
-                        collection_id=collection_id,
-                        title=match["title"],
-                        description=match["description"],
-                        category=match.get("category", ""),
-                        severity=match.get("severity", "medium"),
-                        confidence=confidence,
-                        location=match.get("location", ""),
-                        evidence=match.get("evidence", ""),
-                        source="sast",
-                    )
-                    _persisted[sast_run_id].add(cid)
-                    # Keep the SastRun leads_count in sync.
-                    _increment_sast_leads_count(sast_run_id)
-                except Exception as persist_exc:
-                    log.warning("filter_lead: failed to persist lead: %s", persist_exc)
             events_svc.emit(
                 sast_run_id,
                 {
@@ -408,15 +563,19 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
                     "phase": "sast_filter",
                     "status": "running",
                     "message": (
-                        f"{'KEPT' if kept else 'DISCARDED'} candidate #{cid}: "
+                        f"Discovery {'SUPPORTED' if kept else 'LOW CONFIDENCE'} candidate #{cid}: "
                         f"{match['title']} (confidence={confidence:.0%})"
                     ),
                 },
             )
-            return (
-                f"Candidate #{cid}: confidence={confidence:.0%} — "
-                f"{'KEPT (will become a ScanLead)' if kept else 'DISCARDED (below threshold)'}."
+            if on_candidate_ready is not None:
+                on_candidate_ready(match)
+            outcome = (
+                "SUPPORTED for independent validation"
+                if kept
+                else "flagged as low-confidence for the validator"
             )
+            return f"Candidate #{cid}: confidence={confidence:.0%} — {outcome}."
 
         if tool_name == "done":
             # Persisted by the caller — just return the summary.
@@ -425,6 +584,207 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
         return f"Unknown tool: {tool_name!r}"
 
     return tool_executor
+
+
+def _candidate_for_id(sast_run_id: int, candidate_id: int) -> dict | None:
+    return next(
+        (
+            candidate
+            for candidate in _candidates.get(sast_run_id, [])
+            if candidate["candidate_id"] == candidate_id
+        ),
+        None,
+    )
+
+
+def _make_review_executor(
+    sast_run_id: int,
+    root: Path,
+    coverage: dict[str, dict],
+    phase: str,
+    collection_id: int | None = None,
+    assigned_candidate_id: int | None = None,
+):
+    async def tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
+        if sast_run_id in _sast_stop_requested:
+            return "Scan stopped by user."
+        read_result = _run_read_tool(
+            sast_run_id, root, coverage, phase, tool_name, tool_input
+        )
+        if read_result is not None:
+            return read_result
+        candidate_id = int(tool_input.get("candidate_id", -1))
+        candidate = _candidate_for_id(sast_run_id, candidate_id)
+        if (
+            assigned_candidate_id is not None
+            and tool_name
+            in {"get_candidate", "validate_candidate", "record_attack_path"}
+            and candidate_id != assigned_candidate_id
+        ):
+            return (
+                f"Error: this validator is assigned to candidate "
+                f"#{assigned_candidate_id}, not candidate #{candidate_id}."
+            )
+        if tool_name == "get_candidate":
+            if candidate is None:
+                return f"Error: no candidate #{candidate_id} found."
+            return json.dumps(candidate, ensure_ascii=False)
+        if candidate is None and tool_name in {
+            "validate_candidate",
+            "record_attack_path",
+        }:
+            return f"Error: no candidate #{candidate_id} found."
+        if tool_name == "validate_candidate":
+            verdict = str(tool_input.get("verdict", "inconclusive"))
+            confidence = min(1.0, max(0.0, float(tool_input.get("confidence", 0))))
+            candidate.update(
+                {
+                    "validation_status": verdict,
+                    "validation_reasoning": str(tool_input.get("reasoning", "")),
+                    "confidence": confidence,
+                    "controls": list(tool_input.get("controls") or []),
+                    "counterevidence": list(tool_input.get("counterevidence") or []),
+                    "proof_gaps": list(tool_input.get("proof_gaps") or []),
+                    "reportable": verdict == "confirmed"
+                    and confidence >= CONFIDENCE_THRESHOLD,
+                }
+            )
+            # A verdict completes the validator's research for this candidate.
+            # Persist and announce it now instead of waiting for the validator's
+            # entire agentic loop to finish so the UI can show progressive results.
+            _sync_candidate_to_db(sast_run_id, collection_id, candidate)
+            _persist_coverage(sast_run_id, coverage)
+            _emit_validation_result(sast_run_id, candidate)
+            return f"Candidate #{candidate_id} validation recorded as {verdict}."
+        if tool_name == "record_attack_path":
+            if not candidate.get("reportable"):
+                return f"Error: candidate #{candidate_id} is not reportable."
+            candidate["attack_path"] = {
+                "nodes": list(tool_input.get("nodes") or []),
+                "impact": str(tool_input.get("impact", "")),
+                "severity_reasoning": str(tool_input.get("severity_reasoning", "")),
+                "dynamic_test": str(tool_input.get("dynamic_test", "")),
+            }
+            return f"Candidate #{candidate_id} attack path recorded."
+        if tool_name == "done":
+            return str(tool_input.get("summary", ""))
+        return f"Unknown tool: {tool_name!r}"
+
+    return tool_executor
+
+
+def _candidate_brief(candidates: list[dict], *, reportable_only: bool = False) -> str:
+    selected = (
+        [c for c in candidates if c.get("reportable")]
+        if reportable_only
+        else candidates
+    )
+    return json.dumps(
+        [
+            {
+                "candidate_id": c["candidate_id"],
+                "title": c["title"],
+                "category": c.get("category", ""),
+                "severity": c.get("severity", "medium"),
+                "location": c.get("location", ""),
+                "description": c.get("description", ""),
+                "discovery_confidence": c.get("confidence"),
+                "validation_status": c.get("validation_status"),
+            }
+            for c in selected
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _candidate_validation_message(candidate: dict) -> str:
+    candidate_id = int(candidate["candidate_id"])
+    return (
+        f"Validate only candidate #{candidate_id}. Do not validate any other "
+        "candidate in the run. Call get_candidate for this candidate, inspect "
+        "the relevant source with the read-only file tools, then call "
+        "validate_candidate exactly once followed by done.\n\n"
+        "Assigned candidate:\n" + json.dumps(candidate, ensure_ascii=False, indent=2)
+    )
+
+
+def _emit_validation_result(
+    sast_run_id: int, candidate: dict, *, error: str | None = None
+) -> None:
+    candidate_id = int(candidate["candidate_id"])
+    validation_status = str(candidate.get("validation_status") or "inconclusive")
+    title = candidate.get("title", "")
+    message = (
+        f"Candidate #{candidate_id} validation failed and was marked inconclusive: {title}"
+        if error
+        else f"Candidate #{candidate_id} validated as {validation_status}: {title}"
+    )
+    data = {
+        "candidate_id": candidate_id,
+        "validation_status": validation_status,
+        "confidence": float(candidate.get("confidence") or 0.0),
+        "reportable": bool(candidate.get("reportable")),
+    }
+    if error:
+        data["error"] = error
+    events_svc.emit(
+        sast_run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "sast_validation_result",
+            "status": "complete",
+            "message": message,
+            "data": data,
+        },
+    )
+
+
+def _sync_candidates_to_db(
+    sast_run_id: int, collection_id: int | None
+) -> tuple[int, int]:
+    """Upsert every candidate and return (candidate_count, reportable_count)."""
+    candidates = _candidates.get(sast_run_id, [])
+    for candidate in candidates:
+        _sync_candidate_to_db(sast_run_id, collection_id, candidate)
+    return len(candidates), sum(bool(c.get("reportable")) for c in candidates)
+
+
+def _sync_candidate_to_db(
+    sast_run_id: int, collection_id: int | None, candidate: dict
+) -> None:
+    """Upsert one candidate so completed review work is visible immediately."""
+    title = str(candidate.get("title", ""))
+    category = str(candidate.get("category", ""))
+    location = str(candidate.get("location", ""))
+    create_lead(
+        producer_run_id=sast_run_id,
+        producer_run_type="sast",
+        collection_id=collection_id,
+        title=title,
+        description=str(candidate.get("description", "")),
+        category=category,
+        severity=candidate.get("severity", "medium"),
+        confidence=float(candidate.get("confidence") or 0.0),
+        location=location,
+        evidence=candidate.get("evidence", ""),
+        source="sast",
+        fingerprint=lead_fingerprint(
+            category=category,
+            title=title,
+            location=location,
+        ),
+        suggested_endpoint=candidate.get("suggested_endpoint", ""),
+        source_trace=candidate.get("source_trace") or {},
+        controls=candidate.get("controls") or [],
+        sink_trace=candidate.get("sink_trace") or {},
+        counterevidence=candidate.get("counterevidence") or [],
+        proof_gaps=candidate.get("proof_gaps") or [],
+        validation_status=candidate.get("validation_status", "inconclusive"),
+        validation_reasoning=candidate.get("validation_reasoning", ""),
+        attack_path=candidate.get("attack_path") or {},
+        reportable=bool(candidate.get("reportable")),
+    )
 
 
 # ── SAST scan task ─────────────────────────────────────────────────────────────
@@ -479,12 +839,31 @@ def _build_initial_message(
 async def _sast_scan_task(sast_run_id: int) -> None:
     """Core async task: extract archive, run agentic loop, persist leads."""
     from aespa.services import llm as llm_svc
-    from aespa.services.prompts.sast import SAST_SYSTEM_PROMPT, SAST_TOOLS
+    from aespa.services.prompts.sast import (
+        SAST_ATTACK_PATH_PROMPT,
+        SAST_ATTACK_PATH_TOOLS,
+        SAST_SYSTEM_PROMPT,
+        SAST_TOOLS,
+        SAST_VALIDATION_PROMPT,
+        SAST_VALIDATION_TOOLS,
+    )
     from aespa.services.settings import get_llm_config_for_role
 
     _sast_stop_requested.discard(sast_run_id)
     tmpdir: str | None = None
+    lease = _sast_workspace_leases.get(sast_run_id)
+    if lease is None:
+        lease = try_acquire_sast_workspace_lease(
+            Path(get_settings().data_dir), sast_run_id
+        )
+        if lease is None:
+            raise RuntimeError(
+                f"SAST workspace for run {sast_run_id} is active in another process."
+            )
+        _sast_workspace_leases[sast_run_id] = lease
     run: SastRun | None = None  # populated early; used in except blocks
+    validation_tasks: list[asyncio.Task] = []
+    current_phase = "scope"
     try:
         # ── Load run, collection, document ────────────────────────────────────
         with Session(get_engine(), expire_on_commit=False) as s:
@@ -522,6 +901,12 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 raise RuntimeError(
                     "No LLM configuration. Configure it in Settings first."
                 )
+            validator_cfg_obj = (
+                get_llm_config_for_role(  # type: ignore[arg-type]
+                    s, run, "validator"
+                )
+                or llm_cfg_obj
+            )
             endpoints = (
                 list(
                     s.exec(
@@ -534,9 +919,11 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 if run.collection_id
                 else []
             )
-            for obj in [run, coll, doc, llm_cfg_obj]:
-                if obj is not None:
+            detached: set[int] = set()
+            for obj in [run, coll, doc, llm_cfg_obj, validator_cfg_obj]:
+                if obj is not None and id(obj) not in detached:
                     s.expunge(obj)
+                    detached.add(id(obj))
 
         # ── Extract archive ────────────────────────────────────────────────────
         # Use a deterministic path under <data_dir>/sast_extract/<id>/ so a
@@ -549,20 +936,25 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         tmpdir = str(extract_root / str(sast_run_id))
         shutil.rmtree(tmpdir, ignore_errors=True)
         os.makedirs(tmpdir, exist_ok=True)
-        events_svc.emit(
+        _set_phase(
             sast_run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "sast_extract",
-                "status": "start",
-                "message": f"Extracting source archive: {archive_name}",
-            },
+            "scope",
+            "running",
+            f"Extracting and inventorying source archive: {archive_name}",
         )
         _safe_unzip(archive_path, tmpdir)
         root = Path(tmpdir).resolve()
+        coverage = _build_source_inventory(root)
+        source_file_count = len(coverage)
+        _persist_coverage(sast_run_id, coverage)
+        _set_phase(
+            sast_run_id,
+            "scope",
+            "complete",
+            f"Source scope ready: {source_file_count} regular file(s) inventoried.",
+            {"files_total": source_file_count},
+        )
 
-        # ── Build tool executor ────────────────────────────────────────────────
-        tool_executor = _make_tool_executor(sast_run_id, root, run.collection_id)
         initial_message = _build_initial_message(coll, endpoints, archive_name)
 
         # ── Configure LLM context tracking ────────────────────────────────────
@@ -588,8 +980,143 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         def _stop_check() -> bool:
             return sast_run_id in _sast_stop_requested
 
+        def _raise_if_stopped() -> None:
+            if _stop_check():
+                raise asyncio.CancelledError
+
+        validation_semaphore = asyncio.Semaphore(_SAST_VALIDATOR_MAX_CONCURRENT)
+        validation_scheduled: set[int] = set()
+        validation_failures: list[int] = []
+        validation_started = False
+
+        async def _validate_candidate(candidate_id: int) -> None:
+            async with validation_semaphore:
+                candidate = _candidate_for_id(sast_run_id, candidate_id)
+                if candidate is None:
+                    return
+                try:
+                    await llm_svc.thinking_agentic_loop(
+                        validator_cfg_obj,
+                        system_message=SAST_VALIDATION_PROMPT,
+                        initial_user_message=_candidate_validation_message(candidate),
+                        tool_executor=_make_review_executor(
+                            sast_run_id,
+                            root,
+                            coverage,
+                            "validation",
+                            collection_id=run.collection_id,
+                            assigned_candidate_id=candidate_id,
+                        ),
+                        emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
+                        stop_check=_stop_check,
+                        tools=SAST_VALIDATION_TOOLS,
+                    )
+                    _raise_if_stopped()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.exception(
+                        "SAST validator failed: sast_run_id=%s candidate_id=%s",
+                        sast_run_id,
+                        candidate_id,
+                    )
+                    candidate = _candidate_for_id(sast_run_id, candidate_id)
+                    if candidate is not None:
+                        if candidate.get("validation_status") == "pending":
+                            candidate.update(
+                                {
+                                    "validation_status": "inconclusive",
+                                    "validation_reasoning": f"Validator failed: {exc}",
+                                    "proof_gaps": [
+                                        *candidate.get("proof_gaps", []),
+                                        "Independent validator failed before closing this candidate.",
+                                    ],
+                                    "reportable": False,
+                                }
+                            )
+                            _sync_candidate_to_db(
+                                sast_run_id, run.collection_id, candidate
+                            )
+                            _persist_coverage(sast_run_id, coverage)
+                            _emit_validation_result(
+                                sast_run_id, candidate, error=str(exc)
+                            )
+                            validation_failures.append(candidate_id)
+                    return
+
+                candidate = _candidate_for_id(sast_run_id, candidate_id)
+                if candidate is None:
+                    return
+                if candidate.get("validation_status") == "pending":
+                    candidate.update(
+                        {
+                            "validation_status": "inconclusive",
+                            "validation_reasoning": "Validator returned no explicit verdict.",
+                            "proof_gaps": [
+                                *candidate.get("proof_gaps", []),
+                                "Independent validator did not close this candidate.",
+                            ],
+                            "reportable": False,
+                        }
+                    )
+                    _sync_candidate_to_db(sast_run_id, run.collection_id, candidate)
+                    _persist_coverage(sast_run_id, coverage)
+                    _emit_validation_result(sast_run_id, candidate)
+
+        def _schedule_candidate_validation(candidate: dict) -> None:
+            nonlocal validation_started
+            candidate_id = int(candidate["candidate_id"])
+            if candidate_id in validation_scheduled:
+                return
+            validation_scheduled.add(candidate_id)
+            if not validation_started:
+                validation_started = True
+                _set_phase(
+                    sast_run_id,
+                    "validation",
+                    "running",
+                    "Validating candidates as discovery completes.",
+                    {"candidates": 1, "completed": 0},
+                )
+                events_svc.emit(
+                    sast_run_id,
+                    {
+                        "type": "agent_status",
+                        "agent_id": "sast-validator",
+                        "role": "SAST Validator",
+                        "status": "active",
+                        "current_task": "Validating candidates as they arrive",
+                        "outcome": None,
+                        "_persist": True,
+                    },
+                )
+            validation_tasks.append(
+                asyncio.create_task(
+                    _validate_candidate(candidate_id),
+                    name=f"sast-validator-{sast_run_id}-{candidate_id}",
+                )
+            )
+
+        # ── Build tool executor ────────────────────────────────────────────────
+        tool_executor = _make_tool_executor(
+            sast_run_id,
+            root,
+            run.collection_id,
+            coverage,
+            on_candidate_ready=_schedule_candidate_validation,
+        )
+
+        current_phase = "discovery"
+        _set_phase(
+            sast_run_id,
+            "discovery",
+            "running",
+            "Tracing entry points and source-to-sink candidate paths.",
+            {"files_total": source_file_count},
+        )
+
         # ── Run the agentic exploration loop ──────────────────────────────────
-        summary = await llm_svc.thinking_agentic_loop(
+        discovery_summary = await llm_svc.thinking_agentic_loop(
             llm_cfg_obj,
             system_message=SAST_SYSTEM_PROMPT,
             initial_user_message=initial_message,
@@ -598,21 +1125,192 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             stop_check=_stop_check,
             tools=SAST_TOOLS,
         )
+        _raise_if_stopped()
 
-        # ── Leads already persisted inline during filter_lead calls. ─────────
-        # Count what's now in the DB for this run (source of truth).
-        leads_count = _count_persisted_leads(sast_run_id)
+        candidates = _candidates.get(sast_run_id, [])
+        candidate_count = len(candidates)
+        _persist_coverage(sast_run_id, coverage)
+        _set_phase(
+            sast_run_id,
+            "discovery",
+            "complete",
+            f"Discovery recorded {candidate_count} candidate(s).",
+            {"files_total": source_file_count, "candidates": candidate_count},
+        )
+
+        # ── Complete independent adversarial validation ───────────────────────
+        current_phase = "validation"
+        if not root.is_dir():
+            raise RuntimeError(
+                "SAST source workspace disappeared before independent validation."
+            )
+        for candidate in candidates:
+            if (
+                candidate.get("validation_status") == "pending"
+                and candidate.get("candidate_id") not in validation_scheduled
+            ):
+                candidate.update(
+                    {
+                        "validation_status": "inconclusive",
+                        "validation_reasoning": (
+                            "Discovery did not complete the candidate filter step."
+                        ),
+                        "proof_gaps": [
+                            *candidate.get("proof_gaps", []),
+                            "Candidate was not submitted to the independent validator.",
+                        ],
+                        "reportable": False,
+                    }
+                )
+                _sync_candidate_to_db(sast_run_id, run.collection_id, candidate)
+
+        if validation_tasks:
+            await asyncio.gather(*validation_tasks)
+            _raise_if_stopped()
+            validated_count = sum(c.get("reportable", False) for c in candidates)
+            validation_summary = (
+                f"Independent validation retained {validated_count} of "
+                f"{candidate_count} candidate(s)."
+            )
+            if validation_failures:
+                validation_summary += (
+                    f" {len(validation_failures)} validator task(s) failed "
+                    "and were marked inconclusive."
+                )
+        else:
+            validated_count = 0
+            validation_summary = "No candidates required validation."
+
+        _sync_candidates_to_db(sast_run_id, run.collection_id)
+        _persist_coverage(sast_run_id, coverage)
+        _set_phase(
+            sast_run_id,
+            "validation",
+            "complete",
+            f"Independent validation retained {validated_count} of {candidate_count} candidate(s).",
+            {
+                "candidates": candidate_count,
+                "reportable": validated_count,
+                "validator_tasks": len(validation_tasks),
+                "validator_failures": len(validation_failures),
+            },
+        )
         events_svc.emit(
             sast_run_id,
             {
-                "type": "scanner_phase",
-                "phase": "sast_complete",
+                "type": "agent_status",
+                "agent_id": "sast-validator",
+                "role": "SAST Validator",
                 "status": "complete",
-                "message": (
-                    f"SAST analysis complete. {leads_count} lead(s) recorded "
-                    f"({len(_candidates.get(sast_run_id, [])) - leads_count} discarded). {summary}"
-                ),
+                "current_task": "Validation complete",
+                "outcome": f"{validated_count} reportable candidate(s)",
+                "_persist": True,
             },
+        )
+
+        # ── Independent reachability / attack-path analysis ──────────────────
+        current_phase = "attack_path"
+        _set_phase(
+            sast_run_id,
+            "attack_path",
+            "running",
+            f"Tracing reachability for {validated_count} validated candidate(s).",
+            {"candidates": validated_count},
+        )
+        attack_summary = "No validated candidates required attack-path analysis."
+        if validated_count and not _stop_check():
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "sast-attack-path",
+                    "role": "Attack Path Analyst",
+                    "status": "active",
+                    "current_task": "Tracing external reachability and impact",
+                    "outcome": None,
+                    "_persist": True,
+                },
+            )
+            attack_summary = await llm_svc.thinking_agentic_loop(
+                llm_cfg_obj,
+                system_message=SAST_ATTACK_PATH_PROMPT,
+                initial_user_message=(
+                    "Record an attack path for every validated candidate:\n"
+                    + _candidate_brief(candidates, reportable_only=True)
+                ),
+                tool_executor=_make_review_executor(
+                    sast_run_id, root, coverage, "attack_path"
+                ),
+                emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
+                stop_check=_stop_check,
+                tools=SAST_ATTACK_PATH_TOOLS,
+            )
+            _raise_if_stopped()
+        for candidate in candidates:
+            if candidate.get("reportable") and not candidate.get("attack_path"):
+                candidate["attack_path"] = {
+                    "nodes": [],
+                    "impact": "",
+                    "severity_reasoning": "",
+                    "dynamic_test": candidate.get("suggested_endpoint", ""),
+                    "proof_gap": "Attack-path analyst returned no ordered path.",
+                }
+        _, leads_count = _sync_candidates_to_db(sast_run_id, run.collection_id)
+        _persist_coverage(sast_run_id, coverage)
+        _set_phase(
+            sast_run_id,
+            "attack_path",
+            "complete",
+            f"Attack-path analysis completed for {leads_count} reportable lead(s).",
+            {"reportable": leads_count, "dynamic_confirmation_required": True},
+        )
+        if validated_count:
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "sast-attack-path",
+                    "role": "Attack Path Analyst",
+                    "status": "complete",
+                    "current_task": "Attack-path analysis complete",
+                    "outcome": f"{leads_count} path(s) recorded",
+                    "_persist": True,
+                },
+            )
+
+        # ── Report ────────────────────────────────────────────────────────────
+        current_phase = "report"
+        _set_phase(
+            sast_run_id,
+            "report",
+            "running",
+            "Building the final candidate and coverage report.",
+        )
+        report = {
+            "candidates": candidate_count,
+            "reportable": leads_count,
+            "dismissed": sum(
+                c.get("validation_status") == "dismissed" for c in candidates
+            ),
+            "inconclusive": sum(
+                c.get("validation_status") == "inconclusive" for c in candidates
+            ),
+            "discovery_summary": discovery_summary,
+            "validation_summary": validation_summary,
+            "attack_path_summary": attack_summary,
+        }
+        with Session(get_engine()) as s:
+            persisted_run = s.get(SastRun, sast_run_id)
+            if persisted_run is not None:
+                persisted_run.report_json = json.dumps(report, ensure_ascii=False)
+                s.add(persisted_run)
+                s.commit()
+        _set_phase(
+            sast_run_id,
+            "report",
+            "complete",
+            f"SAST report complete: {leads_count} reportable lead(s) from {candidate_count} candidate(s).",
+            report,
         )
         events_svc.emit(
             sast_run_id,
@@ -639,27 +1337,28 @@ async def _sast_scan_task(sast_run_id: int) -> None:
 
     except asyncio.CancelledError:
         log.info("SAST scan cancelled: sast_run_id=%s", sast_run_id)
-        # Flush any write_lead candidates that never got a filter_lead call.
+        total = 0
         if run is not None:
-            flushed = _flush_unfiltered_candidates(sast_run_id, run.collection_id)
-            total = _count_persisted_leads(sast_run_id)
+            for candidate in _candidates.get(sast_run_id, []):
+                if candidate.get("validation_status") == "pending":
+                    candidate["validation_status"] = "inconclusive"
+                    candidate["validation_reasoning"] = (
+                        "Scan stopped before validation completed."
+                    )
+                    candidate["reportable"] = False
+            _, total = _sync_candidates_to_db(sast_run_id, run.collection_id)
             with Session(get_engine()) as s:
                 r = s.get(SastRun, sast_run_id)
                 if r is not None:
                     r.leads_count = total
                     s.add(r)
                     s.commit()
-        else:
-            flushed, total = 0, 0
         _update_sast_run_status(sast_run_id, "cancelled")
-        events_svc.emit(
+        _set_phase(
             sast_run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "sast_stopped",
-                "status": "warning",
-                "message": f"SAST scan stopped. {total} lead(s) preserved ({flushed} unscored).",
-            },
+            current_phase,
+            "cancelled",
+            f"SAST scan stopped. {total} reportable lead(s) preserved.",
         )
         events_svc.emit(
             sast_run_id,
@@ -675,11 +1374,16 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         )
     except Exception as exc:
         log.exception("SAST scan error: sast_run_id=%s", sast_run_id)
-        # Flush any candidates recorded before the failure.
         if run is not None:
             try:
-                flushed = _flush_unfiltered_candidates(sast_run_id, run.collection_id)
-                total = _count_persisted_leads(sast_run_id)
+                for candidate in _candidates.get(sast_run_id, []):
+                    if candidate.get("validation_status") == "pending":
+                        candidate["validation_status"] = "inconclusive"
+                        candidate["validation_reasoning"] = (
+                            "Scan failed before validation completed."
+                        )
+                        candidate["reportable"] = False
+                _, total = _sync_candidates_to_db(sast_run_id, run.collection_id)
                 with Session(get_engine()) as s:
                     r = s.get(SastRun, sast_run_id)
                     if r is not None:
@@ -689,14 +1393,11 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             except Exception:
                 pass
         _update_sast_run_status(sast_run_id, "failed", str(exc))
-        events_svc.emit(
+        _set_phase(
             sast_run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "sast_stopped",
-                "status": "error",
-                "message": f"SAST scan failed: {exc}",
-            },
+            current_phase,
+            "failed",
+            f"SAST scan failed: {exc}",
         )
         events_svc.emit(
             sast_run_id,
@@ -711,10 +1412,14 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             },
         )
     finally:
+        for task in validation_tasks:
+            if not task.done():
+                task.cancel()
+        if validation_tasks:
+            await asyncio.gather(*validation_tasks, return_exceptions=True)
         _sast_tasks.pop(sast_run_id, None)
         _sast_stop_requested.discard(sast_run_id)
         _candidates.pop(sast_run_id, None)
-        _persisted.pop(sast_run_id, None)
         if tmpdir and os.path.isdir(tmpdir):
             try:
                 shutil.rmtree(tmpdir, ignore_errors=True)
@@ -726,6 +1431,9 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             llm_svc.clear_run_context()
         except Exception:
             pass
+        owned_lease = _sast_workspace_leases.pop(sast_run_id, None)
+        if owned_lease is not None:
+            owned_lease.release()
 
 
 # ── Public lifecycle API ───────────────────────────────────────────────────────
@@ -777,39 +1485,67 @@ async def start_sast_scan(sast_run_id: int) -> None:
 
     log.info("start_sast_scan: sast_run_id=%s", sast_run_id)
 
-    # Tag every event this run emits as run_kind='sast'.  Run ids collide across
-    # web / api / sast, so the scope is authoritative.  This also overrides any
+    lease = try_acquire_sast_workspace_lease(Path(get_settings().data_dir), sast_run_id)
+    if lease is None:
+        raise RuntimeError(
+            f"SAST run {sast_run_id} is already active in another AESPA process."
+        )
+    _sast_workspace_leases[sast_run_id] = lease
+
+    # Tag every event this run emits as run_kind='sast'.  The scope is retained
+    # as the authoritative surface marker.  This also overrides any
     # surrounding caller scope, since the task created below snapshots this
     # authoritative 'sast' context.
-    with events_svc.run_kind_scope("sast"):
-        with Session(get_engine()) as s:
-            run = s.get(SastRun, sast_run_id)
-            if run is None:
-                raise ValueError(f"SastRun {sast_run_id} not found")
-            run.status = "scanning"
-            run.started_at = run.started_at or datetime.now(_UTC)
-            run.updated_at = datetime.now(_UTC)
-            s.add(run)
-            s.commit()
+    try:
+        with events_svc.run_kind_scope("sast"):
+            with Session(get_engine()) as s:
+                run = s.get(SastRun, sast_run_id)
+                if run is None:
+                    raise ValueError(f"SastRun {sast_run_id} not found")
+                run.status = "scanning"
+                run.started_at = datetime.now(_UTC)
+                run.completed_at = None
+                run.error_message = None
+                run.leads_count = 0
+                run.phase_state_json = json.dumps(_empty_phase_state())
+                run.coverage_json = None
+                run.report_json = None
+                run.updated_at = datetime.now(_UTC)
+                s.add(run)
+                for lead in s.exec(
+                    select(ScanLead)
+                    .where(ScanLead.producer_run_id == sast_run_id)
+                    .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+                ).all():
+                    lead.reportable = False
+                    lead.validation_status = "superseded"
+                    lead.status = "inconclusive"
+                    lead.updated_at = datetime.now(_UTC)
+                    s.add(lead)
+                s.commit()
 
-        events_svc.emit(
-            sast_run_id,
-            {
-                "type": "agent_status",
-                "agent_id": "sast-scanner",
-                "role": "SAST Analyst",
-                "status": "active",
-                "current_task": "SAST scan starting…",
-                "outcome": None,
-                "_persist": True,
-            },
-        )
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "sast-scanner",
+                    "role": "SAST Analyst",
+                    "status": "active",
+                    "current_task": "SAST scan starting…",
+                    "outcome": None,
+                    "_persist": True,
+                },
+            )
 
-        task = asyncio.create_task(
-            _sast_scan_task(sast_run_id),
-            name=f"sast-scan-{sast_run_id}",
-        )
-        _sast_tasks[sast_run_id] = task
+            task = asyncio.create_task(
+                _sast_scan_task(sast_run_id),
+                name=f"sast-scan-{sast_run_id}",
+            )
+            _sast_tasks[sast_run_id] = task
+    except Exception:
+        _sast_workspace_leases.pop(sast_run_id, None)
+        lease.release()
+        raise
 
 
 async def run_sast_scan(sast_run_id: int) -> None:
@@ -853,6 +1589,17 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
             )
         return True
     return False
+
+
+async def stop_sast_scan_and_wait(sast_run_id: int, timeout: float = 5.0) -> bool:
+    """Cancel a SAST scan and wait briefly for its cleanup handlers."""
+    task = _sast_tasks.get(sast_run_id)
+    if task is None or task.done():
+        return False
+    stopped = await stop_sast_scan(sast_run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return stopped
 
 
 def is_sast_scan_running(sast_run_id: int) -> bool:

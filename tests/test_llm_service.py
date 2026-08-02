@@ -2810,6 +2810,163 @@ def test_call_with_tools_preempts_tool_choice_for_reasoning_models(monkeypatch):
     assert "tool_choice" not in captured["completion"]
 
 
+def test_call_with_tools_normalizes_minimax_reasoning_fields(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            message = SimpleNamespace(
+                content="## Crawler Progress\n\nThe crawl is complete.",
+                reasoning_content="The user asked for AESPA run status, not a site test.",
+                reasoning_details=[
+                    {
+                        "type": "reasoning.text",
+                        "text": "The user asked for AESPA run status, not a site test.",
+                    }
+                ],
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message, finish_reason="stop")]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="test-key",
+        model="minimax/minimax-m3",
+        max_tokens=2048,
+    )
+
+    blocks, stop_reason, raw_content = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system",
+            messages=[{"role": "user", "content": "What is the crawl progress?"}],
+            tools=[],
+        )
+    )
+
+    assert captured["completion"]["extra_body"] == {"reasoning_split": True}
+    assert [block["type"] for block in blocks] == ["thinking", "text"]
+    assert "not a site test" in blocks[0]["thinking"]
+    assert "## Crawler Progress" in blocks[1]["text"]
+    assert stop_reason == "end_turn"
+    assert raw_content == blocks
+
+
+def test_call_with_tools_normalizes_inline_think_tags(monkeypatch):
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            message = SimpleNamespace(
+                content="<think>Private reasoning.</think>\n\nVisible answer."
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message, finish_reason="stop")]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):  # noqa: ARG002
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai_compatible",
+        api_key="test-key",
+        model="local-reasoning-model",
+        max_tokens=2048,
+    )
+
+    blocks, _, _ = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        )
+    )
+
+    assert [block["type"] for block in blocks] == ["thinking", "text"]
+    assert blocks[0]["thinking"] == "Private reasoning."
+    assert blocks[1]["text"] == "Visible answer."
+
+
+def test_call_with_tools_replays_minimax_reasoning_with_tool_history(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            message = SimpleNamespace(content="The tool result is complete.")
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message, finish_reason="stop")]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):  # noqa: ARG002
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="test-key",
+        model="minimax/minimax-m3",
+        max_tokens=2048,
+    )
+    messages = [
+        {"role": "user", "content": "Use the context tool."},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "I should inspect the run context first.",
+                },
+                {"type": "text", "text": "I will inspect the run context."},
+                {
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "context_tool",
+                    "input": {"tool": "run_status"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": '{"phase": "crawled"}',
+                }
+            ],
+        },
+    ]
+
+    asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system",
+            messages=messages,
+            tools=[],
+        )
+    )
+
+    assistant_request = captured["completion"]["messages"][2]
+    assert assistant_request["content"] == "I will inspect the run context."
+    assert assistant_request["reasoning_content"] == (
+        "I should inspect the run context first."
+    )
+    assert assistant_request["tool_calls"][0]["function"]["name"] == "context_tool"
+
+
 def test_call_with_tools_retries_without_tool_choice_on_error(monkeypatch):
     captured: dict[str, object] = {}
 

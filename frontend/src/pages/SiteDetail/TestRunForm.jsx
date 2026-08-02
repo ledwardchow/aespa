@@ -77,10 +77,10 @@ export function TestRunForm({
         <div className="field">
           <label>Crawler mode</label>
           <select className="select" value={form.crawler_mode} onChange={e => upd({ crawler_mode: e.target.value })}>
-            <option value="url">URL crawl — follow links and routes</option>
-            <option value="interactive">Interactive workflow crawl — explore safe choices, tabs, and dialogs</option>
+            <option value="url">URL crawl — each URL is a page</option>
+            <option value="interactive">Interactive SPA - major UI change is a page</option>
           </select>
-          <div className="field-hint">Interactive mode is experimental. It explores safe form choices and JavaScript navigation, blocks non-GET workflow requests, and skips destructive-looking controls.</div>
+          <div className="field-hint">Use "Interactive SPA" mode if your site doesn't change the URL when you navigate.</div>
         </div>
         <div className="alert" style={{
           marginTop: 12

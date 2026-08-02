@@ -30,6 +30,9 @@ Hard rules
 ──────────
 • A failed probe is NOT evidence of innocence. Network errors, rate-limiting, and \
 mis-specified probes are your problem to work around — keep trying with a different approach.
+• If the finding includes a static attack path from SAST, use it as a map for selecting \
+high-information disproof probes. Verify each reachability hop against live behavior; \
+source-level reachability is not runtime proof and must not determine the verdict by itself.
 • Never return false_positive based solely on failure to reproduce. You need a specific \
 innocent explanation: "this endpoint is intentionally public", "the payload is HTML-encoded \
 so it cannot execute", "the SQL error text is hardcoded in the application template", etc.

@@ -7,7 +7,6 @@ from urllib.parse import urlparse, urlsplit, urlunparse
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import inspect, text
 from sqlmodel import Session, func, select
 
 from aespa.db import get_session
@@ -17,7 +16,7 @@ from aespa.models import (
     PageCredentialView,
     PageLink,
     PageOwaspTest,
-    ScanCheckpoint,
+    SastRun,
     ScanFinding,
     ScanLog,
     ScannerSession,
@@ -51,8 +50,11 @@ from aespa.schemas import (
 )
 from aespa.services import crawler as crawler_svc
 from aespa.services import recon_summary as recon_summary_svc
+from aespa.services import run_cleanup
+from aespa.services import scanner as scanner_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services import settings as settings_service
+from aespa.services import validator as validator_svc
 from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["test_runs"])
@@ -150,6 +152,7 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
         "state_label",
         "state_kind",
         "replay_steps_json",
+        "replay_credential_id",
         "title",
         "page_text",
         "screenshot_b64",
@@ -227,18 +230,18 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
             ],
             "target_intelligence": [
                 {
-                    field: getattr(item, field)
-                    for field in (
-                        "kind",
-                        "key",
-                        "value",
-                        "url",
-                        "method",
-                        "source",
-                        "confidence",
-                        "evidence",
-                        "item_metadata",
-                    )
+                    "kind": item.kind,
+                    "key": item.key,
+                    "value": item.value,
+                    "url": item.url,
+                    "method": item.method,
+                    "source": item.source,
+                    "confidence": item.confidence,
+                    "evidence": item.evidence,
+                    "item_metadata": item.item_metadata,
+                    "page_id": item.page_id,
+                    "page_url": page_urls.get(item.page_id),
+                    "page_state_key": page_state_keys.get(item.page_id),
                 }
                 for item in session.exec(
                     select(TargetIntelItem).where(TargetIntelItem.test_run_id == run.id)
@@ -266,6 +269,9 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
                     "response_body": entry.response_body,
                     "duration_ms": entry.duration_ms,
                     "username": entry.username,
+                    "page_id": entry.page_id,
+                    "page_url": page_urls.get(entry.page_id),
+                    "page_state_key": page_state_keys.get(entry.page_id),
                 }
                 for entry in session.exec(
                     select(TrafficEntry).where(TrafficEntry.test_run_id == run.id)
@@ -669,101 +675,35 @@ def get_test_run(
 
 
 @router.delete("/api/test-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> None:
-    run = _get_run_or_404(session, run_id)
-    # Stop if running
-    if run.status == TestRunStatus.running:
-        crawler_svc.request_stop(run_id)
-    # Cascade-delete pages + links manually (SQLite FK off by default)
-    links = session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all()
-    for link in links:
-        session.delete(link)
-    views = session.exec(
-        select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)
-    ).all()
-    for v in views:
-        session.delete(v)
-    intel = session.exec(
-        select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
-    ).all()
-    for item in intel:
-        session.delete(item)
-    for entry in session.exec(
-        select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
-    ).all():
-        session.delete(entry)
-    pages = session.exec(
-        select(CrawledPage).where(CrawledPage.test_run_id == run_id)
-    ).all()
-    for p in pages:
-        session.delete(p)
-    for finding in session.exec(
-        select(ScanFinding).where(ScanFinding.test_run_id == run_id)
-    ).all():
-        session.delete(finding)
-    # SAST leads imported (copied) into this web run belong to it — remove them so
-    # they don't leak into a reused run id. Originals on the SAST run are untouched.
-    from aespa.models import ScanLead
+async def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> None:
+    _get_run_or_404(session, run_id)
+    # Stop every in-process worker before deleting rows.  The scan can remain
+    # active after the crawl has marked the run complete, so checking only the
+    # persisted status is not sufficient.
+    if crawler_svc.is_running(run_id):
+        await crawler_svc.stop_and_wait(run_id)
+    if scanner_svc.is_thinking_running(run_id):
+        await scanner_svc.stop_thinking_and_wait(run_id)
+    if validator_svc.is_validating(run_id):
+        await validator_svc.stop_and_wait(run_id)
+    from aespa.services import alice_tasks
 
-    for lead in session.exec(
-        select(ScanLead)
-        .where(ScanLead.imported_into_run_type == "web")
-        .where(ScanLead.imported_into_run_id == run_id)
-    ).all():
-        session.delete(lead)
-    for log_entry in session.exec(
-        select(ScanLog)
-        .where(ScanLog.test_run_id == run_id)
-        .where(ScanLog.run_kind == "web")
-    ).all():
-        session.delete(log_entry)
-    for ckpt in session.exec(
-        select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)
-    ).all():
-        session.delete(ckpt)
-    for ss in session.exec(
-        select(ScannerSession)
-        .where(ScannerSession.test_run_id == run_id)
-        .where(ScannerSession.run_kind == "web")
-    ).all():
-        session.delete(ss)
-    for cell in session.exec(
-        select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)
-    ).all():
-        session.delete(cell)
-    # Remove rows left by releases that included the retired task-queue feature.
-    table_names = set(inspect(session.get_bind()).get_table_names())
-    if "pentest_task" in table_names:
-        session.exec(
-            text("DELETE FROM pentest_task WHERE test_run_id = :run_id").bindparams(
-                run_id=run_id
-            )
-        )
-    if "pentest_hypothesis" in table_names:
-        session.exec(
-            text(
-                "DELETE FROM pentest_hypothesis WHERE test_run_id = :run_id"
-            ).bindparams(run_id=run_id)
-        )
-    for log_entry in session.exec(
-        select(AgentLog)
-        .where(AgentLog.test_run_id == run_id)
-        .where(AgentLog.run_kind == "web")
-    ).all():
-        session.delete(log_entry)
-    from aespa.models import AliceChatMessage, AliceChatSession
+    await alice_tasks.stop(run_id)
+    child_sast_ids = [
+        sast_run.id
+        for sast_run in session.exec(
+            select(SastRun)
+            .where(SastRun.triggered_by_run_type == "web")
+            .where(SastRun.triggered_by_run_id == run_id)
+        ).all()
+        if sast_run.id is not None
+    ]
+    if child_sast_ids:
+        from aespa.services import sast_scanner
 
-    for sess in session.exec(
-        select(AliceChatSession)
-        .where(AliceChatSession.test_run_id == run_id)
-        .where(AliceChatSession.run_kind == "web")
-    ).all():
-        for msg in session.exec(
-            select(AliceChatMessage).where(AliceChatMessage.session_id == sess.id)
-        ).all():
-            session.delete(msg)
-        session.delete(sess)
-    session.delete(run)
+        for sast_run_id in child_sast_ids:
+            await sast_scanner.stop_sast_scan_and_wait(sast_run_id)
+    run_cleanup.cascade_delete_web_run(session, run_id)
     session.commit()
 
 
@@ -891,6 +831,11 @@ def update_test_run(
         )
     run.max_depth = payload.max_depth
     run.max_pages = payload.max_pages
+    run.llm_max_concurrency = (
+        payload.llm_max_concurrency
+        if payload.llm_max_concurrency and payload.llm_max_concurrency > 0
+        else None
+    )
     if payload.crawler_mode is not None:
         run.crawler_mode = payload.crawler_mode
     if payload.llm_config_id is not None:
@@ -1068,6 +1013,7 @@ async def import_test_run_crawl(
         "state_label",
         "state_kind",
         "replay_steps_json",
+        "replay_credential_id",
         "title",
         "page_text",
         "screenshot_b64",
@@ -1172,6 +1118,9 @@ async def import_test_run_crawl(
         for item in crawl.get("target_intelligence", []):
             if not isinstance(item, dict) or not isinstance(item.get("kind"), str):
                 continue
+            intel_page = pages_by_identity.get(
+                item.get("page_state_key")
+            ) or pages_by_url.get(item.get("page_url"))
             session.add(
                 TargetIntelItem(
                     test_run_id=run_id,
@@ -1189,6 +1138,7 @@ async def import_test_run_crawl(
                             "item_metadata",
                         )
                     },
+                    page_id=intel_page.id if intel_page else None,
                 )
             )
         for item in crawl.get("traffic", []):
@@ -1216,6 +1166,18 @@ async def import_test_run_crawl(
                             "username",
                         )
                     },
+                    page_id=(
+                        (
+                            pages_by_identity.get(item.get("page_state_key"))
+                            or pages_by_url.get(item.get("page_url"))
+                        ).id
+                        if (
+                            pages_by_identity.get(item.get("page_state_key"))
+                            or pages_by_url.get(item.get("page_url"))
+                        )
+                        else None
+                    ),
+                    session_label=item.get("session_label"),
                 )
             )
         for item in crawl.get("scanner_sessions", []):
@@ -1399,7 +1361,79 @@ def get_page(
     page = session.get(CrawledPage, page_id)
     if page is None or page.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Page not found")
-    return CrawledPageDetail.model_validate(page)
+    detail = CrawledPageDetail.model_validate(page)
+    try:
+        replay = json.loads(page.replay_steps_json or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        replay = []
+    if isinstance(replay, dict):
+        root_url = str(replay.get("root_url") or page.url)
+        steps = replay.get("steps") or []
+    else:
+        root_url = page.url
+        steps = replay if isinstance(replay, list) else []
+    if steps:
+        detail.browser_replay = {
+            "url": root_url,
+            "steps": [{"op": "goto", "url": root_url}]
+            + [
+                {
+                    key: value
+                    for key, value in {
+                        "op": step.get("kind") or step.get("op") or "click",
+                        "selector": step.get("selector"),
+                        "testid": step.get("testid"),
+                        "role": step.get("role"),
+                        "name": step.get("name"),
+                        "value": step.get("value"),
+                    }.items()
+                    if value not in (None, "")
+                }
+                for step in steps
+                if isinstance(step, dict)
+            ],
+        }
+    traffic_rows = session.exec(
+        select(TrafficEntry)
+        .where(TrafficEntry.test_run_id == run_id)
+        .where(TrafficEntry.page_id == page_id)
+        .order_by(TrafficEntry.id.desc())
+        .limit(100)
+    ).all()
+    detail.traffic = [
+        {
+            "id": row.id,
+            "source": row.source,
+            "method": row.method,
+            "url": row.url,
+            "status": row.status,
+            "duration_ms": row.duration_ms,
+            "username": row.username,
+            "session_label": row.session_label,
+        }
+        for row in traffic_rows
+    ]
+    intel_rows = session.exec(
+        select(TargetIntelItem)
+        .where(TargetIntelItem.test_run_id == run_id)
+        .where(TargetIntelItem.page_id == page_id)
+        .where(TargetIntelItem.kind == "object_reference")
+        .order_by(TargetIntelItem.id.desc())
+        .limit(100)
+    ).all()
+    detail.object_references = [
+        {
+            "id": row.id,
+            "key": row.key,
+            "value": row.value,
+            "url": row.url,
+            "method": row.method,
+            "confidence": row.confidence,
+            "metadata": _redacted_metadata(_json_dict(row.item_metadata)),
+        }
+        for row in intel_rows
+    ]
+    return detail
 
 
 @router.get(
@@ -1470,10 +1504,18 @@ def _infer_parent_url_candidates(url_str: str) -> list[str]:
 
 @router.get("/api/test-runs/{run_id}/graph", response_model=GraphData)
 def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData:
-    _get_run_or_404(session, run_id)
+    run = _get_run_or_404(session, run_id)
     pages = session.exec(
         select(CrawledPage).where(CrawledPage.test_run_id == run_id)
     ).all()
+    pages = [
+        page
+        for page in pages
+        if not (
+            page.status == "failed"
+            and (page.error_message or "").strip().upper() == "HTTP 404"
+        )
+    ]
     links = session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all()
     anonymously_accessible_page_ids = set(
         session.exec(
@@ -1482,6 +1524,26 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
             .where(PageCredentialView.credential_id.is_(None))
         ).all()
     )
+    run_finished = run.status in {
+        TestRunStatus.complete,
+        TestRunStatus.failed,
+        TestRunStatus.stopped,
+    }
+
+    def _analysis_status(page: CrawledPage) -> str:
+        if page.status == "redirect":
+            return "skipped"
+        if page.llm_context:
+            return "complete"
+        # The crawler waits for all page-analysis tasks before marking a run
+        # complete. Empty shell pages in a finished run were therefore
+        # skipped (usually because authentication was required), not left in
+        # an LLM queue.
+        if run_finished and not page.title and not page.page_text:
+            return "skipped"
+        if run_finished:
+            return "complete"
+        return "pending"
 
     nodes = [
         GraphNode(
@@ -1492,11 +1554,15 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
             title=p.title,
             depth=p.depth,
             status=p.status,
+            error_message=p.error_message,
             context=p.llm_context,
+            analysis_status=_analysis_status(p),
             in_scope=p.in_scope,
             scan_status=p.scan_status,
             accessible_by=json.loads(p.accessible_by or "[]"),
             accessible_anonymously=p.id in anonymously_accessible_page_ids,
+            replay_available=bool(p.replay_steps_json and p.replay_steps_json != "[]"),
+            replay_credential_id=p.replay_credential_id,
         )
         for p in pages
     ]
@@ -1566,6 +1632,7 @@ def clear_target_intelligence(
 def get_target_intelligence(
     run_id: int,
     kind: str | None = None,
+    page_id: int | None = None,
     limit: int = 500,
     session: Session = Depends(get_session),
 ) -> TargetIntelSummary:
@@ -1581,6 +1648,8 @@ def get_target_intelligence(
     query = select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
     if kind:
         query = query.where(TargetIntelItem.kind == kind)
+    if page_id is not None:
+        query = query.where(TargetIntelItem.page_id == page_id)
     items = session.exec(
         query.order_by(
             TargetIntelItem.kind, TargetIntelItem.discovered_at.desc()

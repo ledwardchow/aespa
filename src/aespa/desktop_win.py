@@ -55,15 +55,21 @@ def _wait_port(port: int, timeout: float = 20.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _server_error is not None:
-            raise RuntimeError(f"Backend server failed to start: {_server_error}") from _server_error
+            raise RuntimeError(
+                f"Backend server failed to start: {_server_error}"
+            ) from _server_error
         try:
             with socket.create_connection(("127.0.0.1", port), 0.25):
                 return
         except OSError:
             time.sleep(0.1)
     if _server_error is not None:
-        raise RuntimeError(f"Backend server failed to start: {_server_error}") from _server_error
-    raise TimeoutError(f"Backend server failed to bind to port {port} within {timeout}s")
+        raise RuntimeError(
+            f"Backend server failed to start: {_server_error}"
+        ) from _server_error
+    raise TimeoutError(
+        f"Backend server failed to bind to port {port} within {timeout}s"
+    )
 
 
 def _on_closing() -> bool:

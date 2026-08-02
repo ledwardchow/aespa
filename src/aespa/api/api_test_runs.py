@@ -1,6 +1,7 @@
 """Slice 5: /api/api-test-runs/{id}/* — standalone + alias routes for ApiTestRun.
 
-The ``ApiTestRun`` uses the same integer id space as ``TestRun``.
+The ``ApiTestRun`` uses the global run id space shared with ``TestRun`` and
+``SastRun``.
 Alice, events, and agent-log endpoints already key on ``test_run_id`` in
 ``AliceChatSession``, ``AgentLog``, etc.  We add thin alias routes here so the
 frontend can call the same alice/events/agent-log URLs against an ApiTestRun id
@@ -239,7 +240,7 @@ def stream_events(
     from aespa.services import events as events_svc
 
     return StreamingResponse(
-        events_svc.stream(run_id),
+        events_svc.stream(run_id, run_kind="api"),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -253,14 +254,34 @@ def stream_events(
 
 
 @router.get("/{run_id}/agent-log")
-def get_agent_log(run_id: int, session: Session = Depends(get_session)) -> list:
+def get_agent_log(
+    run_id: int,
+    limit: int | None = Query(default=None, ge=1, le=1001),
+    before_id: int | None = Query(default=None, ge=1),
+    session: Session = Depends(get_session),
+) -> list:
+    """Return the API agent log, optionally one page at a time.
+
+    The unpaged form remains available for existing consumers. When ``limit``
+    is provided, the newest page is returned by default; ``before_id`` loads
+    the page immediately before the first row currently displayed. Pages are
+    returned in chronological order so callers can prepend older rows.
+    """
     _get_run_or_404(session, run_id)
-    rows = session.exec(
+    query = (
         select(AgentLog)
         .where(AgentLog.test_run_id == run_id)
         .where(AgentLog.run_kind == "api")
-        .order_by(AgentLog.id)
-    ).all()
+    )
+    if limit is None and before_id is None:
+        rows = session.exec(query.order_by(AgentLog.id)).all()
+    else:
+        if before_id is not None:
+            query = query.where(AgentLog.id < before_id)
+        rows = list(
+            session.exec(query.order_by(AgentLog.id.desc()).limit(limit or 1000)).all()
+        )
+        rows.reverse()
     return [
         {
             "id": r.id,

@@ -284,6 +284,16 @@ Singleton row (id = 1). Routes scanner and/or LLM traffic through an upstream HT
 | `proxy_scanner` | `false` | Route scanner HTTP and Playwright traffic through proxy |
 | `proxy_llm` | `false` | Route LLM API calls through proxy |
 
+### Browser Debug Config (`BrowserDebugConfig` model)
+
+Singleton row (id = 1). Controls which Chromium build Playwright uses and
+whether normal browser sessions are visible on the machine running AESPA.
+
+| Field | Default | Description |
+|---|---|---|
+| `browser_engine` | `playwright_chromium` | Use the regular bundled Playwright Chromium build, or select `system_chrome` to use installed stable Google Chrome |
+| `browser_visible` | `false` | Run normal crawl, scan, and ALICE browser sessions with a visible window instead of headless mode; on macOS, AESPA restores the user's previous app after opening an automation page |
+
 ### Specialist Agent Config (`SpecialistAgentConfig` model)
 
 Singleton row (id = 1). Controls when and how Specialist Agents are dispatched during a dynamic scan.
@@ -384,8 +394,8 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `ApiCredential` | A parsed credential row tied to a collection (scheme, label, auth endpoint) |
 | `ApiTestRun` | A single API scan session; linked to an `ApiCollection`; carries `coverage_mode` and `sast_run_id` |
 | `ApiEndpointTest` | One cell in the OWASP API Top-10 coverage matrix (endpoint × category, status, finding IDs) |
-| `SastRun` | A standalone static-analysis scan over a source ZIP; tracks `leads_count` and carries its archive via `source_archive_path` / `source_filename`. Legacy collection linkage fields remain nullable for compatibility. |
-| `ScanLead` | A high-confidence SAST lead. Keyed to its producing `SastRun` (`producer_run_id`). An *original* lead leaves `imported_into_run_id` NULL; a *copy* imported into a dynamic run sets `imported_into_run_type`/`imported_into_run_id` to that run. Web and API scans both consume independent run-owned copies. |
+| `SastRun` | A standalone static-analysis scan over a source ZIP; tracks reportable `leads_count`, persisted semantic phase state, deterministic file coverage receipts, and the final report summary. It carries its archive via `source_archive_path` / `source_filename`. |
+| `ScanLead` | A persisted SAST candidate with a stable fingerprint, structured source/control/sink/counterevidence/proof-gap evidence, an independent validation verdict, attack-path data, and a `reportable` decision. Only reportable originals may be copied into dynamic runs. |
 
 ### `CrawledPage` flags (set by LLM during crawl)
 
@@ -442,6 +452,19 @@ start_crawl(run_id)
        3. Extract TargetIntelItems (endpoints, forms, inputs, IDs, scripts, JWT hints)
        4. Update TestRun status → crawled
 ```
+
+The run view reports the crawl in plain-language stages. Each page event includes
+the credential in use, the phase number, the URL, and the current step: opening
+the page, checking access, analyzing content and links, or moving to the next
+URL. Navigation errors and login-blocked pages are recorded too.
+
+For authenticated sites with multiple credentials, an optional **cross-user
+access check** can follow the crawl. AESPA loads known pages again for each
+credential to detect authorization differences. This is disabled by default and
+can be enabled with the Crawler setting **Enable access reconciliation**. When
+enabled, the UI labels this as access verification, shows progress such as
+`Access check 12/168`, and keeps each page check in the activity log. This is
+verification of known pages, not new page discovery.
 
 The unauthenticated phase is always run first so the crawler maps the public attack surface before logging in. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
 
@@ -657,6 +680,40 @@ never reject `done` indefinitely.
 | `tool` | Call a read-only context tool (see below) |
 | `done` | Finish the scan with a summary |
 
+### WAF detection and request transport
+
+WAF detection is passive. The traffic logger looks at normal response headers,
+cookies, and block pages, then records the provider and a provider-specific
+strategy in the recon summary.
+
+The browser strategy uses JavaScript running in a real Playwright page. This is
+different from Playwright's `APIRequestContext`: that API shares cookies with a
+browser context, but it does not run the page's challenge scripts. The scanner
+also keeps WAF clearance cookies when it swaps between the primary, anonymous,
+and named sessions, so a named session does not silently fall back to raw HTTP.
+
+Browser contexts do not set a stale, hand-written user-agent. Debug settings
+choose the regular bundled Playwright Chromium build by default, or the
+installed stable Chrome channel when `system_chrome` is selected. If selected
+Chrome is unavailable, AESPA falls back to Playwright Chromium. The context
+user-agent is derived from the live browser version and removes only the
+`HeadlessChrome` product token; Playwright still generates the other Client
+Hints from the engine that is actually running. Browser automation signals
+such as `navigator.webdriver` are not changed. The visible-browser setting is
+off by default; guided login remains visible when it requires user interaction.
+
+| Detected provider | Scanner strategy |
+|---|---|
+| Akamai Bot Manager | Real page requests, retain `_abck`/`bm_sz`/`ak_bmsc`, and use normal pacing. Persistent blocks remain evidence. |
+| Cloudflare | Real page requests, let JavaScript or a managed challenge run, and retain `cf_clearance`/`__cf_bm`. Interactive CAPTCHA is reported as a blocker. |
+| Imperva / Incapsula | Real page requests, let the browser challenge settle, and retain the provider's challenge cookies. |
+| AWS WAF | Use the page to acquire a Challenge token when `x-amzn-waf-action` indicates one. A normal Block action is still a valid WAF block; CAPTCHA needs an operator. |
+| F5 BIG-IP ASM | Use the page only for a client-integrity challenge. A signature block is not changed into a pass by browser routing. |
+| Sucuri CloudProxy | Keep the original request on direct HTTP with configured pacing. It is a reverse-proxy/IPS block, so browser routing is not assumed to help. |
+
+The scanner follows same-scope redirects one hop at a time. It does not retry a
+blocked request with payload mutations just to obtain a successful status.
+
 ### Context tools (read-only reconnaissance)
 
 These use an adaptive checkpoint. After 3 consecutive context calls, the LLM should
@@ -825,6 +882,10 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 When both the provider token and username are blank, the GitHub Copilot SDK reads Copilot CLI's real home directory and uses the account selected there. A configured username resolves that account's stored Copilot CLI credential, while an explicit provider token takes precedence over both choices. Named-account and explicit-token sessions get a temporary Copilot home. Every path keeps scans isolated: they use a temporary working directory, remove Copilot's repository environment from the prompt, disable instructions, skills, memory, hooks, embeddings, telemetry, host Git operations, and session storage, and expose only the custom tools AESPA explicitly registers. One Copilot session stays alive for the full AESPA agent conversation, allowing the provider to reuse conversation state and prompt caches. When Copilot requests a tool, its SDK handler pauses while AESPA applies the existing scope checks, execution monitoring, checkpointing, and tool-result limits. AESPA returns the real result to that handler and the same Copilot session continues.
 
 Copilot usage events arrive through the SDK's background JSON-RPC callback, so each callback is bound explicitly to the AESPA run that created the session. AESPA records AI credits, model-call counts, token/cache details, and legacy premium requests when GitHub supplies them. The latest available Copilot allowance percentage and reset date are also included in the run telemetry. AESPA waits briefly for the ephemeral usage event before returning or closing a model turn so final-call usage is not lost.
+
+### Independent monthly statistics
+
+In addition to the run-level `token_usage_json`, `services/statistics.py` records every provider usage event in an independent monthly ledger. Rows are grouped by the local calendar month, canonical transport provider, and exact model string, while also retaining the endpoint base URL captured at call time. This means deleting a scan or changing a model setting cannot remove historical usage. An OpenRouter endpoint configured through the OpenAI-compatible adapter is labelled as OpenRouter. Input is normalized to mean uncached input; provider adapters subtract cached subsets only for APIs whose input counter includes them. The Statistics page can download the LiteLLM model price map, edit monthly prices, and estimate token and native-credit costs. Statistics reset deletes usage rows but keeps downloaded and manual price data.
 
 Factory Droid uses the installed CLI's encrypted login state; AESPA never reads or stores its credential. The settings endpoint opens a short SDK session and uses `initialize_session().available_models` as the account-specific model catalog, including custom models. Each active AESPA message list owns an isolated persistent Droid session. All sessions use the same empty `aespa-droid-workspace` temporary directory so Factory groups them under one UI project instead of creating a project per loop. The child receives only an environment allowlist needed for CLI authentication, networking, and locale; built-in skills and non-AESPA tools are denied.
 
@@ -997,6 +1058,10 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
 | `/api/sast-runs/{id}/leads` | `sast_runs.py` | List the *original* `ScanLead` rows for a SAST run (imported copies excluded) |
 | `/api/sast-runs/{id}/agent-log` | `sast_runs.py` | SAST agent activity log |
+| `/api/statistics/llm` | `statistics.py` | Monthly, provider/model-grouped LLM token and native-credit usage |
+| `/api/statistics/llm/prices/refresh` | `statistics.py` | Download the latest LiteLLM price map |
+| `/api/statistics/llm/prices` | `statistics.py` | Save a monthly or future price override |
+| `/api/statistics/llm` (`DELETE`) | `statistics.py` | Reset all usage months while retaining price data |
 
 ---
 
@@ -1009,6 +1074,8 @@ The web UI is a **single-page application** served from `src/aespa/web/`. It com
 ### Telemetry rendering (`TokenUsageBar`)
 
 Detail views for Web runs, API runs, and SAST runs embed the `TokenUsageBar` component. For API-key providers it renders per-model input, output, and prompt-cache tokens. Factory Droid adds Droid credits and model-call counts while retaining token/cache details. GitHub Copilot adds AI credits or legacy premium requests, model-call counts, and available allowance information. The data is persisted in `token_usage_json`.
+
+The sidebar's **Stats → Usage** page is independent of those detail views. It shows one month at a time, with totals and a provider/model table for uncached input, output, cache reads, cache writes, native credits, and estimated USD cost. It uses the operating system's local month boundary and asks for confirmation before clearing all usage months.
 
 ### WebSocket event types (emitted by `services/events.py`)
 
@@ -1088,14 +1155,15 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 - **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed; all schema changes are applied at startup via `db.py`
 - **Auth session vault** — `ScannerSession` rows in the DB store serialised cookies/tokens; `scanner_sessions.py` manages load/save/invalidation
 
-### Run-id collisions & `run_kind`
+### Run identities and `run_kind`
 
-`TestRun` (web), `ApiTestRun`, and `SastRun` draw ids from **independent autoincrement sequences that collide in the same integer space** — run #5 can exist as all three at once. Tables shared across run kinds must therefore be disambiguated, or rows leak between unrelated runs:
+`TestRun` (web), `ApiTestRun`, and `SastRun` now share one global id sequence through the `run_identity` table. A run id therefore identifies one run across the whole database; a new run never reuses a deleted id.
 
-- **Shared tables carry a `run_kind` column** (`'web'` / `'api'` / `'sast'`): `agent_log`, `scan_log`, `scanner_session`, `alice_chat_session`. Every query filters on it.
-- **Findings use separate FK columns**: `ScanFinding.test_run_id` (web) vs `api_test_run_id` (API), both nullable. `ScanLead` copies key on `imported_into_run_id` for the same reason.
-- **Event emission is scoped, not id-guessed**: `events.run_kind_scope("web"|"api"|"sast")` is the *sole* authoritative source of an event's kind. It is a context variable that `asyncio.create_task` snapshots, so every event a scan emits — directly or from any child task — inherits the right kind even when ids collide. Every background-task entry point that can emit `agent_status`/`scanner_phase` (the web/api/sast scanners, the crawler, the validator, ALICE) MUST open a scope; an emit that escapes every scope deterministically defaults to `'web'`. There is deliberately no per-id fallback registry — keying on a colliding run id is exactly what leaked events into the wrong run's Agents tab (issue #169 / the SAST Agents leak).
-- **Deletion is scoped per kind** (`services/run_cleanup.py` + the inline web cascade in `api/test_runs.py`) so deleting a run removes exactly its own rows and nothing leaks into a later run that reuses the freed id. SQLite reuses the max id after the highest row is deleted, which is what makes this collision practical, not theoretical.
+- **Run tables use global primary keys**: inserts allocate an id in `run_identity`, then use that id in the type-specific run table. Child run columns reference `run_identity.id` with `ON DELETE CASCADE`.
+- **`run_kind` is still stored where it describes event or workflow data** (`agent_log`, `scan_log`, `scanner_session`, `alice_chat_session`, and the workprogram tables). It remains useful for filtering and compatibility, but it is no longer needed to distinguish colliding integer ids.
+- **Findings and traffic keep explicit owners**: web rows use `test_run_id`, API rows use `api_test_run_id`, and API traffic leaves `test_run_id` NULL. `ScanLead` keeps its type-plus-id provenance fields because those links are intentionally soft.
+- **Existing installations migrate at startup**: the global identity revision creates the identity table, remaps old parent and child ids, and removes rows whose owner cannot be determined. Rows marked only with the old default web owner are dropped when both a web and API/SAST run used the same legacy id.
+- **Deletion is explicit and database-backed**: `services/run_cleanup.py` removes run-owned application rows and then deletes the identity anchor. The foreign keys cascade any remaining run-owned rows, so deleting a run cannot leave data behind for a later run.
 
 ---
 
@@ -1166,7 +1234,7 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 1. Load run/site config; verify scope of the user's instruction
 2. Emit [A.L.I.C.E. Initializing] + scope-check status chunks
 3. Convert chat history → Anthropic messages format
-4. Loop (max ALICE_MAX_STEPS = 40):
+4. Loop (max ALICE_MAX_STEPS = 300):
      a. Emit [Step N] Calling LLM... thinking chunk
      b. Call LLM with tools (ALICE tool set — see below)
      c. Stream thinking blocks → thinking_chunk SSE events
@@ -1183,15 +1251,27 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 | Tool | Description |
 |---|---|
 | `http_request` | Issue arbitrary HTTP requests; scope-checked; traffic logged |
-| `browser` | Simple page fetch via httpx with browser-like headers |
-| `context_tool` | Read-only access to crawl data (site map, page details, traffic) |
+| `browser` | Drive a live Playwright browser. `page_id` and `replay=true` restore a saved crawler state and preserve page/session traffic provenance |
+| `context_tool` | Read-only access to crawl data, request history, traffic, coverage gaps, response comparisons, and bounded mutation suggestions |
+| `reauthenticate` | Re-run the configured web login flow, including supported TOTP or email-OTP steps, and refresh the primary session |
+| `skip_coverage` | In web Enforce mode, record a justified inapplicable or technically blocked coverage obligation |
 | `write_finding` | Persist a confirmed vulnerability directly to `ScanFinding`; **skips `normalize_finding_titles`** to prevent false deduplication |
+| `remove_finding` | Remove a finding from the active web or API run when it was written in error or is a confirmed duplicate |
+| `update_lead` | Record the outcome of investigating an imported SAST lead against the active run kind |
 | `forge_jwt` | Sign an HS256 JWT from a discovered secret; stores result in session vault |
 | `decode_jwt` | Decode a JWT's header and payload |
 | `credential_check` | Test a login URL with a list of candidate credential pairs |
 | `register_account` | Create a test account and store the resulting session |
 | `agent_dispatch` | Dispatch a Specialist Agent (see below) |
 | `done` | End the turn with a summary |
+
+On API runs, ALICE keeps the API inventory commands (`collection_info`,
+`endpoint_list`, `endpoint_detail`, `finding_list`, `lead_list`,
+`report_finding`, `coverage_matrix`, and `set_coverage`) and adds the safe shared
+analysis commands (`history_search`, `traffic_search`, `compare_responses`,
+`mutate_request`, and `extract_entities`). API traffic is filtered by
+`api_test_run_id`; it is never read through the web-only `TestRun` owner. API
+ALICE does not get `reauthenticate`, `skip_coverage`, or Specialist dispatch.
 
 #### `write_finding` deduplication
 
@@ -1311,7 +1391,8 @@ _api_scan_task(api_run_id)
             • get_api_test_lead_tools supplies only API-aware top-level tools; browser,
               remove_finding, and agent_dispatch are withheld
             • _api_context_tool_fn routes endpoint_list / endpoint_detail / collection_info / finding_list
-              to API-specific handlers and a strict safe subset to the shared handler; all other
+              to API-specific handlers and history_search / traffic_search / compare_responses /
+              mutate_request / extract_entities to the shared safe analysis handler; all other
               commands are rejected, including web-crawl target_inventory / search_assets
             • _api_check_scope is applied to every target request and redirect hop
             • _make_post_probe_fn updates the coverage matrix cell for each probe (endpoint, category)
@@ -1328,10 +1409,12 @@ _api_scan_task(api_run_id)
 ### ALICE on API runs
 
 API test runs expose the same `/alice/*` endpoints as web test runs. API ALICE routes
-`collection_info`, `endpoint_list`, and `endpoint_detail` to API-specific handlers and
-persists captured sessions under `run_kind="api"`. Specialist dispatch is withheld in API
-mode until the Specialist executor is fully API-aware. The API system prompt includes
-OWASP API Top-10 category descriptions and API context tool documentation.
+`collection_info`, `endpoint_list`, `endpoint_detail`, `finding_list`, and `lead_list` to
+API-specific handlers, and routes safe request-analysis commands through the API traffic
+store. It persists captured sessions under `run_kind="api"`. Specialist dispatch is withheld
+in API mode until the Specialist executor is fully API-aware. The API system prompt includes
+OWASP API Top-10 category descriptions and both API inventory and shared context tool
+documentation.
 
 ---
 
@@ -1349,16 +1432,20 @@ start_sast_scan(sast_run_id)
        1. Load SastRun and resolve its standalone `source_archive_path`.
        2. _safe_unzip - extract archive into a deterministic per-run
           directory at `<data_dir>/sast_extract/<id>/` (path-jailed:
-          entries that would escape the root are rejected). A startup
-          sweep (db._cleanup_orphaned_sast_extractions) reconciles any
-          dirs leaked by a previous hard crash.
-       3. _build_initial_message — construct LLM opening context; the agent
-          discovers entry points itself with the file tools
-       4. _make_tool_executor — build the tool executor with path-jailed file tools
-       5. llm.thinking_agentic_loop with read-only file tools + write_lead / filter_lead / done
-       6. _flush_unfiltered_candidates — persist any remaining candidates
-          at scan end regardless of filter score
-       7. Cleanup temp directory
+          entries that would escape the root are rejected). The worker holds
+          a cross-process workspace lease while the directory is live. A
+          startup sweep (`db._cleanup_orphaned_sast_extractions`) skips leased
+          workspaces and reconciles only dirs leaked by a previous hard crash.
+       3. Build and persist a deterministic file/language inventory.
+       4. Discovery loop — trace sources to sinks and record candidate hypotheses.
+       5. Independent validation loop — a separate adversarial prompt/model role
+          re-reads evidence, records controls/counterevidence/proof gaps, and
+          returns confirmed/dismissed/inconclusive verdicts.
+       6. Attack-path loop — for confirmed candidates, record ordered external
+          reachability, impact, severity reasoning, and a dynamic-test objective.
+       7. Upsert every candidate by stable fingerprint; only independently
+          confirmed candidates above the confidence threshold are reportable.
+       8. Persist final report and file-review coverage; cleanup temp directory.
 ```
 
 ### File tools (all path-jailed to the extraction root)
@@ -1373,16 +1460,15 @@ start_sast_scan(sast_run_id)
 ### Lead lifecycle
 
 ```
-Agent calls write_lead(title, description, category, severity, confidence, location, evidence)
-  └─ Appended to _candidates[sast_run_id] in memory
-
-Agent calls filter_lead(candidate_id, confidence_override?)
-  └─ If confidence ≥ CONFIDENCE_THRESHOLD (0.7):
-       create_lead() → ScanLead row persisted, status="open"
-  └─ If below threshold: candidate discarded
-
-At scan end:
-  _flush_unfiltered_candidates() — any unfiltered candidate above threshold is persisted
+Discovery calls write_lead(...) and filter_lead(...)
+  └─ Candidate remains a hypothesis regardless of discovery self-score
+Independent validator calls validate_candidate(...)
+  ├─ confirmed + confidence ≥ 0.7 → reportable
+  ├─ dismissed → retained with counterevidence, not reportable
+  └─ inconclusive → retained with explicit proof gaps, not reportable
+Attack-path analyst calls record_attack_path(...) for reportable candidates
+  └─ Ordered nodes, impact, severity reasoning, and dynamic-test objective persisted
+Final sync upserts candidates by stable fingerprint, preventing rerun duplicates
 ```
 
 ### ScanLead entity (`services/scan_leads.py`)
@@ -1399,6 +1485,12 @@ At scan end:
 | `confidence` | 0.0–1.0; only leads ≥ 0.7 (`CONFIDENCE_THRESHOLD`) are persisted |
 | `location` | Source file path and line reference |
 | `evidence` | Code snippet or supporting text |
+| `fingerprint` | Stable category/title/location hash used to upsert reruns |
+| `source_trace_json` / `control_trace_json` / `sink_trace_json` | Structured source-to-sink evidence |
+| `counterevidence_json` / `proof_gaps_json` | Adversarial evidence and unresolved proof obligations |
+| `validation_status` / `validation_reasoning` | Independent confirmed/dismissed/inconclusive verdict |
+| `attack_path_json` | Ordered reachability, impact, severity reasoning, and dynamic-test objective |
+| `reportable` | Whether this original may be handed to a dynamic run |
 | `status` | `open` · `investigating` · `confirmed` · `dismissed` · `inconclusive` |
 | `investigated_by_run_type` / `investigated_by_run_id` | The dynamic run that recorded the outcome via `update_lead` |
 | `linked_finding_id` | Set when a confirmed lead is promoted to a `ScanFinding` |
@@ -1410,7 +1502,15 @@ The dynamic loop investigates leads via the shared `update_lead` action, which s
 - **API scans** consume *explicitly imported copies*: the user picks a completed SAST run on the API run's **Scan Leads** tab and `copy_leads_to_run(sast_run_id, "api", run_id)` creates fresh rows owned only by that API run. API scan startup never creates a SAST run or imports collection leads automatically. `_build_api_crawl_context` and API A.L.I.C.E. inject only `format_leads_for_run("api", run_id)`.
 - **Web scans** consume *copies*: the user picks a completed SAST run on the **SAST Leads** tab and `copy_leads_to_run(sast_run_id, "web", run_id)` duplicates its originals into new rows tagged `imported_into_*` (idempotent per source run; originals stay `open`). At scan start `scanner._do_thinking_scan` injects them via `format_leads_for_run("web", run_id)`. Because copies are independent, investigating them never mutates the source SAST run's leads, and deleting a SAST run leaves the copies intact (only `imported_into_run_id IS NULL` originals are cascade-deleted).
 
+The dynamic context includes each lead's ordered reachability, impact, severity reasoning, and dynamic-test objective. The web and API Test Leads use that path to choose focused probes, but must verify every hop against live responses before calling `update_lead`. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
+
 Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import.
+
+The SAST workspace reads `GET /api/sast-runs/{id}/analysis` for authoritative
+phase state and deterministic coverage receipts. `GET .../handoff-targets` lists
+eligible web/API runs, and `POST .../leads/{lead_id}/handoff` idempotently copies
+one reportable lead into the selected run. The UI never reports a queued live
+test unless that persisted copy succeeds.
 
 ### Concurrency
 

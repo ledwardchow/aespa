@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../../lib/api";
 import { apiTranscriptText } from "../../lib/utilities";
 import { OWASP_WEB_LABELS } from "./_constants";
@@ -18,6 +18,17 @@ export function WebRunSitemapGraph({
   const { selectedNode, setSelectedNode, pageDetail, pageViews } = useSelectedSitemapPage(runId);
   const [cascade, setCascade] = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
+  const [testStateBusy, setTestStateBusy] = useState(false);
+  const [testStateMessage, setTestStateMessage] = useState("");
+  const [scannerSessions, setScannerSessions] = useState([]);
+  const [selectedSession, setSelectedSession] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    api.getScannerSessions(runId, true).then(result => {
+      if (!cancelled) setScannerSessions(result?.sessions || result?.items || []);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [runId]);
   const { svgRef } = useSitemapGraph({
     graph,
     activeTab: active ? "sitemap" : "hidden",
@@ -58,6 +69,19 @@ export function WebRunSitemapGraph({
       setScopeBusy(false);
     }
   };
+  const testState = async () => {
+    if (!selectedNode || !pageDetail || testStateBusy) return;
+    setTestStateBusy(true);
+    setTestStateMessage("");
+    try {
+      const result = await api.testPageState(runId, selectedNode.id, selectedSession ? { use_session: selectedSession } : {});
+      setTestStateMessage(result.status === "queued" ? "Queued for the current Test Lead." : "Focused scan started.");
+    } catch (error) {
+      onError(error.message);
+    } finally {
+      setTestStateBusy(false);
+    }
+  };
 
   return <div className="graph-layout" style={{ display: active ? "flex" : "none" }}>
     <div className="graph-canvas-wrap">
@@ -76,29 +100,47 @@ export function WebRunSitemapGraph({
           <div className="legend-item"><span className="legend-dot" style={{ background: SCOPE_OUT_COLOR }} />Out of Scope</div>
           <div className="legend-item"><span className="legend-dot" style={{ background: "var(--bg)", border: "2px solid #fbbf24" }} />Failed</div>
         </>}
+        <div className="legend-item">
+          <span className="pulse-legend-dot" style={{ border: "2px solid #f59e0b", background: "transparent" }} />
+          Pending LLM Analysis
+        </div>
       </div>}
     </div>
     {selectedNode && <SitemapPageInspector
       node={selectedNode} detail={pageDetail} views={pageViews} cascade={cascade} scopeBusy={scopeBusy}
-      onCascade={setCascade} onClose={() => setSelectedNode(null)} onToggleScope={toggleScope} onDelete={deleteNode}
+      testStateBusy={testStateBusy} testStateMessage={testStateMessage}
+      scannerSessions={scannerSessions} selectedSession={selectedSession} onSessionChange={setSelectedSession}
+      onCascade={setCascade} onClose={() => setSelectedNode(null)} onToggleScope={toggleScope} onDelete={deleteNode} onTestState={testState}
     />}
   </div>;
 }
 
-function SitemapPageInspector({ node, detail, views, cascade, scopeBusy, onCascade, onClose, onToggleScope, onDelete }) {
+function SitemapPageInspector({ node, detail, views, cascade, scopeBusy, testStateBusy, testStateMessage, scannerSessions, selectedSession, onSessionChange, onCascade, onClose, onToggleScope, onDelete, onTestState }) {
+  const isFailed = node.status === "failed" || detail?.status === "failed";
+  const errorMessage = detail?.error_message || node.error_message;
+
   return <div className="graph-panel">
     <div className="graph-panel-header"><div className="graph-panel-url">{node.state_label ? `${node.url} · ${node.state_label}` : node.url}</div><button className="btn ghost sm" onClick={onClose}>✕</button></div>
     {detail ? <div className="graph-panel-body">
       {detail.title && <div className="graph-panel-title">{detail.title}</div>}
+      {isFailed && <div className="sitemap-failed-banner" style={{ background: "rgba(245, 158, 11, 0.12)", border: "1px solid #f59e0b", color: "#f59e0b", padding: "8px 12px", borderRadius: 6, marginBottom: 12, fontSize: 12, display: "flex", flexDirection: "column", gap: 4 }}>
+        <div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+          <span>⚠️ Page Load Failed</span>
+        </div>
+        {errorMessage && <div style={{ color: "var(--text-2, #d1d5db)", fontFamily: "monospace", fontSize: 11, wordBreak: "break-word" }}>{errorMessage}</div>}
+      </div>}
       <div className="graph-panel-section-label">Scope</div>
       <div className="scope-row">
         <span className={'scope-badge ' + (node.in_scope === false ? 'out' : 'in')}>{node.in_scope === false ? 'Out of Scope' : 'In Scope'}</span>
+        {isFailed && <span className="cat-badge cat-no" style={{ fontSize: 11 }}>Failed</span>}
         <button className="btn sm" onClick={onToggleScope} disabled={scopeBusy}>{scopeBusy ? '…' : node.in_scope === false ? 'Mark in scope' : 'Mark out of scope'}</button>
         <button className="btn danger-outline sm" onClick={onDelete} disabled={scopeBusy} title="Delete this node (and children if checkbox is ticked)">🗑</button>
       </div>
       <label className="scope-cascade-label"><input type="checkbox" checked={cascade} onChange={event => onCascade(event.target.checked)} />Also apply to all children</label>
+      {detail.browser_replay && <div className="spa-state-action"><div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}><label className="subtle">Session</label><select value={selectedSession} onChange={event => onSessionChange(event.target.value)}><option value="">Discovering session</option>{scannerSessions.map(session => <option key={session.id || session.label} value={session.label}>{session.label}{session.username ? ` · ${session.username}` : ''}</option>)}</select></div><button className="btn sm" onClick={onTestState} disabled={testStateBusy}>{testStateBusy ? '…' : 'Test this state'}</button>{testStateMessage && <span className="subtle">{testStateMessage}</span>}</div>}
       <PageCategories detail={detail} />
       {views.length > 0 ? <PageViews views={views} detail={detail} /> : <PageContext detail={detail} />}
+      {views.length > 0 && <PageStateEvidence detail={detail} />}
     </div> : <div className="subtle" style={{ padding: 12 }}>Loading…</div>}
   </div>;
 }
@@ -127,5 +169,9 @@ function PageViews({ views, detail }) {
 
 function PageContext({ detail }) {
   const transcript = apiTranscriptText(detail.page_text);
-  return <><div className="graph-panel-section-label" style={{ marginTop: 14 }}>LLM Context</div><div className="graph-panel-context">{detail.llm_context || 'No context available.'}</div>{detail.screenshot_b64 && <><div className="graph-panel-section-label" style={{ marginTop: 12 }}>Screenshot</div><img src={'data:image/png;base64,' + detail.screenshot_b64} style={{ width: '100%', borderRadius: 6, border: '1px solid var(--border)' }} alt="screenshot" /></>}{!detail.screenshot_b64 && transcript && <><div className="graph-panel-section-label" style={{ marginTop: 12 }}>API Request / Response</div><pre className="api-transcript">{transcript}</pre></>}</>;
+  return <><div className="graph-panel-section-label" style={{ marginTop: 14 }}>LLM Context</div><div className="graph-panel-context">{detail.llm_context || 'No context available.'}</div>{detail.screenshot_b64 && <><div className="graph-panel-section-label" style={{ marginTop: 12 }}>Screenshot</div><img src={'data:image/png;base64,' + detail.screenshot_b64} style={{ width: '100%', borderRadius: 6, border: '1px solid var(--border)' }} alt="screenshot" /></>}{!detail.screenshot_b64 && transcript && <><div className="graph-panel-section-label" style={{ marginTop: 12 }}>API Request / Response</div><pre className="api-transcript">{transcript}</pre></>}{<PageStateEvidence detail={detail} />}</>;
+}
+
+function PageStateEvidence({ detail }) {
+  return <>{detail.browser_replay && <><div className="graph-panel-section-label" style={{ marginTop: 14 }}>Replay</div><div className="graph-panel-context">{detail.state_kind === 'interactive' ? 'Interactive browser state' : 'URL with replay fallback'} · {detail.browser_replay.steps.length} deterministic steps</div></>}{detail.traffic?.length > 0 && <><div className="graph-panel-section-label" style={{ marginTop: 14 }}>Captured traffic</div><div className="graph-panel-context">{detail.traffic.slice(0, 8).map(item => <div key={item.id}>{item.method} {item.url} → {item.status ?? 'failed'}</div>)}</div></>}{detail.object_references?.length > 0 && <><div className="graph-panel-section-label" style={{ marginTop: 14 }}>Object references</div><div className="graph-panel-context">{detail.object_references.slice(0, 8).map(item => <div key={item.id}>{item.key}: {item.value}</div>)}</div></>}</>;
 }

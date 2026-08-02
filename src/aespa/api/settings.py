@@ -9,6 +9,8 @@ from aespa.db import get_session
 from aespa.models import LLMProviderConfig
 from aespa.schemas import (
     PROVIDER_DEFAULT_MODELS,
+    BrowserDebugConfigIn,
+    BrowserDebugConfigOut,
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
@@ -38,6 +40,7 @@ from aespa.schemas import (
     ValidatorConfigOut,
 )
 from aespa.services import burp_rest as burp_rest_svc
+from aespa.services import crawler as crawler_svc
 from aespa.services import settings as settings_service
 
 log = logging.getLogger(__name__)
@@ -296,11 +299,15 @@ def get_crawler_config(session: Session = Depends(get_session)) -> CrawlerConfig
 
 
 @router.put("/crawler-config", response_model=CrawlerConfigOut)
-def upsert_crawler_config(
+async def upsert_crawler_config(
     payload: CrawlerConfigIn,
     session: Session = Depends(get_session),
 ) -> CrawlerConfigOut:
-    return settings_service.upsert_crawler_config(session, payload)
+    result = settings_service.upsert_crawler_config(session, payload)
+    # Wake any blocked LLM-analysis tasks so they pick up the new limit.
+    for run_id in list(crawler_svc._active_shared):
+        await crawler_svc.notify_limit_change(run_id)
+    return result
 
 
 @router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)
@@ -400,6 +407,21 @@ def upsert_reporting_debug_config(
     session: Session = Depends(get_session),
 ) -> ReportingDebugConfigOut:
     return settings_service.upsert_reporting_debug_config(session, payload)
+
+
+@router.get("/browser-debug", response_model=BrowserDebugConfigOut)
+def get_browser_debug_config(
+    session: Session = Depends(get_session),
+) -> BrowserDebugConfigOut:
+    return settings_service.get_browser_debug_config(session)
+
+
+@router.put("/browser-debug", response_model=BrowserDebugConfigOut)
+def upsert_browser_debug_config(
+    payload: BrowserDebugConfigIn,
+    session: Session = Depends(get_session),
+) -> BrowserDebugConfigOut:
+    return settings_service.upsert_browser_debug_config(session, payload)
 
 
 @router.get("/cloudflare-access", response_model=CloudflareAccessConfigOut)

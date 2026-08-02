@@ -86,8 +86,8 @@ export function useActivity(runId, activeTab, {
   }, {
     id: "reporting",
     role: "Reporting",
-    status: thinkingStatus?.status === "analysing" ? "active" : "idle",
-    currentTask: thinkingStatus?.status === "analysing" ? "Analysing probe results…" : "Standing by"
+    status: thinkingStatus?.status === "analysing" || thinkingStatus?.status === "analyzing" ? "active" : "idle",
+    currentTask: thinkingStatus?.status === "analysing" || thinkingStatus?.status === "analyzing" ? "Analysing probe results…" : "Standing by"
   }];
   const representsAgent = (agent, placeholder) => {
     if (agent.id === placeholder.id) return true;
@@ -118,19 +118,39 @@ export function useActivity(runId, activeTab, {
       username: labelByUsername.get(username) || username || "anonymous",
       url: p.current_url || "",
       pagesVisited: p.pages_visited || 0,
-      done: !!p.done
+      done: !!p.done,
+      stage: p.stage || (p.done ? "phase_complete" : "page_visit"),
+      stageLabel: p.stage_label || (p.done ? "Credential phase complete" : "Opening page"),
+      phaseIndex: p.phase_index,
+      phaseTotal: p.phase_total
     }));
   };
+  const crawlEventsFromActivityLog = () => activityLog.filter(entry => (
+    ["crawl", "reconcile"].includes(entry.phase)
+      && entry.data?.stage
+      && (entry.page_url || entry.data?.username)
+  )).map(entry => ({
+    ts: entry._ts || "--:--:--",
+    username: entry.data?.username || "",
+    url: entry.page_url || "",
+    pagesVisited: entry.data?.pages_visited || 0,
+    done: entry.data?.stage === "phase_complete",
+    stage: entry.data.stage,
+    stageLabel: entry.data.stage_label || entry.message,
+    phaseIndex: entry.data.phase_index,
+    phaseTotal: entry.data.phase_total,
+    task: entry.message
+  }));
   const mergeCrawlEvents = (liveEvents, threadEvents) => {
     const seen = new Set();
     return [...(liveEvents || []), ...threadEvents].filter(event => {
-      const key = `${event.username || ""}:${event.url || ""}:${event.pagesVisited || 0}:${event.done ? 1 : 0}`;
+      const key = `${event.username || ""}:${event.url || ""}:${event.pagesVisited || 0}:${event.stage || ""}:${event.done ? 1 : 0}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
   };
-  const agentCrawlEvents = agent => agent?.id === "crawler" ? mergeCrawlEvents(agent.crawlEvents || [], crawlEventsFromRun()) : [];
+  const agentCrawlEvents = agent => agent?.id === "crawler" ? mergeCrawlEvents(agent.crawlEvents || [], [...crawlEventsFromRun(), ...crawlEventsFromActivityLog()]) : [];
   const compactAgentText = (value, max = 180) => {
     const text = String(value || "").replace(/\s+/g, " ").trim();
     return text.length > max ? text.slice(0, max - 1) + "…" : text;
@@ -174,9 +194,19 @@ export function useActivity(runId, activeTab, {
     outcome: thinkingStepOutcome(entry)
   }));
   const agentTaskHistory = agent => agent?.id === "scanner" && testLeadHistory().length ? testLeadHistory() : agent?.taskHistory || [];
+  const formatCrawlEvent = event => {
+    const phaseLabel = event.phaseIndex && event.phaseTotal ? `Phase ${event.phaseIndex}/${event.phaseTotal} · ` : "";
+    if (event.done) return `${phaseLabel}Completed crawl as ${event.username || "anonymous"} (${event.pagesVisited || 0} pg)`;
+    if (event.task && !event.url) return event.task;
+    return `${phaseLabel}${event.stageLabel || "Crawling"} · ${event.username || "anonymous"}${event.url ? `: ${truncUrl(event.url, 88)}` : ""}`;
+  };
   const agentCurrentTask = agent => {
     agent = normalizeAgentForRun(agent);
     const crawlEvents = agentCrawlEvents(agent);
+    const explicitCrawlerStage = agent?.id === "crawler"
+      && agent.status === "active"
+      && /^(?:Preparing|Authenticating|Signing in|Access check|Verifying page access|Finali[sz]ing crawl|Phase \d+\/\d+)/i.test(String(agent.currentTask || ""));
+    if (explicitCrawlerStage) return agent.currentTask;
     if (agent?.id === "crawler" && crawlEvents.length) {
       if (agent.status !== "active") {
         const label = run?.status === "failed" ? "Crawl failed" : run?.status === "stopped" ? "Crawl stopped" : run?.status === "complete" ? "Crawl complete" : "Crawl is not running";
@@ -184,8 +214,7 @@ export function useActivity(runId, activeTab, {
       }
       const active = [...crawlEvents].reverse().find(h => !h.done && h.url);
       const latest = active || crawlEvents[crawlEvents.length - 1];
-      if (latest.done) return `Completed crawl as ${latest.username || "anonymous"} (${latest.pagesVisited || 0} pg)`;
-      return `Crawling ${truncUrl(latest.url || "", 88)} as ${latest.username || "anonymous"}`;
+      return formatCrawlEvent(latest);
     }
     // Lifecycle updates are emitted by the backend after the Test Lead has
     // delegated probe analysis (and again once every finalisation phase ends).

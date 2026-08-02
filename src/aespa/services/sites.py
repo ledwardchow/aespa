@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from sqlmodel import Session, select
 
-from aespa.models import Credential, PageCredentialView, Site
+from aespa.models import Credential, Site
 from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate
 
 
@@ -144,28 +144,13 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
 
 
 def delete_site(session: Session, site_id: int) -> None:
-    from aespa.models import CrawledPage, PageLink, TestRun
+    from aespa.models import TestRun
+    from aespa.services import run_cleanup
 
     site = get_site(session, site_id)
-    # Manually cascade to test runs and their children (SQLite FK off by default)
     runs = session.exec(select(TestRun).where(TestRun.site_id == site_id)).all()
     for run in runs:
-        links = session.exec(
-            select(PageLink).where(PageLink.test_run_id == run.id)
-        ).all()
-        for lnk in links:
-            session.delete(lnk)
-        views = session.exec(
-            select(PageCredentialView).where(PageCredentialView.test_run_id == run.id)
-        ).all()
-        for view in views:
-            session.delete(view)
-        pages = session.exec(
-            select(CrawledPage).where(CrawledPage.test_run_id == run.id)
-        ).all()
-        for pg in pages:
-            session.delete(pg)
-        session.delete(run)
+        run_cleanup.cascade_delete_web_run(session, run.id)
     session.delete(site)
     session.commit()
 

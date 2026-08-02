@@ -33,6 +33,7 @@ export default [
         setTimeout: "readonly",
         TextDecoder: "readonly",
         URL: "readonly",
+        URLSearchParams: "readonly",
         window: "readonly"
       }
     },
