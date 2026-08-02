@@ -8,6 +8,7 @@ const VARIANT = {
   scanned: "ok",
   running: "running",
   scanning: "running",
+  analyzing: "running",
   analysing: "running",
   crawling: "running",
   stopping: "stopping",
@@ -18,5 +19,6 @@ const VARIANT = {
 
 export function StatusBadge({ status, className = "" }) {
   const variant = VARIANT[status] || "neutral";
-  return <span className={`badge ${variant} ${className}`.trim()}>{status}</span>;
+  const label = status === "analyzing" ? "analysing" : status;
+  return <span className={`badge ${variant} ${className}`.trim()}>{label}</span>;
 }

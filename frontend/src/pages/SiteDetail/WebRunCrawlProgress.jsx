@@ -4,13 +4,16 @@ import { USER_PALETTE } from "./_helpers";
 export function WebRunCrawlProgress({ run, crawlerTask }) {
   const credentials = run.credentials || [];
   const multiUser = credentials.length > 1;
-  const percent = run.status === "complete" ? 100 : Math.min(100, run.pages_discovered / run.max_pages * 100);
-  const progressBar = run.status === "running" || run.pages_discovered > 0 ? <div className="crawl-progress-bar"><div className="crawl-progress-fill" style={{ width: percent + "%" }} /></div> : null;
+  const isRunning = run.status === "running";
+  const progressBar = isRunning ? (
+    <div className="crawl-progress-bar">
+      <div className="crawl-progress-fill running" />
+    </div>
+  ) : null;
   const phaseLabel = {
-    crawling: "Crawling and analyzing pages",
+    crawling: "Crawling and analysing pages",
     reconciling: "Checking direct access for each user",
-    finalizing: "Finalizing crawl results",
-    crawled: "Crawl complete"
+    finalizing: "Finalising crawl results",
   }[run.phase] || (run.status === "running" ? "Crawl in progress" : "Crawl is not running");
   const stageText = crawlerTask || phaseLabel;
   const stageStrip = run.status === "running" || run.phase === "reconciling" || run.phase === "finalizing" ? <div className="crawl-stage-strip">

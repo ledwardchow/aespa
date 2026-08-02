@@ -548,7 +548,7 @@ export function ApiRunAgentsTab({
               {canExpand && isExpanded && <div className="agent-task-history">
                   {children.map(c => {
               const cActive = c.status === "active";
-              const cTask = c.task || (c.taskHistory || []).slice(-1)[0]?.task || "Initializing…";
+              const cTask = c.task || (c.taskHistory || []).slice(-1)[0]?.task || "Initialising…";
               return <div key={c.id} className={"agent-thread-row" + (cActive ? " agent-thread-row--active" : "")}>
                         <span className={"agent-dot agent-dot--sm" + (cActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
                         <span className="agent-thread-id">{c.id.replace("specialist-", "").replace(/-([0-9]+)$/, " #$1")}</span>
@@ -582,7 +582,7 @@ export function ApiRunAgentsTab({
               {canExpand && isExpanded && <div className="agent-task-history">
                   {children.map(va => {
               const vaActive = va.status === "active";
-              const vaTask = va.task || (va.taskHistory || []).slice(-1)[0]?.task || "Initializing…";
+              const vaTask = va.task || (va.taskHistory || []).slice(-1)[0]?.task || "Initialising…";
               const vaOutcome = (va.taskHistory || []).slice(-1)[0]?.outcome;
               return <div key={va.id} className={"agent-thread-row" + (vaActive ? " agent-thread-row--active" : "")}>
                         <span className={"agent-dot agent-dot--sm" + (vaActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
