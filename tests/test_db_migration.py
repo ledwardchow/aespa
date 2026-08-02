@@ -753,7 +753,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "site" in tables
         assert "test_run" in tables
         # The migration chain now includes replay/session provenance fields.
-        assert version == "e1a7b9c3d5f0"
+        assert version == "2c3ed73c25da"
     finally:
         engine.dispose()
 
@@ -864,7 +864,7 @@ def test_replay_provenance_repair_migration_handles_existing_c4_database():
         assert "replay_credential_id" in columns["crawled_page"]
         assert {"page_id", "session_label"} <= columns["traffic_entry"]
         assert "page_id" in columns["target_intel_item"]
-        assert version == "e1a7b9c3d5f0"
+        assert version == "2c3ed73c25da"
     finally:
         engine.dispose()
 

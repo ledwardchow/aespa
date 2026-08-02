@@ -9,8 +9,8 @@ import { usePolling } from "../hooks/usePolling";
 
 function activeJobBadge(job) {
   const status = job.status || "running";
-  const key = status === "failed" ? "danger" : status === "stopping" ? "stopping" : status === "complete" ? "ok" : ["running", "analysing"].includes(status) ? "running" : "neutral";
-  return <span className={"badge " + key}>{status}</span>;
+  const key = status === "failed" ? "danger" : status === "stopping" ? "stopping" : status === "complete" ? "ok" : ["running", "analysing", "analyzing"].includes(status) ? "running" : "neutral";
+  return <span className={"badge " + key}>{status === "analyzing" ? "analysing" : status}</span>;
 }
 function activeJobProgress(job) {
   if (job.total_pages !== null && job.total_pages !== undefined) {

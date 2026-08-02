@@ -40,6 +40,7 @@ from aespa.schemas import (
     ValidatorConfigOut,
 )
 from aespa.services import burp_rest as burp_rest_svc
+from aespa.services import crawler as crawler_svc
 from aespa.services import settings as settings_service
 
 log = logging.getLogger(__name__)
@@ -298,11 +299,15 @@ def get_crawler_config(session: Session = Depends(get_session)) -> CrawlerConfig
 
 
 @router.put("/crawler-config", response_model=CrawlerConfigOut)
-def upsert_crawler_config(
+async def upsert_crawler_config(
     payload: CrawlerConfigIn,
     session: Session = Depends(get_session),
 ) -> CrawlerConfigOut:
-    return settings_service.upsert_crawler_config(session, payload)
+    result = settings_service.upsert_crawler_config(session, payload)
+    # Wake any blocked LLM-analysis tasks so they pick up the new limit.
+    for run_id in list(crawler_svc._active_shared):
+        await crawler_svc.notify_limit_change(run_id)
+    return result
 
 
 @router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)

@@ -236,7 +236,7 @@ export function DebugPage({
           marginBottom: 12
         }}>
           Controls how strongly nodes in the sitemap graph (Sites → run → Sitemap tab) are
-          pulled toward the center. Lower values let the layout spread out more; higher
+          pulled toward the centre. Lower values let the layout spread out more; higher
           values pull it in tighter. Default is {DEFAULT_SITEMAP_GRAVITY}.
         </div>
         <div className="form-row">

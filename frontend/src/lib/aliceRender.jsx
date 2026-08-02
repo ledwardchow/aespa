@@ -243,7 +243,8 @@ const parseAliceThinking = text => {
     }
 
     // Step/Status logs
-    if (trimmed.startsWith("[A.L.I.C.E. Initializing]") || trimmed.includes("Mapped target sitemap")) {
+    const normalizedStatus = trimmed.replace(/^\[A\.L\.I\.C\.E\. Initiali[sz]ing\]/, "[A.L.I.C.E. Initialising]");
+    if (normalizedStatus !== trimmed || trimmed.includes("Mapped target sitemap")) {
       if (currentParagraph.length > 0) {
         blocks.push({
           type: "thought",
@@ -254,7 +255,7 @@ const parseAliceThinking = text => {
       blocks.push({
         type: "status",
         status: "initializing",
-        text: trimmed
+        text: normalizedStatus
       });
       continue;
     }

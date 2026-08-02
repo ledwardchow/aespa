@@ -504,6 +504,11 @@ class CrawlerConfig(SQLModel, table=True):
     suppress_form_submit_actions: bool = Field(default=True)
     block_non_idempotent_interactive_replay: bool = Field(default=True)
     enable_access_reconciliation: bool = Field(default=False)
+    llm_max_concurrency: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, nullable=True),
+        description="Max concurrent LLM page analysis requests (None = unlimited)",
+    )
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -667,6 +672,11 @@ class TestRun(SQLModel, table=True):
     use_screenshots: bool = Field(default=False)
     max_depth: int = Field(default=3)
     max_pages: int = Field(default=500)
+    llm_max_concurrency: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, nullable=True),
+        description="Max concurrent LLM page analysis requests (None = unlimited)",
+    )
     # ``url`` preserves the legacy link-following crawler. ``interactive`` also
     # records safe, reproducible browser states and conditional workflows.
     crawler_mode: str = Field(
@@ -764,7 +774,7 @@ class CrawledPage(SQLModel, table=True):
     screenshot_b64: Optional[str] = Field(default=None)
     llm_context: Optional[str] = Field(default=None)
     depth: int = Field(default=0)
-    status: str = Field(default="crawled")  # crawled | failed
+    status: str = Field(default="crawled")  # crawled | failed | redirect
     error_message: Optional[str] = Field(default=None)
     in_scope: bool = Field(default=True)
     scan_status: str = Field(default="pending")  # pending | running | complete

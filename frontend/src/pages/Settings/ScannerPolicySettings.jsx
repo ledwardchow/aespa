@@ -23,7 +23,7 @@ const METHOD_FIELDS = {
 function GlobalPolicyFields({ form, upd }) {
   return <>
     <section className="policy-group">
-      <div className="form-section-title">Scan behavior</div>
+      <div className="form-section-title">Scan behaviour</div>
       <div className="policy-section-copy">
         Choose how much active testing to perform. The selected mode determines which HTTP method list the scan uses.
       </div>

@@ -10,7 +10,7 @@ export function WebRunFindingsTab(props) {
       <div className="findings-panel">
           <div className="findings-status-bar">
             {thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle" && <span className={"scan-status-badge scan-status-" + (thinkingStopRequested ? "stopping" : thinkingStatus.status)}>
-                {thinkingStopRequested ? "Stopping Dynamic Scan…" : thinkingStatus.status === "running" ? "Dynamic Scan running…" : thinkingStatus.status === "analysing" ? "Dynamic Scan analysing…" : thinkingStatus.status === "stopping" ? "Dynamic Scan stopping…" : thinkingStatus.status === "complete" ? "Dynamic Scan complete" : thinkingStatus.status === "stopped" ? "Dynamic Scan stopped" : thinkingStatus.status === "failed" ? "Dynamic Scan failed" : "Dynamic Scan"}
+                {thinkingStopRequested ? "Stopping Dynamic Scan…" : thinkingStatus.status === "running" ? "Dynamic Scan running…" : thinkingStatus.status === "analysing" || thinkingStatus.status === "analyzing" ? "Dynamic Scan analysing…" : thinkingStatus.status === "stopping" ? "Dynamic Scan stopping…" : thinkingStatus.status === "complete" ? "Dynamic Scan complete" : thinkingStatus.status === "stopped" ? "Dynamic Scan stopped" : thinkingStatus.status === "failed" ? "Dynamic Scan failed" : "Dynamic Scan"}
               </span>}
             <div style={{
             flex: 1
