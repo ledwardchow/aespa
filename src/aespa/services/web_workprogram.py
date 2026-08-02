@@ -805,6 +805,7 @@ def _make_web_post_probe_fn(run_id: int):
         owasp_category: str,
         test_class: str | None = None,
         response_status: int | None = None,
+        page_id: int | None = None,
     ) -> None:
         cat = (owasp_category or "").strip().upper()
         if not cat:
@@ -820,7 +821,11 @@ def _make_web_post_probe_fn(run_id: int):
                     .where(CrawledPage.in_scope == True)  # noqa: E712
                 ).all()
             )
-            page_id = _match_page_for_url(url, pages)
+            if page_id is not None:
+                explicit = next((p for p in pages if p.id == page_id), None)
+                page_id = explicit.id if explicit is not None else None
+            if page_id is None:
+                page_id = _match_page_for_url(url, pages)
             if page_id is None:
                 if response_status == 404:
                     return  # a guessed missing path is not discovered attack surface

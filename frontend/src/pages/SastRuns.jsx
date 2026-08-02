@@ -7,6 +7,7 @@ import { EmptyState } from "../components/EmptyState";
 import { PageHeader, Crumb, Sep } from "../components/PageHeader";
 import { usePolling } from "../hooks/usePolling";
 import { TokenUsageBar } from "../components/TokenUsageBar";
+import { SastRunDetailExperience } from "./SastRunDetailExperience";
 
 
 // ── SastRunDetail ─────────────────────────────────────────────────────────────
@@ -93,13 +94,13 @@ export function SastRunForm() {
 
         <div className="field">
           <label>LLM profile <span className="subtle">(optional — uses the globally active profile if not set)</span></label>
-          <select
+          <select className="select"
             value={llmProfileId}
             onChange={e => setLlmProfileId(e.target.value)}
           >
             <option value="">— Use global active profile —</option>
             {profiles.map(p => (
-              <option key={p.id} value={p.id}>{p.name}</option>
+              <option key={p.id} value={p.id}>{p.name}{p.default_model_name ? ` · ${p.default_model_name}` : ""}</option>
             ))}
           </select>
         </div>
@@ -116,21 +117,28 @@ export function SastRunForm() {
 // ── SastRunsListPage ──────────────────────────────────────────────────────────
 export function SastRunsListPage() {
   const [runs, setRuns] = useState(null);
+  const [profiles, setProfiles] = useState([]);
   const [error, setError] = useState(null);
   const [sortField, setSortField] = useState("started_at");
   const [sortDir, setSortDir] = useState("desc");
 
-  const load = useCallback(async () => {
+  const loadRuns = useCallback(async () => {
     try {
-      setRuns(await api.listAllSastRuns());
+      const r = await api.listAllSastRuns();
+      setRuns(r);
+      setError(null);
     } catch (e) {
       setError(e.message);
     }
   }, []);
 
+  usePolling(loadRuns, { intervalMs: 3000 });
+
   useEffect(() => {
-    load();
-  }, [load]);
+    api.listLLMProfiles()
+      .then(p => setProfiles(p || []))
+      .catch(e => setError(e.message));
+  }, []);
 
   const toggleSort = (field) => {
     if (sortField === field) {
@@ -213,9 +221,18 @@ export function SastRunsListPage() {
               </tr>
             </thead>
             <tbody>{sortedRuns.map(r => <tr key={r.id}>
-                <td><a href={`#/sast-runs/${r.id}/progress`} style={{
-                  fontWeight: 600
-                }}>{r.name}</a></td>
+                <td>
+                  <a href={`#/sast-runs/${r.id}/progress`} style={{
+                    fontWeight: 600
+                  }}>{r.name}</a>
+                  {r.llm_profile_id && <div style={{
+                    fontSize: 11,
+                    color: "var(--muted)",
+                    marginTop: 2
+                  }}>{(profiles.find(p => p.id === r.llm_profile_id) || {
+                      name: "Profile #" + r.llm_profile_id
+                    }).name}</div>}
+                </td>
                 <td><StatusBadge status={r.status} /></td>
                 <td>{r.leads_count}</td>
                 <td>{r.triggered_by_run_id ? <a href={`#/api-runs/${r.triggered_by_run_id}/status`}>API run #{r.triggered_by_run_id}</a> : <span className="subtle">{r.source_filename || "standalone"}</span>}</td>
@@ -228,7 +245,7 @@ export function SastRunsListPage() {
     </div>
   </>;
 }
-export function SastRunDetail({
+export function LegacySastRunDetail({
   runId,
   initialTab
 }) {
@@ -327,6 +344,11 @@ export function SastRunDetail({
     </div>
   </>;
 }
+
+export function SastRunDetail(props) {
+  return <SastRunDetailExperience {...props} />;
+}
+
 export function SastProgressTab({
   runId,
   scanRunning
@@ -354,7 +376,7 @@ export function SastProgressTab({
         if (evt.type === "token_usage_update") {
           setTokenUsage(evt.totals);
         }
-      } catch (err) {}
+      } catch {}
     };
     return () => es.close();
   }, [runId]);

@@ -39,6 +39,17 @@ export const api = {
   startApiAliceRun:    (id,b)     => req(`/api/api-test-runs/${id}/alice/run`,      { method:"POST", body:b }),
   stopApiAliceRun:     (id)       => req(`/api/api-test-runs/${id}/alice/run`,      { method:"DELETE" }),
   getApiAgentLog:      (id)       => req(`/api/api-test-runs/${id}/agent-log`),
+  getApiAgentLogPage:  (id, { limit = 200, beforeId } = {}) => {
+    const query = new URLSearchParams({ limit: String(Math.min(limit + 1, 1001)) });
+    if (beforeId != null) query.set("before_id", String(beforeId));
+    return req(`/api/api-test-runs/${id}/agent-log?${query.toString()}`).then(entries => {
+      const hasMore = entries.length > limit;
+      return {
+        entries: hasMore ? entries.slice(-limit) : entries,
+        hasMore
+      };
+    });
+  },
   clearApiAgentLog:    (id)       => req(`/api/api-test-runs/${id}/agent-log`,     { method:"DELETE" }),
   startApiScan:        (id, coverageMode) => req(`/api/api-test-runs/${id}/scan/start`, { method:"POST", body: coverageMode ? { coverage_mode: coverageMode } : undefined }),
   stopApiScan:         (id)       => req(`/api/api-test-runs/${id}/scan/stop`,     { method:"POST" }),
@@ -62,6 +73,10 @@ export const api = {
   listAllSastRuns:     ()         => req(`/api/sast-runs`),
   getSastScanLog:      (id)       => req(`/api/sast-runs/${id}/scan-log`),
   getSastRun:          (id)       => req(`/api/sast-runs/${id}`),
+  updateSastRun:       (id,b)     => req(`/api/sast-runs/${id}`, { method:"PATCH", body:b }),
+  getSastAnalysis:     (id)       => req(`/api/sast-runs/${id}/analysis`),
+  getSastHandoffTargets:(id)      => req(`/api/sast-runs/${id}/handoff-targets`),
+  handoffSastLead:     (id,lid,b) => req(`/api/sast-runs/${id}/leads/${lid}/handoff`, { method:"POST", body:b }),
   deleteSastRun:       (id)       => req(`/api/sast-runs/${id}`, { method:"DELETE" }),
   startSastScan:       (id)       => req(`/api/sast-runs/${id}/scan/start`, { method:"POST" }),
   stopSastScan:        (id)       => req(`/api/sast-runs/${id}/scan/stop`,  { method:"POST" }),
@@ -121,6 +136,8 @@ export const api = {
   upsertGlobalHttpHeader: (b)     => req("/api/settings/global-http-header", { method:"PUT", body:b }),
   getReportingDebugConfig: ()     => req("/api/settings/reporting-debug"),
   upsertReportingDebugConfig:(b)  => req("/api/settings/reporting-debug", { method:"PUT", body:b }),
+  getBrowserDebugConfig: ()        => req("/api/settings/browser-debug"),
+  upsertBrowserDebugConfig:(b)     => req("/api/settings/browser-debug", { method:"PUT", body:b }),
   getCloudflareAccessConfig: ()   => req("/api/settings/cloudflare-access"),
   upsertCloudflareAccessConfig:(b)=> req("/api/settings/cloudflare-access", { method:"PUT", body:b }),
   getReportingDebugPrompt: (key)  => req(`/api/reporting-debug/prompt${key?`?key=${encodeURIComponent(key)}`:""}`),
@@ -156,6 +173,7 @@ export const api = {
   listPages:        (id)          => req(`/api/test-runs/${id}/pages`),
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
   getPageViews:     (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}/views`),
+  testPageState:    (runId,pgId,b={}) => req(`/api/test-runs/${runId}/pages/${pgId}/test`, { method:"POST", body:b }),
   getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
   getScannerSessions: (id, includeInactive=true) => req(`/api/test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
   updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
@@ -197,6 +215,10 @@ export const api = {
   clearScanLog:         (id)       => req(`/api/test-runs/${id}/scan-log`,              { method:"DELETE" }),
   clearTargetIntel:     (id)       => req(`/api/test-runs/${id}/target-intelligence`,   { method:"DELETE" }),
   getVersion:       ()            => req("/api/version"),
+  getLLMStatistics: (month)       => req(`/api/statistics/llm${month ? `?month=${encodeURIComponent(month)}` : ""}`),
+  refreshLLMPrices: ()            => req("/api/statistics/llm/prices/refresh", { method:"POST" }),
+  updateLLMPrices:  (b)           => req("/api/statistics/llm/prices", { method:"PUT", body:b }),
+  resetLLMStatistics:()           => req("/api/statistics/llm", { method:"DELETE" }),
 };
 
 export async function req(url, opts = {}) {

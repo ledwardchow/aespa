@@ -8,8 +8,9 @@ and reconciles the DB:
 
   * No matching ``SastRun`` row, or the run is in a terminal state
     (``completed`` / ``failed`` / ``cancelled``) → the dir is just deleted.
-  * The run is still ``scanning`` → the run is marked ``failed`` with a
-    note that the process was interrupted, and the dir is deleted.
+  * A workspace leased by a live process → the run and directory are untouched.
+  * An unleased run still marked ``scanning`` → the run is marked ``failed``
+    with a note that the process was interrupted, and the dir is deleted.
   * The run is ``pending`` → the dir is left alone (the user may still
     start the scan). It also should not exist in this case under normal
     operation.
@@ -34,6 +35,7 @@ from aespa.db import (
     set_engine,
 )
 from aespa.models import SastRun
+from aespa.sast_workspace import try_acquire_sast_workspace_lease
 
 _UTC = timezone.utc
 
@@ -133,6 +135,24 @@ def test_sweep_marks_scanning_run_failed_and_removes_dir(engine, tmp_path, monke
     assert run.status == "failed"
     assert "interrupted" in (run.error_message or "").lower()
     assert run.completed_at is not None
+
+
+def test_sweep_leaves_live_scanning_workspace_untouched(engine, tmp_path, monkeypatch):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    run_id = _write_run(status="scanning")
+    d = _seed_dir(run_id=run_id)
+    lease = try_acquire_sast_workspace_lease(tmp_path, run_id)
+    assert lease is not None
+    try:
+        _cleanup_orphaned_sast_extractions()
+
+        assert d.is_dir()
+        with Session(engine) as s:
+            run = s.get(SastRun, run_id)
+        assert run.status == "scanning"
+        assert run.error_message is None
+    finally:
+        lease.release()
 
 
 def test_sweep_leaves_pending_run_alone(engine, tmp_path, monkeypatch):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import (
     BaseModel,
@@ -388,11 +388,20 @@ class SastRunSummary(BaseModel):
     llm_config_id: int | None
     llm_profile_id: int | None = None
     leads_count: int
+    phase_state_json: str | None = None
+    coverage_json: str | None = None
+    report_json: str | None = None
     error_message: str | None
     started_at: datetime | None
     completed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class SastRunUpdate(BaseModel):
+    """Mutable SAST settings. A null profile follows the globally active profile."""
+
+    llm_profile_id: int | None = None
 
 
 class ScanLeadOut(BaseModel):
@@ -410,6 +419,17 @@ class ScanLeadOut(BaseModel):
     description: str
     location: str
     evidence: str
+    fingerprint: str = ""
+    suggested_endpoint: str = ""
+    source_trace_json: str = "{}"
+    control_trace_json: str = "[]"
+    sink_trace_json: str = "{}"
+    counterevidence_json: str = "[]"
+    proof_gaps_json: str = "[]"
+    validation_status: str = "pending"
+    validation_reasoning: str = ""
+    attack_path_json: str = "{}"
+    reportable: bool = True
     note: str
     status: str
     investigated_by_run_type: str | None
@@ -782,6 +802,8 @@ class CrawlerConfigBase(BaseModel):
     skip_dangerous_actions: bool = True
     suppress_form_submit_actions: bool = True
     block_non_idempotent_interactive_replay: bool = True
+    enable_access_reconciliation: bool = False
+    llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
 
 
 class CrawlerConfigIn(CrawlerConfigBase):
@@ -981,6 +1003,24 @@ class ReportingDebugConfigOut(ReportingDebugConfigBase):
     updated_at: datetime
 
 
+# ── Browser debug config schemas ─────────────────────────────────────────────
+
+
+class BrowserDebugConfigBase(BaseModel):
+    browser_engine: Literal["playwright_chromium", "system_chrome"] = (
+        "playwright_chromium"
+    )
+    browser_visible: bool = False
+
+
+class BrowserDebugConfigIn(BrowserDebugConfigBase):
+    pass
+
+
+class BrowserDebugConfigOut(BrowserDebugConfigBase):
+    updated_at: datetime
+
+
 # ── Cloudflare Access config schemas ─────────────────────────────────────────
 
 
@@ -1048,6 +1088,7 @@ class TestRunCreate(BaseModel):
     use_screenshots: bool = False
     max_depth: int = Field(default=3, ge=1, le=10)
     max_pages: int = Field(default=500, ge=5, le=500)
+    llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
     crawler_mode: Literal["url", "interactive"] = "url"
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
@@ -1056,6 +1097,7 @@ class TestRunCreate(BaseModel):
 class TestRunUpdate(BaseModel):
     max_depth: int = Field(ge=1, le=10)
     max_pages: int = Field(ge=5, le=500)
+    llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
     crawler_mode: Literal["url", "interactive"] | None = None
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
@@ -1094,6 +1136,7 @@ class TestRunSummary(BaseModel):
     use_screenshots: bool
     max_depth: int
     max_pages: int
+    llm_max_concurrency: int | None = None
     crawler_mode: str = "url"
     scan_mode: str = "aggressive"
     scan_status: str = "idle"
@@ -1114,6 +1157,8 @@ class TestRunSummary(BaseModel):
     per_user_progress: dict = Field(default_factory=dict)
     scope_hosts: list[str] = Field(default_factory=list)
     crawl_credential_id: int | None = None
+    target_page_ids: list[int] = Field(default_factory=list)
+    target_session_label: str | None = None
 
     @field_validator("per_user_progress", mode="before")
     @classmethod
@@ -1125,6 +1170,21 @@ class TestRunSummary(BaseModel):
         if isinstance(v, str):
             return _json.loads(v)
         return v
+
+    @field_validator("target_page_ids", mode="before")
+    @classmethod
+    def _coerce_target_page_ids(cls, v):
+        import json as _json
+
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            try:
+                parsed = _json.loads(v)
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return []
+        return v if isinstance(v, list) else []
 
 
 class ActiveJobSummary(BaseModel):
@@ -1159,6 +1219,7 @@ class CrawledPageOut(BaseModel):
     state_key: str | None = None
     state_label: str | None = None
     state_kind: str = "url"
+    replay_credential_id: int | None = None
     title: str | None
     llm_context: str | None
     depth: int
@@ -1173,11 +1234,42 @@ class CrawledPageOut(BaseModel):
     discovered_at: datetime
     # screenshot returned separately via /pages/{id} to keep list responses light
 
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_owasp_applicable(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            raw = data.get("owasp_applicable_json")
+            if raw and not data.get("owasp_applicable"):
+                try:
+                    data["owasp_applicable"] = json.loads(raw)
+                except Exception:
+                    pass
+            return data
+        if hasattr(data, "owasp_applicable_json"):
+            raw = getattr(data, "owasp_applicable_json", None)
+            owasp = {}
+            if raw:
+                try:
+                    owasp = json.loads(raw)
+                except Exception:
+                    pass
+            d = {
+                k: getattr(data, k)
+                for k in getattr(data, "__dict__", {})
+                if not k.startswith("_")
+            }
+            d["owasp_applicable"] = owasp
+            return d
+        return data
+
 
 class CrawledPageDetail(CrawledPageOut):
     page_text: str | None
     screenshot_b64: str | None
     replay_steps_json: str = "[]"
+    browser_replay: dict | None = None
+    traffic: list[dict] = []
+    object_references: list[dict] = []
 
 
 class GraphNode(BaseModel):
@@ -1185,10 +1277,14 @@ class GraphNode(BaseModel):
     url: str
     state_label: str | None = None
     state_kind: str = "url"
+    replay_available: bool = False
+    replay_credential_id: int | None = None
     title: str | None
     depth: int
     status: str
+    error_message: str | None = None
     context: str | None
+    analysis_status: str = "pending"  # pending | queued | analyzing | complete | skipped
     in_scope: bool = True
     scan_status: str = "pending"
     accessible_by: list[int] = []
@@ -1221,6 +1317,7 @@ class TargetIntelItemOut(BaseModel):
     confidence: float
     evidence: str
     item_metadata: dict = Field(default_factory=dict)
+    page_id: int | None = None
     discovered_at: datetime
 
     @field_validator("item_metadata", mode="before")

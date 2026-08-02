@@ -12,6 +12,7 @@ For each unvalidated finding:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import difflib
 import json
 import logging
@@ -30,6 +31,7 @@ from aespa.models import (
     CrawledPage,
     Credential,
     ScanFinding,
+    ScanLead,
     Site,
     TestRun,
     TrafficEntry,
@@ -52,6 +54,24 @@ _UA = (
 )
 REQUEST_TIMEOUT = 10.0
 _INTERRUPTED_VALIDATION_NOTE = "Validation was interrupted before a verdict (process restart); reset for re-validation."
+
+
+def _static_attack_path_for_finding(finding_id: int | None) -> dict:
+    """Return the SAST path linked to a dynamic finding, when available."""
+    if finding_id is None:
+        return {}
+    with Session(get_engine()) as s:
+        lead = s.exec(
+            select(ScanLead)
+            .where(ScanLead.linked_finding_id == finding_id)
+            .order_by(ScanLead.updated_at.desc())
+        ).first()
+        if lead is None:
+            return {}
+        from aespa.services.scan_leads import decode_attack_path
+
+        return decode_attack_path(lead.attack_path_json)
+
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -112,7 +132,7 @@ async def start_validation(
     # API findings), so tag its events run_kind='web'.  When invoked inline during
     # a scan this scope is already 'web'; the manual /validate endpoints call here
     # from an unscoped request handler, where this scope is what keeps the
-    # validator's agent_status rows from leaking into a colliding api/sast run.
+    # validator's agent_status rows from leaking into another surface's stream.
     with events_svc.run_kind_scope("web"):
         task = asyncio.create_task(
             _validation_task(
@@ -178,7 +198,48 @@ def request_stop(run_id: int) -> bool:
     return True
 
 
+async def stop_and_wait(run_id: int, timeout: float = 5.0) -> bool:
+    """Cancel validation and wait briefly for its cleanup handlers."""
+    task = _validation_tasks.get(run_id)
+    if task is None:
+        return False
+    request_stop(run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return True
+
+
 async def validate_finding_inline(
+    run_id: int,
+    finding_id: int,
+    llm_cfg=None,
+    cred_sessions: dict[int, dict] | None = None,
+    scanner_policy=None,
+) -> None:
+    """Validate a new finding without leaking failures from its background task."""
+    try:
+        await _validate_finding_inline(
+            run_id,
+            finding_id,
+            llm_cfg=llm_cfg,
+            cred_sessions=cred_sessions,
+            scanner_policy=scanner_policy,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.exception("Inline validation failed for finding id=%s", finding_id)
+        await _persist_verdict(
+            run_id,
+            finding_id,
+            "unconfirmed",
+            f"Validation failed before a verdict: {exc}",
+            validation_results=[],
+            source="validation_error",
+        )
+
+
+async def _validate_finding_inline(
     run_id: int,
     finding_id: int,
     llm_cfg=None,
@@ -214,14 +275,19 @@ async def validate_finding_inline(
         finding.validation_status = "validating"
         finding.validation_note = "Validation running."
         s.add(finding)
-        s.commit()
-        s.refresh(finding)
-        loaded_objs = [finding, *creds, site, run]
+        # Session.commit() expires every ORM row still attached to the session.
+        # Detach the read-only inputs first so their fields remain available to
+        # the background validator. This also preserves provider fields resolved
+        # onto llm_cfg in memory by get_llm_config_for_role().
+        readonly_objs = [*creds, site, run]
         if loaded_llm_cfg:
-            loaded_objs.append(llm_cfg)
-        for obj in loaded_objs:
+            readonly_objs.append(llm_cfg)
+        for obj in readonly_objs:
             if obj is not None:
                 s.expunge(obj)
+        s.commit()
+        s.refresh(finding)
+        s.expunge(finding)
 
     events_svc.emit(
         run_id,
@@ -480,6 +546,7 @@ async def _run_adversarial_validator_loop(
     """
     # Build the user message for the validator.
     disproof_hints = llm_svc._disproof_hints_for_finding(finding.owasp_category or "")
+    static_attack_path = _static_attack_path_for_finding(finding.id)
     initial_message = (
         f"**Finding to review**\n"
         f"Title: {finding.title}\n"
@@ -489,6 +556,18 @@ async def _run_adversarial_validator_loop(
         f"**Description**\n{finding.description or 'No description.'}\n\n"
         f"**Scanner evidence**\n{finding.evidence or 'No evidence provided.'}"
     )
+    if static_attack_path:
+        from aespa.services.scan_leads import format_attack_path_for_prompt
+
+        path_lines = format_attack_path_for_prompt(static_attack_path)
+        if path_lines:
+            initial_message += (
+                "\n\n**Static attack path from SAST (hypothesis, not runtime proof)**\n"
+                "Use this map to choose high-information disproof probes. Verify or "
+                "reject each hop against live behavior; do not treat source reachability "
+                "as proof that the vulnerability is exploitable.\n"
+                + "\n".join(path_lines)
+            )
     if disproof_hints:
         initial_message += (
             f"\n\n**Category-specific disproof strategies**\n{disproof_hints}"

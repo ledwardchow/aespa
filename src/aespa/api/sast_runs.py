@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import io
+import json
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -18,12 +18,15 @@ from aespa.config import get_settings
 from aespa.db import get_session
 from aespa.models import (
     AgentLog,
+    ApiCollection,
     ApiTestRun,
     SastRun,
     ScanLead,
     ScanLog,
+    Site,
+    TestRun,
 )
-from aespa.schemas import SastRunSummary, ScanLeadOut
+from aespa.schemas import SastRunSummary, SastRunUpdate, ScanLeadOut
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import run_cleanup
@@ -32,6 +35,7 @@ _UTC = timezone.utc
 
 # 25 MiB cap, matching the API-document upload limit.
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 router = APIRouter(tags=["sast-runs"])
 
@@ -49,7 +53,18 @@ def _get_run_or_404(session: Session, run_id: int) -> SastRun:
 
 
 def _to_summary(run: SastRun) -> SastRunSummary:
-    return SastRunSummary.model_validate(run)
+    summary = SastRunSummary.model_validate(run)
+    if run.id is None:
+        return summary
+
+    # The task registry is authoritative while a scan is active. A previous
+    # terminal DB status can otherwise briefly leak into list/detail responses
+    # while a rerun is already in progress.
+    from aespa.services import sast_scanner
+
+    if sast_scanner.is_sast_scan_running(run.id):
+        return summary.model_copy(update={"status": "scanning"})
+    return summary
 
 
 # ── Standalone SAST run (upload archive + create, no collection) ──────────────
@@ -72,25 +87,44 @@ async def create_standalone_sast_run(
     Not tied to an API collection — used by the SAST screen and consumed by web
     or API test runs, which explicitly import copies of the resulting leads.
     """
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    if len(content) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MiB upload limit.",
-        )
-    if not zipfile.is_zipfile(io.BytesIO(content)):
-        raise HTTPException(
-            status_code=400, detail="Uploaded file is not a valid ZIP archive."
-        )
-
     original_name = Path(file.filename or "source.zip").name or "source.zip"
     base = Path(get_settings().data_dir) / "sast_uploads"
     base.mkdir(parents=True, exist_ok=True)
     ext = Path(original_name).suffix or ".zip"
-    stored_path = base / f"{uuid.uuid4().hex}{ext}"
-    stored_path.write_bytes(content)
+    upload_id = uuid.uuid4().hex
+    temp_path = base / f".{upload_id}.upload"
+    stored_path = base / f"{upload_id}{ext}"
+    bytes_written = 0
+    try:
+        with temp_path.open("wb") as destination:
+            while True:
+                chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > _MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"File exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MiB "
+                            "upload limit."
+                        ),
+                    )
+                destination.write(chunk)
+
+        if bytes_written == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+        if not zipfile.is_zipfile(temp_path):
+            raise HTTPException(
+                status_code=400, detail="Uploaded file is not a valid ZIP archive."
+            )
+        temp_path.replace(stored_path)
+    except HTTPException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
     from aespa.services import sast_scanner
 
@@ -130,6 +164,58 @@ def get_sast_run(
     run_id: int, session: Session = Depends(get_session)
 ) -> SastRunSummary:
     return _to_summary(_get_run_or_404(session, run_id))
+
+
+@router.patch("/api/sast-runs/{run_id}", response_model=SastRunSummary)
+def update_sast_run(
+    run_id: int,
+    payload: SastRunUpdate,
+    session: Session = Depends(get_session),
+) -> SastRunSummary:
+    """Change the model profile used by the next SAST scan or rerun."""
+    run = _get_run_or_404(session, run_id)
+    from aespa.services import sast_scanner
+
+    if run.status == "scanning" or sast_scanner.is_sast_scan_running(run_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot change the model profile while the SAST scan is running",
+        )
+    if payload.llm_profile_id is not None:
+        from aespa.models import LLMProfile
+
+        if session.get(LLMProfile, payload.llm_profile_id) is None:
+            raise HTTPException(status_code=404, detail="Scan profile not found")
+    run.llm_profile_id = payload.llm_profile_id
+    run.updated_at = datetime.now(_UTC)
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return _to_summary(run)
+
+
+def _json_object(value: str | None, default: dict) -> dict:
+    try:
+        parsed = json.loads(value or "")
+    except (TypeError, ValueError):
+        return default
+    return parsed if isinstance(parsed, dict) else default
+
+
+@router.get("/api/sast-runs/{run_id}/analysis")
+def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> dict:
+    """Return authoritative phase, coverage, and report state for the UI."""
+    run = _get_run_or_404(session, run_id)
+    from aespa.services.sast_scanner import _empty_phase_state
+
+    return {
+        "phases": _json_object(run.phase_state_json, _empty_phase_state()),
+        "coverage": _json_object(
+            run.coverage_json,
+            {"files": [], "summary": {"files_total": 0, "files_reviewed": 0}},
+        ),
+        "report": _json_object(run.report_json, {}),
+    }
 
 
 @router.delete("/api/sast-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -187,7 +273,7 @@ def stream_events(
 ) -> StreamingResponse:
     _get_run_or_404(session, run_id)
     return StreamingResponse(
-        events_svc.stream(run_id),
+        events_svc.stream(run_id, run_kind="sast"),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -323,6 +409,94 @@ def get_sast_leads(
         .order_by(ScanLead.id)
     ).all()
     return [ScanLeadOut.model_validate(lead) for lead in leads]
+
+
+@router.get("/api/sast-runs/{run_id}/handoff-targets")
+def get_sast_handoff_targets(
+    run_id: int, session: Session = Depends(get_session)
+) -> list[dict]:
+    """List dynamic runs that can receive a validated static lead."""
+    _get_run_or_404(session, run_id)
+    targets: list[dict] = []
+    web_runs = session.exec(
+        select(TestRun).order_by(TestRun.id.desc()).limit(100)
+    ).all()  # type: ignore[attr-defined]
+    for run in web_runs:
+        site = session.get(Site, run.site_id)
+        targets.append(
+            {
+                "run_type": "web",
+                "run_id": run.id,
+                "name": run.name,
+                "target": site.name if site else f"Site #{run.site_id}",
+                "status": run.status,
+            }
+        )
+    api_runs = session.exec(
+        select(ApiTestRun).order_by(ApiTestRun.id.desc()).limit(100)  # type: ignore[attr-defined]
+    ).all()
+    for run in api_runs:
+        collection = session.get(ApiCollection, run.collection_id)
+        targets.append(
+            {
+                "run_type": "api",
+                "run_id": run.id,
+                "name": run.name,
+                "target": (
+                    collection.name
+                    if collection
+                    else f"API collection #{run.collection_id}"
+                ),
+                "status": run.status,
+            }
+        )
+    return targets
+
+
+class SastLeadHandoffRequest(BaseModel):
+    run_type: str
+    run_id: int
+
+
+@router.post("/api/sast-runs/{run_id}/leads/{lead_id}/handoff")
+def handoff_sast_lead(
+    run_id: int,
+    lead_id: int,
+    body: SastLeadHandoffRequest,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Queue one validated lead into an explicitly selected dynamic run."""
+    _get_run_or_404(session, run_id)
+    lead = session.get(ScanLead, lead_id)
+    if (
+        lead is None
+        or lead.producer_run_id != run_id
+        or lead.imported_into_run_id is not None
+    ):
+        raise HTTPException(status_code=404, detail="SAST lead not found")
+    if not lead.reportable or lead.validation_status != "confirmed":
+        raise HTTPException(
+            status_code=409,
+            detail="Only independently validated reportable leads can be handed off",
+        )
+    if body.run_type == "web":
+        target = session.get(TestRun, body.run_id)
+    elif body.run_type == "api":
+        target = session.get(ApiTestRun, body.run_id)
+    else:
+        raise HTTPException(status_code=422, detail="run_type must be web or api")
+    if target is None:
+        raise HTTPException(status_code=404, detail="Dynamic target run not found")
+
+    from aespa.services.scan_leads import copy_lead_to_run
+
+    copied = copy_lead_to_run(lead_id, body.run_type, body.run_id)
+    return {
+        "queued": True,
+        "lead_id": copied.id,
+        "run_type": body.run_type,
+        "run_id": body.run_id,
+    }
 
 
 @router.get("/api/api-test-runs/{run_id}/leads", response_model=list[ScanLeadOut])

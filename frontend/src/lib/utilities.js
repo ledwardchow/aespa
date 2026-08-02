@@ -155,6 +155,84 @@ export function leadsToMarkdown(leads, meta = {}) {
   return lines.join("\n");
 }
 
+function markdownTableValue(value) {
+  return markdownListValue(value)
+    .replace(/\|/g, "\\|")
+    .replace(/\r?\n/g, "<br>");
+}
+
+function sastTraceValue(value, fallback) {
+  let parsed = value;
+  if (typeof value === "string") {
+    try { parsed = JSON.parse(value); } catch { parsed = value; }
+  }
+  const empty = parsed == null
+    || parsed === ""
+    || (Array.isArray(parsed) && parsed.length === 0)
+    || (typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).length === 0);
+  if (empty) return { text: fallback, recorded: false };
+  return {
+    text: typeof parsed === "string" ? parsed : JSON.stringify(parsed, null, 2),
+    recorded: true,
+  };
+}
+
+function appendSastTrace(lines, label, value, fallback) {
+  const trace = sastTraceValue(value, fallback);
+  lines.push(`#### ${label}`, "");
+  if (trace.recorded) lines.push(markdownCodeBlock(trace.text), "");
+  else lines.push(trace.text, "");
+}
+
+export function sastReportFilename(name, runId) {
+  const base = slugForFilename(name || `sast-run-${runId || ""}`);
+  return `${base}-sast-report-${new Date().toISOString().slice(0, 10)}.md`;
+}
+
+// Full Candidates-tab report: an at-a-glance issue ledger followed by the same
+// evidence-chain fields shown for each selected candidate in the UI.
+export function sastCandidatesToMarkdown(leads, meta = {}) {
+  const issues = [...(leads || [])];
+  const lines = [`# SAST Report${meta.runName ? `: ${markdownText(meta.runName)}` : ""}`, ""];
+  if (meta.generatedAt) lines.push(`- Exported: ${meta.generatedAt.toLocaleString()}`);
+  lines.push(`- Total issues: ${issues.length}`, "", "## Issue Summary", "");
+  lines.push("| # | Severity | Candidate | Confidence | Validation | Reportable | Location |");
+  lines.push("|---:|---|---|---:|---|---|---|");
+  issues.forEach((lead, index) => {
+    lines.push(`| ${index + 1} | ${markdownTableValue((lead.severity || "medium").toUpperCase())} | ${markdownTableValue(lead.title || "Untitled candidate")} | ${Math.round((lead.confidence || 0) * 100)}% | ${markdownTableValue(lead.validation_status || "pending")} | ${lead.reportable ? "Yes" : "No"} | ${markdownTableValue(lead.location || "Location not provided")} |`);
+  });
+  if (!issues.length) lines.push("| — | — | No issues | — | — | — | — |");
+  lines.push("");
+
+  issues.forEach((lead, index) => {
+    const sourceTrace = sastTraceValue(lead.source_trace_json, "");
+    lines.push(
+      `## ${index + 1}. ${markdownListValue(lead.title || "Untitled candidate")}`,
+      "",
+      `- Lead: #${lead.id ?? "—"}`,
+      `- Category: ${markdownListValue(lead.category || "Unclassified")}`,
+      `- Severity: ${markdownListValue((lead.severity || "medium").toUpperCase())}`,
+      `- Confidence: ${Math.round((lead.confidence || 0) * 100)}%`,
+      `- Validation: ${markdownListValue(lead.validation_status || "pending")}`,
+      `- Reportable: ${lead.reportable ? "Yes" : "No"}`,
+      `- Location: ${markdownListValue(lead.location || "Location not provided")}`,
+      `- Fingerprint: ${markdownListValue(lead.fingerprint)}`,
+      "",
+      "### Evidence Chain",
+      "",
+    );
+    appendSastTrace(lines, "Source", sourceTrace.recorded ? lead.source_trace_json : lead.location, "Not recorded");
+    appendSastTrace(lines, "Controls encountered", lead.control_trace_json, "No controls recorded");
+    appendSastTrace(lines, "Sink", lead.sink_trace_json, "Not recorded");
+    appendSastTrace(lines, "Counterevidence", lead.counterevidence_json, "No counterevidence recorded");
+    appendSastTrace(lines, "Proof gaps", lead.proof_gaps_json, "No unresolved static proof gaps");
+    appendSastTrace(lines, "Attack path", lead.attack_path_json, "Not available for this candidate");
+    if (lead.validation_reasoning) lines.push("#### Validator reasoning", "", markdownText(lead.validation_reasoning), "");
+    if (lead.evidence) lines.push("#### Code evidence", "", markdownCodeBlock(lead.evidence), "");
+  });
+  return lines.join("\n");
+}
+
 export function markdownExportFilename(run, siteName) {
   const base = slugForFilename(run?.name || siteName || `run-${run?.id || "issues"}`);
   const date = new Date().toISOString().slice(0, 10);

@@ -95,7 +95,7 @@ export function SpecialistAgentSettings() {
           <input type="checkbox" checked={form.dispatch_idor} disabled={dis} onChange={e => upd({
           dispatch_idor: e.target.checked
         })} />
-          <span>IDOR / Broken Object Level Authorization (A01)</span>
+          <span>IDOR / Broken Object Level Authorisation (A01)</span>
         </label>
         <label className="toggle-row">
           <input type="checkbox" checked={form.dispatch_auth_bypass} disabled={dis} onChange={e => upd({

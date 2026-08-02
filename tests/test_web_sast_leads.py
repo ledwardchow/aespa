@@ -263,3 +263,31 @@ def test_safe_unzip_skips_prefixed_sibling_escape(tmp_path):
 
     assert (target / "good.py").exists()
     assert not (tmp_path / "5x" / "evil.py").exists()  # escape blocked
+
+
+def test_safe_unzip_rejects_oversized_entry(tmp_path, monkeypatch):
+    from aespa.services import sast_scanner
+
+    target = tmp_path / "extract"
+    target.mkdir()
+    archive = tmp_path / "src.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("large.py", "123456")
+
+    monkeypatch.setattr(sast_scanner, "_MAX_ARCHIVE_ENTRY_BYTES", 5)
+    with pytest.raises(ValueError, match="exceeds"):
+        sast_scanner._safe_unzip(str(archive), str(target))
+
+
+def test_standalone_sast_upload_streams_and_enforces_limit(env, tmp_path, monkeypatch):
+    client, _ = env
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    from aespa.api import sast_runs as sast_api
+
+    monkeypatch.setattr(sast_api, "_MAX_UPLOAD_BYTES", 4)
+    resp = client.post(
+        "/api/sast-runs",
+        files={"file": ("src.zip", b"12345", "application/zip")},
+    )
+    assert resp.status_code == 400
+    assert "upload limit" in resp.text

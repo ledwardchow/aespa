@@ -240,6 +240,41 @@ def test_confirm_without_run_id_does_not_promote(engine):
     assert count == 0
 
 
+def test_owner_scoped_update_rejects_a_lead_from_another_run(engine):
+    """Dynamic agents may only mutate copies imported into their own run."""
+    lead_id = _make_lead(
+        engine,
+        imported_into_run_type="web",
+        imported_into_run_id=7,
+    )
+
+    rejected = update_lead(
+        lead_id,
+        status="dismissed",
+        owner_run_type="api",
+        owner_run_id=7,
+        investigated_by_run_type="api",
+        investigated_by_run_id=7,
+    )
+    assert rejected is None
+
+    with Session(engine) as s:
+        lead = s.get(ScanLead, lead_id)
+    assert lead.status == "open"
+    assert lead.investigated_by_run_id is None
+
+    accepted = update_lead(
+        lead_id,
+        status="dismissed",
+        owner_run_type="web",
+        owner_run_id=7,
+        investigated_by_run_type="web",
+        investigated_by_run_id=7,
+    )
+    assert accepted is not None
+    assert accepted.status == "dismissed"
+
+
 # ── Copy-into-web-run model ─────────────────────────────────────────────────────
 
 
@@ -318,6 +353,64 @@ def test_explicit_imports_are_fresh_and_independent_for_each_api_run(engine):
         original = s.get(ScanLead, original_id)
         assert original.status == "open"
         assert original.investigated_by_run_id is None
+
+
+def test_dynamic_context_includes_sast_attack_path(engine):
+    _make_lead(
+        engine,
+        producer_run_id=10,
+        attack_path_json=json.dumps(
+            {
+                "nodes": ["GET /orders/{id}", "order lookup", "missing owner check"],
+                "impact": "Read another user's order.",
+                "severity_reasoning": "Sensitive cross-account data exposure.",
+                "dynamic_test": "Request a known foreign order id as the lower-privileged user.",
+            }
+        ),
+    )
+
+    assert copy_leads_to_run(10, "web", 7) == 1
+    copy = get_leads_for_run("web", 7)[0]
+    context = format_leads_for_run("web", 7)
+
+    assert f"Lead #{copy.id}" in context
+    assert "Static attack path" in context
+    assert "GET /orders/{id} → order lookup → missing owner check" in context
+    assert "Read another user's order." in context
+    assert "Request a known foreign order id" in context
+
+
+def test_validator_can_load_linked_sast_attack_path(engine):
+    from aespa.services.validator import _static_attack_path_for_finding
+
+    with Session(engine) as s:
+        finding = ScanFinding(
+            test_run_id=7,
+            owasp_category="A01",
+            severity="high",
+            title="BOLA on orders",
+            description="Dynamic proof",
+        )
+        s.add(finding)
+        s.commit()
+        s.refresh(finding)
+        s.add(
+            ScanLead(
+                producer_run_id=10,
+                imported_into_run_type="web",
+                imported_into_run_id=7,
+                linked_finding_id=finding.id,
+                attack_path_json=json.dumps(
+                    {"nodes": ["route", "service", "database"]}
+                ),
+            )
+        )
+        s.commit()
+        finding_id = finding.id
+
+    assert _static_attack_path_for_finding(finding_id) == {
+        "nodes": ["route", "service", "database"]
+    }
 
 
 def test_investigating_copy_leaves_original_open(engine):

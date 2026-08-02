@@ -12,7 +12,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from aespa.db import get_session, set_engine
 from aespa.main import create_app
-from aespa.models import LLMConfig, Site
+from aespa.models import CrawledPage, LLMConfig, Site
 from aespa.models import TestRun as RunModel
 from aespa.services.alice import run_alice_turn, run_alice_turn_stream
 
@@ -84,6 +84,84 @@ def test_data_fixture(db_session):
     }
 
 
+def test_alice_tool_set_includes_auth_and_enforce_coverage_tools():
+    from aespa.services.alice import _get_alice_tools
+
+    names = {tool["name"] for tool in _get_alice_tools()}
+    assert "reauthenticate" in names
+    assert "skip_coverage" in names
+    enforce_names = {
+        tool["name"] for tool in _get_alice_tools(exclude={"skip_coverage"})
+    }
+    assert "reauthenticate" in enforce_names
+    assert "skip_coverage" not in enforce_names
+
+
+def test_alice_run_status_context_reports_crawl_progress(db_session, test_data):
+    """ALICE can answer a crawl-status question from AESPA's live run state."""
+    from aespa.services.scanner import _run_thinking_context_tool
+
+    run = test_data["run"]
+    run.phase = "crawling"
+    run.pages_discovered = 3
+    run.max_pages = 10
+    run.current_url = "http://target.local/account"
+    run.per_user_progress = json.dumps(
+        {"alice": {"current_url": run.current_url, "pages_visited": 3}}
+    )
+    db_session.add(
+        CrawledPage(
+            test_run_id=run.id, url="http://target.local/account", status="crawled"
+        )
+    )
+    db_session.commit()
+
+    result = _run_thinking_context_tool(
+        "run_status",
+        {},
+        pages_snapshot=[],
+        findings_snapshot=[],
+        history=[],
+        run_id=run.id,
+        base_url="http://target.local",
+    )
+
+    assert result["run_kind"] == "web"
+    assert result["phase"] == "crawling"
+    assert result["crawl"]["status"] == "running"
+    assert result["crawl"]["pages_discovered"] == 3
+    assert result["crawl"]["max_pages"] == 10
+    assert result["crawl"]["current_url"] == "http://target.local/account"
+    assert result["crawl"]["per_user_progress"]["alice"]["pages_visited"] == 3
+
+
+def test_alice_prompt_explains_aespa_operational_questions():
+    from aespa.services.prompts.alice import (
+        ALICE_OPERATIONAL_SYSTEM_PROMPT,
+        ALICE_SYSTEM_PROMPT,
+    )
+
+    assert "MANDATORY INTENT ROUTING" in ALICE_SYSTEM_PROMPT
+    assert "CURRENT AESPA RUN STATUS" in ALICE_SYSTEM_PROMPT
+    assert "context_tool(tool='run_status')" in ALICE_SYSTEM_PROMPT
+    assert "do not use http_request, browser" in ALICE_SYSTEM_PROMPT
+    assert "operational/support turn" in ALICE_OPERATIONAL_SYSTEM_PROMPT
+    assert "The only tools available for this turn are context_tool and done" in (
+        ALICE_OPERATIONAL_SYSTEM_PROMPT
+    )
+
+
+def test_alice_operational_question_tool_gate_preserves_explicit_testing():
+    from aespa.services.alice import _classify_alice_intent
+
+    assert _classify_alice_intent("What is the progress of the crawl?") == "operational"
+    assert (
+        _classify_alice_intent("What is the status of this test run?") == "operational"
+    )
+    assert _classify_alice_intent("Test the crawl for XSS") == "testing"
+    assert _classify_alice_intent("Probe the API for IDOR") == "testing"
+
+
 @pytest.fixture(name="test_client")
 def test_client_fixture(db_engine):
     """FastAPI TestClient bound to the overridden test database session."""
@@ -133,6 +211,90 @@ async def test_run_alice_turn_executes_loop_for_in_scope_directive(
 
         assert response["status"] == "complete"
         assert mock_reply in response["message"]
+
+
+@pytest.mark.anyio
+async def test_alice_turn_includes_live_status_for_operational_questions(
+    db_session, test_data
+):
+    """The model receives run state before deciding whether a request is a test."""
+    run = test_data["run"]
+    run.phase = "crawling"
+    run.pages_discovered = 4
+    run.max_pages = 12
+    db_session.add(run)
+    db_session.commit()
+    captured = {}
+
+    async def mock_call_with_tools(*args, **kwargs):
+        captured["calls"] = captured.get("calls", 0) + 1
+        captured["system"] = args[1]
+        captured.setdefault("initial_message", args[2][-1]["content"])
+        captured.setdefault("tools", {tool["name"] for tool in kwargs["tools"]})
+        text_block = {"type": "text", "text": "The crawl has found 4 of 12 pages."}
+        return [text_block], "end_turn", [text_block]
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        response = await run_alice_turn(
+            run.id, "What is the progress of the crawl?", []
+        )
+
+    assert response["status"] == "complete"
+    assert "operational/support turn" in captured["system"]
+    assert "MANDATORY INTENT ROUTING" not in captured["system"]
+    assert captured["tools"] <= {"context_tool", "done"}
+    assert captured["calls"] == 1
+    initial_message = captured["initial_message"]
+    assert "CURRENT AESPA RUN STATUS" in initial_message
+    assert '"pages_discovered": 4' in initial_message
+
+
+@pytest.mark.anyio
+async def test_alice_operational_answer_with_done_tool_stays_visible(
+    db_session, test_data
+):
+    """A final text answer must not be swallowed when the model also calls done."""
+    run = test_data["run"]
+    captured = {"calls": 0}
+
+    async def mock_call_with_tools(*args, **kwargs):  # noqa: ARG001
+        captured["calls"] += 1
+        blocks = [
+            {"type": "text", "text": "The crawl is complete."},
+            {"type": "tool_use", "id": "done-1", "name": "done", "input": {}},
+        ]
+        return blocks, "tool_use", blocks
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        response = await run_alice_turn(run.id, "What is the crawl progress?", [])
+
+    assert captured["calls"] == 1
+    assert "The crawl is complete." in response["message"]
+
+
+@pytest.mark.anyio
+async def test_alice_operational_reasoning_stays_out_of_visible_answer(
+    db_session, test_data
+):
+    """Structured reasoning stays private while the text block reaches the reply."""
+    run = test_data["run"]
+    captured = {"calls": 0}
+
+    async def mock_call_with_tools(*args, **kwargs):  # noqa: ARG001
+        captured["calls"] += 1
+        blocks = [
+            {"type": "thinking", "thinking": "The user asked about AESPA status."},
+            {"type": "text", "text": "The crawl is complete."},
+        ]
+        return blocks, "end_turn", blocks
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        response = await run_alice_turn(run.id, "What is the crawl progress?", [])
+
+    assert captured["calls"] == 1
+    assert "The crawl is complete." in response["message"]
+    assert "AESPA status" not in response["message"]
+    assert "AESPA status" in response["thought_process"]
 
 
 @pytest.mark.anyio
@@ -636,3 +798,183 @@ async def test_alice_browser_blocks_out_of_scope_goto_step(db_session, test_data
         )
 
     assert "[SCOPE BLOCK]" in result
+
+
+@pytest.mark.anyio
+async def test_alice_browser_replays_crawled_state_and_passes_page_provenance(
+    db_session, test_data
+):
+    from aespa.models import CrawledPage
+    from aespa.services.alice import _execute_alice_tool
+
+    run = test_data["run"]
+    page_row = CrawledPage(
+        test_run_id=run.id,
+        url="http://target.local/app",
+        state_kind="interactive",
+        replay_steps_json=json.dumps(
+            {
+                "root_url": "http://target.local/app",
+                "steps": [
+                    {"kind": "click", "selector": "#open"},
+                    {"kind": "fill", "selector": "#search", "value": "alice"},
+                ],
+            }
+        ),
+    )
+    db_session.add(page_row)
+    db_session.commit()
+    db_session.refresh(page_row)
+
+    fake_ctx = AsyncMock()
+    fake_page = MagicMock()
+    captured: dict = {}
+
+    async def fake_get_browser(_run_id, api_run_id=None):
+        return fake_page, fake_ctx
+
+    async def fake_run_action(page, action, default_url, scanner_policy):  # noqa: ARG001
+        captured.update(action)
+        return {
+            "body": "interactive state loaded",
+            "url": "http://target.local/app",
+            "status": 200,
+            "headers": {},
+        }
+
+    with (
+        patch("aespa.services.alice._get_alice_browser", fake_get_browser),
+        patch("aespa.services.scanner._run_thinking_browser_action", fake_run_action),
+    ):
+        result = await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="browser",
+            tool_input={"page_id": page_row.id, "replay": True, "steps": []},
+            step=1,
+            session_vault={},
+        )
+
+    assert "interactive state loaded" in result
+    assert captured["steps"][:3] == [
+        {"op": "goto", "url": "http://target.local/app"},
+        {"op": "click", "selector": "#open"},
+        {"op": "fill", "selector": "#search", "value": "alice"},
+    ]
+
+
+@pytest.mark.anyio
+async def test_alice_skip_coverage_is_gated_to_web_enforce_mode(db_session, test_data):
+    from aespa.services.alice import _execute_alice_tool
+
+    run = test_data["run"]
+    run.coverage_mode = "track"
+    db_session.add(run)
+    db_session.commit()
+    result = await _execute_alice_tool(
+        run_id=run.id,
+        llm_cfg=test_data["llm_cfg"],
+        base_url="http://target.local",
+        site_id=test_data["site"].id,
+        tool_name="skip_coverage",
+        tool_input={"url": "http://target.local/", "owasp_category": "A01"},
+        step=1,
+        session_vault={},
+    )
+    assert "only for web Full mode" in result
+
+    run.coverage_mode = "enforce"
+    db_session.add(run)
+    db_session.commit()
+    with patch(
+        "aespa.services.web_workprogram.skip_web_coverage_obligation",
+        return_value="blocked with evidence",
+    ) as skip:
+        result = await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="skip_coverage",
+            tool_input={
+                "url": "http://target.local/",
+                "owasp_category": "A01",
+                "disposition": "blocked",
+                "reason": "login flow unavailable",
+                "evidence": "HTTP 403",
+            },
+            step=2,
+            session_vault={},
+        )
+    skip.assert_called_once()
+    assert "blocked with evidence" in result
+
+
+@pytest.mark.anyio
+async def test_alice_reauthenticate_refreshes_configured_primary_session(
+    db_session, test_data
+):
+    from aespa.models import Credential
+    from aespa.services.alice import _execute_alice_tool
+
+    credential = Credential(
+        site_id=test_data["site"].id,
+        username="admin",
+        password="secret",
+        login_url="http://target.local/login",
+    )
+    db_session.add(credential)
+    db_session.commit()
+
+    async def fake_export(**kwargs):  # noqa: ARG001
+        return {"sid": "fresh"}, "fresh-token"
+
+    vault: dict = {}
+    with patch("aespa.services.scanner._export_cred_session", fake_export):
+        result = await _execute_alice_tool(
+            run_id=test_data["run"].id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="reauthenticate",
+            tool_input={
+                "reason": "The primary session returned 403 after a prior 200."
+            },
+            step=1,
+            session_vault=vault,
+        )
+
+    assert "succeeded" in result
+    assert vault["configured_primary"]["cookies"] == {"sid": "fresh"}
+    assert vault["configured_primary"]["extra_headers"] == {
+        "Authorization": "Bearer fresh-token"
+    }
+
+
+@pytest.mark.anyio
+async def test_alice_web_update_lead_records_web_run_kind(test_data):
+    from aespa.services.alice import _execute_alice_tool
+
+    updated = MagicMock(id=12, status="dismissed", note="not reproducible")
+    with patch(
+        "aespa.services.scan_leads.update_lead", return_value=updated
+    ) as update_lead:
+        result = await _execute_alice_tool(
+            run_id=test_data["run"].id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="update_lead",
+            tool_input={
+                "lead_id": 12,
+                "outcome": "dismissed",
+                "note": "not reproducible",
+            },
+            step=1,
+            session_vault={},
+        )
+
+    assert json.loads(result)["status"] == "dismissed"
+    assert update_lead.call_args.kwargs["investigated_by_run_type"] == "web"
