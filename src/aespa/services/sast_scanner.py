@@ -17,6 +17,7 @@ The scan:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import json
 import logging
@@ -1485,8 +1486,8 @@ async def start_sast_scan(sast_run_id: int) -> None:
         )
     _sast_workspace_leases[sast_run_id] = lease
 
-    # Tag every event this run emits as run_kind='sast'.  Run ids collide across
-    # web / api / sast, so the scope is authoritative.  This also overrides any
+    # Tag every event this run emits as run_kind='sast'.  The scope is retained
+    # as the authoritative surface marker.  This also overrides any
     # surrounding caller scope, since the task created below snapshots this
     # authoritative 'sast' context.
     try:
@@ -1582,6 +1583,17 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
             )
         return True
     return False
+
+
+async def stop_sast_scan_and_wait(sast_run_id: int, timeout: float = 5.0) -> bool:
+    """Cancel a SAST scan and wait briefly for its cleanup handlers."""
+    task = _sast_tasks.get(sast_run_id)
+    if task is None or task.done():
+        return False
+    stopped = await stop_sast_scan(sast_run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return stopped
 
 
 def is_sast_scan_running(sast_run_id: int) -> bool:

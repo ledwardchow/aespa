@@ -1,6 +1,7 @@
 """Slice 5: /api/api-test-runs/{id}/* — standalone + alias routes for ApiTestRun.
 
-The ``ApiTestRun`` uses the same integer id space as ``TestRun``.
+The ``ApiTestRun`` uses the global run id space shared with ``TestRun`` and
+``SastRun``.
 Alice, events, and agent-log endpoints already key on ``test_run_id`` in
 ``AliceChatSession``, ``AgentLog``, etc.  We add thin alias routes here so the
 frontend can call the same alice/events/agent-log URLs against an ApiTestRun id

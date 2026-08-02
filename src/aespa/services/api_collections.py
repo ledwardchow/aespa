@@ -30,11 +30,6 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# API-scan traffic has no real TestRun row; traffic._write stores this sentinel
-# in the NOT NULL test_run_id column and keys the real run on api_test_run_id.
-_API_TRAFFIC_SENTINEL_RUN_ID = 0
-
-
 def list_collections(session: Session) -> list[ApiCollection]:
     return list(session.exec(select(ApiCollection).order_by(ApiCollection.name)).all())
 
@@ -495,9 +490,8 @@ def import_collection(session: Session, bundle: dict) -> ApiCollection:
             t = dict(t)
             t.pop("id")
             t["api_test_run_id"] = new_run_id
-            # API traffic has no real TestRun; test_run_id is NOT NULL, so it
-            # carries the sentinel 0 the scanner writes (see traffic._write).
-            t["test_run_id"] = _API_TRAFFIC_SENTINEL_RUN_ID
+            # API traffic has no web TestRun owner.
+            t["test_run_id"] = None
             _parse_datetimes(t, "created_at")
             session.add(TrafficEntry(**t))
 

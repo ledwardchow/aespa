@@ -878,8 +878,8 @@ _SHARED_CONTEXT_COMMANDS = frozenset(
 )
 
 # These web-crawl inventory commands key their data solely by TestRun id. API
-# run ids occupy a separate integer sequence and can collide with TestRun ids,
-# so allowing either command here could expose an unrelated web run's intel.
+# This inventory belongs only to web crawls, so allowing either command here
+# could expose data from an unrelated surface.
 _BLOCKED_API_CONTEXT_COMMANDS = frozenset({"target_inventory", "search_assets"})
 
 
@@ -1519,9 +1519,8 @@ async def start_api_scan(api_run_id: int) -> None:
 
     log.info("start_api_scan: api_run_id=%s", api_run_id)
 
-    # Tag every event this run emits as run_kind='api'.  Run ids collide across
-    # web / api / sast (independent counters), so the scope — not the id — is the
-    # authoritative discriminator.  asyncio.create_task snapshots this context,
+    # Tag every event this run emits as run_kind='api'.  The scope is the
+    # authoritative surface marker.  asyncio.create_task snapshots this context,
     # so the scan task (and its child specialist tasks) inherit the tag even
     # after this function returns.
     with events_svc.run_kind_scope("api"):

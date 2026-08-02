@@ -179,9 +179,8 @@ def _import_finding(
     assert r.status_code == 200, r.text
 
 
-def test_delete_run_cleans_up_findings_so_reused_id_is_clean(client):
-    """Regression for #173: deleting an API run must remove its findings, or a new
-    run that reuses the freed (SQLite-recycled) id inherits them."""
+def test_delete_run_cleans_up_findings_and_identity(client):
+    """Deleting an API run removes its findings and retires its global id."""
     cid = _make_collection(client)
     run1 = _make_run(client, cid, "Run 1")
     _import_finding(client, run1["id"])
@@ -191,10 +190,10 @@ def test_delete_run_cleans_up_findings_so_reused_id_is_clean(client):
     assert r.status_code == 200
     assert len(r.json()) == 1
 
-    # Delete the run; a freshly created run reuses the same integer id.
+    # Delete the run; a fresh run gets a new global identity.
     assert client.delete(f"/api/api-test-runs/{run1['id']}").status_code == 204
     run2 = _make_run(client, cid, "Run 2")
-    assert run2["id"] == run1["id"], "expected SQLite to recycle the freed id"
+    assert run2["id"] != run1["id"]
 
     # The new run must NOT see the deleted run's finding.
     r = client.get(f"/api/api-test-runs/{run2['id']}/findings")
@@ -442,11 +441,10 @@ def test_events_endpoint_404(client):
 
 
 def test_api_and_web_findings_do_not_cross():
-    """ApiTestRun.id and TestRun.id are independent autoincrement sequences, so
-    the first run of each kind both get id=1.  Findings must stay attached to
-    their own run kind: web findings key on test_run_id, API findings on
-    api_test_run_id (with test_run_id left NULL).  Regression for API findings
-    leaking into the web run of the same integer id."""
+    """Web and API runs use one global id namespace and keep separate findings.
+
+    API findings use api_test_run_id with test_run_id left NULL.
+    """
     from sqlalchemy.pool import StaticPool
     from sqlmodel import Session, SQLModel, create_engine
 
@@ -481,8 +479,7 @@ def test_api_and_web_findings_do_not_cross():
         s.refresh(api_run)
 
         web_run_id, api_run_id = web_run.id, api_run.id
-        # The collision that used to cause the leak.
-        assert web_run_id == api_run_id == 1
+        assert web_run_id != api_run_id
 
         s.add(
             models.ScanFinding(
@@ -704,7 +701,7 @@ def test_alice_sessions_do_not_cross_colliding_ids():
         s.refresh(api_run)
 
         web_run_id, api_run_id = web_run.id, api_run.id
-        assert web_run_id == api_run_id == 1
+        assert web_run_id != api_run_id
 
     def _override_session():
         with Session(engine) as session:
