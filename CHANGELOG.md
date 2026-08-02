@@ -2,7 +2,25 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## August 1, 2026
+## [PR #257] August 2 Update - SAST/Crawler "2.0", usage statistics and schema cleanup
+
+### Significant SAST improvements
+
+Previously, the SAST module had a single agentic loop and was probably good enough to find leads for DAST to validate, but wasn't very useful as a standalone tool.
+
+This has been entirely revised make it useful as a standalone scan option; it tracks coverage on files, runs a discovery phase, adversarial validation of each finding, and traces attack paths which a human/DAST scanner can read to attempt reproduction in a live environment.
+
+### Significant web crawler improvements
+
+The crawler's underlying plumbing was probably the most neglected part of this tool, largely unchanged since May (aside from the "SPA crawl" mode). It has now been revised to make it significantly faster by separating the crawling/route identification from the LLM analysis; LLM calls are queued up and run separately with results committed when they're done. This move from serial to parallel operation has made Bank of Ed crawls speed up from ~30 minutes to ~5 minutes.
+
+There's some cleanup of LLM error states + display of progress, you're much more likely to get a clean site map with fewer orphaned/errored nodes.
+
+### DB schema cleanup
+
+- **One ID sequence for all run types** (`models.py`, database migration): Previously, Web, API, and source code runs had separate test run IDs and various functionality (i.e. chats and scanner log entries) only stored one test run ID + a scan type, this caused issues when scans were deleted and the rows were not cascade deleted, resulting in orphaned entries showing up in the wrong scan when the ID was reused. All scans now receive IDs from one shared sequence and FK constraints now cascade. Orphaned entries are deleted as part of the migration.
+
+### Usage statistics
 
 - **Independent monthly LLM statistics** (`services/statistics.py`, `api/statistics.py`, frontend Stats page): Added a scan-independent monthly ledger for uncached input, output, cache reads/writes, provider-native credits, and price estimates. Usage survives scan deletion and model changes, supports LiteLLM price refreshes and manual monthly overrides, and can be reset with confirmation. OpenRouter endpoints configured through the OpenAI-compatible adapter are labelled as OpenRouter in the ledger, each row retains its endpoint base URL, and the breakdown table gives the provider/model column the most room.
 
@@ -25,7 +43,7 @@ All pull requests merged to `main`, in reverse chronological order.
 ### Factory Droid provider and model discovery
 
 - **Factory Droid LLM provider** (`services/droid_provider.py`, `services/droid_mcp_relay.py`): Added support for Factory Droid as an LLM provider.
-- **Dynamic model discovery** (`services/model_discovery.py`, `GET /api/llm/models`): Endpoint `GET /api/llm/models` dynamically discovers available models from providers instead of requiring the user to enter model names. 
+- **Dynamic model discovery** (`services/model_discovery.py`, `GET /api/llm/models`): Endpoint `GET /api/llm/models` dynamically discovers available models from providers instead of requiring the user to enter model names.
 
 ### Crawler safety and authentication enhancements
 
