@@ -121,9 +121,7 @@ def _persist_agent_status_event(run_id: int, event: dict) -> None:
         pass  # never let persistence failures break the scan
 
 
-async def stream(
-    run_id: int, run_kind: str = "web"
-) -> AsyncGenerator[str, None]:
+async def stream(run_id: int, run_kind: str = "web") -> AsyncGenerator[str, None]:
     """Yield events for ``(run_kind, run_id)`` until the client disconnects."""
     q: asyncio.Queue = asyncio.Queue(maxsize=500)
     key = (run_kind, run_id)

@@ -361,8 +361,12 @@ class LLMUsageMonth(SQLModel, table=True):
     factory_credits: float = Field(default=0.0)
     input_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
     output_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
-    cache_read_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
-    cache_write_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    cache_read_price_usd_per_million: Optional[float] = Field(
+        default=None, nullable=True
+    )
+    cache_write_price_usd_per_million: Optional[float] = Field(
+        default=None, nullable=True
+    )
     credit_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
     credit_unit: Optional[str] = Field(default=None, nullable=True)
     price_source: Optional[str] = Field(default=None, nullable=True)
@@ -386,8 +390,12 @@ class LLMPriceCatalog(SQLModel, table=True):
     model: str = Field(index=True)
     input_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
     output_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
-    cache_read_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
-    cache_write_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
+    cache_read_price_usd_per_million: Optional[float] = Field(
+        default=None, nullable=True
+    )
+    cache_write_price_usd_per_million: Optional[float] = Field(
+        default=None, nullable=True
+    )
     credit_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
     credit_unit: Optional[str] = Field(default=None, nullable=True)
     price_source: Optional[str] = Field(default=None, nullable=True)
@@ -1317,14 +1325,12 @@ def _allocate_run_identity(mapper, connection, target) -> None:
 
     if requested_id is not None:
         occupied = connection.execute(
-            table.select().with_only_columns(table.c.id).where(
-                table.c.id == requested_id
-            )
+            table.select()
+            .with_only_columns(table.c.id)
+            .where(table.c.id == requested_id)
         ).first()
         if occupied is None:
-            connection.execute(
-                table.insert().values(id=requested_id, kind=kind)
-            )
+            connection.execute(table.insert().values(id=requested_id, kind=kind))
             return
 
     values = {"kind": kind}

@@ -223,7 +223,9 @@ def test_severity_threshold_skip_is_not_an_unconfirmed_verdict(monkeypatch):
     assert persisted[0][0][3].startswith("Not validated:")
 
 
-def test_inline_validation_refreshes_rows_before_detaching(monkeypatch, isolated_db_engine):
+def test_inline_validation_refreshes_rows_before_detaching(
+    monkeypatch, isolated_db_engine
+):
     with Session(isolated_db_engine) as session:
         site = Site(
             name="Inline validation target",

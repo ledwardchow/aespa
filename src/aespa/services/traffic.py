@@ -126,6 +126,7 @@ def _safe_playwright_post_data(request) -> Optional[str]:
 
 # ── Low-level writer ──────────────────────────────────────────────────────────
 
+
 def _write(
     run_id: Optional[int],
     source: str,

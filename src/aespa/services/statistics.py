@@ -74,7 +74,9 @@ def _price_candidates(provider: str, model: str) -> list[str]:
     values = [model, f"{provider}/{model}"]
     if "/" in model:
         values.append(model.split("/", 1)[1])
-    return list(dict.fromkeys(value.strip().lower() for value in values if value.strip()))
+    return list(
+        dict.fromkeys(value.strip().lower() for value in values if value.strip())
+    )
 
 
 def resolve_price(
@@ -152,9 +154,7 @@ def _feed(session: Session) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _rates_for(
-    session: Session, provider: str, model: str
-) -> dict[str, Any]:
+def _rates_for(session: Session, provider: str, model: str) -> dict[str, Any]:
     catalog = session.exec(
         select(LLMPriceCatalog).where(
             LLMPriceCatalog.provider == provider,
@@ -207,7 +207,9 @@ def _cost(row: LLMUsageMonth) -> tuple[float, float, float]:
         + row.cache_read_tokens * (row.cache_read_price_usd_per_million or 0)
         + row.cache_write_tokens * (row.cache_write_price_usd_per_million or 0)
     ) / 1_000_000
-    credit_count = row.ai_credits if row.provider == "github_copilot" else row.factory_credits
+    credit_count = (
+        row.ai_credits if row.provider == "github_copilot" else row.factory_credits
+    )
     credit_cost = credit_count * (row.credit_price_usd_per_million or 0) / 1_000_000
     return token_cost, credit_cost, token_cost + credit_cost
 
@@ -236,7 +238,9 @@ def _row_dict(row: LLMUsageMonth) -> dict[str, Any]:
             "source": row.price_source,
             "confidence": row.price_confidence,
             "manual_override": row.manual_override,
-            "updated_at": row.price_updated_at.isoformat() if row.price_updated_at else None,
+            "updated_at": row.price_updated_at.isoformat()
+            if row.price_updated_at
+            else None,
         },
         "estimated_token_cost_usd": token_cost,
         "estimated_credit_cost_usd": credit_cost,
@@ -330,17 +334,24 @@ def get_statistics(session: Session, month: str | None = None) -> dict[str, Any]
         "ai_credits": sum(row.ai_credits for row in rows),
         "factory_credits": sum(row.factory_credits for row in rows),
     }
-    costs = [
-        _cost(row)
-        for row in rows
-    ]
-    totals["estimated_token_cost_usd"] = sum(cost[0] for cost in costs) if costs else None
-    totals["estimated_credit_cost_usd"] = sum(cost[1] for cost in costs) if costs else None
-    totals["estimated_total_cost_usd"] = sum(cost[2] for cost in costs) if costs else None
+    costs = [_cost(row) for row in rows]
+    totals["estimated_token_cost_usd"] = (
+        sum(cost[0] for cost in costs) if costs else None
+    )
+    totals["estimated_credit_cost_usd"] = (
+        sum(cost[1] for cost in costs) if costs else None
+    )
+    totals["estimated_total_cost_usd"] = (
+        sum(cost[2] for cost in costs) if costs else None
+    )
     all_rows = list(session.exec(select(LLMUsageMonth)))
     lifetime_costs = [_cost(row) for row in all_rows]
-    lifetime_token_cost = sum(cost[0] for cost in lifetime_costs) if lifetime_costs else None
-    lifetime_credit_cost = sum(cost[1] for cost in lifetime_costs) if lifetime_costs else None
+    lifetime_token_cost = (
+        sum(cost[0] for cost in lifetime_costs) if lifetime_costs else None
+    )
+    lifetime_credit_cost = (
+        sum(cost[1] for cost in lifetime_costs) if lifetime_costs else None
+    )
     lifetime = {
         "months": len({row.month for row in all_rows}),
         "requests": sum(row.requests for row in all_rows),
@@ -357,7 +368,9 @@ def get_statistics(session: Session, month: str | None = None) -> dict[str, Any]
         sum(cost[2] for cost in lifetime_costs) if lifetime_costs else None
     )
     months = list(
-        session.exec(select(LLMUsageMonth.month).distinct().order_by(LLMUsageMonth.month.desc()))
+        session.exec(
+            select(LLMUsageMonth.month).distinct().order_by(LLMUsageMonth.month.desc())
+        )
     )
     feed = session.get(LLMPriceFeed, 1)
     return {
@@ -421,7 +434,11 @@ def refresh_prices(session: Session) -> dict[str, Any]:
             setattr(catalog, key, value)
         catalog.updated_at = now
     session.commit()
-    return {"updated_rows": updated, "fetched_at": now.isoformat(), "source": PRICE_FEED_URL}
+    return {
+        "updated_rows": updated,
+        "fetched_at": now.isoformat(),
+        "source": PRICE_FEED_URL,
+    }
 
 
 def set_prices(session: Session, payload: dict[str, Any]) -> dict[str, Any]:

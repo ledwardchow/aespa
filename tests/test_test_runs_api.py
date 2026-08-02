@@ -455,23 +455,42 @@ def test_delete_web_run_cascades_all_owned_rows_and_preserves_api_collision(
         assert session.exec(select(models.PageCredentialView)).all() == []
         assert session.exec(select(models.TargetIntelItem)).all() == []
         assert session.exec(select(models.ScanCheckpoint)).all() == []
-        assert session.exec(
-            select(models.ScannerSession).where(models.ScannerSession.run_kind == "web")
-        ).all() == []
-        assert session.exec(
-            select(models.ScanLog).where(models.ScanLog.run_kind == "web")
-        ).all() == []
-        assert session.exec(
-            select(models.AgentLog).where(models.AgentLog.run_kind == "web")
-        ).all() == []
-        assert session.exec(
-            select(models.PhaseCheckpoint).where(
-                models.PhaseCheckpoint.run_kind == "web"
-            )
-        ).all() == []
-        assert session.exec(
-            select(models.ScanObligation).where(models.ScanObligation.run_kind == "web")
-        ).all() == []
+        assert (
+            session.exec(
+                select(models.ScannerSession).where(
+                    models.ScannerSession.run_kind == "web"
+                )
+            ).all()
+            == []
+        )
+        assert (
+            session.exec(
+                select(models.ScanLog).where(models.ScanLog.run_kind == "web")
+            ).all()
+            == []
+        )
+        assert (
+            session.exec(
+                select(models.AgentLog).where(models.AgentLog.run_kind == "web")
+            ).all()
+            == []
+        )
+        assert (
+            session.exec(
+                select(models.PhaseCheckpoint).where(
+                    models.PhaseCheckpoint.run_kind == "web"
+                )
+            ).all()
+            == []
+        )
+        assert (
+            session.exec(
+                select(models.ScanObligation).where(
+                    models.ScanObligation.run_kind == "web"
+                )
+            ).all()
+            == []
+        )
         assert session.exec(select(models.ScanFinding)).all() == [
             session.get(models.ScanFinding, api_ids["finding"])
         ]

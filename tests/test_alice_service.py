@@ -91,8 +91,7 @@ def test_alice_tool_set_includes_auth_and_enforce_coverage_tools():
     assert "reauthenticate" in names
     assert "skip_coverage" in names
     enforce_names = {
-        tool["name"]
-        for tool in _get_alice_tools(exclude={"skip_coverage"})
+        tool["name"] for tool in _get_alice_tools(exclude={"skip_coverage"})
     }
     assert "reauthenticate" in enforce_names
     assert "skip_coverage" not in enforce_names
@@ -111,7 +110,9 @@ def test_alice_run_status_context_reports_crawl_progress(db_session, test_data):
         {"alice": {"current_url": run.current_url, "pages_visited": 3}}
     )
     db_session.add(
-        CrawledPage(test_run_id=run.id, url="http://target.local/account", status="crawled")
+        CrawledPage(
+            test_run_id=run.id, url="http://target.local/account", status="crawled"
+        )
     )
     db_session.commit()
 
@@ -154,7 +155,9 @@ def test_alice_operational_question_tool_gate_preserves_explicit_testing():
     from aespa.services.alice import _classify_alice_intent
 
     assert _classify_alice_intent("What is the progress of the crawl?") == "operational"
-    assert _classify_alice_intent("What is the status of this test run?") == "operational"
+    assert (
+        _classify_alice_intent("What is the status of this test run?") == "operational"
+    )
     assert _classify_alice_intent("Test the crawl for XSS") == "testing"
     assert _classify_alice_intent("Probe the API for IDOR") == "testing"
 
@@ -232,7 +235,9 @@ async def test_alice_turn_includes_live_status_for_operational_questions(
         return [text_block], "end_turn", [text_block]
 
     with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
-        response = await run_alice_turn(run.id, "What is the progress of the crawl?", [])
+        response = await run_alice_turn(
+            run.id, "What is the progress of the crawl?", []
+        )
 
     assert response["status"] == "complete"
     assert "operational/support turn" in captured["system"]
@@ -934,7 +939,9 @@ async def test_alice_reauthenticate_refreshes_configured_primary_session(
             base_url="http://target.local",
             site_id=test_data["site"].id,
             tool_name="reauthenticate",
-            tool_input={"reason": "The primary session returned 403 after a prior 200."},
+            tool_input={
+                "reason": "The primary session returned 403 after a prior 200."
+            },
             step=1,
             session_vault=vault,
         )
@@ -960,7 +967,11 @@ async def test_alice_web_update_lead_records_web_run_kind(test_data):
             base_url="http://target.local",
             site_id=test_data["site"].id,
             tool_name="update_lead",
-            tool_input={"lead_id": 12, "outcome": "dismissed", "note": "not reproducible"},
+            tool_input={
+                "lead_id": 12,
+                "outcome": "dismissed",
+                "note": "not reproducible",
+            },
             step=1,
             session_vault={},
         )

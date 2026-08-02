@@ -364,9 +364,7 @@ def test_agent_log_pagination_returns_newest_page_and_loads_older_rows():
     SQLModel.metadata.create_all(engine)
     try:
         with Session(engine) as session:
-            collection = models.ApiCollection(
-                name="C", base_url="https://example.com"
-            )
+            collection = models.ApiCollection(name="C", base_url="https://example.com")
             session.add(collection)
             session.commit()
             session.refresh(collection)
@@ -400,9 +398,7 @@ def test_agent_log_pagination_returns_newest_page_and_loads_older_rows():
         app.dependency_overrides[get_session] = _override_session
         with TestClient(app, raise_server_exceptions=True) as client:
             all_rows = client.get(f"/api/api-test-runs/{run_id}/agent-log")
-            newest = client.get(
-                f"/api/api-test-runs/{run_id}/agent-log?limit=200"
-            )
+            newest = client.get(f"/api/api-test-runs/{run_id}/agent-log?limit=200")
             older = client.get(
                 f"/api/api-test-runs/{run_id}/agent-log"
                 f"?limit=200&before_id={newest.json()[0]['id']}"

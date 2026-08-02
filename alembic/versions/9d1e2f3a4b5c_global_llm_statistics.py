@@ -28,8 +28,12 @@ def upgrade() -> None:
         sa.Column("requests", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("input_tokens", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("output_tokens", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("cache_read_tokens", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("cache_write_tokens", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column(
+            "cache_read_tokens", sa.Integer(), nullable=False, server_default="0"
+        ),
+        sa.Column(
+            "cache_write_tokens", sa.Integer(), nullable=False, server_default="0"
+        ),
         sa.Column("ai_credits", sa.Float(), nullable=False, server_default="0"),
         sa.Column("factory_credits", sa.Float(), nullable=False, server_default="0"),
         sa.Column("input_price_usd_per_million", sa.Float(), nullable=True),
@@ -40,12 +44,16 @@ def upgrade() -> None:
         sa.Column("credit_unit", sa.String(), nullable=True),
         sa.Column("price_source", sa.String(), nullable=True),
         sa.Column("price_confidence", sa.String(), nullable=True),
-        sa.Column("manual_override", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column(
+            "manual_override", sa.Boolean(), nullable=False, server_default=sa.false()
+        ),
         sa.Column("price_updated_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("month", "provider", "model", name="uq_llm_usage_month_key"),
+        sa.UniqueConstraint(
+            "month", "provider", "model", name="uq_llm_usage_month_key"
+        ),
     )
     op.create_index("ix_llm_usage_month_month", "llm_usage_month", ["month"])
     op.create_index("ix_llm_usage_month_provider", "llm_usage_month", ["provider"])
@@ -64,7 +72,9 @@ def upgrade() -> None:
         sa.Column("credit_unit", sa.String(), nullable=True),
         sa.Column("price_source", sa.String(), nullable=True),
         sa.Column("price_confidence", sa.String(), nullable=True),
-        sa.Column("manual_override", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column(
+            "manual_override", sa.Boolean(), nullable=False, server_default=sa.false()
+        ),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("provider", "model", name="uq_llm_price_catalog_key"),

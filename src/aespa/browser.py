@@ -191,9 +191,7 @@ async def launch_playwright_browser(
                     channel="chromium", **launch_kwargs
                 )
             except Exception as chromium_error:
-                log.debug(
-                    "Playwright Chromium channel unavailable: %s", chromium_error
-                )
+                log.debug("Playwright Chromium channel unavailable: %s", chromium_error)
 
         if launched_browser is None:
             # Last-resort compatibility path for installations that only contain

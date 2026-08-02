@@ -23,9 +23,7 @@ def upgrade() -> None:
     op.create_table(
         "browser_debug_config",
         sa.Column("id", sa.Integer(), nullable=False),
-        sa.Column(
-            "browser_engine", sqlmodel.sql.sqltypes.AutoString(), nullable=False
-        ),
+        sa.Column("browser_engine", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
         sa.Column("browser_visible", sa.Boolean(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.PrimaryKeyConstraint("id"),

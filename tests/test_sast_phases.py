@@ -46,9 +46,7 @@ def _run_with_web_target(engine) -> tuple[int, int]:
         return sast_run.id, web_run.id
 
 
-def test_analysis_endpoint_returns_persisted_semantic_state(
-    client, isolated_db_engine
-):
+def test_analysis_endpoint_returns_persisted_semantic_state(client, isolated_db_engine):
     sast_run_id, _ = _run_with_web_target(isolated_db_engine)
 
     response = client.get(f"/api/sast-runs/{sast_run_id}/analysis")
@@ -88,9 +86,7 @@ def test_sast_summaries_prefer_live_scanner_status(
     assert listed_run["status"] == "scanning"
 
 
-def test_sast_model_profile_can_be_changed_after_creation(
-    client, isolated_db_engine
-):
+def test_sast_model_profile_can_be_changed_after_creation(client, isolated_db_engine):
     sast_run_id, _ = _run_with_web_target(isolated_db_engine)
     with Session(isolated_db_engine) as session:
         profile = LLMProfile(name="SAST review profile")
@@ -120,9 +116,7 @@ def test_sast_model_profile_can_be_changed_after_creation(
     assert missing.status_code == 404
 
 
-def test_sast_model_profile_cannot_change_while_scanning(
-    client, isolated_db_engine
-):
+def test_sast_model_profile_cannot_change_while_scanning(client, isolated_db_engine):
     sast_run_id, _ = _run_with_web_target(isolated_db_engine)
     with Session(isolated_db_engine) as session:
         run = session.get(SastRun, sast_run_id)
@@ -208,9 +202,7 @@ def test_review_executor_records_independent_verdict_and_attack_path(
             "validation_status": "pending",
         }
     ]
-    executor = sast_scanner._make_review_executor(
-        41, root, coverage, "validation"
-    )
+    executor = sast_scanner._make_review_executor(41, root, coverage, "validation")
     result = asyncio.run(
         executor(
             "validate_candidate",
