@@ -845,6 +845,11 @@ def _extract_json(raw: str, expect: type = list) -> Any:
     raise ValueError(f"no valid '{open_ch}' container found in LLM response")
 
 
+def extract_json_response(raw: str, expect: type = list) -> Any:
+    """Public bounded JSON response parser for auxiliary LLM workflows."""
+    return _extract_json(raw, expect=expect)
+
+
 def _extract_action_json(raw: str) -> dict:
     action = _extract_json(raw, expect=dict)
     if not isinstance(action, dict):
@@ -4409,6 +4414,7 @@ async def thinking_agentic_loop(
     max_consecutive_text_turns: int = 3,
     max_context_chars: int = 0,
     on_context_compaction=None,
+    text_only_repair_message: str | None = None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -4808,12 +4814,15 @@ async def thinking_agentic_loop(
                             {
                                 "type": "text",
                                 "text": (
-                                    "Your previous response did not call a tool, so no scan action "
-                                    "was executed. Continue by calling exactly one tool now. Use "
-                                    "http_request, browser, context_tool, write_finding, forge_jwt, "
-                                    "decode_jwt, credential_check, or register_account for the next "
-                                    "assessment step. Call done only if the assessment is genuinely "
-                                    "complete and key attack areas have been covered."
+                                    text_only_repair_message
+                                    or (
+                                        "Your previous response did not call a tool, so no scan action "
+                                        "was executed. Continue by calling exactly one tool now. Use "
+                                        "http_request, browser, context_tool, write_finding, forge_jwt, "
+                                        "decode_jwt, credential_check, or register_account for the next "
+                                        "assessment step. Call done only if the assessment is genuinely "
+                                        "complete and key attack areas have been covered."
+                                    )
                                 ),
                             }
                         ],

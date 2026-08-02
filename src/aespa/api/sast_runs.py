@@ -482,9 +482,12 @@ def handoff_sast_lead(
     body: SastLeadHandoffRequest,
     session: Session = Depends(get_session),
 ) -> dict:
-    """Queue one validated lead into an explicitly selected dynamic run."""
+    """Queue one validated lead into an explicitly selected dynamic run.
+
+    Campaign-owned sources and targets are valid because this only creates an
+    independent lead copy; it does not alter the run lifecycle or source lead.
+    """
     _get_run_or_404(session, run_id)
-    _reject_if_campaign_owned(session, "sast", run_id)
     lead = session.get(ScanLead, lead_id)
     if (
         lead is None
@@ -505,7 +508,6 @@ def handoff_sast_lead(
         raise HTTPException(status_code=422, detail="run_type must be web or api")
     if target is None:
         raise HTTPException(status_code=404, detail="Dynamic target run not found")
-    _reject_if_campaign_owned(session, body.run_type, body.run_id)
 
     from aespa.services.scan_leads import copy_lead_to_run
 
@@ -574,16 +576,18 @@ def import_api_run_sast_leads(
     body: ApiImportLeadsRequest,
     session: Session = Depends(get_session),
 ) -> dict:
-    """Copy one completed SAST run's leads into an API test run."""
+    """Copy one completed SAST run's leads into an API test run.
+
+    Campaign ownership does not block lead copies: the source remains
+    immutable and the destination receives separately owned investigation rows.
+    """
     if session.get(ApiTestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="API test run not found")
-    _reject_if_campaign_owned(session, "api", run_id)
     sast_run = session.get(SastRun, body.sast_run_id)
     if sast_run is None:
         raise HTTPException(status_code=404, detail="SAST run not found")
     if sast_run.status != "completed":
         raise HTTPException(status_code=409, detail="SAST run is not completed")
-    _reject_if_campaign_owned(session, "sast", body.sast_run_id)
 
     from aespa.services.scan_leads import copy_leads_to_run
 

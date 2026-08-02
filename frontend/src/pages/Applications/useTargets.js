@@ -45,5 +45,11 @@ export function useTargets(applicationId, onChanged) {
     onChanged?.();
   }, [applicationId, load, onChanged]);
 
-  return { targets, allSites, allApiCollections, error, setError, attachMany, detach, reload: load };
+  const setComponent = useCallback(async (targetId, componentId) => {
+    await api.updateAppTarget(applicationId, targetId, { component_id: componentId || null });
+    await load();
+    onChanged?.();
+  }, [applicationId, load, onChanged]);
+
+  return { targets, allSites, allApiCollections, error, setError, attachMany, detach, setComponent, reload: load };
 }

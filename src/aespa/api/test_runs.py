@@ -760,15 +760,17 @@ def import_sast_leads(
     body: ImportLeadsRequest,
     session: Session = Depends(get_session),
 ) -> dict:
-    """Copy a SAST run's leads into this web run as independent rows."""
+    """Copy SAST leads into this web run as independent rows.
+
+    Campaign ownership does not block lead copies: the source remains
+    immutable and the destination receives separately owned investigation rows.
+    """
     from aespa.models import SastRun
     from aespa.services.scan_leads import copy_leads_to_run
 
     _get_run_or_404(session, run_id)
-    _reject_if_campaign_owned(session, "web", run_id)
     if session.get(SastRun, body.sast_run_id) is None:
         raise HTTPException(status_code=404, detail="SAST run not found")
-    _reject_if_campaign_owned(session, "sast", body.sast_run_id)
     imported = copy_leads_to_run(body.sast_run_id, "web", run_id)
     return {"imported": imported}
 

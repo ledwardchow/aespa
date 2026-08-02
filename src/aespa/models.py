@@ -1261,6 +1261,11 @@ class ApplicationTarget(SQLModel, table=True):
 
     ``target_id`` refers to ``site.id`` or ``api_collection.id`` depending on
     ``target_type`` — the underlying target row is reused, never copied.
+
+    ``component_id`` is an optional explicit ownership link.  When set, a
+    campaign automatically imports that component's reportable SAST leads into
+    this target's child run; inferred and cross-component leads remain
+    review-gated.
     """
 
     __tablename__ = "application_target"
@@ -1274,6 +1279,9 @@ class ApplicationTarget(SQLModel, table=True):
     application_id: int = Field(foreign_key="application.id", index=True)
     target_type: str = Field(index=True)  # "site" | "api_collection"
     target_id: int = Field(index=True)
+    component_id: Optional[int] = Field(
+        default=None, foreign_key="application_component.id", index=True
+    )
     created_at: datetime = Field(default_factory=_utcnow)
 
 

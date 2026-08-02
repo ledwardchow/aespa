@@ -31,6 +31,7 @@ from aespa.schemas import (
     ApplicationComponentUpdate,
     ApplicationCreate,
     ApplicationTargetCreate,
+    ApplicationTargetUpdate,
     ApplicationUpdate,
     ComponentTargetHintCreate,
 )
@@ -245,6 +246,14 @@ def _delete_component_snapshots(session: Session, component_id: int) -> None:
 
 def delete_component(session: Session, application_id: int, component_id: int) -> None:
     component = get_component(session, application_id, component_id)
+    target_reference = session.exec(
+        select(ApplicationTarget).where(ApplicationTarget.component_id == component_id)
+    ).first()
+    if target_reference is not None:
+        raise ReferencedByCampaign(
+            "A live target still uses this code component. Clear the target's "
+            "component assignment first."
+        )
     referenced = session.exec(
         select(CampaignSourceMember)
         .join(
@@ -394,6 +403,26 @@ def attach_target(
         target_type=payload.target_type,
         target_id=payload.target_id,
     )
+    session.add(target)
+    session.commit()
+    session.refresh(target)
+    return target
+
+
+def update_target(
+    session: Session,
+    application_id: int,
+    target_id: int,
+    payload: ApplicationTargetUpdate,
+) -> ApplicationTarget:
+    target = get_target(session, application_id, target_id)
+    if payload.component_id is not None:
+        component = session.get(ApplicationComponent, payload.component_id)
+        if component is None or component.application_id != application_id:
+            raise CrossApplicationReference(
+                "Code component does not belong to this application"
+            )
+    target.component_id = payload.component_id
     session.add(target)
     session.commit()
     session.refresh(target)
