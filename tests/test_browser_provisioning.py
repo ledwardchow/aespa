@@ -43,11 +43,13 @@ def test_launch_playwright_browser_defaults_to_playwright_chromium():
     )
 
     assert result["channel"] == "chromium"
-    assert playwright.chromium.calls == [{
-        "channel": "chromium",
-        "headless": True,
-        "args": ["--proxy-bypass-list=<-loopback>"],
-    }]
+    assert playwright.chromium.calls == [
+        {
+            "channel": "chromium",
+            "headless": True,
+            "args": ["--proxy-bypass-list=<-loopback>"],
+        }
+    ]
 
 
 def test_launch_playwright_browser_can_select_system_chrome(monkeypatch):
@@ -93,9 +95,7 @@ def test_headed_launch_remembers_previous_app_for_focus_protection(monkeypatch):
 
     previous_app = object()
     restored = []
-    monkeypatch.setattr(
-        browser, "_capture_frontmost_application", lambda: previous_app
-    )
+    monkeypatch.setattr(browser, "_capture_frontmost_application", lambda: previous_app)
     monkeypatch.setattr(
         browser,
         "_restore_frontmost_application",

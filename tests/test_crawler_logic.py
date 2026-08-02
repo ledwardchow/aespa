@@ -1086,7 +1086,7 @@ def test_interactive_workflow_returns_link_revealed_by_form_choice(monkeypatch):
     monkeypatch.setattr(crawler.events_svc, "emit", lambda *args: None)
     monkeypatch.setattr(crawler.llm_svc, "analyse_page", fake_analyse)
 
-    shared = crawler._CrawlShared({}, {}, 1)
+    shared = crawler._CrawlShared({}, {}, 1, run_id=0)
     discoveries = asyncio.run(
         crawler._explore_interactive_states(
             run_id=7,
@@ -1170,7 +1170,7 @@ def test_interactive_workflow_maps_noop_back_to_canonical_url_node(monkeypatch):
             root_url=page.url,
             root_page_id=1,
             root_depth=0,
-            shared=crawler._CrawlShared({}, {}, 1),
+            shared=crawler._CrawlShared({}, {}, 1, run_id=0),
             max_pages=10,
             credential_id=None,
             username=None,
@@ -1249,7 +1249,7 @@ def test_interactive_workflow_caps_replay_attempts(monkeypatch):
             root_url=page.url,
             root_page_id=1,
             root_depth=0,
-            shared=crawler._CrawlShared({}, {}, 1),
+            shared=crawler._CrawlShared({}, {}, 1, run_id=0),
             max_pages=10,
             credential_id=None,
             username=None,
@@ -1351,7 +1351,7 @@ def test_selection_only_state_is_reused_but_enabled_next_is_explored(monkeypatch
             root_url=page.url,
             root_page_id=1,
             root_depth=0,
-            shared=crawler._CrawlShared({}, {}, 1),
+            shared=crawler._CrawlShared({}, {}, 1, run_id=0),
             max_pages=10,
             credential_id=None,
             username=None,
@@ -1465,7 +1465,7 @@ def test_interactive_replay_waits_for_spa_bootstrap(monkeypatch):
             root_url=page.url,
             root_page_id=1,
             root_depth=0,
-            shared=crawler._CrawlShared({}, {}, 1),
+            shared=crawler._CrawlShared({}, {}, 1, run_id=0),
             max_pages=10,
             credential_id=None,
             username=None,
@@ -1521,7 +1521,7 @@ def test_interactive_workflow_detects_javascript_url_navigation(monkeypatch):
             root_url=page.url,
             root_page_id=1,
             root_depth=3,
-            shared=crawler._CrawlShared({}, {}, 1),
+            shared=crawler._CrawlShared({}, {}, 1, run_id=0),
             max_pages=10,
             credential_id=None,
             username=None,
@@ -1598,7 +1598,7 @@ def test_interactive_workflow_detects_same_origin_popup(monkeypatch):
             root_url=page.url,
             root_page_id=1,
             root_depth=1,
-            shared=crawler._CrawlShared({}, {}, 1),
+            shared=crawler._CrawlShared({}, {}, 1, run_id=0),
             max_pages=10,
             credential_id=None,
             username=None,
@@ -2366,7 +2366,7 @@ def test_crawl_progress_includes_user_phase_and_stage(monkeypatch):
         current_url="https://t.local/admin",
         pages_visited=4,
         stage="page_analysis",
-        stage_label="Analyzing page and discovering links",
+        stage_label="Analysing page and discovering links",
         phase_index=2,
         phase_total=4,
     )
@@ -2379,7 +2379,7 @@ def test_crawl_progress_includes_user_phase_and_stage(monkeypatch):
         "pages_visited": 4,
         "current_url": "https://t.local/admin",
         "stage": "page_analysis",
-        "stage_label": "Analyzing page and discovering links",
+        "stage_label": "Analysing page and discovering links",
         "phase_index": 2,
         "phase_total": 4,
         "done": False,
@@ -3195,3 +3195,34 @@ def test_authenticate_entra_id_selects_notification_and_emits_number(monkeypatch
             "message": "Entra login confirmed for alice@example.com.",
         },
     ) in emitted
+
+
+def test_parse_minimax_unclosed_thinking_block():
+    from aespa.services.llm import _parse
+
+    raw_minimax = """<minimax_thinking>
+Analyzing page content for https://example.com/admin.
+Forms detected, requires authentication.
+{
+  "page_label": "Admin Dashboard",
+  "context": "Admin control panel for user management.",
+  "suggested_links": [],
+  "categories": { "req_auth": true, "takes_input": true }
+}"""
+
+    context, links, cats = _parse(raw_minimax, "https://example.com/admin")
+    assert context == "Admin control panel for user management."
+    assert cats["page_label"] == "Admin Dashboard"
+    assert cats["req_auth"] is True
+    assert "<minimax_thinking>" not in context
+
+
+def test_crawl_shared_llm_max_concurrency():
+    # _CrawlShared now uses a _DynamicConcurrencyGate that reads the limit
+    # from the DB at acquire time.  Without a real run_id in the DB the
+    # limit_fn returns None (unlimited), so we verify the gate is always
+    # present and that the limit_fn correctly surfaces None for run_id=0.
+    shared = crawler._CrawlShared(crawled_norms={}, state_keys={}, pages_done=0, run_id=0)
+    assert shared.llm_gate is not None
+    # No real run in DB for run_id=0 → should return None (unlimited)
+    assert crawler._read_effective_llm_concurrency(0) is None

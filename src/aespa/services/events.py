@@ -11,25 +11,22 @@ import contextvars
 import json
 from typing import AsyncGenerator, Iterator
 
-# (run_kind, run_id) → list of subscriber queues.  Web, API, and SAST runs use
-# independent integer sequences, so run_id alone is not a safe event-bus key.
+# (run_kind, run_id) → list of subscriber queues.  The kind remains part of the
+# event-bus key so each surface can keep its own stream and compatibility path.
 _queues: dict[tuple[str, int], list[asyncio.Queue]] = {}
 
-# web TestRun, ApiTestRun and SastRun ids come from independent counters and
-# collide (id 1 can be all three at once), so the shared agent_log / scan_log
-# tables need a discriminator written at persist time.  Resolving that
-# discriminator from the run id alone is impossible when ids collide, so the
-# authoritative — and only — source is ``_run_kind_ctx``: a context variable
+# The shared agent_log / scan_log tables retain a discriminator written at
+# persist time. The authoritative source is ``_run_kind_ctx``: a context variable
 # each scan orchestrator sets (via ``run_kind_scope``) for the duration of its
 # work.  Because ``asyncio.create_task`` snapshots the current context, every
 # event a scan emits — directly or from any child task it spawns — inherits the
-# correct kind regardless of id collisions.
+# correct kind regardless of the numeric id.
 #
 # INVARIANT: every background-task entry point that can emit ``agent_status`` /
 # ``scanner_phase`` MUST run inside a ``run_kind_scope`` (the web/api/sast
 # scanners, the crawler, the validator, and ALICE all do).  There is
-# deliberately no id-keyed fallback: keying on a colliding run id is what leaked
-# events across runs.  An emit that somehow escapes every scope falls back to
+# deliberately no id-keyed fallback: the scope is the explicit routing signal.
+# An emit that somehow escapes every scope falls back to
 # ``'web'`` — deterministic, never routed by stale global state.
 _run_kind_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "aespa_run_kind", default=None
@@ -124,9 +121,7 @@ def _persist_agent_status_event(run_id: int, event: dict) -> None:
         pass  # never let persistence failures break the scan
 
 
-async def stream(
-    run_id: int, run_kind: str = "web"
-) -> AsyncGenerator[str, None]:
+async def stream(run_id: int, run_kind: str = "web") -> AsyncGenerator[str, None]:
     """Yield events for ``(run_kind, run_id)`` until the client disconnects."""
     q: asyncio.Queue = asyncio.Queue(maxsize=500)
     key = (run_kind, run_id)

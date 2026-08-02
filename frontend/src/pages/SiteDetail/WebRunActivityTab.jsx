@@ -268,7 +268,7 @@ export function WebRunActivityTab(props) {
             }}>No specialist agents dispatched yet.</div>;
             return specialistAgents.map(sa => {
               const saActive = sa.status === "active";
-              const saTask = sa.currentTask || sa.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+              const saTask = sa.currentTask || sa.taskHistory?.slice(-1)[0]?.task || "Initialising…";
               const saSteps = sa.stepHistory || [];
               const saExpanded = saSteps.length > 0 && !collapsedAgentIds.has(sa.id);
               const threadLabel = sa.id.replace("specialist-", "").replace(/-([0-9]+)$/, " #$1");
@@ -326,7 +326,7 @@ export function WebRunActivityTab(props) {
                       {canExpand && isExpanded && <div className="agent-task-history">
                           {specialistAgents.map(sa => {
                       const saActive = sa.status === "active";
-                      const saTask = sa.currentTask || sa.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                      const saTask = sa.currentTask || sa.taskHistory?.slice(-1)[0]?.task || "Initialising…";
                       return <div key={sa.id} className={"agent-thread-row" + (saActive ? " agent-thread-row--active" : "")}>
                                 <span className={"agent-dot agent-dot--sm" + (saActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
                                 <span className="agent-thread-id">{sa.id.replace("specialist-", "").replace(/-([0-9]+)$/, " #$1")}</span>
@@ -359,7 +359,7 @@ export function WebRunActivityTab(props) {
                       {canExpand && isExpanded && <div className="agent-task-history">
                           {validatorAgents.map(va => {
                       const vaActive = va.status === "active";
-                      const vaTask = va.currentTask || va.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                      const vaTask = va.currentTask || va.taskHistory?.slice(-1)[0]?.task || "Initialising…";
                       const vaOutcome = va.outcome || va.taskHistory?.slice(-1)[0]?.outcome;
                       const findingNum = va.id.replace("validator-", "");
                       return <div key={va.id} className={"agent-thread-row" + (vaActive ? " agent-thread-row--active" : "")}>
@@ -396,7 +396,7 @@ export function WebRunActivityTab(props) {
                       {canExpand && isExpanded && <div className="agent-task-history">
                           {burpAgents.map(ba => {
                       const baActive = ba.status === "active";
-                      const baTask = ba.currentTask || ba.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                      const baTask = ba.currentTask || ba.taskHistory?.slice(-1)[0]?.task || "Initialising…";
                       return <div key={ba.id} className={"agent-thread-row" + (baActive ? " agent-thread-row--active" : "")}>
                                 <span className={"agent-dot agent-dot--sm" + (baActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
                                 <span className="agent-thread-id">{ba.id.replace("burp-", "")}</span>

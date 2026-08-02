@@ -105,8 +105,16 @@ def test_browser_strategy_uses_page_fetch_for_named_sessions():
                 "extra_headers": {"Authorization": "Bearer primary"},
             },
             primary_browser_cookies=[
-                {"name": "primary_session", "value": "yes", "url": "https://target.local"},
-                {"name": "cf_clearance", "value": "clear", "url": "https://target.local"},
+                {
+                    "name": "primary_session",
+                    "value": "yes",
+                    "url": "https://target.local",
+                },
+                {
+                    "name": "cf_clearance",
+                    "value": "clear",
+                    "url": "https://target.local",
+                },
             ],
             browser_page=browser_page,
         )
@@ -124,9 +132,7 @@ def test_browser_strategy_uses_page_fetch_for_named_sessions():
 
 def test_direct_strategy_does_not_use_browser_page():
     traffic._waf_cache.clear()
-    traffic._waf_cache[("web", 92)] = detect_waf(
-        {"server": "sucuri/cloudproxy"}, None
-    )
+    traffic._waf_cache[("web", 92)] = detect_waf({"server": "sucuri/cloudproxy"}, None)
 
     http_client = _FakeHttpClient()
     browser_context = _FakeBrowserContext()

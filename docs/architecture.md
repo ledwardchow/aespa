@@ -1155,14 +1155,15 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 - **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed; all schema changes are applied at startup via `db.py`
 - **Auth session vault** — `ScannerSession` rows in the DB store serialised cookies/tokens; `scanner_sessions.py` manages load/save/invalidation
 
-### Run-id collisions & `run_kind`
+### Run identities and `run_kind`
 
-`TestRun` (web), `ApiTestRun`, and `SastRun` draw ids from **independent autoincrement sequences that collide in the same integer space** — run #5 can exist as all three at once. Tables shared across run kinds must therefore be disambiguated, or rows leak between unrelated runs:
+`TestRun` (web), `ApiTestRun`, and `SastRun` now share one global id sequence through the `run_identity` table. A run id therefore identifies one run across the whole database; a new run never reuses a deleted id.
 
-- **Shared tables carry a `run_kind` column** (`'web'` / `'api'` / `'sast'`): `agent_log`, `scan_log`, `scanner_session`, `alice_chat_session`. Every query filters on it.
-- **Findings use separate FK columns**: `ScanFinding.test_run_id` (web) vs `api_test_run_id` (API), both nullable. `ScanLead` copies key on `imported_into_run_id` for the same reason.
-- **Event emission is scoped, not id-guessed**: `events.run_kind_scope("web"|"api"|"sast")` is the *sole* authoritative source of an event's kind. It is a context variable that `asyncio.create_task` snapshots, so every event a scan emits — directly or from any child task — inherits the right kind even when ids collide. Every background-task entry point that can emit `agent_status`/`scanner_phase` (the web/api/sast scanners, the crawler, the validator, ALICE) MUST open a scope; an emit that escapes every scope deterministically defaults to `'web'`. There is deliberately no per-id fallback registry — keying on a colliding run id is exactly what leaked events into the wrong run's Agents tab (issue #169 / the SAST Agents leak).
-- **Deletion is scoped per kind** (`services/run_cleanup.py` + the inline web cascade in `api/test_runs.py`) so deleting a run removes exactly its own rows and nothing leaks into a later run that reuses the freed id. SQLite reuses the max id after the highest row is deleted, which is what makes this collision practical, not theoretical.
+- **Run tables use global primary keys**: inserts allocate an id in `run_identity`, then use that id in the type-specific run table. Child run columns reference `run_identity.id` with `ON DELETE CASCADE`.
+- **`run_kind` is still stored where it describes event or workflow data** (`agent_log`, `scan_log`, `scanner_session`, `alice_chat_session`, and the workprogram tables). It remains useful for filtering and compatibility, but it is no longer needed to distinguish colliding integer ids.
+- **Findings and traffic keep explicit owners**: web rows use `test_run_id`, API rows use `api_test_run_id`, and API traffic leaves `test_run_id` NULL. `ScanLead` keeps its type-plus-id provenance fields because those links are intentionally soft.
+- **Existing installations migrate at startup**: the global identity revision creates the identity table, remaps old parent and child ids, and removes rows whose owner cannot be determined. Rows marked only with the old default web owner are dropped when both a web and API/SAST run used the same legacy id.
+- **Deletion is explicit and database-backed**: `services/run_cleanup.py` removes run-owned application rows and then deletes the identity anchor. The foreign keys cascade any remaining run-owned rows, so deleting a run cannot leave data behind for a later run.
 
 ---
 
@@ -1269,7 +1270,7 @@ On API runs, ALICE keeps the API inventory commands (`collection_info`,
 `report_finding`, `coverage_matrix`, and `set_coverage`) and adds the safe shared
 analysis commands (`history_search`, `traffic_search`, `compare_responses`,
 `mutate_request`, and `extract_entities`). API traffic is filtered by
-`api_test_run_id`; it is never read through the colliding web `TestRun` id. API
+`api_test_run_id`; it is never read through the web-only `TestRun` owner. API
 ALICE does not get `reauthenticate`, `skip_coverage`, or Specialist dispatch.
 
 #### `write_finding` deduplication
@@ -1500,6 +1501,8 @@ The dynamic loop investigates leads via the shared `update_lead` action, which s
 
 - **API scans** consume *explicitly imported copies*: the user picks a completed SAST run on the API run's **Scan Leads** tab and `copy_leads_to_run(sast_run_id, "api", run_id)` creates fresh rows owned only by that API run. API scan startup never creates a SAST run or imports collection leads automatically. `_build_api_crawl_context` and API A.L.I.C.E. inject only `format_leads_for_run("api", run_id)`.
 - **Web scans** consume *copies*: the user picks a completed SAST run on the **SAST Leads** tab and `copy_leads_to_run(sast_run_id, "web", run_id)` duplicates its originals into new rows tagged `imported_into_*` (idempotent per source run; originals stay `open`). At scan start `scanner._do_thinking_scan` injects them via `format_leads_for_run("web", run_id)`. Because copies are independent, investigating them never mutates the source SAST run's leads, and deleting a SAST run leaves the copies intact (only `imported_into_run_id IS NULL` originals are cascade-deleted).
+
+The dynamic context includes each lead's ordered reachability, impact, severity reasoning, and dynamic-test objective. The web and API Test Leads use that path to choose focused probes, but must verify every hop against live responses before calling `update_lead`. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
 
 Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import.
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -53,6 +54,8 @@ logging.basicConfig(
 
 _stop_requested: set[int] = set()
 _active_tasks: dict[int, asyncio.Task] = {}
+# Active _CrawlShared objects keyed by run_id, used to notify gate on limit change.
+_active_shared: dict[int, "_CrawlShared"] = {}
 
 # Guided login registry: credential_id -> asyncio.Event (set by the confirm endpoint)
 _guided_registry: dict[int, asyncio.Event] = {}
@@ -87,8 +90,30 @@ def request_stop(run_id: int) -> None:
         task.cancel()
 
 
+async def stop_and_wait(run_id: int, timeout: float = 5.0) -> bool:
+    """Cancel a crawl and wait briefly for its cleanup handlers to finish."""
+    task = _active_tasks.get(run_id)
+    if task is None:
+        return False
+    request_stop(run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return True
+
+
 def is_running(run_id: int) -> bool:
     return run_id in _active_tasks
+
+
+async def notify_limit_change(run_id: int) -> None:
+    """Wake any LLM-analysis tasks waiting on the concurrency gate for *run_id*.
+
+    Call this whenever the user changes ``llm_max_concurrency`` so that tasks
+    blocked on the old limit immediately re-evaluate the new one.
+    """
+    shared = _active_shared.get(run_id)
+    if shared is not None:
+        await shared.llm_gate.notify()
 
 
 def _utcnow() -> datetime:
@@ -178,9 +203,8 @@ def _crawl_seed_urls(
 async def start_crawl(run_id: int) -> None:
     if run_id in _active_tasks:
         return
-    # Tag every event this crawl emits as run_kind='web'.  Run ids collide across
-    # web / api / sast, so the scope — snapshotted by create_task below into the
-    # crawl task and any worker it spawns — is the authoritative discriminator.
+    # Tag every event this crawl emits as run_kind='web'.  The scope is
+    # snapshotted by create_task into the crawl task and its workers.
     # Without it, an unscoped agent_status emit for an id that was also a SAST/API
     # run would be mis-tagged and leak into that run's Agents tab.
     with events_svc.run_kind_scope("web"):
@@ -217,13 +241,87 @@ async def _crawl_task(run_id: int) -> None:
                 s.commit()
     finally:
         _stop_requested.discard(run_id)
+        _active_shared.pop(run_id, None)
+
+
+
+# ── Dynamic LLM concurrency gate ─────────────────────────────────────────────
+
+
+def _read_effective_llm_concurrency(run_id: int) -> int | None:
+    """Return the current effective LLM concurrency cap for *run_id*.
+
+    Reads from the DB on every call so mid-run UI changes are picked up
+    immediately.  Per-run override (``TestRun.llm_max_concurrency``) wins;
+    falls back to the global crawler config.  Returns ``None`` if unlimited.
+    """
+    try:
+        with Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            cap = getattr(run, "llm_max_concurrency", None) if run else None
+            if cap is not None:
+                return cap if cap > 0 else None
+            cfg = get_crawler_config(s)
+            val = getattr(cfg, "llm_max_concurrency", None)
+            return val if val and val > 0 else None
+    except Exception:
+        return None
+
+
+class _DynamicConcurrencyGate:
+    """Async context manager that enforces a live-readable concurrency limit.
+
+    Unlike ``asyncio.Semaphore`` the limit is resolved by calling ``limit_fn``
+    on *every* acquire attempt.  This lets the operator change the cap mid-run
+    (e.g. via the UI) without restarting the crawl.
+
+    ``limit_fn()`` must return an ``int > 0`` to enforce a cap, or ``None`` /
+    ``0`` to allow unlimited concurrent callers.
+    """
+
+    def __init__(self, limit_fn) -> None:
+        self._limit_fn = limit_fn
+        self._active: int = 0
+        self._cond: asyncio.Condition = asyncio.Condition()
+
+    async def acquire(self) -> None:
+        async with self._cond:
+            while True:
+                limit = self._limit_fn()
+                if not limit or limit <= 0 or self._active < limit:
+                    self._active += 1
+                    return
+                await self._cond.wait()
+
+    async def release(self) -> None:
+        async with self._cond:
+            self._active = max(0, self._active - 1)
+            self._cond.notify_all()
+
+    async def notify(self) -> None:
+        """Wake all waiters so they re-evaluate the (possibly changed) limit."""
+        async with self._cond:
+            self._cond.notify_all()
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *_):
+        await self.release()
 
 
 # ── Shared state for parallel crawlers ───────────────────────────────────────
 
 
 class _CrawlShared:
-    def __init__(self, crawled_norms: dict, state_keys: dict, pages_done: int) -> None:
+    def __init__(
+        self,
+        crawled_norms: dict,
+        state_keys: dict,
+        pages_done: int,
+        run_id: int,
+    ) -> None:
         self.crawled_norms: dict[str, int] = crawled_norms  # norm_url → page_id
         self.state_keys: dict[str, int] = (
             state_keys  # SPA interaction fingerprint → page_id
@@ -235,6 +333,17 @@ class _CrawlShared:
         # bundle referenced on every page (or repeatedly dynamically imported)
         # is only downloaded and regex-scanned once per crawl.
         self.mined_script_urls: set[str] = set()
+        # Shared cache for LLM page analysis results keyed by (url, content_hash)
+        self.llm_analysis_cache: dict[
+            tuple[str, str], tuple[str, list[str], dict]
+        ] = {}
+        self.llm_pending_count: int = 0
+        self.llm_completed_count: int = 0
+        # Dynamic gate: re-reads the effective concurrency limit from the DB on
+        # every acquire so UI changes take effect immediately mid-crawl.
+        self.llm_gate: _DynamicConcurrencyGate = _DynamicConcurrencyGate(
+            lambda: _read_effective_llm_concurrency(run_id)
+        )
 
 
 # ── Progress logging ──────────────────────────────────────────────────────────
@@ -287,22 +396,25 @@ def _crawl_progress(
     phase_index: int,
     phase_total: int,
     done: bool = False,
+    llm_pending: int = 0,
+    llm_completed: int = 0,
 ) -> None:
     """Emit live per-user progress with enough context for the Agents panel."""
-    events_svc.emit(
-        run_id,
-        {
-            "type": "crawl_progress",
-            "username": username,
-            "pages_visited": pages_visited,
-            "current_url": current_url,
-            "stage": stage,
-            "stage_label": stage_label,
-            "phase_index": phase_index,
-            "phase_total": phase_total,
-            "done": done,
-        },
-    )
+    evt: dict = {
+        "type": "crawl_progress",
+        "username": username,
+        "pages_visited": pages_visited,
+        "current_url": current_url,
+        "stage": stage,
+        "stage_label": stage_label,
+        "phase_index": phase_index,
+        "phase_total": phase_total,
+        "done": done,
+    }
+    if llm_pending > 0 or llm_completed > 0:
+        evt["llm_pending"] = llm_pending
+        evt["llm_completed"] = llm_completed
+    events_svc.emit(run_id, evt)
 
 
 # ── Core orchestrator ─────────────────────────────────────────────────────────
@@ -386,7 +498,9 @@ async def _do_crawl_inner(run_id: int) -> None:
         crawled_norms={_norm(ep.url): ep.id for ep in existing},
         state_keys={ep.state_key: ep.id for ep in existing if ep.state_key},
         pages_done=len(existing),
+        run_id=run_id,
     )
+    _active_shared[run_id] = shared
 
     _update_run(
         run_id,
@@ -530,7 +644,7 @@ async def _do_crawl_inner(run_id: int) -> None:
             "agent_id": "crawler",
             "role": "Crawler",
             "status": "active",
-            "current_task": "Finalizing crawl results",
+            "current_task": "Finalising crawl results",
             "outcome": None,
             "_persist": True,
         },
@@ -539,10 +653,10 @@ async def _do_crawl_inner(run_id: int) -> None:
         run_id,
         "crawl",
         "info",
-        "Finalizing crawl — merging credential views and preparing the attack surface",
+        "Finalising crawl — merging credential views and preparing the attack surface",
         data={
             "stage": "finalizing",
-            "stage_label": "Finalizing crawl",
+            "stage_label": "Finalising crawl",
             "pages_discovered": shared.pages_done,
         },
     )
@@ -616,6 +730,151 @@ async def _do_crawl_inner(run_id: int) -> None:
             "_persist": True,
         },
     )
+
+
+# ── Asynchronous LLM Page Analysis ───────────────────────────────────────────
+
+
+async def _async_analyse_and_update_page(
+    run_id: int,
+    page_id: int,
+    credential_id: int | None,
+    username: str,
+    final_url: str,
+    title: str,
+    text: str,
+    screenshot_b64: str | None,
+    llm_cfg,
+    shared: _CrawlShared,
+) -> None:
+    async with shared.lock:
+        shared.llm_pending_count += 1
+        pending = shared.llm_pending_count
+        completed = shared.llm_completed_count
+
+    events_svc.emit(
+        run_id,
+        {
+            "type": "llm_analysis_progress",
+            "page_id": page_id,
+            "url": final_url,
+            "username": username,
+            "status": "queued",
+            "pending_count": pending,
+            "completed_count": completed,
+        },
+    )
+
+    cats: dict = {
+        "req_auth": None,
+        "takes_input": None,
+        "has_object_ref": None,
+        "has_business_logic": None,
+    }
+    context = ""
+    suggested: list[str] = []
+
+    text_snippet = text or ""
+    content_hash = hashlib.sha256(text_snippet[:8000].encode()).hexdigest()
+    cache_key = (final_url, content_hash)
+
+    try:
+        cached = None
+        async with shared.lock:
+            if cache_key in shared.llm_analysis_cache:
+                cached = shared.llm_analysis_cache[cache_key]
+
+        if cached is not None:
+            context, suggested, cats = cached
+        elif _is_api_page(final_url, text_snippet):
+            context = "[API endpoint — LLM analysis skipped]"
+            cached = (context, suggested, cats)
+            async with shared.lock:
+                shared.llm_analysis_cache[cache_key] = cached
+        else:
+            try:
+                async with shared.llm_gate:
+                    events_svc.emit(
+                        run_id,
+                        {
+                            "type": "llm_analysis_progress",
+                            "page_id": page_id,
+                            "url": final_url,
+                            "username": username,
+                            "status": "analyzing",
+                            "pending_count": shared.llm_pending_count,
+                            "completed_count": shared.llm_completed_count,
+                        },
+                    )
+                    context, suggested, cats = await llm_svc.analyse_page(
+                        llm_cfg, final_url, title, text_snippet[:8000], screenshot_b64
+                    )
+                log.info("  LLM ok for %s (user=%s) cats=%s", final_url, username, cats)
+                cached = (context, suggested, cats)
+                async with shared.lock:
+                    shared.llm_analysis_cache[cache_key] = cached
+            except Exception as e:
+                log.warning("  LLM failed for %s: %s", final_url, e)
+                context = f"[LLM failed: {e}]"
+
+        _save_credential_view(
+            page_id,
+            run_id,
+            credential_id,
+            username,
+            screenshot_b64,
+            context,
+            text_snippet[:10_000],
+            cats,
+        )
+        state_label = _page_function_label(cats.get("page_label"))
+        _update_page(
+            page_id,
+            state_label=state_label,
+            llm_context=context,
+            req_auth=cats.get("req_auth"),
+            takes_input=cats.get("takes_input"),
+            has_object_ref=cats.get("has_object_ref"),
+            has_business_logic=cats.get("has_business_logic"),
+            owasp_applicable_json=json.dumps(cats.get("owasp_applicable") or {}),
+        )
+    finally:
+        async with shared.lock:
+            shared.llm_pending_count = max(0, shared.llm_pending_count - 1)
+            shared.llm_completed_count += 1
+            pending = shared.llm_pending_count
+            completed = shared.llm_completed_count
+
+        state_label = _page_function_label(cats.get("page_label"))
+        events_svc.emit(
+            run_id,
+            {
+                "type": "page_updated",
+                "page_id": page_id,
+                "url": final_url,
+                "username": username,
+                "state_label": state_label,
+                "llm_context": context,
+                "req_auth": cats.get("req_auth"),
+                "takes_input": cats.get("takes_input"),
+                "has_object_ref": cats.get("has_object_ref"),
+                "has_business_logic": cats.get("has_business_logic"),
+                "owasp_applicable": cats.get("owasp_applicable") or {},
+                "analysis_status": "complete",
+            },
+        )
+        events_svc.emit(
+            run_id,
+            {
+                "type": "llm_analysis_progress",
+                "page_id": page_id,
+                "url": final_url,
+                "username": username,
+                "status": "complete",
+                "pending_count": pending,
+                "completed_count": completed,
+            },
+        )
 
 
 # ── Per-credential BFS ────────────────────────────────────────────────────────
@@ -696,6 +955,7 @@ async def _crawl_as_credential(
     )
 
     local_pages = 0  # pages actually navigated to by this credential
+    llm_tasks: list[asyncio.Task] = []
 
     async with async_playwright() as p:
         # <-loopback> removes Chromium's default proxy bypass for localhost so
@@ -1024,14 +1284,31 @@ async def _crawl_as_credential(
                 final_url = raw_final
 
             norm_final = _norm(final_url)
+            source_page_status = None
+            with Session(get_engine()) as s:
+                source_page = s.get(CrawledPage, page_id)
+                source_page_status = source_page.status if source_page else None
+
+            # A URL can redirect for an anonymous phase and load successfully
+            # for an authenticated phase. Promote the original placeholder
+            # back to a normal page when that happens.
+            if norm_final == norm and source_page_status == "redirect":
+                _update_page(page_id, status="crawled", error_message=None)
+
             if norm_final != norm:
                 async with shared.lock:
                     if norm_final in shared.crawled_norms:
                         existing_id = shared.crawled_norms[norm_final]
                         if is_first:
-                            _update_page(page_id, status="redirect")
-                            shared.crawled_norms[norm] = existing_id
-                            shared.pages_done -= 1
+                            _update_page(
+                                page_id,
+                                status="redirect",
+                                analysis_status="skipped",
+                            )
+                            # Keep the requested URL mapped to its own
+                            # placeholder. A redirect observed for one
+                            # credential must not make later authenticated
+                            # phases reuse the redirect target's page ID.
                         page_id = existing_id
                         is_first = False
                     elif is_first:
@@ -1085,7 +1362,11 @@ async def _crawl_as_credential(
 
             if on_login:
                 if is_first:
-                    _update_page(page_id, status="crawled")
+                    _update_page(
+                        page_id,
+                        status="crawled",
+                        analysis_status="skipped",
+                    )
                 log.debug(
                     "  Login form for %s (user=%s) — inaccessible", final_url, username
                 )
@@ -1157,7 +1438,7 @@ async def _crawl_as_credential(
                 final_url,
                 local_pages,
                 stage="page_analysis",
-                stage_label="Analyzing page and discovering links",
+                stage_label="Analysing page and discovering links",
                 phase_index=phase_idx + 1,
                 phase_total=total_phases,
             )
@@ -1167,7 +1448,7 @@ async def _crawl_as_credential(
                 pages_visited=local_pages,
                 current_url=final_url,
                 stage="page_analysis",
-                stage_label="Analyzing page and discovering links",
+                stage_label="Analysing page and discovering links",
                 phase_index=phase_idx + 1,
                 phase_total=total_phases,
             )
@@ -1175,11 +1456,11 @@ async def _crawl_as_credential(
                 run_id,
                 "crawl",
                 "info",
-                f"Phase {phase_idx + 1}/{total_phases} — {username}: analyzing page and discovering links",
+                f"Phase {phase_idx + 1}/{total_phases} — {username}: analysing page and discovering links",
                 page_url=final_url,
                 data={
                     "stage": "page_analysis",
-                    "stage_label": "Analyzing page and discovering links",
+                    "stage_label": "Analysing page and discovering links",
                     "username": username,
                     "phase_index": phase_idx + 1,
                     "phase_total": total_phases,
@@ -1233,41 +1514,37 @@ async def _crawl_as_credential(
                             )
                         )
 
-            # ── LLM analysis ──────────────────────────────────────────────────
-            cats: dict = {
-                "req_auth": None,
-                "takes_input": None,
-                "has_object_ref": None,
-                "has_business_logic": None,
-            }
-            context = ""
-            suggested: list[str] = []
-            if _is_api_page(final_url, text):
-                context = "[API endpoint — LLM analysis skipped]"
-            else:
-                try:
-                    context, suggested, cats = await llm_svc.analyse_page(
-                        llm_cfg, final_url, title, text[:8000], screenshot_b64
-                    )
-                    log.info(
-                        "  LLM ok for %s (user=%s) cats=%s", final_url, username, cats
-                    )
-                except Exception as e:
-                    log.warning("  LLM failed for %s: %s", final_url, e)
-                    context = f"[LLM failed: {e}]"
-
-            # ── Persist per-credential view ───────────────────────────────────
+            # ── Persist per-credential view & initial page record ─────────────
             _save_credential_view(
                 page_id,
                 run_id,
                 credential_id,
                 username,
                 screenshot_b64,
-                context,
+                "",
                 text[:10_000],
-                cats,
+                {},
             )
             _update_accessible_by(page_id, credential_id)
+
+            # Launch LLM page analysis asynchronously without blocking crawl navigation
+            llm_tasks.append(
+                asyncio.create_task(
+                    _async_analyse_and_update_page(
+                        run_id=run_id,
+                        page_id=page_id,
+                        credential_id=credential_id,
+                        username=username,
+                        final_url=final_url,
+                        title=title,
+                        text=text,
+                        screenshot_b64=screenshot_b64,
+                        llm_cfg=llm_cfg,
+                        shared=shared,
+                    ),
+                    name=f"llm-analyse-page-{page_id}",
+                )
+            )
 
             # ── Update main CrawledPage if first to fill it ───────────────────
             with Session(get_engine()) as s:
@@ -1282,20 +1559,11 @@ async def _crawl_as_credential(
             if is_first or fill_main:
                 _page_update = {
                     "url": final_url,
-                    "state_label": _page_function_label(cats.get("page_label")),
                     "title": title,
                     "page_text": text[:10_000],
                     "screenshot_b64": screenshot_b64,
-                    "llm_context": context,
                     "status": "crawled",
                     "depth": depth,
-                    "req_auth": cats["req_auth"],
-                    "takes_input": cats["takes_input"],
-                    "has_object_ref": cats["has_object_ref"],
-                    "has_business_logic": cats["has_business_logic"],
-                    "owasp_applicable_json": json.dumps(
-                        cats.get("owasp_applicable") or {}
-                    ),
                 }
                 _action_data = (incoming_action or {}).get("action_data") or {}
                 if isinstance(_action_data, dict) and _action_data.get("replay_steps"):
@@ -1355,11 +1623,11 @@ async def _crawl_as_credential(
                         "node": {
                             "id": page_id,
                             "url": final_url,
-                            "state_label": _page_function_label(cats.get("page_label")),
+                            "state_label": None,
                             "title": title,
                             "depth": depth,
                             "status": "crawled",
-                            "context": context,
+                            "context": "",
                             "in_scope": True,
                             "scan_status": "pending",
                             "accessible_by": ab,
@@ -1482,24 +1750,6 @@ async def _crawl_as_credential(
                                 discovery,
                             )
                         )
-                filtered_suggested = _filter_suggested_links(
-                    suggested, same_domain_links, base_netloc
-                )
-                if len(filtered_suggested) < len(suggested):
-                    log.info(
-                        "Dropped %d LLM-suggested crawl URL(s) that were not observed as page links for %s",
-                        len(suggested) - len(filtered_suggested),
-                        final_url,
-                    )
-                for sugg_url in reversed(filtered_suggested):
-                    n = _norm(sugg_url)
-                    if (
-                        n not in queued
-                        and _same_domain(sugg_url, base_netloc)
-                        and not _is_session_ending_url(sugg_url)
-                    ):
-                        queued.add(n)
-                        queue.appendleft((sugg_url, depth + 1, page_id, None))
                 for link_url, link_text in same_domain_links:
                     n = _norm(link_url)
                     if (
@@ -1558,6 +1808,8 @@ async def _crawl_as_credential(
                 },
             )
 
+        if llm_tasks:
+            await asyncio.gather(*llm_tasks, return_exceptions=True)
         await browser.close()
 
     _update_credential_progress(
@@ -2072,8 +2324,7 @@ async def _perform_interactive_action(
     block_non_idempotent_interactive_replay: bool,
 ) -> dict:
     action_identity = " ".join(
-        str(step.get(key) or "")
-        for key in ("name", "selector", "testid", "element_id")
+        str(step.get(key) or "") for key in ("name", "selector", "testid", "element_id")
     )
     if _is_session_ending_url("", action_identity):
         return {"ok": False, "changed": False, "blocked_requests": []}
@@ -2461,9 +2712,7 @@ async def _explore_interactive_states(
             # controls before the interactive snapshot is taken.  Use a tighter
             # busy_grace_ms than the main loop's 30 s default so the 90 s
             # _INTERACTIVE_MAX_SECONDS budget isn't consumed by a single replay.
-            await _wait_for_content_settle(
-                page, max_wait_ms=3_000, busy_grace_ms=12_000
-            )
+            await _wait_for_content_settle(page, max_wait_ms=1_000, busy_grace_ms=3_000)
             replay_root = await _interactive_state_snapshot(
                 page, capture_screenshot=False
             )
@@ -2749,7 +2998,7 @@ def _save_page_placeholder(run_id: int, url: str, depth: int) -> int:
     return cp.id
 
 
-def _update_page(page_id: int, **kwargs) -> None:
+def _update_page(page_id: int, *, analysis_status: str | None = None, **kwargs) -> None:
     with Session(get_engine()) as s:
         cp = s.get(CrawledPage, page_id)
         if cp is None:
@@ -2758,6 +3007,27 @@ def _update_page(page_id: int, **kwargs) -> None:
             setattr(cp, k, v)
         s.add(cp)
         s.commit()
+        run_id = cp.test_run_id
+        status = cp.status
+        error_msg = cp.error_message
+
+    events_svc.emit(
+        run_id,
+        {
+            "type": "page_updated",
+            "page_id": page_id,
+            "status": status,
+            "error_message": error_msg,
+            "state_label": kwargs.get("state_label"),
+            "llm_context": kwargs.get("llm_context"),
+            "req_auth": kwargs.get("req_auth"),
+            "takes_input": kwargs.get("takes_input"),
+            "has_object_ref": kwargs.get("has_object_ref"),
+            "has_business_logic": kwargs.get("has_business_logic"),
+            "owasp_applicable": kwargs.get("owasp_applicable"),
+            "analysis_status": analysis_status,
+        },
+    )
 
 
 def _save_credential_view(
@@ -4660,6 +4930,32 @@ async def _confirm_direct_page_access(
         )
     if not candidate_text.strip():
         return False, "The direct-load response did not contain meaningful page text."
+    if _looks_like_login_text(candidate_text):
+        return (
+            False,
+            "The direct-load response contains login or access denied indicators.",
+        )
+    cand_title_norm = (candidate_title or "").strip().lower()
+    orig_title_norm = (original_title or "").strip().lower()
+    if (
+        cand_title_norm
+        and orig_title_norm
+        and cand_title_norm == orig_title_norm
+        and len((candidate_text or "").strip()) > 100
+    ):
+        return (
+            True,
+            "Direct access confirmed (matching page title and content structure).",
+        )
+    orig_clean = (original_text or "").strip()
+    cand_clean = (candidate_text or "").strip()
+    if len(orig_clean) > 100 and len(cand_clean) > 100:
+        if (
+            orig_clean[:1000] == cand_clean[:1000]
+            or cand_clean[:3000] in orig_clean
+            or orig_clean[:3000] in cand_clean
+        ):
+            return True, "Direct access confirmed (matching page body text)."
     try:
         verdict = await llm_svc.judge_page_access(
             llm_cfg,
@@ -5119,9 +5415,7 @@ def _response_suggests_session_dropped(resp) -> bool:
     return resp is not None and resp.status in (401, 419, 440)
 
 
-async def _page_requires_login(
-    page, login_url: str, *, settle_ms: int = 0
-) -> bool:  # noqa: ARG001
+async def _page_requires_login(page, login_url: str, *, settle_ms: int = 0) -> bool:  # noqa: ARG001
     """Return whether the page is blocked by a login wall.
 
     Some SPAs ship the login form in the initial HTML and hide it only after
@@ -5344,9 +5638,9 @@ async def _auth_check_still_authenticated(
             await check_page.wait_for_load_state("networkidle", timeout=2_000)
         except Exception:
             pass
-        if _response_suggests_session_dropped(
-            response
-        ) or await _page_requires_login(check_page, login_url, settle_ms=1_500):
+        if _response_suggests_session_dropped(response) or await _page_requires_login(
+            check_page, login_url, settle_ms=1_500
+        ):
             return False
         try:
             title = await check_page.title()

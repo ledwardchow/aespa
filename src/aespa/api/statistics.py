@@ -23,7 +23,9 @@ def refresh_llm_prices(session: Session = Depends(get_session)) -> dict:
         return statistics_service.refresh_prices(session)
     except Exception as exc:
         session.rollback()
-        raise HTTPException(status_code=502, detail=f"Price download failed: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Price download failed: {exc}"
+        ) from exc
 
 
 @router.put("/llm/prices")

@@ -23,20 +23,72 @@ def upgrade() -> None:
     op.add_column("sast_run", sa.Column("coverage_json", sa.String(), nullable=True))
     op.add_column("sast_run", sa.Column("report_json", sa.String(), nullable=True))
 
-    op.add_column("scan_lead", sa.Column("fingerprint", sa.String(), nullable=False, server_default=""))
-    op.add_column("scan_lead", sa.Column("suggested_endpoint", sa.String(), nullable=False, server_default=""))
-    op.add_column("scan_lead", sa.Column("source_trace_json", sa.String(), nullable=False, server_default="{}"))
-    op.add_column("scan_lead", sa.Column("control_trace_json", sa.String(), nullable=False, server_default="[]"))
-    op.add_column("scan_lead", sa.Column("sink_trace_json", sa.String(), nullable=False, server_default="{}"))
-    op.add_column("scan_lead", sa.Column("counterevidence_json", sa.String(), nullable=False, server_default="[]"))
-    op.add_column("scan_lead", sa.Column("proof_gaps_json", sa.String(), nullable=False, server_default="[]"))
-    op.add_column("scan_lead", sa.Column("validation_status", sa.String(), nullable=False, server_default="pending"))
-    op.add_column("scan_lead", sa.Column("validation_reasoning", sa.String(), nullable=False, server_default=""))
-    op.add_column("scan_lead", sa.Column("attack_path_json", sa.String(), nullable=False, server_default="{}"))
-    op.add_column("scan_lead", sa.Column("reportable", sa.Boolean(), nullable=False, server_default=sa.true()))
-    op.create_index("ix_scan_lead_fingerprint", "scan_lead", ["fingerprint"], unique=False)
-    op.create_index("ix_scan_lead_validation_status", "scan_lead", ["validation_status"], unique=False)
-    op.create_index("ix_scan_lead_reportable", "scan_lead", ["reportable"], unique=False)
+    op.add_column(
+        "scan_lead",
+        sa.Column("fingerprint", sa.String(), nullable=False, server_default=""),
+    )
+    op.add_column(
+        "scan_lead",
+        sa.Column("suggested_endpoint", sa.String(), nullable=False, server_default=""),
+    )
+    op.add_column(
+        "scan_lead",
+        sa.Column(
+            "source_trace_json", sa.String(), nullable=False, server_default="{}"
+        ),
+    )
+    op.add_column(
+        "scan_lead",
+        sa.Column(
+            "control_trace_json", sa.String(), nullable=False, server_default="[]"
+        ),
+    )
+    op.add_column(
+        "scan_lead",
+        sa.Column("sink_trace_json", sa.String(), nullable=False, server_default="{}"),
+    )
+    op.add_column(
+        "scan_lead",
+        sa.Column(
+            "counterevidence_json", sa.String(), nullable=False, server_default="[]"
+        ),
+    )
+    op.add_column(
+        "scan_lead",
+        sa.Column("proof_gaps_json", sa.String(), nullable=False, server_default="[]"),
+    )
+    op.add_column(
+        "scan_lead",
+        sa.Column(
+            "validation_status", sa.String(), nullable=False, server_default="pending"
+        ),
+    )
+    op.add_column(
+        "scan_lead",
+        sa.Column(
+            "validation_reasoning", sa.String(), nullable=False, server_default=""
+        ),
+    )
+    op.add_column(
+        "scan_lead",
+        sa.Column("attack_path_json", sa.String(), nullable=False, server_default="{}"),
+    )
+    op.add_column(
+        "scan_lead",
+        sa.Column("reportable", sa.Boolean(), nullable=False, server_default=sa.true()),
+    )
+    op.create_index(
+        "ix_scan_lead_fingerprint", "scan_lead", ["fingerprint"], unique=False
+    )
+    op.create_index(
+        "ix_scan_lead_validation_status",
+        "scan_lead",
+        ["validation_status"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_scan_lead_reportable", "scan_lead", ["reportable"], unique=False
+    )
 
 
 def downgrade() -> None:

@@ -200,7 +200,6 @@ export function StatisticsPage() {
     </div>
     <div className="content scroll-content">
       <div className="page-body">
-      <p className="subtle">Usage from every AESPA LLM call, grouped by provider and model. Counts are independent of scans and use your system’s local calendar month.</p>
       {error && <div className="error-banner">{error}</div>}
       <UsageSummary title="Lifetime" stats={lifetime} headerContent={<span className="subtle stats-summary-meta">{fmtCount(lifetime.months)} month{lifetime.months === 1 ? "" : "s"}</span>} />
       <UsageSummary title={`Monthly · ${monthLabel(month)}`} stats={totals} headerContent={monthlyHeader} />

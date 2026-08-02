@@ -22,12 +22,18 @@ def _build_engine(settings: Settings) -> Engine:
         connect_args["check_same_thread"] = False
         connect_args["timeout"] = 30
     engine = create_engine(settings.database_url, echo=False, connect_args=connect_args)
-    if is_sqlite and ":memory:" not in settings.database_url:
+    if is_sqlite:
+        engine._aespa_enforce_foreign_keys = True  # type: ignore[attr-defined]
 
         @event.listens_for(engine, "connect")
         def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
             cursor = dbapi_connection.cursor()
             try:
+                # Child run records point at the global identity row.  Keep
+                # SQLite's FK enforcement on for every runtime connection;
+                # the identity migration temporarily disables it while it
+                # rebuilds legacy tables.
+                cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA synchronous=NORMAL")
                 cursor.execute("PRAGMA busy_timeout=30000")
@@ -65,12 +71,23 @@ def _get_alembic_config(engine: Engine) -> Config:
 
 
 def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> None:
-    """If the DB has existing domain tables but lacks alembic_version, stamp with head."""
+    """Give an unversioned database a safe starting point.
+
+    A database that already contains ``run_identity`` was created by the new
+    schema and can be stamped at head.  Older databases must start immediately
+    before the global-run-identity revision so that their ids and child rows
+    are remapped instead of silently skipping that migration.
+    """
     try:
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
-        if ("site" in tables or "test_run" in tables) and "alembic_version" not in tables:
-            command.stamp(alembic_cfg, "head")
+        if (
+            "site" in tables or "test_run" in tables
+        ) and "alembic_version" not in tables:
+            command.stamp(
+                alembic_cfg,
+                "head" if "run_identity" in tables else "d2f9a6b1c340",
+            )
     except Exception:
         pass
 
@@ -81,6 +98,15 @@ def run_migrations(engine: Engine | None = None) -> None:
     alembic_cfg = _get_alembic_config(engine)
     _stamp_legacy_db_if_needed(engine, alembic_cfg)
     command.upgrade(alembic_cfg, "head")
+    if engine.dialect.name == "sqlite" and getattr(
+        engine, "_aespa_enforce_foreign_keys", False
+    ):
+        # The migration temporarily turns FK enforcement off while SQLite
+        # rebuilds tables.  Alembic may return the same pooled connection, so
+        # restore the runtime setting explicitly after its transaction ends.
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+            conn.commit()
 
 
 def init_db() -> None:
@@ -214,7 +240,9 @@ def _reset_orphaned_running_runs(engine: Engine) -> None:
                     _text("SELECT name FROM sqlite_master WHERE type='table'")
                 )
             }
-            note = "Interrupted by a server restart; mark as failed."
+            crawl_note = "Last crawl interrupted prior to completion"
+            legacy_crawl_note = "Interrupted by a server restart; mark as failed."
+            scan_note = legacy_crawl_note
             if "test_run" in tables:
                 conn.execute(
                     _text(
@@ -224,7 +252,17 @@ def _reset_orphaned_running_runs(engine: Engine) -> None:
                         "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
                         "WHERE status='running'"
                     ),
-                    {"note": note},
+                    {"note": crawl_note},
+                )
+                conn.execute(
+                    _text(
+                        "UPDATE test_run SET error_message=:crawl_note "
+                        "WHERE error_message=:legacy_crawl_note"
+                    ),
+                    {
+                        "crawl_note": crawl_note,
+                        "legacy_crawl_note": legacy_crawl_note,
+                    },
                 )
             if "api_test_run" in tables:
                 conn.execute(
@@ -235,7 +273,7 @@ def _reset_orphaned_running_runs(engine: Engine) -> None:
                         "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
                         "WHERE status='running'"
                     ),
-                    {"note": note},
+                    {"note": scan_note},
                 )
             if "sast_run" in tables:
                 conn.execute(
@@ -245,7 +283,7 @@ def _reset_orphaned_running_runs(engine: Engine) -> None:
                         "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
                         "WHERE status='scanning'"
                     ),
-                    {"note": note},
+                    {"note": scan_note},
                 )
             conn.commit()
     except Exception:
@@ -375,9 +413,8 @@ def _cleanup_orphaned_sast_extractions() -> None:
         pass  # never block startup on a best-effort cleanup
 
 
-def _migrate(engine: Engine) -> None:
-    """Apply Alembic migrations and runtime startup backfills."""
-    run_migrations(engine)
+def _migrate_legacy_columns(engine: Engine) -> None:
+    """Apply runtime startup backfills after Alembic has run."""
     _ensure_column(
         engine,
         "global_http_header_config",
@@ -545,9 +582,8 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "llm_provider_config", "project_id", "TEXT")
     _ensure_column(engine, "llm_provider_config", "username", "TEXT")
     _ensure_column(engine, "llm_config", "username", "TEXT")
-    # agent_log / scan_log share the test_run_id column between web TestRuns and
-    # ApiTestRuns, whose ids come from independent counters and collide.  Tag each
-    # row with the run kind so the two panels stop reading each other's rows.
+    # agent_log / scan_log retain a shared test_run_id column and a run kind so
+    # the two panels continue to display their own surface's rows.
     _ensure_column(engine, "agent_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _ensure_column(engine, "scan_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _ensure_column(
@@ -1971,6 +2007,25 @@ def _ensure_llm_config_temperature_nullable(engine: Engine) -> None:
             )
         )
         conn.commit()
+
+
+def _migrate(engine: Engine) -> None:
+    """Apply schema migrations and legacy startup repairs."""
+    run_migrations(engine)
+    enforce_foreign_keys = engine.dialect.name == "sqlite" and getattr(
+        engine, "_aespa_enforce_foreign_keys", False
+    )
+    if enforce_foreign_keys:
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            conn.commit()
+    try:
+        _migrate_legacy_columns(engine)
+    finally:
+        if enforce_foreign_keys:
+            with engine.connect() as conn:
+                conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+                conn.commit()
 
 
 def get_session() -> Iterator[Session]:

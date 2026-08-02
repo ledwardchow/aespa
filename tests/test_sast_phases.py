@@ -46,9 +46,7 @@ def _run_with_web_target(engine) -> tuple[int, int]:
         return sast_run.id, web_run.id
 
 
-def test_analysis_endpoint_returns_persisted_semantic_state(
-    client, isolated_db_engine
-):
+def test_analysis_endpoint_returns_persisted_semantic_state(client, isolated_db_engine):
     sast_run_id, _ = _run_with_web_target(isolated_db_engine)
 
     response = client.get(f"/api/sast-runs/{sast_run_id}/analysis")
@@ -88,9 +86,7 @@ def test_sast_summaries_prefer_live_scanner_status(
     assert listed_run["status"] == "scanning"
 
 
-def test_sast_model_profile_can_be_changed_after_creation(
-    client, isolated_db_engine
-):
+def test_sast_model_profile_can_be_changed_after_creation(client, isolated_db_engine):
     sast_run_id, _ = _run_with_web_target(isolated_db_engine)
     with Session(isolated_db_engine) as session:
         profile = LLMProfile(name="SAST review profile")
@@ -120,9 +116,7 @@ def test_sast_model_profile_can_be_changed_after_creation(
     assert missing.status_code == 404
 
 
-def test_sast_model_profile_cannot_change_while_scanning(
-    client, isolated_db_engine
-):
+def test_sast_model_profile_cannot_change_while_scanning(client, isolated_db_engine):
     sast_run_id, _ = _run_with_web_target(isolated_db_engine)
     with Session(isolated_db_engine) as session:
         run = session.get(SastRun, sast_run_id)
@@ -208,9 +202,7 @@ def test_review_executor_records_independent_verdict_and_attack_path(
             "validation_status": "pending",
         }
     ]
-    executor = sast_scanner._make_review_executor(
-        41, root, coverage, "validation"
-    )
+    executor = sast_scanner._make_review_executor(41, root, coverage, "validation")
     result = asyncio.run(
         executor(
             "validate_candidate",
@@ -247,6 +239,96 @@ def test_review_executor_records_independent_verdict_and_attack_path(
     )
     assert sast_scanner._candidates[41][0]["attack_path"]["nodes"][-1] == "db.execute"
     sast_scanner._candidates.pop(41, None)
+
+
+def test_review_executor_persists_each_verdict_before_next_candidate(
+    tmp_path, isolated_db_engine, monkeypatch
+):
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "app.py").write_text("print('hello')\n")
+    coverage = sast_scanner._build_source_inventory(root)
+    sast_scanner._candidates[42] = [
+        {
+            "candidate_id": 0,
+            "title": "First candidate",
+            "description": "First description",
+            "category": "A03",
+            "location": "app.py:1",
+            "validation_status": "pending",
+            "reportable": False,
+        },
+        {
+            "candidate_id": 1,
+            "title": "Second candidate",
+            "description": "Second description",
+            "category": "A01",
+            "location": "app.py:1",
+            "validation_status": "pending",
+            "reportable": False,
+        },
+    ]
+    emitted = []
+    monkeypatch.setattr(
+        sast_scanner.events_svc,
+        "emit",
+        lambda run_id, event: emitted.append((run_id, event)),
+    )
+    executor = sast_scanner._make_review_executor(42, root, coverage, "validation")
+
+    asyncio.run(
+        executor(
+            "validate_candidate",
+            {
+                "candidate_id": 0,
+                "verdict": "confirmed",
+                "confidence": 0.91,
+                "reasoning": "The first path is exploitable.",
+            },
+            1,
+        )
+    )
+
+    with Session(isolated_db_engine) as session:
+        leads = session.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_id == 42)
+            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+        ).all()
+    assert [(lead.title, lead.validation_status) for lead in leads] == [
+        ("First candidate", "confirmed")
+    ]
+    assert any(
+        event.get("phase") == "sast_validation_result"
+        and event.get("data", {}).get("candidate_id") == 0
+        for _, event in emitted
+    )
+
+    asyncio.run(
+        executor(
+            "validate_candidate",
+            {
+                "candidate_id": 1,
+                "verdict": "dismissed",
+                "confidence": 0.84,
+                "reasoning": "The second path is blocked.",
+            },
+            2,
+        )
+    )
+
+    with Session(isolated_db_engine) as session:
+        leads = session.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_id == 42)
+            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+            .order_by(ScanLead.id)
+        ).all()
+    assert [(lead.title, lead.validation_status) for lead in leads] == [
+        ("First candidate", "confirmed"),
+        ("Second candidate", "dismissed"),
+    ]
+    sast_scanner._candidates.pop(42, None)
 
 
 def test_file_inventory_records_actual_read_receipts(tmp_path):
@@ -458,3 +540,128 @@ def test_full_sast_task_executes_three_real_phase_loops(
     assert saved_lead.reportable is True
     assert json.loads(saved_lead.attack_path_json)["nodes"][-1] == "db.execute"
     assert json.loads(saved_run.coverage_json)["summary"]["files_reviewed"] == 1
+
+
+def test_sast_validation_starts_before_discovery_finishes(
+    tmp_path, monkeypatch, isolated_db_engine
+):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr(
+            "app.py",
+            "def item(request):\n    value = request.args['id']\n    return db.execute(value)\n",
+        )
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="overlapping-validation",
+            status="scanning",
+            source_archive_path=str(archive),
+            source_filename="source.zip",
+            llm_config_id=config.id,
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    calls: list[str] = []
+    validator_started: list[int] = []
+    discovery_observed_validator: list[bool] = []
+
+    async def fake_loop(_config, **kwargs):
+        prompt = kwargs["system_message"]
+        execute = kwargs["tool_executor"]
+        if "independent adversarial validator" in prompt:
+            candidate_id = 0 if "candidate #0" in kwargs["initial_user_message"] else 1
+            calls.append("validation")
+            validator_started.append(candidate_id)
+            await asyncio.sleep(0)
+            await execute(
+                "validate_candidate",
+                {
+                    "candidate_id": candidate_id,
+                    "verdict": "confirmed",
+                    "confidence": 0.93,
+                    "reasoning": "The query is not parameterized.",
+                    "controls": [],
+                    "counterevidence": [],
+                    "proof_gaps": [],
+                },
+                1,
+            )
+        elif "attack-path analyst" in prompt:
+            calls.append("attack_path")
+            for candidate_id in (0, 1):
+                await execute(
+                    "record_attack_path",
+                    {
+                        "candidate_id": candidate_id,
+                        "nodes": ["HTTP id", "item", "db.execute"],
+                        "impact": "Database compromise",
+                        "severity_reasoning": "Remote input reaches SQL",
+                        "dynamic_test": "GET /item?id='",
+                    },
+                    1,
+                )
+        else:
+            calls.append("discovery")
+            for candidate_id in (0, 1):
+                await execute(
+                    "write_lead",
+                    {
+                        "title": f"SQL injection in item {candidate_id}",
+                        "category": "A03",
+                        "severity": "high",
+                        "location": f"app.py:{candidate_id + 2}",
+                        "description": "Request id reaches db.execute.",
+                        "evidence": "db.execute(value)",
+                        "suggested_endpoint": "GET /item?id=",
+                    },
+                    1,
+                )
+                await execute(
+                    "filter_lead",
+                    {
+                        "lead_id": candidate_id,
+                        "confidence": 0.88,
+                        "reasoning": "Concrete path",
+                    },
+                    2,
+                )
+                if candidate_id == 0:
+                    await asyncio.sleep(0)
+                    discovery_observed_validator.append(bool(validator_started))
+        return "phase complete"
+
+    from aespa.services import llm
+
+    monkeypatch.setattr(llm, "thinking_agentic_loop", fake_loop)
+    monkeypatch.setattr(llm, "set_run_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm, "clear_run_context", lambda: None)
+
+    asyncio.run(sast_scanner._sast_scan_task(run_id))
+
+    assert discovery_observed_validator == [True]
+    assert sorted(validator_started) == [0, 1]
+    assert calls[0] == "discovery"
+    assert calls.count("validation") == 2
+    assert calls[-1] == "attack_path"
+    with Session(isolated_db_engine) as session:
+        saved_run = session.get(SastRun, run_id)
+        saved_leads = session.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_id == run_id)
+            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+            .order_by(ScanLead.id)
+        ).all()
+    assert saved_run.status == "completed"
+    assert saved_run.leads_count == 2
+    assert [lead.validation_status for lead in saved_leads] == [
+        "confirmed",
+        "confirmed",
+    ]

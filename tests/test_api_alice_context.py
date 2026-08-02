@@ -486,7 +486,7 @@ def test_report_finding_no_link_when_url_matches_nothing(db_session):
 
 
 def test_alice_remove_finding_is_scoped_to_api_run_kind(db_session):
-    """API-mode ALICE must not delete a web finding from a colliding TestRun id."""
+    """API-mode ALICE must not delete a web finding from another run."""
     import aespa.db as db_mod
     from aespa.models import (
         ApiCollection,
@@ -513,7 +513,7 @@ def test_alice_remove_finding_is_scoped_to_api_run_kind(db_session):
     db_session.commit()
     db_session.refresh(web_run)
     db_session.refresh(api_run)
-    assert web_run.id == api_run.id
+    assert web_run.id != api_run.id
 
     web_finding = ScanFinding(
         test_run_id=web_run.id,
@@ -649,7 +649,7 @@ def test_api_alice_credential_check_uses_api_scope_callback():
 
 
 def test_alice_remove_finding_is_scoped_to_web_run_kind(db_session):
-    """Web-mode ALICE must not delete an API finding from a colliding ApiTestRun id."""
+    """Web-mode ALICE must not delete an API finding from another run."""
     import aespa.db as db_mod
     from aespa.models import (
         ApiCollection,
@@ -676,7 +676,7 @@ def test_alice_remove_finding_is_scoped_to_web_run_kind(db_session):
     db_session.commit()
     db_session.refresh(web_run)
     db_session.refresh(api_run)
-    assert web_run.id == api_run.id
+    assert web_run.id != api_run.id
 
     web_finding = ScanFinding(
         test_run_id=web_run.id,

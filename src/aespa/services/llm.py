@@ -132,6 +132,7 @@ def _usage_base_url(config: LLMConfig) -> str | None:
         return configured
     return None
 
+
 # Per-run usage accumulator. Copilot entries also carry AI-credit/request data.
 _run_token_usage: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
 
@@ -455,9 +456,7 @@ def _record_usage(
     }
     normalized_input = max(0, input_tokens)
     if usage_provider in inclusive_input_providers:
-        normalized_input = max(
-            0, input_tokens - cache_read_tokens - cache_write_tokens
-        )
+        normalized_input = max(0, input_tokens - cache_read_tokens - cache_write_tokens)
     try:
         from aespa.services import statistics as statistics_service
 
@@ -660,14 +659,16 @@ _THINKING_CONTEXT_TOOLS = frozenset(_THINKING_CONTEXT_TOOL_ARG_KEYS)
 
 
 _THINKING_TAG_RE = re.compile(
-    r"<(think|thinking|reasoning|thought)\b[^>]*>(.*?)</\1\s*>",
+    r"<(think|thinking|reasoning|thought|[\w:-]*thinking|[\w:-]*thought|[\w:-]*reasoning|thought_process|reflection|analysis)\b[^>]*>(.*?)</\1\s*>",
     flags=re.DOTALL | re.IGNORECASE,
 )
 _OPEN_THINKING_TAG_RE = re.compile(
-    r"<(think|thinking|reasoning|thought)\b[^>]*>", flags=re.IGNORECASE
+    r"<(think|thinking|reasoning|thought|[\w:-]*thinking|[\w:-]*thought|[\w:-]*reasoning|thought_process|reflection|analysis)\b[^>]*>",
+    flags=re.IGNORECASE,
 )
 _CLOSING_THINKING_TAG_RE = re.compile(
-    r"</(?:think|thinking|reasoning|thought)\s*>", flags=re.IGNORECASE
+    r"</(?:think|thinking|reasoning|thought|[\w:-]*thinking|[\w:-]*thought|[\w:-]*reasoning|thought_process|reflection|analysis)\s*>",
+    flags=re.IGNORECASE,
 )
 
 
@@ -713,8 +714,17 @@ def _split_thinking_text(raw: str) -> tuple[str, str]:
                 reasoning_parts.append(private)
             if final:
                 visible_parts.append(final)
-        elif private_tail.strip():
-            reasoning_parts.append(private_tail.strip())
+        else:
+            json_match = re.search(r"[\{\[]", private_tail)
+            if json_match:
+                private = private_tail[: json_match.start()].strip()
+                final = private_tail[json_match.start() :].strip()
+                if private:
+                    reasoning_parts.append(private)
+                if final:
+                    visible_parts.append(final)
+            elif private_tail.strip():
+                reasoning_parts.append(private_tail.strip())
     else:
         tail = _CLOSING_THINKING_TAG_RE.sub("", tail).strip()
         if tail:
@@ -725,13 +735,28 @@ def _split_thinking_text(raw: str) -> tuple[str, str]:
 
 def _strip_thinking_blocks(raw: str) -> str:
     """Remove visible model reasoning wrappers while keeping the final answer."""
+    if not raw:
+        return ""
     _, text = _split_thinking_text(raw)
+    if not text:
+        text = raw
 
-    # Some local/OpenRouter reasoning models emit pseudo-markup blocks without a
-    # closing tag when they are interrupted near the final JSON.
-    return re.sub(
-        r"(?is)^\s*(?:reasoning|thinking|thought)\s*:\s*.*?(?=[\[{])", "", text
+    text = re.sub(
+        r"(?is)<(think|thinking|reasoning|thought|[\w:-]*thinking|[\w:-]*thought|[\w:-]*reasoning|thought_process|reflection|analysis)\b[^>]*>.*?(?:</\1\s*>|(?=[\{\[]))",
+        "",
+        text,
     )
+    text = re.sub(
+        r"(?is)^\s*(?:reasoning|thinking|thought|minimax_thinking|thinking process|thought process)\s*:\s*.*?(?=[\[{])",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"(?is)^\s*<(?:think|thinking|reasoning|thought|[\w:-]*thinking|[\w:-]*thought|[\w:-]*reasoning)\b[^>]*>.*?(?=[\{\[\"]|\n\n|\Z)",
+        "",
+        text,
+    )
+    return text.strip()
 
 
 def _extract_json(raw: str, expect: type = list) -> Any:
@@ -1017,11 +1042,18 @@ async def decide_login_action(
 def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCategories]:
     if not raw:
         return "", [], dict(_EMPTY_CATS)
+    raw_cleaned = _strip_thinking_blocks(raw).strip()
     try:
         data = _extract_json(raw, expect=dict)
         if not isinstance(data, dict):
-            return raw.strip(), [], dict(_EMPTY_CATS)
-        context = str(data.get("context") or raw)
+            ctx = _strip_thinking_blocks(raw_cleaned).strip()
+            return ctx, [], dict(_EMPTY_CATS)
+        raw_ctx = str(data.get("context") or "").strip()
+        if not raw_ctx or raw_ctx == raw:
+            raw_ctx = raw_cleaned
+        context = _strip_thinking_blocks(raw_ctx).strip()
+        if not context or context.startswith("<") or "thinking" in context.lower()[:30]:
+            context = f"Page analysis for {page_url}"
         label = " ".join(str(data.get("page_label") or "").split())
         links = data.get("suggested_links") or []
         if not isinstance(links, list):
@@ -1048,7 +1080,7 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         cats["page_label"] = " ".join(label.split()[:5]) if label else ""
         return context, safe_links, cats
     except Exception:
-        return raw.strip(), [], dict(_EMPTY_CATS)
+        return raw_cleaned, [], dict(_EMPTY_CATS)
 
 
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:

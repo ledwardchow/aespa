@@ -17,6 +17,7 @@ The scan:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import json
 import logging
@@ -25,6 +26,7 @@ import re
 import shutil
 import stat
 import zipfile
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,12 +72,12 @@ _MAX_ARCHIVE_ENTRY_BYTES = 50 * 1024 * 1024
 _MAX_COMPRESSION_RATIO = 1_000
 _MAX_INSPECT_FILE_BYTES = 10 * 1024 * 1024
 _PHASES = ("scope", "discovery", "validation", "attack_path", "report")
+_SAST_VALIDATOR_MAX_CONCURRENT = 4
 
 
 def _empty_phase_state() -> dict[str, dict]:
     return {
-        phase: {"status": "pending", "message": "", "data": {}}
-        for phase in _PHASES
+        phase: {"status": "pending", "message": "", "data": {}} for phase in _PHASES
     }
 
 
@@ -479,6 +481,7 @@ def _make_tool_executor(
     root: Path,
     collection_id: int | None,
     coverage: dict[str, dict] | None = None,
+    on_candidate_ready: Callable[[dict], None] | None = None,
 ):
     """Return an async tool_executor closure for the SAST agentic loop.
 
@@ -565,6 +568,8 @@ def _make_tool_executor(
                     ),
                 },
             )
+            if on_candidate_ready is not None:
+                on_candidate_ready(match)
             outcome = (
                 "SUPPORTED for independent validation"
                 if kept
@@ -597,6 +602,8 @@ def _make_review_executor(
     root: Path,
     coverage: dict[str, dict],
     phase: str,
+    collection_id: int | None = None,
+    assigned_candidate_id: int | None = None,
 ):
     async def tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         if sast_run_id in _sast_stop_requested:
@@ -608,6 +615,16 @@ def _make_review_executor(
             return read_result
         candidate_id = int(tool_input.get("candidate_id", -1))
         candidate = _candidate_for_id(sast_run_id, candidate_id)
+        if (
+            assigned_candidate_id is not None
+            and tool_name
+            in {"get_candidate", "validate_candidate", "record_attack_path"}
+            and candidate_id != assigned_candidate_id
+        ):
+            return (
+                f"Error: this validator is assigned to candidate "
+                f"#{assigned_candidate_id}, not candidate #{candidate_id}."
+            )
         if tool_name == "get_candidate":
             if candidate is None:
                 return f"Error: no candidate #{candidate_id} found."
@@ -632,6 +649,12 @@ def _make_review_executor(
                     and confidence >= CONFIDENCE_THRESHOLD,
                 }
             )
+            # A verdict completes the validator's research for this candidate.
+            # Persist and announce it now instead of waiting for the validator's
+            # entire agentic loop to finish so the UI can show progressive results.
+            _sync_candidate_to_db(sast_run_id, collection_id, candidate)
+            _persist_coverage(sast_run_id, coverage)
+            _emit_validation_result(sast_run_id, candidate)
             return f"Candidate #{candidate_id} validation recorded as {verdict}."
         if tool_name == "record_attack_path":
             if not candidate.get("reportable"):
@@ -639,9 +662,7 @@ def _make_review_executor(
             candidate["attack_path"] = {
                 "nodes": list(tool_input.get("nodes") or []),
                 "impact": str(tool_input.get("impact", "")),
-                "severity_reasoning": str(
-                    tool_input.get("severity_reasoning", "")
-                ),
+                "severity_reasoning": str(tool_input.get("severity_reasoning", "")),
                 "dynamic_test": str(tool_input.get("dynamic_test", "")),
             }
             return f"Candidate #{candidate_id} attack path recorded."
@@ -653,7 +674,11 @@ def _make_review_executor(
 
 
 def _candidate_brief(candidates: list[dict], *, reportable_only: bool = False) -> str:
-    selected = [c for c in candidates if c.get("reportable")] if reportable_only else candidates
+    selected = (
+        [c for c in candidates if c.get("reportable")]
+        if reportable_only
+        else candidates
+    )
     return json.dumps(
         [
             {
@@ -673,41 +698,93 @@ def _candidate_brief(candidates: list[dict], *, reportable_only: bool = False) -
     )
 
 
+def _candidate_validation_message(candidate: dict) -> str:
+    candidate_id = int(candidate["candidate_id"])
+    return (
+        f"Validate only candidate #{candidate_id}. Do not validate any other "
+        "candidate in the run. Call get_candidate for this candidate, inspect "
+        "the relevant source with the read-only file tools, then call "
+        "validate_candidate exactly once followed by done.\n\n"
+        "Assigned candidate:\n" + json.dumps(candidate, ensure_ascii=False, indent=2)
+    )
+
+
+def _emit_validation_result(
+    sast_run_id: int, candidate: dict, *, error: str | None = None
+) -> None:
+    candidate_id = int(candidate["candidate_id"])
+    validation_status = str(candidate.get("validation_status") or "inconclusive")
+    title = candidate.get("title", "")
+    message = (
+        f"Candidate #{candidate_id} validation failed and was marked inconclusive: {title}"
+        if error
+        else f"Candidate #{candidate_id} validated as {validation_status}: {title}"
+    )
+    data = {
+        "candidate_id": candidate_id,
+        "validation_status": validation_status,
+        "confidence": float(candidate.get("confidence") or 0.0),
+        "reportable": bool(candidate.get("reportable")),
+    }
+    if error:
+        data["error"] = error
+    events_svc.emit(
+        sast_run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "sast_validation_result",
+            "status": "complete",
+            "message": message,
+            "data": data,
+        },
+    )
+
+
 def _sync_candidates_to_db(
     sast_run_id: int, collection_id: int | None
 ) -> tuple[int, int]:
     """Upsert every candidate and return (candidate_count, reportable_count)."""
     candidates = _candidates.get(sast_run_id, [])
     for candidate in candidates:
-        create_lead(
-            producer_run_id=sast_run_id,
-            producer_run_type="sast",
-            collection_id=collection_id,
-            title=candidate["title"],
-            description=candidate["description"],
-            category=candidate.get("category", ""),
-            severity=candidate.get("severity", "medium"),
-            confidence=float(candidate.get("confidence") or 0.0),
-            location=candidate.get("location", ""),
-            evidence=candidate.get("evidence", ""),
-            source="sast",
-            fingerprint=lead_fingerprint(
-                category=candidate.get("category", ""),
-                title=candidate["title"],
-                location=candidate.get("location", ""),
-            ),
-            suggested_endpoint=candidate.get("suggested_endpoint", ""),
-            source_trace=candidate.get("source_trace") or {},
-            controls=candidate.get("controls") or [],
-            sink_trace=candidate.get("sink_trace") or {},
-            counterevidence=candidate.get("counterevidence") or [],
-            proof_gaps=candidate.get("proof_gaps") or [],
-            validation_status=candidate.get("validation_status", "inconclusive"),
-            validation_reasoning=candidate.get("validation_reasoning", ""),
-            attack_path=candidate.get("attack_path") or {},
-            reportable=bool(candidate.get("reportable")),
-        )
+        _sync_candidate_to_db(sast_run_id, collection_id, candidate)
     return len(candidates), sum(bool(c.get("reportable")) for c in candidates)
+
+
+def _sync_candidate_to_db(
+    sast_run_id: int, collection_id: int | None, candidate: dict
+) -> None:
+    """Upsert one candidate so completed review work is visible immediately."""
+    title = str(candidate.get("title", ""))
+    category = str(candidate.get("category", ""))
+    location = str(candidate.get("location", ""))
+    create_lead(
+        producer_run_id=sast_run_id,
+        producer_run_type="sast",
+        collection_id=collection_id,
+        title=title,
+        description=str(candidate.get("description", "")),
+        category=category,
+        severity=candidate.get("severity", "medium"),
+        confidence=float(candidate.get("confidence") or 0.0),
+        location=location,
+        evidence=candidate.get("evidence", ""),
+        source="sast",
+        fingerprint=lead_fingerprint(
+            category=category,
+            title=title,
+            location=location,
+        ),
+        suggested_endpoint=candidate.get("suggested_endpoint", ""),
+        source_trace=candidate.get("source_trace") or {},
+        controls=candidate.get("controls") or [],
+        sink_trace=candidate.get("sink_trace") or {},
+        counterevidence=candidate.get("counterevidence") or [],
+        proof_gaps=candidate.get("proof_gaps") or [],
+        validation_status=candidate.get("validation_status", "inconclusive"),
+        validation_reasoning=candidate.get("validation_reasoning", ""),
+        attack_path=candidate.get("attack_path") or {},
+        reportable=bool(candidate.get("reportable")),
+    )
 
 
 # ── SAST scan task ─────────────────────────────────────────────────────────────
@@ -785,6 +862,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             )
         _sast_workspace_leases[sast_run_id] = lease
     run: SastRun | None = None  # populated early; used in except blocks
+    validation_tasks: list[asyncio.Task] = []
     current_phase = "scope"
     try:
         # ── Load run, collection, document ────────────────────────────────────
@@ -823,9 +901,12 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 raise RuntimeError(
                     "No LLM configuration. Configure it in Settings first."
                 )
-            validator_cfg_obj = get_llm_config_for_role(  # type: ignore[arg-type]
-                s, run, "validator"
-            ) or llm_cfg_obj
+            validator_cfg_obj = (
+                get_llm_config_for_role(  # type: ignore[arg-type]
+                    s, run, "validator"
+                )
+                or llm_cfg_obj
+            )
             endpoints = (
                 list(
                     s.exec(
@@ -874,10 +955,6 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             {"files_total": source_file_count},
         )
 
-        # ── Build tool executor ────────────────────────────────────────────────
-        tool_executor = _make_tool_executor(
-            sast_run_id, root, run.collection_id, coverage
-        )
         initial_message = _build_initial_message(coll, endpoints, archive_name)
 
         # ── Configure LLM context tracking ────────────────────────────────────
@@ -906,6 +983,128 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         def _raise_if_stopped() -> None:
             if _stop_check():
                 raise asyncio.CancelledError
+
+        validation_semaphore = asyncio.Semaphore(_SAST_VALIDATOR_MAX_CONCURRENT)
+        validation_scheduled: set[int] = set()
+        validation_failures: list[int] = []
+        validation_started = False
+
+        async def _validate_candidate(candidate_id: int) -> None:
+            async with validation_semaphore:
+                candidate = _candidate_for_id(sast_run_id, candidate_id)
+                if candidate is None:
+                    return
+                try:
+                    await llm_svc.thinking_agentic_loop(
+                        validator_cfg_obj,
+                        system_message=SAST_VALIDATION_PROMPT,
+                        initial_user_message=_candidate_validation_message(candidate),
+                        tool_executor=_make_review_executor(
+                            sast_run_id,
+                            root,
+                            coverage,
+                            "validation",
+                            collection_id=run.collection_id,
+                            assigned_candidate_id=candidate_id,
+                        ),
+                        emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
+                        stop_check=_stop_check,
+                        tools=SAST_VALIDATION_TOOLS,
+                    )
+                    _raise_if_stopped()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.exception(
+                        "SAST validator failed: sast_run_id=%s candidate_id=%s",
+                        sast_run_id,
+                        candidate_id,
+                    )
+                    candidate = _candidate_for_id(sast_run_id, candidate_id)
+                    if candidate is not None:
+                        if candidate.get("validation_status") == "pending":
+                            candidate.update(
+                                {
+                                    "validation_status": "inconclusive",
+                                    "validation_reasoning": f"Validator failed: {exc}",
+                                    "proof_gaps": [
+                                        *candidate.get("proof_gaps", []),
+                                        "Independent validator failed before closing this candidate.",
+                                    ],
+                                    "reportable": False,
+                                }
+                            )
+                            _sync_candidate_to_db(
+                                sast_run_id, run.collection_id, candidate
+                            )
+                            _persist_coverage(sast_run_id, coverage)
+                            _emit_validation_result(
+                                sast_run_id, candidate, error=str(exc)
+                            )
+                            validation_failures.append(candidate_id)
+                    return
+
+                candidate = _candidate_for_id(sast_run_id, candidate_id)
+                if candidate is None:
+                    return
+                if candidate.get("validation_status") == "pending":
+                    candidate.update(
+                        {
+                            "validation_status": "inconclusive",
+                            "validation_reasoning": "Validator returned no explicit verdict.",
+                            "proof_gaps": [
+                                *candidate.get("proof_gaps", []),
+                                "Independent validator did not close this candidate.",
+                            ],
+                            "reportable": False,
+                        }
+                    )
+                    _sync_candidate_to_db(sast_run_id, run.collection_id, candidate)
+                    _persist_coverage(sast_run_id, coverage)
+                    _emit_validation_result(sast_run_id, candidate)
+
+        def _schedule_candidate_validation(candidate: dict) -> None:
+            nonlocal validation_started
+            candidate_id = int(candidate["candidate_id"])
+            if candidate_id in validation_scheduled:
+                return
+            validation_scheduled.add(candidate_id)
+            if not validation_started:
+                validation_started = True
+                _set_phase(
+                    sast_run_id,
+                    "validation",
+                    "running",
+                    "Validating candidates as discovery completes.",
+                    {"candidates": 1, "completed": 0},
+                )
+                events_svc.emit(
+                    sast_run_id,
+                    {
+                        "type": "agent_status",
+                        "agent_id": "sast-validator",
+                        "role": "SAST Validator",
+                        "status": "active",
+                        "current_task": "Validating candidates as they arrive",
+                        "outcome": None,
+                        "_persist": True,
+                    },
+                )
+            validation_tasks.append(
+                asyncio.create_task(
+                    _validate_candidate(candidate_id),
+                    name=f"sast-validator-{sast_run_id}-{candidate_id}",
+                )
+            )
+
+        # ── Build tool executor ────────────────────────────────────────────────
+        tool_executor = _make_tool_executor(
+            sast_run_id,
+            root,
+            run.collection_id,
+            coverage,
+            on_candidate_ready=_schedule_candidate_validation,
+        )
 
         current_phase = "discovery"
         _set_phase(
@@ -939,61 +1138,49 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             {"files_total": source_file_count, "candidates": candidate_count},
         )
 
-        # ── Independent adversarial validation ───────────────────────────────
+        # ── Complete independent adversarial validation ───────────────────────
         current_phase = "validation"
         if not root.is_dir():
             raise RuntimeError(
                 "SAST source workspace disappeared before independent validation."
             )
-        _set_phase(
-            sast_run_id,
-            "validation",
-            "running",
-            f"Adversarially validating {candidate_count} candidate(s).",
-            {"candidates": candidate_count},
-        )
-        validation_summary = "No candidates required validation."
-        if candidates and not _stop_check():
-            events_svc.emit(
-                sast_run_id,
-                {
-                    "type": "agent_status",
-                    "agent_id": "sast-validator",
-                    "role": "SAST Validator",
-                    "status": "active",
-                    "current_task": "Attempting to disprove discovery candidates",
-                    "outcome": None,
-                    "_persist": True,
-                },
-            )
-            validation_summary = await llm_svc.thinking_agentic_loop(
-                validator_cfg_obj,
-                system_message=SAST_VALIDATION_PROMPT,
-                initial_user_message=(
-                    "Validate every candidate in this ledger:\n" + _candidate_brief(candidates)
-                ),
-                tool_executor=_make_review_executor(
-                    sast_run_id, root, coverage, "validation"
-                ),
-                emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
-                stop_check=_stop_check,
-                tools=SAST_VALIDATION_TOOLS,
-            )
-            _raise_if_stopped()
         for candidate in candidates:
-            if candidate.get("validation_status") == "pending":
+            if (
+                candidate.get("validation_status") == "pending"
+                and candidate.get("candidate_id") not in validation_scheduled
+            ):
                 candidate.update(
                     {
                         "validation_status": "inconclusive",
-                        "validation_reasoning": "Validator returned no explicit verdict.",
+                        "validation_reasoning": (
+                            "Discovery did not complete the candidate filter step."
+                        ),
                         "proof_gaps": [
                             *candidate.get("proof_gaps", []),
-                            "Independent validator did not close this candidate.",
+                            "Candidate was not submitted to the independent validator.",
                         ],
                         "reportable": False,
                     }
                 )
-        validated_count = sum(c.get("reportable", False) for c in candidates)
+                _sync_candidate_to_db(sast_run_id, run.collection_id, candidate)
+
+        if validation_tasks:
+            await asyncio.gather(*validation_tasks)
+            _raise_if_stopped()
+            validated_count = sum(c.get("reportable", False) for c in candidates)
+            validation_summary = (
+                f"Independent validation retained {validated_count} of "
+                f"{candidate_count} candidate(s)."
+            )
+            if validation_failures:
+                validation_summary += (
+                    f" {len(validation_failures)} validator task(s) failed "
+                    "and were marked inconclusive."
+                )
+        else:
+            validated_count = 0
+            validation_summary = "No candidates required validation."
+
         _sync_candidates_to_db(sast_run_id, run.collection_id)
         _persist_coverage(sast_run_id, coverage)
         _set_phase(
@@ -1001,7 +1188,12 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             "validation",
             "complete",
             f"Independent validation retained {validated_count} of {candidate_count} candidate(s).",
-            {"candidates": candidate_count, "reportable": validated_count},
+            {
+                "candidates": candidate_count,
+                "reportable": validated_count,
+                "validator_tasks": len(validation_tasks),
+                "validator_failures": len(validation_failures),
+            },
         )
         events_svc.emit(
             sast_run_id,
@@ -1150,7 +1342,9 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             for candidate in _candidates.get(sast_run_id, []):
                 if candidate.get("validation_status") == "pending":
                     candidate["validation_status"] = "inconclusive"
-                    candidate["validation_reasoning"] = "Scan stopped before validation completed."
+                    candidate["validation_reasoning"] = (
+                        "Scan stopped before validation completed."
+                    )
                     candidate["reportable"] = False
             _, total = _sync_candidates_to_db(sast_run_id, run.collection_id)
             with Session(get_engine()) as s:
@@ -1185,7 +1379,9 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 for candidate in _candidates.get(sast_run_id, []):
                     if candidate.get("validation_status") == "pending":
                         candidate["validation_status"] = "inconclusive"
-                        candidate["validation_reasoning"] = "Scan failed before validation completed."
+                        candidate["validation_reasoning"] = (
+                            "Scan failed before validation completed."
+                        )
                         candidate["reportable"] = False
                 _, total = _sync_candidates_to_db(sast_run_id, run.collection_id)
                 with Session(get_engine()) as s:
@@ -1216,6 +1412,11 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             },
         )
     finally:
+        for task in validation_tasks:
+            if not task.done():
+                task.cancel()
+        if validation_tasks:
+            await asyncio.gather(*validation_tasks, return_exceptions=True)
         _sast_tasks.pop(sast_run_id, None)
         _sast_stop_requested.discard(sast_run_id)
         _candidates.pop(sast_run_id, None)
@@ -1284,17 +1485,15 @@ async def start_sast_scan(sast_run_id: int) -> None:
 
     log.info("start_sast_scan: sast_run_id=%s", sast_run_id)
 
-    lease = try_acquire_sast_workspace_lease(
-        Path(get_settings().data_dir), sast_run_id
-    )
+    lease = try_acquire_sast_workspace_lease(Path(get_settings().data_dir), sast_run_id)
     if lease is None:
         raise RuntimeError(
             f"SAST run {sast_run_id} is already active in another AESPA process."
         )
     _sast_workspace_leases[sast_run_id] = lease
 
-    # Tag every event this run emits as run_kind='sast'.  Run ids collide across
-    # web / api / sast, so the scope is authoritative.  This also overrides any
+    # Tag every event this run emits as run_kind='sast'.  The scope is retained
+    # as the authoritative surface marker.  This also overrides any
     # surrounding caller scope, since the task created below snapshots this
     # authoritative 'sast' context.
     try:
@@ -1390,6 +1589,17 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
             )
         return True
     return False
+
+
+async def stop_sast_scan_and_wait(sast_run_id: int, timeout: float = 5.0) -> bool:
+    """Cancel a SAST scan and wait briefly for its cleanup handlers."""
+    task = _sast_tasks.get(sast_run_id)
+    if task is None or task.done():
+        return False
+    stopped = await stop_sast_scan(sast_run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return stopped
 
 
 def is_sast_scan_running(sast_run_id: int) -> bool:
