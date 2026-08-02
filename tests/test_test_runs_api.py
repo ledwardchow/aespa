@@ -1034,6 +1034,49 @@ def test_get_graph_empty(client: TestClient):
     assert data["links"] == []
 
 
+def test_get_graph_does_not_report_finished_redirects_as_pending(
+    client: TestClient, isolated_db_engine
+):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    with Session(isolated_db_engine) as session:
+        db_run = session.get(models.TestRun, run["id"])
+        db_run.status = models.TestRunStatus.complete
+        session.add_all(
+            [
+                models.CrawledPage(
+                    test_run_id=db_run.id,
+                    url="https://target.local/login-only",
+                    status="crawled",
+                ),
+                models.CrawledPage(
+                    test_run_id=db_run.id,
+                    url="https://target.local/redirected",
+                    status="redirect",
+                ),
+                models.CrawledPage(
+                    test_run_id=db_run.id,
+                    url="https://target.local/dashboard",
+                    status="crawled",
+                    title="Dashboard",
+                    page_text="Welcome",
+                    llm_context="Authenticated dashboard",
+                ),
+            ]
+        )
+        session.commit()
+
+    response = client.get(f"/api/test-runs/{run['id']}/graph")
+    assert response.status_code == 200
+    statuses = {
+        node["url"]: node["analysis_status"] for node in response.json()["nodes"]
+    }
+    assert statuses["https://target.local/login-only"] == "skipped"
+    assert statuses["https://target.local/redirected"] == "skipped"
+    assert statuses["https://target.local/dashboard"] == "complete"
+
+
 def test_get_graph_reports_unauthenticated_access():
     from aespa.api import test_runs as test_runs_api
     from aespa.models import CrawledPage, PageCredentialView, Site, TestRun
@@ -1091,6 +1134,61 @@ def test_get_graph_reports_unauthenticated_access():
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
+
+
+def test_get_graph_hides_404_failures_but_keeps_other_failures(client: TestClient):
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import CrawledPage, Site, TestRun
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(site_id=site.id, name="Run 1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            session.add_all(
+                [
+                    CrawledPage(
+                        test_run_id=run.id,
+                        url="https://target.local/missing",
+                        depth=1,
+                        status="failed",
+                        error_message="HTTP 404",
+                    ),
+                    CrawledPage(
+                        test_run_id=run.id,
+                        url="https://target.local/broken",
+                        depth=1,
+                        status="failed",
+                        error_message="Navigation timeout",
+                    ),
+                ]
+            )
+            session.commit()
+
+            graph = test_runs_api.get_graph(run.id, session=session)
+
+        assert len(graph.nodes) == 1
+        node = graph.nodes[0]
+        assert node.status == "failed"
+        assert node.error_message == "Navigation timeout"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
 
 
 def test_list_pages_empty(client: TestClient):

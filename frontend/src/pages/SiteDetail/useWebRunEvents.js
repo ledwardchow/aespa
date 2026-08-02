@@ -1,10 +1,18 @@
+import { useRef } from "react";
 import { api } from "../../lib/api";
 import { truncUrl } from "../../lib/utilities";
 import { isDynamicScanActive } from "./_helpers";
 import { useEventStream } from "../../hooks/useEventStream";
 
+const isHidden404Node = node => (
+  node?.status === "failed"
+  && String(node.error_message || "").trim().toUpperCase() === "HTTP 404"
+);
+
 export function useWebRunEvents(options) {
   const { runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent, setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData, setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts, setGuidedLoginPending, setGuidedLoginErrors, setEntraPrompts, setCheckpointStatus } = options;
+
+  const pageAnalysisStatusMapRef = useRef(new Map());
 
   // SSE: receive incremental graph + status updates — no graph polling needed.
   useEventStream(`/api/test-runs/${runId}/events`, {
@@ -20,11 +28,14 @@ export function useWebRunEvents(options) {
           if (!prev) return prev;
           const exists = prev.nodes.some(n => n.id === evt.node.id);
           if (exists) return prev;
+          const cachedStatus = pageAnalysisStatusMapRef.current.get(evt.node.id);
           const node = {
             ...evt.node,
             accessible_by: evt.node.accessible_by || [],
-            accessible_anonymously: !!evt.node.accessible_anonymously
+            accessible_anonymously: !!evt.node.accessible_anonymously,
+            analysis_status: cachedStatus || evt.node.analysis_status || (evt.node.status === "redirect" ? "skipped" : evt.node.context ? "complete" : "pending")
           };
+          if (isHidden404Node(node)) return prev;
           const newLinks = evt.link ? [...prev.links, evt.link] : prev.links;
           return {
             nodes: [...prev.nodes, node],
@@ -35,14 +46,67 @@ export function useWebRunEvents(options) {
         setCrawlUsername(evt.username || null);
       } else if (evt.type === "node_accessible_by") {
         api.getGraph(runId).then(setGraph).catch(() => {});
+      } else if (evt.type === "page_updated") {
+        setGraph(prev => {
+          if (!prev) return prev;
+          const updatedNode = prev.nodes.find(n => n.id === evt.page_id);
+          const nextNode = updatedNode ? {
+            ...updatedNode,
+            status: evt.status ?? updatedNode.status,
+            error_message: evt.error_message ?? updatedNode.error_message,
+            state_label: evt.state_label || updatedNode.state_label,
+            context: evt.llm_context || updatedNode.context,
+            req_auth: evt.req_auth ?? updatedNode.req_auth,
+            takes_input: evt.takes_input ?? updatedNode.takes_input,
+            has_object_ref: evt.has_object_ref ?? updatedNode.has_object_ref,
+            has_business_logic: evt.has_business_logic ?? updatedNode.has_business_logic,
+            owasp_applicable: evt.owasp_applicable || updatedNode.owasp_applicable,
+            analysis_status: evt.analysis_status
+              || (evt.status === "redirect" ? "skipped" : evt.llm_context ? "complete" : updatedNode.analysis_status)
+          } : null;
+          if (isHidden404Node(nextNode)) {
+            return {
+              nodes: prev.nodes.filter(n => n.id !== evt.page_id),
+              links: prev.links.filter(link => link.source !== evt.page_id && link.target !== evt.page_id)
+            };
+          }
+          return {
+            ...prev,
+            nodes: prev.nodes.map(n => n.id === evt.page_id ? nextNode : n)
+          };
+        });
+      } else if (evt.type === "llm_analysis_progress") {
+        setRun(prev => prev ? {
+          ...prev,
+          llm_pending: evt.pending_count,
+          llm_completed: evt.completed_count
+        } : prev);
+        if (evt.page_id && evt.status) {
+          pageAnalysisStatusMapRef.current.set(evt.page_id, evt.status);
+          setGraph(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              nodes: prev.nodes.map(n => n.id === evt.page_id ? {
+                ...n,
+                analysis_status: evt.status
+              } : n)
+            };
+          });
+        }
       } else if (evt.type === "run_update") {
         setRun(prev => prev ? {
           ...prev,
           status: evt.status ?? prev.status,
           phase: evt.phase ?? prev.phase,
-          pages_discovered: evt.pages_discovered ?? prev.pages_discovered
+          pages_discovered: evt.pages_discovered ?? prev.pages_discovered,
+          llm_pending: evt.status && evt.status !== "running" ? 0 : prev.llm_pending
         } : prev);
-        if (evt.status && evt.status !== "running") setCrawlStopRequested(false);
+        if (evt.status && evt.status !== "running") {
+          setCrawlStopRequested(false);
+          pageAnalysisStatusMapRef.current.clear();
+          api.getGraph(runId).then(setGraph).catch(() => {});
+        }
         if (evt.username !== undefined) setCrawlUsername(evt.username || null);
       } else if (evt.type === "crawl_progress") {
         const ts = new Date().toLocaleTimeString("en-US", {

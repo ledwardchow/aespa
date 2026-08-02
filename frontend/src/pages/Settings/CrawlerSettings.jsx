@@ -29,7 +29,8 @@ export function CrawlerSettings() {
         skip_dangerous_actions: !!form.skip_dangerous_actions,
         suppress_form_submit_actions: !!form.suppress_form_submit_actions,
         block_non_idempotent_interactive_replay: !!form.block_non_idempotent_interactive_replay,
-        enable_access_reconciliation: !!form.enable_access_reconciliation
+        enable_access_reconciliation: !!form.enable_access_reconciliation,
+        llm_max_concurrency: form.llm_max_concurrency && form.llm_max_concurrency > 0 ? form.llm_max_concurrency : null
       });
       setForm(updated);
       setSaved(true);
@@ -95,6 +96,33 @@ export function CrawlerSettings() {
         }} />
           <span>Enable access reconciliation (recheck known pages with each credential)</span>
         </label>
+
+        <div style={{ marginTop: 16, marginBottom: 8 }}>
+          <label style={{ display: "block", fontWeight: 600, fontSize: 13, marginBottom: 4 }}>
+            LLM Concurrency Limit
+          </label>
+          <div className="subtle" style={{ fontSize: 11, marginBottom: 6 }}>
+            Maximum concurrent requests sent to the LLM during page analysis. Default is unlimited (0 or blank). Excess requests will queue automatically.
+          </div>
+          <input
+            type="number"
+            min="0"
+            max="100"
+            className="input"
+            placeholder="Unlimited (default)"
+            value={form.llm_max_concurrency ?? ""}
+            onChange={e => {
+              setSaved(false);
+              const val = e.target.value === "" ? null : parseInt(e.target.value, 10);
+              setForm(f => ({
+                ...f,
+                llm_max_concurrency: val && val > 0 ? val : null
+              }));
+            }}
+            style={{ width: 200 }}
+          />
+        </div>
+
         <div className="divider" />
         <div className="row spread">
           <div>{saved && <span className="save-confirm"><IconCheck /> Saved</span>}</div>

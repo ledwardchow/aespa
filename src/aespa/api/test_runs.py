@@ -831,6 +831,11 @@ def update_test_run(
         )
     run.max_depth = payload.max_depth
     run.max_pages = payload.max_pages
+    run.llm_max_concurrency = (
+        payload.llm_max_concurrency
+        if payload.llm_max_concurrency and payload.llm_max_concurrency > 0
+        else None
+    )
     if payload.crawler_mode is not None:
         run.crawler_mode = payload.crawler_mode
     if payload.llm_config_id is not None:
@@ -1499,10 +1504,18 @@ def _infer_parent_url_candidates(url_str: str) -> list[str]:
 
 @router.get("/api/test-runs/{run_id}/graph", response_model=GraphData)
 def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData:
-    _get_run_or_404(session, run_id)
+    run = _get_run_or_404(session, run_id)
     pages = session.exec(
         select(CrawledPage).where(CrawledPage.test_run_id == run_id)
     ).all()
+    pages = [
+        page
+        for page in pages
+        if not (
+            page.status == "failed"
+            and (page.error_message or "").strip().upper() == "HTTP 404"
+        )
+    ]
     links = session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all()
     anonymously_accessible_page_ids = set(
         session.exec(
@@ -1511,6 +1524,26 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
             .where(PageCredentialView.credential_id.is_(None))
         ).all()
     )
+    run_finished = run.status in {
+        TestRunStatus.complete,
+        TestRunStatus.failed,
+        TestRunStatus.stopped,
+    }
+
+    def _analysis_status(page: CrawledPage) -> str:
+        if page.status == "redirect":
+            return "skipped"
+        if page.llm_context:
+            return "complete"
+        # The crawler waits for all page-analysis tasks before marking a run
+        # complete. Empty shell pages in a finished run were therefore
+        # skipped (usually because authentication was required), not left in
+        # an LLM queue.
+        if run_finished and not page.title and not page.page_text:
+            return "skipped"
+        if run_finished:
+            return "complete"
+        return "pending"
 
     nodes = [
         GraphNode(
@@ -1521,7 +1554,9 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
             title=p.title,
             depth=p.depth,
             status=p.status,
+            error_message=p.error_message,
             context=p.llm_context,
+            analysis_status=_analysis_status(p),
             in_scope=p.in_scope,
             scan_status=p.scan_status,
             accessible_by=json.loads(p.accessible_by or "[]"),
