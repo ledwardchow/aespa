@@ -5,7 +5,7 @@ import { EmptyState } from "../../components/EmptyState";
 
 const ORIGIN_LABEL = {
   deterministic: "Direct evidence match",
-  llm_assisted: "LLM-assisted match"
+  llm_assisted: "LLM-resolved match"
 };
 
 // ── CampaignConnectionsTab ───────────────────────────────────────────────────
@@ -13,7 +13,7 @@ const ORIGIN_LABEL = {
 // selecting a connection (in either view) opens a side panel with its
 // confidence, evidence, source facts, and origin type. Handles zero
 // connections and large sets without extra dependencies.
-export function CampaignConnectionsTab({ applicationId, campaignId }) {
+export function CampaignConnectionsTab({ applicationId, campaignId, campaign }) {
   const [connections, setConnections] = useState(null);
   const [components, setComponents] = useState({});
   const [error, setError] = useState(null);
@@ -41,7 +41,9 @@ export function CampaignConnectionsTab({ applicationId, campaignId }) {
   if (connections === null) return <div className="subtle">Loading…</div>;
   if (connections.length === 0) return <EmptyState
     title="No connections found"
-    sub="Connections appear once the campaign's code scans finish and context matching runs. A component with no outbound calls, or no well-evidenced match, produces none — that's expected, not an error." />;
+    sub={campaign?.status === "failed" || campaign?.status === "interrupted"
+      ? "Connection mapping did not complete. Review the campaign activity and error details, then retry the campaign."
+      : "No evidence-backed cross-component connection has been resolved yet. Review campaign activity to see whether mapping is still running or needs attention."} />;
 
   const name = id => components[id] || `#${id}`;
 
@@ -83,6 +85,13 @@ export function CampaignConnectionsTab({ applicationId, campaignId }) {
 
 function ConnectionDetailPanel({ connection, sourceName, targetName }) {
   const evidence = safeParseJson(connection.evidence_json, {});
+  const locations = value => [
+    ...(value?.evidence_location ? [value.evidence_location] : []),
+    ...(Array.isArray(value?.supporting_locations) ? value.supporting_locations : [])
+  ];
+  const renderLocations = value => locations(value).map(location =>
+    <div key={location} className="mono subtle" style={{ fontSize: 12 }}>{location}</div>
+  );
   return <div className="card">
     <div className="form-section-title">{sourceName} → {targetName}</div>
     <div style={{ marginTop: 8 }}><strong>Confidence:</strong> {confidencePct(connection.confidence)}</div>
@@ -91,10 +100,12 @@ function ConnectionDetailPanel({ connection, sourceName, targetName }) {
     {evidence.call && <div style={{ marginTop: 8 }}>
       <strong>Outbound call ({sourceName}):</strong>
       <div className="mono subtle" style={{ fontSize: 12 }}>{evidence.call.method} {evidence.call.path}{evidence.call.host ? ` @ ${evidence.call.host}` : ""}</div>
+      {renderLocations(evidence.call)}
     </div>}
     {evidence.route && <div style={{ marginTop: 8 }}>
       <strong>Matched route ({targetName}):</strong>
       <div className="mono subtle" style={{ fontSize: 12 }}>{evidence.route.method} {evidence.route.path}</div>
+      {renderLocations(evidence.route)}
     </div>}
   </div>;
 }

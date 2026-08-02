@@ -17,9 +17,11 @@ the agentic SAST analysis itself.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Bound the total work done per SAST run regardless of repository size.
 _MAX_FILES_SCANNED = 4000
@@ -121,6 +123,33 @@ def _fingerprint(*parts: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def interface_fact_fingerprint(
+    *,
+    fact_type: str,
+    method: str | None,
+    path: str | None,
+    host: str | None,
+    name: str | None,
+) -> str:
+    """Fingerprint interface identity without tying it to one evidence line."""
+    raw_path = (path or "").strip().lower()
+    if "://" in raw_path:
+        raw_path = urlparse(raw_path).path
+    raw_path = raw_path.split("?", 1)[0].rstrip("/") or "/"
+    raw_path = re.sub(r"\{[^}]+\}", "{}", raw_path)
+    raw_path = re.sub(r"/:[\w-]+", "/{}", raw_path)
+    canonical = "|".join(
+        (
+            (fact_type or "").strip().lower(),
+            (method or "").strip().lower(),
+            re.sub(r"\s+", " ", raw_path),
+            (host or "").strip().lower(),
+            (name or "").strip().lower(),
+        )
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _iter_source_files(root: Path):
     scanned = 0
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -177,16 +206,23 @@ def extract_component_facts(root: Path) -> list[dict]:
     """
     facts: list[dict] = list(_detect_framework_facts(root))
     seen_fingerprints: set[str] = {
-        _fingerprint(f["fact_type"], f.get("name") or "", f["evidence_location"])
+        interface_fact_fingerprint(
+            fact_type=f["fact_type"],
+            method=f.get("method"),
+            path=f.get("path"),
+            host=f.get("host"),
+            name=f.get("name"),
+        )
         for f in facts
     }
 
     def _add(fact: dict) -> None:
-        fp = _fingerprint(
-            fact["fact_type"],
-            fact.get("method") or "",
-            fact.get("path") or fact.get("name") or "",
-            fact["evidence_location"],
+        fp = interface_fact_fingerprint(
+            fact_type=fact["fact_type"],
+            method=fact.get("method"),
+            path=fact.get("path"),
+            host=fact.get("host"),
+            name=fact.get("name"),
         )
         if fp in seen_fingerprints:
             return
@@ -298,14 +334,14 @@ def extract_component_facts(root: Path) -> list[dict]:
 
 
 def persist_component_facts(sast_run_id: int, root: Path) -> int:
-    """Extract and upsert ``ComponentFact`` rows for one completed SAST run.
+    """Extract and upsert deterministic ``ComponentFact`` rows for one run.
 
     Looks up the owning ``ApplicationComponent`` via ``CampaignSourceMember``
     (``component_id`` stays ``NULL`` for a standalone SAST run — this never
     requires the run to know about campaigns itself). Idempotent per run: a
-    rerun replaces the previous fact set instead of duplicating it. Returns the
-    number of facts persisted. Never raises — a facts failure must not break
-    the SAST scan that produced the leads.
+    deterministic facts while preserving facts recorded by the LLM mapper.
+    Returns the number of deterministic facts persisted. Extraction failures
+    remain non-fatal to the vulnerability scan.
     """
     from sqlmodel import Session, select
 
@@ -325,20 +361,55 @@ def persist_component_facts(sast_run_id: int, root: Path) -> int:
         ).first()
         component_id = membership.component_id if membership else None
 
-        for existing in session.exec(
-            select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)
-        ).all():
-            session.delete(existing)
-
+        existing_rows = list(
+            session.exec(
+                select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)
+            ).all()
+        )
+        existing_by_fingerprint = {row.fingerprint: row for row in existing_rows}
+        desired: dict[str, dict] = {}
         for raw in raw_facts:
-            import json
-
-            fp = _fingerprint(
-                raw["fact_type"],
-                raw.get("method") or "",
-                raw.get("path") or raw.get("name") or "",
-                raw["evidence_location"],
+            fp = interface_fact_fingerprint(
+                fact_type=raw["fact_type"],
+                method=raw.get("method"),
+                path=raw.get("path"),
+                host=raw.get("host"),
+                name=raw.get("name"),
             )
+            desired[fp] = raw
+
+        for existing in existing_rows:
+            try:
+                detail = json.loads(existing.detail_json or "{}")
+            except (TypeError, ValueError):
+                detail = {}
+            if "llm" not in str(detail.get("origin") or "").lower() and (
+                existing.fingerprint not in desired
+            ):
+                session.delete(existing)
+
+        for fp, raw in desired.items():
+            existing = existing_by_fingerprint.get(fp)
+            if existing is not None:
+                try:
+                    detail = json.loads(existing.detail_json or "{}")
+                except (TypeError, ValueError):
+                    detail = {}
+                if "llm" in str(detail.get("origin") or "").lower():
+                    continue
+                existing.component_id = component_id
+                existing.fact_type = raw["fact_type"]
+                existing.method = raw.get("method")
+                existing.path = raw.get("path")
+                existing.host = raw.get("host")
+                existing.name = raw.get("name")
+                existing.detail_json = json.dumps(
+                    {"origin": "deterministic", **(raw.get("detail") or {})}
+                )
+                existing.evidence_location = raw["evidence_location"]
+                existing.fingerprint = fp
+                session.add(existing)
+                continue
             session.add(
                 ComponentFact(
                     sast_run_id=sast_run_id,
@@ -348,7 +419,9 @@ def persist_component_facts(sast_run_id: int, root: Path) -> int:
                     path=raw.get("path"),
                     host=raw.get("host"),
                     name=raw.get("name"),
-                    detail_json=json.dumps(raw.get("detail") or {}),
+                    detail_json=json.dumps(
+                        {"origin": "deterministic", **(raw.get("detail") or {})}
+                    ),
                     evidence_location=raw["evidence_location"],
                     fingerprint=fp,
                 )
