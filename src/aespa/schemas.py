@@ -1605,6 +1605,10 @@ class ApplicationTargetCreate(BaseModel):
     target_id: int
 
 
+class ApplicationTargetUpdate(BaseModel):
+    component_id: int | None = None
+
+
 class ApplicationTargetOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -1612,6 +1616,7 @@ class ApplicationTargetOut(BaseModel):
     application_id: int
     target_type: str
     target_id: int
+    component_id: int | None = None
     created_at: datetime
     name: str | None = None  # resolved Site/ApiCollection name for convenience
 

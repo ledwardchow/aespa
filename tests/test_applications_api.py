@@ -255,6 +255,52 @@ def test_attach_and_detach_target(client, isolated_db_engine):
         assert s.get(ApplicationTarget, target["id"]) is None
 
 
+def test_target_can_optionally_select_code_component(client):
+    app = _create_application(client)
+    component = _create_component(client, app["id"], "orders-api")
+    site_id = client.post(
+        "/api/sites", json={"name": "S5b", "base_url": "http://t5b.local"}
+    ).json()["id"]
+    target = client.post(
+        f"/api/applications/{app['id']}/targets",
+        json={"target_type": "site", "target_id": site_id},
+    ).json()
+    assert target["component_id"] is None
+
+    update = client.patch(
+        f"/api/applications/{app['id']}/targets/{target['id']}",
+        json={"component_id": component["id"]},
+    )
+    assert update.status_code == 200
+    assert update.json()["component_id"] == component["id"]
+
+    clear = client.patch(
+        f"/api/applications/{app['id']}/targets/{target['id']}",
+        json={"component_id": None},
+    )
+    assert clear.status_code == 200
+    assert clear.json()["component_id"] is None
+
+
+def test_target_component_link_rejects_component_from_another_application(client):
+    app_a = _create_application(client, "Target owner")
+    app_b = _create_application(client, "Component owner")
+    component_b = _create_component(client, app_b["id"], "foreign")
+    site_id = client.post(
+        "/api/sites", json={"name": "S5c", "base_url": "http://t5c.local"}
+    ).json()["id"]
+    target = client.post(
+        f"/api/applications/{app_a['id']}/targets",
+        json={"target_type": "site", "target_id": site_id},
+    ).json()
+
+    update = client.patch(
+        f"/api/applications/{app_a['id']}/targets/{target['id']}",
+        json={"component_id": component_b["id"]},
+    )
+    assert update.status_code == 400
+
+
 def test_application_delete_blocked_while_campaign_exists(
     client, tmp_path, monkeypatch
 ):
