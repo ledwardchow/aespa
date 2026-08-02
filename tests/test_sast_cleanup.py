@@ -137,9 +137,7 @@ def test_sweep_marks_scanning_run_failed_and_removes_dir(engine, tmp_path, monke
     assert run.completed_at is not None
 
 
-def test_sweep_leaves_live_scanning_workspace_untouched(
-    engine, tmp_path, monkeypatch
-):
+def test_sweep_leaves_live_scanning_workspace_untouched(engine, tmp_path, monkeypatch):
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
     run_id = _write_run(status="scanning")
     d = _seed_dir(run_id=run_id)

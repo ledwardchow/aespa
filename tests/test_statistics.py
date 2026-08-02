@@ -32,7 +32,12 @@ def test_provider_specific_cache_normalization_contract():
             "output_cost_per_token": 0.000002,
         }
     }
-    assert statistics.resolve_price("openai", "gpt-test", feed)["input_price_usd_per_million"] == 1
+    assert (
+        statistics.resolve_price("openai", "gpt-test", feed)[
+            "input_price_usd_per_million"
+        ]
+        == 1
+    )
     # Bedrock and Anthropic report uncached input separately; their adapters
     # therefore pass the raw input value through to the ledger.
     assert statistics.local_month(datetime(2026, 8, 1, tzinfo=timezone.utc))
@@ -81,7 +86,9 @@ def test_usage_keeps_first_observed_base_url(isolated_db_engine):
 
 
 def test_monthly_price_override_and_reset_keep_catalog(isolated_db_engine):
-    statistics.record_usage("factory_droid", "test-model", factory_credits=1_000_000, month="2026-08")
+    statistics.record_usage(
+        "factory_droid", "test-model", factory_credits=1_000_000, month="2026-08"
+    )
     with Session(isolated_db_engine) as session:
         statistics.set_prices(
             session,
@@ -101,7 +108,9 @@ def test_monthly_price_override_and_reset_keep_catalog(isolated_db_engine):
 
 
 def test_statistics_api_is_independent_and_reset_is_explicit(client):
-    statistics.record_usage("anthropic", "claude-test", input_tokens=12, month="2026-08")
+    statistics.record_usage(
+        "anthropic", "claude-test", input_tokens=12, month="2026-08"
+    )
     response = client.get("/api/statistics/llm?month=2026-08")
     assert response.status_code == 200
     assert response.json()["totals"]["input_tokens"] == 12
@@ -111,8 +120,12 @@ def test_statistics_api_is_independent_and_reset_is_explicit(client):
 
 
 def test_statistics_api_includes_lifetime_cost(client):
-    statistics.record_usage("factory_droid", "droid-test", factory_credits=1_000_000, month="2026-07")
-    statistics.record_usage("factory_droid", "droid-test", factory_credits=500_000, month="2026-08")
+    statistics.record_usage(
+        "factory_droid", "droid-test", factory_credits=1_000_000, month="2026-07"
+    )
+    statistics.record_usage(
+        "factory_droid", "droid-test", factory_credits=500_000, month="2026-08"
+    )
     lifetime = client.get("/api/statistics/llm?month=2026-08").json()["lifetime"]
     assert lifetime["months"] == 2
     assert lifetime["factory_credits"] == 1_500_000

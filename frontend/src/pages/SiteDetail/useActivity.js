@@ -86,8 +86,8 @@ export function useActivity(runId, activeTab, {
   }, {
     id: "reporting",
     role: "Reporting",
-    status: thinkingStatus?.status === "analysing" ? "active" : "idle",
-    currentTask: thinkingStatus?.status === "analysing" ? "Analysing probe results…" : "Standing by"
+    status: thinkingStatus?.status === "analysing" || thinkingStatus?.status === "analyzing" ? "active" : "idle",
+    currentTask: thinkingStatus?.status === "analysing" || thinkingStatus?.status === "analyzing" ? "Analysing probe results…" : "Standing by"
   }];
   const representsAgent = (agent, placeholder) => {
     if (agent.id === placeholder.id) return true;
@@ -205,7 +205,7 @@ export function useActivity(runId, activeTab, {
     const crawlEvents = agentCrawlEvents(agent);
     const explicitCrawlerStage = agent?.id === "crawler"
       && agent.status === "active"
-      && /^(?:Preparing|Authenticating|Signing in|Access check|Verifying page access|Finalizing crawl|Phase \d+\/\d+)/i.test(String(agent.currentTask || ""));
+      && /^(?:Preparing|Authenticating|Signing in|Access check|Verifying page access|Finali[sz]ing crawl|Phase \d+\/\d+)/i.test(String(agent.currentTask || ""));
     if (explicitCrawlerStage) return agent.currentTask;
     if (agent?.id === "crawler" && crawlEvents.length) {
       if (agent.status !== "active") {

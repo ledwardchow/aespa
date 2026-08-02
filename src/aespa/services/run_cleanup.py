@@ -1,11 +1,9 @@
 """Reusable cascade-delete helpers for scan runs.
 
-SQLite reuses the max autoincrement id, and ``TestRun`` / ``ApiTestRun`` /
-``SastRun`` (plus ``ApiCollection``) all draw ids from independent counters that
-collide.  When a run (or its parent collection) is deleted without removing its
-child rows, a newly created run/collection reuses the freed id and inherits the
-orphaned findings, traffic, logs, etc.  These helpers delete every row that keys
-on a given run so nothing leaks into a reused id.
+Run ids are globally unique now, but explicit cleanup still matters because it
+removes the run's stored evidence, logs, sessions, and temporary lead copies.
+The identity anchor is deleted last so the database foreign keys can cascade
+anything a new child table adds in the future.
 
 Each table is scoped to the run kind: findings/traffic key on the dedicated
 ``api_test_run_id`` column; coverage cells FK to ``api_test_run``; logs, scanner
@@ -18,6 +16,7 @@ so a collection delete can cascade many runs atomically.
 
 from __future__ import annotations
 
+from sqlalchemy import delete, text
 from sqlmodel import Session, select
 
 from aespa.models import (
@@ -26,13 +25,210 @@ from aespa.models import (
     AliceChatSession,
     ApiEndpointTest,
     ApiTestRun,
+    CoverageEvidence,
+    CrawledPage,
+    PageCredentialView,
+    PageLink,
+    PageOwaspTest,
+    PhaseCheckpoint,
+    ProbeExecution,
+    RunIdentity,
     SastRun,
+    ScanCheckpoint,
     ScanFinding,
     ScanLead,
     ScanLog,
     ScannerSession,
+    ScanObligation,
+    TargetIntelItem,
+    TestRun,
     TrafficEntry,
 )
+
+
+def _delete_run_identity(session: Session, run_id: int, run) -> None:
+    """Remove the identity anchor after its type-specific row is gone.
+
+    Child run records point to ``run_identity`` with database-level cascade
+    rules.  The explicit flush makes deletion safe on SQLite with foreign-key
+    enforcement enabled, while the direct child cleanup below remains usable
+    on older databases that have not been migrated yet.
+    """
+    if run is not None:
+        session.delete(run)
+        session.flush()
+    session.execute(delete(RunIdentity).where(RunIdentity.id == run_id))
+
+
+def cascade_delete_web_run(session: Session, run_id: int) -> None:
+    """Delete a web ``TestRun`` and every row owned by it.
+
+    Web run ids can be reused by SQLite after the parent row is deleted.  The
+    cleanup therefore covers both the original crawl tables and the newer scan
+    workprogram/evidence tables.  Rows shared with API runs are filtered by
+    ``run_kind`` or the dedicated API run column so a colliding API id is not
+    removed accidentally.
+    """
+    # Capture IDs before deleting their parents so dependent rows can be removed
+    # in a foreign-key-safe order.
+    pages = session.exec(
+        select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+    ).all()
+    findings = session.exec(
+        select(ScanFinding)
+        .where(ScanFinding.test_run_id == run_id)
+        .where(ScanFinding.api_test_run_id == None)  # noqa: E711
+    ).all()
+    finding_ids = [finding.id for finding in findings if finding.id is not None]
+
+    executions = session.exec(
+        select(ProbeExecution)
+        .where(ProbeExecution.run_kind == "web")
+        .where(ProbeExecution.run_id == run_id)
+    ).all()
+    execution_ids = [
+        execution.id for execution in executions if execution.id is not None
+    ]
+
+    # A SAST lead is owned by its original SAST run, but an imported copy is
+    # owned by the dynamic run.  Remove copies and clear references from source
+    # leads before deleting the findings they may point to.
+    for lead in session.exec(
+        select(ScanLead)
+        .where(ScanLead.imported_into_run_type == "web")
+        .where(ScanLead.imported_into_run_id == run_id)
+    ).all():
+        session.delete(lead)
+    for lead in session.exec(
+        select(ScanLead)
+        .where(ScanLead.investigated_by_run_type == "web")
+        .where(ScanLead.investigated_by_run_id == run_id)
+    ).all():
+        lead.investigated_by_run_type = None
+        lead.investigated_by_run_id = None
+        session.add(lead)
+    if finding_ids:
+        for lead in session.exec(
+            select(ScanLead).where(ScanLead.linked_finding_id.in_(finding_ids))
+        ).all():
+            lead.linked_finding_id = None
+            session.add(lead)
+
+    # Messages depend on chat sessions.  Evidence depends on probe executions,
+    # which depend on obligations and may reference captured traffic.
+    for chat in session.exec(
+        select(AliceChatSession)
+        .where(AliceChatSession.test_run_id == run_id)
+        .where(AliceChatSession.run_kind == "web")
+    ).all():
+        for message in session.exec(
+            select(AliceChatMessage).where(AliceChatMessage.session_id == chat.id)
+        ).all():
+            session.delete(message)
+        session.delete(chat)
+
+    if execution_ids:
+        for evidence in session.exec(
+            select(CoverageEvidence).where(
+                CoverageEvidence.execution_id.in_(execution_ids)
+            )
+        ).all():
+            session.delete(evidence)
+    for execution in executions:
+        session.delete(execution)
+
+    # Findings and page workprogram cells must go before crawled pages because
+    # both carry page references.
+    for finding in findings:
+        session.delete(finding)
+    for cell in session.exec(
+        select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)
+    ).all():
+        session.delete(cell)
+    for link in session.exec(
+        select(PageLink).where(PageLink.test_run_id == run_id)
+    ).all():
+        session.delete(link)
+    for view in session.exec(
+        select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)
+    ).all():
+        session.delete(view)
+    for item in session.exec(
+        select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+    ).all():
+        session.delete(item)
+    for entry in session.exec(
+        select(TrafficEntry)
+        .where(TrafficEntry.test_run_id == run_id)
+        .where(TrafficEntry.api_test_run_id == None)  # noqa: E711
+    ).all():
+        session.delete(entry)
+    for page in pages:
+        session.delete(page)
+
+    # These tables retain a surface marker for compatibility and presentation.
+    for model in (ScannerSession, ScanLog, AgentLog):
+        for row in session.exec(
+            select(model)
+            .where(model.test_run_id == run_id)
+            .where(model.run_kind == "web")
+        ).all():
+            session.delete(row)
+    for checkpoint in session.exec(
+        select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)
+    ).all():
+        session.delete(checkpoint)
+    for checkpoint in session.exec(
+        select(PhaseCheckpoint)
+        .where(PhaseCheckpoint.run_kind == "web")
+        .where(PhaseCheckpoint.run_id == run_id)
+    ).all():
+        session.delete(checkpoint)
+    for obligation in session.exec(
+        select(ScanObligation)
+        .where(ScanObligation.run_kind == "web")
+        .where(ScanObligation.run_id == run_id)
+    ).all():
+        session.delete(obligation)
+
+    # Retired task-queue tables may still exist in upgraded databases even
+    # though their ORM models are no longer part of the application.
+    # Query through this Session.  Inspecting the Engine would borrow the same
+    # StaticPool connection in tests and can roll back the uncommitted deletes.
+    table_names = {
+        row[0]
+        for row in session.exec(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ).all()
+    }
+    if "pentest_task" in table_names:
+        session.exec(
+            text("DELETE FROM pentest_task WHERE test_run_id = :run_id").bindparams(
+                run_id=run_id
+            )
+        )
+    if "pentest_hypothesis" in table_names:
+        session.exec(
+            text(
+                "DELETE FROM pentest_hypothesis WHERE test_run_id = :run_id"
+            ).bindparams(run_id=run_id)
+        )
+
+    # A SAST run explicitly linked as being spawned by this web run is also a
+    # child.  Its own helper removes its original leads and activity rows.
+    for sast_run in session.exec(
+        select(SastRun)
+        .where(SastRun.triggered_by_run_type == "web")
+        .where(SastRun.triggered_by_run_id == run_id)
+    ).all():
+        if sast_run.id is not None:
+            cascade_delete_sast_run(session, sast_run.id)
+
+    run = session.get(TestRun, run_id)
+    _delete_run_identity(session, run_id, run)
 
 
 def cascade_delete_api_run(session: Session, run_id: int) -> None:
@@ -84,8 +280,7 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
     ).all():
         session.delete(log)
     run = session.get(ApiTestRun, run_id)
-    if run is not None:
-        session.delete(run)
+    _delete_run_identity(session, run_id, run)
 
 
 def cascade_delete_sast_run(session: Session, run_id: int) -> None:
@@ -125,4 +320,4 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
                     os.remove(run.source_archive_path)
             except Exception:
                 pass
-        session.delete(run)
+        _delete_run_identity(session, run_id, run)

@@ -20,11 +20,48 @@ _UTC = timezone.utc
 CONFIDENCE_THRESHOLD = 0.7
 
 
+def decode_attack_path(value: str | None) -> dict:
+    """Decode a persisted SAST attack path without trusting its shape."""
+    try:
+        parsed = json.loads(value or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _prompt_text(value: object, limit: int = 600) -> str:
+    """Return bounded, readable text for an agent context block."""
+    text = str(value or "").strip()
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def format_attack_path_for_prompt(attack_path: dict) -> list[str]:
+    """Render SAST attack-path fields as bounded dynamic-test guidance."""
+    if not isinstance(attack_path, dict):
+        return []
+
+    lines: list[str] = []
+    nodes = attack_path.get("nodes")
+    if isinstance(nodes, list):
+        node_text = " → ".join(
+            _prompt_text(node, 220) for node in nodes if str(node or "").strip()
+        )
+        if node_text:
+            lines.append(f"  Reachability: {node_text[:1000]}")
+    for key, label in (
+        ("impact", "Impact"),
+        ("severity_reasoning", "Severity reasoning"),
+        ("dynamic_test", "Dynamic test objective"),
+    ):
+        value = _prompt_text(attack_path.get(key))
+        if value:
+            lines.append(f"  {label}: {value}")
+    return lines
+
+
 def lead_fingerprint(*, category: str, title: str, location: str) -> str:
     """Return a stable, run-independent identity for a static candidate."""
-    canonical = "|".join(
-        part.strip().lower() for part in (category, title, location)
-    )
+    canonical = "|".join(part.strip().lower() for part in (category, title, location))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -96,14 +133,18 @@ def create_lead(
         lead.source_trace_json = json.dumps(source_trace or {}, ensure_ascii=False)
         lead.control_trace_json = json.dumps(controls or [], ensure_ascii=False)
         lead.sink_trace_json = json.dumps(sink_trace or {}, ensure_ascii=False)
-        lead.counterevidence_json = json.dumps(counterevidence or [], ensure_ascii=False)
+        lead.counterevidence_json = json.dumps(
+            counterevidence or [], ensure_ascii=False
+        )
         lead.proof_gaps_json = json.dumps(proof_gaps or [], ensure_ascii=False)
         lead.validation_status = validation_status
         lead.validation_reasoning = validation_reasoning
         lead.attack_path_json = json.dumps(attack_path or {}, ensure_ascii=False)
         lead.reportable = reportable
-        lead.status = "open" if reportable else (
-            "dismissed" if validation_status == "dismissed" else "inconclusive"
+        lead.status = (
+            "open"
+            if reportable
+            else ("dismissed" if validation_status == "dismissed" else "inconclusive")
         )
         lead.updated_at = now
         s.add(lead)
@@ -209,7 +250,9 @@ def copy_leads_to_run(
     return made
 
 
-def copy_lead_to_run(lead_id: int, target_run_type: str, target_run_id: int) -> ScanLead:
+def copy_lead_to_run(
+    lead_id: int, target_run_type: str, target_run_id: int
+) -> ScanLead:
     """Idempotently copy one reportable original lead into a dynamic run."""
     with Session(get_engine()) as s:
         original = s.get(ScanLead, lead_id)
@@ -460,8 +503,8 @@ def update_lead(
     Dynamic agents must provide the run that owns the imported lead.  The
     ownership check is deliberately optional for backwards-compatible service
     callers that operate on original SAST rows, but every scanner/ALICE call
-    supplies it.  Run IDs collide across web and API runs, so both dimensions
-    are required for the protected path.
+    supplies it.  The kind is retained because this is a soft link across
+    different run surfaces, so both dimensions are required for the protected path.
     """
     allowed_statuses = {"investigating", "confirmed", "dismissed", "inconclusive"}
     if status not in allowed_statuses:
@@ -616,6 +659,14 @@ def _format_leads_block(leads: list[ScanLead]) -> str:
                 "…" if len(lead.evidence) > 400 else ""
             )
             lines.append(f"  Evidence: {evidence_preview}")
+        attack_path_lines = format_attack_path_for_prompt(
+            decode_attack_path(lead.attack_path_json)
+        )
+        if attack_path_lines:
+            lines.append(
+                "  Static attack path (a hypothesis, not runtime proof; verify every hop):"
+            )
+            lines.extend(attack_path_lines)
         lines.append("")
 
     return "\n".join(lines)

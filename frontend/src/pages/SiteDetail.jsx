@@ -808,7 +808,7 @@ export function TestRunDetail({
       />
 
       {activeTab === "sitemap" && run && <>
-        <WebRunSitemapMeta run={run} crawlUsername={crawlUsername} profiles={runProfiles} onRunUpdate={setRun} onError={setError} crawlCredentialId={crawlCredentialId} onCrawlCredentialChange={setCrawlCredentialId} />
+        <WebRunSitemapMeta run={run} graph={graph} crawlUsername={crawlUsername} profiles={runProfiles} onRunUpdate={setRun} onError={setError} crawlCredentialId={crawlCredentialId} onCrawlCredentialChange={setCrawlCredentialId} />
         {activeTab === "sitemap" && run && <ScopeHostsPanel siteId={run.site_id} hosts={scopeHosts} onChange={setScopeHosts} />}
         <WebRunCrawlProgress run={run} crawlerTask={crawlerTask} /></>}
 

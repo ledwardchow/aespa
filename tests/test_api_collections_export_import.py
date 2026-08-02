@@ -100,7 +100,7 @@ def test_roundtrip(session, tmp_path, monkeypatch):
     )
     session.add(finding)
     session.flush()
-    # API traffic uses the sentinel test_run_id=0 (no real TestRun row).
+    # API traffic has no web-run owner.
     session.add(
         TrafficEntry(
             test_run_id=0,
@@ -239,7 +239,7 @@ def test_roundtrip(session, tmp_path, monkeypatch):
     new_traffic = session.exec(
         select(TrafficEntry).where(TrafficEntry.api_test_run_id == new_run.id)
     ).one()
-    assert new_traffic.test_run_id == 0  # sentinel preserved, not NULL
+    assert new_traffic.test_run_id is None
 
     assert (
         len(

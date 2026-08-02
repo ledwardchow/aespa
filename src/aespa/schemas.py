@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import (
     BaseModel,
@@ -803,6 +803,7 @@ class CrawlerConfigBase(BaseModel):
     suppress_form_submit_actions: bool = True
     block_non_idempotent_interactive_replay: bool = True
     enable_access_reconciliation: bool = False
+    llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
 
 
 class CrawlerConfigIn(CrawlerConfigBase):
@@ -1087,6 +1088,7 @@ class TestRunCreate(BaseModel):
     use_screenshots: bool = False
     max_depth: int = Field(default=3, ge=1, le=10)
     max_pages: int = Field(default=500, ge=5, le=500)
+    llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
     crawler_mode: Literal["url", "interactive"] = "url"
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
@@ -1095,6 +1097,7 @@ class TestRunCreate(BaseModel):
 class TestRunUpdate(BaseModel):
     max_depth: int = Field(ge=1, le=10)
     max_pages: int = Field(ge=5, le=500)
+    llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
     crawler_mode: Literal["url", "interactive"] | None = None
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
@@ -1133,6 +1136,7 @@ class TestRunSummary(BaseModel):
     use_screenshots: bool
     max_depth: int
     max_pages: int
+    llm_max_concurrency: int | None = None
     crawler_mode: str = "url"
     scan_mode: str = "aggressive"
     scan_status: str = "idle"
@@ -1230,6 +1234,34 @@ class CrawledPageOut(BaseModel):
     discovered_at: datetime
     # screenshot returned separately via /pages/{id} to keep list responses light
 
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_owasp_applicable(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            raw = data.get("owasp_applicable_json")
+            if raw and not data.get("owasp_applicable"):
+                try:
+                    data["owasp_applicable"] = json.loads(raw)
+                except Exception:
+                    pass
+            return data
+        if hasattr(data, "owasp_applicable_json"):
+            raw = getattr(data, "owasp_applicable_json", None)
+            owasp = {}
+            if raw:
+                try:
+                    owasp = json.loads(raw)
+                except Exception:
+                    pass
+            d = {
+                k: getattr(data, k)
+                for k in getattr(data, "__dict__", {})
+                if not k.startswith("_")
+            }
+            d["owasp_applicable"] = owasp
+            return d
+        return data
+
 
 class CrawledPageDetail(CrawledPageOut):
     page_text: str | None
@@ -1250,7 +1282,9 @@ class GraphNode(BaseModel):
     title: str | None
     depth: int
     status: str
+    error_message: str | None = None
     context: str | None
+    analysis_status: str = "pending"  # pending | queued | analyzing | complete | skipped
     in_scope: bool = True
     scan_status: str = "pending"
     accessible_by: list[int] = []

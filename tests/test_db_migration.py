@@ -28,6 +28,53 @@ def test_ensure_column_adds_missing_column():
         engine.dispose()
 
 
+def test_reset_orphaned_running_runs_uses_crawl_message_and_updates_legacy_text():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE test_run ("
+                    "id INTEGER PRIMARY KEY, status TEXT, phase TEXT, outcome TEXT, "
+                    "terminal_reason TEXT, error_message TEXT, completed_at DATETIME)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO test_run "
+                    "(id, status, error_message) VALUES "
+                    "(1, 'running', 'old error'), "
+                    "(2, 'failed', 'Interrupted by a server restart; mark as failed.')"
+                )
+            )
+            conn.commit()
+
+        db._reset_orphaned_running_runs(engine)
+
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT id, status, phase, outcome, terminal_reason, error_message "
+                    "FROM test_run ORDER BY id"
+                )
+            ).all()
+
+        assert rows[0][1:] == (
+            "failed",
+            "finished",
+            "failed",
+            "interrupted",
+            "Last crawl interrupted prior to completion",
+        )
+        assert rows[1][-1] == "Last crawl interrupted prior to completion"
+    finally:
+        engine.dispose()
+
+
 def test_backfill_scanner_session_account_labels_replaces_opaque_subjects():
     engine = create_engine(
         "sqlite:///:memory:",
@@ -706,7 +753,70 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "site" in tables
         assert "test_run" in tables
         # The migration chain now includes replay/session provenance fields.
-        assert version == "d2f9a6b1c340"
+        assert version == "2c3ed73c25da"
+    finally:
+        engine.dispose()
+
+
+def test_global_run_identity_migration_remaps_collisions_and_drops_ambiguous_rows():
+    """Old shared rows are remapped only when their owner is knowable."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as conn:
+            for statement in (
+                "CREATE TABLE site (id INTEGER PRIMARY KEY)",
+                "CREATE TABLE api_collection (id INTEGER PRIMARY KEY)",
+                "CREATE TABLE test_run (id INTEGER PRIMARY KEY, site_id INTEGER, name TEXT)",
+                "CREATE TABLE api_test_run (id INTEGER PRIMARY KEY, collection_id INTEGER, name TEXT)",
+                "CREATE TABLE agent_log (id INTEGER PRIMARY KEY, test_run_id INTEGER NOT NULL, run_kind TEXT NOT NULL)",
+                "CREATE TABLE traffic_entry (id INTEGER PRIMARY KEY, test_run_id INTEGER NOT NULL, api_test_run_id INTEGER, source TEXT)",
+                "CREATE TABLE scan_finding (id INTEGER PRIMARY KEY, test_run_id INTEGER, api_test_run_id INTEGER, title TEXT)",
+                "CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)",
+                "INSERT INTO alembic_version VALUES ('d2f9a6b1c340')",
+                "INSERT INTO site VALUES (1)",
+                "INSERT INTO api_collection VALUES (1)",
+                "INSERT INTO test_run VALUES (31, 1, 'Bank of Ed')",
+                "INSERT INTO api_test_run VALUES (31, 1, 'Hack This Site')",
+                # The default web marker is ambiguous when both old parents
+                # exist and must be discarded.
+                "INSERT INTO agent_log VALUES (1, 31, 'web')",
+                "INSERT INTO agent_log VALUES (2, 31, 'api')",
+                "INSERT INTO traffic_entry VALUES (1, 31, 31, 'httpx')",
+                "INSERT INTO scan_finding VALUES (1, 31, NULL, 'ambiguous')",
+                "INSERT INTO scan_finding VALUES (2, NULL, 31, 'api')",
+            ):
+                conn.execute(text(statement))
+            conn.commit()
+
+        db.run_migrations(engine)
+
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            identities = conn.execute(
+                text("SELECT id, kind, legacy_id FROM run_identity ORDER BY id")
+            ).all()
+            parents = conn.execute(text("SELECT id, name FROM api_test_run")).all()
+            logs = conn.execute(
+                text("SELECT test_run_id, run_kind FROM agent_log ORDER BY id")
+            ).all()
+            traffic = conn.execute(
+                text("SELECT test_run_id, api_test_run_id FROM traffic_entry")
+            ).all()
+            findings = conn.execute(
+                text(
+                    "SELECT test_run_id, api_test_run_id, title FROM scan_finding ORDER BY id"
+                )
+            ).all()
+
+        assert identities == [(31, "web", 31), (32, "api", 31)]
+        assert parents == [(32, "Hack This Site")]
+        assert logs == [(32, "api")]
+        assert traffic == [(None, 32)]
+        assert findings == [(None, 32, "api")]
     finally:
         engine.dispose()
 
@@ -737,8 +847,7 @@ def test_replay_provenance_repair_migration_handles_existing_c4_database():
         with engine.connect() as conn:
             columns = {
                 table: {
-                    row[1]
-                    for row in conn.execute(text(f"PRAGMA table_info({table})"))
+                    row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))
                 }
                 for table in (
                     "test_run",
@@ -755,7 +864,7 @@ def test_replay_provenance_repair_migration_handles_existing_c4_database():
         assert "replay_credential_id" in columns["crawled_page"]
         assert {"page_id", "session_label"} <= columns["traffic_entry"]
         assert "page_id" in columns["target_intel_item"]
-        assert version == "d2f9a6b1c340"
+        assert version == "2c3ed73c25da"
     finally:
         engine.dispose()
 

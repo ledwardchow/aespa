@@ -2289,7 +2289,9 @@ def _run_thinking_context_tool(
                 s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id))
             )
             findings_count = len(
-                s.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all()
+                s.exec(
+                    select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+                ).all()
             )
 
         try:
@@ -2301,7 +2303,13 @@ def _run_thinking_context_tool(
 
         if run.phase == "crawling":
             crawl_status = "running"
-        elif run.phase in {"crawled", "scanning", "reporting", "validating", "finished"}:
+        elif run.phase in {
+            "crawled",
+            "scanning",
+            "reporting",
+            "validating",
+            "finished",
+        }:
             crawl_status = "complete"
         elif run.status == "failed":
             crawl_status = "failed"
@@ -2608,7 +2616,7 @@ def _run_thinking_context_tool(
     if tool_name == "lead_list":
         if run_id is None:
             return {"tool": "lead_list", "error": "run_id unavailable"}
-        from aespa.services.scan_leads import get_all_leads_for_run
+        from aespa.services.scan_leads import decode_attack_path, get_all_leads_for_run
 
         status_filter = str(args.get("status") or "").lower()
         all_leads = get_all_leads_for_run("web", run_id)
@@ -2634,6 +2642,7 @@ def _run_thinking_context_tool(
                     "status": ld.status or "open",
                     "note": ld.note or "",
                     "linked_finding_id": ld.linked_finding_id,
+                    "attack_path": decode_attack_path(ld.attack_path_json),
                 }
                 for ld in leads_out
             ],
@@ -5696,6 +5705,17 @@ def request_thinking_stop(run_id: int) -> None:
     )
 
 
+async def stop_thinking_and_wait(run_id: int, timeout: float = 5.0) -> bool:
+    """Cancel a dynamic scan and wait briefly for its cleanup handlers."""
+    task = _thinking_tasks.get(run_id)
+    if task is None:
+        return False
+    request_thinking_stop(run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return True
+
+
 async def await_specialist_barrier(run_id: int, timeout: float = 60.0) -> int:
     """Bounded specialist barrier: await in-flight specialists before finalization."""
     tasks = [t for t in list(_specialist_tasks.get(run_id, [])) if not t.done()]
@@ -5769,9 +5789,8 @@ async def start_thinking_scan(run_id: int) -> None:
         return
     # Clear any stale checkpoint so the scan starts fresh.
     checkpoint_svc.clear_checkpoint(run_id)
-    # Tag this run's events as run_kind='web'.  Run ids collide across
-    # web / api / sast, so the scope — snapshotted by create_task below — keeps
-    # web log rows correctly tagged even if the same id was registered as an API
+    # Tag this run's events as run_kind='web'.  The scope — snapshotted by
+    # create_task below — keeps web log rows correctly tagged for compatibility
     # run earlier in this process.
     with events_svc.run_kind_scope("web"):
         task = asyncio.create_task(
@@ -11007,8 +11026,7 @@ def _tls_posture_finding(
 ) -> ScanFinding | None:
     """Build ONE consolidated A02 finding from a scan_tls result, or None if clean.
 
-    ``is_api_run`` keys the finding on ``api_test_run_id`` instead of ``test_run_id``
-    (web/API run ids share an int space — see the run-id-collision note in CLAUDE.md).
+    ``is_api_run`` keys the finding on ``api_test_run_id`` instead of ``test_run_id``.
     """
     issues = result.get("issues") or []
     if not issues:

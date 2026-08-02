@@ -203,9 +203,7 @@ def _json_object(value: str | None, default: dict) -> dict:
 
 
 @router.get("/api/sast-runs/{run_id}/analysis")
-def get_sast_analysis(
-    run_id: int, session: Session = Depends(get_session)
-) -> dict:
+def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> dict:
     """Return authoritative phase, coverage, and report state for the UI."""
     run = _get_run_or_404(session, run_id)
     from aespa.services.sast_scanner import _empty_phase_state
@@ -420,7 +418,9 @@ def get_sast_handoff_targets(
     """List dynamic runs that can receive a validated static lead."""
     _get_run_or_404(session, run_id)
     targets: list[dict] = []
-    web_runs = session.exec(select(TestRun).order_by(TestRun.id.desc()).limit(100)).all()  # type: ignore[attr-defined]
+    web_runs = session.exec(
+        select(TestRun).order_by(TestRun.id.desc()).limit(100)
+    ).all()  # type: ignore[attr-defined]
     for run in web_runs:
         site = session.get(Site, run.site_id)
         targets.append(
@@ -443,7 +443,9 @@ def get_sast_handoff_targets(
                 "run_id": run.id,
                 "name": run.name,
                 "target": (
-                    collection.name if collection else f"API collection #{run.collection_id}"
+                    collection.name
+                    if collection
+                    else f"API collection #{run.collection_id}"
                 ),
                 "status": run.status,
             }
