@@ -73,6 +73,19 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
     return run
 
 
+def _reject_if_campaign_owned(session: Session, run_kind: str, run_id: int) -> None:
+    """Single reusable guard: 409 any mutation of a campaign-owned run.
+
+    Read-only endpoints (detail/log/status reads) never call this.
+    """
+    try:
+        run_cleanup.assert_run_not_campaign_owned(session, run_kind, run_id)
+    except run_cleanup.ChildRunOwnedByCampaign as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+
+
 def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     from aespa.models import Site
     from aespa.services import scanner as scanner_svc
@@ -677,6 +690,7 @@ def get_test_run(
 @router.delete("/api/test-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, "web", run_id)
     # Stop every in-process worker before deleting rows.  The scan can remain
     # active after the crawl has marked the run complete, so checking only the
     # persisted status is not sufficient.
@@ -751,8 +765,10 @@ def import_sast_leads(
     from aespa.services.scan_leads import copy_leads_to_run
 
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, "web", run_id)
     if session.get(SastRun, body.sast_run_id) is None:
         raise HTTPException(status_code=404, detail="SAST run not found")
+    _reject_if_campaign_owned(session, "sast", body.sast_run_id)
     imported = copy_leads_to_run(body.sast_run_id, "web", run_id)
     return {"imported": imported}
 
@@ -780,6 +796,7 @@ def clear_test_run_leads(run_id: int, session: Session = Depends(get_session)) -
     from aespa.models import ScanLead
 
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, "web", run_id)
     for lead in session.exec(
         select(ScanLead)
         .where(ScanLead.imported_into_run_type == "web")
@@ -804,6 +821,7 @@ def delete_test_run_lead(
     from aespa.models import ScanLead
 
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, "web", run_id)
     lead = session.get(ScanLead, lead_id)
     if (
         lead is None
@@ -825,6 +843,7 @@ def update_test_run(
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     run = _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, "web", run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(
             status_code=409, detail="Cannot edit settings while crawl is running"
@@ -867,6 +886,7 @@ async def start_test_run(
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     run = _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, "web", run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Test run is already running")
     if run.status not in (
@@ -914,6 +934,7 @@ async def restart_test_run(
 ) -> TestRunSummary:
     """Wipe all crawled pages/links for this run and start a fresh crawl."""
     run = _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, "web", run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Stop the run before restarting.")
     if get_llm_config_for_run(session, run) is None:
@@ -948,6 +969,7 @@ def clear_test_run_crawl(
 ) -> TestRunSummary:
     """Wipe crawled pages/links for this run without starting a new crawl."""
     run = _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, "web", run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(
             status_code=409, detail="Stop the run before clearing crawl data."
@@ -984,6 +1006,7 @@ async def import_test_run_crawl(
 ) -> TestRunSummary:
     """Populate a new run from an exported crawl without re-running Playwright."""
     run = _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, "web", run_id)
     if run.status != TestRunStatus.pending:
         raise HTTPException(
             status_code=409,
@@ -1305,6 +1328,7 @@ def stop_test_run(
     run_id: int, session: Session = Depends(get_session)
 ) -> TestRunSummary:
     run = _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, "web", run_id)
     if run.status != TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Test run is not currently running")
     crawler_svc.request_stop(run_id)

@@ -18,6 +18,7 @@ scanner with API-specific overrides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -1587,6 +1588,17 @@ async def stop_api_scan(api_run_id: int) -> bool:
             )
         return True
     return False
+
+
+async def stop_api_scan_and_wait(api_run_id: int, timeout: float = 5.0) -> bool:
+    """Cancel an API scan and wait briefly for its cleanup handlers."""
+    task = _scan_tasks.get(api_run_id)
+    if task is None or task.done():
+        return False
+    stopped = await stop_api_scan(api_run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return stopped
 
 
 def is_api_scan_running(api_run_id: int) -> bool:

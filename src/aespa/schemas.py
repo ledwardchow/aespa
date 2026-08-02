@@ -1531,3 +1531,288 @@ class ScanCheckpointStatusOut(BaseModel):
     exists: bool
     step_count: int | None = None
     updated_at: datetime | None = None
+
+
+# ── Applications & multi-repository campaigns ────────────────────────────────
+
+
+class ApplicationCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+
+
+class ApplicationUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+
+
+class ApplicationSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+    component_count: int = 0
+    site_count: int = 0
+    api_collection_count: int = 0
+    last_campaign_status: str | None = None
+
+
+class ApplicationDetail(ApplicationSummary):
+    pass
+
+
+class ApplicationComponentCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    role: str | None = None
+    description: str | None = None
+
+
+class ApplicationComponentUpdate(BaseModel):
+    role: str | None = None
+    description: str | None = None
+
+
+class ApplicationComponentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    application_id: int
+    name: str
+    role: str | None
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+    latest_snapshot: "ComponentSnapshotOut | None" = None
+    snapshot_count: int = 0
+
+
+class ComponentSnapshotOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    component_id: int
+    filename: str
+    size_bytes: int
+    sha256: str
+    created_at: datetime
+
+
+class ApplicationTargetCreate(BaseModel):
+    target_type: Literal["site", "api_collection"]
+    target_id: int
+
+
+class ApplicationTargetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    application_id: int
+    target_type: str
+    target_id: int
+    created_at: datetime
+    name: str | None = None  # resolved Site/ApiCollection name for convenience
+
+
+class ComponentTargetHintCreate(BaseModel):
+    component_id: int
+    target_id: int
+    note: str | None = None
+
+
+class ComponentTargetHintOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    application_id: int
+    component_id: int
+    target_id: int
+    note: str | None
+    created_at: datetime
+
+
+class CampaignSourceMemberCreate(BaseModel):
+    component_id: int
+    snapshot_id: int
+
+
+class CampaignTargetMemberCreate(BaseModel):
+    target_id: int
+
+
+class CampaignCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    source_members: list[CampaignSourceMemberCreate] = Field(min_length=1)
+    target_members: list[CampaignTargetMemberCreate] = Field(min_length=1)
+    llm_config_id: int | None = None
+    llm_profile_id: int | None = None
+    max_parallel_sast: int = Field(default=2, ge=1, le=8)
+
+
+class CampaignSourceMemberOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    component_id: int
+    snapshot_id: int
+    sast_run_id: int | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignTargetMemberOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    target_id: int
+    target_type: str
+    test_run_id: int | None
+    api_test_run_id: int | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    application_id: int
+    name: str
+    status: str
+    max_parallel_sast: int
+    warnings_json: str = "[]"
+    review_submitted_at: datetime | None
+    error_message: str | None
+    # Set only while status == "interrupted"; the stage retry will resume.
+    interrupted_stage: str | None = None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignDetail(CampaignSummary):
+    source_members: list[CampaignSourceMemberOut] = []
+    target_members: list[CampaignTargetMemberOut] = []
+
+
+class ComponentConnectionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    source_component_id: int
+    source_fact_id: int
+    target_component_id: int
+    target_fact_id: int
+    match_kind: str
+    confidence: float
+    rationale: str
+    evidence_json: str
+    created_at: datetime
+
+
+class LeadTargetMappingOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    lead_id: int
+    target_id: int
+    target_type: str
+    score: float
+    rationale: str
+    evidence_json: str
+    status: str
+    copied_lead_id: int | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    # Lead context for the review UI, added on top of the raw mapping row —
+    # backward compatible: existing consumers reading only the fields above
+    # are unaffected. Populated best-effort; left None/empty if the lead row
+    # (or its component provenance) cannot be resolved for any reason.
+    lead_title: str | None = None
+    lead_description: str | None = None
+    lead_severity: str | None = None
+    lead_location: str | None = None
+    lead_producer_run_type: str | None = None
+    lead_producer_run_id: int | None = None
+    component_ids: list[int] = Field(default_factory=list)
+    component_names: list[str] = Field(default_factory=list)
+
+
+class LeadTargetMappingReviewItem(BaseModel):
+    mapping_id: int
+    approve: bool
+
+
+class LeadTargetMappingReviewRequest(BaseModel):
+    """A batch of approve/reject decisions. May be empty, but only when the
+    campaign has zero pending proposals — validated server-side."""
+
+    decisions: list[LeadTargetMappingReviewItem] = Field(default_factory=list)
+
+
+class LeadTargetMappingReviewResult(BaseModel):
+    approved: int
+    rejected: int
+    copied: int
+
+
+class CampaignFindingRow(BaseModel):
+    """One combined-findings row: a ScanFinding plus its component/target context."""
+
+    finding_id: int
+    target_type: str
+    target_run_id: int
+    # First contributing component id (kept for backward compatibility);
+    # component_name is comma-joined when a cross-repo lead has more than
+    # one contributing component. Both stay None when the finding has no
+    # linked campaign lead — never guessed from target/host matching.
+    component_id: int | None
+    component_name: str | None
+    component_ids: list[int] = Field(default_factory=list)
+    component_names: list[str] = Field(default_factory=list)
+    target_name: str | None
+    title: str
+    severity: str
+    status: str
+
+
+class CampaignActivityEntry(BaseModel):
+    """One persisted campaign activity row — an AgentLog or ScanLog entry
+    tagged run_kind='campaign', merged into one stable chronological feed
+    that matches what the live SSE stream shows in real time.
+
+    ``event_id`` is a stable, monotonically-advancing cursor: the composite
+    "<max agent_log.id seen>.<max scan_log.id seen>" watermark immediately
+    after this entry, in the order this feed emits entries. Passing it back
+    as the ``cursor`` query param (or ``Last-Event-ID`` header) on
+    ``.../activity/stream`` resumes exactly after it — never repeating and
+    never skipping an entry, even though AgentLog and ScanLog are two
+    independently-numbered tables merged into one feed.
+    """
+
+    event_id: str = ""
+    timestamp: datetime
+    type: str  # "agent_status" | "scanner_phase"
+    status: str
+    role: str | None = None  # agent_status only
+    phase: str | None = None  # scanner_phase only
+    message: str | None = None  # scanner_phase only
+    task: str | None = None  # agent_status only (AgentLog.current_task)
+    outcome: str | None = None  # agent_status only
+
+
+class CampaignProgress(BaseModel):
+    status: str
+    warnings: list[str] = []
+    source_members: list[CampaignSourceMemberOut] = []
+    target_members: list[CampaignTargetMemberOut] = []
