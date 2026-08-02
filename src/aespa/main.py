@@ -15,6 +15,7 @@ from sqlmodel import Session
 from aespa.api.alice import router as alice_router
 from aespa.api.api_collections import router as api_collections_router
 from aespa.api.api_test_runs import router as api_test_runs_router
+from aespa.api.applications import router as applications_router
 from aespa.api.events import router as events_router
 from aespa.api.reporting_debug import router as reporting_debug_router
 from aespa.api.sast_runs import router as sast_runs_router
@@ -26,6 +27,7 @@ from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
 from aespa.config import Settings, get_settings
 from aespa.db import get_session, init_db
+from aespa.services import campaigns as campaigns_svc
 from aespa.services import copilot_provider as copilot_provider_svc
 from aespa.services import droid_provider as droid_provider_svc
 from aespa.services import validator as validator_svc
@@ -36,6 +38,7 @@ from aespa.services.settings import get_cloudflare_access_config
 async def _lifespan(app: FastAPI):  # noqa: ARG001
     init_db()
     await validator_svc.resume_interrupted_validations()
+    campaigns_svc.reconcile_campaigns()
     try:
         yield
     finally:
@@ -127,6 +130,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(reporting_debug_router)
     app.include_router(alice_router)
     app.include_router(statistics_router)
+    app.include_router(applications_router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

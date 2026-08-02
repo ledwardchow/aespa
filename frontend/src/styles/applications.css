@@ -1,0 +1,112 @@
+/* Applications & Campaigns feature — styles.css/run.css cover almost
+   everything (cards, badges, tables, tabs, forms); this file only adds the
+   handful of layout primitives specific to this feature. */
+
+.btn.active {
+  background: var(--accent-glow);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.alert.warning {
+  background: rgba(245, 166, 35, 0.1);
+  border: 1px solid rgba(245, 166, 35, 0.3);
+  color: var(--warn, #f5a623);
+}
+
+/* ── Component cards ────────────────────────────────────────── */
+
+.app-component-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+.app-component-card { display: flex; flex-direction: column; padding: 16px; }
+.app-snapshot-summary { margin-top: 10px; padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 6px; }
+.app-snapshot-history { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; }
+.app-snapshot-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; }
+
+/* ── Targets & hints ────────────────────────────────────────── */
+
+.app-target-list { display: flex; flex-direction: column; gap: 6px; }
+.app-target-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid var(--border-2); border-radius: 7px; background: var(--panel-2); }
+.app-hint-list { display: flex; flex-direction: column; gap: 6px; }
+.app-hint-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border: 1px solid var(--border-2); border-radius: 7px; }
+.app-hint-row span:first-child { flex: 1; font-weight: 600; }
+
+.multi-select { border: 1px solid var(--border-2); border-radius: 8px; overflow: hidden; }
+.multi-select-search { width: 100%; border: none; border-bottom: 1px solid var(--border-2); border-radius: 0; padding: 8px 10px; background: var(--panel-2); }
+.multi-select-list { max-height: 220px; overflow: auto; }
+.multi-select-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
+.multi-select-row:hover { background: var(--panel-2); }
+.multi-select-row.checked { background: var(--accent-glow); }
+.multi-select-label { flex: 1; }
+.multi-select-meta { color: var(--muted); font-size: 11px; }
+
+/* ── Campaign wizard ────────────────────────────────────────── */
+
+.app-wizard-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+
+/* ── Campaign stage banner ──────────────────────────────────── */
+
+.campaign-stage-region { flex: 0 0 auto; padding-top: 14px; }
+.campaign-stage-banner { display: flex; gap: 4px; padding: 0 24px 14px; flex-wrap: wrap; }
+.campaign-stage-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+}
+.campaign-stage-step.done { color: var(--ok); border-color: rgba(63,207,112,0.3); }
+.campaign-stage-step.current { color: var(--text); border-color: var(--accent); background: var(--accent-glow); font-weight: 700; }
+.campaign-stage-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--border-2);
+  font-size: 10px;
+  font-weight: 700;
+}
+.campaign-stage-step.done .campaign-stage-num { background: var(--ok); color: #06210f; }
+.campaign-stage-step.current .campaign-stage-num { background: var(--accent); color: #fff; }
+.campaign-stage-paused { display: flex; align-items: center; margin-left: 6px; }
+.campaign-token-usage { margin: -28px -28px 0; }
+
+/* ── Progress / frozen-selection lists ──────────────────────── */
+
+.app-progress-list { display: flex; flex-direction: column; gap: 6px; }
+.app-progress-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border: 1px solid var(--border-2); border-radius: 7px; background: var(--panel-2); }
+
+/* ── Connections diagram/list ───────────────────────────────── */
+
+.connection-diagram { display: flex; flex-direction: column; gap: 8px; }
+.connection-edge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+}
+.connection-edge:hover { border-color: var(--accent); }
+.connection-edge.selected { border-color: var(--accent); background: var(--accent-glow); }
+.connection-node { font-weight: 600; }
+.connection-arrow { color: var(--muted); }
+.row-selected { background: var(--accent-glow); }
+
+/* ── Review leads ───────────────────────────────────────────── */
+
+.app-review-lead-card table { width: 100%; }

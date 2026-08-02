@@ -65,6 +65,100 @@ def lead_fingerprint(*, category: str, title: str, location: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def upsert_lead(
+    session: Session,
+    *,
+    producer_run_id: int,
+    producer_run_type: str = "sast",
+    collection_id: int | None = None,
+    title: str,
+    description: str,
+    category: str = "",
+    severity: str = "medium",
+    confidence: float,
+    location: str = "",
+    evidence: str = "",
+    source: str = "sast",
+    fingerprint: str = "",
+    suggested_endpoint: str = "",
+    source_trace: dict | None = None,
+    controls: list | None = None,
+    sink_trace: dict | None = None,
+    counterevidence: list | None = None,
+    proof_gaps: list | None = None,
+    validation_status: str = "pending",
+    validation_reasoning: str = "",
+    attack_path: dict | None = None,
+    reportable: bool = True,
+) -> ScanLead:
+    """Upsert one original static candidate by stable fingerprint, within an
+    already-open ``session``.
+
+    Session-aware core of ``create_lead``: adds/flushes the row but never
+    commits or opens its own ``Session`` — callers that are already inside a
+    transaction (e.g. ``services.correlation``) can write a lead alongside
+    their other changes and commit exactly once, atomically. ``create_lead``
+    below is the standalone convenience wrapper every other caller keeps
+    using unchanged.
+    """
+    fingerprint = fingerprint or lead_fingerprint(
+        category=category, title=title, location=location
+    )
+    now = datetime.now(_UTC)
+    lead = session.exec(
+        select(ScanLead)
+        .where(ScanLead.producer_run_id == producer_run_id)
+        .where(ScanLead.producer_run_type == producer_run_type)
+        .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+        .where(ScanLead.fingerprint == fingerprint)
+    ).first()
+    if lead is None:
+        lead = session.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_id == producer_run_id)
+            .where(ScanLead.producer_run_type == producer_run_type)
+            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+            .where(ScanLead.category == category)
+            .where(ScanLead.title == title)
+            .where(ScanLead.location == location)
+        ).first()
+    if lead is None:
+        lead = ScanLead(
+            producer_run_id=producer_run_id,
+            producer_run_type=producer_run_type,
+            collection_id=collection_id,
+            fingerprint=fingerprint,
+            created_at=now,
+        )
+    lead.title = title
+    lead.description = description
+    lead.category = category
+    lead.severity = severity
+    lead.confidence = confidence
+    lead.location = location
+    lead.evidence = evidence
+    lead.source = source
+    lead.suggested_endpoint = suggested_endpoint
+    lead.source_trace_json = json.dumps(source_trace or {}, ensure_ascii=False)
+    lead.control_trace_json = json.dumps(controls or [], ensure_ascii=False)
+    lead.sink_trace_json = json.dumps(sink_trace or {}, ensure_ascii=False)
+    lead.counterevidence_json = json.dumps(counterevidence or [], ensure_ascii=False)
+    lead.proof_gaps_json = json.dumps(proof_gaps or [], ensure_ascii=False)
+    lead.validation_status = validation_status
+    lead.validation_reasoning = validation_reasoning
+    lead.attack_path_json = json.dumps(attack_path or {}, ensure_ascii=False)
+    lead.reportable = reportable
+    lead.status = (
+        "open"
+        if reportable
+        else ("dismissed" if validation_status == "dismissed" else "inconclusive")
+    )
+    lead.updated_at = now
+    session.add(lead)
+    session.flush()
+    return lead
+
+
 def create_lead(
     *,
     producer_run_id: int,
@@ -90,64 +184,38 @@ def create_lead(
     attack_path: dict | None = None,
     reportable: bool = True,
 ) -> ScanLead:
-    """Upsert one original static candidate by stable fingerprint."""
-    fingerprint = fingerprint or lead_fingerprint(
-        category=category, title=title, location=location
-    )
-    now = datetime.now(_UTC)
+    """Upsert one original static candidate by stable fingerprint.
+
+    Standalone convenience wrapper: opens its own ``Session``, commits, and
+    returns a detached instance. Use ``upsert_lead`` instead when the write
+    must happen inside a transaction the caller already owns.
+    """
     with Session(get_engine()) as s:
-        lead = s.exec(
-            select(ScanLead)
-            .where(ScanLead.producer_run_id == producer_run_id)
-            .where(ScanLead.producer_run_type == producer_run_type)
-            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-            .where(ScanLead.fingerprint == fingerprint)
-        ).first()
-        if lead is None:
-            lead = s.exec(
-                select(ScanLead)
-                .where(ScanLead.producer_run_id == producer_run_id)
-                .where(ScanLead.producer_run_type == producer_run_type)
-                .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-                .where(ScanLead.category == category)
-                .where(ScanLead.title == title)
-                .where(ScanLead.location == location)
-            ).first()
-        if lead is None:
-            lead = ScanLead(
-                producer_run_id=producer_run_id,
-                producer_run_type=producer_run_type,
-                collection_id=collection_id,
-                fingerprint=fingerprint,
-                created_at=now,
-            )
-        lead.title = title
-        lead.description = description
-        lead.category = category
-        lead.severity = severity
-        lead.confidence = confidence
-        lead.location = location
-        lead.evidence = evidence
-        lead.source = source
-        lead.suggested_endpoint = suggested_endpoint
-        lead.source_trace_json = json.dumps(source_trace or {}, ensure_ascii=False)
-        lead.control_trace_json = json.dumps(controls or [], ensure_ascii=False)
-        lead.sink_trace_json = json.dumps(sink_trace or {}, ensure_ascii=False)
-        lead.counterevidence_json = json.dumps(
-            counterevidence or [], ensure_ascii=False
+        lead = upsert_lead(
+            s,
+            producer_run_id=producer_run_id,
+            producer_run_type=producer_run_type,
+            collection_id=collection_id,
+            title=title,
+            description=description,
+            category=category,
+            severity=severity,
+            confidence=confidence,
+            location=location,
+            evidence=evidence,
+            source=source,
+            fingerprint=fingerprint,
+            suggested_endpoint=suggested_endpoint,
+            source_trace=source_trace,
+            controls=controls,
+            sink_trace=sink_trace,
+            counterevidence=counterevidence,
+            proof_gaps=proof_gaps,
+            validation_status=validation_status,
+            validation_reasoning=validation_reasoning,
+            attack_path=attack_path,
+            reportable=reportable,
         )
-        lead.proof_gaps_json = json.dumps(proof_gaps or [], ensure_ascii=False)
-        lead.validation_status = validation_status
-        lead.validation_reasoning = validation_reasoning
-        lead.attack_path_json = json.dumps(attack_path or {}, ensure_ascii=False)
-        lead.reportable = reportable
-        lead.status = (
-            "open"
-            if reportable
-            else ("dismissed" if validation_status == "dismissed" else "inconclusive")
-        )
-        lead.updated_at = now
-        s.add(lead)
         s.commit()
         s.refresh(lead)
         s.expunge(lead)

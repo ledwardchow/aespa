@@ -31,6 +31,7 @@ from aespa.schemas import (
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import findings as findings_svc
 from aespa.services import llm as llm_svc
+from aespa.services import run_cleanup
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
 
@@ -42,6 +43,14 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
     if run is None:
         raise HTTPException(status_code=404, detail="Test run not found")
     return run
+
+
+def _reject_if_campaign_owned(session: Session, run_id: int) -> None:
+    """Single reusable guard: 409 any mutation of a campaign-owned web run."""
+    try:
+        run_cleanup.assert_run_not_campaign_owned(session, "web", run_id)
+    except run_cleanup.ChildRunOwnedByCampaign as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 class _StartScanBody(BaseModel):
@@ -59,6 +68,7 @@ async def start_thinking_scan(
 ) -> dict:
     """Start an LLM-directed scan that dynamically chooses what to test next."""
     run = _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(
             status_code=409, detail="Crawl is still running — wait for it to finish"
@@ -103,6 +113,7 @@ async def test_page_state(
 ) -> dict:
     """Queue a focused Test Lead scan for one persisted URL/SPA page state."""
     run = _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     if run.status == TestRunStatus.running and not scanner_svc.is_thinking_running(
         run_id
     ):
@@ -141,6 +152,7 @@ async def stop_thinking_scan(
     import asyncio
 
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     scanner_svc.request_thinking_stop(run_id)
     await asyncio.sleep(0)  # yield to event loop so queued SSE events are flushed
     return scanner_svc.get_thinking_scan_status(run_id)
@@ -171,6 +183,7 @@ async def resume_thinking_scan(
 ) -> dict:
     """Resume an interrupted dynamic scan from the last saved checkpoint."""
     run = _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(
             status_code=409, detail="Crawl is still running — wait for it to finish"
@@ -197,6 +210,7 @@ def delete_finding(
     session: Session = Depends(get_session),
 ) -> None:
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     finding = session.get(ScanFinding, finding_id)
     if finding is None or finding.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Finding not found")
@@ -215,6 +229,7 @@ def update_finding(
 ) -> ScanFindingOut:
     """Apply a user edit (severity, validation status, free text) to a finding."""
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     finding = session.get(ScanFinding, finding_id)
     if finding is None or finding.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Finding not found")
@@ -238,6 +253,7 @@ def delete_findings_group(
     removed.  If omitted, **all** findings are deleted and every page's
     scan_status is reset to 'pending' so the scanner can re-run from scratch."""
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     if title is not None:
         findings = session.exec(
             select(ScanFinding)
@@ -315,6 +331,7 @@ def import_findings(
     session: Session = Depends(get_session),
 ) -> ScanFindingImportResult:
     run = _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     if not payload:
         raise HTTPException(status_code=400, detail="No findings to import")
 
@@ -386,6 +403,7 @@ async def start_validation(
 ) -> ValidationStatusOut:
     """Start background validation of all unvalidated findings for this run."""
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     if validator_svc.is_validating(run_id):
         raise HTTPException(status_code=409, detail="Validation already running")
     await validator_svc.start_validation(run_id)
@@ -401,6 +419,7 @@ def stop_validation(
 ) -> ValidationStatusOut:
     """Stop background validation for this run."""
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     validator_svc.request_stop(run_id)
     return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
 
@@ -416,6 +435,7 @@ async def validate_single_finding(
 ) -> ScanFindingOut:
     """Start background validation of a single finding. Returns immediately with status 'validating'."""
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     finding = session.get(ScanFinding, finding_id)
     if finding is None or finding.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Finding not found")
@@ -451,6 +471,7 @@ def clear_scan_log(
 ) -> None:
     """Delete all persisted activity log entries for this run."""
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     for entry in session.exec(
         select(ScanLog)
         .where(ScanLog.test_run_id == run_id)
@@ -493,6 +514,7 @@ def clear_agent_log(
 ) -> None:
     """Delete all persisted agent log entries for this run."""
     _get_run_or_404(session, run_id)
+    _reject_if_campaign_owned(session, run_id)
     for entry in session.exec(
         select(AgentLog)
         .where(AgentLog.test_run_id == run_id)
