@@ -126,7 +126,8 @@ async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
     )
     ctx = await browser.new_context(
         user_agent=playwright_user_agent(browser),
-        ignore_https_errors=True, **_playwright_proxy()
+        ignore_https_errors=True,
+        **_playwright_proxy(),
     )
     protect_playwright_context(browser, ctx)
     headers = _playwright_global_headers()
@@ -619,6 +620,7 @@ async def _execute_alice_tool(
                 from aespa.services.scanner import (
                     _run_thinking_context_tool,
                 )
+
                 output = _run_thinking_context_tool(
                     ctx_tool,
                     ctx_args,
@@ -1742,8 +1744,7 @@ async def run_alice_turn_stream(
     run_status = _get_web_alice_run_status(run_id, base_url)
     run_status_block = (
         "CURRENT AESPA RUN STATUS (read-only operational context; captured at the "
-        "start of this turn):\n"
-        + json.dumps(run_status, default=str, indent=2)
+        "start of this turn):\n" + json.dumps(run_status, default=str, indent=2)
     )
 
     if intent == "operational":
@@ -2867,8 +2868,7 @@ async def run_api_alice_turn_stream(
     run_status = _run_api_context_tool(collection_id, api_run_id, "run_status", {})
     run_status_block = (
         "CURRENT AESPA API RUN STATUS (read-only operational context; captured at the "
-        "start of this turn):\n"
-        + json.dumps(run_status, default=str, indent=2)
+        "start of this turn):\n" + json.dumps(run_status, default=str, indent=2)
     )
 
     # Inject this API run's independent SAST-lead copies.

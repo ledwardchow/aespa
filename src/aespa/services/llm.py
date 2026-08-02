@@ -132,6 +132,7 @@ def _usage_base_url(config: LLMConfig) -> str | None:
         return configured
     return None
 
+
 # Per-run usage accumulator. Copilot entries also carry AI-credit/request data.
 _run_token_usage: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
 
@@ -455,9 +456,7 @@ def _record_usage(
     }
     normalized_input = max(0, input_tokens)
     if usage_provider in inclusive_input_providers:
-        normalized_input = max(
-            0, input_tokens - cache_read_tokens - cache_write_tokens
-        )
+        normalized_input = max(0, input_tokens - cache_read_tokens - cache_write_tokens)
     try:
         from aespa.services import statistics as statistics_service
 

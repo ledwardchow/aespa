@@ -96,9 +96,7 @@ def upgrade() -> None:
             if "ix_traffic_entry_page_id" not in traffic_indexes:
                 batch.create_index("ix_traffic_entry_page_id", ["page_id"])
             if "ix_traffic_entry_session_label" not in traffic_indexes:
-                batch.create_index(
-                    "ix_traffic_entry_session_label", ["session_label"]
-                )
+                batch.create_index("ix_traffic_entry_session_label", ["session_label"])
             if not traffic_fk:
                 batch.create_foreign_key(
                     "fk_traffic_entry_page_id_crawled_page",
@@ -109,9 +107,7 @@ def upgrade() -> None:
 
     intel_columns = _columns("target_intel_item")
     intel_indexes = _indexes("target_intel_item")
-    intel_fk = _has_foreign_key(
-        "target_intel_item", ["page_id"], "crawled_page"
-    )
+    intel_fk = _has_foreign_key("target_intel_item", ["page_id"], "crawled_page")
     if (
         "page_id" not in intel_columns
         or "ix_target_intel_item_page_id" not in intel_indexes

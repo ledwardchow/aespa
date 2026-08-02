@@ -82,9 +82,8 @@ def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> None:
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
         if (
-            ("site" in tables or "test_run" in tables)
-            and "alembic_version" not in tables
-        ):
+            "site" in tables or "test_run" in tables
+        ) and "alembic_version" not in tables:
             command.stamp(
                 alembic_cfg,
                 "head" if "run_identity" in tables else "d2f9a6b1c340",
@@ -99,9 +98,8 @@ def run_migrations(engine: Engine | None = None) -> None:
     alembic_cfg = _get_alembic_config(engine)
     _stamp_legacy_db_if_needed(engine, alembic_cfg)
     command.upgrade(alembic_cfg, "head")
-    if (
-        engine.dialect.name == "sqlite"
-        and getattr(engine, "_aespa_enforce_foreign_keys", False)
+    if engine.dialect.name == "sqlite" and getattr(
+        engine, "_aespa_enforce_foreign_keys", False
     ):
         # The migration temporarily turns FK enforcement off while SQLite
         # rebuilds tables.  Alembic may return the same pooled connection, so
@@ -2014,9 +2012,8 @@ def _ensure_llm_config_temperature_nullable(engine: Engine) -> None:
 def _migrate(engine: Engine) -> None:
     """Apply schema migrations and legacy startup repairs."""
     run_migrations(engine)
-    enforce_foreign_keys = (
-        engine.dialect.name == "sqlite"
-        and getattr(engine, "_aespa_enforce_foreign_keys", False)
+    enforce_foreign_keys = engine.dialect.name == "sqlite" and getattr(
+        engine, "_aespa_enforce_foreign_keys", False
     )
     if enforce_foreign_keys:
         with engine.connect() as conn:
