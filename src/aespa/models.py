@@ -3,12 +3,54 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-from sqlalchemy import Column, ForeignKey, Integer, String, UniqueConstraint, text
+from sqlalchemy import (
+    Column,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    event,
+    text,
+)
 from sqlmodel import Field, Relationship, SQLModel
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _run_identity_fk(*, nullable: bool = False) -> Column:
+    return Column(
+        Integer,
+        ForeignKey("run_identity.id", ondelete="CASCADE"),
+        nullable=nullable,
+        index=True,
+    )
+
+
+def _run_identity_pk() -> Column:
+    return Column(
+        Integer,
+        ForeignKey("run_identity.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
+class RunIdentity(SQLModel, table=True):
+    """One globally unique identity shared by web, API, and SAST runs.
+
+    The type-specific run tables retain their existing names and fields, but
+    their primary keys now come from this single namespace.  ``legacy_id`` is
+    retained only as migration/debug metadata; it is not an owner key.
+    """
+
+    __tablename__ = "run_identity"
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    kind: str = Field(index=True)  # web | api | sast
+    legacy_id: Optional[int] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
 
 
 # ── Site / Credential ─────────────────────────────────────────────────────────
@@ -193,7 +235,7 @@ class ApiTestRun(SQLModel, table=True):
 
     __tablename__ = "api_test_run"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: Optional[int] = Field(default=None, sa_column=_run_identity_pk())
     collection_id: int = Field(foreign_key="api_collection.id", index=True)
     name: str
     status: str = Field(default="pending")  # pending|running|completed|failed|cancelled
@@ -240,7 +282,7 @@ class ApiEndpointTest(SQLModel, table=True):
     __tablename__ = "api_endpoint_test"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    api_test_run_id: int = Field(foreign_key="api_test_run.id", index=True)
+    api_test_run_id: int = Field(sa_column=_run_identity_fk())
     endpoint_id: int = Field(foreign_key="api_endpoint.id", index=True)
     owasp_api_category: str  # API1 … API10
     status: str = Field(
@@ -609,7 +651,7 @@ class TestRunStatus(str, Enum):
 class TestRun(SQLModel, table=True):
     __tablename__ = "test_run"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: Optional[int] = Field(default=None, sa_column=_run_identity_pk())
     site_id: int = Field(foreign_key="site.id", index=True)
     name: str
     status: str = Field(default=TestRunStatus.pending)
@@ -696,7 +738,7 @@ class CrawledPage(SQLModel, table=True):
     __tablename__ = "crawled_page"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
     url: str = Field(index=True)
     # URL is evidence/a navigation hint, not necessarily identity for SPA views.
     state_key: Optional[str] = Field(default=None, index=True)
@@ -751,7 +793,7 @@ class PageOwaspTest(SQLModel, table=True):
     __tablename__ = "page_owasp_test"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
     page_id: int = Field(foreign_key="crawled_page.id", index=True)
     owasp_category: str  # A01 … A10
     status: str = Field(
@@ -772,7 +814,7 @@ class PageLink(SQLModel, table=True):
     __tablename__ = "page_link"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
     source_page_id: int = Field(foreign_key="crawled_page.id", index=True)
     target_page_id: Optional[int] = Field(default=None, foreign_key="crawled_page.id")
     target_url: str
@@ -787,9 +829,12 @@ class TrafficEntry(SQLModel, table=True):
     __tablename__ = "traffic_entry"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    # API traffic is owned by api_test_run_id and has no web-run owner.
+    test_run_id: Optional[int] = Field(
+        default=None, sa_column=_run_identity_fk(nullable=True)
+    )
     api_test_run_id: Optional[int] = Field(
-        default=None, index=True
+        default=None, sa_column=_run_identity_fk(nullable=True)
     )  # set for API scan traffic
     source: str  # "playwright" | "httpx"
     created_at: datetime = Field(default_factory=_utcnow)
@@ -820,10 +865,8 @@ class ScannerSession(SQLModel, table=True):
     __tablename__ = "scanner_session"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
-    # See AgentLog.run_kind — web TestRun ids and ApiTestRun ids come from
-    # independent counters and collide.  Without this discriminator a web run and
-    # an API run that share an integer id would read/delete each other's sessions.
+    test_run_id: int = Field(sa_column=_run_identity_fk())
+    # Retained as a surface discriminator for compatibility and filtering.
     run_kind: str = Field(default="web", index=True)  # "web" | "api"
     label: str = Field(
         index=True
@@ -860,7 +903,7 @@ class PageCredentialView(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     page_id: int = Field(foreign_key="crawled_page.id", index=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
     credential_id: Optional[int] = Field(default=None)
     username: Optional[str] = Field(default=None)
     screenshot_b64: Optional[str] = Field(default=None)
@@ -879,7 +922,7 @@ class TargetIntelItem(SQLModel, table=True):
     __tablename__ = "target_intel_item"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
     kind: str = Field(
         index=True
     )  # endpoint | form | input | script | storage_key | id | token_hint | response_field
@@ -909,10 +952,9 @@ class ScanFinding(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     # Nullable: a finding belongs to EITHER a web TestRun (test_run_id) OR an
     # ApiTestRun (api_test_run_id), never both.  The two tables have independent
-    # autoincrement id sequences, so populating test_run_id for an API finding
-    # made it collide with — and leak into — the web run of the same number.
+    # Both columns now reference the single global run-identity namespace.
     test_run_id: Optional[int] = Field(
-        default=None, foreign_key="test_run.id", index=True, nullable=True
+        default=None, sa_column=_run_identity_fk(nullable=True)
     )
     page_id: Optional[int] = Field(
         default=None,
@@ -955,7 +997,9 @@ class ScanFinding(SQLModel, table=True):
         default=None
     )  # LLM reasoning from validation
     # API test run attribution (nullable — only set for findings from API runs)
-    api_test_run_id: Optional[int] = Field(default=None, index=True)
+    api_test_run_id: Optional[int] = Field(
+        default=None, sa_column=_run_identity_fk(nullable=True)
+    )
     owasp_api_category: Optional[str] = Field(
         default=None, index=True
     )  # "API1" … "API10"
@@ -976,9 +1020,8 @@ class ScanLog(SQLModel, table=True):
     __tablename__ = "scan_log"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
-    # See AgentLog.run_kind — separates web-scan and API-scan rows that share the
-    # test_run_id column but draw ids from independent counters.  "web" | "api".
+    test_run_id: int = Field(sa_column=_run_identity_fk())
+    # Retained as a surface discriminator for compatibility and filtering.
     run_kind: str = Field(default="web", index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     phase: str  # thinking_step | site_plan | page_plan | …
@@ -999,7 +1042,15 @@ class ScanCheckpoint(SQLModel, table=True):
     __tablename__ = "scan_checkpoint"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True, unique=True)
+    test_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("run_identity.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+            unique=True,
+        )
+    )
     # Full Anthropic multi-turn messages list serialised as JSON.
     messages_json: str = Field(default="[]")
     # Action-trace history list used by history_search / endpoint_detail context tools.
@@ -1025,7 +1076,7 @@ class AliceChatSession(SQLModel, table=True):
     __tablename__ = "alice_chat_session"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
     # See AgentLog.run_kind — separates web-scan and API-scan rows that share the
     # same run_id. "web" | "api".
     run_kind: str = Field(default="web", index=True)
@@ -1045,7 +1096,7 @@ class SastRun(SQLModel, table=True):
 
     __tablename__ = "sast_run"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: Optional[int] = Field(default=None, sa_column=_run_identity_pk())
     # Nullable: API SAST runs key on a collection; standalone (web-oriented) runs
     # have no collection and carry their own uploaded archive instead.
     collection_id: Optional[int] = Field(
@@ -1159,9 +1210,9 @@ class AgentLog(SQLModel, table=True):
     __tablename__ = "agent_log"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
-    # Disambiguates the otherwise-shared test_run_id namespace: web TestRun ids
-    # and ApiTestRun ids come from separate counters and collide.  "web" | "api".
+    test_run_id: int = Field(sa_column=_run_identity_fk())
+    # Retained as an event/presentation discriminator for compatibility.  The
+    # integer itself is globally unique now.
     run_kind: str = Field(default="web", index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     agent_id: str = Field(
@@ -1183,7 +1234,7 @@ class PhaseCheckpoint(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     run_kind: str = Field(default="web", index=True)  # web | api
-    run_id: int = Field(index=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
     phase: str = Field(
         index=True
     )  # crawl | recon | obligations | dynamic_scan | reporting | validation
@@ -1199,7 +1250,7 @@ class ScanObligation(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     run_kind: str = Field(default="web", index=True)  # web | api
-    run_id: int = Field(index=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
     scan_mode: str = Field(default="quick")  # quick | full
     owasp_catalog: str = Field(default="web_2025")  # web_2025 | api_2023
     owasp_category: str = Field(index=True)  # A01..A10 or API1..API10
@@ -1223,7 +1274,7 @@ class ProbeExecution(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     run_kind: str = Field(default="web", index=True)  # web | api
-    run_id: int = Field(index=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
     obligation_id: int = Field(foreign_key="scan_obligation.id", index=True)
     traffic_id: Optional[int] = Field(
         default=None, foreign_key="traffic_entry.id", index=True
@@ -1250,3 +1301,39 @@ class CoverageEvidence(SQLModel, table=True):
     )  # passed|finding|inconclusive|not_applicable|blocked
     evidence_hash: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+# Run ids used to be allocated independently by each run table.  Allocate the
+# parent key from one small identity table instead, so an integer can never
+# mean both a web run and an API/SAST run in the same database.
+def _allocate_run_identity(mapper, connection, target) -> None:
+    kind = {
+        TestRun: "web",
+        ApiTestRun: "api",
+        SastRun: "sast",
+    }[type(target)]
+    table = RunIdentity.__table__
+    requested_id = target.id
+
+    if requested_id is not None:
+        occupied = connection.execute(
+            table.select().with_only_columns(table.c.id).where(
+                table.c.id == requested_id
+            )
+        ).first()
+        if occupied is None:
+            connection.execute(
+                table.insert().values(id=requested_id, kind=kind)
+            )
+            return
+
+    values = {"kind": kind}
+    if requested_id is not None:
+        values["legacy_id"] = requested_id
+    result = connection.execute(table.insert().values(**values))
+    target.id = result.inserted_primary_key[0]
+
+
+event.listens_for(TestRun, "before_insert")(_allocate_run_identity)
+event.listens_for(ApiTestRun, "before_insert")(_allocate_run_identity)
+event.listens_for(SastRun, "before_insert")(_allocate_run_identity)

@@ -111,6 +111,10 @@ async def stop(run_id: int, run_type: str = "site") -> bool:
         return False
     if task.asyncio_task and not task.asyncio_task.done():
         task.asyncio_task.cancel()
+        try:
+            await task.asyncio_task
+        except (asyncio.CancelledError, Exception):
+            pass
         return True
     return False
 
@@ -202,8 +206,8 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
         stream_fn = alice_svc.run_alice_turn_stream
 
     # Tag every event this turn emits with the right run_kind for the lifetime of
-    # the stream.  Run ids collide across web / api / sast, so the scope — not the
-    # id — is authoritative; child tasks spawned during the turn inherit it.
+    # the stream.  The scope remains authoritative for the surface marker; child
+    # tasks spawned during the turn inherit it.
     run_kind = "api" if task.run_type == "api" else "web"
 
     try:

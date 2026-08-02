@@ -402,7 +402,7 @@ async def test_make_httpx_hooks_keys_api_runs_on_api_column(monkeypatch):
     with Session(engine) as session:
         entry = session.exec(select(TrafficEntry)).one()
         assert entry.api_test_run_id == 7
-        assert entry.test_run_id == 0  # sentinel — no real TestRun row for API runs
+        assert entry.test_run_id is None  # API traffic has no web-run owner
         assert entry.username == "alice"
 
     # API traffic panel query (api_run_id) sees it; web query does not.

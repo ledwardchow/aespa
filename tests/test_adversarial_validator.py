@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -302,6 +303,48 @@ def test_adversarial_validator_system_prompt_contains_key_concepts():
     assert "false_positive" in prompt or "false positive" in prompt
     assert "confirmed" in prompt
     assert "done" in prompt
+
+
+def test_validator_prompt_includes_linked_sast_attack_path(monkeypatch):
+    captured = {}
+
+    async def fake_loop(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        validator,
+        "_static_attack_path_for_finding",
+        lambda _: {
+            "nodes": ["route", "service", "database"],
+            "dynamic_test": "Try a foreign object id.",
+        },
+    )
+    monkeypatch.setattr(validator.llm_svc, "thinking_agentic_loop", fake_loop)
+
+    asyncio.run(
+        validator._run_adversarial_validator_loop(
+            run_id=1,
+            finding=SimpleNamespace(
+                id=9,
+                title="BOLA",
+                owasp_category="A01",
+                severity="high",
+                affected_url="https://target.test/orders/2",
+                description="Object access is not restricted.",
+                evidence="The response returned another user's order.",
+            ),
+            validator_cfg=SimpleNamespace(max_steps=2, require_concrete_disproof=False),
+            llm_cfg=object(),
+            cred_sessions={},
+            scanner_policy=SimpleNamespace(),
+        )
+    )
+
+    prompt = captured["initial_user_message"]
+    assert "Static attack path from SAST" in prompt
+    assert "route → service → database" in prompt
+    assert "Try a foreign object id." in prompt
+    assert "not runtime proof" in prompt
 
 
 # ── Severity threshold ────────────────────────────────────────────────────────

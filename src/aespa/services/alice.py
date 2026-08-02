@@ -102,7 +102,7 @@ async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
     """Return a live (page, context) for ``run_id``, launching one if needed.
 
     Pass ``api_run_id`` for API-collection runs so browser traffic is keyed on
-    the API column (see the run-id-collision note in CLAUDE.md).
+    the API owner column.
     """
     entry = _alice_browsers.get(run_id)
     if entry:
@@ -463,8 +463,7 @@ async def _execute_alice_tool(
         reauth_attempts = [0]
 
     # Traffic keying: for API runs the traffic table is keyed on the API column,
-    # with test_run_id left NULL (web/API run ids share an int space and would
-    # otherwise collide). See the run-id-collision note in CLAUDE.md.
+    # with test_run_id left NULL because API traffic has no web-run owner.
     _traffic_run_id = None if api_run_id is not None else run_id
 
     # ── http_request ─────────────────────────────────────────────────────────
@@ -2414,7 +2413,7 @@ def _run_api_context_tool(
 
         finding = _SF(
             # API findings key on api_test_run_id only; test_run_id stays NULL so
-            # they never leak into the web run of the same integer id.
+            # they never leak into a web run.
             test_run_id=None,
             api_test_run_id=run_id,
             page_id=None,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -85,6 +86,17 @@ def request_stop(run_id: int) -> None:
     task = _active_tasks.get(run_id)
     if task and not task.done():
         task.cancel()
+
+
+async def stop_and_wait(run_id: int, timeout: float = 5.0) -> bool:
+    """Cancel a crawl and wait briefly for its cleanup handlers to finish."""
+    task = _active_tasks.get(run_id)
+    if task is None:
+        return False
+    request_stop(run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return True
 
 
 def is_running(run_id: int) -> bool:
@@ -178,9 +190,8 @@ def _crawl_seed_urls(
 async def start_crawl(run_id: int) -> None:
     if run_id in _active_tasks:
         return
-    # Tag every event this crawl emits as run_kind='web'.  Run ids collide across
-    # web / api / sast, so the scope — snapshotted by create_task below into the
-    # crawl task and any worker it spawns — is the authoritative discriminator.
+    # Tag every event this crawl emits as run_kind='web'.  The scope is
+    # snapshotted by create_task into the crawl task and its workers.
     # Without it, an unscoped agent_status emit for an id that was also a SAST/API
     # run would be mis-tagged and leak into that run's Agents tab.
     with events_svc.run_kind_scope("web"):
