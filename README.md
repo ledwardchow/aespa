@@ -207,9 +207,9 @@ API Scan Findings
 
 ## Recommended models
 
-- Claude Sonnet 4.6 - Output token cap 70000. Doesn't seem to trigger refusals even without CVP.
+- Claude Sonnet 4.6 - Doesn't seem to trigger refusals even without CVP.
 - Sonnet 5 works about as well as 4.6 and doesn't trigger refusals.
-- GPT 5.4/5.5/5.6 work well too, but you need an account with Trusted Access or the scanner will terminate early/frequent refusals.
-- Opus 4.8 also triggers refusals if not on CVP, but usually not immediately (it'll complete a "quick" mode scan most of the time)
+- Opus 4.8 triggers refusals if not on CVP, but usually not immediately (it'll complete a "quick" mode scan most of the time)
+- GPT 5.4/5.5/5.6 work well, but you need an account with Trusted Access or the scanner will terminate early/frequent refusals.
 - Minimax M3
-- GLM 5.2 
+- GLM 5.2
