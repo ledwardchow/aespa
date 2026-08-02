@@ -1335,6 +1335,15 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 s.add(r)
                 s.commit()
 
+        # Deterministic, bounded interface-fact extraction (routes, outbound
+        # calls, auth boundaries, queues, datastores, framework markers).
+        # Runs for every SAST run — component_id stays NULL unless this run
+        # belongs to a campaign, so standalone SAST behavior is unchanged.
+        if root is not None:
+            from aespa.services.component_facts import persist_component_facts
+
+            persist_component_facts(sast_run_id, root)
+
     except asyncio.CancelledError:
         log.info("SAST scan cancelled: sast_run_id=%s", sast_run_id)
         total = 0
