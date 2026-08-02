@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from aespa import models
 from aespa.db import get_session
 from aespa.models import ScannerSession, TargetIntelItem
 
@@ -214,6 +215,290 @@ def test_get_run(client: TestClient):
     r = client.get(f"/api/test-runs/{run['id']}")
     assert r.status_code == 200
     assert r.json()["id"] == run["id"]
+
+
+def test_delete_web_run_cascades_all_owned_rows_and_preserves_api_collision(
+    client: TestClient, isolated_db_engine
+):
+    """Deleting a web run must leave a reused id completely clean.
+
+    API rows have a different global id and must survive web-run deletion.
+    """
+    site = _make_site(client)
+    web_run = _make_run(client, site["id"]).json()
+    web_id = web_run["id"]
+
+    with Session(isolated_db_engine) as session:
+        collection = models.ApiCollection(name="API", base_url="https://api.local")
+        session.add(collection)
+        session.commit()
+        session.refresh(collection)
+        api_run = models.ApiTestRun(collection_id=collection.id, name="API run")
+        session.add(api_run)
+        session.commit()
+        session.refresh(api_run)
+        assert api_run.id != web_id
+
+        page = models.CrawledPage(test_run_id=web_id, url="https://target.local/")
+        session.add(page)
+        session.flush()
+
+        web_finding = models.ScanFinding(
+            test_run_id=web_id,
+            owasp_category="A01",
+            severity="high",
+            title="Web finding",
+            description="web",
+        )
+        api_finding = models.ScanFinding(
+            api_test_run_id=api_run.id,
+            owasp_category="A00",
+            owasp_api_category="API1",
+            severity="high",
+            title="API finding",
+            description="api",
+        )
+        session.add(web_finding)
+        session.add(api_finding)
+        session.flush()
+
+        web_traffic = models.TrafficEntry(
+            test_run_id=web_id,
+            source="test",
+            method="GET",
+            url="https://target.local/",
+        )
+        # API traffic is owned by the dedicated API attribution column.
+        api_traffic = models.TrafficEntry(
+            test_run_id=api_run.id,
+            api_test_run_id=api_run.id,
+            source="test",
+            method="GET",
+            url="https://api.local/",
+        )
+        session.add(web_traffic)
+        session.add(api_traffic)
+        session.flush()
+
+        web_obligation = models.ScanObligation(
+            run_kind="web",
+            run_id=web_id,
+            owasp_category="A01",
+            vulnerability_technique="idor",
+            route_template="/accounts/{id}",
+        )
+        api_obligation = models.ScanObligation(
+            run_kind="api",
+            run_id=api_run.id,
+            owasp_category="API1",
+            vulnerability_technique="idor",
+            route_template="/accounts/{id}",
+        )
+        session.add(web_obligation)
+        session.add(api_obligation)
+        session.flush()
+
+        web_execution = models.ProbeExecution(
+            run_kind="web",
+            run_id=web_id,
+            obligation_id=web_obligation.id,
+            traffic_id=web_traffic.id,
+        )
+        api_execution = models.ProbeExecution(
+            run_kind="api",
+            run_id=api_run.id,
+            obligation_id=api_obligation.id,
+            traffic_id=api_traffic.id,
+        )
+        session.add(web_execution)
+        session.add(api_execution)
+        session.flush()
+        web_evidence = models.CoverageEvidence(execution_id=web_execution.id)
+        api_evidence = models.CoverageEvidence(execution_id=api_execution.id)
+        session.add(web_evidence)
+        session.add(api_evidence)
+
+        session.add(
+            models.PageOwaspTest(
+                test_run_id=web_id, page_id=page.id, owasp_category="A01"
+            )
+        )
+        session.add(
+            models.PageLink(
+                test_run_id=web_id,
+                source_page_id=page.id,
+                target_url="https://target.local/accounts",
+            )
+        )
+        session.add(models.PageCredentialView(page_id=page.id, test_run_id=web_id))
+        session.add(
+            models.TargetIntelItem(
+                test_run_id=web_id,
+                kind="endpoint",
+                key="/accounts",
+                value="https://target.local/accounts",
+            )
+        )
+        session.add(models.ScanCheckpoint(test_run_id=web_id))
+        session.add(
+            models.ScannerSession(test_run_id=web_id, run_kind="web", label="web")
+        )
+        session.add(
+            models.ScannerSession(test_run_id=api_run.id, run_kind="api", label="api")
+        )
+        session.add(
+            models.ScanLog(
+                test_run_id=web_id,
+                run_kind="web",
+                phase="test",
+                message="web",
+            )
+        )
+        session.add(
+            models.ScanLog(
+                test_run_id=api_run.id,
+                run_kind="api",
+                phase="test",
+                message="api",
+            )
+        )
+        session.add(
+            models.AgentLog(
+                test_run_id=web_id,
+                run_kind="web",
+                agent_id="web",
+                role="Scanner",
+                status="complete",
+            )
+        )
+        session.add(
+            models.AgentLog(
+                test_run_id=api_run.id,
+                run_kind="api",
+                agent_id="api",
+                role="Scanner",
+                status="complete",
+            )
+        )
+        session.add(
+            models.PhaseCheckpoint(
+                run_kind="web", run_id=web_id, phase="scan", idempotency_key="web"
+            )
+        )
+        session.add(
+            models.PhaseCheckpoint(
+                run_kind="api", run_id=api_run.id, phase="scan", idempotency_key="api"
+            )
+        )
+        web_chat = models.AliceChatSession(
+            test_run_id=web_id, run_kind="web", session_key="web"
+        )
+        api_chat = models.AliceChatSession(
+            test_run_id=api_run.id, run_kind="api", session_key="api"
+        )
+        session.add(web_chat)
+        session.add(api_chat)
+        session.flush()
+        session.add(
+            models.AliceChatMessage(
+                session_id=web_chat.id, message_key="web", sender="user"
+            )
+        )
+        session.add(
+            models.AliceChatMessage(
+                session_id=api_chat.id, message_key="api", sender="user"
+            )
+        )
+        session.add(
+            models.ScanLead(
+                producer_run_id=1,
+                imported_into_run_type="web",
+                imported_into_run_id=web_id,
+                title="Imported web lead",
+            )
+        )
+        source_lead = models.ScanLead(
+            producer_run_id=1,
+            linked_finding_id=web_finding.id,
+            investigated_by_run_type="web",
+            investigated_by_run_id=web_id,
+            title="Source lead",
+        )
+        api_lead = models.ScanLead(
+            producer_run_id=1,
+            imported_into_run_type="api",
+            imported_into_run_id=api_run.id,
+            title="Imported API lead",
+        )
+        session.add(source_lead)
+        session.add(api_lead)
+        session.commit()
+
+        api_ids = {
+            "finding": api_finding.id,
+            "traffic": api_traffic.id,
+            "execution": api_execution.id,
+            "evidence": api_evidence.id,
+            "obligation": api_obligation.id,
+            "session": api_chat.id,
+            "lead": api_lead.id,
+        }
+
+    response = client.delete(f"/api/test-runs/{web_id}")
+    assert response.status_code == 204
+
+    with Session(isolated_db_engine) as session:
+        assert session.get(models.TestRun, web_id) is None
+        assert session.exec(select(models.CrawledPage)).all() == []
+        assert session.exec(select(models.PageOwaspTest)).all() == []
+        assert session.exec(select(models.PageLink)).all() == []
+        assert session.exec(select(models.PageCredentialView)).all() == []
+        assert session.exec(select(models.TargetIntelItem)).all() == []
+        assert session.exec(select(models.ScanCheckpoint)).all() == []
+        assert session.exec(
+            select(models.ScannerSession).where(models.ScannerSession.run_kind == "web")
+        ).all() == []
+        assert session.exec(
+            select(models.ScanLog).where(models.ScanLog.run_kind == "web")
+        ).all() == []
+        assert session.exec(
+            select(models.AgentLog).where(models.AgentLog.run_kind == "web")
+        ).all() == []
+        assert session.exec(
+            select(models.PhaseCheckpoint).where(
+                models.PhaseCheckpoint.run_kind == "web"
+            )
+        ).all() == []
+        assert session.exec(
+            select(models.ScanObligation).where(models.ScanObligation.run_kind == "web")
+        ).all() == []
+        assert session.exec(select(models.ScanFinding)).all() == [
+            session.get(models.ScanFinding, api_ids["finding"])
+        ]
+        assert session.get(models.TrafficEntry, api_ids["traffic"]) is not None
+        assert session.get(models.ProbeExecution, api_ids["execution"]) is not None
+        assert session.get(models.CoverageEvidence, api_ids["evidence"]) is not None
+        assert session.get(models.ScanObligation, api_ids["obligation"]) is not None
+        assert session.get(models.AliceChatSession, api_ids["session"]) is not None
+        assert session.get(models.ScanLead, api_ids["lead"]) is not None
+        assert session.exec(select(models.AliceChatMessage)).one().message_key == "api"
+        assert (
+            session.exec(
+                select(models.ScanLead).where(
+                    models.ScanLead.imported_into_run_type == "web"
+                )
+            ).all()
+            == []
+        )
+        source = session.exec(
+            select(models.ScanLead).where(models.ScanLead.title == "Source lead")
+        ).one()
+        assert source.linked_finding_id is None
+        assert source.investigated_by_run_id is None
+
+    new_run = _make_run(client, site["id"]).json()
+    assert new_run["id"] != web_id
+    assert client.get(f"/api/test-runs/{web_id}/target-intelligence").status_code == 404
 
 
 def test_get_target_intelligence_returns_counts_and_items(client: TestClient):

@@ -126,12 +126,8 @@ def _safe_playwright_post_data(request) -> Optional[str]:
 
 # ── Low-level writer ──────────────────────────────────────────────────────────
 
-# Sentinel test_run_id used when writing API-scan traffic (no real TestRun row).
-_API_SENTINEL_RUN_ID = 0
-
-
 def _write(
-    run_id: int,
+    run_id: Optional[int],
     source: str,
     method: str,
     url: str,
@@ -150,7 +146,7 @@ def _write(
 
     with Session(get_engine()) as s:
         entry = TrafficEntry(
-            test_run_id=run_id,
+            test_run_id=None if api_run_id is not None else run_id,
             api_test_run_id=api_run_id,
             source=source,
             created_at=_utcnow(),
@@ -173,7 +169,7 @@ def _write(
 
 
 def _maybe_record_waf(
-    run_id: int,
+    run_id: Optional[int],
     api_run_id: Optional[int],
     url: str,
     response_headers: dict,
@@ -353,10 +349,9 @@ class LoggingAsyncClient(httpx.AsyncClient):
         if self.run_id is None and self.api_run_id is None:
             return await super().send(request, *args, **kwargs)
 
-        # For API runs there is no real TestRun row; use sentinel 0.
-        effective_run_id = (
-            self.run_id if self.run_id is not None else _API_SENTINEL_RUN_ID
-        )
+        # For API runs there is no web TestRun row; _write receives None for
+        # that owner and keys the entry on api_test_run_id.
+        effective_run_id = self.run_id
 
         t0 = time.monotonic()
         try:
@@ -443,8 +438,8 @@ def make_httpx_hooks(
     Pass ``api_run_id`` (with ``run_id=None``) for API-collection runs so traffic
     is keyed on the API column and shows up in the API traffic panel.
     """
-    # API runs have no real TestRun row; test_run_id is NOT NULL, so use sentinel 0.
-    effective_run_id = run_id if run_id is not None else _API_SENTINEL_RUN_ID
+    # API runs have no web TestRun row; _write stores NULL in that column.
+    effective_run_id = run_id
     _pending: dict[int, float] = {}  # id(request) → monotonic start time
 
     async def on_request(request) -> None:
@@ -504,8 +499,8 @@ def setup_playwright_logging(
     Pass ``api_run_id`` (with ``run_id=None``) for API-collection runs so traffic
     is keyed on the API column and shows up in the API traffic panel.
     """
-    # API runs have no real TestRun row; test_run_id is NOT NULL, so use sentinel 0.
-    effective_run_id = run_id if run_id is not None else _API_SENTINEL_RUN_ID
+    # API runs have no web TestRun row; _write stores NULL in that column.
+    effective_run_id = run_id
     _pending: dict[int, float] = {}
     _req_data: dict[int, dict] = {}
 
