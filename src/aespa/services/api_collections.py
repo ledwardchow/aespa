@@ -26,6 +26,10 @@ class DuplicateApiCollectionName(ApiCollectionServiceError):
     pass
 
 
+class CollectionReferencedByApplication(ApiCollectionServiceError):
+    """Raised when an ApiCollection is still attached to an Application."""
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -107,12 +111,22 @@ def delete_collection(session: Session, collection_id: int) -> None:
         ApiDocument,
         ApiEndpoint,
         ApiTestRun,
+        ApplicationTarget,
         SastRun,
         ScanLead,
     )
     from aespa.services import run_cleanup
 
     collection = get_collection(session, collection_id)
+    referenced = session.exec(
+        select(ApplicationTarget.id)
+        .where(ApplicationTarget.target_type == "api_collection")
+        .where(ApplicationTarget.target_id == collection_id)
+    ).first()
+    if referenced is not None:
+        raise CollectionReferencedByApplication(
+            "This API collection is attached to an application — detach it there first."
+        )
 
     for run in session.exec(
         select(ApiTestRun).where(ApiTestRun.collection_id == collection_id)

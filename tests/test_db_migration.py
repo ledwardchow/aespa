@@ -938,3 +938,119 @@ def test_migrate_creates_browser_debug_config_for_legacy_db_missing_table():
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
+
+
+def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema():
+    """A real legacy DB (run_identity present, no alembic_version, predating
+    the Applications/Campaign feature) must still receive every new table.
+
+    Regression for a bug where the legacy stamp always targeted the literal
+    Alembic keyword ``"head"``, which silently drifted forward as new
+    migrations were added and caused this exact database shape to skip the
+    entire Applications/Campaign schema forever.
+    """
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as conn:
+            for statement in (
+                "CREATE TABLE site (id INTEGER PRIMARY KEY, name TEXT)",
+                "CREATE TABLE api_collection (id INTEGER PRIMARY KEY, name TEXT)",
+                "CREATE TABLE run_identity (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, legacy_id INTEGER, created_at DATETIME)",
+                "CREATE TABLE test_run (id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL, name TEXT)",
+                "CREATE TABLE api_test_run (id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL, name TEXT)",
+                "CREATE TABLE crawler_config (id INTEGER PRIMARY KEY, test_run_id INTEGER)",
+                "INSERT INTO site VALUES (1, 'legacy site')",
+                "INSERT INTO run_identity VALUES (1, 'web', 1, CURRENT_TIMESTAMP)",
+                "INSERT INTO test_run VALUES (1, 1, 'legacy run')",
+            ):
+                conn.execute(text(statement))
+            conn.commit()
+
+        with engine.connect() as conn:
+            tables_before = {
+                row[0]
+                for row in conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+        assert "application" not in tables_before
+        assert "assessment_campaign" not in tables_before
+
+        db.run_migrations(engine)
+
+        with engine.connect() as conn:
+            tables_after = {
+                row[0]
+                for row in conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar()
+            campaign_columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(assessment_campaign)"))
+            }
+
+        # The full Applications/Campaign schema now exists...
+        assert {
+            "application",
+            "application_component",
+            "component_snapshot",
+            "application_target",
+            "component_target_hint",
+            "assessment_campaign",
+            "campaign_source_member",
+            "campaign_target_member",
+            "component_fact",
+            "component_connection",
+            "lead_target_mapping",
+            "scan_lead_component_provenance",
+        } <= tables_after
+        # ...including the follow-up migration's column.
+        assert "interrupted_stage" in campaign_columns
+        assert version == "cc7896879130"
+    finally:
+        engine.dispose()
+
+
+def test_current_db_with_applications_tables_stamps_head_without_recreating():
+    """A DB already at the current schema (e.g. built via metadata.create_all)
+    but missing only the alembic_version bookkeeping row must be recognized
+    as already current and not re-run migrations that would try to create
+    tables that already exist.
+    """
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        with engine.connect() as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+        assert "alembic_version" not in tables
+        assert "assessment_campaign" in tables
+
+        db.run_migrations(engine)
+
+        with engine.connect() as conn:
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar()
+
+        assert version == "cc7896879130"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()

@@ -1201,6 +1201,261 @@ class ScanLead(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+# ── Applications & multi-repository campaigns ───────────────────────────────
+#
+# An Application groups named code components (repositories/micro-frontends),
+# their immutable uploaded ZIP snapshots, and the existing Site/ApiCollection
+# targets that make up one product. An AssessmentCampaign coordinates ordinary
+# SastRun/TestRun/ApiTestRun children for one application, joining the global
+# run_identity namespace (kind="campaign") so its events/logs never collide
+# with a web/api/sast run id. See docs/architecture.md for the full design.
+
+
+class Application(SQLModel, table=True):
+    __tablename__ = "application"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True, unique=True)
+    description: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ApplicationComponent(SQLModel, table=True):
+    """A named repository or micro-frontend belonging to an Application."""
+
+    __tablename__ = "application_component"
+    __table_args__ = (
+        UniqueConstraint("application_id", "name", name="uq_component_app_name"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    application_id: int = Field(foreign_key="application.id", index=True)
+    name: str
+    role: Optional[str] = Field(default=None)  # e.g. "Backend API", "Micro-frontend"
+    description: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ComponentSnapshot(SQLModel, table=True):
+    """One immutable uploaded ZIP version for an ApplicationComponent.
+
+    Snapshots are never edited in place — uploading again creates a new row so
+    a campaign that already froze an older snapshot keeps its exact meaning.
+    """
+
+    __tablename__ = "component_snapshot"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    component_id: int = Field(foreign_key="application_component.id", index=True)
+    filename: str
+    stored_path: str  # absolute path to the stored zip
+    size_bytes: int = Field(default=0)
+    sha256: str = Field(index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ApplicationTarget(SQLModel, table=True):
+    """An existing Site or ApiCollection attached to an Application.
+
+    ``target_id`` refers to ``site.id`` or ``api_collection.id`` depending on
+    ``target_type`` — the underlying target row is reused, never copied.
+    """
+
+    __tablename__ = "application_target"
+    __table_args__ = (
+        UniqueConstraint(
+            "application_id", "target_type", "target_id", name="uq_app_target"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    application_id: int = Field(foreign_key="application.id", index=True)
+    target_type: str = Field(index=True)  # "site" | "api_collection"
+    target_id: int = Field(index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ComponentTargetHint(SQLModel, table=True):
+    """An optional user-supplied hint that a component talks to a live target.
+
+    Purely advisory: it boosts deterministic correlation confidence but is
+    never required for a campaign to run.
+    """
+
+    __tablename__ = "component_target_hint"
+    __table_args__ = (
+        UniqueConstraint("component_id", "target_id", name="uq_component_target_hint"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    application_id: int = Field(foreign_key="application.id", index=True)
+    component_id: int = Field(foreign_key="application_component.id", index=True)
+    target_id: int = Field(foreign_key="application_target.id", index=True)
+    note: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class AssessmentCampaign(SQLModel, table=True):
+    """One coordinated multi-repository test of an Application.
+
+    Joins the global run_identity namespace (kind="campaign") purely so its
+    SSE events / AgentLog / ScanLog rows use the shared id space; it does not
+    reuse any web/api/sast run behavior directly.
+    """
+
+    __tablename__ = "assessment_campaign"
+
+    id: Optional[int] = Field(default=None, sa_column=_run_identity_pk())
+    application_id: int = Field(foreign_key="application.id", index=True)
+    name: str
+    status: str = Field(default="draft", index=True)
+    # draft -> sast_running -> correlating -> awaiting_review -> dast_running
+    # -> completed | failed | stopped | interrupted
+    max_parallel_sast: int = Field(default=2)
+    llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
+    llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
+    warnings_json: str = Field(default="[]")  # plain-language partial-failure notes
+    review_submitted_at: Optional[datetime] = Field(default=None)
+    error_message: Optional[str] = Field(default=None)
+    # Set by reconcile_campaigns() when a restart interrupts an active stage
+    # (one of "sast_running" | "correlating" | "dast_running"); `retry_campaign`
+    # reads this to resume the exact stage without recreating any child run.
+    # Cleared once a retry is issued.
+    interrupted_stage: Optional[str] = Field(default=None)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class CampaignSourceMember(SQLModel, table=True):
+    """One frozen (component, snapshot) pair selected for a campaign."""
+
+    __tablename__ = "campaign_source_member"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "component_id", name="uq_campaign_component"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    campaign_id: int = Field(sa_column=_run_identity_fk())
+    component_id: int = Field(foreign_key="application_component.id", index=True)
+    snapshot_id: int = Field(foreign_key="component_snapshot.id", index=True)
+    sast_run_id: Optional[int] = Field(default=None, index=True)
+    status: str = Field(default="pending")  # pending|running|completed|failed|skipped
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class CampaignTargetMember(SQLModel, table=True):
+    """One frozen live target (Site or ApiCollection) selected for a campaign."""
+
+    __tablename__ = "campaign_target_member"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "target_id", name="uq_campaign_target"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    campaign_id: int = Field(sa_column=_run_identity_fk())
+    target_id: int = Field(foreign_key="application_target.id", index=True)
+    target_type: str = Field(index=True)  # "site" | "api_collection"
+    test_run_id: Optional[int] = Field(default=None, index=True)  # web child
+    api_test_run_id: Optional[int] = Field(default=None, index=True)  # api child
+    status: str = Field(default="pending")  # pending|running|completed|failed|skipped
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ComponentFact(SQLModel, table=True):
+    """One compact, deterministic interface fact recorded by a SAST run.
+
+    Kept intentionally small (routes/calls/auth boundaries/queues/datastores/
+    framework markers) so a campaign can join facts across repositories
+    without ever passing whole source trees between agents.
+    """
+
+    __tablename__ = "component_fact"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(index=True)  # SastRun.id that produced this fact
+    # Populated via CampaignSourceMember lookup when the SastRun belongs to a
+    # campaign; NULL for a standalone SAST run.
+    component_id: Optional[int] = Field(
+        default=None, foreign_key="application_component.id", index=True
+    )
+    fact_type: str = Field(
+        index=True
+    )  # route | http_call | auth_boundary | queue | datastore | framework
+    method: Optional[str] = Field(default=None)  # GET/POST/... when applicable
+    path: Optional[str] = Field(default=None)  # /api/orders/{id}
+    host: Optional[str] = Field(default=None)
+    name: Optional[str] = Field(default=None)  # queue/datastore/client/framework name
+    detail_json: str = Field(default="{}")  # small bounded extra structured info
+    evidence_location: str = Field(default="")  # file:line
+    fingerprint: str = Field(default="", index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ComponentConnection(SQLModel, table=True):
+    """One matched edge in a campaign's cross-repository application map."""
+
+    __tablename__ = "component_connection"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    campaign_id: int = Field(sa_column=_run_identity_fk())
+    source_component_id: int = Field(foreign_key="application_component.id", index=True)
+    source_fact_id: int = Field(foreign_key="component_fact.id", index=True)
+    target_component_id: int = Field(foreign_key="application_component.id", index=True)
+    target_fact_id: int = Field(foreign_key="component_fact.id", index=True)
+    match_kind: str = Field(default="deterministic")  # deterministic|hint|llm_assisted
+    confidence: float = Field(default=0.0)
+    rationale: str = Field(default="")
+    evidence_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class LeadTargetMapping(SQLModel, table=True):
+    """A proposed (or reviewed) routing of one ScanLead to one live target."""
+
+    __tablename__ = "lead_target_mapping"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "lead_id", "target_id", name="uq_lead_target"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    campaign_id: int = Field(sa_column=_run_identity_fk())
+    lead_id: int = Field(foreign_key="scan_lead.id", index=True)
+    target_id: int = Field(foreign_key="application_target.id", index=True)
+    target_type: str = Field(index=True)  # "site" | "api_collection"
+    score: float = Field(default=0.0)
+    rationale: str = Field(default="")
+    evidence_json: str = Field(default="{}")
+    status: str = Field(default="proposed", index=True)  # proposed|approved|rejected
+    copied_lead_id: Optional[int] = Field(default=None)  # set once approved+copied
+    reviewed_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ScanLeadComponentProvenance(SQLModel, table=True):
+    """Many-component provenance for a campaign-generated cross-repo ScanLead."""
+
+    __tablename__ = "scan_lead_component_provenance"
+    __table_args__ = (
+        UniqueConstraint(
+            "scan_lead_id", "component_id", name="uq_lead_component_provenance"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scan_lead_id: int = Field(foreign_key="scan_lead.id", index=True)
+    component_id: int = Field(foreign_key="application_component.id", index=True)
+    role: str = Field(default="contributing")  # primary|contributing
+    fact_id: Optional[int] = Field(default=None, foreign_key="component_fact.id")
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 class AliceChatMessage(SQLModel, table=True):
     """One chat bubble inside an AliceChatSession."""
 
@@ -1329,6 +1584,7 @@ def _allocate_run_identity(mapper, connection, target) -> None:
         TestRun: "web",
         ApiTestRun: "api",
         SastRun: "sast",
+        AssessmentCampaign: "campaign",
     }[type(target)]
     table = RunIdentity.__table__
     requested_id = target.id
@@ -1353,3 +1609,4 @@ def _allocate_run_identity(mapper, connection, target) -> None:
 event.listens_for(TestRun, "before_insert")(_allocate_run_identity)
 event.listens_for(ApiTestRun, "before_insert")(_allocate_run_identity)
 event.listens_for(SastRun, "before_insert")(_allocate_run_identity)
+event.listens_for(AssessmentCampaign, "before_insert")(_allocate_run_identity)

@@ -30,6 +30,14 @@ export function useRoute() {
   if ((m = hash.match(/^#\/runs\/(\d+)\/alice-popout$/))) return { name: "alice-popout", id: +m[1] };
   if ((m = hash.match(/^#\/runs\/(\d+)\/([a-z]+)$/)))   return { name: "run-detail",  id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
+  if (hash === "#/applications/new")                     return { name: "app-new" };
+  if ((m = hash.match(/^#\/applications\/(\d+)\/edit$/))) return { name: "app-edit", id: +m[1] };
+  if ((m = hash.match(/^#\/applications\/(\d+)\/campaigns\/new$/))) return { name: "campaign-new", id: +m[1] };
+  if ((m = hash.match(/^#\/applications\/(\d+)\/campaigns\/(\d+)\/([a-z]+)$/))) return { name: "campaign-detail", id: +m[1], campaignId: +m[2], tab: m[3] };
+  if ((m = hash.match(/^#\/applications\/(\d+)\/campaigns\/(\d+)$/))) return { name: "campaign-detail", id: +m[1], campaignId: +m[2] };
+  if ((m = hash.match(/^#\/applications\/(\d+)\/([a-z-]+)$/))) return { name: "app-detail", id: +m[1], tab: m[2] };
+  if ((m = hash.match(/^#\/applications\/(\d+)$/)))       return { name: "app-detail", id: +m[1] };
+  if (hash === "#/applications")                         return { name: "app-list" };
   if (hash === "#/active-jobs")                          return { name: "active-jobs" };
   if (hash === "#/stats" || hash === "#/stats/usage")    return { name: "stats" };
   if (hash === "#/settings")                             return { name: "settings" };

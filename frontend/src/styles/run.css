@@ -1008,6 +1008,7 @@
 .surface-chip-waf { border-color:#ef4444; background:rgba(239,68,68,.14); color:#fca5a5; font-weight:700; }
 @media (max-width:900px) { .surface-summary-grid { grid-template-columns:repeat(2,1fr); } .surface-signal-grid { grid-template-columns:1fr; } .surface-coverage-row { grid-template-columns:42px 1fr 80px; } .surface-coverage-row .surface-progress,.surface-coverage-row .subtle { display:none; } }
 .scope-hosts-panel {
+  margin: 0 -28px;
   padding: 10px 14px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
