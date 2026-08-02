@@ -799,9 +799,7 @@ def test_global_run_identity_migration_remaps_collisions_and_drops_ambiguous_row
             identities = conn.execute(
                 text("SELECT id, kind, legacy_id FROM run_identity ORDER BY id")
             ).all()
-            parents = conn.execute(
-                text("SELECT id, name FROM api_test_run")
-            ).all()
+            parents = conn.execute(text("SELECT id, name FROM api_test_run")).all()
             logs = conn.execute(
                 text("SELECT test_run_id, run_kind FROM agent_log ORDER BY id")
             ).all()
@@ -809,7 +807,9 @@ def test_global_run_identity_migration_remaps_collisions_and_drops_ambiguous_row
                 text("SELECT test_run_id, api_test_run_id FROM traffic_entry")
             ).all()
             findings = conn.execute(
-                text("SELECT test_run_id, api_test_run_id, title FROM scan_finding ORDER BY id")
+                text(
+                    "SELECT test_run_id, api_test_run_id, title FROM scan_finding ORDER BY id"
+                )
             ).all()
 
         assert identities == [(31, "web", 31), (32, "api", 31)]
@@ -847,8 +847,7 @@ def test_replay_provenance_repair_migration_handles_existing_c4_database():
         with engine.connect() as conn:
             columns = {
                 table: {
-                    row[1]
-                    for row in conn.execute(text(f"PRAGMA table_info({table})"))
+                    row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))
                 }
                 for table in (
                     "test_run",

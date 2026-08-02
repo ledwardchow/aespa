@@ -2289,7 +2289,9 @@ def _run_thinking_context_tool(
                 s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id))
             )
             findings_count = len(
-                s.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all()
+                s.exec(
+                    select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+                ).all()
             )
 
         try:
@@ -2301,7 +2303,13 @@ def _run_thinking_context_tool(
 
         if run.phase == "crawling":
             crawl_status = "running"
-        elif run.phase in {"crawled", "scanning", "reporting", "validating", "finished"}:
+        elif run.phase in {
+            "crawled",
+            "scanning",
+            "reporting",
+            "validating",
+            "finished",
+        }:
             crawl_status = "complete"
         elif run.status == "failed":
             crawl_status = "failed"

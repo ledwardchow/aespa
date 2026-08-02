@@ -61,9 +61,7 @@ def format_attack_path_for_prompt(attack_path: dict) -> list[str]:
 
 def lead_fingerprint(*, category: str, title: str, location: str) -> str:
     """Return a stable, run-independent identity for a static candidate."""
-    canonical = "|".join(
-        part.strip().lower() for part in (category, title, location)
-    )
+    canonical = "|".join(part.strip().lower() for part in (category, title, location))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -135,14 +133,18 @@ def create_lead(
         lead.source_trace_json = json.dumps(source_trace or {}, ensure_ascii=False)
         lead.control_trace_json = json.dumps(controls or [], ensure_ascii=False)
         lead.sink_trace_json = json.dumps(sink_trace or {}, ensure_ascii=False)
-        lead.counterevidence_json = json.dumps(counterevidence or [], ensure_ascii=False)
+        lead.counterevidence_json = json.dumps(
+            counterevidence or [], ensure_ascii=False
+        )
         lead.proof_gaps_json = json.dumps(proof_gaps or [], ensure_ascii=False)
         lead.validation_status = validation_status
         lead.validation_reasoning = validation_reasoning
         lead.attack_path_json = json.dumps(attack_path or {}, ensure_ascii=False)
         lead.reportable = reportable
-        lead.status = "open" if reportable else (
-            "dismissed" if validation_status == "dismissed" else "inconclusive"
+        lead.status = (
+            "open"
+            if reportable
+            else ("dismissed" if validation_status == "dismissed" else "inconclusive")
         )
         lead.updated_at = now
         s.add(lead)
@@ -248,7 +250,9 @@ def copy_leads_to_run(
     return made
 
 
-def copy_lead_to_run(lead_id: int, target_run_type: str, target_run_id: int) -> ScanLead:
+def copy_lead_to_run(
+    lead_id: int, target_run_type: str, target_run_id: int
+) -> ScanLead:
     """Idempotently copy one reportable original lead into a dynamic run."""
     with Session(get_engine()) as s:
         original = s.get(ScanLead, lead_id)

@@ -50,7 +50,10 @@ WEB_RUN_COLUMNS = {
 }
 
 RUN_FK_COLUMNS = {
-    **{table: {column: False for column in columns} for table, columns in WEB_RUN_COLUMNS.items()},
+    **{
+        table: {column: False for column in columns}
+        for table, columns in WEB_RUN_COLUMNS.items()
+    },
     **{
         table: {column: False for column in columns}
         for table, columns in SHARED_RUN_COLUMNS.items()
@@ -85,7 +88,9 @@ def _fetch_ids(table: str) -> list[int]:
         return []
     return [
         int(row[0])
-        for row in _bind().execute(sa.text(f"SELECT id FROM {_quote(table)} ORDER BY id"))
+        for row in _bind().execute(
+            sa.text(f"SELECT id FROM {_quote(table)} ORDER BY id")
+        )
     ]
 
 
@@ -106,8 +111,7 @@ def _insert_identity(kind: str, legacy_id: int) -> int:
 
     result = bind.execute(
         sa.text(
-            "INSERT INTO run_identity (kind, legacy_id) "
-            "VALUES (:kind, :legacy_id)"
+            "INSERT INTO run_identity (kind, legacy_id) VALUES (:kind, :legacy_id)"
         ),
         {"kind": kind, "legacy_id": legacy_id},
     )
@@ -146,7 +150,9 @@ def _delete_by_ids(table: str, ids: Iterable[int]) -> None:
     )
 
 
-def _update_web_only(table: str, column: str, mapping: dict[tuple[str, int], int]) -> None:
+def _update_web_only(
+    table: str, column: str, mapping: dict[tuple[str, int], int]
+) -> None:
     if table not in _tables() or column not in _columns(table):
         return
     bind = _bind()
@@ -197,9 +203,7 @@ def _update_shared(
         return
     bind = _bind()
     rows = bind.execute(
-        sa.text(
-            f"SELECT id, run_kind, {_quote(column)} FROM {_quote(table)}"
-        )
+        sa.text(f"SELECT id, run_kind, {_quote(column)} FROM {_quote(table)}")
     ).all()
     delete_ids: list[int] = []
     for row_id, marker, old_run_id in rows:
@@ -232,9 +236,7 @@ def _update_dual_attribution(
         return
     bind = _bind()
     rows = bind.execute(
-        sa.text(
-            f"SELECT id, test_run_id, api_test_run_id FROM {_quote(table)}"
-        )
+        sa.text(f"SELECT id, test_run_id, api_test_run_id FROM {_quote(table)}")
     ).all()
     delete_ids: list[int] = []
     for row_id, old_web_id, old_api_id in rows:
@@ -263,9 +265,10 @@ def _update_dual_attribution(
         key = ("web", int(old_web_id))
         # A web-only row whose old id was shared by another run kind cannot be
         # assigned safely.  Drop it according to the migration policy above.
-        if key not in mapping or sum(
-            (kind, int(old_web_id)) in mapping for kind in PARENT_TABLES
-        ) > 1:
+        if (
+            key not in mapping
+            or sum((kind, int(old_web_id)) in mapping for kind in PARENT_TABLES) > 1
+        ):
             delete_ids.append(int(row_id))
             continue
         bind.execute(
@@ -288,9 +291,7 @@ def _remap_soft_links(mapping: dict[tuple[str, int], int]) -> None:
             )
         )
         for old_id, new_id in (
-            (old, new)
-            for (kind, old), new in mapping.items()
-            if kind == "sast"
+            (old, new) for (kind, old), new in mapping.items() if kind == "sast"
         ):
             bind.execute(
                 sa.text(
@@ -407,7 +408,9 @@ def _rebuild_with_run_fks(table: str, run_columns: dict[str, bool]) -> None:
     if table not in _tables():
         return
     existing = _columns(table)
-    run_columns = {name: nullable for name, nullable in run_columns.items() if name in existing}
+    run_columns = {
+        name: nullable for name, nullable in run_columns.items() if name in existing
+    }
     if not run_columns:
         return
 
@@ -479,11 +482,7 @@ def _rebuild_with_run_fks(table: str, run_columns: dict[str, bool]) -> None:
         )
     )
     bind.execute(sa.text(f"DROP TABLE {_quote(table)}"))
-    bind.execute(
-        sa.text(
-            f"ALTER TABLE {_quote(temp_name)} RENAME TO {_quote(table)}"
-        )
-    )
+    bind.execute(sa.text(f"ALTER TABLE {_quote(temp_name)} RENAME TO {_quote(table)}"))
 
     final = sa.Table(table, sa.MetaData(), autoload_with=bind)
     for name, columns, unique in index_specs:
@@ -495,7 +494,9 @@ def _rebuild_with_run_fks(table: str, run_columns: dict[str, bool]) -> None:
                 )
             )
         }:
-            sa.Index(name, *(final.c[column] for column in columns), unique=unique).create(bind)
+            sa.Index(
+                name, *(final.c[column] for column in columns), unique=unique
+            ).create(bind)
 
 
 def upgrade() -> None:
@@ -531,7 +532,9 @@ def upgrade() -> None:
     _update_dual_attribution("scan_finding", mapping)
     _update_dual_attribution("traffic_entry", mapping)
     if "api_endpoint_test" in _tables():
-        rows = bind.execute(sa.text("SELECT id, api_test_run_id FROM api_endpoint_test")).all()
+        rows = bind.execute(
+            sa.text("SELECT id, api_test_run_id FROM api_endpoint_test")
+        ).all()
         for row_id, old_id in rows:
             key = ("api", int(old_id)) if old_id is not None else None
             if key in mapping:
@@ -577,6 +580,7 @@ def upgrade() -> None:
                 "WHERE api_test_run_id IS NOT NULL"
             )
         )
+
 
 def downgrade() -> None:
     # A downgrade would reintroduce an ambiguous id namespace and cannot

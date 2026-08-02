@@ -77,8 +77,7 @@ _SAST_VALIDATOR_MAX_CONCURRENT = 4
 
 def _empty_phase_state() -> dict[str, dict]:
     return {
-        phase: {"status": "pending", "message": "", "data": {}}
-        for phase in _PHASES
+        phase: {"status": "pending", "message": "", "data": {}} for phase in _PHASES
     }
 
 
@@ -618,7 +617,8 @@ def _make_review_executor(
         candidate = _candidate_for_id(sast_run_id, candidate_id)
         if (
             assigned_candidate_id is not None
-            and tool_name in {"get_candidate", "validate_candidate", "record_attack_path"}
+            and tool_name
+            in {"get_candidate", "validate_candidate", "record_attack_path"}
             and candidate_id != assigned_candidate_id
         ):
             return (
@@ -662,9 +662,7 @@ def _make_review_executor(
             candidate["attack_path"] = {
                 "nodes": list(tool_input.get("nodes") or []),
                 "impact": str(tool_input.get("impact", "")),
-                "severity_reasoning": str(
-                    tool_input.get("severity_reasoning", "")
-                ),
+                "severity_reasoning": str(tool_input.get("severity_reasoning", "")),
                 "dynamic_test": str(tool_input.get("dynamic_test", "")),
             }
             return f"Candidate #{candidate_id} attack path recorded."
@@ -676,7 +674,11 @@ def _make_review_executor(
 
 
 def _candidate_brief(candidates: list[dict], *, reportable_only: bool = False) -> str:
-    selected = [c for c in candidates if c.get("reportable")] if reportable_only else candidates
+    selected = (
+        [c for c in candidates if c.get("reportable")]
+        if reportable_only
+        else candidates
+    )
     return json.dumps(
         [
             {
@@ -703,8 +705,7 @@ def _candidate_validation_message(candidate: dict) -> str:
         "candidate in the run. Call get_candidate for this candidate, inspect "
         "the relevant source with the read-only file tools, then call "
         "validate_candidate exactly once followed by done.\n\n"
-        "Assigned candidate:\n"
-        + json.dumps(candidate, ensure_ascii=False, indent=2)
+        "Assigned candidate:\n" + json.dumps(candidate, ensure_ascii=False, indent=2)
     )
 
 
@@ -900,9 +901,12 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 raise RuntimeError(
                     "No LLM configuration. Configure it in Settings first."
                 )
-            validator_cfg_obj = get_llm_config_for_role(  # type: ignore[arg-type]
-                s, run, "validator"
-            ) or llm_cfg_obj
+            validator_cfg_obj = (
+                get_llm_config_for_role(  # type: ignore[arg-type]
+                    s, run, "validator"
+                )
+                or llm_cfg_obj
+            )
             endpoints = (
                 list(
                     s.exec(
@@ -1338,7 +1342,9 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             for candidate in _candidates.get(sast_run_id, []):
                 if candidate.get("validation_status") == "pending":
                     candidate["validation_status"] = "inconclusive"
-                    candidate["validation_reasoning"] = "Scan stopped before validation completed."
+                    candidate["validation_reasoning"] = (
+                        "Scan stopped before validation completed."
+                    )
                     candidate["reportable"] = False
             _, total = _sync_candidates_to_db(sast_run_id, run.collection_id)
             with Session(get_engine()) as s:
@@ -1373,7 +1379,9 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 for candidate in _candidates.get(sast_run_id, []):
                     if candidate.get("validation_status") == "pending":
                         candidate["validation_status"] = "inconclusive"
-                        candidate["validation_reasoning"] = "Scan failed before validation completed."
+                        candidate["validation_reasoning"] = (
+                            "Scan failed before validation completed."
+                        )
                         candidate["reportable"] = False
                 _, total = _sync_candidates_to_db(sast_run_id, run.collection_id)
                 with Session(get_engine()) as s:
@@ -1477,9 +1485,7 @@ async def start_sast_scan(sast_run_id: int) -> None:
 
     log.info("start_sast_scan: sast_run_id=%s", sast_run_id)
 
-    lease = try_acquire_sast_workspace_lease(
-        Path(get_settings().data_dir), sast_run_id
-    )
+    lease = try_acquire_sast_workspace_lease(Path(get_settings().data_dir), sast_run_id)
     if lease is None:
         raise RuntimeError(
             f"SAST run {sast_run_id} is already active in another AESPA process."
