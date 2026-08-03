@@ -575,7 +575,7 @@ def _score_lead_target(
     if hint is not None:
         score += 0.6
         parts.append("Direct hint linking this component to this target")
-        evidence["hint"] = hint.note or "component-target hint"
+        evidence["hint"] = hint.note or "code-to-live-target routing association"
 
     lead_host = _host_of(lead.suggested_endpoint) or _host_of(lead.location)
     target_host = _target_host(session, target)

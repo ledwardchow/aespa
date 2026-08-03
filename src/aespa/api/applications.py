@@ -1,5 +1,5 @@
 """Thin API router for Applications: components, ZIP snapshots, targets,
-connection hints, and multi-repository assessment campaigns.
+code-to-target routing associations, and multi-repository assessment campaigns.
 
 All real logic lives in ``services/applications.py``, ``services/campaigns.py``,
 and ``services/correlation.py`` — this module only validates the HTTP
@@ -540,7 +540,7 @@ def detach_target(
         raise _conflict(exc) from exc
 
 
-# ── Connection hints ───────────────────────────────────────────────────────────
+# ── Code-to-target routing associations ────────────────────────────────────────
 
 
 @router.get("/{application_id}/hints", response_model=list[ComponentTargetHintOut])

@@ -1067,7 +1067,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/statistics/llm/prices/refresh` | `statistics.py` | Download the latest LiteLLM price map |
 | `/api/statistics/llm/prices` | `statistics.py` | Save a monthly or future price override |
 | `/api/statistics/llm` (`DELETE`) | `statistics.py` | Reset all usage months while retaining price data |
-| `/api/applications/` | `applications.py` | CRUD for applications, code components, ZIP snapshots, targets, explicit target component links, and connection hints |
+| `/api/applications/` | `applications.py` | CRUD for applications, code components, ZIP snapshots, targets, explicit target component links, and code-to-target routing associations |
 | `/api/applications/{id}/campaigns/` | `applications.py` | Create/list/get/delete campaigns; `start`/`stop`/`retry`/`continue` lifecycle actions |
 | `/api/applications/{id}/campaigns/{id}/status` | `applications.py` | Campaign progress (status, warnings, source/target member states) |
 | `/api/applications/{id}/campaigns/{id}/events` | `applications.py` | Live SSE stream (same event bus as web/API/SAST runs, scoped `run_kind="campaign"`) |
@@ -1550,7 +1550,7 @@ This layer never replaces the standalone SAST/web/API workflows described in sec
 | `component_snapshot` | One immutable uploaded ZIP version for a component (filename, stored path, size, SHA-256) — never edited in place |
 | `application_target` | An existing `Site` or `ApiCollection` attached to an application (reused, never copied) |
 | `application_target.component_id` | An optional explicit code-component owner for a live target; linked component SAST leads are auto-imported into that target's child run |
-| `component_target_hint` | An optional user-supplied "this component talks to this target" hint that boosts inferred correlation confidence |
+| `component_target_hint` | An optional user-supplied code-to-target routing association that boosts inferred correlation confidence |
 | `assessment_campaign` | One coordinated test; its `id` comes from the same global `run_identity` namespace as web/API/SAST runs (`kind="campaign"`), so its events/logs never collide with a run id |
 | `campaign_source_member` | One frozen `(component, snapshot)` pair selected for a campaign, plus the `SastRun` id it spawned |
 | `campaign_target_member` | One frozen live target selected for a campaign, plus the `TestRun`/`ApiTestRun` id it spawned |
