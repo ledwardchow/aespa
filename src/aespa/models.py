@@ -1286,7 +1286,7 @@ class ApplicationTarget(SQLModel, table=True):
 
 
 class ComponentTargetHint(SQLModel, table=True):
-    """An optional user-supplied hint that a component talks to a live target.
+    """An optional user-supplied code-to-live-target routing association.
 
     Purely advisory: it boosts deterministic correlation confidence but is
     never required for a campaign to run.
