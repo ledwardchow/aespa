@@ -8,7 +8,7 @@ import { safeParseJson } from "./_helpers";
 // Overall stage warnings, per-child-member progress, and an aggregated token
 // usage bar (best-effort — summed across every child run this campaign
 // created, since there is no single campaign-level usage endpoint).
-export function CampaignOverviewTab({ applicationId, campaign }) {
+export function CampaignOverviewTab({ applicationId, campaign, resumeSource, resumeTarget, busy }) {
   const [tokenUsage, setTokenUsage] = useState(null);
   const [tokenExpanded, setTokenExpanded] = useState(false);
   const [componentNames, setComponentNames] = useState({});
@@ -60,6 +60,8 @@ export function CampaignOverviewTab({ applicationId, campaign }) {
   }, [campaign.source_members, campaign.target_members]);
 
   const warnings = safeParseJson(campaign.warnings_json, []);
+  const canResumeMember = !["sast_running", "correlating", "dast_running"].includes(campaign.status);
+  const resumable = status => ["pending", "failed", "skipped"].includes(status);
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
     {campaign.error_message && <div className="alert error">{campaign.error_message}</div>}
@@ -67,6 +69,9 @@ export function CampaignOverviewTab({ applicationId, campaign }) {
       <div style={{ fontWeight: 700, marginBottom: 4 }}>Partial-context warnings</div>
       <ul style={{ margin: 0, paddingLeft: 18 }}>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
     </div>}
+    <div className="alert info">
+      To recover one action only, use the <strong>Resume SAST</strong>, <strong>Resume web</strong>, or <strong>Resume API</strong> button at the right of its row below. The same buttons are in the <strong>Runs</strong> tab.
+    </div>
 
     <div className="campaign-token-usage">
       <TokenUsageBar tokenUsage={tokenUsage} tokenExpanded={tokenExpanded} setTokenExpanded={setTokenExpanded} />
@@ -79,6 +84,7 @@ export function CampaignOverviewTab({ applicationId, campaign }) {
           <span style={{ flex: 1 }}>{componentNames[m.component_id] || `Component #${m.component_id}`}</span>
           <StatusBadge status={m.status} />
           {m.sast_run_id && <a href={`#/sast-runs/${m.sast_run_id}`} className="subtle">View SAST run →</a>}
+          {canResumeMember && resumable(m.status) && <button className="btn secondary sm" title="Resume only this SAST action" disabled={busy} onClick={() => resumeSource(m.id)}>Resume SAST</button>}
         </div>)}
         {campaign.source_members.length === 0 && <div className="subtle">No source members.</div>}
       </div>
@@ -93,6 +99,7 @@ export function CampaignOverviewTab({ applicationId, campaign }) {
           <StatusBadge status={m.status} />
           {m.test_run_id && <a href={`#/runs/${m.test_run_id}`} className="subtle">View web run →</a>}
           {m.api_test_run_id && <a href={`#/api-runs/${m.api_test_run_id}`} className="subtle">View API run →</a>}
+          {canResumeMember && resumable(m.status) && <button className="btn secondary sm" title={`Resume only this ${m.target_type === "site" ? "web" : "API"} action`} disabled={busy} onClick={() => resumeTarget(m.id)}>Resume {m.target_type === "site" ? "web" : "API"}</button>}
         </div>)}
         {campaign.target_members.length === 0 && <div className="subtle">No target members.</div>}
       </div>

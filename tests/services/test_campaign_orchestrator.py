@@ -244,6 +244,103 @@ async def test_partial_sast_failure_produces_warning_but_still_reaches_review(
 
 
 @pytest.mark.anyio
+async def test_resume_source_member_retries_only_selected_child(
+    isolated_db_engine, monkeypatch
+):
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        second = ApplicationComponent(
+            application_id=ctx["application_id"], name="orders-api"
+        )
+        s.add(second)
+        s.flush()
+        second_snapshot = ComponentSnapshot(
+            component_id=second.id,
+            filename="api.zip",
+            stored_path="/tmp/api.zip",
+            size_bytes=1,
+            sha256="f" * 64,
+        )
+        s.add(second_snapshot)
+        s.commit()
+        second_snapshot_id = second_snapshot.id
+        campaign = campaigns_svc.create_campaign(
+            s,
+            ctx["application_id"],
+            CampaignCreate(
+                name="resume-one",
+                source_members=[
+                    CampaignSourceMemberCreate(
+                        component_id=ctx["component_id"], snapshot_id=ctx["snapshot_id"]
+                    ),
+                    CampaignSourceMemberCreate(
+                        component_id=second.id, snapshot_id=second_snapshot.id
+                    ),
+                ],
+                target_members=[CampaignTargetMemberCreate(target_id=ctx["target_id"])],
+            ),
+        )
+        campaign_id = campaign.id
+
+    async def _fake_run_sast_scan(sast_run_id: int) -> None:
+        with Session(isolated_db_engine) as s:
+            run = s.get(SastRun, sast_run_id)
+            run.status = "completed"
+            s.add(run)
+            s.commit()
+
+    from aespa.services import sast_scanner as sast_scanner_svc
+
+    monkeypatch.setattr(sast_scanner_svc, "run_sast_scan", _fake_run_sast_scan)
+    await campaigns_svc.start_campaign(campaign_id)
+    await campaigns_svc._campaign_tasks[campaign_id]
+
+    with Session(isolated_db_engine) as s:
+        members = list(
+            s.exec(
+                select(CampaignSourceMember).where(
+                    CampaignSourceMember.campaign_id == campaign_id
+                )
+            ).all()
+        )
+        selected = next(m for m in members if m.snapshot_id == second_snapshot_id)
+        preserved = next(m for m in members if m.snapshot_id == ctx["snapshot_id"])
+        selected.status = "failed"
+        selected_run = s.get(SastRun, selected.sast_run_id)
+        selected_run.status = "failed"
+        s.add(selected)
+        s.add(selected_run)
+        s.commit()
+        selected_id = selected.id
+        selected_run_id = selected.sast_run_id
+        preserved_id = preserved.id
+
+    calls: list[int] = []
+
+    async def _fake_resume(sast_run_id: int) -> None:
+        calls.append(sast_run_id)
+        with Session(isolated_db_engine) as s:
+            run = s.get(SastRun, sast_run_id)
+            run.status = "completed"
+            s.add(run)
+            s.commit()
+
+    monkeypatch.setattr(sast_scanner_svc, "run_sast_scan", _fake_resume)
+    await campaigns_svc.resume_source_member(campaign_id, selected_id)
+    task = campaigns_svc._campaign_member_tasks[(campaign_id, "source", selected_id)]
+    await task
+
+    with Session(isolated_db_engine) as s:
+        selected = s.get(CampaignSourceMember, selected_id)
+        preserved = s.get(CampaignSourceMember, preserved_id)
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        assert calls == [selected_run_id]
+        assert selected.status == "completed"
+        assert preserved.status == "completed"
+        assert campaign.status == "awaiting_review"
+
+
+@pytest.mark.anyio
 async def test_continue_to_live_testing_gated_until_review_submitted(
     isolated_db_engine,
 ):
@@ -760,10 +857,10 @@ def test_standalone_sast_deletion_still_removes_its_own_upload(
     assert not archive_path.exists()
 
 
-# ── Regression: blocking external deletion of campaign-owned children ───────
+# ── Regression: external deletion detaches campaign-owned children ───────────
 
 
-def test_direct_sast_run_deletion_blocked_when_owned_by_campaign(
+def test_direct_sast_run_deletion_detaches_campaign_member(
     isolated_db_engine,
 ):
     from aespa.services import run_cleanup
@@ -782,17 +879,24 @@ def test_direct_sast_run_deletion_blocked_when_owned_by_campaign(
         member.sast_run_id = sast_run.id
         s.add(member)
         s.commit()
+        campaign_id = campaign.id
         sast_run_id = sast_run.id
 
     with Session(isolated_db_engine) as s:
-        with pytest.raises(run_cleanup.ChildRunOwnedByCampaign):
-            run_cleanup.raise_if_sast_run_owned_by_campaign(s, sast_run_id)
-    # Row is untouched — the manifest is preserved.
-    with Session(isolated_db_engine) as s:
-        assert s.get(SastRun, sast_run_id) is not None
+        run_cleanup.cascade_delete_sast_run(s, sast_run_id)
+        s.commit()
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign_id
+            )
+        ).first()
+        assert member is not None
+        assert member.sast_run_id is None
+        assert member.status == "pending"
+        assert s.get(SastRun, sast_run_id) is None
 
 
-def test_direct_web_run_deletion_blocked_when_owned_by_campaign(
+def test_direct_web_run_deletion_detaches_campaign_member(
     isolated_db_engine,
 ):
     from aespa.services import run_cleanup
@@ -811,14 +915,24 @@ def test_direct_web_run_deletion_blocked_when_owned_by_campaign(
         member.test_run_id = run.id
         s.add(member)
         s.commit()
+        campaign_id = campaign.id
         run_id = run.id
 
     with Session(isolated_db_engine) as s:
-        with pytest.raises(run_cleanup.ChildRunOwnedByCampaign):
-            run_cleanup.raise_if_web_run_owned_by_campaign(s, run_id)
+        run_cleanup.cascade_delete_web_run(s, run_id)
+        s.commit()
+        member = s.exec(
+            select(CampaignTargetMember).where(
+                CampaignTargetMember.campaign_id == campaign_id
+            )
+        ).first()
+        assert member is not None
+        assert member.test_run_id is None
+        assert member.status == "pending"
+        assert s.get(TestRun, run_id) is None
 
 
-def test_direct_api_run_deletion_blocked_when_owned_by_campaign(
+def test_direct_api_run_deletion_detaches_campaign_member(
     isolated_db_engine,
 ):
     from aespa.models import ApiCollection, ApiTestRun
@@ -849,11 +963,21 @@ def test_direct_api_run_deletion_blocked_when_owned_by_campaign(
         member.api_test_run_id = run.id
         s.add(member)
         s.commit()
+        campaign_id = campaign.id
         run_id = run.id
 
     with Session(isolated_db_engine) as s:
-        with pytest.raises(run_cleanup.ChildRunOwnedByCampaign):
-            run_cleanup.raise_if_api_run_owned_by_campaign(s, run_id)
+        run_cleanup.cascade_delete_api_run(s, run_id)
+        s.commit()
+        member = s.exec(
+            select(CampaignTargetMember).where(
+                CampaignTargetMember.campaign_id == campaign_id
+            )
+        ).first()
+        assert member is not None
+        assert member.api_test_run_id is None
+        assert member.status == "pending"
+        assert s.get(ApiTestRun, run_id) is None
 
 
 def test_site_deletion_blocked_while_attached_to_application(client):
@@ -887,9 +1011,8 @@ def test_api_collection_deletion_blocked_while_attached_to_application(client):
     assert resp.status_code == 409
 
 
-def test_direct_test_run_delete_endpoint_blocked_when_campaign_owned(client):
-    """The standalone DELETE /api/test-runs/{id} route itself, not just the
-    service guard, refuses to remove a campaign-owned child run."""
+def test_direct_test_run_delete_endpoint_detaches_campaign_member(client):
+    """The standalone DELETE /api/test-runs/{id} route detaches its campaign row."""
     site_resp = client.post(
         "/api/sites", json={"name": "S-direct", "base_url": "http://sd.local"}
     )
@@ -923,7 +1046,7 @@ def test_direct_test_run_delete_endpoint_blocked_when_campaign_owned(client):
         s.commit()
 
     resp = client.delete(f"/api/test-runs/{run_id}")
-    assert resp.status_code == 409
+    assert resp.status_code == 204
 
 
 # ── Regression: verifying real terminal status before "completed" ──────────

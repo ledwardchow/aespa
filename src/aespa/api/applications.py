@@ -718,6 +718,50 @@ async def retry_campaign(
     return _to_campaign_detail(session, campaign)
 
 
+@router.post(
+    "/{application_id}/campaigns/{campaign_id}/sources/{member_id}/resume",
+    response_model=CampaignDetail,
+)
+async def resume_campaign_source(
+    application_id: int,
+    campaign_id: int,
+    member_id: int,
+    session: Session = Depends(get_session),
+) -> CampaignDetail:
+    """Retry one campaign-owned SAST child without rerunning other members."""
+    try:
+        campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
+        await campaigns_svc.resume_source_member(campaign.id, member_id)
+    except campaigns_svc.CampaignNotFound as exc:
+        raise _not_found(exc) from exc
+    except campaigns_svc.InvalidCampaignState as exc:
+        raise _conflict(exc) from exc
+    session.refresh(campaign)
+    return _to_campaign_detail(session, campaign)
+
+
+@router.post(
+    "/{application_id}/campaigns/{campaign_id}/targets/{member_id}/resume",
+    response_model=CampaignDetail,
+)
+async def resume_campaign_target(
+    application_id: int,
+    campaign_id: int,
+    member_id: int,
+    session: Session = Depends(get_session),
+) -> CampaignDetail:
+    """Retry one campaign-owned live-target child without rerunning siblings."""
+    try:
+        campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
+        await campaigns_svc.resume_target_member(campaign.id, member_id)
+    except campaigns_svc.CampaignNotFound as exc:
+        raise _not_found(exc) from exc
+    except campaigns_svc.InvalidCampaignState as exc:
+        raise _conflict(exc) from exc
+    session.refresh(campaign)
+    return _to_campaign_detail(session, campaign)
+
+
 @router.get(
     "/{application_id}/campaigns/{campaign_id}/status",
     response_model=CampaignProgress,
