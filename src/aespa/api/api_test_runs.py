@@ -32,6 +32,7 @@ from aespa.models import (
 )
 from aespa.schemas import (
     ApiTestRunSummary,
+    CoverageModeLiteral,
     ScanFindingImportIn,
     ScanFindingImportResult,
     ScanFindingOut,
@@ -372,7 +373,7 @@ def export_api_agent_log(
 
 
 class ScanStartIn(BaseModel):
-    coverage_mode: str | None = None  # "track" | "enforce"; overrides the run setting
+    coverage_mode: CoverageModeLiteral | None = None
 
 
 @router.post("/{run_id}/scan/start")
@@ -384,11 +385,19 @@ async def start_api_scan(
     run = _get_run_or_404(session, run_id)
     _reject_if_campaign_owned(session, run_id)
     # Allow the scan-start control to override the run's coverage mode.
-    if body and body.coverage_mode in ("track", "enforce"):
+    if body and body.coverage_mode is not None:
         run.coverage_mode = body.coverage_mode
         run.updated_at = datetime.now(timezone.utc)
         session.add(run)
         session.commit()
+    if run.coverage_mode == "sast_validate":
+        from aespa.services.scan_leads import get_leads_for_run
+
+        if not get_leads_for_run("api", run_id):
+            raise HTTPException(
+                status_code=409,
+                detail="No open imported SAST leads are available to validate",
+            )
     from aespa.services import api_scanner
 
     await api_scanner.start_api_scan(run_id)
