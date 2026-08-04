@@ -142,7 +142,7 @@ export function DebugPage({
     <div className="content scroll-content">
       {!cfg && !browserCfg && !error && !browserError && <div className="subtle">Loading…</div>}
 
-      <div className="card" style={{ marginTop: 16 }}>
+      <div className="card" style={{ marginTop: 16, maxWidth: 680 }}>
         <div className="form-section-title">Browser</div>
         <div className="field-hint" style={{ marginBottom: 12 }}>
           Choose which Chromium build powers crawls, scans, and browser-based testing.
@@ -183,7 +183,7 @@ export function DebugPage({
       </div>
 
       {error && <div className="alert error">{error}</div>}
-      {cfg && <div className="card">
+      {cfg && <div className="card" style={{ marginTop: 16, maxWidth: 680 }}>
           <div className="form-section-title">Specialist Agent</div>
           <label className="toggle-row">
             <input type="checkbox" checked={cfg.trigger_specialist_on_burp ?? false} disabled={saving} onChange={e => toggle(e.target.checked)} />
@@ -200,7 +200,8 @@ export function DebugPage({
         </div>}
 
       <div className="card" style={{
-        marginTop: 16
+        marginTop: 16,
+        maxWidth: 680
       }}>
         <div className="form-section-title">Reporting Lab</div>
         <div className="field-hint" style={{
@@ -231,7 +232,8 @@ export function DebugPage({
       </div>
 
       <div className="card" style={{
-        marginTop: 16
+        marginTop: 16,
+        maxWidth: 680
       }}>
         <div className="form-section-title">Applications</div>
         <div className="field-hint" style={{
@@ -256,7 +258,8 @@ export function DebugPage({
       </div>
 
       <div className="card" style={{
-        marginTop: 16
+        marginTop: 16,
+        maxWidth: 680
       }}>
         <div className="form-section-title">Sitemap Graph</div>
         <div className="field-hint" style={{
@@ -295,7 +298,8 @@ export function DebugPage({
       </div>
 
       <div className="card" style={{
-        marginTop: 16
+        marginTop: 16,
+        maxWidth: 680
       }}>
         <div className="form-section-title">Cloudflare Access</div>
         <div className="field-hint" style={{
