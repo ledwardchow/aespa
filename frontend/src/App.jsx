@@ -172,8 +172,8 @@ function App() {
           <a href="#/external-integrations" className={"nav-item" + (onExternalIntegrations ? " active" : "")} title="External Integrations">
             <span className="nav-icon"><IconShield /></span>{!collapsed && " External Integrations"}
           </a>
-          <a href="#/debug" className={"nav-item" + (onDebug ? " active" : "")} title="Debug">
-            <span className="nav-icon"><IconBug /></span>{!collapsed && " Debug"}
+          <a href="#/debug" className={"nav-item" + (onDebug ? " active" : "")} title="System Settings">
+            <span className="nav-icon"><IconBug /></span>{!collapsed && " System Settings"}
           </a>
           {reportingDebugCfg?.panel_enabled && <>
             {!collapsed && <div className="nav-section-label" style={{

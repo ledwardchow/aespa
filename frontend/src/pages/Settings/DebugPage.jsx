@@ -137,7 +137,7 @@ export function DebugPage({
   };
   return <>
     <div className="topbar">
-      <div className="topbar-title">Debug</div>
+      <div className="topbar-title">System Settings</div>
     </div>
     <div className="content scroll-content">
       {!cfg && !browserCfg && !error && !browserError && <div className="subtle">Loading…</div>}
