@@ -279,8 +279,7 @@ def _finish_campaign(
         campaign.status = status
         campaign.completed_at = _utcnow()
         campaign.updated_at = _utcnow()
-        if error:
-            campaign.error_message = error
+        campaign.error_message = error if error else None
         s.add(campaign)
         s.commit()
     events_svc.emit(
