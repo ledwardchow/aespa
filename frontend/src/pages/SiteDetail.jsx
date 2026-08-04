@@ -756,6 +756,7 @@ export function TestRunDetail({
     <input ref={crawlImportInputRef} type="file" accept="application/json,.json" hidden onChange={onImportCrawlFile} />
 
     <div className="content" style={{
+      paddingTop: 0,
       paddingBottom: 0,
       display: "flex",
       flexDirection: "column",

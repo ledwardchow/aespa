@@ -13,6 +13,7 @@ export function ScanPolicyPage() {
   return <>
     <div className="topbar"><div className="topbar-title">Agent Settings</div></div>
     <div className="content" style={{
+      paddingTop: 0,
       paddingLeft: 16,
       paddingRight: 0,
       paddingBottom: 0,
