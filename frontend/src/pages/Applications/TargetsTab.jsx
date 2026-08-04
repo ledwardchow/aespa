@@ -66,9 +66,9 @@ export function TargetsTab({ applicationId, components, onChanged }) {
       </div>)}
     </div>}
 
-    <div className="form-section-title" style={{ marginTop: 28 }}>Code-to-live-target routing <span className="subtle" style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></div>
+    <div className="form-section-title" style={{ marginTop: 28 }}>SAST lead to DAST target routing<span className="subtle" style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></div>
     <div className="subtle" style={{ fontSize: 12, marginBottom: 10 }}>
-      Use these when a code component is expected to be tested through or call a live target. They help route SAST leads to the right DAST run. The explicit Code component assignment above remains the authoritative ownership mapping; these associations are advisory.
+      If SAST findings are identified in a code component, you can map it to a user/system-facing entry point for DAST testing here. (Basically: "Where is the ultimate entry point for input processed by this component?")
     </div>
     {hintError && <div className="alert error" style={{ marginBottom: 12 }}>{hintError}</div>}
     <HintsEditor
