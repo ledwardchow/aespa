@@ -21,6 +21,7 @@ from aespa.models import (
     TestRunStatus,
 )
 from aespa.schemas import (
+    CoverageModeLiteral,
     ScanCheckpointStatusOut,
     ScanFindingImportIn,
     ScanFindingImportResult,
@@ -54,7 +55,7 @@ def _reject_if_campaign_owned(session: Session, run_id: int) -> None:
 
 
 class _StartScanBody(BaseModel):
-    coverage_mode: Optional[str] = None  # "track" | "enforce"
+    coverage_mode: Optional[CoverageModeLiteral] = None
     target_page_id: Optional[int] = None
     target_page_ids: Optional[list[int]] = None
     use_session: Optional[str] = None
@@ -75,7 +76,7 @@ async def start_thinking_scan(
         )
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-    if body and body.coverage_mode in ("track", "enforce"):
+    if body and body.coverage_mode is not None:
         run.coverage_mode = body.coverage_mode
     if body:
         target_ids = body.target_page_ids or (
@@ -93,13 +94,22 @@ async def start_thinking_scan(
             run.target_session_label = body.use_session or None
         session.add(run)
         session.commit()
-    # Seed workprogram synchronously so it's populated before the response returns.
-    try:
-        from aespa.services.web_workprogram import seed_web_workprogram
+    if run.coverage_mode != "sast_validate":
+        # Seed workprogram synchronously so it's populated before the response returns.
+        try:
+            from aespa.services.web_workprogram import seed_web_workprogram
 
-        seed_web_workprogram(run_id)
-    except Exception as _se:
-        pass  # non-fatal
+            seed_web_workprogram(run_id)
+        except Exception:
+            pass  # non-fatal
+    if run.coverage_mode == "sast_validate":
+        from aespa.services.scan_leads import get_leads_for_run
+
+        if not get_leads_for_run("web", run_id):
+            raise HTTPException(
+                status_code=409,
+                detail="No open imported SAST leads are available to validate",
+            )
     await scanner_svc.start_thinking_scan(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
@@ -193,12 +203,21 @@ async def resume_thinking_scan(
     status = checkpoint_svc.checkpoint_status(run_id)
     if not status["exists"]:
         raise HTTPException(status_code=404, detail="No checkpoint found for this run")
-    try:
-        from aespa.services.web_workprogram import seed_web_workprogram
+    if run.coverage_mode == "sast_validate":
+        from aespa.services.scan_leads import get_leads_for_run
 
-        seed_web_workprogram(run_id)
-    except Exception:
-        pass
+        if not get_leads_for_run("web", run_id):
+            raise HTTPException(
+                status_code=409,
+                detail="No open imported SAST leads are available to validate",
+            )
+    else:
+        try:
+            from aespa.services.web_workprogram import seed_web_workprogram
+
+            seed_web_workprogram(run_id)
+        except Exception:
+            pass
     await scanner_svc.start_thinking_scan_resume(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 

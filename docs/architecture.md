@@ -2,7 +2,7 @@
 
 AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security scanner. It covers three distinct surfaces:
 
-- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage with Track/Enforce modes.
+- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage with Track/Enforce modes, while SAST Validate focuses only on imported SAST leads.
 - **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
 - **SAST assistance** — a standalone agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
 - **Multi-repository applications** — when a product's code is split across several repositories/micro-frontends, an **Application** groups them (with immutable uploaded ZIP snapshots) alongside the existing Sites/API Collections that make up the live product. An **AssessmentCampaign** coordinates ordinary SAST/web/API child runs for that application, joins compact per-repository interface facts into a cross-repository map, and proposes which live target should receive each SAST lead — subject to human review before any dynamic scan starts.
@@ -685,6 +685,19 @@ never reject `done` indefinitely.
 | `tool` | Call a read-only context tool (see below) |
 | `done` | Finish the scan with a summary |
 
+The existing `coverage_mode` selector has three values: `track` (Quick), `enforce`
+(Full), and `sast_validate` (SAST Validate). SAST Validate does not seed or resolve
+normal coverage obligations, dispatch specialists, schedule Burp work, or run the
+general post-scan reporting pass. It loads every open imported lead as a compact
+index, requires the Test Lead to fetch each lead's complete evidence with
+`context_tool` → `lead_detail`, and cannot finish until every imported lead is
+`confirmed`, `dismissed`, or `inconclusive`. The Test Lead must follow the lead's
+attack path and may use configured credentials and sessions to reach protected
+functionality. A finding is allowed only when the lead is confirmed or when an
+incidental issue is directly evidenced by traffic already generated for that lead;
+incidental issues receive no follow-up probes. The existing deterministic TLS
+posture check still runs for HTTPS targets unless deterministic checks are disabled.
+
 ### WAF detection and request transport
 
 WAF detection is passive. The traffic logger looks at normal response headers,
@@ -740,6 +753,7 @@ targeted scan round will change the next action.
 | `auth_matrix` | Test a set of endpoints across auth boundaries |
 | `extract_entities` | Parse URLs, IDs, JWTs, error strings from text |
 | `coverage_gaps` | Compact live list of high-value uncovered web route/category cells |
+| `lead_detail` | Full evidence, traces, validation data, and attack path for an imported SAST lead owned by the current run |
 
 ### Web OWASP Coverage (OWASP Top-10 matrix)
 
@@ -752,7 +766,7 @@ Input-bearing A03 cells additionally persist class-level states in `test_classes
 - `seed_web_workprogram(run_id)` creates the cells; it runs synchronously when a dynamic scan starts (and on resume) via `api/scan.py`, and can be re-triggered through `POST /api/test-runs/{id}/coverage/seed`.
 - `_make_web_post_probe_fn` / `_make_web_post_finding_fn` update cells as the agentic loop probes pages and writes findings (findings flip the cell to `finding` and record the `ScanFinding.id`).
 - `web_route_inventory.enrich_dynamic_route` classifies routes first observed during the dynamic scan from their request/response evidence. It OR-merges deterministic and LLM-derived applicability into the canonical `CrawledPage`, reseeds newly applicable cells, and leaves the current probe hook to mark the exercised category `in_progress`. Browser-observed routes are enriched too; passive JavaScript route literals remain target intelligence until actively reached.
-- `TestRun.coverage_mode` selects **Track** (observe only) or **Enforce**; in Enforce mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop, classifying each `(page, category)` as probe-worthy or skippable up to a budget.
+- `TestRun.coverage_mode` selects **Track** (`track`, the Quick mode), **Enforce** (`enforce`, the Full mode), or **SAST Validate** (`sast_validate`). In Enforce mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop, classifying each `(page, category)` as probe-worthy or skippable up to a budget. SAST Validate does not use the work program; it validates only open imported SAST leads and retains the HTTPS TLS posture check.
 - `get_web_coverage_matrix(run_id)` powers the **OWASP Coverage** UI tab (`GET /api/test-runs/{id}/coverage`).
 
 ---
@@ -1391,6 +1405,11 @@ Cell statuses: `uncovered` → `in_progress` → `covered` (finding attached) / 
 **Track mode** — the agentic loop steers itself; cells are updated as probes are made.  
 **Enforce mode** — after the main loop, `_enforce_coverage_loop` drives every still-uncovered cell to a terminal state. An LLM classifier decides per `(endpoint, category)` whether to probe or record a skip reason, up to a configurable budget.
 
+**SAST Validate mode** (`coverage_mode="sast_validate"`) does not seed, probe, or
+resolve the API coverage matrix. It validates only open imported SAST leads, using
+the lead's attack path and configured sessions; the existing HTTPS TLS posture
+check remains enabled unless deterministic checks are disabled.
+
 ### API scan engine (`services/api_scanner.py`)
 
 The entry point `start_api_scan(api_run_id)` launches `_api_scan_task` as a background `asyncio.Task`.
@@ -1400,7 +1419,7 @@ _api_scan_task(api_run_id)
   └─ _do_api_thinking_scan(api_run_id)
        1. Load ApiTestRun, LLM config, scanner policy, collection
        2. seed_sessions_from_credentials — load ApiCredentials into scanner session vault
-       3. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs
+       3. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs (Track/Enforce only)
        4. _build_api_crawl_context — build LLM opening context from collection metadata + explicitly imported SAST leads
        5. _do_agentic_thinking_loop (shared with web scanner)
             • get_api_test_lead_tools supplies only API-aware top-level tools; browser,
@@ -1413,6 +1432,11 @@ _api_scan_task(api_run_id)
             • _make_post_probe_fn updates the coverage matrix cell for each probe (endpoint, category)
             • _make_post_finding_fn stamps api_test_run_id and OWASP category on each finding
        7. (enforce mode only) _enforce_coverage_loop — drive uncovered cells to terminal state
+
+In SAST Validate, the API prompt and tool list are restricted to context lookup,
+HTTP requests, finding/lead updates, and completion. Coverage probe hooks and
+final untouched-cell resolution are disabled. `lead_detail` is available in all
+API scan modes and enforces ownership by `(run_kind, run_id, lead_id)`.
 ```
 
 ### Scope enforcement
@@ -1517,7 +1541,7 @@ The dynamic loop investigates leads via the shared `update_lead` action, which s
 - **API scans** consume *explicitly imported copies*: the user picks a completed SAST run on the API run's **Scan Leads** tab and `copy_leads_to_run(sast_run_id, "api", run_id)` creates fresh rows owned only by that API run. API scan startup never creates a SAST run or imports collection leads automatically. `_build_api_crawl_context` and API A.L.I.C.E. inject only `format_leads_for_run("api", run_id)`.
 - **Web scans** consume *copies*: the user picks a completed SAST run on the **SAST Leads** tab and `copy_leads_to_run(sast_run_id, "web", run_id)` duplicates its originals into new rows tagged `imported_into_*` (idempotent per source run; originals stay `open`). At scan start `scanner._do_thinking_scan` injects them via `format_leads_for_run("web", run_id)`. Because copies are independent, investigating them never mutates the source SAST run's leads, and deleting a SAST run leaves the copies intact (only `imported_into_run_id IS NULL` originals are cascade-deleted).
 
-The dynamic context includes each lead's ordered reachability, impact, severity reasoning, and dynamic-test objective. The web and API Test Leads use that path to choose focused probes, but must verify every hop against live responses before calling `update_lead`. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
+The dynamic context includes each lead's ordered reachability, impact, severity reasoning, and dynamic-test objective. The web and API Test Leads use that path to choose focused probes, but must verify every hop against live responses before calling `update_lead`. In SAST Validate, the opening prompt contains only a compact index; `lead_detail` retrieves the complete lead one at a time. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
 
 Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import.
 

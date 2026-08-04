@@ -740,7 +740,7 @@ _API_THINKING_AGENT_SYSTEM = (
     "- context_tool: query the API endpoint inventory without hitting the target.\n"
     "  Available sub-commands: endpoint_list, endpoint_detail, collection_info,\n"
     "  finding_list, history_search, traffic_search, compare_responses, mutate_request,\n"
-    "  extract_entities.\n"
+    "  extract_entities, lead_list, lead_detail.\n"
     "  After 3 consecutive calls, execute a probe or write a finding.\n"
     "- write_finding: persist a confirmed finding with concrete evidence. No duplicates.\n"
     "  Set owasp_category to the OWASP API Top 10 code (e.g. API1, API3, API5).\n"
@@ -781,7 +781,7 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "attribute or exact text to prove the payload affected the rendered DOM.\n"
     "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
     "the target. Available sub-commands: site_map, page_detail, history_search, "
-    "finding_list, lead_list, target_inventory, traffic_search, extract_entities, "
+    "finding_list, lead_list, lead_detail, target_inventory, traffic_search, extract_entities, "
     "coverage_gaps. coverage_gaps returns a compact live list of uncovered "
     "route/category cells; use it when choosing the next distinct surface or before done. "
     "After 3 consecutive calls, either execute a probe/write a finding or "
@@ -1360,6 +1360,90 @@ _API_TEST_LEAD_TOOL_NAMES = frozenset(
         "done",
     }
 )
+
+
+_SAST_VALIDATE_TOOL_NAMES = frozenset(
+    {
+        "context_tool",
+        "http_request",
+        "browser",
+        "reauthenticate",
+        "write_finding",
+        "update_lead",
+        "done",
+    }
+)
+
+
+_SAST_VALIDATE_SYSTEM_WEB = """
+You are the Test Lead for a SAST Validate scan. Your only mission is to validate the
+imported SAST leads in the initial lead index against the live web application. This is
+not a general penetration test: do not enumerate unrelated routes, pursue coverage gaps,
+or test hypotheses that are not part of a listed lead.
+
+The lead index is compact and incomplete. Before investigating each lead, call
+context_tool with tool=lead_detail and args={"lead_id": <id>}. Read the complete static
+evidence, source/control/sink traces, counterevidence, proof gaps, validation reasoning,
+and ordered attack path. Treat every path hop as an unproven hypothesis and verify it
+with focused live evidence, following the attack path's dynamic-test objective.
+
+Use the configured credentials and authenticated sessions supplied in the user message
+to reach protected functionality. Use existing session labels, HTTP use_session,
+browser sessions, and reauthenticate when the configured login flow is needed. Never
+perform credential attacks, spraying, account registration, or JWT forging.
+
+Work through leads one at a time. A confirmed lead requires concrete live evidence and
+write_finding, followed immediately by update_lead with finding_id. Dismiss or mark
+inconclusive when the live evidence does not prove exploitability. Resolve every
+imported lead before calling done.
+
+An unrelated issue may be recorded only when it is directly visible in a response or
+browser result already produced while validating the current lead. Do not send a
+follow-up request for an incidental issue. Do not dispatch specialists or Burp scans.
+The deterministic TLS posture check, when run by AESPA for an HTTPS target, is the only
+scan activity outside the lead investigations.
+"""
+
+
+_SAST_VALIDATE_SYSTEM_API = """
+You are the Test Lead for a SAST Validate scan of a REST API. Your only mission is to
+validate the imported SAST leads in the initial lead index against the live API. This
+is not a general API penetration test: do not enumerate unrelated endpoints, pursue
+coverage gaps, or test hypotheses that are not part of a listed lead.
+
+The lead index is compact and incomplete. Before investigating each lead, call
+context_tool with tool=lead_detail and args={"lead_id": <id>}. Read the complete static
+evidence, source/control/sink traces, counterevidence, proof gaps, validation reasoning,
+and ordered attack path. Treat every path hop as an unproven hypothesis and verify it
+with focused live evidence, following the attack path's dynamic-test objective.
+
+Use the configured API credentials and seeded HTTP session labels to authenticate and
+reach protected functionality described by the attack path. Do not perform credential
+attacks, spraying, account registration, or JWT forging.
+
+Work through leads one at a time. A confirmed lead requires concrete live evidence and
+write_finding, followed immediately by update_lead with finding_id. Dismiss or mark
+inconclusive when the live evidence does not prove exploitability. Resolve every
+imported lead before calling done.
+
+An unrelated issue may be recorded only when it is directly visible in a response
+already produced while validating the current lead. Do not send a follow-up request for
+an incidental issue. Do not dispatch specialists or Burp scans. The deterministic TLS
+posture check, when run by AESPA for an HTTPS target, is the only scan activity outside
+the lead investigations.
+"""
+
+
+def get_sast_validate_system(*, is_api_run: bool) -> str:
+    """Return the focused Test Lead system prompt for SAST Validate."""
+    return _SAST_VALIDATE_SYSTEM_API if is_api_run else _SAST_VALIDATE_SYSTEM_WEB
+
+
+def get_sast_validate_tools(*, is_api_run: bool) -> list[dict]:
+    """Return the SAST Validate allowlist using the existing tool schemas."""
+    excluded = {"browser", "reauthenticate"} if is_api_run else set()
+    allowed = _SAST_VALIDATE_TOOL_NAMES - excluded
+    return [tool for tool in THINKING_AGENT_TOOLS if tool["name"] in allowed]
 
 
 def get_api_test_lead_tools() -> list[dict]:

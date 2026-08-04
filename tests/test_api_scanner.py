@@ -346,7 +346,7 @@ def test_api_test_lead_exposes_only_api_aware_tools():
 
 
 @pytest.mark.parametrize(
-    "tool_name", ["site_map", "page_detail", "lead_list", "auth_matrix"]
+    "tool_name", ["site_map", "page_detail", "auth_matrix"]
 )
 def test_api_context_rejects_non_whitelisted_shared_commands(
     db_engine, collection, api_run, tool_name

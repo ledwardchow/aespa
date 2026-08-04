@@ -302,6 +302,8 @@ class ApiCredentialCreate(BaseModel):
 
 # ── API Test Run schemas ──────────────────────────────────────────────────────
 
+CoverageModeLiteral = Literal["track", "enforce", "sast_validate"]
+
 
 class ApiTestRunCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -309,7 +311,7 @@ class ApiTestRunCreate(BaseModel):
     name: str | None = None  # auto-generated if omitted
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
-    coverage_mode: str = "track"  # track|enforce
+    coverage_mode: CoverageModeLiteral = "track"
 
 
 class ApiTestRunSummary(BaseModel):

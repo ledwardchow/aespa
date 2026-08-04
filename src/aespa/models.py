@@ -242,7 +242,9 @@ class ApiTestRun(SQLModel, table=True):
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     # Per-run model-mixing profile (null = use the globally active profile).
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
-    coverage_mode: str = Field(default="track")  # track|enforce (used in Slice 8)
+    coverage_mode: str = Field(
+        default="track"
+    )  # track (Quick) | enforce (Full) | sast_validate
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
@@ -708,7 +710,7 @@ class TestRun(SQLModel, table=True):
     execution_snapshot_json: Optional[str] = Field(default=None)
     # Compact operational metrics used to compare scanner architecture versions.
     scan_metrics_json: Optional[str] = Field(default=None)
-    # Coverage mode: "track" (observe) or "enforce" (drive every cell to terminal)
+    # Coverage mode: "track" (Quick), "enforce" (Full), or "sast_validate".
     coverage_mode: str = Field(
         default="track",
         sa_column=Column(String, nullable=False, server_default=text("'track'")),

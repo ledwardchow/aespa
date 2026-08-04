@@ -29,6 +29,19 @@ def decode_attack_path(value: str | None) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _decode_structured_json(value: str | None, default: object) -> object:
+    """Decode a persisted structured lead field without failing the context tool."""
+    try:
+        parsed = json.loads(value or json.dumps(default))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return default
+    if isinstance(default, dict) and not isinstance(parsed, dict):
+        return default
+    if isinstance(default, list) and not isinstance(parsed, list):
+        return default
+    return parsed
+
+
 def _prompt_text(value: object, limit: int = 600) -> str:
     """Return bounded, readable text for an agent context block."""
     text = str(value or "").strip()
@@ -403,6 +416,51 @@ def get_all_leads_for_run(target_run_type: str, target_run_id: int) -> list[Scan
         )
 
 
+def get_lead_detail_for_run(
+    target_run_type: str,
+    target_run_id: int,
+    lead_id: int,
+) -> dict | None:
+    """Return complete actionable detail only for a lead owned by this run."""
+    normalized_type = (target_run_type or "").strip().lower()
+    with Session(get_engine(), expire_on_commit=False) as s:
+        lead = s.exec(
+            select(ScanLead)
+            .where(ScanLead.id == lead_id)
+            .where(ScanLead.imported_into_run_type == normalized_type)
+            .where(ScanLead.imported_into_run_id == target_run_id)
+        ).first()
+        if lead is None:
+            return None
+        return {
+            "id": lead.id,
+            "source_sast_run_id": lead.producer_run_id,
+            "source": lead.source,
+            "fingerprint": lead.fingerprint,
+            "category": lead.category,
+            "severity": lead.severity,
+            "confidence": lead.confidence,
+            "title": lead.title,
+            "description": lead.description,
+            "location": lead.location,
+            "status": lead.status or "open",
+            "evidence": lead.evidence,
+            "suggested_endpoint": lead.suggested_endpoint,
+            "source_trace": _decode_structured_json(lead.source_trace_json, {}),
+            "control_trace": _decode_structured_json(lead.control_trace_json, []),
+            "sink_trace": _decode_structured_json(lead.sink_trace_json, {}),
+            "counterevidence": _decode_structured_json(lead.counterevidence_json, []),
+            "proof_gaps": _decode_structured_json(lead.proof_gaps_json, []),
+            "validation_status": lead.validation_status,
+            "validation_reasoning": lead.validation_reasoning,
+            "attack_path": decode_attack_path(lead.attack_path_json),
+            "note": lead.note,
+            "linked_finding_id": lead.linked_finding_id,
+            "imported_into_run_type": lead.imported_into_run_type,
+            "imported_into_run_id": lead.imported_into_run_id,
+        }
+
+
 def _promote_lead_to_finding(
     s: Session,
     lead: ScanLead,
@@ -565,6 +623,7 @@ def update_lead(
     investigated_by_run_type: str | None = None,
     investigated_by_run_id: int | None = None,
     linked_finding_id: int | None = None,
+    link_coverage: bool = True,
 ) -> ScanLead | None:
     """Record the outcome of a dynamic investigation on a lead.
 
@@ -660,7 +719,11 @@ def update_lead(
         s.add(lead)
         # Snapshot the fields the coverage hook needs before the session closes.
         cov_args = None
-        if promoted_id is not None and (run_type or "").lower() != "web":
+        if (
+            link_coverage
+            and promoted_id is not None
+            and (run_type or "").lower() != "web"
+        ):
             cov_args = {
                 "collection_id": lead.collection_id,
                 "run_id": run_id,
@@ -697,6 +760,44 @@ def format_leads_for_run(
     string if no open leads have been imported.
     """
     return _format_leads_block(get_leads_for_run(target_run_type, target_run_id)[:cap])
+
+
+def format_lead_index_for_validation(
+    target_run_type: str,
+    target_run_id: int,
+) -> str:
+    """Render every open imported lead as a compact SAST Validate work list."""
+    leads = get_leads_for_run(target_run_type, target_run_id)
+    if not leads:
+        return ""
+
+    lines = [
+        "=== SAST VALIDATION LEAD INDEX ===",
+        "Every entry below is an unproven static-analysis hypothesis. "
+        "Before investigating a lead, call context_tool with "
+        "tool=lead_detail and args={\"lead_id\": <id>} to retrieve its complete "
+        "evidence, traces, proof gaps, reasoning, and attack path.",
+        "",
+    ]
+    for lead in leads:
+        attack_path = decode_attack_path(lead.attack_path_json)
+        objective = _prompt_text(attack_path.get("dynamic_test"), 240)
+        lines.append(
+            f"[Lead #{lead.id}] [{(lead.severity or 'medium').upper()}] "
+            f"[{int((lead.confidence or 0) * 100)}% confidence] {lead.title}"
+        )
+        lines.append(
+            f"  Category: {lead.category or 'unknown'}  "
+            f"Location: {lead.location or 'unknown'}"
+        )
+        lines.append(f"  Suggested endpoint: {lead.suggested_endpoint or 'none'}")
+        lines.append(f"  Dynamic-test objective: {objective or 'retrieve lead_detail'}")
+        lines.append(
+            f"  Required first action: context_tool(tool=lead_detail, "
+            f"args={{\"lead_id\": {lead.id}}})"
+        )
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _format_leads_block(leads: list[ScanLead]) -> str:

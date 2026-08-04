@@ -438,7 +438,7 @@ export function ApiCollectionDetail({
                 <tr>
                   <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("name")}>Name {sortArrow("name")}</th>
                   <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("status")}>Status {sortArrow("status")}</th>
-                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("coverage_mode")}>Coverage {sortArrow("coverage_mode")}</th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("coverage_mode")}>Scan mode {sortArrow("coverage_mode")}</th>
                   <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("created_at")}>Created {sortArrow("created_at")}</th>
                   <th></th>
                 </tr>
@@ -448,7 +448,7 @@ export function ApiCollectionDetail({
                     fontWeight: 600
                   }}>{r.name}</a></td>
                   <td><StatusBadge status={r.status} /></td>
-                  <td>{r.coverage_mode === "enforce" ? "Full" : "Quick"}</td>
+                  <td>{r.coverage_mode === "enforce" ? "Full" : r.coverage_mode === "sast_validate" ? "SAST Validate" : "Quick"}</td>
                   <td style={{
                   fontSize: 12,
                   color: "var(--muted)"
