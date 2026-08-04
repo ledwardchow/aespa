@@ -514,6 +514,20 @@ class CrawlerConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class ComponentMapperConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for component-mapper budgets."""
+
+    __tablename__ = "component_mapper_config"
+
+    id: Optional[int] = Field(default=1, primary_key=True)
+    max_tool_calls: int = Field(default=120)
+    max_source_files: int = Field(default=500)
+    max_source_bytes: int = Field(default=50 * 1024 * 1024)
+    max_facts: int = Field(default=200)
+    max_concurrent: int = Field(default=4)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class BurpRestApiConfig(SQLModel, table=True):
     """Singleton row (id always = 1) for Burp Suite REST API integration settings."""
 

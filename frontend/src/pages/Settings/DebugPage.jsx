@@ -7,6 +7,8 @@ import { DEFAULT_SITEMAP_GRAVITY, getSitemapGravity, setSitemapGravity } from ".
 export function DebugPage({
   showUsername,
   setShowUsername,
+  showApplications,
+  setShowApplications,
   username,
   reportingDebugCfg,
   setReportingDebugCfg
@@ -226,6 +228,31 @@ export function DebugPage({
         {repSaved && <div className="save-confirm" style={{
           marginTop: 8
         }}><IconCheck /> Saved</div>}
+      </div>
+
+      <div className="card" style={{
+        marginTop: 16
+      }}>
+        <div className="form-section-title">Applications</div>
+        <div className="field-hint" style={{
+          marginBottom: 12
+        }}>
+          Show multi-repository application campaign scanning features under Targets in the sidebar.
+        </div>
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={showApplications ?? false}
+            onChange={e => {
+              const checked = e.target.checked;
+              setShowApplications(checked);
+              try {
+                localStorage.setItem("aespa_show_applications", String(checked));
+              } catch {}
+            }}
+          />
+          <span>Show Applications scanning feature</span>
+        </label>
       </div>
 
       <div className="card" style={{

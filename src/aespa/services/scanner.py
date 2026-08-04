@@ -6450,8 +6450,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         crawl_context = (
             "SAST Validate scope: investigate only the imported leads below. "
             "The lead index is a compact work list; call lead_detail before testing "
-            "each lead. Do not conduct general coverage testing.\n\n"
-            + lead_index
+            "each lead. Do not conduct general coverage testing.\n\n" + lead_index
         )
     else:
         # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
@@ -6539,7 +6538,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                 if _enforce_directive:
                     crawl_context = f"{crawl_context}\n\n{_enforce_directive}"
             except Exception as _ed_exc:
-                log.warning("build_web_enforce_directive failed (non-fatal): %s", _ed_exc)
+                log.warning(
+                    "build_web_enforce_directive failed (non-fatal): %s", _ed_exc
+                )
     _web_post_probe_fn = _make_web_post_probe_fn(run_id)
     _web_post_finding_fn = _make_web_post_finding_fn(run_id)
     _finding_hooks[run_id] = (
@@ -7009,9 +7010,7 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                         unresolved = [
                             lead
-                            for lead in get_all_leads_for_run(
-                                "web", run_id
-                            )
+                            for lead in get_all_leads_for_run("web", run_id)
                             if (lead.status or "open")
                             not in {"confirmed", "dismissed", "inconclusive"}
                         ]
@@ -8847,7 +8846,8 @@ async def _do_agentic_thinking_loop(
             unresolved = [
                 lead
                 for lead in leads
-                if (lead.status or "open") not in {"confirmed", "dismissed", "inconclusive"}
+                if (lead.status or "open")
+                not in {"confirmed", "dismissed", "inconclusive"}
             ]
             if unresolved:
                 first = unresolved[0]
@@ -9114,9 +9114,10 @@ async def _do_agentic_thinking_loop(
                         run_id,
                         int(lead_id),
                     )
-                    if lead_detail is None or (
-                        lead_detail.get("status") or "open"
-                    ) != "open":
+                    if (
+                        lead_detail is None
+                        or (lead_detail.get("status") or "open") != "open"
+                    ):
                         return (
                             f"Lead #{lead_id} is not an open SAST lead available "
                             "for validation."

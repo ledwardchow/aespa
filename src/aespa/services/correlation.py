@@ -800,7 +800,10 @@ async def correlate_campaign_with_llm(
 ) -> dict:
     """Run source mapping, exact correlation, and bounded LLM disambiguation."""
     from aespa.services import component_mapper
-    from aespa.services.settings import get_llm_config_for_role
+    from aespa.services.settings import (
+        get_component_mapper_config,
+        get_llm_config_for_role,
+    )
 
     with Session(get_engine()) as session:
         campaign = session.get(AssessmentCampaign, campaign_id)
@@ -824,7 +827,8 @@ async def correlate_campaign_with_llm(
         has_explicit_mapper_config = (
             campaign.llm_config_id is not None or campaign.llm_profile_id is not None
         )
-        max_parallel = max(1, campaign.max_parallel_sast)
+        mapper_config = get_component_mapper_config(session)
+        max_parallel = mapper_config.max_concurrent
 
     if llm_config is None:
         if not has_explicit_mapper_config:

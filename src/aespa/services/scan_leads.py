@@ -775,7 +775,7 @@ def format_lead_index_for_validation(
         "=== SAST VALIDATION LEAD INDEX ===",
         "Every entry below is an unproven static-analysis hypothesis. "
         "Before investigating a lead, call context_tool with "
-        "tool=lead_detail and args={\"lead_id\": <id>} to retrieve its complete "
+        'tool=lead_detail and args={"lead_id": <id>} to retrieve its complete '
         "evidence, traces, proof gaps, reasoning, and attack path.",
         "",
     ]
@@ -794,7 +794,7 @@ def format_lead_index_for_validation(
         lines.append(f"  Dynamic-test objective: {objective or 'retrieve lead_detail'}")
         lines.append(
             f"  Required first action: context_tool(tool=lead_detail, "
-            f"args={{\"lead_id\": {lead.id}}})"
+            f'args={{"lead_id": {lead.id}}})'
         )
         lines.append("")
     return "\n".join(lines)
