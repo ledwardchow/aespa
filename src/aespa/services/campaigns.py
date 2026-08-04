@@ -449,6 +449,10 @@ async def start_campaign(campaign_id: int) -> None:
 
 async def rebuild_campaign_connections(campaign_id: int) -> dict:
     """Re-map immutable source snapshots without rerunning child scans."""
+    if is_campaign_running(campaign_id):
+        raise InvalidCampaignState(
+            "Cannot rebuild connections while another campaign action is running"
+        )
     with Session(get_engine()) as session:
         campaign = session.get(AssessmentCampaign, campaign_id)
         if campaign is None:

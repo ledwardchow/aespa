@@ -142,6 +142,7 @@ export const api = {
   // fetch→subscribe gap) — prefer it over the plain /events stream.
   getCampaignActivityStreamUrl: (id,cid,cursor) => `/api/applications/${id}/campaigns/${cid}/activity/stream${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
   getCampaignConnections: (id,cid) => req(`/api/applications/${id}/campaigns/${cid}/connections`),
+  rebuildCampaignConnections: (id,cid) => req(`/api/applications/${id}/campaigns/${cid}/connections/rebuild`, { method:"POST" }),
   getCampaignMappings: (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/mappings`),
   reviewCampaignMappings: (id,cid,b) => req(`/api/applications/${id}/campaigns/${cid}/review`, { method:"POST", body:b }),
   continueCampaign:    (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/continue`, { method:"POST" }),

@@ -57,7 +57,8 @@ export function useCampaign(applicationId, campaignId) {
   const retry = useCallback(() => runAction(() => api.retryCampaign(applicationId, campaignId)), [runAction, applicationId, campaignId]);
   const resumeSource = useCallback((memberId) => runAction(() => api.resumeCampaignSource(applicationId, campaignId, memberId)), [runAction, applicationId, campaignId]);
   const resumeTarget = useCallback((memberId) => runAction(() => api.resumeCampaignTarget(applicationId, campaignId, memberId)), [runAction, applicationId, campaignId]);
+  const rebuildConnections = useCallback(() => runAction(() => api.rebuildCampaignConnections(applicationId, campaignId)), [runAction, applicationId, campaignId]);
   const continueToLive = useCallback(() => runAction(() => api.continueCampaign(applicationId, campaignId)), [runAction, applicationId, campaignId]);
 
-  return { campaign, error, setError, busy, load, start, stop, retry, resumeSource, resumeTarget, continueToLive, isActive: campaign ? ACTIVE_STAGES.has(campaign.status) : false };
+  return { campaign, error, setError, busy, load, start, stop, retry, resumeSource, resumeTarget, rebuildConnections, continueToLive, isActive: campaign ? ACTIVE_STAGES.has(campaign.status) : false };
 }
