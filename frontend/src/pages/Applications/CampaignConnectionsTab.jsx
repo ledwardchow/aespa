@@ -13,7 +13,7 @@ const ORIGIN_LABEL = {
 // selecting a connection (in either view) opens a side panel with its
 // confidence, evidence, source facts, and origin type. Handles zero
 // connections and large sets without extra dependencies.
-export function CampaignConnectionsTab({ applicationId, campaignId, campaign }) {
+export function CampaignConnectionsTab({ applicationId, campaignId, campaign, rebuildConnections, busy }) {
   const [connections, setConnections] = useState(null);
   const [components, setComponents] = useState({});
   const [error, setError] = useState(null);
@@ -33,22 +33,40 @@ export function CampaignConnectionsTab({ applicationId, campaignId, campaign }) 
       setComponents(map);
     }).catch(e => !cancelled && setError(e.message));
     return () => { cancelled = true; };
-  }, [applicationId, campaignId]);
+  }, [applicationId, campaignId, campaign?.status, campaign?.updated_at]);
 
   const selected = useMemo(() => (connections || []).find(c => c.id === selectedId) || null, [connections, selectedId]);
+  const canRebuild = ["failed", "interrupted", "awaiting_review", "completed", "stopped"].includes(campaign?.status);
+  const retrying = campaign?.status === "failed" || campaign?.status === "interrupted";
+  const rebuildLabel = retrying ? "Resume context matching" : "Re-run context matching";
+  const matchingControls = <div className="row spread" style={{ marginBottom: 14, gap: 10, flexWrap: "wrap" }}>
+    <div>
+      <div className="form-section-title">Context matching</div>
+      <div className="subtle" style={{ fontSize: 12 }}>
+        {retrying
+          ? "Retry the matching stage without rerunning completed code scans."
+          : "Rebuild the component connection map without rerunning child scans."}
+      </div>
+    </div>
+    {canRebuild && <button className="btn secondary sm" disabled={busy} onClick={rebuildConnections}>
+      {busy ? "Matching context…" : rebuildLabel}
+    </button>}
+  </div>;
 
-  if (error) return <div className="alert error">{error}</div>;
-  if (connections === null) return <div className="subtle">Loading…</div>;
-  if (connections.length === 0) return <EmptyState
-    title="No connections found"
-    sub={campaign?.status === "failed" || campaign?.status === "interrupted"
-      ? "Connection mapping did not complete. Review the campaign activity and error details, then retry the campaign."
-      : "No evidence-backed cross-component connection has been resolved yet. Review campaign activity to see whether mapping is still running or needs attention."} />;
+  if (error) return <>{matchingControls}<div className="alert error">{error}</div></>;
+  if (connections === null) return <>{matchingControls}<div className="subtle">Loading…</div></>;
 
   const name = id => components[id] || `#${id}`;
 
+  if (connections.length === 0) return <>{matchingControls}<EmptyState
+    title="No connections found"
+    sub={campaign?.status === "failed" || campaign?.status === "interrupted"
+      ? "Connection mapping did not complete. Resume context matching to retry it without rerunning completed code scans."
+      : "No evidence-backed cross-component connection has been resolved yet. Review campaign activity to see whether mapping is still running or needs attention."} /></>;
+
   return <div style={{ display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" }}>
     <div style={{ flex: "1 1 480px", minWidth: 320 }}>
+      {matchingControls}
       <div className="row spread" style={{ marginBottom: 10 }}>
         <span className="subtle">{connections.length} connection{connections.length !== 1 ? "s" : ""}</span>
         <div className="row" style={{ gap: 6 }}>

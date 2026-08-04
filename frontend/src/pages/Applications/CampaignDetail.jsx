@@ -26,7 +26,7 @@ const CAMPAIGN_TABS = [
 // shell only owns the campaign record and the actions that mutate its
 // lifecycle, so it never grows into a prop-bag monolith.
 export function CampaignDetail({ applicationId, campaignId, initialTab }) {
-  const { campaign, error, busy, load, start, stop, retry, resumeSource, resumeTarget, continueToLive, isActive } = useCampaign(applicationId, campaignId);
+  const { campaign, error, busy, load, start, stop, retry, resumeSource, resumeTarget, rebuildConnections, continueToLive, isActive } = useCampaign(applicationId, campaignId);
   const tab = initialTab || "overview";
 
   if (!campaign) {
@@ -58,7 +58,7 @@ export function CampaignDetail({ applicationId, campaignId, initialTab }) {
       {error && <div className="alert error" style={{ marginBottom: 16 }}>{error}</div>}
       {tab === "overview" && <CampaignOverviewTab applicationId={applicationId} campaignId={campaignId} campaign={campaign} resumeSource={resumeSource} resumeTarget={resumeTarget} busy={busy} />}
       {tab === "components" && <CampaignComponentsTab applicationId={applicationId} campaign={campaign} />}
-      {tab === "connections" && <CampaignConnectionsTab applicationId={applicationId} campaignId={campaignId} campaign={campaign} />}
+      {tab === "connections" && <CampaignConnectionsTab applicationId={applicationId} campaignId={campaignId} campaign={campaign} rebuildConnections={rebuildConnections} busy={busy} />}
       {tab === "review" && <CampaignReviewTab applicationId={applicationId} campaignId={campaignId} campaign={campaign} onSubmitted={load} canContinue={canContinue} continueToLive={continueToLive} continueBusy={busy} />}
       {tab === "runs" && <CampaignRunsTab applicationId={applicationId} campaign={campaign} resumeSource={resumeSource} resumeTarget={resumeTarget} busy={busy} />}
       {tab === "findings" && <CampaignFindingsTab applicationId={applicationId} campaignId={campaignId} />}
