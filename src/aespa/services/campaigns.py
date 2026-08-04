@@ -49,6 +49,10 @@ _UTC = timezone.utc
 # Background orchestrator tasks + cooperative stop flags, keyed by campaign_id
 # — mirrors the pattern used by crawler.py / scanner.py / sast_scanner.py.
 _campaign_tasks: dict[int, asyncio.Task] = {}
+# Independent member retries are tracked separately from the campaign
+# orchestrator so a single failed child can be retried without restarting the
+# stage (or any completed sibling).
+_campaign_member_tasks: dict[tuple[int, str, int], asyncio.Task] = {}
 _campaign_stop_requested: set[int] = set()
 
 _ACTIVE_STATUSES = ("sast_running", "correlating", "dast_running")
@@ -196,7 +200,12 @@ def delete_campaign(session: Session, application_id: int, campaign_id: int) -> 
 
 def is_campaign_running(campaign_id: int) -> bool:
     task = _campaign_tasks.get(campaign_id)
-    return task is not None and not task.done()
+    if task is not None and not task.done():
+        return True
+    return any(
+        key[0] == campaign_id and not task.done()
+        for key, task in _campaign_member_tasks.items()
+    )
 
 
 def get_campaign_progress(session: Session, campaign_id: int) -> dict:
@@ -596,6 +605,409 @@ async def _run_sast_stage(campaign_id: int) -> None:
     _append_campaign_warnings(campaign_id, warnings)
 
 
+async def _resume_source_member_task(
+    campaign_id: int, member_id: int, sast_run_id: int
+) -> None:
+    from aespa.services import sast_scanner as sast_scanner_svc
+
+    try:
+        if campaign_id in _campaign_stop_requested:
+            _update_source_member_status(member_id, "skipped")
+            return
+        await sast_scanner_svc.run_sast_scan(sast_run_id)
+        with Session(get_engine()) as s:
+            member = s.get(CampaignSourceMember, member_id)
+            run = s.get(SastRun, sast_run_id)
+            if member is None:
+                return
+            if campaign_id in _campaign_stop_requested:
+                member.status = "skipped"
+            else:
+                member.status = (
+                    "completed"
+                    if run is not None and run.status == "completed"
+                    else "failed"
+                )
+            member.updated_at = _utcnow()
+            s.add(member)
+            s.commit()
+            completed = member.status == "completed"
+        if not completed:
+            _append_campaign_warnings(
+                campaign_id,
+                [
+                    "A resumed source-code scan did not finish successfully — "
+                    "matches involving that component may be incomplete."
+                ],
+            )
+    except asyncio.CancelledError:
+        with Session(get_engine()) as s:
+            member = s.get(CampaignSourceMember, member_id)
+            if member is not None and member.status == "running":
+                member.status = "skipped"
+                member.updated_at = _utcnow()
+                s.add(member)
+                s.commit()
+        raise
+    except Exception as exc:  # noqa: BLE001 — isolate one child retry
+        log.exception(
+            "Campaign %s source member %s resume failed", campaign_id, member_id
+        )
+        _update_source_member_status(member_id, "failed")
+        _append_campaign_warnings(
+            campaign_id, [f"A resumed source-code scan failed to run: {exc}"]
+        )
+    finally:
+        _campaign_member_tasks.pop((campaign_id, "source", member_id), None)
+
+
+async def resume_source_member(campaign_id: int, member_id: int) -> None:
+    """Retry one failed/pending campaign SAST child without touching siblings."""
+    from aespa.services import sast_scanner as sast_scanner_svc
+
+    key = (campaign_id, "source", member_id)
+    if key in _campaign_member_tasks and not _campaign_member_tasks[key].done():
+        return
+    with Session(get_engine()) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        if campaign is None:
+            raise CampaignNotFound(f"Campaign id={campaign_id} does not exist")
+        if campaign.status in _ACTIVE_STATUSES or is_campaign_running(campaign_id):
+            raise InvalidCampaignState(
+                "Wait for the campaign's current stage to finish before resuming "
+                "an individual action"
+            )
+        member = s.get(CampaignSourceMember, member_id)
+        if member is None or member.campaign_id != campaign_id:
+            raise CampaignNotFound(
+                f"Source member id={member_id} does not belong to this campaign"
+            )
+        if member.sast_run_id is None:
+            snapshot = s.get(ComponentSnapshot, member.snapshot_id)
+            component = s.get(ApplicationComponent, member.component_id)
+            if snapshot is None or component is None:
+                raise InvalidCampaignState(
+                    "This source member no longer has a valid component snapshot"
+                )
+            run = SastRun(
+                name=f"{component.name} — {campaign.name}",
+                source_archive_path=snapshot.stored_path,
+                source_filename=snapshot.filename,
+                llm_config_id=campaign.llm_config_id,
+                llm_profile_id=campaign.llm_profile_id,
+                triggered_by_run_type="campaign",
+                triggered_by_run_id=campaign_id,
+                status="pending",
+            )
+            s.add(run)
+            s.flush()
+            member.sast_run_id = run.id
+        if member.status == "completed":
+            raise InvalidCampaignState("This source-code scan is already completed")
+        if sast_scanner_svc.is_sast_scan_running(member.sast_run_id):
+            raise InvalidCampaignState("This source-code scan is already running")
+        member.status = "running"
+        member.updated_at = _utcnow()
+        campaign.updated_at = _utcnow()
+        s.add(member)
+        s.add(campaign)
+        s.commit()
+        sast_run_id = member.sast_run_id
+
+    with events_svc.run_kind_scope("campaign"):
+        task = asyncio.create_task(
+            _resume_source_member_task(campaign_id, member_id, sast_run_id),
+            name=f"campaign-{campaign_id}-source-{member_id}",
+        )
+    _campaign_member_tasks[key] = task
+
+
+async def _execute_target_member(
+    campaign_id: int,
+    member_id: int,
+    target_type: str,
+    target_id: int,
+    test_run_id: int | None,
+    api_test_run_id: int | None,
+) -> tuple[bool, str | None]:
+    """Run one target child and return (completed, warning)."""
+    from aespa.services import api_scanner as api_scanner_svc
+    from aespa.services import crawler as crawler_svc
+    from aespa.services import scanner as scanner_svc
+
+    if campaign_id in _campaign_stop_requested:
+        _update_target_member_status(member_id, "skipped")
+        return False, None
+    with Session(get_engine()) as s:
+        member = s.get(CampaignTargetMember, member_id)
+        already_terminal = member is not None and member.status in (
+            "completed",
+            "failed",
+        )
+    if already_terminal:
+        return member.status == "completed", None
+    _update_target_member_status(member_id, "running")
+    try:
+        if target_type == "site":
+            if test_run_id is None:
+                raise ValueError("Web target has no child test run")
+            await crawler_svc.start_crawl(test_run_id)
+            while crawler_svc.is_running(test_run_id):
+                if campaign_id in _campaign_stop_requested:
+                    return False, None
+                await asyncio.sleep(1.0)
+            if campaign_id in _campaign_stop_requested:
+                return False, None
+            with Session(get_engine()) as s:
+                run = s.get(TestRun, test_run_id)
+                crawl_ok = run is not None and run.phase == "crawled"
+            if not crawl_ok:
+                warning = (
+                    "A web target's crawl did not finish — its dynamic scan was "
+                    "skipped."
+                )
+                _update_target_member_status(member_id, "failed")
+                return False, warning
+            correlation_svc.copy_explicit_component_leads_for_target(
+                campaign_id, target_id, "web", test_run_id
+            )
+            correlation_svc.copy_approved_mappings_for_target(
+                campaign_id, target_id, "web", test_run_id
+            )
+            await scanner_svc.start_thinking_scan(test_run_id)
+            while scanner_svc.is_thinking_running(test_run_id):
+                if campaign_id in _campaign_stop_requested:
+                    return False, None
+                await asyncio.sleep(1.0)
+            if campaign_id in _campaign_stop_requested:
+                return False, None
+            with Session(get_engine()) as s:
+                run = s.get(TestRun, test_run_id)
+                scan_ok = run is not None and run.status == "complete"
+            if scan_ok:
+                _update_target_member_status(member_id, "completed")
+                return True, None
+            warning = (
+                "A web target's dynamic scan did not finish successfully — its "
+                "results may be incomplete."
+            )
+            _update_target_member_status(member_id, "failed")
+            return False, warning
+
+        if api_test_run_id is None:
+            raise ValueError("API target has no child test run")
+        correlation_svc.copy_explicit_component_leads_for_target(
+            campaign_id, target_id, "api", api_test_run_id
+        )
+        correlation_svc.copy_approved_mappings_for_target(
+            campaign_id, target_id, "api", api_test_run_id
+        )
+        await api_scanner_svc.start_api_scan(api_test_run_id)
+        while api_scanner_svc.is_api_scan_running(api_test_run_id):
+            if campaign_id in _campaign_stop_requested:
+                return False, None
+            await asyncio.sleep(1.0)
+        if campaign_id in _campaign_stop_requested:
+            return False, None
+        with Session(get_engine()) as s:
+            run = s.get(ApiTestRun, api_test_run_id)
+            scan_ok = run is not None and run.status == "completed"
+        if scan_ok:
+            _update_target_member_status(member_id, "completed")
+            return True, None
+        warning = (
+            "An API target's dynamic scan did not finish successfully — its "
+            "results may be incomplete."
+        )
+        _update_target_member_status(member_id, "failed")
+        return False, warning
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — isolate one target
+        _update_target_member_status(member_id, "failed")
+        return False, f"A live-target scan failed: {exc}"
+
+
+async def _resume_target_member_task(
+    campaign_id: int,
+    member_id: int,
+    target_type: str,
+    target_id: int,
+    test_run_id: int | None,
+    api_test_run_id: int | None,
+) -> None:
+    try:
+        completed, warning = await _execute_target_member(
+            campaign_id,
+            member_id,
+            target_type,
+            target_id,
+            test_run_id,
+            api_test_run_id,
+        )
+        if warning:
+            _append_campaign_warnings(campaign_id, [warning])
+        if completed:
+            with Session(get_engine()) as s:
+                campaign = s.get(AssessmentCampaign, campaign_id)
+                if (
+                    campaign is not None
+                    and campaign.status == "failed"
+                    and campaign.error_message
+                    == "No live target completed its dynamic scan."
+                ):
+                    campaign.status = "completed"
+                    campaign.error_message = None
+                    campaign.completed_at = _utcnow()
+                    campaign.updated_at = _utcnow()
+                    s.add(campaign)
+                    s.commit()
+        if not completed and campaign_id in _campaign_stop_requested:
+            _update_target_member_status(member_id, "skipped")
+    except asyncio.CancelledError:
+        with Session(get_engine()) as s:
+            member = s.get(CampaignTargetMember, member_id)
+            if member is not None and member.status == "running":
+                member.status = "skipped"
+                member.updated_at = _utcnow()
+                s.add(member)
+                s.commit()
+        raise
+    finally:
+        _campaign_member_tasks.pop((campaign_id, "target", member_id), None)
+
+
+async def resume_target_member(campaign_id: int, member_id: int) -> None:
+    """Retry one failed/pending campaign target child without touching siblings."""
+    from aespa.services import api_scanner as api_scanner_svc
+    from aespa.services import crawler as crawler_svc
+    from aespa.services import scanner as scanner_svc
+
+    key = (campaign_id, "target", member_id)
+    if key in _campaign_member_tasks and not _campaign_member_tasks[key].done():
+        return
+    with Session(get_engine()) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        if campaign is None:
+            raise CampaignNotFound(f"Campaign id={campaign_id} does not exist")
+        if campaign.status in _ACTIVE_STATUSES or is_campaign_running(campaign_id):
+            raise InvalidCampaignState(
+                "Wait for the campaign's current stage to finish before resuming "
+                "an individual action"
+            )
+        member = s.get(CampaignTargetMember, member_id)
+        if member is None or member.campaign_id != campaign_id:
+            raise CampaignNotFound(
+                f"Target member id={member_id} does not belong to this campaign"
+            )
+        if member.status == "completed":
+            raise InvalidCampaignState("This target scan is already completed")
+        target = s.get(ApplicationTarget, member.target_id)
+        if target is None:
+            raise InvalidCampaignState("This target no longer exists")
+        if member.target_type == "site":
+            if member.test_run_id is None:
+                site = s.get(Site, target.target_id)
+                if site is None:
+                    raise InvalidCampaignState("This site target no longer exists")
+                run = TestRun(
+                    site_id=target.target_id,
+                    name=f"{site.name} — {campaign.name}",
+                    llm_config_id=campaign.llm_config_id,
+                    llm_profile_id=campaign.llm_profile_id,
+                )
+                s.add(run)
+                s.flush()
+                member.test_run_id = run.id
+            if member.test_run_id is None:
+                raise InvalidCampaignState("This web target has no run to resume")
+            if crawler_svc.is_running(
+                member.test_run_id
+            ) or scanner_svc.is_thinking_running(member.test_run_id):
+                raise InvalidCampaignState("This web target scan is already running")
+        else:
+            if member.api_test_run_id is None:
+                collection = s.get(ApiCollection, target.target_id)
+                if collection is None:
+                    raise InvalidCampaignState("This API target no longer exists")
+                run = ApiTestRun(
+                    collection_id=target.target_id,
+                    name=f"{collection.name} — {campaign.name}",
+                    llm_config_id=campaign.llm_config_id,
+                    llm_profile_id=campaign.llm_profile_id,
+                )
+                s.add(run)
+                s.flush()
+                member.api_test_run_id = run.id
+            if member.api_test_run_id is None:
+                raise InvalidCampaignState("This API target has no run to resume")
+            if api_scanner_svc.is_api_scan_running(member.api_test_run_id):
+                raise InvalidCampaignState("This API target scan is already running")
+        member.status = "running"
+        member.updated_at = _utcnow()
+        campaign.updated_at = _utcnow()
+        s.add(member)
+        s.add(campaign)
+        s.commit()
+        target_ref = (
+            member.id,
+            member.target_type,
+            member.target_id,
+            member.test_run_id,
+            member.api_test_run_id,
+        )
+
+    with events_svc.run_kind_scope("campaign"):
+        task = asyncio.create_task(
+            _resume_target_member_task(campaign_id, *target_ref),
+            name=f"campaign-{campaign_id}-target-{member_id}",
+        )
+    _campaign_member_tasks[key] = task
+
+
+async def stop_member_tasks_for_run(run_kind: str, run_id: int) -> None:
+    """Cancel any independent campaign retry currently using a child run."""
+    with Session(get_engine()) as s:
+        if run_kind == "sast":
+            member_ids = set(
+                s.exec(
+                    select(CampaignSourceMember.id).where(
+                        CampaignSourceMember.sast_run_id == run_id
+                    )
+                ).all()
+            )
+        elif run_kind == "web":
+            member_ids = set(
+                s.exec(
+                    select(CampaignTargetMember.id).where(
+                        CampaignTargetMember.test_run_id == run_id
+                    )
+                ).all()
+            )
+        elif run_kind == "api":
+            member_ids = set(
+                s.exec(
+                    select(CampaignTargetMember.id).where(
+                        CampaignTargetMember.api_test_run_id == run_id
+                    )
+                ).all()
+            )
+        else:
+            raise ValueError(f"Unknown run_kind: {run_kind!r}")
+
+    member_tasks = [
+        task
+        for (campaign_id, task_kind, member_id), task in _campaign_member_tasks.items()
+        if task_kind in ({"sast"} if run_kind == "sast" else {"target"})
+        and member_id in member_ids
+        and not task.done()
+    ]
+    for task in member_tasks:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+
+
 async def stop_campaign(campaign_id: int) -> bool:
     """Cancel the orchestrator and propagate the stop to every active child.
 
@@ -638,6 +1050,15 @@ async def stop_campaign(campaign_id: int) -> bool:
             member.api_test_run_id
         ):
             await api_scanner_svc.stop_api_scan_and_wait(member.api_test_run_id)
+
+    member_tasks = [
+        task
+        for (task_campaign_id, _, _), task in _campaign_member_tasks.items()
+        if task_campaign_id == campaign_id and not task.done()
+    ]
+    for member_task in member_tasks:
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(member_task), timeout=10.0)
 
     task = _campaign_tasks.get(campaign_id)
     if task is not None and not task.done():
@@ -767,10 +1188,6 @@ async def _run_dast_stage(campaign_id: int) -> bool:
     successful terminal state — the caller uses this to decide whether the
     campaign may report "completed" rather than "failed".
     """
-    from aespa.services import api_scanner as api_scanner_svc
-    from aespa.services import crawler as crawler_svc
-    from aespa.services import scanner as scanner_svc
-
     with Session(get_engine()) as s:
         campaign = s.get(AssessmentCampaign, campaign_id)
         members = s.exec(
@@ -830,94 +1247,18 @@ async def _run_dast_stage(campaign_id: int) -> bool:
         test_run_id: int | None,
         api_test_run_id: int | None,
     ) -> None:
-        if campaign_id in _campaign_stop_requested:
-            _update_target_member_status(member_id, "skipped")
-            return
-        with Session(get_engine()) as s:
-            member = s.get(CampaignTargetMember, member_id)
-            already_terminal = member is not None and member.status in (
-                "completed",
-                "failed",
-            )
-        if already_terminal:
-            # Retry resumes only targets still in flight at interruption —
-            # an already-finished target is never rerun or duplicated.
-            completed_flags[member_id] = member.status == "completed"
-            return
-        _update_target_member_status(member_id, "running")
-        try:
-            if target_type == "site":
-                await crawler_svc.start_crawl(test_run_id)
-                while crawler_svc.is_running(test_run_id):
-                    if campaign_id in _campaign_stop_requested:
-                        return
-                    await asyncio.sleep(1.0)
-                with Session(get_engine()) as s:
-                    run = s.get(TestRun, test_run_id)
-                    crawl_ok = run is not None and run.phase == "crawled"
-                if not crawl_ok:
-                    warnings.append(
-                        "A web target's crawl did not finish — its dynamic "
-                        "scan was skipped."
-                    )
-                    _update_target_member_status(member_id, "failed")
-                    return
-                correlation_svc.copy_explicit_component_leads_for_target(
-                    campaign_id, target_id, "web", test_run_id
-                )
-                correlation_svc.copy_approved_mappings_for_target(
-                    campaign_id, target_id, "web", test_run_id
-                )
-                await scanner_svc.start_thinking_scan(test_run_id)
-                while scanner_svc.is_thinking_running(test_run_id):
-                    if campaign_id in _campaign_stop_requested:
-                        return
-                    await asyncio.sleep(1.0)
-                # Reload the run and require its own terminal success status
-                # before reporting this member "completed" — the wait loop
-                # only tells us the task exited, not that it finished well.
-                with Session(get_engine()) as s:
-                    run = s.get(TestRun, test_run_id)
-                    scan_ok = run is not None and run.status == "complete"
-                if scan_ok:
-                    _update_target_member_status(member_id, "completed")
-                    completed_flags[member_id] = True
-                else:
-                    warnings.append(
-                        "A web target's dynamic scan did not finish "
-                        "successfully — its results may be incomplete."
-                    )
-                    _update_target_member_status(member_id, "failed")
-            else:
-                correlation_svc.copy_explicit_component_leads_for_target(
-                    campaign_id, target_id, "api", api_test_run_id
-                )
-                correlation_svc.copy_approved_mappings_for_target(
-                    campaign_id, target_id, "api", api_test_run_id
-                )
-                await api_scanner_svc.start_api_scan(api_test_run_id)
-                while api_scanner_svc.is_api_scan_running(api_test_run_id):
-                    if campaign_id in _campaign_stop_requested:
-                        return
-                    await asyncio.sleep(1.0)
-                # Same terminal-status check for the API scan.
-                with Session(get_engine()) as s:
-                    run = s.get(ApiTestRun, api_test_run_id)
-                    scan_ok = run is not None and run.status == "completed"
-                if scan_ok:
-                    _update_target_member_status(member_id, "completed")
-                    completed_flags[member_id] = True
-                else:
-                    warnings.append(
-                        "An API target's dynamic scan did not finish "
-                        "successfully — its results may be incomplete."
-                    )
-                    _update_target_member_status(member_id, "failed")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — isolate one target's failure
-            warnings.append(f"A live-target scan failed: {exc}")
-            _update_target_member_status(member_id, "failed")
+        completed, warning = await _execute_target_member(
+            campaign_id,
+            member_id,
+            target_type,
+            target_id,
+            test_run_id,
+            api_test_run_id,
+        )
+        if completed:
+            completed_flags[member_id] = True
+        if warning:
+            warnings.append(warning)
 
     await asyncio.gather(*(_run_target(*ref) for ref in prepared))
     _append_campaign_warnings(campaign_id, warnings)

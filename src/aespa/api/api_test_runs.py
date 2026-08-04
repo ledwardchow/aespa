@@ -63,19 +63,6 @@ def _get_run_or_404(session: Session, run_id: int) -> ApiTestRun:
     return run
 
 
-def _reject_if_campaign_owned(session: Session, run_id: int) -> None:
-    """Single reusable guard: 409 any mutation of a campaign-owned API run.
-
-    Read-only endpoints (detail/log/status reads) never call this.
-    """
-    try:
-        run_cleanup.assert_run_not_campaign_owned(session, "api", run_id)
-    except run_cleanup.ChildRunOwnedByCampaign as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
-
-
 def _to_summary(run: ApiTestRun) -> ApiTestRunSummary:
     return ApiTestRunSummary.model_validate(run)
 
@@ -91,9 +78,17 @@ def get_api_test_run(
 
 
 @router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_api_test_run(run_id: int, session: Session = Depends(get_session)) -> None:
+async def delete_api_test_run(
+    run_id: int, session: Session = Depends(get_session)
+) -> None:
     _get_run_or_404(session, run_id)
-    _reject_if_campaign_owned(session, run_id)
+    from aespa.services import api_scanner
+    from aespa.services import campaigns as campaigns_svc
+
+    await campaigns_svc.stop_member_tasks_for_run("api", run_id)
+    if api_scanner.is_api_scan_running(run_id):
+        await api_scanner.stop_api_scan_and_wait(run_id)
+    await alice_tasks.stop(run_id, run_type="api")
     run_cleanup.cascade_delete_api_run(session, run_id)
     session.commit()
 
@@ -383,7 +378,6 @@ async def start_api_scan(
     session: Session = Depends(get_session),
 ) -> dict:
     run = _get_run_or_404(session, run_id)
-    _reject_if_campaign_owned(session, run_id)
     # Allow the scan-start control to override the run's coverage mode.
     if body and body.coverage_mode is not None:
         run.coverage_mode = body.coverage_mode
@@ -407,7 +401,6 @@ async def start_api_scan(
 @router.post("/{run_id}/scan/stop")
 async def stop_api_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
     _get_run_or_404(session, run_id)
-    _reject_if_campaign_owned(session, run_id)
     from aespa.services import api_scanner
 
     stopped = await api_scanner.stop_api_scan(run_id)

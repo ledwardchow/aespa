@@ -1,7 +1,8 @@
-"""Standalone mutation endpoints must refuse unsafe changes to campaign-owned
-runs while allowing explicit SAST lead handoff/import operations. Lifecycle,
-settings, scan-control, and destructive run mutations remain guarded; the
-lead-copy exceptions are covered here alongside read-only endpoint checks.
+"""Campaign child runs remain usable through their ordinary run endpoints.
+
+Campaign lead handoff/import operations and read-only endpoint behavior remain
+covered here alongside lifecycle, settings, scan-control, and destructive
+mutations.
 """
 
 from __future__ import annotations
@@ -182,20 +183,19 @@ def test_sast_profile_update_blocked_for_campaign_owned_run(client, isolated_db_
     resp = client.patch(
         f"/api/sast-runs/{ctx['sast_run_id']}", json={"llm_profile_id": None}
     )
-    assert resp.status_code == 409
-    assert "campaign" in resp.json()["detail"].lower()
+    assert "campaign" not in resp.json().get("detail", "").lower()
 
 
 def test_sast_scan_start_blocked_for_campaign_owned_run(client, isolated_db_engine):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/sast-runs/{ctx['sast_run_id']}/scan/start")
-    assert resp.status_code == 409
+    assert "campaign" not in resp.json().get("detail", "").lower()
 
 
 def test_sast_scan_stop_blocked_for_campaign_owned_run(client, isolated_db_engine):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/sast-runs/{ctx['sast_run_id']}/scan/stop")
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 def test_sast_lead_handoff_allowed_for_campaign_owned_source(
@@ -242,11 +242,11 @@ def test_clear_and_delete_api_run_leads_blocked_for_campaign_owned_run(
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     assert (
         client.delete(f"/api/api-test-runs/{ctx['api_run_id']}/leads").status_code
-        == 409
+        != 409
     )
     assert (
         client.delete(f"/api/api-test-runs/{ctx['api_run_id']}/leads/1").status_code
-        == 409
+        != 409
     )
 
 
@@ -259,25 +259,25 @@ def test_web_settings_update_blocked_for_campaign_owned_run(client, isolated_db_
         f"/api/test-runs/{ctx['web_run_id']}",
         json={"max_depth": 3, "max_pages": 50},
     )
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 def test_web_start_blocked_for_campaign_owned_run(client, isolated_db_engine):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/start")
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 def test_web_restart_blocked_for_campaign_owned_run(client, isolated_db_engine):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/restart")
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 def test_web_crawl_clear_blocked_for_campaign_owned_run(client, isolated_db_engine):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/crawl/clear")
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 def test_web_crawl_import_blocked_for_campaign_owned_run(client, isolated_db_engine):
@@ -286,13 +286,13 @@ def test_web_crawl_import_blocked_for_campaign_owned_run(client, isolated_db_eng
         f"/api/test-runs/{ctx['web_run_id']}/crawl/import",
         files={"file": ("crawl.json", b"{}", "application/json")},
     )
-    assert resp.status_code == 409
+    assert "campaign" not in resp.json().get("detail", "").lower()
 
 
 def test_web_stop_blocked_for_campaign_owned_run(client, isolated_db_engine):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/stop")
-    assert resp.status_code == 409
+    assert "campaign" not in resp.json().get("detail", "").lower()
 
 
 def test_web_import_leads_allowed_for_campaign_owned_target(client, isolated_db_engine):
@@ -323,9 +323,9 @@ def test_clear_and_delete_web_run_leads_blocked_for_campaign_owned_run(
     client, isolated_db_engine
 ):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    assert client.delete(f"/api/test-runs/{ctx['web_run_id']}/leads").status_code == 409
+    assert client.delete(f"/api/test-runs/{ctx['web_run_id']}/leads").status_code != 409
     assert (
-        client.delete(f"/api/test-runs/{ctx['web_run_id']}/leads/1").status_code == 409
+        client.delete(f"/api/test-runs/{ctx['web_run_id']}/leads/1").status_code != 409
     )
 
 
@@ -335,13 +335,13 @@ def test_clear_and_delete_web_run_leads_blocked_for_campaign_owned_run(
 def test_thinking_scan_start_blocked_for_campaign_owned_run(client, isolated_db_engine):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/thinking-scan/start")
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 def test_thinking_scan_stop_blocked_for_campaign_owned_run(client, isolated_db_engine):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/thinking-scan/stop")
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 def test_thinking_scan_resume_blocked_for_campaign_owned_run(
@@ -349,7 +349,7 @@ def test_thinking_scan_resume_blocked_for_campaign_owned_run(
 ):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/thinking-scan/resume")
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 def test_focused_page_scan_blocked_for_campaign_owned_run(client, isolated_db_engine):
@@ -357,7 +357,7 @@ def test_focused_page_scan_blocked_for_campaign_owned_run(client, isolated_db_en
     resp = client.post(
         f"/api/test-runs/{ctx['web_run_id']}/pages/{ctx['web_page_id']}/test"
     )
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 def test_finding_mutations_blocked_for_campaign_owned_run(client, isolated_db_engine):
@@ -367,16 +367,16 @@ def test_finding_mutations_blocked_for_campaign_owned_run(client, isolated_db_en
 
     assert (
         client.delete(f"/api/test-runs/{web_run_id}/findings/{finding_id}").status_code
-        == 409
+        != 409
     )
     assert (
         client.patch(
             f"/api/test-runs/{web_run_id}/findings/{finding_id}",
             json={"severity": "low"},
         ).status_code
-        == 409
+        != 409
     )
-    assert client.delete(f"/api/test-runs/{web_run_id}/findings").status_code == 409
+    assert client.delete(f"/api/test-runs/{web_run_id}/findings").status_code != 409
     assert (
         client.post(
             f"/api/test-runs/{web_run_id}/findings/import",
@@ -389,7 +389,7 @@ def test_finding_mutations_blocked_for_campaign_owned_run(client, isolated_db_en
                 }
             ],
         ).status_code
-        == 409
+        != 409
     )
 
 
@@ -400,13 +400,13 @@ def test_validation_endpoints_blocked_for_campaign_owned_run(
     web_run_id = ctx["web_run_id"]
     finding_id = ctx["web_finding_id"]
 
-    assert client.post(f"/api/test-runs/{web_run_id}/validate").status_code == 409
-    assert client.post(f"/api/test-runs/{web_run_id}/validate/stop").status_code == 409
+    assert client.post(f"/api/test-runs/{web_run_id}/validate").status_code != 409
+    assert client.post(f"/api/test-runs/{web_run_id}/validate/stop").status_code != 409
     assert (
         client.post(
             f"/api/test-runs/{web_run_id}/findings/{finding_id}/validate"
         ).status_code
-        == 409
+        != 409
     )
 
 
@@ -414,8 +414,8 @@ def test_log_clearing_blocked_for_campaign_owned_run(client, isolated_db_engine)
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     web_run_id = ctx["web_run_id"]
 
-    assert client.delete(f"/api/test-runs/{web_run_id}/scan-log").status_code == 409
-    assert client.delete(f"/api/test-runs/{web_run_id}/agent-log").status_code == 409
+    assert client.delete(f"/api/test-runs/{web_run_id}/scan-log").status_code != 409
+    assert client.delete(f"/api/test-runs/{web_run_id}/agent-log").status_code != 409
 
 
 # ── API mutation endpoints ───────────────────────────────────────────────────
@@ -424,13 +424,13 @@ def test_log_clearing_blocked_for_campaign_owned_run(client, isolated_db_engine)
 def test_api_scan_start_blocked_for_campaign_owned_run(client, isolated_db_engine):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/api-test-runs/{ctx['api_run_id']}/scan/start")
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 def test_api_scan_stop_blocked_for_campaign_owned_run(client, isolated_db_engine):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
     resp = client.post(f"/api/api-test-runs/{ctx['api_run_id']}/scan/stop")
-    assert resp.status_code == 409
+    assert resp.status_code != 409
 
 
 # ── Read-only endpoints must still work for a campaign-owned run ────────────
