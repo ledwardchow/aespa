@@ -64,18 +64,15 @@ export function CampaignOverviewTab({ applicationId, campaign, resumeSource, res
   const resumable = status => ["pending", "failed", "skipped"].includes(status);
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div className="campaign-token-usage">
+      <TokenUsageBar tokenUsage={tokenUsage} tokenExpanded={tokenExpanded} setTokenExpanded={setTokenExpanded} />
+    </div>
+
     {campaign.error_message && <div className="alert error">{campaign.error_message}</div>}
     {warnings.length > 0 && <div className="alert warning">
       <div style={{ fontWeight: 700, marginBottom: 4 }}>Partial-context warnings</div>
       <ul style={{ margin: 0, paddingLeft: 18 }}>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
     </div>}
-    <div className="alert info">
-      To recover one action only, use the <strong>Resume SAST</strong>, <strong>Resume web</strong>, or <strong>Resume API</strong> button at the right of its row below. The same buttons are in the <strong>Runs</strong> tab.
-    </div>
-
-    <div className="campaign-token-usage">
-      <TokenUsageBar tokenUsage={tokenUsage} tokenExpanded={tokenExpanded} setTokenExpanded={setTokenExpanded} />
-    </div>
 
     <div>
       <div className="form-section-title">Code scans</div>
