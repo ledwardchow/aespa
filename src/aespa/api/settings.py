@@ -15,6 +15,8 @@ from aespa.schemas import (
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
+    ComponentMapperConfigIn,
+    ComponentMapperConfigOut,
     CrawlerConfigIn,
     CrawlerConfigOut,
     GlobalHttpHeaderConfigIn,
@@ -308,6 +310,21 @@ async def upsert_crawler_config(
     for run_id in list(crawler_svc._active_shared):
         await crawler_svc.notify_limit_change(run_id)
     return result
+
+
+@router.get("/component-mapper-config", response_model=ComponentMapperConfigOut)
+def get_component_mapper_config(
+    session: Session = Depends(get_session),
+) -> ComponentMapperConfigOut:
+    return settings_service.get_component_mapper_config(session)
+
+
+@router.put("/component-mapper-config", response_model=ComponentMapperConfigOut)
+def upsert_component_mapper_config(
+    payload: ComponentMapperConfigIn,
+    session: Session = Depends(get_session),
+) -> ComponentMapperConfigOut:
+    return settings_service.upsert_component_mapper_config(session, payload)
 
 
 @router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)

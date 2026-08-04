@@ -1144,7 +1144,8 @@ def _build_api_crawl_context(
             ep_summary.append(f"  … and {len(endpoints) - 80} more (use endpoint_list)")
         if ep_summary:
             lines.append(
-                f"In-scope endpoints ({len(endpoints)} total):\n" + "\n".join(ep_summary)
+                f"In-scope endpoints ({len(endpoints)} total):\n"
+                + "\n".join(ep_summary)
             )
 
     try:

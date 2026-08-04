@@ -816,6 +816,28 @@ class CrawlerConfigOut(CrawlerConfigBase):
     updated_at: datetime
 
 
+class ComponentMapperConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    max_tool_calls: int = Field(default=120, ge=1, le=1000)
+    max_source_files: int = Field(default=500, ge=1, le=10000)
+    max_source_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        ge=1 * 1024 * 1024,
+        le=250 * 1024 * 1024,
+    )
+    max_facts: int = Field(default=200, ge=1, le=1000)
+    max_concurrent: int = Field(default=4, ge=1, le=32)
+
+
+class ComponentMapperConfigIn(ComponentMapperConfigBase):
+    pass
+
+
+class ComponentMapperConfigOut(ComponentMapperConfigBase):
+    updated_at: datetime
+
+
 class UpstreamProxyConfigBase(BaseModel):
     proxy_url: str | None = Field(default=None, max_length=500)
     proxy_scanner: bool = False
@@ -1286,7 +1308,9 @@ class GraphNode(BaseModel):
     status: str
     error_message: str | None = None
     context: str | None
-    analysis_status: str = "pending"  # pending | queued | analyzing | complete | skipped
+    analysis_status: str = (
+        "pending"  # pending | queued | analyzing | complete | skipped
+    )
     in_scope: bool = True
     scan_status: str = "pending"
     accessible_by: list[int] = []

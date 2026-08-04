@@ -68,6 +68,13 @@ function App() {
       return true;
     }
   });
+  const [showApplications, setShowApplications] = useState(() => {
+    try {
+      return localStorage.getItem("aespa_show_applications") === "true";
+    } catch {
+      return false;
+    }
+  });
   const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 700);
   useEffect(() => {
     const onResize = () => { if (window.innerWidth <= 700) setCollapsed(true); };
@@ -132,9 +139,11 @@ function App() {
         </div>
         <nav className="sidebar-nav">
           {!collapsed && <div className="nav-section-label">Targets</div>}
-          <a href="#/applications" className={"nav-item" + (onApplications ? " active" : "")} title="Applications">
-            <span className="nav-icon"><IconApplications /></span>{!collapsed && " Applications"}
-          </a>
+          {showApplications && (
+            <a href="#/applications" className={"nav-item" + (onApplications ? " active" : "")} title="Applications">
+              <span className="nav-icon"><IconApplications /></span>{!collapsed && " Applications"}
+            </a>
+          )}
           <a href="#/" className={"nav-item" + (onSites ? " active" : "")} title="Sites">
             <span className="nav-icon"><IconSites /></span>{!collapsed && " Sites"}
           </a>
@@ -206,7 +215,7 @@ function App() {
           {route.name === "settings" && <SettingsPage />}
           {route.name === "scan-policy" && <ScanPolicyPage />}
           {route.name === "external-integrations" && <ExternalIntegrationsPage />}
-          {route.name === "debug" && <DebugPage showUsername={showUsername} setShowUsername={setShowUsername} username={username} reportingDebugCfg={reportingDebugCfg} setReportingDebugCfg={setReportingDebugCfg} />}
+          {route.name === "debug" && <DebugPage showUsername={showUsername} setShowUsername={setShowUsername} showApplications={showApplications} setShowApplications={setShowApplications} username={username} reportingDebugCfg={reportingDebugCfg} setReportingDebugCfg={setReportingDebugCfg} />}
           {route.name === "reporting-debug" && <ReportingDebugPage />}
         </React.Suspense>
       </div>
