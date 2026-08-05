@@ -7,7 +7,8 @@ import { IconPlus } from "../../components/Icons";
 
 // ── TargetsTab ───────────────────────────────────────────────────────────────
 // Attach/detach existing Sites and API Collections via a searchable
-// multi-select, plus optional component ownership links and connection hints.
+// multi-select, plus optional component ownership links and code-to-target
+// routing associations.
 
 export function TargetsTab({ applicationId, components, onChanged }) {
   const { targets, allSites, allApiCollections, error, setError, attachMany, detach, setComponent } = useTargets(applicationId, onChanged);
@@ -65,9 +66,9 @@ export function TargetsTab({ applicationId, components, onChanged }) {
       </div>)}
     </div>}
 
-    <div className="form-section-title" style={{ marginTop: 28 }}>Connection hints <span className="subtle" style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></div>
+    <div className="form-section-title" style={{ marginTop: 28 }}>SAST lead to DAST target routing<span className="subtle" style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></div>
     <div className="subtle" style={{ fontSize: 12, marginBottom: 10 }}>
-      Use these for inferred component-to-component communication. An explicit code component selected above automatically routes that component's reportable SAST leads to the target; these hints remain advisory.
+      If SAST findings are identified in a code component, you can map it to a user/system-facing entry point for DAST testing here. (Basically: "Where is the ultimate entry point for input processed by this component?")
     </div>
     {hintError && <div className="alert error" style={{ marginBottom: 12 }}>{hintError}</div>}
     <HintsEditor
@@ -147,18 +148,18 @@ function HintsEditor({ components, targets, hints, onCreate, onDelete }) {
         <button className="btn danger-outline sm" onClick={() => onDelete(h.id)}>Remove</button>
       </div>)}
     </div>}
-    {components.length === 0 || targets.length === 0 ? <div className="subtle" style={{ fontSize: 12 }}>Add at least one component and one live target to create a hint.</div> : <form className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }} onSubmit={submit}>
+    {components.length === 0 || targets.length === 0 ? <div className="subtle" style={{ fontSize: 12 }}>Add at least one component and one live target to create a routing association.</div> : <form className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }} onSubmit={submit}>
       <select className="select" value={componentId} onChange={e => setComponentId(e.target.value)}>
         <option value="">Component…</option>
         {components.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
       </select>
-      <span className="subtle">talks to</span>
+      <span className="subtle">maps to</span>
       <select className="select" value={targetId} onChange={e => setTargetId(e.target.value)}>
         <option value="">Target…</option>
         {targets.map(t => <option key={t.id} value={t.id}>{t.name || `#${t.target_id}`}</option>)}
       </select>
       <input type="text" value={note} onChange={e => setNote(e.target.value)} placeholder="Note (optional)" style={{ minWidth: 180 }} />
-      <button type="submit" className="btn secondary sm" disabled={saving || !componentId || !targetId}>Add hint</button>
+      <button type="submit" className="btn secondary sm" disabled={saving || !componentId || !targetId}>Add mapping</button>
     </form>}
   </div>;
 }

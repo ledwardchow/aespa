@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { nav } from "../lib/router";
 import { downloadTextFile, sastCandidatesToMarkdown, sastReportFilename } from "../lib/utilities";
+import { SastLeadDetails } from "../components/SastLeadDetails";
 import { PageHeader, Crumb, Sep } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { TokenUsageBar } from "../components/TokenUsageBar";
@@ -214,35 +215,15 @@ function CandidatesView({ leads, selectedLead, onSelect, targets, onQueue, queue
   </div>;
 }
 
-function TraceBlock({ label, value, empty = "Not recorded" }) {
-  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return <div className="sast-flow-step"><span>{label}</span>{text && text !== "{}" && text !== "[]" ? <pre>{text}</pre> : <p>{empty}</p>}</div>;
-}
-
 function LeadEvidence({ lead, targets, onQueue, queueBusy }) {
   const [targetKey, setTargetKey] = useState("");
   useEffect(() => { setTargetKey(""); }, [lead?.id]);
   if (!lead) return <aside className="sast-evidence-panel"><div className="sast-panel-empty">Select a candidate to inspect its evidence chain.</div></aside>;
-  const source = jsonValue(lead.source_trace_json, {});
-  const controls = jsonValue(lead.control_trace_json, []);
-  const sink = jsonValue(lead.sink_trace_json, {});
-  const counterevidence = jsonValue(lead.counterevidence_json, []);
-  const proofGaps = jsonValue(lead.proof_gaps_json, []);
-  const attackPath = jsonValue(lead.attack_path_json, {});
   const selectedTarget = targets.find(target => `${target.run_type}:${target.run_id}` === targetKey);
   return <aside className="sast-evidence-panel">
     <div className="sast-panel-header"><div><div className="sast-panel-title">Evidence chain</div><div className="sast-panel-sub">Lead #{lead.id} · {lead.fingerprint?.slice(0, 10) || "unfingerprinted"}</div></div><span className={`sast-state sast-state-${lead.validation_status || "pending"}`}>{lead.validation_status || "pending"}</span></div>
     <div className="sast-evidence-body">
-      <div className="sast-evidence-kicker">{lead.category || "Unclassified"} · {(lead.severity || "medium").toUpperCase()}</div>
-      <h3>{lead.title || "Untitled candidate"}</h3>
-      <TraceBlock label="Source" value={Object.keys(source).length ? source : lead.location} />
-      <TraceBlock label="Controls encountered" value={controls} empty="No controls recorded" />
-      <TraceBlock label="Sink" value={sink} />
-      <TraceBlock label="Counterevidence" value={counterevidence} empty="No counterevidence recorded" />
-      <TraceBlock label="Proof gaps" value={proofGaps} empty="No unresolved static proof gaps" />
-      <TraceBlock label="Attack path" value={attackPath} empty="Not available for this candidate" />
-      {lead.validation_reasoning && <div className="sast-evidence-callout"><strong>Validator reasoning</strong><br />{lead.validation_reasoning}</div>}
-      {lead.evidence && <div className="sast-evidence-callout"><strong>Code evidence</strong><pre>{lead.evidence}</pre></div>}
+      <SastLeadDetails lead={lead} showSummary={false} />
       <div className="sast-handoff-box">
         <strong>Dynamic confirmation</strong>
         <span>{lead.reportable ? "Send this validated lead to a web or API run for live reproduction." : "Only independently confirmed, reportable leads can be handed off."}</span>

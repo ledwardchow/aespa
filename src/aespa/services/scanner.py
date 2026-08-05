@@ -65,6 +65,8 @@ from aespa.services.prompts.specialist import (
     get_specialist_tools as _get_specialist_tools,
 )
 from aespa.services.prompts.test_lead import (
+    get_sast_validate_system,
+    get_sast_validate_tools,
     get_thinking_agent_system,
 )
 from aespa.services.scan_completion import ScanCompletionPolicy
@@ -2266,6 +2268,7 @@ def _run_thinking_context_tool(
     run_id: int | None = None,
     base_url: str = "",
     api_run_id: int | None = None,
+    open_leads_only: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(args, dict):
         args = {}
@@ -2616,11 +2619,21 @@ def _run_thinking_context_tool(
     if tool_name == "lead_list":
         if run_id is None:
             return {"tool": "lead_list", "error": "run_id unavailable"}
-        from aespa.services.scan_leads import decode_attack_path, get_all_leads_for_run
+        from aespa.services.scan_leads import (
+            decode_attack_path,
+            get_all_leads_for_run,
+            get_leads_for_run,
+        )
 
         status_filter = str(args.get("status") or "").lower()
-        all_leads = get_all_leads_for_run("web", run_id)
-        if status_filter:
+        owner_type = "api" if api_run_id is not None else "web"
+        owner_id = api_run_id if api_run_id is not None else run_id
+        all_leads = (
+            get_leads_for_run(owner_type, owner_id)
+            if open_leads_only
+            else get_all_leads_for_run(owner_type, owner_id)
+        )
+        if status_filter and not open_leads_only:
             all_leads = [
                 ld for ld in all_leads if (ld.status or "open") == status_filter
             ]
@@ -2647,6 +2660,35 @@ def _run_thinking_context_tool(
                 for ld in leads_out
             ],
         }
+
+    if tool_name == "lead_detail":
+        owner_type = "api" if api_run_id is not None else "web"
+        raw_lead_id = args.get("lead_id")
+        if isinstance(raw_lead_id, bool):
+            return {"tool": "lead_detail", "error": "lead_id must be an integer"}
+        try:
+            lead_id = int(raw_lead_id)
+        except (TypeError, ValueError, OverflowError):
+            return {"tool": "lead_detail", "error": "lead_id must be an integer"}
+        if isinstance(raw_lead_id, float) and not raw_lead_id.is_integer():
+            return {"tool": "lead_detail", "error": "lead_id must be an integer"}
+        owner_id = api_run_id if api_run_id is not None else run_id
+        if owner_id is None:
+            return {"tool": "lead_detail", "error": "run_id unavailable"}
+        from aespa.services.scan_leads import get_lead_detail_for_run
+
+        detail = get_lead_detail_for_run(owner_type, owner_id, lead_id)
+        if detail is None:
+            return {
+                "tool": "lead_detail",
+                "error": "lead not found or unavailable for this run",
+            }
+        if open_leads_only and (detail.get("status") or "open") != "open":
+            return {
+                "tool": "lead_detail",
+                "error": "lead not found or unavailable for this run",
+            }
+        return {"tool": "lead_detail", "lead": detail}
 
     if tool_name in {"target_inventory", "search_assets"}:
         if run_id is None:
@@ -6388,7 +6430,11 @@ async def _do_thinking_scan(run_id: int) -> None:
             },
         )
 
-    if not resuming and not scanner_policy.disable_deterministic_checks:
+    if (
+        not resuming
+        and coverage_mode != "sast_validate"
+        and not scanner_policy.disable_deterministic_checks
+    ):
         # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM
         # loop starts. The thinking-scan agent can then find them via target_inventory
         # without re-fetching and re-parsing JS source itself.
@@ -6397,31 +6443,41 @@ async def _do_thinking_scan(run_id: int) -> None:
         ) as _hx_sink:
             await _analyse_js_sinks(run_id, _hx_sink, scanner_policy=scanner_policy)
 
-    # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
-    # are available through context tools so they are only sent when needed.
-    # Refresh on both fresh starts and resumes so dynamic routes and workprogram
-    # progress, rather than a stale crawl-time heuristic snapshot, shape the brief.
-    recon_summary_svc.build_recon_summary(run_id)
+    if coverage_mode == "sast_validate":
+        from aespa.services.scan_leads import format_lead_index_for_validation
 
-    crawl_context = _build_thinking_context_from_recon_summary(
-        run_id,
-        base_url,
-        findings_snapshot,
-    )
-    intel_context = _build_target_intelligence_context(run_id)
-    if intel_context:
-        crawl_context = f"{crawl_context}\n\n{intel_context}"
+        lead_index = format_lead_index_for_validation("web", run_id)
+        crawl_context = (
+            "SAST Validate scope: investigate only the imported leads below. "
+            "The lead index is a compact work list; call lead_detail before testing "
+            "each lead. Do not conduct general coverage testing.\n\n" + lead_index
+        )
+    else:
+        # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
+        # are available through context tools so they are only sent when needed.
+        # Refresh on both fresh starts and resumes so dynamic routes and workprogram
+        # progress, rather than a stale crawl-time heuristic snapshot, shape the brief.
+        recon_summary_svc.build_recon_summary(run_id)
 
-    # Append any SAST leads imported into this web run so the Test Lead can
-    # investigate them (mirrors the API scan's collection-keyed lead injection).
-    try:
-        from aespa.services.scan_leads import format_leads_for_run
+        crawl_context = _build_thinking_context_from_recon_summary(
+            run_id,
+            base_url,
+            findings_snapshot,
+        )
+        intel_context = _build_target_intelligence_context(run_id)
+        if intel_context:
+            crawl_context = f"{crawl_context}\n\n{intel_context}"
 
-        leads_block = format_leads_for_run("web", run_id)
-        if leads_block:
-            crawl_context = f"{crawl_context}\n\n{leads_block}"
-    except Exception:
-        pass
+        # Append any SAST leads imported into this web run so the Test Lead can
+        # investigate them (mirrors the API scan's collection-keyed lead injection).
+        try:
+            from aespa.services.scan_leads import format_leads_for_run
+
+            leads_block = format_leads_for_run("web", run_id)
+            if leads_block:
+                crawl_context = f"{crawl_context}\n\n{leads_block}"
+        except Exception:
+            pass
 
     # Resolve a login URL for the selector: prefer the site-level one, else fall back
     # to the first credential that carries its own login_url. A configured login URL is
@@ -6435,21 +6491,22 @@ async def _do_thinking_scan(run_id: int) -> None:
                 break
 
     # Select and inject WSTG skill reference blocks based on observed attack surface.
-    _selected_skills = llm_svc.select_wstg_skills(
-        pages_snapshot,
-        intel_items_for_selector,
-        requires_auth=requires_auth,
-        base_url=base_url,
-        login_url=_login_url_for_selector,
-    )
-    _skill_context = llm_svc.build_wstg_skill_context(_selected_skills)
-    if _skill_context:
-        crawl_context = f"{crawl_context}\n\n{_skill_context}"
-        log.info(
-            "WSTG skills injected for run_id=%s: %s",
-            run_id,
-            ", ".join(sorted(_selected_skills)),
+    if coverage_mode != "sast_validate":
+        _selected_skills = llm_svc.select_wstg_skills(
+            pages_snapshot,
+            intel_items_for_selector,
+            requires_auth=requires_auth,
+            base_url=base_url,
+            login_url=_login_url_for_selector,
         )
+        _skill_context = llm_svc.build_wstg_skill_context(_selected_skills)
+        if _skill_context:
+            crawl_context = f"{crawl_context}\n\n{_skill_context}"
+            log.info(
+                "WSTG skills injected for run_id=%s: %s",
+                run_id,
+                ", ".join(sorted(_selected_skills)),
+            )
 
     # ── Workprogram: seed coverage cells and build enforce directive ──────────
     from aespa.services.web_workprogram import (
@@ -6461,30 +6518,35 @@ async def _do_thinking_scan(run_id: int) -> None:
         seed_web_workprogram,
     )
 
-    try:
-        seed_web_workprogram(run_id)
-    except Exception as _wp_exc:
-        log.warning("seed_web_workprogram failed (non-fatal): %s", _wp_exc)
-    try:
-        seed_scan_obligations(
-            run_id,
-            scan_mode="full" if coverage_mode == "enforce" else "quick",
-            run_kind="web",
-        )
-    except Exception as _obligation_exc:
-        log.warning("seed_scan_obligations failed (non-fatal): %s", _obligation_exc)
-    if coverage_mode == "enforce":
+    if coverage_mode != "sast_validate":
         try:
-            reopen_unjustified_web_skips(run_id)
-            _enforce_directive = _build_web_enforce_directive(run_id)
-            if _enforce_directive:
-                crawl_context = f"{crawl_context}\n\n{_enforce_directive}"
-        except Exception as _ed_exc:
-            log.warning("build_web_enforce_directive failed (non-fatal): %s", _ed_exc)
+            seed_web_workprogram(run_id)
+        except Exception as _wp_exc:
+            log.warning("seed_web_workprogram failed (non-fatal): %s", _wp_exc)
+        try:
+            seed_scan_obligations(
+                run_id,
+                scan_mode="full" if coverage_mode == "enforce" else "quick",
+                run_kind="web",
+            )
+        except Exception as _obligation_exc:
+            log.warning("seed_scan_obligations failed (non-fatal): %s", _obligation_exc)
+        if coverage_mode == "enforce":
+            try:
+                reopen_unjustified_web_skips(run_id)
+                _enforce_directive = _build_web_enforce_directive(run_id)
+                if _enforce_directive:
+                    crawl_context = f"{crawl_context}\n\n{_enforce_directive}"
+            except Exception as _ed_exc:
+                log.warning(
+                    "build_web_enforce_directive failed (non-fatal): %s", _ed_exc
+                )
     _web_post_probe_fn = _make_web_post_probe_fn(run_id)
     _web_post_finding_fn = _make_web_post_finding_fn(run_id)
     _finding_hooks[run_id] = (
-        _web_post_finding_fn  # covers specialists + all other paths
+        None
+        if coverage_mode == "sast_validate"
+        else _web_post_finding_fn  # covers specialists + all other paths
     )
 
     _persist_execution_snapshot(
@@ -6773,7 +6835,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 or value.lower() in _bool_values
             )
         }
-        if _suspicious_auth_cookies:
+        if _suspicious_auth_cookies and coverage_mode != "sast_validate":
             _cookie_detail = ", ".join(
                 f"{k}={v}" for k, v in _suspicious_auth_cookies.items()
             )
@@ -6801,17 +6863,24 @@ async def _do_thinking_scan(run_id: int) -> None:
             run_id not in _thinking_stop_requested
             and not scanner_policy.disable_deterministic_checks
         ):
-            await _run_deterministic_site_modules(
-                run_id=run_id,
-                base_url=base_url,
-                cred_sessions=deterministic_sessions,
-                site_id=site_id,
-                primary_session=session_vault.get("configured_primary"),
-                browser_ctx=browser_ctx,
-                browser_page=pw_page,
-                primary_browser_cookies=_primary_browser_cookies,
-                scanner_policy=scanner_policy,
-            )
+            if coverage_mode == "sast_validate":
+                tls_findings = await _run_tls_posture_module(
+                    run_id=run_id, base_url=base_url
+                )
+                if tls_findings and _save_deterministic_findings(run_id, tls_findings):
+                    _emit_scan_update(run_id)
+            else:
+                await _run_deterministic_site_modules(
+                    run_id=run_id,
+                    base_url=base_url,
+                    cred_sessions=deterministic_sessions,
+                    site_id=site_id,
+                    primary_session=session_vault.get("configured_primary"),
+                    browser_ctx=browser_ctx,
+                    browser_page=pw_page,
+                    primary_browser_cookies=_primary_browser_cookies,
+                    scanner_policy=scanner_policy,
+                )
 
         async with _make_scanner_client(
             run_id=run_id,
@@ -6852,8 +6921,24 @@ async def _do_thinking_scan(run_id: int) -> None:
                     creds=creds,
                     login_url=login_url or "",
                     guidance=guidance,
-                    post_probe_fn=_web_post_probe_fn,
-                    post_finding_fn=_web_post_finding_fn,
+                    system_message_override=(
+                        get_sast_validate_system(is_api_run=False)
+                        if coverage_mode == "sast_validate"
+                        else None
+                    ),
+                    tools_override=(
+                        get_sast_validate_tools(is_api_run=False)
+                        if coverage_mode == "sast_validate"
+                        else None
+                    ),
+                    post_probe_fn=(
+                        None if coverage_mode == "sast_validate" else _web_post_probe_fn
+                    ),
+                    post_finding_fn=(
+                        None
+                        if coverage_mode == "sast_validate"
+                        else _web_post_finding_fn
+                    ),
                     coverage_mode=coverage_mode,
                 )
             # ── Step-by-step path (fallback for non-agentic providers) ──────
@@ -6920,6 +7005,28 @@ async def _do_thinking_scan(run_id: int) -> None:
                     break
 
                 if action.get("action") == "done":
+                    if coverage_mode == "sast_validate":
+                        from aespa.services.scan_leads import get_all_leads_for_run
+
+                        unresolved = [
+                            lead
+                            for lead in get_all_leads_for_run("web", run_id)
+                            if (lead.status or "open")
+                            not in {"confirmed", "dismissed", "inconclusive"}
+                        ]
+                        if unresolved:
+                            history.append(
+                                {
+                                    "step": step,
+                                    "method": "DONE_REJECTED",
+                                    "response_status": 409,
+                                    "response_body": (
+                                        f"Lead #{unresolved[0].id} ({unresolved[0].title}) "
+                                        "is not terminal; resolve every imported lead."
+                                    ),
+                                }
+                            )
+                            continue
                     log.info(
                         "LLM completed thinking scan at step %d: %s",
                         step,
@@ -6946,6 +7053,31 @@ async def _do_thinking_scan(run_id: int) -> None:
                         if isinstance(action.get("args"), dict)
                         else {}
                     )
+                    if coverage_mode == "sast_validate":
+                        allowed_tools = {
+                            "context_tool",
+                            "http_request",
+                            "write_finding",
+                            "update_lead",
+                            "done",
+                        }
+                        allowed_tools.update({"browser", "reauthenticate"})
+                        if tool_name not in allowed_tools:
+                            history.append(
+                                _thinking_tool_result_record(
+                                    step,
+                                    tool_name,
+                                    args,
+                                    {
+                                        "error": (
+                                            f"{tool_name} is unavailable in SAST "
+                                            "Validate mode."
+                                        )
+                                    },
+                                    note,
+                                )
+                            )
+                            continue
                     budget_reason = _context_budget_reason(action)
                     if (
                         consecutive_context_tools >= CONTEXT_TOOL_CHECKPOINT_INTERVAL
@@ -6964,6 +7096,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                             history=history,
                             run_id=run_id,
                             base_url=base_url,
+                            open_leads_only=coverage_mode == "sast_validate",
                         )
                         if budget_reason:
                             output["context_budget_reason"] = budget_reason
@@ -7063,7 +7196,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     if saved is not None:
                         _emit_scan_update(run_id)
                         _emit_thinking_status(run_id)
-                        _schedule_burp_active_scan(run_id, saved, session_vault)
+                        if coverage_mode != "sast_validate":
+                            _schedule_burp_active_scan(run_id, saved, session_vault)
                     events_svc.emit(
                         run_id,
                         {
@@ -8093,7 +8227,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 await sleep_between_probes(scanner_policy)
 
     # ── Analyse results ───────────────────────────────────────────────────────
-    if all_results:
+    if all_results and coverage_mode != "sast_validate":
         _thinking_scan_status[run_id] = "analysing"
         _emit_thinking_status(run_id)
         deterministic_saved = 0
@@ -8336,12 +8470,12 @@ async def _do_thinking_scan(run_id: int) -> None:
             except Exception as _mc_exc:
                 log.warning("mark_in_progress_to_covered fallback failed: %s", _mc_exc)
         stopped = run_id in _thinking_stop_requested
-    else:
+    elif coverage_mode != "sast_validate":
         try:
             mark_in_progress_to_covered(run_id)
         except Exception as _mc_exc:
             log.warning("mark_in_progress_to_covered failed (non-fatal): %s", _mc_exc)
-    if not stopped:
+    if not stopped and coverage_mode != "sast_validate":
         try:
             await await_specialist_barrier(run_id)
         except Exception as _barrier_exc:
@@ -8617,6 +8751,23 @@ async def _do_agentic_thinking_loop(
         _blocked: set[str] = set()
         _failed: dict[str, int] = {}
 
+    if coverage_mode == "sast_validate" and resume_messages is not None:
+        from aespa.services.scan_leads import format_lead_index_for_validation
+
+        current_lead_index = format_lead_index_for_validation(
+            "api" if is_api_run else "web", run_id
+        )
+        system_message_override = (
+            (system_message_override or get_sast_validate_system(is_api_run=is_api_run))
+            + "\n\nAUTHORITATIVE RESUME STATE:\n"
+            "The earlier conversation may contain leads that have since been "
+            "confirmed, dismissed, or otherwise closed. Ignore those stale entries. "
+            "In this resumed SAST Validate run, investigate only the currently open "
+            "leads listed below; `lead_list` and `lead_detail` are restricted to "
+            "those open leads.\n\n"
+            + (current_lead_index or "There are currently no open SAST leads.")
+        )
+
     _ssrf_canary[run_id] = _SSRF_CANARY_FINGERPRINT
 
     completion_policy = ScanCompletionPolicy.from_state(
@@ -8687,6 +8838,38 @@ async def _do_agentic_thinking_loop(
         )
 
     def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
+        if coverage_mode == "sast_validate":
+            from aespa.services.scan_leads import get_all_leads_for_run
+
+            owner_type = "api" if is_api_run else "web"
+            leads = get_all_leads_for_run(owner_type, run_id)
+            unresolved = [
+                lead
+                for lead in leads
+                if (lead.status or "open")
+                not in {"confirmed", "dismissed", "inconclusive"}
+            ]
+            if unresolved:
+                first = unresolved[0]
+                message = (
+                    f"Lead #{first.id} ({first.title}) is still "
+                    f"{first.status or 'open'}; resolve every imported SAST lead "
+                    "with update_lead before calling done."
+                )
+                _emit_completion_log(f"Step {step}: {message}", status="warning")
+                return False, message
+            counts = {
+                status: sum(1 for lead in leads if (lead.status or "open") == status)
+                for status in ("confirmed", "dismissed", "inconclusive")
+            }
+            summary = (
+                "SAST lead validation complete: "
+                f"{counts['confirmed']} confirmed, {counts['dismissed']} dismissed, "
+                f"{counts['inconclusive']} inconclusive."
+            )
+            _emit_completion_log(f"Step {step}: {summary}")
+            return True, summary
+
         def _get_coverage_gaps() -> dict[str, Any]:
             if is_api_run:
                 return {}
@@ -8780,6 +8963,21 @@ async def _do_agentic_thinking_loop(
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         nonlocal progressive_findings_count
         note = _infer_step_note(tool_name, tool_input, step)
+        if coverage_mode == "sast_validate":
+            allowed_tools = {
+                "context_tool",
+                "http_request",
+                "write_finding",
+                "update_lead",
+                "done",
+            }
+            if not is_api_run:
+                allowed_tools.update({"browser", "reauthenticate"})
+            if tool_name not in allowed_tools:
+                return (
+                    f"Tool {tool_name!r} is unavailable in SAST Validate mode. "
+                    "Investigate only listed imported SAST leads."
+                )
 
         # Emit live agent_status update for every agentic step (SSE only, not persisted).
         events_svc.emit(
@@ -8821,6 +9019,7 @@ async def _do_agentic_thinking_loop(
                         history=history,
                         run_id=run_id,
                         base_url=base_url,
+                        open_leads_only=coverage_mode == "sast_validate",
                     )
                 else:
                     output = _run_thinking_context_tool(
@@ -8831,6 +9030,7 @@ async def _do_agentic_thinking_loop(
                         history=history,
                         run_id=run_id,
                         base_url=base_url,
+                        open_leads_only=coverage_mode == "sast_validate",
                     )
                 if budget_reason:
                     output["context_budget_reason"] = budget_reason
@@ -8901,7 +9101,27 @@ async def _do_agentic_thinking_loop(
             lead_note = str(tool_input.get("note") or "")
             finding_id = tool_input.get("finding_id")
             try:
-                from aespa.services.scan_leads import update_lead as _update_lead
+                from aespa.services.scan_leads import (
+                    get_lead_detail_for_run,
+                )
+                from aespa.services.scan_leads import (
+                    update_lead as _update_lead,
+                )
+
+                if coverage_mode == "sast_validate":
+                    lead_detail = get_lead_detail_for_run(
+                        "api" if is_api_run else "web",
+                        run_id,
+                        int(lead_id),
+                    )
+                    if (
+                        lead_detail is None
+                        or (lead_detail.get("status") or "open") != "open"
+                    ):
+                        return (
+                            f"Lead #{lead_id} is not an open SAST lead available "
+                            "for validation."
+                        )
 
                 # Map outcome string to ScanLead.status
                 status_map = {
@@ -8919,6 +9139,7 @@ async def _do_agentic_thinking_loop(
                     investigated_by_run_type="api" if is_api_run else "web",
                     investigated_by_run_id=run_id,
                     linked_finding_id=int(finding_id) if finding_id else None,
+                    link_coverage=coverage_mode != "sast_validate",
                 )
                 if updated is None:
                     return f"Lead #{lead_id} not found."
@@ -9010,18 +9231,19 @@ async def _do_agentic_thinking_loop(
             if saved is not None:
                 _emit_scan_update(run_id)
                 _emit_thinking_status(run_id)
-                _schedule_burp_active_scan(run_id, saved, session_vault)
-                from aespa.services import validator as _validator_svc
+                if coverage_mode != "sast_validate":
+                    _schedule_burp_active_scan(run_id, saved, session_vault)
+                    from aespa.services import validator as _validator_svc
 
-                asyncio.create_task(
-                    _validator_svc.validate_finding_inline(
-                        run_id,
-                        saved.id,
-                        llm_cfg=llm_cfg,
-                        cred_sessions=get_active_sessions(run_id) or {},
-                        scanner_policy=scanner_policy,
+                    asyncio.create_task(
+                        _validator_svc.validate_finding_inline(
+                            run_id,
+                            saved.id,
+                            llm_cfg=llm_cfg,
+                            cred_sessions=get_active_sessions(run_id) or {},
+                            scanner_policy=scanner_policy,
+                        )
                     )
-                )
             events_svc.emit(
                 run_id,
                 {

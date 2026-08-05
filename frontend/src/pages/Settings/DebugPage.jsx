@@ -7,6 +7,8 @@ import { DEFAULT_SITEMAP_GRAVITY, getSitemapGravity, setSitemapGravity } from ".
 export function DebugPage({
   showUsername,
   setShowUsername,
+  showApplications,
+  setShowApplications,
   username,
   reportingDebugCfg,
   setReportingDebugCfg
@@ -135,12 +137,12 @@ export function DebugPage({
   };
   return <>
     <div className="topbar">
-      <div className="topbar-title">Debug</div>
+      <div className="topbar-title">System Settings</div>
     </div>
     <div className="content scroll-content">
       {!cfg && !browserCfg && !error && !browserError && <div className="subtle">Loading…</div>}
 
-      <div className="card" style={{ marginTop: 16 }}>
+      <div className="card" style={{ marginTop: 16, maxWidth: 680 }}>
         <div className="form-section-title">Browser</div>
         <div className="field-hint" style={{ marginBottom: 12 }}>
           Choose which Chromium build powers crawls, scans, and browser-based testing.
@@ -181,7 +183,7 @@ export function DebugPage({
       </div>
 
       {error && <div className="alert error">{error}</div>}
-      {cfg && <div className="card">
+      {cfg && <div className="card" style={{ marginTop: 16, maxWidth: 680 }}>
           <div className="form-section-title">Specialist Agent</div>
           <label className="toggle-row">
             <input type="checkbox" checked={cfg.trigger_specialist_on_burp ?? false} disabled={saving} onChange={e => toggle(e.target.checked)} />
@@ -198,7 +200,8 @@ export function DebugPage({
         </div>}
 
       <div className="card" style={{
-        marginTop: 16
+        marginTop: 16,
+        maxWidth: 680
       }}>
         <div className="form-section-title">Reporting Lab</div>
         <div className="field-hint" style={{
@@ -229,7 +232,34 @@ export function DebugPage({
       </div>
 
       <div className="card" style={{
-        marginTop: 16
+        marginTop: 16,
+        maxWidth: 680
+      }}>
+        <div className="form-section-title">Applications</div>
+        <div className="field-hint" style={{
+          marginBottom: 12
+        }}>
+          Show multi-repository application campaign scanning features under Targets in the sidebar.
+        </div>
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={showApplications ?? false}
+            onChange={e => {
+              const checked = e.target.checked;
+              setShowApplications(checked);
+              try {
+                localStorage.setItem("aespa_show_applications", String(checked));
+              } catch {}
+            }}
+          />
+          <span>Show Applications scanning feature</span>
+        </label>
+      </div>
+
+      <div className="card" style={{
+        marginTop: 16,
+        maxWidth: 680
       }}>
         <div className="form-section-title">Sitemap Graph</div>
         <div className="field-hint" style={{
@@ -268,7 +298,8 @@ export function DebugPage({
       </div>
 
       <div className="card" style={{
-        marginTop: 16
+        marginTop: 16,
+        maxWidth: 680
       }}>
         <div className="form-section-title">Cloudflare Access</div>
         <div className="field-hint" style={{

@@ -244,7 +244,6 @@ async def _crawl_task(run_id: int) -> None:
         _active_shared.pop(run_id, None)
 
 
-
 # ── Dynamic LLM concurrency gate ─────────────────────────────────────────────
 
 
@@ -334,9 +333,7 @@ class _CrawlShared:
         # is only downloaded and regex-scanned once per crawl.
         self.mined_script_urls: set[str] = set()
         # Shared cache for LLM page analysis results keyed by (url, content_hash)
-        self.llm_analysis_cache: dict[
-            tuple[str, str], tuple[str, list[str], dict]
-        ] = {}
+        self.llm_analysis_cache: dict[tuple[str, str], tuple[str, list[str], dict]] = {}
         self.llm_pending_count: int = 0
         self.llm_completed_count: int = 0
         # Dynamic gate: re-reads the effective concurrency limit from the DB on

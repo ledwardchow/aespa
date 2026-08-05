@@ -87,24 +87,67 @@
 
 /* ── Connections diagram/list ───────────────────────────────── */
 
-.connection-diagram { display: flex; flex-direction: column; gap: 8px; }
-.connection-edge {
+.connection-diagram { display: flex; flex-direction: column; gap: 12px; }
+.connection-card {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
+  flex-direction: column;
   border: 1px solid var(--border-2);
   border-radius: 8px;
   background: var(--panel-2);
-  color: var(--text);
-  cursor: pointer;
-  text-align: left;
+  padding: 12px 14px;
+  gap: 10px;
+}
+.connection-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.connection-flow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+.connection-node { font-weight: 600; }
+.connection-arrow { color: var(--accent); font-weight: bold; }
+.connection-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.connection-card-body {
+  border-top: 1px solid var(--border-2);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   font-size: 13px;
 }
-.connection-edge:hover { border-color: var(--accent); }
-.connection-edge.selected { border-color: var(--accent); background: var(--accent-glow); }
-.connection-node { font-weight: 600; }
-.connection-arrow { color: var(--muted); }
+.connection-rationale {
+  color: var(--text);
+  line-height: 1.4;
+}
+.connection-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  background: var(--bg-1);
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-1);
+}
+.connection-evidence-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.evidence-label {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-muted);
+}
 .row-selected { background: var(--accent-glow); }
 
 /* ── Review leads ───────────────────────────────────────────── */

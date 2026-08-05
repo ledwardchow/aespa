@@ -15,6 +15,7 @@ from aespa.models import (
     BrowserDebugConfig,
     BurpRestApiConfig,
     CloudflareAccessConfig,
+    ComponentMapperConfig,
     CrawlerConfig,
     GlobalHttpHeaderConfig,
     LLMConfig,
@@ -33,6 +34,8 @@ from aespa.schemas import (
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
+    ComponentMapperConfigIn,
+    ComponentMapperConfigOut,
     CrawlerConfigIn,
     CrawlerConfigOut,
     GlobalHttpHeaderConfigIn,
@@ -712,6 +715,41 @@ def upsert_crawler_config(
     session.commit()
     session.refresh(cfg)
     return get_crawler_config(session)
+
+
+def get_component_mapper_config(session: Session) -> ComponentMapperConfigOut:
+    cfg = session.get(ComponentMapperConfig, _SINGLETON_ID)
+    if cfg is None:
+        return ComponentMapperConfigOut(
+            **ComponentMapperConfigIn().model_dump(),
+            updated_at=_utcnow(),
+        )
+    return ComponentMapperConfigOut(
+        max_tool_calls=cfg.max_tool_calls,
+        max_source_files=cfg.max_source_files,
+        max_source_bytes=cfg.max_source_bytes,
+        max_facts=cfg.max_facts,
+        max_concurrent=cfg.max_concurrent,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_component_mapper_config(
+    session: Session, payload: ComponentMapperConfigIn
+) -> ComponentMapperConfigOut:
+    cfg = session.get(ComponentMapperConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = ComponentMapperConfig(id=_SINGLETON_ID)
+    cfg.max_tool_calls = payload.max_tool_calls
+    cfg.max_source_files = payload.max_source_files
+    cfg.max_source_bytes = payload.max_source_bytes
+    cfg.max_facts = payload.max_facts
+    cfg.max_concurrent = payload.max_concurrent
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_component_mapper_config(session)
 
 
 def get_run_scanner_policy(session: Session, run: TestRun) -> RunScannerPolicyOut:

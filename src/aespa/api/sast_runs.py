@@ -52,19 +52,6 @@ def _get_run_or_404(session: Session, run_id: int) -> SastRun:
     return run
 
 
-def _reject_if_campaign_owned(session: Session, run_kind: str, run_id: int) -> None:
-    """Single reusable guard: 409 any mutation of a campaign-owned run.
-
-    Read-only endpoints (detail/analysis/status/log reads) never call this.
-    """
-    try:
-        run_cleanup.assert_run_not_campaign_owned(session, run_kind, run_id)
-    except run_cleanup.ChildRunOwnedByCampaign as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
-
-
 def _to_summary(run: SastRun) -> SastRunSummary:
     summary = SastRunSummary.model_validate(run)
     if run.id is None:
@@ -187,7 +174,6 @@ def update_sast_run(
 ) -> SastRunSummary:
     """Change the model profile used by the next SAST scan or rerun."""
     run = _get_run_or_404(session, run_id)
-    _reject_if_campaign_owned(session, "sast", run_id)
     from aespa.services import sast_scanner
 
     if run.status == "scanning" or sast_scanner.is_sast_scan_running(run_id):
@@ -233,9 +219,14 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
 
 
 @router.delete("/api/sast-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
+async def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
-    _reject_if_campaign_owned(session, "sast", run_id)
+    from aespa.services import campaigns as campaigns_svc
+    from aespa.services import sast_scanner
+
+    await campaigns_svc.stop_member_tasks_for_run("sast", run_id)
+    if sast_scanner.is_sast_scan_running(run_id):
+        await sast_scanner.stop_sast_scan_and_wait(run_id)
     run_cleanup.cascade_delete_sast_run(session, run_id)
     session.commit()
 
@@ -249,7 +240,6 @@ async def start_sast_scan(
     session: Session = Depends(get_session),
 ) -> dict:
     _get_run_or_404(session, run_id)
-    _reject_if_campaign_owned(session, "sast", run_id)
     from aespa.services import sast_scanner
 
     await sast_scanner.start_sast_scan(run_id)
@@ -262,7 +252,6 @@ async def stop_sast_scan(
     session: Session = Depends(get_session),
 ) -> dict:
     _get_run_or_404(session, run_id)
-    _reject_if_campaign_owned(session, "sast", run_id)
     from aespa.services import sast_scanner
 
     stopped = await sast_scanner.stop_sast_scan(run_id)
@@ -606,7 +595,6 @@ def clear_api_run_leads(
     """Delete all imported leads owned by an API run, preserving originals."""
     if session.get(ApiTestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="API test run not found")
-    _reject_if_campaign_owned(session, "api", run_id)
     for lead in session.exec(
         select(ScanLead)
         .where(ScanLead.imported_into_run_type == "api")
@@ -628,7 +616,6 @@ def delete_api_run_lead(
     """Delete one lead owned by an API run, preserving the SAST original."""
     if session.get(ApiTestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="API test run not found")
-    _reject_if_campaign_owned(session, "api", run_id)
     lead = session.get(ScanLead, lead_id)
     if (
         lead is None

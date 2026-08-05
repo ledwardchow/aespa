@@ -41,6 +41,8 @@ from aespa.services import scanner_sessions
 from aespa.services.prompts.test_lead import (
     _API_THINKING_AGENT_SYSTEM,
     get_api_test_lead_tools,
+    get_sast_validate_system,
+    get_sast_validate_tools,
 )
 
 log = logging.getLogger(__name__)
@@ -870,6 +872,8 @@ _API_CONTEXT_COMMANDS = frozenset(
 # Sub-commands that must fall through to the shared scanner context tool.
 _SHARED_CONTEXT_COMMANDS = frozenset(
     {
+        "lead_list",
+        "lead_detail",
         "history_search",
         "traffic_search",
         "compare_responses",
@@ -884,7 +888,12 @@ _SHARED_CONTEXT_COMMANDS = frozenset(
 _BLOCKED_API_CONTEXT_COMMANDS = frozenset({"target_inventory", "search_assets"})
 
 
-def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
+def _make_api_context_tool_fn(
+    collection_id: int,
+    api_run_id: int,
+    *,
+    restrict_leads_to_open: bool = False,
+):
     """Return a context_tool_fn that combines API inventory + shared tools."""
     from aespa.services.alice import _run_api_context_tool
     from aespa.services.scanner import _run_thinking_context_tool
@@ -898,6 +907,7 @@ def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
         history=None,
         run_id=None,
         base_url="",
+        open_leads_only: bool | None = None,
     ) -> dict[str, Any]:
         if tool_name in _BLOCKED_API_CONTEXT_COMMANDS:
             return {
@@ -925,6 +935,11 @@ def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
                 run_id=run_id,
                 base_url=base_url,
                 api_run_id=api_run_id,
+                open_leads_only=(
+                    restrict_leads_to_open
+                    if open_leads_only is None
+                    else open_leads_only
+                ),
             )
 
         return {
@@ -954,7 +969,7 @@ _OWASP_WEB_TO_API: dict[str, str] = {
 }
 
 
-def _make_post_finding_fn(api_run_id: int):
+def _make_post_finding_fn(api_run_id: int, *, update_coverage: bool = True):
     """Return a hook that derives ``owasp_api_category`` for each finding and
     updates the coverage matrix cell for the finding's endpoint + category.
 
@@ -980,7 +995,10 @@ def _make_post_finding_fn(api_run_id: int):
             affected_url = f.affected_url
             finding_id = f.id
 
-        # Update the coverage matrix cell for this finding.
+        # Update the coverage matrix cell for this finding unless the scan is
+        # validating imported SAST leads without normal coverage tracking.
+        if not update_coverage:
+            return
         if owasp_api_cat:
             with Session(get_engine()) as s:
                 run = s.get(ApiTestRun, api_run_id)
@@ -1071,7 +1089,11 @@ def _make_persist_credential_fn(collection_id: int, api_run_id: int):
 # ── Crawl context builder ─────────────────────────────────────────────────────
 
 
-def _build_api_crawl_context(api_run_id: int) -> str:
+def _build_api_crawl_context(
+    api_run_id: int,
+    *,
+    sast_validate: bool = False,
+) -> str:
     """Build the initial LLM context string from the API collection + endpoints."""
     with Session(get_engine()) as s:
         run = s.get(ApiTestRun, api_run_id)
@@ -1109,20 +1131,22 @@ def _build_api_crawl_context(api_run_id: int) -> str:
     if auth_notes:
         lines.append("Credentials available:\n" + "\n".join(auth_notes))
 
-    ep_summary: list[str] = []
-    for ep in endpoints[:80]:
-        line = f"  [{ep.method}] {ep.path}"
-        if ep.auth_required:
-            line += " (auth)"
-        if ep.summary:
-            line += f" — {ep.summary}"
-        ep_summary.append(line)
-    if len(endpoints) > 80:
-        ep_summary.append(f"  … and {len(endpoints) - 80} more (use endpoint_list)")
-    if ep_summary:
-        lines.append(
-            f"In-scope endpoints ({len(endpoints)} total):\n" + "\n".join(ep_summary)
-        )
+    if not sast_validate:
+        ep_summary: list[str] = []
+        for ep in endpoints[:80]:
+            line = f"  [{ep.method}] {ep.path}"
+            if ep.auth_required:
+                line += " (auth)"
+            if ep.summary:
+                line += f" — {ep.summary}"
+            ep_summary.append(line)
+        if len(endpoints) > 80:
+            ep_summary.append(f"  … and {len(endpoints) - 80} more (use endpoint_list)")
+        if ep_summary:
+            lines.append(
+                f"In-scope endpoints ({len(endpoints)} total):\n"
+                + "\n".join(ep_summary)
+            )
 
     try:
         readiness = json.loads(coll.readiness_json or "{}")
@@ -1134,9 +1158,16 @@ def _build_api_crawl_context(api_run_id: int) -> str:
     # Append this run's fresh SAST-lead copies. Collection originals are never
     # mutated by a dynamic scan, so every run independently reassesses them.
     try:
-        from aespa.services.scan_leads import format_leads_for_run
+        from aespa.services.scan_leads import (
+            format_lead_index_for_validation,
+            format_leads_for_run,
+        )
 
-        leads_block = format_leads_for_run("api", api_run_id)
+        leads_block = (
+            format_lead_index_for_validation("api", api_run_id)
+            if sast_validate
+            else format_leads_for_run("api", api_run_id)
+        )
         if leads_block:
             lines.append(leads_block)
     except Exception:
@@ -1214,10 +1245,14 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     session_vault = scanner_sessions.load_session_vault(api_run_id, run_kind="api")
 
     # Build the per-category probe hook (replaces the old broad traffic hook).
-    post_probe_fn = _make_post_probe_fn(api_run_id)
+    post_probe_fn = (
+        None if coverage_mode == "sast_validate" else _make_post_probe_fn(api_run_id)
+    )
 
     # Build the initial LLM context from the API collection.
-    crawl_context = _build_api_crawl_context(api_run_id)
+    crawl_context = _build_api_crawl_context(
+        api_run_id, sast_validate=coverage_mode == "sast_validate"
+    )
 
     # In enforce mode, append the coverage checklist + directive so the agent
     # systematically drives every endpoint × applicable category to coverage.
@@ -1261,8 +1296,14 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     findings_snapshot = _load_findings_snapshot(api_run_id, is_api_run=True)
 
     # Context tool + finding hooks.
-    context_tool_fn = _make_api_context_tool_fn(collection_id, api_run_id)
-    post_finding_fn = _make_post_finding_fn(api_run_id)
+    context_tool_fn = _make_api_context_tool_fn(
+        collection_id,
+        api_run_id,
+        restrict_leads_to_open=coverage_mode == "sast_validate",
+    )
+    post_finding_fn = _make_post_finding_fn(
+        api_run_id, update_coverage=coverage_mode != "sast_validate"
+    )
     persist_credential_fn = _make_persist_credential_fn(collection_id, api_run_id)
 
     # Register the post-finding coverage hook in the shared registry that
@@ -1272,7 +1313,9 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     # web's _do_thinking_scan. ponytail: popped in the finally below.
     from aespa.services.scanner import _finding_hooks
 
-    _finding_hooks[api_run_id] = post_finding_fn
+    _finding_hooks[api_run_id] = (
+        post_finding_fn if coverage_mode != "sast_validate" else None
+    )
 
     events_svc.emit(
         api_run_id,
@@ -1345,13 +1388,24 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             creds=None,
             login_url="",
             # API overrides
-            system_message_override=_API_THINKING_AGENT_SYSTEM,
-            tools_override=get_api_test_lead_tools(),
+            system_message_override=(
+                get_sast_validate_system(is_api_run=True)
+                if coverage_mode == "sast_validate"
+                else _API_THINKING_AGENT_SYSTEM
+            ),
+            tools_override=(
+                get_sast_validate_tools(is_api_run=True)
+                if coverage_mode == "sast_validate"
+                else get_api_test_lead_tools()
+            ),
             scope_check_fn=lambda url: _api_check_scope(url, api_run_id),
             context_tool_fn=context_tool_fn,
-            post_finding_fn=post_finding_fn,
+            post_finding_fn=(
+                post_finding_fn if coverage_mode != "sast_validate" else None
+            ),
             post_probe_fn=post_probe_fn,
             persist_credential_fn=persist_credential_fn,
+            coverage_mode=coverage_mode,
         )
 
     log.info(
@@ -1377,7 +1431,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         )
         prober = _make_enforce_prober(api_run_id, llm_cfg, base_url)
         await _enforce_coverage_loop(api_run_id, prober)
-    else:
+    elif coverage_mode != "sast_validate":
         # Track mode: promote cells the scan actually touched to covered.
         mark_all_cells_covered(api_run_id)
     # Remove endpoint cache.
@@ -1535,8 +1589,12 @@ async def start_api_scan(api_run_id: int) -> None:
             s.add(run)
             s.commit()
 
-        # Seed the coverage matrix before starting the scan task.
-        seed_coverage_matrix(api_run_id)
+        # Coverage is not part of SAST Validate; it resolves only imported leads.
+        with Session(get_engine()) as s:
+            run = s.get(ApiTestRun, api_run_id)
+            coverage_mode = run.coverage_mode if run is not None else "track"
+        if coverage_mode != "sast_validate":
+            seed_coverage_matrix(api_run_id)
 
         # Emit an immediate agent_status row so the Agents sidebar is non-empty.
         events_svc.emit(

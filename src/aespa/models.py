@@ -242,7 +242,9 @@ class ApiTestRun(SQLModel, table=True):
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     # Per-run model-mixing profile (null = use the globally active profile).
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
-    coverage_mode: str = Field(default="track")  # track|enforce (used in Slice 8)
+    coverage_mode: str = Field(
+        default="track"
+    )  # track (Quick) | enforce (Full) | sast_validate
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
@@ -512,6 +514,20 @@ class CrawlerConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class ComponentMapperConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for component-mapper budgets."""
+
+    __tablename__ = "component_mapper_config"
+
+    id: Optional[int] = Field(default=1, primary_key=True)
+    max_tool_calls: int = Field(default=120)
+    max_source_files: int = Field(default=500)
+    max_source_bytes: int = Field(default=50 * 1024 * 1024)
+    max_facts: int = Field(default=200)
+    max_concurrent: int = Field(default=4)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class BurpRestApiConfig(SQLModel, table=True):
     """Singleton row (id always = 1) for Burp Suite REST API integration settings."""
 
@@ -708,7 +724,7 @@ class TestRun(SQLModel, table=True):
     execution_snapshot_json: Optional[str] = Field(default=None)
     # Compact operational metrics used to compare scanner architecture versions.
     scan_metrics_json: Optional[str] = Field(default=None)
-    # Coverage mode: "track" (observe) or "enforce" (drive every cell to terminal)
+    # Coverage mode: "track" (Quick), "enforce" (Full), or "sast_validate".
     coverage_mode: str = Field(
         default="track",
         sa_column=Column(String, nullable=False, server_default=text("'track'")),
@@ -1286,7 +1302,7 @@ class ApplicationTarget(SQLModel, table=True):
 
 
 class ComponentTargetHint(SQLModel, table=True):
-    """An optional user-supplied hint that a component talks to a live target.
+    """An optional user-supplied code-to-live-target routing association.
 
     Purely advisory: it boosts deterministic correlation confidence but is
     never required for a campaign to run.
