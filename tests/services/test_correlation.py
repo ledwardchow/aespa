@@ -881,3 +881,58 @@ def test_cross_repo_lead_flows_end_to_end_through_mapping_review_and_dast_copy(
 
     leads_for_run = get_leads_for_run("api", api_run_id)
     assert any(lead.id == mapping.copied_lead_id for lead in leads_for_run)
+
+
+def test_generate_cross_repo_lead_for_backend_route_vulnerability(isolated_db_engine):
+    """When a SAST lead exists on a backend route (Repo B) connected to a frontend call site (Repo A),
+    correlate_campaign must generate a cross-repository lead with Repo A as primary provenance,
+    populating attack_path_json with structured entrypoint details."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+
+    with Session(isolated_db_engine) as s:
+        target_lead = ScanLead(
+            producer_run_id=9002,
+            producer_run_type="sast",
+            title="Arbitrary order price acceptance",
+            category="A01",
+            severity="high",
+            confidence=0.88,
+            location="src/routes.py:10",  # matches route_fact evidence_location
+            evidence="Order total is accepted directly from payload without catalog price re-verification.",
+            reportable=True,
+            validation_status="confirmed",
+        )
+        s.add(target_lead)
+        s.commit()
+
+    res = correlate_campaign(ctx["campaign_id"])
+    assert res["cross_component_leads"] >= 1
+
+    with Session(isolated_db_engine) as s:
+        cross_leads = s.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_type == "campaign")
+            .where(ScanLead.producer_run_id == ctx["campaign_id"])
+        ).all()
+
+        backend_cross_lead = next(
+            (l for l in cross_leads if "Arbitrary order price acceptance" in l.title), None
+        )
+        assert backend_cross_lead is not None
+        assert backend_cross_lead.attack_path_json != "{}"
+
+        attack_path = json.loads(backend_cross_lead.attack_path_json)
+        assert "frontend_entrypoint" in attack_path
+        assert attack_path["frontend_entrypoint"]["location"] == "src/checkout.js:42"
+        assert attack_path["backend_route"]["location"] == "src/routes.py:10"
+
+        provenance = s.exec(
+            select(ScanLeadComponentProvenance).where(
+                ScanLeadComponentProvenance.scan_lead_id == backend_cross_lead.id
+            )
+        ).all()
+
+        primary_prov = next((p for p in provenance if p.role == "primary"), None)
+        assert primary_prov is not None
+        assert primary_prov.component_id == ctx["ui_component_id"]
+
