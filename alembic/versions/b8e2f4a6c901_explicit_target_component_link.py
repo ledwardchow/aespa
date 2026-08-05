@@ -55,7 +55,9 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "sqlite":
-        op.drop_index("ix_application_target_component_id", table_name="application_target")
+        op.drop_index(
+            "ix_application_target_component_id", table_name="application_target"
+        )
         op.execute("ALTER TABLE application_target DROP COLUMN component_id")
         return
 

@@ -325,6 +325,12 @@ a:hover { color: var(--accent-hover); }
 .content.scroll-content.no-padding {
   padding: 0;
 }
+.content:has(> .tab-bar:first-child),
+.content:has(> .settings-tab-bar:first-child),
+.content:has(> .web-run-navigation:first-child),
+.content:has(> *:first-child > .tab-bar:first-child) {
+  padding-top: 0;
+}
 
 .page-body { display: flex; flex-direction: column; gap: 16px; }
 .panel {
@@ -542,10 +548,20 @@ form.card {
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: var(--muted);
-  margin-bottom: -6px;
+  margin-bottom: 12px;
   margin-top: 4px;
-  padding-bottom: 10px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
+}
+
+.form-section-title .subtle {
+  text-transform: none;
+  font-weight: 400;
+  margin-left: 6px;
+}
+
+form.card > .form-section-title {
+  margin-bottom: 0;
 }
 
 .policy-group {
@@ -886,6 +902,7 @@ legend {
 .settings-tab-bar { margin-bottom: 14px; }
 
 .settings-content {
+  padding-top: 0;
   padding-left: 0;
   padding-right: 0;
 }

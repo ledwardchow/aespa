@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect } from "react";
 import { api } from "../../lib/api";
 
-// Optional "component X talks to target Y" connection hints — improve
-// correlation confidence but are never required. `onChanged` (optional) is
+// Optional code-to-target routing associations — improve correlation
+// confidence but are never required. `onChanged` (optional) is
 // invoked after create/delete — see useComponents for why.
 export function useHints(applicationId, onChanged) {
   const [hints, setHints] = useState(null);

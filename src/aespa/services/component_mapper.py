@@ -23,6 +23,7 @@ from aespa.models import (
     SastRun,
 )
 from aespa.services import events as events_svc
+from aespa.services import settings as settings_svc
 from aespa.services.component_facts import interface_fact_fingerprint
 from aespa.services.prompts.component_mapper import (
     COMPONENT_MAPPER_SYSTEM_PROMPT,
@@ -48,8 +49,6 @@ _FACT_TYPES = {
     "rpc_server",
 }
 _HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
-_MAX_TOOL_CALLS = 40
-_MAX_FACTS = 200
 _MAX_STRING = 2000
 _LOCATION_RE = re.compile(r"^(?P<path>.+):(?P<line>[1-9][0-9]*)$")
 
@@ -157,6 +156,27 @@ def _merge_detail(existing: dict, incoming: dict) -> dict:
     return merged
 
 
+def purge_llm_component_facts(sast_run_id: int) -> int:
+    """Purge previously recorded LLM ComponentFact rows for one run."""
+    with Session(get_engine()) as session:
+        rows = list(
+            session.exec(
+                select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)
+            ).all()
+        )
+        deleted = 0
+        for row in rows:
+            try:
+                detail = json.loads(row.detail_json or "{}")
+            except (TypeError, ValueError):
+                detail = {}
+            if "llm" in str(detail.get("origin") or "").lower():
+                session.delete(row)
+                deleted += 1
+        session.commit()
+        return deleted
+
+
 def _persist_facts(
     *,
     sast_run_id: int,
@@ -164,6 +184,20 @@ def _persist_facts(
     facts: list[dict],
 ) -> int:
     with Session(get_engine()) as session:
+        existing_rows = list(
+            session.exec(
+                select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)
+            ).all()
+        )
+        for row in existing_rows:
+            try:
+                detail = json.loads(row.detail_json or "{}")
+            except (TypeError, ValueError):
+                detail = {}
+            if "llm" in str(detail.get("origin") or "").lower():
+                session.delete(row)
+        session.flush()
+
         existing_rows = list(
             session.exec(
                 select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)
@@ -346,6 +380,8 @@ async def map_campaign_component(
             },
         )
         raise error
+    with Session(get_engine()) as session:
+        mapper_config = settings_svc.get_component_mapper_config(session)
 
     workdir = (
         Path(get_settings().data_dir)
@@ -360,6 +396,10 @@ async def map_campaign_component(
     facts: list[dict] = []
     rejected = 0
     tool_calls = 0
+    read_files: set[str] = set()
+    source_bytes = 0
+    budget_reason: str | None = None
+    source_budget_reason: str | None = None
 
     events_svc.emit(
         campaign_id,
@@ -382,12 +422,15 @@ async def map_campaign_component(
             ) from exc
 
         async def executor(tool_name: str, tool_input: dict, _step: int) -> str:
-            nonlocal rejected, tool_calls
-            tool_calls += 1
-            if tool_calls > _MAX_TOOL_CALLS:
-                raise CorrelationTransientError(
-                    "Interface mapping tool-call budget exhausted."
+            nonlocal rejected, tool_calls, source_bytes
+            nonlocal budget_reason, source_budget_reason
+            if tool_calls >= mapper_config.max_tool_calls:
+                budget_reason = (
+                    "Interface mapping tool-call budget exhausted "
+                    f"({mapper_config.max_tool_calls} calls)."
                 )
+                return f"{budget_reason} Record no more facts; mapping will stop."
+            tool_calls += 1
             if stop_check and stop_check():
                 return "Mapping stopped by campaign."
             if tool_name == "list_files":
@@ -400,10 +443,38 @@ async def map_campaign_component(
                 return glob_files(root, str(tool_input.get("pattern") or ""))
             if tool_name == "read_file":
                 path = str(tool_input.get("path") or "")
+                parsed = _parse_location(f"{path}:1")
+                normalized_path = parsed[0] if parsed else None
+                if (
+                    normalized_path
+                    and normalized_path not in read_files
+                    and len(read_files) >= mapper_config.max_source_files
+                ):
+                    source_budget_reason = (
+                        "Source file budget exhausted "
+                        f"({mapper_config.max_source_files} files)."
+                    )
+                    return (
+                        f"Error: {source_budget_reason} "
+                        "Record facts from files already read or call done."
+                    )
                 start = tool_input.get("start_line")
                 end = tool_input.get("end_line")
                 result = read_file(root, path, start, end)
                 if not result.startswith("Error:"):
+                    result_bytes = len(result.encode("utf-8", errors="replace"))
+                    if source_bytes + result_bytes > mapper_config.max_source_bytes:
+                        source_budget_reason = (
+                            "Source byte budget exhausted "
+                            f"({mapper_config.max_source_bytes:,} bytes)."
+                        )
+                        return (
+                            f"Error: {source_budget_reason} "
+                            "Record facts from files already read or call done."
+                        )
+                    source_bytes += result_bytes
+                    if normalized_path:
+                        read_files.add(normalized_path)
                     _record_read_range(root, read_ranges, path, start, end, result)
                 return result
             if tool_name == "grep":
@@ -414,6 +485,35 @@ async def map_campaign_component(
                     include_pattern=str(tool_input.get("include_pattern") or ""),
                 )
                 if not result.startswith("(") and not result.startswith("Error:"):
+                    result_bytes = len(result.encode("utf-8", errors="replace"))
+                    if source_bytes + result_bytes > mapper_config.max_source_bytes:
+                        source_budget_reason = (
+                            "Source byte budget exhausted "
+                            f"({mapper_config.max_source_bytes:,} bytes)."
+                        )
+                        return (
+                            f"Error: {source_budget_reason} "
+                            "Record facts from files already read or call done."
+                        )
+                    matched_paths = {
+                        match.group(1).replace("\\", "/")
+                        for line in result.splitlines()
+                        if (
+                            match := re.match(r"^(.+):([0-9]+):", line)
+                        )
+                    }
+                    new_paths = matched_paths - read_files
+                    if len(read_files) + len(new_paths) > mapper_config.max_source_files:
+                        source_budget_reason = (
+                            "Source file budget exhausted "
+                            f"({mapper_config.max_source_files} files)."
+                        )
+                        return (
+                            f"Error: {source_budget_reason} "
+                            "Record facts from files already read or call done."
+                        )
+                    source_bytes += result_bytes
+                    read_files.update(matched_paths)
                     for line in result.splitlines():
                         match = re.match(r"^(.+):([0-9]+):", line)
                         if match:
@@ -427,16 +527,21 @@ async def map_campaign_component(
                             )
                 return result
             if tool_name == "record_interface_fact":
-                if len(facts) >= _MAX_FACTS:
-                    raise CorrelationTransientError(
-                        "Interface mapping fact budget exhausted."
+                if len(facts) >= mapper_config.max_facts:
+                    budget_reason = (
+                        "Interface mapping fact budget exhausted "
+                        f"({mapper_config.max_facts} facts)."
                     )
+                    return f"{budget_reason} Record no more facts; mapping will stop."
                 try:
                     facts.append(_validate_fact(root, tool_input, read_ranges))
                 except (TypeError, ValueError, OSError) as exc:
                     rejected += 1
                     return f"Error: rejected interface fact: {exc}"
-                return f"Interface fact accepted ({len(facts)}/{_MAX_FACTS})."
+                return (
+                    f"Interface fact accepted "
+                    f"({len(facts)}/{mapper_config.max_facts})."
+                )
             if tool_name == "done":
                 return str(tool_input.get("summary") or "")
             return f"Error: unsupported mapper tool {tool_name!r}"
@@ -454,6 +559,7 @@ async def map_campaign_component(
             stop_check=stop_check,
             tools=COMPONENT_MAPPER_TOOLS,
             max_context_chars=120_000,
+            termination_check=lambda: budget_reason,
             text_only_repair_message=(
                 "Your previous response did not call a tool. Continue by calling "
                 "exactly one mapper tool: list_files, glob, read_file, grep, "
@@ -462,6 +568,8 @@ async def map_campaign_component(
         )
         if stop_check and stop_check():
             raise asyncio.CancelledError
+        if budget_reason and not summary:
+            summary = budget_reason
         recorded = _persist_facts(
             sast_run_id=run.id,
             component_id=component.id,
@@ -475,7 +583,11 @@ async def map_campaign_component(
                 "role": "Component Mapper",
                 "status": "complete",
                 "current_task": f"Mapped interfaces for {component.name}",
-                "outcome": f"{recorded} fact(s), {rejected} rejected",
+                "outcome": (
+                    f"{recorded} fact(s), {rejected} rejected"
+                    + (f"; {budget_reason}" if budget_reason else "")
+                    + (f"; {source_budget_reason}" if source_budget_reason else "")
+                ),
                 "_persist": True,
             },
         )

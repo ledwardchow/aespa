@@ -131,6 +131,8 @@ export const api = {
   startCampaign:       (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/start`, { method:"POST" }),
   stopCampaign:        (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/stop`, { method:"POST" }),
   retryCampaign:       (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/retry`, { method:"POST" }),
+  resumeCampaignSource:(id,cid,mid) => req(`/api/applications/${id}/campaigns/${cid}/sources/${mid}/resume`, { method:"POST" }),
+  resumeCampaignTarget:(id,cid,mid) => req(`/api/applications/${id}/campaigns/${cid}/targets/${mid}/resume`, { method:"POST" }),
   getCampaignStatus:   (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/status`),
   getCampaignActivity: (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/activity`),
   // URL builder (not a fetch call) — EventSource needs a raw URL, not the
@@ -140,6 +142,7 @@ export const api = {
   // fetch→subscribe gap) — prefer it over the plain /events stream.
   getCampaignActivityStreamUrl: (id,cid,cursor) => `/api/applications/${id}/campaigns/${cid}/activity/stream${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
   getCampaignConnections: (id,cid) => req(`/api/applications/${id}/campaigns/${cid}/connections`),
+  rebuildCampaignConnections: (id,cid) => req(`/api/applications/${id}/campaigns/${cid}/connections/rebuild`, { method:"POST" }),
   getCampaignMappings: (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/mappings`),
   reviewCampaignMappings: (id,cid,b) => req(`/api/applications/${id}/campaigns/${cid}/review`, { method:"POST", body:b }),
   continueCampaign:    (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/continue`, { method:"POST" }),
@@ -168,6 +171,8 @@ export const api = {
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
   getCrawlerConfig: ()            => req("/api/settings/crawler-config"),
   upsertCrawlerConfig: (b)        => req("/api/settings/crawler-config", { method:"PUT", body:b }),
+  getComponentMapperConfig: ()    => req("/api/settings/component-mapper-config"),
+  upsertComponentMapperConfig:(b) => req("/api/settings/component-mapper-config", { method:"PUT", body:b }),
   getBurpRestApiConfig: ()        => req("/api/settings/burp-rest-api"),
   upsertBurpRestApiConfig: (b)    => req("/api/settings/burp-rest-api", { method:"PUT", body:b }),
   testBurpConnection: ()          => req("/api/settings/burp-rest-api/test-connection", { method:"POST" }),

@@ -1,5 +1,5 @@
 """Thin API router for Applications: components, ZIP snapshots, targets,
-connection hints, and multi-repository assessment campaigns.
+code-to-target routing associations, and multi-repository assessment campaigns.
 
 All real logic lives in ``services/applications.py``, ``services/campaigns.py``,
 and ``services/correlation.py`` — this module only validates the HTTP
@@ -540,7 +540,7 @@ def detach_target(
         raise _conflict(exc) from exc
 
 
-# ── Connection hints ───────────────────────────────────────────────────────────
+# ── Code-to-target routing associations ────────────────────────────────────────
 
 
 @router.get("/{application_id}/hints", response_model=list[ComponentTargetHintOut])
@@ -710,6 +710,50 @@ async def retry_campaign(
     try:
         campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
         await campaigns_svc.retry_campaign(campaign.id)
+    except campaigns_svc.CampaignNotFound as exc:
+        raise _not_found(exc) from exc
+    except campaigns_svc.InvalidCampaignState as exc:
+        raise _conflict(exc) from exc
+    session.refresh(campaign)
+    return _to_campaign_detail(session, campaign)
+
+
+@router.post(
+    "/{application_id}/campaigns/{campaign_id}/sources/{member_id}/resume",
+    response_model=CampaignDetail,
+)
+async def resume_campaign_source(
+    application_id: int,
+    campaign_id: int,
+    member_id: int,
+    session: Session = Depends(get_session),
+) -> CampaignDetail:
+    """Retry one campaign-owned SAST child without rerunning other members."""
+    try:
+        campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
+        await campaigns_svc.resume_source_member(campaign.id, member_id)
+    except campaigns_svc.CampaignNotFound as exc:
+        raise _not_found(exc) from exc
+    except campaigns_svc.InvalidCampaignState as exc:
+        raise _conflict(exc) from exc
+    session.refresh(campaign)
+    return _to_campaign_detail(session, campaign)
+
+
+@router.post(
+    "/{application_id}/campaigns/{campaign_id}/targets/{member_id}/resume",
+    response_model=CampaignDetail,
+)
+async def resume_campaign_target(
+    application_id: int,
+    campaign_id: int,
+    member_id: int,
+    session: Session = Depends(get_session),
+) -> CampaignDetail:
+    """Retry one campaign-owned live-target child without rerunning siblings."""
+    try:
+        campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
+        await campaigns_svc.resume_target_member(campaign.id, member_id)
     except campaigns_svc.CampaignNotFound as exc:
         raise _not_found(exc) from exc
     except campaigns_svc.InvalidCampaignState as exc:
@@ -998,6 +1042,23 @@ def _enrich_mappings(
                     "lead_location": lead.location,
                     "lead_producer_run_type": lead.producer_run_type,
                     "lead_producer_run_id": lead.producer_run_id,
+                    "lead_category": lead.category,
+                    "lead_confidence": lead.confidence,
+                    "lead_source": lead.source,
+                    "lead_fingerprint": lead.fingerprint,
+                    "lead_suggested_endpoint": lead.suggested_endpoint,
+                    "lead_status": lead.status,
+                    "lead_validation_status": lead.validation_status,
+                    "lead_validation_reasoning": lead.validation_reasoning,
+                    "lead_reportable": lead.reportable,
+                    "lead_evidence": lead.evidence,
+                    "lead_note": lead.note,
+                    "lead_source_trace_json": lead.source_trace_json,
+                    "lead_control_trace_json": lead.control_trace_json,
+                    "lead_sink_trace_json": lead.sink_trace_json,
+                    "lead_counterevidence_json": lead.counterevidence_json,
+                    "lead_proof_gaps_json": lead.proof_gaps_json,
+                    "lead_attack_path_json": lead.attack_path_json,
                     "component_ids": component_ids,
                     "component_names": [
                         component_name_by_id[cid]

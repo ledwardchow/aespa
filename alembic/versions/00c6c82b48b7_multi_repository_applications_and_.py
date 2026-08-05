@@ -31,9 +31,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     with op.batch_alter_table("application", schema=None) as batch_op:
-        batch_op.create_index(
-            batch_op.f("ix_application_name"), ["name"], unique=True
-        )
+        batch_op.create_index(batch_op.f("ix_application_name"), ["name"], unique=True)
 
     op.create_table(
         "application_component",
@@ -46,9 +44,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.ForeignKeyConstraint(["application_id"], ["application.id"]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "application_id", "name", name="uq_component_app_name"
-        ),
+        sa.UniqueConstraint("application_id", "name", name="uq_component_app_name"),
     )
     with op.batch_alter_table("application_component", schema=None) as batch_op:
         batch_op.create_index(
@@ -316,13 +312,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["campaign_id"], ["run_identity.id"], ondelete="CASCADE"
         ),
-        sa.ForeignKeyConstraint(
-            ["source_component_id"], ["application_component.id"]
-        ),
+        sa.ForeignKeyConstraint(["source_component_id"], ["application_component.id"]),
         sa.ForeignKeyConstraint(["source_fact_id"], ["component_fact.id"]),
-        sa.ForeignKeyConstraint(
-            ["target_component_id"], ["application_component.id"]
-        ),
+        sa.ForeignKeyConstraint(["target_component_id"], ["application_component.id"]),
         sa.ForeignKeyConstraint(["target_fact_id"], ["component_fact.id"]),
         sa.PrimaryKeyConstraint("id"),
     )

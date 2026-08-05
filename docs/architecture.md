@@ -2,7 +2,7 @@
 
 AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security scanner. It covers three distinct surfaces:
 
-- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage with Track/Enforce modes.
+- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage with Track/Enforce modes, while SAST Validate focuses only on imported SAST leads.
 - **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
 - **SAST assistance** — a standalone agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
 - **Multi-repository applications** — when a product's code is split across several repositories/micro-frontends, an **Application** groups them (with immutable uploaded ZIP snapshots) alongside the existing Sites/API Collections that make up the live product. An **AssessmentCampaign** coordinates ordinary SAST/web/API child runs for that application, joins compact per-repository interface facts into a cross-repository map, and proposes which live target should receive each SAST lead — subject to human review before any dynamic scan starts.
@@ -685,6 +685,19 @@ never reject `done` indefinitely.
 | `tool` | Call a read-only context tool (see below) |
 | `done` | Finish the scan with a summary |
 
+The existing `coverage_mode` selector has three values: `track` (Quick), `enforce`
+(Full), and `sast_validate` (SAST Validate). SAST Validate does not seed or resolve
+normal coverage obligations, dispatch specialists, schedule Burp work, or run the
+general post-scan reporting pass. It loads every open imported lead as a compact
+index, requires the Test Lead to fetch each lead's complete evidence with
+`context_tool` → `lead_detail`, and cannot finish until every imported lead is
+`confirmed`, `dismissed`, or `inconclusive`. The Test Lead must follow the lead's
+attack path and may use configured credentials and sessions to reach protected
+functionality. A finding is allowed only when the lead is confirmed or when an
+incidental issue is directly evidenced by traffic already generated for that lead;
+incidental issues receive no follow-up probes. The existing deterministic TLS
+posture check still runs for HTTPS targets unless deterministic checks are disabled.
+
 ### WAF detection and request transport
 
 WAF detection is passive. The traffic logger looks at normal response headers,
@@ -740,6 +753,7 @@ targeted scan round will change the next action.
 | `auth_matrix` | Test a set of endpoints across auth boundaries |
 | `extract_entities` | Parse URLs, IDs, JWTs, error strings from text |
 | `coverage_gaps` | Compact live list of high-value uncovered web route/category cells |
+| `lead_detail` | Full evidence, traces, validation data, and attack path for an imported SAST lead owned by the current run |
 
 ### Web OWASP Coverage (OWASP Top-10 matrix)
 
@@ -752,7 +766,7 @@ Input-bearing A03 cells additionally persist class-level states in `test_classes
 - `seed_web_workprogram(run_id)` creates the cells; it runs synchronously when a dynamic scan starts (and on resume) via `api/scan.py`, and can be re-triggered through `POST /api/test-runs/{id}/coverage/seed`.
 - `_make_web_post_probe_fn` / `_make_web_post_finding_fn` update cells as the agentic loop probes pages and writes findings (findings flip the cell to `finding` and record the `ScanFinding.id`).
 - `web_route_inventory.enrich_dynamic_route` classifies routes first observed during the dynamic scan from their request/response evidence. It OR-merges deterministic and LLM-derived applicability into the canonical `CrawledPage`, reseeds newly applicable cells, and leaves the current probe hook to mark the exercised category `in_progress`. Browser-observed routes are enriched too; passive JavaScript route literals remain target intelligence until actively reached.
-- `TestRun.coverage_mode` selects **Track** (observe only) or **Enforce**; in Enforce mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop, classifying each `(page, category)` as probe-worthy or skippable up to a budget.
+- `TestRun.coverage_mode` selects **Track** (`track`, the Quick mode), **Enforce** (`enforce`, the Full mode), or **SAST Validate** (`sast_validate`). In Enforce mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop, classifying each `(page, category)` as probe-worthy or skippable up to a budget. SAST Validate does not use the work program; it validates only open imported SAST leads and retains the HTTPS TLS posture check.
 - `get_web_coverage_matrix(run_id)` powers the **OWASP Coverage** UI tab (`GET /api/test-runs/{id}/coverage`).
 
 ---
@@ -1067,7 +1081,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/statistics/llm/prices/refresh` | `statistics.py` | Download the latest LiteLLM price map |
 | `/api/statistics/llm/prices` | `statistics.py` | Save a monthly or future price override |
 | `/api/statistics/llm` (`DELETE`) | `statistics.py` | Reset all usage months while retaining price data |
-| `/api/applications/` | `applications.py` | CRUD for applications, code components, ZIP snapshots, targets, explicit target component links, and connection hints |
+| `/api/applications/` | `applications.py` | CRUD for applications, code components, ZIP snapshots, targets, explicit target component links, and code-to-target routing associations |
 | `/api/applications/{id}/campaigns/` | `applications.py` | Create/list/get/delete campaigns; `start`/`stop`/`retry`/`continue` lifecycle actions |
 | `/api/applications/{id}/campaigns/{id}/status` | `applications.py` | Campaign progress (status, warnings, source/target member states) |
 | `/api/applications/{id}/campaigns/{id}/events` | `applications.py` | Live SSE stream (same event bus as web/API/SAST runs, scoped `run_kind="campaign"`) |
@@ -1391,6 +1405,11 @@ Cell statuses: `uncovered` → `in_progress` → `covered` (finding attached) / 
 **Track mode** — the agentic loop steers itself; cells are updated as probes are made.  
 **Enforce mode** — after the main loop, `_enforce_coverage_loop` drives every still-uncovered cell to a terminal state. An LLM classifier decides per `(endpoint, category)` whether to probe or record a skip reason, up to a configurable budget.
 
+**SAST Validate mode** (`coverage_mode="sast_validate"`) does not seed, probe, or
+resolve the API coverage matrix. It validates only open imported SAST leads, using
+the lead's attack path and configured sessions; the existing HTTPS TLS posture
+check remains enabled unless deterministic checks are disabled.
+
 ### API scan engine (`services/api_scanner.py`)
 
 The entry point `start_api_scan(api_run_id)` launches `_api_scan_task` as a background `asyncio.Task`.
@@ -1400,7 +1419,7 @@ _api_scan_task(api_run_id)
   └─ _do_api_thinking_scan(api_run_id)
        1. Load ApiTestRun, LLM config, scanner policy, collection
        2. seed_sessions_from_credentials — load ApiCredentials into scanner session vault
-       3. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs
+       3. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs (Track/Enforce only)
        4. _build_api_crawl_context — build LLM opening context from collection metadata + explicitly imported SAST leads
        5. _do_agentic_thinking_loop (shared with web scanner)
             • get_api_test_lead_tools supplies only API-aware top-level tools; browser,
@@ -1413,6 +1432,11 @@ _api_scan_task(api_run_id)
             • _make_post_probe_fn updates the coverage matrix cell for each probe (endpoint, category)
             • _make_post_finding_fn stamps api_test_run_id and OWASP category on each finding
        7. (enforce mode only) _enforce_coverage_loop — drive uncovered cells to terminal state
+
+In SAST Validate, the API prompt and tool list are restricted to context lookup,
+HTTP requests, finding/lead updates, and completion. Coverage probe hooks and
+final untouched-cell resolution are disabled. `lead_detail` is available in all
+API scan modes and enforces ownership by `(run_kind, run_id, lead_id)`.
 ```
 
 ### Scope enforcement
@@ -1517,7 +1541,7 @@ The dynamic loop investigates leads via the shared `update_lead` action, which s
 - **API scans** consume *explicitly imported copies*: the user picks a completed SAST run on the API run's **Scan Leads** tab and `copy_leads_to_run(sast_run_id, "api", run_id)` creates fresh rows owned only by that API run. API scan startup never creates a SAST run or imports collection leads automatically. `_build_api_crawl_context` and API A.L.I.C.E. inject only `format_leads_for_run("api", run_id)`.
 - **Web scans** consume *copies*: the user picks a completed SAST run on the **SAST Leads** tab and `copy_leads_to_run(sast_run_id, "web", run_id)` duplicates its originals into new rows tagged `imported_into_*` (idempotent per source run; originals stay `open`). At scan start `scanner._do_thinking_scan` injects them via `format_leads_for_run("web", run_id)`. Because copies are independent, investigating them never mutates the source SAST run's leads, and deleting a SAST run leaves the copies intact (only `imported_into_run_id IS NULL` originals are cascade-deleted).
 
-The dynamic context includes each lead's ordered reachability, impact, severity reasoning, and dynamic-test objective. The web and API Test Leads use that path to choose focused probes, but must verify every hop against live responses before calling `update_lead`. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
+The dynamic context includes each lead's ordered reachability, impact, severity reasoning, and dynamic-test objective. The web and API Test Leads use that path to choose focused probes, but must verify every hop against live responses before calling `update_lead`. In SAST Validate, the opening prompt contains only a compact index; `lead_detail` retrieves the complete lead one at a time. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
 
 Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import.
 
@@ -1550,7 +1574,7 @@ This layer never replaces the standalone SAST/web/API workflows described in sec
 | `component_snapshot` | One immutable uploaded ZIP version for a component (filename, stored path, size, SHA-256) — never edited in place |
 | `application_target` | An existing `Site` or `ApiCollection` attached to an application (reused, never copied) |
 | `application_target.component_id` | An optional explicit code-component owner for a live target; linked component SAST leads are auto-imported into that target's child run |
-| `component_target_hint` | An optional user-supplied "this component talks to this target" hint that boosts inferred correlation confidence |
+| `component_target_hint` | An optional user-supplied code-to-target routing association that boosts inferred correlation confidence |
 | `assessment_campaign` | One coordinated test; its `id` comes from the same global `run_identity` namespace as web/API/SAST runs (`kind="campaign"`), so its events/logs never collide with a run id |
 | `campaign_source_member` | One frozen `(component, snapshot)` pair selected for a campaign, plus the `SastRun` id it spawned |
 | `campaign_target_member` | One frozen live target selected for a campaign, plus the `TestRun`/`ApiTestRun` id it spawned |
@@ -1604,6 +1628,8 @@ draft ─start─▶ sast_running ─▶ correlating ─▶ awaiting_review
 - **`correlating`** — runs `correlate_campaign` (synchronous, deterministic). Facts are looked up by each `CampaignSourceMember`'s own `sast_run_id` — never by `component_id` alone — so a component reused across two campaigns/snapshots never leaks the other campaign's facts into this one.
 - **`awaiting_review`** — paused until the review gate is satisfied: `submit_review` rejects an unknown/foreign `mapping_id` outright (all-or-nothing per batch) and only accepts an empty decision list when the campaign genuinely has zero proposals; `review_submitted_at` is stamped only once every proposed mapping — across one or more submissions — has an approved/rejected decision.
 - **`dast_running`** — for each frozen target, a `TestRun`/`ApiTestRun` is created (once, rerun-safe) and driven the same way the standalone screens do: a web target always waits for `crawler.start_crawl` to reach `phase == "crawled"` before its approved leads are copied and `scanner.start_thinking_scan` starts; an API target copies its approved leads and calls `api_scanner.start_api_scan` directly. Every target runs concurrently. A target is only marked `completed` after reloading its `TestRun`/`ApiTestRun` and confirming a genuine success status (`"complete"`/`"completed"`) — the wait loop exiting only means the task is done, not that it succeeded. The campaign itself only reports `completed` if at least one target actually succeeded; if every target failed, it reports `failed` rather than a false success.
+- **Independent child retry** — once the campaign orchestrator is idle, `POST .../sources/{member_id}/resume` and `POST .../targets/{member_id}/resume` retry only the selected failed/pending/skipped child. The existing child run is reused when available, completed siblings and the campaign stage are left untouched (except that a failed no-target campaign is promoted to `completed` when a target retry succeeds), and the retry is tracked separately so stopping or deleting a campaign cannot race an in-flight member retry. The same child run remains directly manageable from its ordinary SAST, web, or API screen; deleting a child detaches that member and allows the campaign resume action to create a replacement child from the frozen snapshot or target.
+- **Context matching retry** — the Connections tab exposes `Resume context matching` for failed/interrupted correlation and `Re-run context matching` for completed review/live stages. It reuses the collected SAST facts and immutable snapshots without rerunning child scans; downstream review/mapping data is preserved once the campaign has moved past correlation, and concurrent campaign actions are rejected.
 - **Stop propagation** — `stop_campaign` marks a cooperative stop flag, then awaits each running child's own `stop_*_and_wait` barrier (`sast_scanner.stop_sast_scan_and_wait`, `crawler.stop_and_wait`, `scanner.stop_thinking_and_wait`, `api_scanner.stop_api_scan_and_wait`) — not just a fire-and-forget stop request — before cancelling and awaiting the orchestrator task itself (bounded, shielded). Once every barrier has settled, `_normalize_running_members_after_stop` force-sets any `CampaignSourceMember`/`CampaignTargetMember` still reading `running` to `skipped` — a per-member coroutine's own stop-requested check (inside a polling loop, or a bare `CancelledError` re-raise) can return/unwind without itself recording a terminal status, and a member must never keep claiming to be in progress after the campaign is done stopping. By the time `stop_campaign` returns, the campaign is genuinely persisted `stopped`, no member is left `running`, and it is safe for `delete_campaign` to cascade immediately. This is a distinct, more final state than the restart-`interrupted` reset in `reconcile_campaigns` below — `retry_campaign` only ever resumes from `interrupted`, never from an explicitly `stopped` campaign.
 - **Findings** stay owned by their child run exactly as before — `GET .../findings` reads across children rather than creating a second finding copy — and each row resolves its contributing component(s) the same way mappings do: through the finding's linked `ScanLead` (`ScanLead.linked_finding_id`), never guessed from target/host matching. A SAST-produced lead's component comes from `CampaignSourceMember`; a campaign-produced cross-repo lead's components come from `ScanLeadComponentProvenance` on the *original* lead — the finding's linked row is itself a copy imported into the dynamic run, so it is matched back to its original by fingerprint (the same identity `copy_lead_to_run` uses for its own idempotency). `component_name` stays a comma-joined string for backward compatibility; `component_ids`/`component_names` give the same information as lists.
 - **Activity** — `GET .../activity` replays the campaign's persisted `AgentLog`/`ScanLog` rows (filtered `run_kind == "campaign"` and this campaign's id) as one stable, chronological feed — the reload/replay counterpart to the live `GET .../events` SSE stream, which keeps working unchanged for real-time updates. `GET .../activity/stream` is a third option: a cursor-safe SSE stream that replays persisted history after a cursor and then keeps following new persisted rows, with **no fetch→subscribe gap window** — every message it emits, "replayed" or "new", comes from re-querying `AgentLog`/`ScanLog` on a ~1s poll (`_ACTIVITY_STREAM_POLL_SECONDS`), so there is no in-memory subscribe step that could start after a row has already committed. Each `CampaignActivityEntry` carries `event_id`, a composite `"<max AgentLog.id seen>.<max ScanLog.id seen>"` watermark (the two tables have independent id sequences, so a single counter cannot capture "everything seen so far" on its own). Pass it back as `Last-Event-ID` (checked first, browser `EventSource` reconnects do this automatically) or the `?cursor=` query param (checked second) to resume exactly after it; omit both to replay full history. Every SSE frame includes an `id: <event_id>` line for this purpose.
@@ -1612,7 +1638,7 @@ draft ─start─▶ sast_running ─▶ correlating ─▶ awaiting_review
 
 Deleting a campaign (`run_cleanup.cascade_delete_campaign`) removes rows in FK-safe order: every join/mapping row that references a `ScanLead`/`ComponentFact` (`ComponentConnection`, `LeadTargetMapping`, `ScanLeadComponentProvenance`) is deleted and flushed *before* the child-run cascades remove the facts/leads they point to — verified with SQLite foreign-key enforcement genuinely on in tests. It also never deletes a `ComponentSnapshot`'s ZIP file: `cascade_delete_sast_run` only removes a run's `source_archive_path` when that path is *not* a known snapshot's `stored_path` — a campaign-created `SastRun`'s archive is always a shared, immutable snapshot another campaign may still select, while a standalone SAST run's own upload is still removed as before.
 
-A `SastRun`/`TestRun`/`ApiTestRun` a campaign's frozen manifest still references cannot be deleted through its own standalone route — `raise_if_sast_run_owned_by_campaign` / `raise_if_web_run_owned_by_campaign` / `raise_if_api_run_owned_by_campaign` guard `DELETE /api/sast-runs/{id}`, `DELETE /api/test-runs/{id}`, and the API test-run equivalent with a 409. The same `run_cleanup.assert_run_not_campaign_owned` guard is reused (via a small `_reject_if_campaign_owned` wrapper per router) on every other state-mutating endpoint for a campaign-owned run — SAST profile update/scan start/stop/lead handoff/import/clear/delete-lead; web settings update/start/restart/crawl clear/crawl import/stop/import-leads/clear-leads/delete-lead, the focused per-page scan (`POST .../pages/{page_id}/test`), finding create/update/delete/import, validation start/stop/single-finding validate, and scan/agent-log clearing; API scan start/stop and any mutable settings — directing the caller to the campaign instead. Read-only detail/log/status endpoints are never blocked. Deleting the underlying `Site`/`ApiCollection` behind an application target is blocked the same way while any `ApplicationTarget` still attaches it — detach it from every application first. The only way to remove a campaign-owned child run is to delete the campaign itself.
+Campaign child runs are intentionally not subject to a separate ownership lock. Their ordinary SAST, web, and API detail screens can start/stop, edit, validate, clear, and delete them directly, including when the run is listed inside a campaign. Deleting a child clears its run id from the campaign member and returns that member to `pending`; a later campaign resume recreates the child from the frozen source snapshot or live target. Deleting the underlying `Site`/`ApiCollection` behind an application target is still blocked while any `ApplicationTarget` attaches it — detach it from every application first.
 
 `db._stamp_legacy_db_if_needed` picks a legacy database's Alembic stamp from *actual table presence*, not a fixed assumption: a pre-Alembic database with `run_identity` but not yet `assessment_campaign` (a genuine legacy database predating this feature) is stamped at the revision immediately before it so those two migrations replay for real, instead of the previous behavior of stamping straight at the symbolic `"head"` — which was correct only until the next migration was added, after which it silently skipped every migration since for this exact database shape. A database that already has every current table (e.g. a dev/test database built via `metadata.create_all()`) is still recognized as already current and stamped at `head` directly, so replaying migrations never tries to re-create a table that already exists.
 

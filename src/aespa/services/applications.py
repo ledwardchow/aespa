@@ -1,5 +1,5 @@
 """Service-layer CRUD for Applications: components, ZIP snapshots, targets,
-and connection hints.
+and code-to-target routing associations.
 
 Pure functions taking a SQLModel ``Session``, mirroring ``services.sites`` /
 ``services.api_collections``. Campaign orchestration lives in
@@ -452,7 +452,7 @@ def detach_target(session: Session, application_id: int, target_id: int) -> None
     session.commit()
 
 
-# ── Connection hints ───────────────────────────────────────────────────────────
+# ── Code-to-target routing associations ────────────────────────────────────────
 
 
 def list_hints(session: Session, application_id: int) -> list[ComponentTargetHint]:
