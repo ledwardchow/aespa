@@ -1775,6 +1775,23 @@ class LeadTargetMappingOut(BaseModel):
     lead_location: str | None = None
     lead_producer_run_type: str | None = None
     lead_producer_run_id: int | None = None
+    lead_category: str | None = None
+    lead_confidence: float | None = None
+    lead_source: str | None = None
+    lead_fingerprint: str | None = None
+    lead_suggested_endpoint: str | None = None
+    lead_status: str | None = None
+    lead_validation_status: str | None = None
+    lead_validation_reasoning: str | None = None
+    lead_reportable: bool | None = None
+    lead_evidence: str | None = None
+    lead_note: str | None = None
+    lead_source_trace_json: str | None = None
+    lead_control_trace_json: str | None = None
+    lead_sink_trace_json: str | None = None
+    lead_counterevidence_json: str | None = None
+    lead_proof_gaps_json: str | None = None
+    lead_attack_path_json: str | None = None
     component_ids: list[int] = Field(default_factory=list)
     component_names: list[str] = Field(default_factory=list)
 

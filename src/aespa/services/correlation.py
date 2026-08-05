@@ -28,6 +28,7 @@ from aespa.db import get_engine
 from aespa.models import (
     ApiCollection,
     ApiEndpoint,
+    ApplicationComponent,
     ApplicationTarget,
     AssessmentCampaign,
     CampaignSourceMember,
@@ -455,9 +456,13 @@ def _same_file(location_a: str, location_b: str) -> bool:
 def _generate_cross_component_leads(
     session: Session, campaign_id: int, connections: list[ComponentConnection]
 ) -> list[ScanLead]:
-    """Create a campaign-owned lead only when two components' evidence
-    genuinely combines into a new hypothesis: a reportable lead at the exact
-    outbound-call site, reaching a route with no recorded auth boundary."""
+    """Create campaign-owned leads when two components' evidence combines into
+    a new hypothesis:
+    1. A reportable SAST lead at the outbound-call site (Repo A) reaching an
+       unauthenticated route (Repo B).
+    2. A reportable SAST lead at the target route site (Repo B) accessible via
+       an outbound call site (Repo A).
+    """
     created: list[ScanLead] = []
     for connection in connections:
         if connection.confidence < _MIN_CROSS_LEAD_CONNECTION_SCORE:
@@ -467,6 +472,12 @@ def _generate_cross_component_leads(
         if source_fact is None or target_fact is None:
             continue
 
+        source_comp = session.get(ApplicationComponent, connection.source_component_id)
+        target_comp = session.get(ApplicationComponent, connection.target_component_id)
+        source_comp_name = source_comp.name if source_comp else f"#{connection.source_component_id}"
+        target_comp_name = target_comp.name if target_comp else f"#{connection.target_component_id}"
+
+        # ── Case 1: SAST lead on the calling component (source_fact) ─────────
         source_lead = session.exec(
             select(ScanLead)
             .where(ScanLead.producer_run_id == source_fact.sast_run_id)
@@ -475,79 +486,192 @@ def _generate_cross_component_leads(
             .where(ScanLead.reportable == True)  # noqa: E712
             .where(ScanLead.location == source_fact.evidence_location)
         ).first()
-        if source_lead is None:
-            continue
 
-        target_auth_facts = session.exec(
-            select(ComponentFact)
-            .where(ComponentFact.sast_run_id == target_fact.sast_run_id)
-            .where(ComponentFact.fact_type == "auth_boundary")
-        ).all()
-        if any(
-            _same_file(fact.evidence_location, target_fact.evidence_location)
-            for fact in target_auth_facts
-        ):
-            continue  # the receiving route already has a recorded auth boundary
-
-        fingerprint = lead_fingerprint(
-            category=source_lead.category,
-            title=f"cross-repo:{source_lead.title}",
-            location=f"{source_fact.evidence_location}->{target_fact.evidence_location}",
-        )
-        lead = upsert_lead(
-            session,
-            producer_run_id=campaign_id,
-            producer_run_type="campaign",
-            title=(
-                f"Cross-repository: {source_lead.title} reaches an "
-                f"unauthenticated {target_fact.method or ''} {target_fact.path or target_fact.name or ''}".strip()
-            ),
-            description=(
-                f"{source_lead.description}\n\nThis call site is connected "
-                "(deterministic route/method match) to a route in another "
-                "repository that has no recorded authentication boundary."
-            ),
-            category=source_lead.category,
-            severity=source_lead.severity,
-            confidence=min(source_lead.confidence, connection.confidence),
-            location=f"{source_fact.evidence_location} -> {target_fact.evidence_location}",
-            evidence=(
-                f"Outbound call: {source_fact.method} {source_fact.path} "
-                f"({source_fact.evidence_location})\n"
-                f"Matched route: {target_fact.method} {target_fact.path} "
-                f"({target_fact.evidence_location})\n{source_lead.evidence}"
-            ),
-            source="campaign",
-            fingerprint=fingerprint,
-            # The receiving route is the live endpoint that would actually
-            # be probed — set it so lead-target scoring can match it against
-            # a campaign target's parsed ApiEndpoint rows, same as any other
-            # lead.
-            suggested_endpoint=f"{target_fact.method or ''} {target_fact.path or ''}".strip(),
-            validation_status="pending",
-            reportable=True,
-        )
-        created.append(lead)
-
-        for component_id, role, fact_id in (
-            (connection.source_component_id, "primary", source_fact.id),
-            (connection.target_component_id, "contributing", target_fact.id),
-        ):
-            existing = session.exec(
-                select(ScanLeadComponentProvenance)
-                .where(ScanLeadComponentProvenance.scan_lead_id == lead.id)
-                .where(ScanLeadComponentProvenance.component_id == component_id)
-            ).first()
-            if existing is not None:
-                continue
-            session.add(
-                ScanLeadComponentProvenance(
-                    scan_lead_id=lead.id,
-                    component_id=component_id,
-                    role=role,
-                    fact_id=fact_id,
+        if source_lead is not None:
+            target_auth_facts = session.exec(
+                select(ComponentFact)
+                .where(ComponentFact.sast_run_id == target_fact.sast_run_id)
+                .where(ComponentFact.fact_type == "auth_boundary")
+            ).all()
+            if not any(
+                _same_file(fact.evidence_location, target_fact.evidence_location)
+                for fact in target_auth_facts
+            ):
+                fingerprint = lead_fingerprint(
+                    category=source_lead.category,
+                    title=f"cross-repo:{source_lead.title}",
+                    location=f"{source_fact.evidence_location}->{target_fact.evidence_location}",
                 )
+                attack_path = {
+                    "frontend_entrypoint": {
+                        "component_id": connection.source_component_id,
+                        "component_name": source_comp_name,
+                        "location": source_fact.evidence_location,
+                        "method": source_fact.method,
+                        "path": source_fact.path,
+                        "host": source_fact.host,
+                    },
+                    "backend_route": {
+                        "component_id": connection.target_component_id,
+                        "component_name": target_comp_name,
+                        "location": target_fact.evidence_location,
+                        "method": target_fact.method,
+                        "path": target_fact.path,
+                    },
+                    "vulnerability": {
+                        "lead_id": source_lead.id,
+                        "category": source_lead.category,
+                        "severity": source_lead.severity,
+                        "title": source_lead.title,
+                        "description": source_lead.description,
+                        "evidence": source_lead.evidence,
+                    },
+                }
+                lead = upsert_lead(
+                    session,
+                    producer_run_id=campaign_id,
+                    producer_run_type="campaign",
+                    title=(
+                        f"Cross-repository: {source_lead.title} reaches an "
+                        f"unauthenticated {target_fact.method or ''} {target_fact.path or target_fact.name or ''}".strip()
+                    ),
+                    description=(
+                        f"{source_lead.description}\n\nThis call site is connected "
+                        "(deterministic route/method match) to a route in another "
+                        "repository that has no recorded authentication boundary."
+                    ),
+                    category=source_lead.category,
+                    severity=source_lead.severity,
+                    confidence=min(source_lead.confidence, connection.confidence),
+                    location=f"{source_fact.evidence_location} -> {target_fact.evidence_location}",
+                    evidence=(
+                        f"Outbound call: {source_fact.method} {source_fact.path} "
+                        f"({source_fact.evidence_location})\n"
+                        f"Matched route: {target_fact.method} {target_fact.path} "
+                        f"({target_fact.evidence_location})\n{source_lead.evidence}"
+                    ),
+                    source="campaign",
+                    fingerprint=fingerprint,
+                    suggested_endpoint=f"{target_fact.method or ''} {target_fact.path or ''}".strip(),
+                    attack_path=attack_path,
+                    validation_status="pending",
+                    reportable=True,
+                )
+                created.append(lead)
+
+                for component_id, role, fact_id in (
+                    (connection.source_component_id, "primary", source_fact.id),
+                    (connection.target_component_id, "contributing", target_fact.id),
+                ):
+                    existing = session.exec(
+                        select(ScanLeadComponentProvenance)
+                        .where(ScanLeadComponentProvenance.scan_lead_id == lead.id)
+                        .where(ScanLeadComponentProvenance.component_id == component_id)
+                    ).first()
+                    if existing is None:
+                        session.add(
+                            ScanLeadComponentProvenance(
+                                scan_lead_id=lead.id,
+                                component_id=component_id,
+                                role=role,
+                                fact_id=fact_id,
+                            )
+                        )
+
+        # ── Case 2: SAST lead on the receiving target route (target_fact) ────
+        target_lead = session.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_id == target_fact.sast_run_id)
+            .where(ScanLead.producer_run_type == "sast")
+            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+            .where(ScanLead.reportable == True)  # noqa: E712
+            .where(ScanLead.location == target_fact.evidence_location)
+        ).first()
+
+        if target_lead is not None:
+            fingerprint = lead_fingerprint(
+                category=target_lead.category,
+                title=f"cross-repo:backend:{target_lead.title}",
+                location=f"{source_fact.evidence_location}->{target_fact.evidence_location}",
             )
+            attack_path = {
+                "frontend_entrypoint": {
+                    "component_id": connection.source_component_id,
+                    "component_name": source_comp_name,
+                    "location": source_fact.evidence_location,
+                    "method": source_fact.method,
+                    "path": source_fact.path,
+                    "host": source_fact.host,
+                },
+                "backend_route": {
+                    "component_id": connection.target_component_id,
+                    "component_name": target_comp_name,
+                    "location": target_fact.evidence_location,
+                    "method": target_fact.method,
+                    "path": target_fact.path,
+                },
+                "vulnerability": {
+                    "lead_id": target_lead.id,
+                    "category": target_lead.category,
+                    "severity": target_lead.severity,
+                    "title": target_lead.title,
+                    "description": target_lead.description,
+                    "evidence": target_lead.evidence,
+                },
+            }
+            lead = upsert_lead(
+                session,
+                producer_run_id=campaign_id,
+                producer_run_type="campaign",
+                title=(
+                    f"Cross-repository: Backend lead '{target_lead.title}' accessible via "
+                    f"{source_comp_name} ({source_fact.evidence_location})"
+                ),
+                description=(
+                    f"Backend vulnerability '{target_lead.title}' in {target_comp_name} ({target_fact.evidence_location}) "
+                    f"is accessible via frontend entrypoint {source_fact.evidence_location} in {source_comp_name}.\n\n"
+                    f"Attack Path:\n"
+                    f"- Entrypoint: {source_fact.evidence_location} ({source_fact.method or ''} {source_fact.path or ''})\n"
+                    f"- Target Route: {target_fact.evidence_location} ({target_fact.method or ''} {target_fact.path or ''})\n"
+                    f"- Vulnerability Description: {target_lead.description}"
+                ),
+                category=target_lead.category,
+                severity=target_lead.severity,
+                confidence=min(target_lead.confidence, connection.confidence),
+                location=f"{source_fact.evidence_location} -> {target_fact.evidence_location}",
+                evidence=(
+                    f"Frontend entrypoint: {source_fact.evidence_location} ({source_fact.method or ''} {source_fact.path or ''})\n"
+                    f"Backend route: {target_fact.evidence_location} ({target_fact.method or ''} {target_fact.path or ''})\n"
+                    f"Backend SAST lead: {target_lead.evidence}"
+                ),
+                source="campaign",
+                fingerprint=fingerprint,
+                suggested_endpoint=f"{target_fact.method or ''} {target_fact.path or ''}".strip(),
+                attack_path=attack_path,
+                validation_status="pending",
+                reportable=True,
+            )
+            created.append(lead)
+
+            for component_id, role, fact_id in (
+                (connection.source_component_id, "primary", source_fact.id),
+                (connection.target_component_id, "contributing", target_fact.id),
+            ):
+                existing = session.exec(
+                    select(ScanLeadComponentProvenance)
+                    .where(ScanLeadComponentProvenance.scan_lead_id == lead.id)
+                    .where(ScanLeadComponentProvenance.component_id == component_id)
+                ).first()
+                if existing is None:
+                    session.add(
+                        ScanLeadComponentProvenance(
+                            scan_lead_id=lead.id,
+                            component_id=component_id,
+                            role=role,
+                            fact_id=fact_id,
+                        )
+                    )
+
     session.flush()
     return created
 
@@ -741,6 +865,8 @@ def correlate_campaign(
     Deterministic only unless ``llm_match`` is supplied — tests never pass it,
     so this function never performs network I/O.
     """
+    from aespa.services import component_mapper
+
     with Session(get_engine()) as session:
         source_members = list(
             session.exec(
@@ -756,6 +882,10 @@ def correlate_campaign(
                 )
             ).all()
         )
+        if llm_match is None:
+            for m in source_members:
+                if m.sast_run_id:
+                    component_mapper.purge_llm_component_facts(m.sast_run_id)
         connections = _build_component_connections(
             session, campaign_id, source_members, llm_match
         )
@@ -773,6 +903,8 @@ def correlate_campaign(
 
 def rebuild_connections_deterministic(campaign_id: int) -> dict:
     """Rebuild only the application map without changing downstream review data."""
+    from aespa.services import component_mapper
+
     with Session(get_engine()) as session:
         source_members = list(
             session.exec(
@@ -781,6 +913,9 @@ def rebuild_connections_deterministic(campaign_id: int) -> dict:
                 )
             ).all()
         )
+        for m in source_members:
+            if m.sast_run_id:
+                component_mapper.purge_llm_component_facts(m.sast_run_id)
         connections = _build_component_connections(
             session, campaign_id, source_members, None
         )
@@ -823,6 +958,9 @@ async def correlate_campaign_with_llm(
                 )
             ).all()
         )
+        for m in source_members:
+            if m.sast_run_id:
+                component_mapper.purge_llm_component_facts(m.sast_run_id)
         llm_config = get_llm_config_for_role(session, campaign, "component_mapper")
         has_explicit_mapper_config = (
             campaign.llm_config_id is not None or campaign.llm_profile_id is not None

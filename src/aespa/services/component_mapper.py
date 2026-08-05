@@ -156,6 +156,27 @@ def _merge_detail(existing: dict, incoming: dict) -> dict:
     return merged
 
 
+def purge_llm_component_facts(sast_run_id: int) -> int:
+    """Purge previously recorded LLM ComponentFact rows for one run."""
+    with Session(get_engine()) as session:
+        rows = list(
+            session.exec(
+                select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)
+            ).all()
+        )
+        deleted = 0
+        for row in rows:
+            try:
+                detail = json.loads(row.detail_json or "{}")
+            except (TypeError, ValueError):
+                detail = {}
+            if "llm" in str(detail.get("origin") or "").lower():
+                session.delete(row)
+                deleted += 1
+        session.commit()
+        return deleted
+
+
 def _persist_facts(
     *,
     sast_run_id: int,
@@ -163,6 +184,20 @@ def _persist_facts(
     facts: list[dict],
 ) -> int:
     with Session(get_engine()) as session:
+        existing_rows = list(
+            session.exec(
+                select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)
+            ).all()
+        )
+        for row in existing_rows:
+            try:
+                detail = json.loads(row.detail_json or "{}")
+            except (TypeError, ValueError):
+                detail = {}
+            if "llm" in str(detail.get("origin") or "").lower():
+                session.delete(row)
+        session.flush()
+
         existing_rows = list(
             session.exec(
                 select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)

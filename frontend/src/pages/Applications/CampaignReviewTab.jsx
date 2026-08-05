@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { useReviewLeads } from "./useReviewLeads";
 import { EmptyState } from "../../components/EmptyState";
+import { SastLeadDetails } from "../../components/SastLeadDetails";
 import { severityClass, confidencePct, safeParseJson } from "./_helpers";
 
 const HIGH_CONFIDENCE = 0.8;
@@ -179,18 +180,55 @@ export function CampaignReviewTab({ applicationId, campaignId, campaign, canCont
 }
 
 function LeadGroup({ mappings, targets, decisions, selected, onSetDecision, onToggleSelected }) {
+  const [expanded, setExpanded] = useState(false);
   const first = mappings[0];
   const componentNames = componentNamesFor(first);
+  const leadObj = {
+    id: first.lead_id,
+    title: first.lead_title,
+    description: first.lead_description,
+    severity: first.lead_severity,
+    location: first.lead_location,
+    category: first.lead_category,
+    confidence: first.lead_confidence,
+    source: first.lead_source,
+    fingerprint: first.lead_fingerprint,
+    suggested_endpoint: first.lead_suggested_endpoint,
+    status: first.lead_status,
+    validation_status: first.lead_validation_status,
+    validation_reasoning: first.lead_validation_reasoning,
+    reportable: first.lead_reportable,
+    evidence: first.lead_evidence,
+    note: first.lead_note,
+    source_trace_json: first.lead_source_trace_json,
+    control_trace_json: first.lead_control_trace_json,
+    sink_trace_json: first.lead_sink_trace_json,
+    counterevidence_json: first.lead_counterevidence_json,
+    proof_gaps_json: first.lead_proof_gaps_json,
+    attack_path_json: first.lead_attack_path_json,
+    producer_run_id: first.lead_producer_run_id,
+    producer_run_type: first.lead_producer_run_type,
+  };
+
   return <div className="card app-review-lead-card" style={{ marginBottom: 14 }}>
-    <div className="row" style={{ gap: 8, alignItems: "center" }}>
-      <span className={"sev-badge " + severityClass(first.lead_severity || "medium")}>{first.lead_severity || "unknown"}</span>
-      <span style={{ fontWeight: 700, flex: 1 }}>{first.lead_title || `Lead #${first.lead_id}`}</span>
+    <div className="row spread" style={{ gap: 8, alignItems: "center" }}>
+      <div className="row" style={{ gap: 8, alignItems: "center", flex: 1, flexWrap: "wrap" }}>
+        <span className={"sev-badge " + severityClass(first.lead_severity || "medium")}>{first.lead_severity || "unknown"}</span>
+        <span style={{ fontWeight: 700 }}>{first.lead_title || `Lead #${first.lead_id}`}</span>
+        <span className="subtle" style={{ fontSize: 12 }}>
+          {componentNames.join(", ")}{first.lead_location ? ` · ${first.lead_location}` : ""}
+        </span>
+      </div>
+      <button className="btn secondary sm" onClick={() => setExpanded(prev => !prev)}>
+        {expanded ? "Collapse trace" : "View full trace"}
+      </button>
     </div>
-    <div className="subtle" style={{ fontSize: 12, marginTop: 4 }}>
-      {componentNames.join(", ")}{first.lead_location ? ` · ${first.lead_location}` : ""}
-    </div>
-    {first.lead_description && <div style={{ fontSize: 13, marginTop: 8 }}>{first.lead_description}</div>}
-    <table style={{ marginTop: 10 }}>
+    
+    {expanded && <div style={{ marginTop: 10, borderTop: "1px solid var(--border-2)", paddingTop: 10 }}>
+      <SastLeadDetails lead={leadObj} showSummary={false} />
+    </div>}
+
+    <table style={{ marginTop: 12 }}>
       <thead><tr><th></th><th>Proposed target</th><th>Confidence</th><th>Why</th><th>Decision</th></tr></thead>
       <tbody>
         {mappings.map(mapping => {
