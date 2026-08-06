@@ -520,11 +520,15 @@ class ComponentMapperConfig(SQLModel, table=True):
     __tablename__ = "component_mapper_config"
 
     id: Optional[int] = Field(default=1, primary_key=True)
-    max_tool_calls: int = Field(default=120)
+    max_tool_calls: int = Field(default=100)
     max_source_files: int = Field(default=500)
     max_source_bytes: int = Field(default=50 * 1024 * 1024)
-    max_facts: int = Field(default=200)
+    max_facts: int = Field(default=500)
     max_concurrent: int = Field(default=4)
+    max_trace_edges: int = Field(default=8)
+    max_trace_components: int = Field(default=6)
+    max_paths_per_lead: int = Field(default=10)
+    min_trace_confidence: float = Field(default=0.50)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -1213,6 +1217,12 @@ class ScanLead(SQLModel, table=True):
     # run for provenance. Copies are owned by (imported_into_run_type, _run_id).
     imported_into_run_type: Optional[str] = Field(default=None, index=True)  # "web"
     imported_into_run_id: Optional[int] = Field(default=None, index=True)
+    # Origin and bounded path metadata used by campaign/frontend attack-path
+    # views. These remain nullable so older standalone leads keep their meaning.
+    origin_lead_id: Optional[int] = Field(default=None, index=True)
+    trace_path_key: Optional[str] = Field(default=None, index=True)
+    trace_status: str = Field(default="none")
+    trace_confidence: Optional[float] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -1348,6 +1358,12 @@ class AssessmentCampaign(SQLModel, table=True):
     # reads this to resume the exact stage without recreating any child run.
     # Cleared once a retry is issued.
     interrupted_stage: Optional[str] = Field(default=None)
+    # Optional per-campaign overrides for the component mapper's trace budget.
+    # NULL means use the singleton ComponentMapperConfig value.
+    max_trace_edges: Optional[int] = Field(default=None)
+    max_trace_components: Optional[int] = Field(default=None)
+    max_paths_per_lead: Optional[int] = Field(default=None)
+    min_trace_confidence: Optional[float] = Field(default=None)
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
@@ -1425,6 +1441,15 @@ class ComponentConnection(SQLModel, table=True):
     """One matched edge in a campaign's cross-repository application map."""
 
     __tablename__ = "component_connection"
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id",
+            "source_fact_id",
+            "target_fact_id",
+            "edge_kind",
+            name="uq_component_connection_edge",
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     campaign_id: int = Field(sa_column=_run_identity_fk())
@@ -1436,6 +1461,13 @@ class ComponentConnection(SQLModel, table=True):
     confidence: float = Field(default=0.0)
     rationale: str = Field(default="")
     evidence_json: str = Field(default="{}")
+    # ``same_component`` edges are directed call/route hops within one SAST
+    # run. Run ids make the edge unambiguous when a component has snapshots
+    # from multiple campaigns.
+    edge_kind: str = Field(default="calls", index=True)
+    source_sast_run_id: Optional[int] = Field(default=None, index=True)
+    target_sast_run_id: Optional[int] = Field(default=None, index=True)
+    path_scope: str = Field(default="cross_component", index=True)
     created_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -1458,6 +1490,16 @@ class LeadTargetMapping(SQLModel, table=True):
     status: str = Field(default="proposed", index=True)  # proposed|approved|rejected
     copied_lead_id: Optional[int] = Field(default=None)  # set once approved+copied
     reviewed_at: Optional[datetime] = Field(default=None)
+    auto_approved: bool = Field(default=False)
+    approved: Optional[bool] = Field(default=None)
+    final_score: Optional[float] = Field(default=None)
+    change_reason: Optional[str] = Field(default=None)
+    path_json: str = Field(default="{}")
+    approved_attack_path_json: str = Field(default="{}")
+    final_attack_path_json: str = Field(default="{}")
+    attack_path_changes_json: str = Field(default="[]")
+    path_status: Optional[str] = Field(default=None, index=True)
+    edited_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

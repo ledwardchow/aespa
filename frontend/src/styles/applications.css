@@ -153,3 +153,29 @@
 /* ── Review leads ───────────────────────────────────────────── */
 
 .app-review-lead-card table { width: 100%; }
+.app-review-mappings-table { table-layout: fixed; min-width: 680px; }
+.app-review-mappings-table .review-select-col { width: 4%; }
+.app-review-mappings-table .review-target-col { width: 20%; }
+.app-review-mappings-table .review-confidence-col { width: 12%; }
+.app-review-mappings-table .review-why-col { width: 43%; }
+.app-review-mappings-table .review-decision-col { width: 21%; }
+.app-review-mappings-table th,
+.app-review-mappings-table td {
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.app-review-mappings-table .review-confidence-col,
+.app-review-mappings-table td:nth-child(3) {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+.app-review-mappings-table td:last-child .row { flex-wrap: wrap; }
+.app-review-path-editor-row td {
+  padding: 0 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.app-review-path-editor {
+  width: 100%;
+  box-sizing: border-box;
+}

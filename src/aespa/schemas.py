@@ -439,6 +439,10 @@ class ScanLeadOut(BaseModel):
     linked_finding_id: int | None
     imported_into_run_type: str | None
     imported_into_run_id: int | None
+    origin_lead_id: int | None = None
+    trace_path_key: str | None = None
+    trace_status: str = "none"
+    trace_confidence: float | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -819,15 +823,19 @@ class CrawlerConfigOut(CrawlerConfigBase):
 class ComponentMapperConfigBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    max_tool_calls: int = Field(default=120, ge=1, le=1000)
+    max_tool_calls: int = Field(default=100, ge=1, le=1000)
     max_source_files: int = Field(default=500, ge=1, le=10000)
     max_source_bytes: int = Field(
         default=50 * 1024 * 1024,
         ge=1 * 1024 * 1024,
         le=250 * 1024 * 1024,
     )
-    max_facts: int = Field(default=200, ge=1, le=1000)
+    max_facts: int = Field(default=500, ge=1, le=1000)
     max_concurrent: int = Field(default=4, ge=1, le=32)
+    max_trace_edges: int = Field(default=8, ge=1, le=100)
+    max_trace_components: int = Field(default=6, ge=1, le=50)
+    max_paths_per_lead: int = Field(default=10, ge=1, le=100)
+    min_trace_confidence: float = Field(default=0.50, ge=0.0, le=1.0)
 
 
 class ComponentMapperConfigIn(ComponentMapperConfigBase):
@@ -1680,6 +1688,10 @@ class CampaignCreate(BaseModel):
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
     max_parallel_sast: int = Field(default=2, ge=1, le=8)
+    max_trace_edges: int | None = Field(default=None, ge=1, le=64)
+    max_trace_components: int | None = Field(default=None, ge=1, le=32)
+    max_paths_per_lead: int | None = Field(default=None, ge=1, le=100)
+    min_trace_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class CampaignSourceMemberOut(BaseModel):
@@ -1722,6 +1734,10 @@ class CampaignSummary(BaseModel):
     error_message: str | None
     # Set only while status == "interrupted"; the stage retry will resume.
     interrupted_stage: str | None = None
+    max_trace_edges: int | None = None
+    max_trace_components: int | None = None
+    max_paths_per_lead: int | None = None
+    min_trace_confidence: float | None = None
     started_at: datetime | None
     completed_at: datetime | None
     created_at: datetime
@@ -1746,6 +1762,14 @@ class ComponentConnectionOut(BaseModel):
     confidence: float
     rationale: str
     evidence_json: str
+    edge_kind: str = "calls"
+    source_sast_run_id: int | None = None
+    target_sast_run_id: int | None = None
+    path_scope: str = "cross_component"
+    source_component_name: str | None = None
+    target_component_name: str | None = None
+    source_fact_summary: dict = Field(default_factory=dict)
+    target_fact_summary: dict = Field(default_factory=dict)
     created_at: datetime
 
 
@@ -1763,6 +1787,16 @@ class LeadTargetMappingOut(BaseModel):
     status: str
     copied_lead_id: int | None
     reviewed_at: datetime | None
+    auto_approved: bool = False
+    approved: bool | None = None
+    final_score: float | None = None
+    change_reason: str | None = None
+    path_json: str = "{}"
+    approved_attack_path_json: str = "{}"
+    final_attack_path_json: str = "{}"
+    attack_path_changes_json: str = "[]"
+    path_status: str | None = None
+    edited_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     # Lead context for the review UI, added on top of the raw mapping row —
@@ -1779,6 +1813,10 @@ class LeadTargetMappingOut(BaseModel):
     lead_confidence: float | None = None
     lead_source: str | None = None
     lead_fingerprint: str | None = None
+    lead_origin_lead_id: int | None = None
+    lead_trace_path_key: str | None = None
+    lead_trace_status: str | None = None
+    lead_trace_confidence: float | None = None
     lead_suggested_endpoint: str | None = None
     lead_status: str | None = None
     lead_validation_status: str | None = None
@@ -1814,6 +1852,15 @@ class LeadTargetMappingReviewResult(BaseModel):
     copied: int
 
 
+class LeadTargetMappingEditRequest(BaseModel):
+    expected_updated_at: datetime | None = None
+    path: dict = Field(default_factory=dict)
+
+
+class CampaignSupplementalValidationRequest(BaseModel):
+    mapping_ids: list[int] = Field(min_length=1)
+
+
 class CampaignFindingRow(BaseModel):
     """One combined-findings row: a ScanFinding plus its component/target context."""
 
@@ -1832,6 +1879,8 @@ class CampaignFindingRow(BaseModel):
     title: str
     severity: str
     status: str
+    frontend_attack_path: dict | None = None
+    backend_attack_path: dict | None = None
 
 
 class CampaignActivityEntry(BaseModel):

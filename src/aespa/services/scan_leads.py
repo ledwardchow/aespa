@@ -48,12 +48,73 @@ def _prompt_text(value: object, limit: int = 600) -> str:
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
-def format_attack_path_for_prompt(attack_path: dict) -> list[str]:
+def format_attack_path_for_prompt(
+    attack_path: dict, *, _nested: bool = False
+) -> list[str]:
     """Render SAST attack-path fields as bounded dynamic-test guidance."""
     if not isinstance(attack_path, dict):
         return []
 
     lines: list[str] = []
+    live = attack_path.get("live_frontend_context")
+    if isinstance(live, dict):
+        resolution = _prompt_text(live.get("resolution_status"))
+        if resolution:
+            lines.append(f"  Live frontend resolution: {resolution}")
+        for key, label in (
+            ("url", "Frontend URL"),
+            ("route", "Frontend route"),
+            ("action", "Frontend action"),
+            ("trigger", "Frontend trigger"),
+        ):
+            value = _prompt_text(live.get(key))
+            if value:
+                lines.append(f"  {label}: {value}")
+        request = live.get("request")
+        if isinstance(request, dict):
+            method = _prompt_text(request.get("method"))
+            path = _prompt_text(request.get("path"))
+            if method or path:
+                lines.append(f"  Live request: {(method + ' ' + path).strip()}")
+            mutations = request.get("mutation_points")
+            if isinstance(mutations, list) and mutations:
+                lines.append(
+                    "  Live mutation points: "
+                    + ", ".join(_prompt_text(item, 160) for item in mutations[:12])
+                )
+
+    if not _nested:
+        final_objective = _prompt_text(attack_path.get("dynamic_test"))
+        if final_objective:
+            lines.append(f"  Final frontend dynamic test: {final_objective}")
+
+    approved = attack_path.get("approved_pre_crawl_path")
+    if isinstance(approved, dict):
+        lines.append("  Approved pre-crawl path:")
+        lines.extend(format_attack_path_for_prompt(approved, _nested=True))
+
+    prerequisites = attack_path.get("prerequisites")
+    if not isinstance(prerequisites, list) and isinstance(approved, dict):
+        prerequisites = approved.get("prerequisites")
+    if isinstance(prerequisites, list):
+        values = [
+            _prompt_text(item, 180) for item in prerequisites if str(item or "").strip()
+        ]
+        if values:
+            lines.append("  Prerequisites: " + "; ".join(values[:12]))
+
+    mutation_points = attack_path.get("mutation_points")
+    if not isinstance(mutation_points, list) and isinstance(approved, dict):
+        mutation_points = approved.get("mutation_points")
+    if isinstance(mutation_points, list):
+        values = [
+            _prompt_text(item, 180)
+            for item in mutation_points
+            if str(item or "").strip()
+        ]
+        if values:
+            lines.append("  Mutation points: " + ", ".join(values[:12]))
+
     nodes = attack_path.get("nodes")
     if isinstance(nodes, list):
         node_text = " → ".join(
@@ -61,14 +122,35 @@ def format_attack_path_for_prompt(attack_path: dict) -> list[str]:
         )
         if node_text:
             lines.append(f"  Reachability: {node_text[:1000]}")
+    hops = attack_path.get("hops")
+    if not isinstance(hops, list) and isinstance(approved, dict):
+        hops = approved.get("hops")
+    if isinstance(hops, list) and hops:
+        lines.append(
+            "  Ordered component hops: "
+            + _prompt_text(json.dumps(hops[:12], separators=(",", ":")), 1600)
+        )
     for key, label in (
         ("impact", "Impact"),
         ("severity_reasoning", "Severity reasoning"),
         ("dynamic_test", "Dynamic test objective"),
     ):
+        if not _nested and key == "dynamic_test":
+            continue
         value = _prompt_text(attack_path.get(key))
         if value:
             lines.append(f"  {label}: {value}")
+    gaps = attack_path.get("proof_gaps")
+    if isinstance(gaps, list):
+        values = [_prompt_text(item, 180) for item in gaps if str(item or "").strip()]
+        if values:
+            lines.append("  Proof gaps: " + "; ".join(values[:12]))
+    origin = attack_path.get("origin_attack_path")
+    if isinstance(origin, dict) and origin:
+        lines.append(
+            "  Original backend SAST path retained for evidence: "
+            + _prompt_text(json.dumps(origin, separators=(",", ":")), 1200)
+        )
     return lines
 
 
@@ -252,6 +334,20 @@ def list_leads_for_run(producer_run_id: int) -> list[ScanLead]:
         )
 
 
+def _copy_path_metadata(source: ScanLead, target: ScanLead) -> None:
+    for name in (
+        "origin_component_id",
+        "origin_sast_run_id",
+        "origin_path_json",
+        "origin_lead_id",
+        "trace_path_key",
+        "trace_status",
+        "trace_confidence",
+    ):
+        if hasattr(source, name) and hasattr(target, name):
+            setattr(target, name, getattr(source, name))
+
+
 def copy_leads_to_run(
     sast_run_id: int,
     target_run_type: str,
@@ -325,6 +421,7 @@ def copy_leads_to_run(
                 created_at=now,
                 updated_at=now,
             )
+            _copy_path_metadata(o, copy)
             s.add(copy)
             made += 1
         s.commit()
@@ -382,11 +479,83 @@ def copy_lead_to_run(
             created_at=datetime.now(_UTC),
             updated_at=datetime.now(_UTC),
         )
+        _copy_path_metadata(original, copied)
         s.add(copied)
         s.commit()
         s.refresh(copied)
         s.expunge(copied)
         return copied
+
+
+def prepend_frontend_context_to_copied_lead(
+    lead_id: int,
+    *,
+    context: dict | None,
+    warning: str | None = None,
+) -> ScanLead | None:
+    """Prepend target-specific crawl context without changing the source lead."""
+    with Session(get_engine()) as session:
+        lead = session.get(ScanLead, lead_id)
+        if lead is None or lead.imported_into_run_id is None:
+            return None
+        path = decode_attack_path(lead.attack_path_json)
+        if not path:
+            path = {"schema_version": 2, "perspective": "frontend"}
+        if (
+            path.get("perspective") == "frontend"
+            and "approved_pre_crawl_path" not in path
+        ):
+            path["approved_pre_crawl_path"] = dict(path)
+        live = dict(context or {})
+        if warning:
+            live.setdefault("warnings", []).append(warning)
+            live.setdefault("resolution_status", "unavailable")
+            gaps = path.setdefault("proof_gaps", [])
+            if warning not in gaps:
+                gaps.append(warning)
+        path["live_frontend_context"] = live
+        path["post_crawl_changes"] = live.get("post_crawl_changes", [])
+        path["schema_version"] = max(int(path.get("schema_version", 1)), 2)
+        lead.attack_path_json = json.dumps(path, ensure_ascii=False)
+        if hasattr(lead, "trace_status") and live.get("resolution_status"):
+            lead.trace_status = str(live["resolution_status"])
+        lead.updated_at = datetime.now(_UTC)
+        session.add(lead)
+        session.commit()
+        session.refresh(lead)
+        session.expunge(lead)
+        return lead
+
+
+def set_final_frontend_path(
+    lead_id: int,
+    *,
+    final_path: dict,
+    warning: str | None = None,
+) -> ScanLead | None:
+    """Persist a resolved frontend path on one copied lead."""
+    with Session(get_engine()) as session:
+        lead = session.get(ScanLead, lead_id)
+        if lead is None or lead.imported_into_run_id is None:
+            return None
+        path = dict(final_path)
+        if warning:
+            path.setdefault("warnings", []).append(warning)
+        if "approved_pre_crawl_path" not in path:
+            path["approved_pre_crawl_path"] = decode_attack_path(
+                getattr(lead, "origin_path_json", "") or lead.attack_path_json
+            )
+        lead.attack_path_json = json.dumps(path, separators=(",", ":"))
+        if hasattr(lead, "trace_status") and path.get("live_frontend_context", {}).get(
+            "resolution_status"
+        ) in {"matched", "partial"}:
+            lead.trace_status = "live_resolved"
+        lead.updated_at = datetime.now(_UTC)
+        session.add(lead)
+        session.commit()
+        session.refresh(lead)
+        session.expunge(lead)
+        return lead
 
 
 def get_leads_for_run(target_run_type: str, target_run_id: int) -> list[ScanLead]:

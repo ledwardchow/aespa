@@ -52,6 +52,27 @@ def test_extracts_framework_marker_from_package_json(tmp_path):
     assert any(f["name"] == "Express" for f in frameworks)
 
 
+def test_extracts_frontend_routes_actions_and_axios_calls(tmp_path):
+    (tmp_path / "src" / "app" / "checkout").mkdir(parents=True)
+    (tmp_path / "src" / "app" / "checkout" / "page.tsx").write_text(
+        "<button onClick={submitOrder}>Place order</button>\n"
+        'axios.post("/api/orders", { price })\n'
+    )
+    (tmp_path / "router.tsx").write_text(
+        '<Route path="/checkout" element={<Checkout />} />\n'
+    )
+
+    facts = extract_component_facts(tmp_path)
+    ui_routes = [fact for fact in facts if fact["fact_type"] == "ui_route"]
+    actions = [fact for fact in facts if fact["fact_type"] == "ui_action"]
+    calls = [fact for fact in facts if fact["fact_type"] == "http_call"]
+
+    assert {fact["path"] for fact in ui_routes} == {"/checkout"}
+    assert actions[0]["detail"]["handler"] == "submitOrder"
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["path"] == "/api/orders"
+
+
 def test_extraction_is_bounded_and_deterministic(tmp_path):
     (tmp_path / "app.py").write_text("@app.route('/x')\ndef view():\n    pass\n")
     first = extract_component_facts(tmp_path)
