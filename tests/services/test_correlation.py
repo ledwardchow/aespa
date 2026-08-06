@@ -164,13 +164,14 @@ def _seed_two_component_campaign(engine) -> dict:
 def test_correlate_campaign_builds_deterministic_connection(isolated_db_engine):
     ctx = _seed_two_component_campaign(isolated_db_engine)
     result = correlate_campaign(ctx["campaign_id"])
-    assert result["connections"] == 1
+    assert result["connections"] == 2  # one internal anchor edge + one API hop
 
     with Session(isolated_db_engine) as s:
         connections = s.exec(
             select(ComponentConnection).where(
                 ComponentConnection.campaign_id == ctx["campaign_id"]
             )
+            .where(ComponentConnection.edge_kind == "calls")
         ).all()
     assert len(connections) == 1
     connection = connections[0]
@@ -178,6 +179,113 @@ def test_correlate_campaign_builds_deterministic_connection(isolated_db_engine):
     assert connection.confidence >= 0.7
     assert connection.source_component_id == ctx["ui_component_id"]
     assert connection.target_component_id == ctx["api_component_id"]
+
+
+def test_purge_llm_component_facts_clears_dependent_rows_with_fk_enforcement(
+    fk_engine,
+):
+    ctx = _seed_two_component_campaign(fk_engine)
+    from aespa.services.component_mapper import purge_llm_component_facts
+
+    with Session(fk_engine) as session:
+        llm_fact = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="handler",
+            name="create_order",
+            detail_json='{"origin":"llm"}',
+            evidence_location="src/checkout.js:50",
+            fingerprint="llm-handler-fp",
+        )
+        session.add(llm_fact)
+        session.flush()
+        llm_fact_id = llm_fact.id
+        session.add(
+            ComponentConnection(
+                campaign_id=ctx["campaign_id"],
+                source_component_id=ctx["ui_component_id"],
+                source_fact_id=llm_fact_id,
+                target_component_id=ctx["api_component_id"],
+                target_fact_id=ctx["route_fact_id"],
+                confidence=0.8,
+            )
+        )
+        campaign_lead = ScanLead(
+            producer_run_id=ctx["campaign_id"],
+            producer_run_type="campaign",
+            title="derived lead",
+        )
+        session.add(campaign_lead)
+        session.flush()
+        campaign_lead_id = campaign_lead.id
+        session.add(
+            ScanLeadComponentProvenance(
+                scan_lead_id=campaign_lead_id,
+                component_id=ctx["ui_component_id"],
+                fact_id=llm_fact_id,
+            )
+        )
+        session.commit()
+
+    assert purge_llm_component_facts(9001) == 1
+
+    with Session(fk_engine) as session:
+        assert session.get(ComponentFact, llm_fact_id) is None
+        assert session.exec(
+            select(ComponentConnection).where(
+                ComponentConnection.source_fact_id == llm_fact_id
+            )
+        ).first() is None
+        provenance = session.exec(
+            select(ScanLeadComponentProvenance).where(
+                ScanLeadComponentProvenance.scan_lead_id == campaign_lead_id
+            )
+        ).one()
+        assert provenance.fact_id is None
+
+
+def test_persist_facts_clears_stale_graph_references_with_fk_enforcement(fk_engine):
+    ctx = _seed_two_component_campaign(fk_engine)
+    from aespa.services.component_mapper import _persist_facts
+
+    with Session(fk_engine) as session:
+        llm_fact = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="handler",
+            name="create_order",
+            detail_json='{"origin":"llm"}',
+            evidence_location="src/checkout.js:50",
+            fingerprint="llm-handler-fp",
+        )
+        session.add(llm_fact)
+        session.flush()
+        llm_fact_id = llm_fact.id
+        session.add(
+            ComponentConnection(
+                campaign_id=ctx["campaign_id"],
+                source_component_id=ctx["ui_component_id"],
+                source_fact_id=llm_fact_id,
+                target_component_id=ctx["api_component_id"],
+                target_fact_id=ctx["route_fact_id"],
+                confidence=0.8,
+            )
+        )
+        session.commit()
+
+    assert _persist_facts(
+        sast_run_id=9001,
+        component_id=ctx["ui_component_id"],
+        facts=[],
+    ) == 0
+
+    with Session(fk_engine) as session:
+        assert session.get(ComponentFact, llm_fact_id) is None
+        assert session.exec(
+            select(ComponentConnection).where(
+                ComponentConnection.source_fact_id == llm_fact_id
+            )
+        ).first() is None
 
 
 @pytest.mark.anyio
@@ -218,12 +326,13 @@ async def test_llm_correlation_persists_valid_ambiguous_match(
     monkeypatch.setattr(llm, "plain_completion", fake_completion)
     result = await correlate_campaign_with_llm(ctx["campaign_id"])
 
-    assert result["connections"] == 1
+    assert result["connections"] == 2  # internal anchor edge plus the LLM hop
     with Session(isolated_db_engine) as session:
         connection = session.exec(
             select(ComponentConnection).where(
                 ComponentConnection.campaign_id == ctx["campaign_id"]
             )
+            .where(ComponentConnection.edge_kind == "calls")
         ).one()
         assert connection.match_kind == "llm_assisted"
         assert connection.confidence == 0.88
@@ -514,9 +623,9 @@ def test_correlate_campaign_ignores_facts_from_a_different_sast_run_of_same_comp
         rogue_call_fact_id = rogue_call_fact.id
 
     result = correlate_campaign(ctx["campaign_id"])
-    # Still exactly the one genuine connection from THIS campaign's own
-    # facts — the unrelated other-run fact was never considered.
-    assert result["connections"] == 1
+    # The unrelated other-run fact is not considered. The result also includes
+    # the internal lead-anchor edge for the genuine fact.
+    assert result["connections"] == 2
     with Session(isolated_db_engine) as s:
         connections = s.exec(
             select(ComponentConnection).where(
@@ -916,7 +1025,12 @@ def test_generate_cross_repo_lead_for_backend_route_vulnerability(isolated_db_en
         ).all()
 
         backend_cross_lead = next(
-            (l for l in cross_leads if "Arbitrary order price acceptance" in l.title), None
+            (
+                lead
+                for lead in cross_leads
+                if "Arbitrary order price acceptance" in lead.title
+            ),
+            None,
         )
         assert backend_cross_lead is not None
         assert backend_cross_lead.attack_path_json != "{}"
@@ -935,4 +1049,3 @@ def test_generate_cross_repo_lead_for_backend_route_vulnerability(isolated_db_en
         primary_prov = next((p for p in provenance if p.role == "primary"), None)
         assert primary_prov is not None
         assert primary_prov.component_id == ctx["ui_component_id"]
-

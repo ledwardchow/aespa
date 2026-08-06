@@ -10,6 +10,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy import or_
 from sqlmodel import Session, select
 
 from aespa.config import get_settings
@@ -18,9 +19,12 @@ from aespa.models import (
     ApplicationComponent,
     AssessmentCampaign,
     CampaignSourceMember,
+    ComponentConnection,
     ComponentFact,
     ComponentSnapshot,
     SastRun,
+    ScanLead,
+    ScanLeadComponentProvenance,
 )
 from aespa.services import events as events_svc
 from aespa.services import settings as settings_svc
@@ -43,6 +47,10 @@ log = logging.getLogger(__name__)
 _FACT_TYPES = {
     "route",
     "http_call",
+    "ui_route",
+    "ui_action",
+    "handler",
+    "lead_anchor",
     "queue_publish",
     "queue_consume",
     "rpc_client",
@@ -156,23 +164,54 @@ def _merge_detail(existing: dict, incoming: dict) -> dict:
     return merged
 
 
+def _delete_component_facts(session: Session, rows: list[ComponentFact]) -> None:
+    """Delete facts after clearing graph and provenance references."""
+    fact_ids = {row.id for row in rows if row.id is not None}
+    if not fact_ids:
+        return
+
+    for connection in session.exec(
+        select(ComponentConnection).where(
+            or_(
+                ComponentConnection.source_fact_id.in_(fact_ids),
+                ComponentConnection.target_fact_id.in_(fact_ids),
+            )
+        )
+    ).all():
+        session.delete(connection)
+    for provenance in session.exec(
+        select(ScanLeadComponentProvenance).where(
+            ScanLeadComponentProvenance.fact_id.in_(fact_ids)
+        )
+    ).all():
+        provenance.fact_id = None
+        session.add(provenance)
+    session.flush()
+    for row in rows:
+        session.delete(row)
+
+
 def purge_llm_component_facts(sast_run_id: int) -> int:
     """Purge previously recorded LLM ComponentFact rows for one run."""
     with Session(get_engine()) as session:
-        rows = list(
+        all_rows = list(
             session.exec(
                 select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)
             ).all()
         )
-        deleted = 0
-        for row in rows:
+        rows = []
+        for row in all_rows:
             try:
                 detail = json.loads(row.detail_json or "{}")
             except (TypeError, ValueError):
                 detail = {}
             if "llm" in str(detail.get("origin") or "").lower():
-                session.delete(row)
-                deleted += 1
+                rows.append(row)
+        deleted = len(rows)
+        if not rows:
+            return 0
+
+        _delete_component_facts(session, rows)
         session.commit()
         return deleted
 
@@ -189,13 +228,15 @@ def _persist_facts(
                 select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)
             ).all()
         )
+        stale_rows = []
         for row in existing_rows:
             try:
                 detail = json.loads(row.detail_json or "{}")
             except (TypeError, ValueError):
                 detail = {}
             if "llm" in str(detail.get("origin") or "").lower():
-                session.delete(row)
+                stale_rows.append(row)
+        _delete_component_facts(session, stale_rows)
         session.flush()
 
         existing_rows = list(
@@ -227,6 +268,7 @@ def _persist_facts(
                 "confidence": raw["confidence"],
                 "reasoning": raw["reasoning"],
                 "supporting_locations": raw["supporting_locations"],
+                **(raw["detail"] if isinstance(raw.get("detail"), dict) else {}),
             }
             row = by_fingerprint.get(fingerprint)
             if row is None:
@@ -293,6 +335,7 @@ def _validate_fact(
     root: Path,
     raw: dict,
     read_ranges: dict[str, list[tuple[int, int]]],
+    eligible_lead_ids: set[int] | None = None,
 ) -> dict:
     fact_type = raw.get("fact_type")
     if fact_type not in _FACT_TYPES:
@@ -318,6 +361,48 @@ def _validate_fact(
         except ValueError:
             continue
         supporting.append(f"{parsed[0]}:{parsed[1]}")
+    detail = dict(raw.get("detail")) if isinstance(raw.get("detail"), dict) else {}
+    for key in (
+        "handler_locations",
+        "route_locations",
+        "trigger_locations",
+        "source_locations",
+        "related_locations",
+    ):
+        values = detail.get(key)
+        if isinstance(values, str):
+            values = [values]
+        if values is None:
+            continue
+        if not isinstance(values, list):
+            raise ValueError(f"detail.{key} must be a list of file:line values")
+        validated_locations: list[str] = []
+        for location in values[:8]:
+            parsed_location, line = _validate_evidence(root, location, read_ranges)
+            validated_locations.append(f"{parsed_location}:{line}")
+        detail[key] = validated_locations
+    if "handler_location" in detail:
+        parsed_location, line = _validate_evidence(
+            root, detail["handler_location"], read_ranges
+        )
+        detail["handler_location"] = f"{parsed_location}:{line}"
+    if "route_location" in detail:
+        parsed_location, line = _validate_evidence(
+            root, detail["route_location"], read_ranges
+        )
+        detail["route_location"] = f"{parsed_location}:{line}"
+    if "source_location" in detail:
+        parsed_location, line = _validate_evidence(
+            root, detail["source_location"], read_ranges
+        )
+        detail["source_location"] = f"{parsed_location}:{line}"
+    if fact_type == "lead_anchor":
+        try:
+            lead_id = int(detail["lead_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("lead_anchor facts require a lead_id") from exc
+        if eligible_lead_ids is not None and lead_id not in eligible_lead_ids:
+            raise ValueError("lead_anchor references an ineligible SAST lead")
     result = {
         "fact_type": fact_type,
         "method": method,
@@ -328,8 +413,9 @@ def _validate_fact(
         "evidence_location": f"{evidence_location}:{_line}",
         "supporting_locations": supporting,
         "reasoning": str(raw.get("reasoning") or "")[:1000],
+        "detail": detail,
     }
-    if fact_type in {"route", "http_call"} and not result["path"]:
+    if fact_type in {"route", "http_call", "ui_route"} and not result["path"]:
         raise ValueError("route and http_call facts require a path")
     if fact_type not in {"route", "http_call"} and not (
         result["name"] or result["path"]
@@ -382,6 +468,26 @@ async def map_campaign_component(
         raise error
     with Session(get_engine()) as session:
         mapper_config = settings_svc.get_component_mapper_config(session)
+        eligible_leads = session.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_type == "sast")
+            .where(ScanLead.producer_run_id == run.id)
+            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+            .where(ScanLead.reportable == True)  # noqa: E712
+            .order_by(ScanLead.id)
+            .limit(200)
+        ).all()
+    lead_context = [
+        {
+            "lead_id": lead.id,
+            "title": lead.title,
+            "location": lead.location,
+            "fingerprint": lead.fingerprint,
+            "source": lead.source,
+        }
+        for lead in eligible_leads
+    ]
+    eligible_lead_ids = {lead.id for lead in eligible_leads if lead.id is not None}
 
     workdir = (
         Path(get_settings().data_dir)
@@ -498,12 +604,13 @@ async def map_campaign_component(
                     matched_paths = {
                         match.group(1).replace("\\", "/")
                         for line in result.splitlines()
-                        if (
-                            match := re.match(r"^(.+):([0-9]+):", line)
-                        )
+                        if (match := re.match(r"^(.+):([0-9]+):", line))
                     }
                     new_paths = matched_paths - read_files
-                    if len(read_files) + len(new_paths) > mapper_config.max_source_files:
+                    if (
+                        len(read_files) + len(new_paths)
+                        > mapper_config.max_source_files
+                    ):
                         source_budget_reason = (
                             "Source file budget exhausted "
                             f"({mapper_config.max_source_files} files)."
@@ -534,13 +641,19 @@ async def map_campaign_component(
                     )
                     return f"{budget_reason} Record no more facts; mapping will stop."
                 try:
-                    facts.append(_validate_fact(root, tool_input, read_ranges))
+                    facts.append(
+                        _validate_fact(
+                            root,
+                            tool_input,
+                            read_ranges,
+                            eligible_lead_ids,
+                        )
+                    )
                 except (TypeError, ValueError, OSError) as exc:
                     rejected += 1
                     return f"Error: rejected interface fact: {exc}"
                 return (
-                    f"Interface fact accepted "
-                    f"({len(facts)}/{mapper_config.max_facts})."
+                    f"Interface fact accepted ({len(facts)}/{mapper_config.max_facts})."
                 )
             if tool_name == "done":
                 return str(tool_input.get("summary") or "")
@@ -553,7 +666,10 @@ async def map_campaign_component(
             system_message=COMPONENT_MAPPER_SYSTEM_PROMPT,
             initial_user_message=(
                 f"Map the external interfaces of component {component.name!r}. "
-                "Begin by listing the repository and reading its manifests/configuration."
+                "Begin by listing the repository and reading its manifests/configuration. "
+                "The following validated SAST leads are immutable candidates for "
+                "lead_anchor facts; connect only when source evidence proves reachability:\n"
+                + json.dumps(lead_context, separators=(",", ":"))
             ),
             tool_executor=executor,
             stop_check=stop_check,

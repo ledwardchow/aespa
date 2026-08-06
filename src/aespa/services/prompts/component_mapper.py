@@ -23,6 +23,10 @@ the source provides enough evidence. Normalize dynamic path segments to
 
 Record only concrete, evidence-backed facts:
 - route: an inbound HTTP route served by this component;
+- ui_route: a browser route/page entry point (React Router or Next.js);
+- ui_action: a concrete click or form-submit action on a UI route;
+- handler: a local handler/function that dispatches a request;
+- lead_anchor: a supplied validated SAST lead location that a route reaches;
 - http_call: an outbound HTTP call made by this component;
 - queue_publish / queue_consume: a concrete message destination;
 - rpc_client / rpc_server: a concrete RPC service or method.
@@ -31,6 +35,10 @@ Use the actual HTTP method when known. Record separate facts for distinct
 method/path pairs. A fact's primary evidence location must be a file and line
 you read. Add supporting locations when composition depends on another file.
 Do not infer an integration from a dependency name or component name alone.
+When a relationship is proven across files, include the related file:line
+locations in detail using only these keys as applicable: handler_locations,
+route_locations, trigger_locations, source_locations, and related_locations.
+For a lead_anchor, include the supplied lead_id and source_location in detail.
 Do not report vulnerabilities. Call done after the useful interface surface is
 covered.
 
@@ -65,6 +73,10 @@ _RECORD_INTERFACE_FACT = {
                 "enum": [
                     "route",
                     "http_call",
+                    "ui_route",
+                    "ui_action",
+                    "handler",
+                    "lead_anchor",
                     "queue_publish",
                     "queue_consume",
                     "rpc_client",
@@ -95,6 +107,7 @@ _RECORD_INTERFACE_FACT = {
                 "maxItems": 8,
             },
             "reasoning": {"type": "string", "maxLength": 1000},
+            "detail": {"type": "object", "additionalProperties": True},
         },
         "required": [
             "fact_type",

@@ -15,6 +15,7 @@ export function CampaignConnectionsTab({ applicationId, campaignId, campaign, re
   const [connections, setConnections] = useState(null);
   const [components, setComponents] = useState({});
   const [error, setError] = useState(null);
+  const [scopeFilter, setScopeFilter] = useState("all");
 
   useEffect(() => {
     let cancelled = false;
@@ -50,6 +51,9 @@ export function CampaignConnectionsTab({ applicationId, campaignId, campaign, re
   if (connections === null) return <>{matchingControls}<div className="subtle">Loading…</div></>;
 
   const name = id => components[id] || `#${id}`;
+  const visibleConnections = connections.filter(connection =>
+    scopeFilter === "all" || (connection.path_scope || "cross_component") === scopeFilter
+  );
 
   if (connections.length === 0) return <>{matchingControls}<EmptyState
     title="No connections found"
@@ -60,10 +64,17 @@ export function CampaignConnectionsTab({ applicationId, campaignId, campaign, re
   return <div>
     {matchingControls}
     <div className="row spread" style={{ marginBottom: 12 }}>
-      <span className="subtle">{connections.length} connection{connections.length !== 1 ? "s" : ""}</span>
+      <div className="row" style={{ gap: 8 }}>
+        <span className="subtle">{visibleConnections.length} of {connections.length} connection{connections.length !== 1 ? "s" : ""}</span>
+        <select className="select" value={scopeFilter} onChange={event => setScopeFilter(event.target.value)}>
+          <option value="all">All edges</option>
+          <option value="internal">Internal</option>
+          <option value="cross_component">Cross-codebase</option>
+        </select>
+      </div>
     </div>
     <div className="connection-diagram">
-      {connections.map(c => <ConnectionCard key={c.id} connection={c} sourceName={name(c.source_component_id)} targetName={name(c.target_component_id)} />)}
+      {visibleConnections.map(c => <ConnectionCard key={c.id} connection={c} sourceName={name(c.source_component_id)} targetName={name(c.target_component_id)} />)}
     </div>
   </div>;
 }
@@ -87,6 +98,8 @@ function ConnectionCard({ connection, sourceName, targetName }) {
       </div>
       <div className="connection-badges">
         <span className="badge neutral">{confidencePct(connection.confidence)}</span>
+        <span className="badge neutral" style={{ marginLeft: 6 }}>{connection.edge_kind || "calls"}</span>
+        <span className="badge neutral" style={{ marginLeft: 6 }}>{connection.path_scope === "internal" ? "Internal" : "Cross-codebase"}</span>
         <span className="badge info" style={{ marginLeft: 6 }}>{ORIGIN_LABEL[connection.match_kind] || connection.match_kind}</span>
       </div>
     </div>
