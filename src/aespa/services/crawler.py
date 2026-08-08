@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -1593,6 +1594,7 @@ async def _crawl_as_credential(
                 link_text=(incoming_action or {}).get("link_text"),
                 action_kind=(incoming_action or {}).get("action_kind", "navigate"),
                 action_data=(incoming_action or {}).get("action_data"),
+                interaction_id=(incoming_action or {}).get("interaction_id"),
             )
             for edge_norm in {norm, norm_final}:
                 for edge in pending_interactive_edges.pop(edge_norm, []):
@@ -1604,6 +1606,7 @@ async def _crawl_as_credential(
                         link_text=edge.get("link_text"),
                         action_kind=edge.get("action_kind", "navigate"),
                         action_data=edge.get("action_data"),
+                        interaction_id=edge.get("interaction_id"),
                     )
 
             # ── SSE ───────────────────────────────────────────────────────────
@@ -1728,6 +1731,7 @@ async def _crawl_as_credential(
                             link_text=discovery.get("link_text"),
                             action_kind=discovery.get("action_kind", "navigate"),
                             action_data=discovery.get("action_data"),
+                            interaction_id=discovery.get("interaction_id"),
                         )
                         continue
                     pending_interactive_edges.setdefault(n, []).append(discovery)
@@ -2719,11 +2723,26 @@ async def _explore_interactive_states(
                 existing_page_ids = {id(open_page) for open_page in page.context.pages}
             except Exception:
                 existing_page_ids = set()
-            replay = await _replay_interactive_steps(
-                page,
-                steps,
-                block_non_idempotent_interactive_replay=block_non_idempotent_interactive_replay,
-            )
+            # Attach the id before replay so Playwright response listeners see
+            # the same value as the eventual PageLink.
+            interaction_id = uuid.uuid4().hex
+            try:
+                traffic_svc.set_browser_context_tag(
+                    page.context, parent_id, username, interaction_id
+                )
+            except Exception:
+                pass
+            try:
+                replay = await _replay_interactive_steps(
+                    page,
+                    steps,
+                    block_non_idempotent_interactive_replay=block_non_idempotent_interactive_replay,
+                )
+            finally:
+                try:
+                    traffic_svc.clear_browser_context_tag(page.context)
+                except Exception:
+                    pass
             if replay["blocked_requests"]:
                 blocked = replay["blocked_requests"][-1]
                 action = steps[-1]
@@ -2742,6 +2761,8 @@ async def _explore_interactive_states(
             if not replay["ok"]:
                 continue
             action = steps[-1]
+            # One opaque id ties this replayed browser path to the requests it
+            # caused in TrafficEntry and to the PageLink shown in the UI.
             try:
                 new_pages = [
                     open_page
@@ -2768,6 +2789,7 @@ async def _explore_interactive_states(
                             "link_text": action["name"],
                             "action_kind": "popup",
                             "action_data": {"replay_steps": steps},
+                            "interaction_id": interaction_id,
                         }
                     )
                 try:
@@ -2784,6 +2806,7 @@ async def _explore_interactive_states(
                         "link_text": action["name"],
                         "action_kind": "click",
                         "action_data": {"replay_steps": steps},
+                        "interaction_id": interaction_id,
                     }
                 )
                 continue
@@ -2830,6 +2853,7 @@ async def _explore_interactive_states(
                     link_text=action["name"],
                     action_kind="click",
                     action_data={"replay_steps": steps},
+                    interaction_id=interaction_id,
                 )
             if is_new:
                 context = "[Interactive SPA state reached by replay]"
@@ -5114,6 +5138,7 @@ def _save_link(
     link_text: Optional[str] = None,
     action_kind: str = "navigate",
     action_data: Optional[dict] = None,
+    interaction_id: Optional[str] = None,
 ) -> None:
     if source_id is None:
         return
@@ -5125,6 +5150,7 @@ def _save_link(
             .where(PageLink.target_page_id == target_id)
             .where(PageLink.target_url == target_url)
             .where(PageLink.action_kind == action_kind)
+            .where(PageLink.interaction_id == interaction_id)
         ).first()
         if existing:
             return
@@ -5136,6 +5162,7 @@ def _save_link(
             link_text=link_text,
             action_kind=action_kind,
             action_data_json=json.dumps(action_data or {}),
+            interaction_id=interaction_id,
         )
         s.add(pl)
         s.commit()

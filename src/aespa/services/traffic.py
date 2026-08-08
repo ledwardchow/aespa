@@ -31,21 +31,28 @@ _waf_cache_hydrated: set[tuple[str, int]] = set()
 # The active browser target is tagged on the context while one self-contained
 # browser action runs.  This lets asynchronous Playwright listeners persist the
 # originating SPA page without depending on Playwright object internals.
-_browser_context_tags: dict[int, tuple[Optional[int], Optional[str]]] = {}
+_browser_context_tags: dict[
+    int, tuple[Optional[int], Optional[str], Optional[str]]
+] = {}
 
 
 def set_browser_context_tag(
-    ctx, page_id: Optional[int], session_label: Optional[str]
+    ctx,
+    page_id: Optional[int],
+    session_label: Optional[str],
+    interaction_id: Optional[str] = None,
 ) -> None:
-    _browser_context_tags[id(ctx)] = (page_id, session_label)
+    _browser_context_tags[id(ctx)] = (page_id, session_label, interaction_id)
 
 
 def clear_browser_context_tag(ctx) -> None:
     _browser_context_tags.pop(id(ctx), None)
 
 
-def _browser_context_tag(ctx) -> tuple[Optional[int], Optional[str]]:
-    return _browser_context_tags.get(id(ctx), (None, None))
+def _browser_context_tag(
+    ctx,
+) -> tuple[Optional[int], Optional[str], Optional[str]]:
+    return _browser_context_tags.get(id(ctx), (None, None, None))
 
 
 def get_cached_waf(run_id: int, *, api_run_id: Optional[int] = None) -> Optional[dict]:
@@ -142,6 +149,7 @@ def _write(
     api_run_id: Optional[int] = None,
     page_id: Optional[int] = None,
     session_label: Optional[str] = None,
+    interaction_id: Optional[str] = None,
 ) -> None:
     from aespa.models import TrafficEntry
 
@@ -162,6 +170,7 @@ def _write(
             username=username,
             page_id=page_id,
             session_label=session_label,
+            interaction_id=interaction_id,
         )
         s.add(entry)
         s.commit()

@@ -1440,6 +1440,9 @@ class TrafficEntryOut(BaseModel):
     response_body: str | None
     duration_ms: int | None
     username: str | None
+    page_id: int | None = None
+    session_label: str | None = None
+    interaction_id: str | None = None
 
 
 class ScanFindingOut(BaseModel):
@@ -1717,6 +1720,8 @@ class CampaignTargetMemberOut(BaseModel):
     test_run_id: int | None
     api_test_run_id: int | None
     status: str
+    status_message: str | None = None
+    validation_summary_json: str = "{}"
     created_at: datetime
     updated_at: datetime
 

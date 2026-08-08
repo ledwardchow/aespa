@@ -38,7 +38,7 @@ export function stageIndex(status) {
 }
 
 export function isTerminalPause(status) {
-  return status === "stopped" || status === "failed" || status === "interrupted";
+  return status === "stopped" || status === "failed" || status === "interrupted" || status === "incomplete";
 }
 
 export const MEMBER_STATUS_LABEL = {
@@ -46,7 +46,8 @@ export const MEMBER_STATUS_LABEL = {
   running: "running",
   completed: "completed",
   failed: "failed",
-  skipped: "skipped"
+  skipped: "skipped",
+  incomplete: "incomplete — resume available"
 };
 
 export function severityClass(sev) {

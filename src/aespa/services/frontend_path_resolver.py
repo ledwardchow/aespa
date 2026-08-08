@@ -81,6 +81,11 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
     action_kind = (
         str(entrypoint.get("trigger") or path.get("trigger") or "").strip().casefold()
     )
+    approved_interaction_id = str(
+        entrypoint.get("interaction_id")
+        or path.get("interaction_id")
+        or ""
+    ).strip()
 
     page = next(
         (
@@ -100,6 +105,14 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
             and (
                 not request_path
                 or _route(str(candidate.get("url") or "")) == request_path
+            )
+            and (
+                page is None
+                or candidate.get("page_id") == page.get("id")
+            )
+            and (
+                not approved_interaction_id
+                or candidate.get("interaction_id") == approved_interaction_id
             )
         ),
         None,
@@ -133,6 +146,17 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
         None,
     )
 
+    # If the approved path names an action, it is not enough to find a page and
+    # an unrelated request.  The action must exist and, when the crawler has a
+    # causal interaction id, the request must carry the same id.
+    if (action_label or action_kind or approved_interaction_id) and action is None:
+        request = None
+    if action is not None and request is not None:
+        action_interaction_id = str(action.get("interaction_id") or "").strip()
+        request_interaction_id = str(request.get("interaction_id") or "").strip()
+        if action_interaction_id and request_interaction_id != action_interaction_id:
+            request = None
+
     if page is None and request is None and action is None:
         resolution_status = "unavailable"
     elif page is None or request is None:
@@ -160,6 +184,10 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
             if request.get("id") is not None
             else None,
         }
+        if request.get("interaction_id"):
+            live["request"]["interaction_id"] = request["interaction_id"]
+        if request.get("session_label"):
+            live["request"]["session_label"] = request["session_label"]
         if isinstance(request.get("fields"), list):
             live["request"]["mutation_points"] = [
                 str(field) for field in request["fields"][:30]

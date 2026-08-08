@@ -61,7 +61,7 @@ export function CampaignOverviewTab({ applicationId, campaign, resumeSource, res
 
   const warnings = safeParseJson(campaign.warnings_json, []);
   const canResumeMember = !["sast_running", "correlating", "dast_running"].includes(campaign.status);
-  const resumable = status => ["pending", "failed", "skipped"].includes(status);
+  const resumable = status => ["pending", "failed", "skipped", "incomplete"].includes(status);
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
     <div className="campaign-token-usage">
@@ -80,6 +80,8 @@ export function CampaignOverviewTab({ applicationId, campaign, resumeSource, res
         {campaign.source_members.map(m => <div key={m.id} className="app-progress-row">
           <span style={{ flex: 1 }}>{componentNames[m.component_id] || `Component #${m.component_id}`}</span>
           <StatusBadge status={m.status} />
+          {m.status_message && <span className="subtle" title={m.status_message}>{m.status_message}</span>}
+          {m.validation_summary_json && <span className="subtle">{(() => { const s = safeParseJson(m.validation_summary_json, {}); return s.total ? `${(s.confirmed || 0) + (s.dismissed || 0) + (s.inconclusive || 0)}/${s.total} leads resolved` : null; })()}</span>}
           {m.sast_run_id && <a href={`#/sast-runs/${m.sast_run_id}`} className="subtle">View SAST run →</a>}
           {canResumeMember && resumable(m.status) && <button className="btn secondary sm" title="Resume only this SAST action" disabled={busy} onClick={() => resumeSource(m.id)}>Resume SAST</button>}
         </div>)}
@@ -94,6 +96,8 @@ export function CampaignOverviewTab({ applicationId, campaign, resumeSource, res
           <span className="badge neutral">{m.target_type === "site" ? "Site" : "API collection"}</span>
           <span style={{ flex: 1 }}>{targetNames[m.target_id] || `#${m.target_id}`}</span>
           <StatusBadge status={m.status} />
+          {m.status_message && <span className="subtle" title={m.status_message}>{m.status_message}</span>}
+          {m.validation_summary_json && <span className="subtle">{(() => { const s = safeParseJson(m.validation_summary_json, {}); return s.total ? `${(s.confirmed || 0) + (s.dismissed || 0) + (s.inconclusive || 0)}/${s.total} leads resolved` : null; })()}</span>}
           {m.test_run_id && <a href={`#/runs/${m.test_run_id}`} className="subtle">View web run →</a>}
           {m.api_test_run_id && <a href={`#/api-runs/${m.api_test_run_id}`} className="subtle">View API run →</a>}
           {canResumeMember && resumable(m.status) && <button className="btn secondary sm" title={`Resume only this ${m.target_type === "site" ? "web" : "API"} action`} disabled={busy} onClick={() => resumeTarget(m.id)}>Resume {m.target_type === "site" ? "web" : "API"}</button>}

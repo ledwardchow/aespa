@@ -230,6 +230,13 @@ def _score_call_to_route(
 ) -> tuple[float, str, dict]:
     score = 0.0
     parts: list[str] = []
+    call_host = _host_of(call.host)
+    route_host = _host_of(route.host)
+    if call_host and route_host and call_host != route_host:
+        return 0.0, "", {}
+    if call_host and route_host and call_host == route_host:
+        score += 0.15
+        parts.append("service host matches")
     if call.method and route.method and call.method.upper() == route.method.upper():
         score += 0.3
         parts.append("HTTP method matches")
@@ -842,14 +849,14 @@ def _generate_cross_component_leads(
 
         # ── Case 1: SAST lead on the calling component (source_fact) ─────────
         source_leads = [
-            l for l in session.exec(
+            source_lead for source_lead in session.exec(
                 select(ScanLead)
                 .where(ScanLead.producer_run_id == source_fact.sast_run_id)
                 .where(ScanLead.producer_run_type == "sast")
                 .where(ScanLead.imported_into_run_id == None)  # noqa: E711
                 .where(ScanLead.reportable == True)  # noqa: E712
             ).all()
-            if _same_file(l.location, source_fact.evidence_location)
+            if _same_file(source_lead.location, source_fact.evidence_location)
         ]
 
         for source_lead in source_leads:
@@ -938,14 +945,14 @@ def _generate_cross_component_leads(
 
         # ── Case 2: SAST lead on the receiving target route (target_fact) ────
         target_leads = [
-            l for l in session.exec(
+            target_lead for target_lead in session.exec(
                 select(ScanLead)
                 .where(ScanLead.producer_run_id == target_fact.sast_run_id)
                 .where(ScanLead.producer_run_type == "sast")
                 .where(ScanLead.imported_into_run_id == None)  # noqa: E711
                 .where(ScanLead.reportable == True)  # noqa: E712
             ).all()
-            if _same_file(l.location, target_fact.evidence_location)
+            if _same_file(target_lead.location, target_fact.evidence_location)
         ]
 
         for target_lead in target_leads:
@@ -1390,6 +1397,16 @@ def _best_score_across_components(
     return best
 
 
+def _lead_has_proof_gaps(lead: ScanLead) -> bool:
+    """Return whether a traced lead records any unresolved proof gap."""
+    raw = getattr(lead, "proof_gaps_json", "") or ""
+    try:
+        gaps = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        gaps = []
+    return bool(gaps) if isinstance(gaps, list | dict) else bool(str(raw).strip())
+
+
 def _propose_mappings_for_lead(
     session: Session,
     campaign_id: int,
@@ -1432,9 +1449,15 @@ def _propose_mappings_for_lead(
         score, rationale, evidence = _best_score_across_components(
             session, lead, component_ids, target
         )
+        # A campaign-derived frontend path is safe to auto-route only when its
+        # entire trace comes from the one component that owns the target.  A
+        # path spanning repositories needs a reviewer to confirm the hop.
         explicitly_owned = (
             lead.producer_run_type == "campaign"
+            and len(component_ids) == 1
             and target.component_id in component_ids
+            and str(getattr(lead, "trace_status", "") or "") == "complete"
+            and not _lead_has_proof_gaps(lead)
         )
         if explicitly_owned:
             score = max(score, 1.0)
@@ -1466,8 +1489,7 @@ def _propose_mappings_for_lead(
             evidence_json=json.dumps(evidence),
             status=(
                 "approved"
-                if lead.producer_run_type == "campaign"
-                and target.component_id in component_ids
+                if explicitly_owned
                 else "proposed"
             ),
         )
@@ -2096,11 +2118,12 @@ def enrich_copied_web_leads_for_target(
             .where(LeadTargetMapping.target_id == target_id)
             .where(LeadTargetMapping.status == "approved")
         ).all()
-        lead_ids = [
+        mapping_lead_ids = [
             mapping.copied_lead_id
             for mapping in mappings
             if mapping.copied_lead_id is not None
         ]
+        lead_ids = list(mapping_lead_ids)
         lead_ids.extend(
             lead.id
             for lead in session.exec(
@@ -2149,7 +2172,13 @@ def enrich_copied_web_leads_for_target(
                         session.add(current)
                         session.commit()
                 updated += 1
+    # Mapping copies already received an exact page/action/request resolution
+    # above.  Do not replace that path with the bulk crawl inventory; only
+    # non-mapping imports need the generic context warning.
+    mapping_lead_id_set = set(mapping_lead_ids)
     for lead_id in lead_ids:
+        if lead_id in mapping_lead_id_set:
+            continue
         if (
             prepend_frontend_context_to_copied_lead(
                 lead_id,
@@ -2215,6 +2244,19 @@ def propose_crawl_discovered_paths(
                 str(existing_request.get("method") or "").upper(),
                 str(existing_request.get("path") or ""),
             ) if isinstance(existing_request, dict) else ("", "")
+            approved_transition = base_path.get("request_transition")
+            if not isinstance(approved_transition, dict):
+                approved_transition = {}
+            approved_method = str(
+                approved_transition.get("method") or existing_request_key[0] or ""
+            ).upper()
+            approved_path = str(
+                approved_transition.get("path") or existing_request_key[1] or ""
+            )
+
+            def _route_key(value: str) -> str:
+                parsed = urlparse(str(value or ""))
+                return parsed.path.rstrip("/") or "/"
 
             for page in pages[:40]:
                 page_id = page.get("id")
@@ -2232,6 +2274,14 @@ def propose_crawl_discovered_paths(
                         str(request.get("url") or ""),
                     )
                     if request_key == existing_request_key:
+                        continue
+                    # A crawl alternative is useful only when it observed the
+                    # same backend operation as the approved trace.  Unrelated
+                    # page traffic stays in the crawl inventory and is never
+                    # turned into a vulnerability-specific proposal.
+                    if approved_method and request_key[0] != approved_method:
+                        continue
+                    if approved_path and _route_key(request_key[1]) != _route_key(approved_path):
                         continue
                     action = next(
                         (
@@ -2252,7 +2302,7 @@ def propose_crawl_discovered_paths(
                             ),
                             (
                                 f"action:{action['id']}"
-                                if action and action.get("id") is not None
+                    if action and action.get("id") is not None
                                 else None
                             ),
                         )

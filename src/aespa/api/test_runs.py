@@ -201,6 +201,7 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
                     "link_text": link.link_text,
                     "action_kind": link.action_kind,
                     "action_data_json": link.action_data_json,
+                    "interaction_id": link.interaction_id,
                 }
                 for link in session.exec(
                     select(PageLink).where(PageLink.test_run_id == run.id)
@@ -272,6 +273,7 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
                     "page_id": entry.page_id,
                     "page_url": page_urls.get(entry.page_id),
                     "page_state_key": page_state_keys.get(entry.page_id),
+                    "interaction_id": entry.interaction_id,
                 }
                 for entry in session.exec(
                     select(TrafficEntry).where(TrafficEntry.test_run_id == run.id)
@@ -1083,6 +1085,7 @@ async def import_test_run_crawl(
                     link_text=item.get("link_text"),
                     action_kind=item.get("action_kind") or "navigate",
                     action_data_json=item.get("action_data_json") or "{}",
+                    interaction_id=item.get("interaction_id"),
                 )
             )
 
@@ -1171,6 +1174,7 @@ async def import_test_run_crawl(
                             "response_body",
                             "duration_ms",
                             "username",
+                            "interaction_id",
                         )
                     },
                     page_id=(
@@ -1417,6 +1421,7 @@ def get_page(
             "duration_ms": row.duration_ms,
             "username": row.username,
             "session_label": row.session_label,
+            "interaction_id": row.interaction_id,
         }
         for row in traffic_rows
     ]

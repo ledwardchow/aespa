@@ -831,7 +831,7 @@ See [§4 Configuration](#4-configuration) for the full `SpecialistAgentConfig` f
 
 ### Adversarial validator
 
-After any finding is written, the validator service (`validator.py`) can run an independent **adversarial validation** pass. The validator agent is given a different system prompt with an explicit mandate to disprove the finding — it re-runs the probe and looks for counter-evidence. This reduces false positives more effectively than self-review by the same agent.
+After a normal web finding is written, the validator service (`validator.py`) can run an independent check. The validator is told to try to disprove the finding and records the evidence it used. A timeout, provider error, missing verdict, or malformed verdict is saved as **unconfirmed**, never as confirmed; the finding can be retried from the finding row's **Retry validation** button. Applications SAST validation keeps its existing lead workflow and does not run this separate validator.
 
 Validation outcomes:
 - **confirmed** — vulnerability is reproducible and real
@@ -1561,9 +1561,11 @@ SAST scans use the same task-registry pattern as web and API scans: `_sast_tasks
 
 **Files**: `src/aespa/services/applications.py`, `src/aespa/services/campaigns.py`, `src/aespa/services/correlation.py`, `src/aespa/services/component_facts.py`, `src/aespa/services/component_mapper.py`, `src/aespa/services/source_tools.py`, `src/aespa/api/applications.py`
 
-An **Application** is the answer to "our product isn't one ZIP, one Site, or one API Collection — it's several of those working together." It groups named **code components** (repositories/micro-frontends), their **immutable ZIP snapshots**, and the existing Sites/API Collections that make up the live product. An **AssessmentCampaign** is one coordinated test of an application: it freezes an exact snapshot per component and an exact set of live targets, runs ordinary child `SastRun`/`TestRun`/`ApiTestRun` scans for them, joins each SAST run's compact interface facts into a small cross-repository map, and proposes which live target should receive each lead — a human reviews and approves that routing before any dynamic scan starts.
+An **Application** groups named code components (repositories or micro-frontends), their fixed ZIP snapshots, and the live Sites/API Collections that make up the product. An **AssessmentCampaign** freezes those inputs, runs SAST for each component, connects the resulting leads to live targets, and asks a human to review inferred routes before testing starts.
 
-This layer never replaces the standalone SAST/web/API workflows described in sections 6, 7, and 17 — a campaign only creates and drives the same child run types through their existing entry points (`sast_scanner.run_sast_scan`, `crawler.start_crawl`, `scanner.start_thinking_scan`, `api_scanner.start_api_scan`).
+Applications live-target children are deliberately different from normal scans: a Site is crawled to collect frontend evidence, then the child run validates only the imported SAST leads. It does not start the normal Quick/Full coverage scan. API children validate their imported leads directly. A child reports **incomplete** when any imported lead is still open; retry reuses the same child run, crawl, and lead rows and continues the remaining work.
+
+This layer never replaces the standalone SAST/web/API workflows described in sections 6, 7, and 17. It reuses their services, with the campaign child runs set to `coverage_mode="sast_validate"`.
 
 ### Data model
 
@@ -1577,7 +1579,7 @@ This layer never replaces the standalone SAST/web/API workflows described in sec
 | `component_target_hint` | An optional user-supplied code-to-target routing association that boosts inferred correlation confidence |
 | `assessment_campaign` | One coordinated test; its `id` comes from the same global `run_identity` namespace as web/API/SAST runs (`kind="campaign"`), so its events/logs never collide with a run id |
 | `campaign_source_member` | One frozen `(component, snapshot)` pair selected for a campaign, plus the `SastRun` id it spawned |
-| `campaign_target_member` | One frozen live target selected for a campaign, plus the `TestRun`/`ApiTestRun` id it spawned |
+| `campaign_target_member` | One frozen live target selected for a campaign, plus the child run id, validation summary, and a message explaining incomplete work |
 | `component_fact` | A compact interface fact recorded by a SAST run (deterministic baseline or evidence-backed LLM mapping) |
 | `component_connection` | One directed, evidence-backed graph edge (`contains`, `triggers`, `dispatches`, `calls`, or `reaches`) within or across component snapshots |
 | `lead_target_mapping` | A proposed (then reviewed) routing of one `ScanLead` to one live target, including approved and final frontend attack-path versions |
@@ -1612,7 +1614,7 @@ Mapping/provider failures do not advance a campaign to `awaiting_review`: transi
 
 `services/campaigns.submit_review(campaign_id, decisions)` applies a list of `(mapping_id, approve)` decisions idempotently — resubmitting the same decision twice does not toggle counters or create duplicates — and records `review_submitted_at` on the campaign. Approving a mapping here does **not** copy anything yet: the live target's `TestRun`/`ApiTestRun` does not exist until the DAST stage starts. `continue_to_live_testing(campaign_id)` is explicitly gated on `status == "awaiting_review"` **and** `review_submitted_at` being set — this is the mechanism that keeps DAST from starting before a human has reviewed inferred lead routing. Once each target's child run exists, the DAST stage first copies reportable leads from the target's explicitly assigned `component_id` (if any), then `correlation.copy_approved_mappings_for_target` copies approved inferred/cross-component mappings into that exact run via the existing `scan_leads` copy helpers. A rejected mapping is never copied. Completed campaigns may review later crawl-discovered proposals; approval does not mutate the original scan, and the separate supplemental-validation action copies only the selected paths into the existing web run and starts a lead-only `sast_validate` pass.
 
-`GET .../mappings` gives the review screen everything it needs in one call — each `LeadTargetMappingOut` row carries the raw mapping fields plus linked lead context, trace status/confidence, origin vulnerability id, and contributing component ids/names. Path cards are grouped under their originating SAST vulnerability but approved independently. Reviewers may edit only frontend guidance fields; backend source/sink evidence is immutable and edited field names are retained as reviewer-supplied guidance. `approved_attack_path_json` is preserved byte-for-byte, while crawl resolution writes `final_attack_path_json` and a bounded `attack_path_changes_json` audit record.
+`GET .../mappings` gives the review screen everything it needs in one call — each `LeadTargetMappingOut` row carries the raw mapping fields plus linked lead context, trace status/confidence, origin vulnerability id, and contributing component ids/names. Path cards are grouped under their originating SAST vulnerability but approved independently. Reviewers may edit only frontend guidance fields; backend source/sink evidence is immutable and edited field names are retained as reviewer-supplied guidance. `approved_attack_path_json` is preserved byte-for-byte, while crawl resolution writes `final_attack_path_json` and a bounded `attack_path_changes_json` audit record. A matched path must use the same page for its route, action, and request. Interactive browser replays store an opaque interaction id on both the action link and the traffic rows, so a request from another page or action cannot be substituted.
 
 ### Campaign lifecycle (`services/campaigns.py`)
 
@@ -1621,6 +1623,8 @@ draft ─start─▶ sast_running ─▶ correlating ─▶ awaiting_review
                                                     │ (review submitted)
                                                     ▼
                                               dast_running ─▶ completed
+                                                    │
+                                          (any stage) ─▶ incomplete ─▶ resume
                                                     │
                                           (any stage) ─▶ stopped | failed | interrupted
 ```

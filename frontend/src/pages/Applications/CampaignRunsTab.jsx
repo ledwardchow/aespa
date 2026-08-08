@@ -26,7 +26,7 @@ export function CampaignRunsTab({ applicationId, campaign, resumeSource, resumeT
   const sourceRuns = campaign.source_members;
   const targetRuns = campaign.target_members;
   const canResumeMember = !["sast_running", "correlating", "dast_running"].includes(campaign.status);
-  const resumable = status => ["pending", "failed", "skipped"].includes(status);
+  const resumable = status => ["pending", "failed", "skipped", "incomplete"].includes(status);
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
     <div>

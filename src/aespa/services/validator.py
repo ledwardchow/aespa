@@ -611,7 +611,15 @@ async def _run_adversarial_validator_loop(
         if tool_name == "context_tool":
             return await _validator_context_tool(tool_input, run_id, finding)
         if tool_name == "done":
-            verdict = tool_input.get("verdict", "confirmed")
+            verdict = tool_input.get("verdict") or "unconfirmed"
+            if verdict not in {
+                "confirmed",
+                "false_positive",
+                "low_confidence",
+                "unconfirmed",
+                "skipped",
+            }:
+                verdict = "unconfirmed"
             reasoning = tool_input.get("reasoning", "")
             confidence = tool_input.get("confidence", "medium")
             verdict_holder.append((verdict, reasoning, confidence, dict(tool_input)))
@@ -645,11 +653,13 @@ async def _run_adversarial_validator_loop(
 
     if verdict_holder:
         return verdict_holder[0]
-    # Step budget exhausted without a verdict.
+    # Step budget exhausted without a verdict.  A validator that did not reach
+    # an explicit conclusion has not proved exploitability; keep the finding
+    # uncertain so a retry can be requested instead of silently confirming it.
     return (
-        "confirmed",
-        "Adversarial validator exhausted the step budget without finding a disproof.",
-        "low",
+        "unconfirmed",
+        "Adversarial validator stopped before reaching a verdict; retry validation to continue.",
+        "none",
         {},
     )
 
@@ -873,10 +883,10 @@ async def _validate_one(
                 "Adversarial validator loop failed for finding %s: %s", finding.id, e
             )
             verdict, reasoning = (
-                "confirmed",
-                f"Adversarial validator encountered an error: {e}",
+                "unconfirmed",
+                f"Adversarial validator encountered an error: {e}. Retry validation to try again.",
             )
-            confidence = "low"
+            confidence = "none"
         log.info(
             "  Finding %s adversarial verdict: %s (confidence: %s)",
             finding.id,
@@ -955,9 +965,23 @@ async def _validate_one(
         )
     except Exception as e:
         log.warning("validate_finding_result failed for finding %s: %s", finding.id, e)
-        verdict_data = {"verdict": "confirmed", "reasoning": f"Validation error: {e}"}
+        verdict_data = {
+            "verdict": "unconfirmed",
+            "reasoning": f"Validation could not complete: {e}. Retry validation to try again.",
+        }
 
-    verdict = verdict_data.get("verdict", "confirmed")
+    if not isinstance(verdict_data, dict):
+        verdict_data = {
+            "verdict": "unconfirmed",
+            "reasoning": "Validator returned an unusable response. Retry validation to try again.",
+        }
+    verdict = verdict_data.get("verdict")
+    if verdict not in {"confirmed", "false_positive", "low_confidence", "unconfirmed", "skipped"}:
+        verdict = "unconfirmed"
+        verdict_data = {
+            **verdict_data,
+            "reasoning": "Validator returned no usable verdict. Retry validation to try again.",
+        }
     reasoning = verdict_data.get("reasoning", "")
     log.info("  Finding %s verdict: %s", finding.id, verdict)
 
@@ -1096,6 +1120,18 @@ async def _persist_verdict(
     validation_results: list[dict] | None = None,
     source: str = "validation",
 ) -> None:
+    allowed_verdicts = {
+        "confirmed",
+        "false_positive",
+        "low_confidence",
+        "unconfirmed",
+        "skipped",
+    }
+    if verdict not in allowed_verdicts:
+        verdict = "unconfirmed"
+        reasoning = reasoning or "Validator returned no usable verdict."
+        if "retry" not in reasoning.casefold():
+            reasoning = f"{reasoning} Retry validation to try again."
     evidence_json = "[]"
     evidence_items: list[dict[str, Any]] = []
     finding_title = f"Finding #{finding_id}"

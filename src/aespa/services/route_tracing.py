@@ -61,6 +61,48 @@ def _decode_detail(fact: ComponentFact) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _has_valid_frontend_sequence(
+    facts: tuple[ComponentFact, ...], edges: tuple[ComponentConnection, ...]
+) -> bool:
+    """Check that a complete path uses the expected UI-to-sink edge grammar."""
+    if len(facts) != len(edges) + 1 or not facts:
+        return False
+    if facts[0].fact_type not in {"ui_route", "ui_action"}:
+        return False
+    if facts[-1].fact_type != "lead_anchor":
+        return False
+    for source, target, edge in zip(facts[:-1], facts[1:], edges, strict=True):
+        kind = _edge_kind(edge)
+        if "same source file" in str(getattr(edge, "rationale", "") or "").casefold():
+            # Co-location is useful as a hint, but it is not proof that one
+            # browser action calls one specific request or sink.
+            return False
+        allowed = (
+            kind == "contains"
+            and source.fact_type == "ui_route"
+            and target.fact_type == "ui_action"
+        ) or (
+            kind == "triggers"
+            and source.fact_type in {"ui_route", "ui_action"}
+            and target.fact_type == "http_call"
+        ) or (
+            kind == "calls"
+            and source.fact_type == "http_call"
+            and target.fact_type == "route"
+        ) or (
+            kind == "dispatches"
+            and source.fact_type in {"route", "handler"}
+            and target.fact_type in {"route", "handler", "http_call"}
+        ) or (
+            kind == "reaches"
+            and source.fact_type in {"route", "handler"}
+            and target.fact_type == "lead_anchor"
+        )
+        if not allowed:
+            return False
+    return True
+
+
 def _lead_anchor_facts(session: Session, lead: ScanLead) -> list[ComponentFact]:
     """Find facts that can anchor a lead without trusting a single file match."""
     facts = list(
@@ -202,6 +244,8 @@ def trace_lead_paths(
         edges = tuple(reversed(edges_reversed))
         key = tuple(int(fact.id) for fact in facts if fact.id is not None)
         if not key or key in seen:
+            return
+        if complete and not _has_valid_frontend_sequence(facts, edges):
             return
         seen.add(key)
         confidence = min(
