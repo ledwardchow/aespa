@@ -6,7 +6,7 @@ const BYTES_PER_MIB = 1024 * 1024;
 
 function toForm(config) {
   return {
-    max_tool_calls: config.max_tool_calls ?? 100,
+    max_tool_calls: config.max_tool_calls ?? 250,
     max_source_files: config.max_source_files ?? 500,
     max_source_bytes: config.max_source_bytes ?? 50 * BYTES_PER_MIB,
     max_facts: config.max_facts ?? 500,
@@ -89,7 +89,7 @@ export function ComponentMapperSettings() {
             value={form.max_tool_calls}
             onChange={e => update({ max_tool_calls: Number(e.target.value) })} />
           <div className="field-hint">
-            Includes file listing, search, reads, and fact recording. Default: 100.
+            Includes file listing, search, reads, and fact recording. Default: 250.
           </div>
         </div>
         <div className="field">

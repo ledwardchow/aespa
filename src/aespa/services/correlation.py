@@ -359,7 +359,7 @@ def _build_component_connections(
                     target=action,
                     match_kind="deterministic",
                     confidence=0.65,
-                    rationale="UI action is declared in the same frontend component",
+                    rationale="UI route and action reside in the same source file",
                     evidence=evidence,
                     edge_kind="contains",
                 )
@@ -374,7 +374,7 @@ def _build_component_connections(
                     target=call,
                     match_kind="deterministic",
                     confidence=0.55,
-                    rationale="Frontend route and request call are in the same component",
+                    rationale="UI route and outbound HTTP request reside in the same source file",
                     evidence={
                         "route": _fact_evidence(route),
                         "call": _fact_evidence(call),
@@ -393,7 +393,7 @@ def _build_component_connections(
                     target=call,
                     match_kind="deterministic",
                     confidence=0.60,
-                    rationale="UI action and outbound request share source evidence",
+                    rationale="UI action and outbound HTTP request reside in the same source file",
                     evidence={
                         "action": _fact_evidence(action),
                         "call": _fact_evidence(call),
@@ -415,7 +415,7 @@ def _build_component_connections(
                     target=call,
                     match_kind="deterministic",
                     confidence=0.60,
-                    rationale="Handler and outbound request share source evidence",
+                    rationale="Backend handler and outbound HTTP call reside in the same source file",
                     evidence={
                         "handler": _fact_evidence(handler),
                         "call": _fact_evidence(call),
@@ -439,7 +439,7 @@ def _build_component_connections(
                     target=anchor,
                     match_kind="deterministic",
                     confidence=0.60,
-                    rationale="Source fact shares the lead's validated evidence file",
+                    rationale="API route/handler and SAST vulnerability lead reside in the same source file",
                     evidence={
                         "source": _fact_evidence(source),
                         "lead_anchor": _fact_evidence(anchor),
@@ -488,7 +488,7 @@ def _build_component_connections(
                     target=target,
                     match_kind="deterministic",
                     confidence=0.75,
-                    rationale="Mapper supplied supporting locations connecting the facts",
+                    rationale="Code analysis identified supporting references linking these constructs",
                     evidence={
                         "source": _fact_evidence(source),
                         "target": _fact_evidence(target),
@@ -678,6 +678,7 @@ async def match_ambiguous_connections(
     llm_config,
     ambiguous: list[AmbiguousCall],
     *,
+    campaign_id: int | None = None,
     stop_check=None,
 ) -> list[ConnectionProposal]:
     """Ask the LLM to resolve bounded unresolved fact candidates."""
@@ -687,10 +688,35 @@ async def match_ambiguous_connections(
     from aespa.services.prompts.component_mapper import CONNECTION_MATCHER_SYSTEM_PROMPT
 
     proposals: list[ConnectionProposal] = []
+    total_batches = (len(ambiguous) + 49) // 50
     for offset in range(0, len(ambiguous), 50):
         if stop_check and stop_check():
             raise asyncio.CancelledError
+        batch_idx = (offset // 50) + 1
         batch = ambiguous[offset : offset + 50]
+        if campaign_id:
+            events_svc.emit(
+                campaign_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "connection-matcher",
+                    "role": "Connection Matcher",
+                    "status": "active",
+                    "current_task": f"Turn {batch_idx}/{total_batches}: Disambiguating {len(batch)} candidate pair(s)",
+                    "outcome": None,
+                    "_persist": True,
+                },
+            )
+            events_svc.emit(
+                campaign_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "component_mapping",
+                    "status": "running",
+                    "message": f"[Connection Matcher] Turn {batch_idx}/{total_batches}: Evaluating LLM disambiguation for {len(batch)} candidate pair(s)",
+                    "data": {"batch": batch_idx, "total_batches": total_batches, "candidates": len(batch)},
+                },
+            )
         prompt = (
             "Resolve only pairs from this JSON input. Return a JSON array with "
             "call_id, route_id, confidence, rationale, and evidence. Do not "
@@ -815,16 +841,18 @@ def _generate_cross_component_leads(
         )
 
         # ── Case 1: SAST lead on the calling component (source_fact) ─────────
-        source_lead = session.exec(
-            select(ScanLead)
-            .where(ScanLead.producer_run_id == source_fact.sast_run_id)
-            .where(ScanLead.producer_run_type == "sast")
-            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-            .where(ScanLead.reportable == True)  # noqa: E712
-            .where(ScanLead.location == source_fact.evidence_location)
-        ).first()
+        source_leads = [
+            l for l in session.exec(
+                select(ScanLead)
+                .where(ScanLead.producer_run_id == source_fact.sast_run_id)
+                .where(ScanLead.producer_run_type == "sast")
+                .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+                .where(ScanLead.reportable == True)  # noqa: E712
+            ).all()
+            if _same_file(l.location, source_fact.evidence_location)
+        ]
 
-        if source_lead is not None:
+        for source_lead in source_leads:
             target_auth_facts = session.exec(
                 select(ComponentFact)
                 .where(ComponentFact.sast_run_id == target_fact.sast_run_id)
@@ -909,16 +937,18 @@ def _generate_cross_component_leads(
                     )
 
         # ── Case 2: SAST lead on the receiving target route (target_fact) ────
-        target_lead = session.exec(
-            select(ScanLead)
-            .where(ScanLead.producer_run_id == target_fact.sast_run_id)
-            .where(ScanLead.producer_run_type == "sast")
-            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-            .where(ScanLead.reportable == True)  # noqa: E712
-            .where(ScanLead.location == target_fact.evidence_location)
-        ).first()
+        target_leads = [
+            l for l in session.exec(
+                select(ScanLead)
+                .where(ScanLead.producer_run_id == target_fact.sast_run_id)
+                .where(ScanLead.producer_run_type == "sast")
+                .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+                .where(ScanLead.reportable == True)  # noqa: E712
+            ).all()
+            if _same_file(l.location, target_fact.evidence_location)
+        ]
 
-        if target_lead is not None:
+        for target_lead in target_leads:
             fingerprint = lead_fingerprint(
                 category=target_lead.category,
                 title=f"cross-repo:backend:{target_lead.title}",
@@ -1600,272 +1630,281 @@ async def correlate_campaign_with_llm(
 ) -> dict:
     """Run source mapping, exact correlation, and bounded LLM disambiguation."""
     from aespa.services import component_mapper
+    from aespa.services import llm as llm_svc
     from aespa.services.settings import (
         get_component_mapper_config,
         get_llm_config_for_role,
     )
 
-    with Session(get_engine()) as session:
-        campaign = session.get(AssessmentCampaign, campaign_id)
-        if campaign is None:
-            raise ValueError(f"Campaign {campaign_id} does not exist")
-        source_members = list(
-            session.exec(
-                select(CampaignSourceMember).where(
-                    CampaignSourceMember.campaign_id == campaign_id
-                )
-            ).all()
+    with events_svc.run_kind_scope("campaign"):
+        llm_svc.set_run_context(
+            campaign_id,
+            lambda evt: events_svc.emit(campaign_id, evt),
+            run_kind="campaign",
         )
-        target_members = list(
-            session.exec(
-                select(CampaignTargetMember).where(
-                    CampaignTargetMember.campaign_id == campaign_id
-                )
-            ).all()
-        )
-        for m in source_members:
-            if m.sast_run_id:
-                component_mapper.purge_llm_component_facts(m.sast_run_id)
-        llm_config = get_llm_config_for_role(session, campaign, "component_mapper")
-        has_explicit_mapper_config = (
-            campaign.llm_config_id is not None or campaign.llm_profile_id is not None
-        )
-        mapper_config = get_component_mapper_config(session)
-        max_parallel = mapper_config.max_concurrent
 
-    if llm_config is None:
-        if not has_explicit_mapper_config:
-            result = (
-                rebuild_connections_deterministic(campaign_id)
-                if preserve_downstream
-                else correlate_campaign(campaign_id)
+        with Session(get_engine()) as session:
+            campaign = session.get(AssessmentCampaign, campaign_id)
+            if campaign is None:
+                raise ValueError(f"Campaign {campaign_id} does not exist")
+            source_members = list(
+                session.exec(
+                    select(CampaignSourceMember).where(
+                        CampaignSourceMember.campaign_id == campaign_id
+                    )
+                ).all()
             )
+            target_members = list(
+                session.exec(
+                    select(CampaignTargetMember).where(
+                        CampaignTargetMember.campaign_id == campaign_id
+                    )
+                ).all()
+            )
+            for m in source_members:
+                if m.sast_run_id:
+                    component_mapper.purge_llm_component_facts(m.sast_run_id)
+            llm_config = get_llm_config_for_role(session, campaign, "component_mapper")
+            has_explicit_mapper_config = (
+                campaign.llm_config_id is not None or campaign.llm_profile_id is not None
+            )
+            mapper_config = get_component_mapper_config(session)
+            max_parallel = mapper_config.max_concurrent
+
+        if llm_config is None:
+            if not has_explicit_mapper_config:
+                result = (
+                    rebuild_connections_deterministic(campaign_id)
+                    if preserve_downstream
+                    else correlate_campaign(campaign_id)
+                )
+                events_svc.emit(
+                    campaign_id,
+                    {
+                        "type": "scanner_phase",
+                        "phase": "component_mapping",
+                        "status": "warning",
+                        "message": (
+                            "No LLM mapping profile is configured; retained the "
+                            "deterministic connection baseline."
+                        ),
+                        "data": result,
+                    },
+                )
+                return result
+            raise component_mapper.CorrelationTransientError(
+                "No LLM configuration is available for component mapping."
+            )
+
+        events_svc.emit(
+            campaign_id,
+            {
+                "type": "scanner_phase",
+                "phase": "component_mapping",
+                "status": "running",
+                "message": f"Mapping interfaces for {len(source_members)} component(s).",
+                "data": {"components": len(source_members)},
+            },
+        )
+        semaphore = asyncio.Semaphore(max_parallel)
+
+        async def _map(
+            member: CampaignSourceMember,
+        ) -> component_mapper.ComponentMappingResult:
+            async with semaphore:
+                return await component_mapper.map_campaign_component(
+                    campaign_id,
+                    member.id,
+                    llm_config=llm_config,
+                    stop_check=stop_check,
+                )
+
+        mapping_tasks = [
+            asyncio.create_task(_map(member), name=f"component-map-{member.id}")
+            for member in source_members
+        ]
+        try:
+            await asyncio.gather(*mapping_tasks)
+        except BaseException:
+            for task in mapping_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*mapping_tasks, return_exceptions=True)
+            raise
+        if stop_check and stop_check():
+            raise asyncio.CancelledError
+
+        with Session(get_engine()) as session:
+            connections = _build_component_connections(
+                session, campaign_id, source_members, None
+            )
+            session.commit()
+            ambiguous = _ambiguous_calls(session, source_members, connections)
+
+        events_svc.emit(
+            campaign_id,
+            {
+                "type": "scanner_phase",
+                "phase": "component_mapping",
+                "status": "complete",
+                "message": (
+                    f"Exact matching found {len(connections)} connection(s); "
+                    f"{len(ambiguous)} unresolved candidate set(s) remain."
+                ),
+                "data": {
+                    "deterministic_connections": len(connections),
+                    "ambiguous_candidates": len(ambiguous),
+                },
+            },
+        )
+        try:
+            proposals = await match_ambiguous_connections(
+                llm_config,
+                ambiguous,
+                campaign_id=campaign_id,
+                stop_check=stop_check,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            from aespa.services.component_mapper import CorrelationTransientError
+
+            raise CorrelationTransientError(
+                f"Ambiguous connection matching failed: {exc}"
+            ) from exc
+        if stop_check and stop_check():
+            raise asyncio.CancelledError
+
+        with Session(get_engine()) as session:
+            source_by_fact: dict[int, ComponentFact] = {}
+            route_by_fact: dict[int, ComponentFact] = {}
+            for member in source_members:
+                if member.sast_run_id is None:
+                    continue
+                facts = session.exec(
+                    select(ComponentFact).where(
+                        ComponentFact.sast_run_id == member.sast_run_id
+                    )
+                ).all()
+                for fact in facts:
+                    if fact.fact_type == "http_call":
+                        source_by_fact[fact.id] = fact
+                    elif fact.fact_type == "route":
+                        route_by_fact[fact.id] = fact
+            deterministic_call_ids = {
+                connection.source_fact_id for connection in connections
+                if getattr(connection, "edge_kind", "calls") == "calls"
+            }
+            seen_pairs: set[tuple[int, int]] = set()
+            for proposal in proposals:
+                pair = (proposal.call_id, proposal.route_id)
+                if pair in seen_pairs or proposal.call_id in deterministic_call_ids:
+                    continue
+                call = source_by_fact.get(proposal.call_id)
+                route = route_by_fact.get(proposal.route_id)
+                if call is None or route is None or call.component_id == route.component_id:
+                    continue
+                if proposal.confidence < 0.70:
+                    continue
+                evidence = {
+                    **proposal.evidence,
+                    "call": {
+                        "method": call.method,
+                        "path": call.path,
+                        "host": call.host,
+                        **_fact_evidence(call),
+                    },
+                    "route": {
+                        "method": route.method,
+                        "path": route.path,
+                        **_fact_evidence(route),
+                    },
+                }
+                session.add(
+                    _make_connection(
+                        campaign_id=campaign_id,
+                        source=call,
+                        target=route,
+                        match_kind="llm_assisted",
+                        confidence=proposal.confidence,
+                        rationale=proposal.rationale,
+                        evidence=evidence,
+                        edge_kind="calls",
+                    )
+                )
+                seen_pairs.add(pair)
+            session.flush()
+            all_connections = list(
+                session.exec(
+                    select(ComponentConnection).where(
+                        ComponentConnection.campaign_id == campaign_id
+                    )
+                ).all()
+            )
+            if preserve_downstream:
+                cross_leads = []
+                frontend_leads = []
+                mappings = []
+            else:
+                cross_leads = _generate_cross_component_leads(
+                    session, campaign_id, all_connections
+                )
+                frontend_leads = _generate_frontend_path_leads(
+                    session, campaign_id, source_members
+                )
+                mappings = _propose_lead_target_mappings(
+                    session, campaign_id, source_members, target_members
+                )
+            session.commit()
+            result = {
+                "connections": len(all_connections),
+                "cross_component_leads": len(cross_leads) + len(frontend_leads),
+                "lead_target_mappings": len(mappings),
+            }
+        wording_warnings: list[str] = []
+        if not preserve_downstream and frontend_leads:
+            wording_warnings = await _rewrite_pre_crawl_frontend_paths(
+                campaign_id,
+                llm_config=llm_config,
+            )
+            if wording_warnings:
+                with Session(get_engine()) as session:
+                    campaign = session.get(AssessmentCampaign, campaign_id)
+                    if campaign is not None:
+                        try:
+                            warnings = json.loads(campaign.warnings_json or "[]")
+                        except (TypeError, json.JSONDecodeError):
+                            warnings = []
+                        warnings.extend(
+                            warning for warning in wording_warnings if warning not in warnings
+                        )
+                        campaign.warnings_json = json.dumps(warnings[-50:])
+                        session.add(campaign)
+                        session.commit()
+        if wording_warnings:
             events_svc.emit(
                 campaign_id,
                 {
                     "type": "scanner_phase",
                     "phase": "component_mapping",
                     "status": "warning",
-                    "message": (
-                        "No LLM mapping profile is configured; retained the "
-                        "deterministic connection baseline."
-                    ),
-                    "data": result,
+                    "message": "Some frontend path wording remained deterministic.",
+                    "data": {"warnings": wording_warnings},
                 },
             )
-            return result
-        raise component_mapper.CorrelationTransientError(
-            "No LLM configuration is available for component mapping."
-        )
-
-    events_svc.emit(
-        campaign_id,
-        {
-            "type": "scanner_phase",
-            "phase": "component_mapping",
-            "status": "running",
-            "message": f"Mapping interfaces for {len(source_members)} component(s).",
-            "data": {"components": len(source_members)},
-        },
-    )
-    semaphore = asyncio.Semaphore(max_parallel)
-
-    async def _map(
-        member: CampaignSourceMember,
-    ) -> component_mapper.ComponentMappingResult:
-        async with semaphore:
-            return await component_mapper.map_campaign_component(
-                campaign_id,
-                member.id,
-                llm_config=llm_config,
-                stop_check=stop_check,
-            )
-
-    mapping_tasks = [
-        asyncio.create_task(_map(member), name=f"component-map-{member.id}")
-        for member in source_members
-    ]
-    try:
-        await asyncio.gather(*mapping_tasks)
-    except BaseException:
-        for task in mapping_tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*mapping_tasks, return_exceptions=True)
-        raise
-    if stop_check and stop_check():
-        raise asyncio.CancelledError
-
-    with Session(get_engine()) as session:
-        connections = _build_component_connections(
-            session, campaign_id, source_members, None
-        )
-        session.commit()
-        ambiguous = _ambiguous_calls(session, source_members, connections)
-
-    events_svc.emit(
-        campaign_id,
-        {
-            "type": "scanner_phase",
-            "phase": "component_mapping",
-            "status": "complete",
-            "message": (
-                f"Exact matching found {len(connections)} connection(s); "
-                f"{len(ambiguous)} unresolved candidate set(s) remain."
-            ),
-            "data": {
-                "deterministic_connections": len(connections),
-                "ambiguous_candidates": len(ambiguous),
-            },
-        },
-    )
-    try:
-        proposals = await match_ambiguous_connections(
-            llm_config,
-            ambiguous,
-            stop_check=stop_check,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        from aespa.services.component_mapper import CorrelationTransientError
-
-        raise CorrelationTransientError(
-            f"Ambiguous connection matching failed: {exc}"
-        ) from exc
-    if stop_check and stop_check():
-        raise asyncio.CancelledError
-
-    with Session(get_engine()) as session:
-        source_by_fact: dict[int, ComponentFact] = {}
-        route_by_fact: dict[int, ComponentFact] = {}
-        for member in source_members:
-            if member.sast_run_id is None:
-                continue
-            facts = session.exec(
-                select(ComponentFact).where(
-                    ComponentFact.sast_run_id == member.sast_run_id
-                )
-            ).all()
-            for fact in facts:
-                if fact.fact_type == "http_call":
-                    source_by_fact[fact.id] = fact
-                elif fact.fact_type == "route":
-                    route_by_fact[fact.id] = fact
-        deterministic_call_ids = {
-            connection.source_fact_id for connection in connections
-            if getattr(connection, "edge_kind", "calls") == "calls"
-        }
-        seen_pairs: set[tuple[int, int]] = set()
-        for proposal in proposals:
-            pair = (proposal.call_id, proposal.route_id)
-            if pair in seen_pairs or proposal.call_id in deterministic_call_ids:
-                continue
-            call = source_by_fact.get(proposal.call_id)
-            route = route_by_fact.get(proposal.route_id)
-            if call is None or route is None or call.component_id == route.component_id:
-                continue
-            if proposal.confidence < 0.70:
-                continue
-            evidence = {
-                **proposal.evidence,
-                "call": {
-                    "method": call.method,
-                    "path": call.path,
-                    "host": call.host,
-                    **_fact_evidence(call),
-                },
-                "route": {
-                    "method": route.method,
-                    "path": route.path,
-                    **_fact_evidence(route),
-                },
-            }
-            session.add(
-                _make_connection(
-                    campaign_id=campaign_id,
-                    source=call,
-                    target=route,
-                    match_kind="llm_assisted",
-                    confidence=proposal.confidence,
-                    rationale=proposal.rationale,
-                    evidence=evidence,
-                    edge_kind="calls",
-                )
-            )
-            seen_pairs.add(pair)
-        session.flush()
-        all_connections = list(
-            session.exec(
-                select(ComponentConnection).where(
-                    ComponentConnection.campaign_id == campaign_id
-                )
-            ).all()
-        )
-        if preserve_downstream:
-            cross_leads = []
-            frontend_leads = []
-            mappings = []
-        else:
-            cross_leads = _generate_cross_component_leads(
-                session, campaign_id, all_connections
-            )
-            frontend_leads = _generate_frontend_path_leads(
-                session, campaign_id, source_members
-            )
-            mappings = _propose_lead_target_mappings(
-                session, campaign_id, source_members, target_members
-            )
-        session.commit()
-        result = {
-            "connections": len(all_connections),
-            "cross_component_leads": len(cross_leads) + len(frontend_leads),
-            "lead_target_mappings": len(mappings),
-        }
-    wording_warnings: list[str] = []
-    if not preserve_downstream and frontend_leads:
-        wording_warnings = await _rewrite_pre_crawl_frontend_paths(
-            campaign_id,
-            llm_config=llm_config,
-        )
-        if wording_warnings:
-            with Session(get_engine()) as session:
-                campaign = session.get(AssessmentCampaign, campaign_id)
-                if campaign is not None:
-                    try:
-                        warnings = json.loads(campaign.warnings_json or "[]")
-                    except (TypeError, json.JSONDecodeError):
-                        warnings = []
-                    warnings.extend(
-                        warning for warning in wording_warnings if warning not in warnings
-                    )
-                    campaign.warnings_json = json.dumps(warnings[-50:])
-                    session.add(campaign)
-                    session.commit()
-    if wording_warnings:
         events_svc.emit(
             campaign_id,
             {
                 "type": "scanner_phase",
                 "phase": "component_mapping",
-                "status": "warning",
-                "message": "Some frontend path wording remained deterministic.",
-                "data": {"warnings": wording_warnings},
+                "status": "complete",
+                "message": (
+                    f"Connection mapping complete: {result['connections']} connection(s)."
+                ),
+                "data": result,
             },
         )
-    events_svc.emit(
-        campaign_id,
-        {
-            "type": "scanner_phase",
-            "phase": "component_mapping",
-            "status": "complete",
-            "message": (
-                f"Connection mapping complete: {result['connections']} connection(s)."
-            ),
-            "data": result,
-        },
-    )
-    return result
+        return result
 
 
 def count_pending_mappings(campaign_id: int) -> int:

@@ -27,7 +27,35 @@ from aespa.models import (
     ScanLeadComponentProvenance,
 )
 from aespa.services import events as events_svc
+from aespa.services import llm as llm_svc
 from aespa.services import settings as settings_svc
+
+
+def _format_tool_desc(tool_name: str, tool_input: dict) -> str:
+    if tool_name == "list_files":
+        path = tool_input.get("path") or "."
+        return f"listed files in '{path}'"
+    if tool_name == "glob":
+        pattern = tool_input.get("pattern") or "*"
+        return f"matched glob pattern '{pattern}'"
+    if tool_name == "read_file":
+        path = tool_input.get("path") or ""
+        start = tool_input.get("start_line")
+        end = tool_input.get("end_line")
+        lines = f":L{start}-L{end}" if start and end else ""
+        return f"read source file '{path}{lines}'"
+    if tool_name == "grep":
+        pattern = tool_input.get("pattern") or ""
+        path = tool_input.get("path") or ""
+        scope = f" in '{path}'" if path else ""
+        return f"searched pattern '{pattern}'{scope}"
+    if tool_name == "record_interface_fact":
+        fact_type = tool_input.get("fact_type") or "fact"
+        name = tool_input.get("name") or tool_input.get("path") or ""
+        return f"recorded {fact_type} fact '{name}'"
+    if tool_name == "done":
+        return "completed interface mapping"
+    return f"executed {tool_name}"
 from aespa.services.component_facts import interface_fact_fingerprint
 from aespa.services.prompts.component_mapper import (
     COMPONENT_MAPPER_SYSTEM_PROMPT,
@@ -530,6 +558,34 @@ async def map_campaign_component(
         async def executor(tool_name: str, tool_input: dict, _step: int) -> str:
             nonlocal rejected, tool_calls, source_bytes
             nonlocal budget_reason, source_budget_reason
+            tool_desc = _format_tool_desc(tool_name, tool_input)
+            events_svc.emit(
+                campaign_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": f"component-mapper-{member_id}",
+                    "role": "Component Mapper",
+                    "status": "active",
+                    "current_task": f"[{component.name}] Turn {_step + 1}: {tool_desc}",
+                    "outcome": None,
+                    "_persist": True,
+                },
+            )
+            events_svc.emit(
+                campaign_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "component_mapping",
+                    "status": "running",
+                    "message": f"[{component.name}] Turn {_step + 1}: {tool_desc}",
+                    "data": {
+                        "component_id": component.id,
+                        "component_name": component.name,
+                        "step": _step + 1,
+                        "tool": tool_name,
+                    },
+                },
+            )
             if tool_calls >= mapper_config.max_tool_calls:
                 budget_reason = (
                     "Interface mapping tool-call budget exhausted "
@@ -659,7 +715,11 @@ async def map_campaign_component(
                 return str(tool_input.get("summary") or "")
             return f"Error: unsupported mapper tool {tool_name!r}"
 
-        from aespa.services import llm as llm_svc
+        llm_svc.set_run_context(
+            campaign_id,
+            lambda evt: events_svc.emit(campaign_id, evt),
+            run_kind="campaign",
+        )
 
         summary = await llm_svc.thinking_agentic_loop(
             llm_config,

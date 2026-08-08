@@ -520,7 +520,7 @@ class ComponentMapperConfig(SQLModel, table=True):
     __tablename__ = "component_mapper_config"
 
     id: Optional[int] = Field(default=1, primary_key=True)
-    max_tool_calls: int = Field(default=100)
+    max_tool_calls: int = Field(default=250)
     max_source_files: int = Field(default=500)
     max_source_bytes: int = Field(default=50 * 1024 * 1024)
     max_facts: int = Field(default=500)
