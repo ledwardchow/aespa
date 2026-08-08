@@ -11,6 +11,10 @@ from sqlmodel import Session, select
 
 from aespa.db import get_engine
 from aespa.models import ScanFinding, ScanLead
+from aespa.services.references import (
+    ensure_lead_reference,
+    inherit_lead_reference,
+)
 
 log = logging.getLogger(__name__)
 
@@ -251,6 +255,8 @@ def upsert_lead(
     lead.updated_at = now
     session.add(lead)
     session.flush()
+    ensure_lead_reference(session, lead)
+    session.flush()
     return lead
 
 
@@ -378,6 +384,7 @@ def copy_leads_to_run(
         made = 0
         now = datetime.now(_UTC)
         for o in originals:
+            ensure_lead_reference(s, o)
             if not o.fingerprint:
                 o.fingerprint = lead_fingerprint(
                     category=o.category, title=o.title, location=o.location
@@ -418,11 +425,14 @@ def copy_leads_to_run(
                 status="open",
                 imported_into_run_type=target_run_type,
                 imported_into_run_id=target_run_id,
+                origin_lead_id=o.id,
+                origin_reference=o.public_reference,
                 created_at=now,
                 updated_at=now,
             )
             _copy_path_metadata(o, copy)
             s.add(copy)
+            ensure_lead_reference(s, copy)
             made += 1
         s.commit()
     return made
@@ -450,6 +460,7 @@ def copy_lead_to_run(
         if existing is not None:
             s.expunge(existing)
             return existing
+        ensure_lead_reference(s, original)
         copied = ScanLead(
             collection_id=original.collection_id,
             producer_run_type=original.producer_run_type,
@@ -476,11 +487,14 @@ def copy_lead_to_run(
             status="open",
             imported_into_run_type=target_run_type,
             imported_into_run_id=target_run_id,
+            origin_lead_id=original.id,
+            origin_reference=original.public_reference,
             created_at=datetime.now(_UTC),
             updated_at=datetime.now(_UTC),
         )
         _copy_path_metadata(original, copied)
         s.add(copied)
+        ensure_lead_reference(s, copied)
         s.commit()
         s.refresh(copied)
         s.expunge(copied)
@@ -561,7 +575,7 @@ def set_final_frontend_path(
 def get_leads_for_run(target_run_type: str, target_run_id: int) -> list[ScanLead]:
     """Return open leads imported into a dynamic run (consumed by that scan)."""
     with Session(get_engine(), expire_on_commit=False) as s:
-        return list(
+        leads = list(
             s.exec(
                 select(ScanLead)
                 .where(ScanLead.imported_into_run_type == target_run_type)
@@ -570,12 +584,16 @@ def get_leads_for_run(target_run_type: str, target_run_id: int) -> list[ScanLead
                 .order_by(ScanLead.severity.desc(), ScanLead.confidence.desc())  # type: ignore[attr-defined]
             ).all()
         )
+        for lead in leads:
+            ensure_lead_reference(s, lead)
+        s.commit()
+        return leads
 
 
 def get_all_leads_for_run(target_run_type: str, target_run_id: int) -> list[ScanLead]:
     """Return ALL leads imported into a dynamic run, regardless of status."""
     with Session(get_engine(), expire_on_commit=False) as s:
-        return list(
+        leads = list(
             s.exec(
                 select(ScanLead)
                 .where(ScanLead.imported_into_run_type == target_run_type)
@@ -583,26 +601,36 @@ def get_all_leads_for_run(target_run_type: str, target_run_id: int) -> list[Scan
                 .order_by(ScanLead.id)
             ).all()
         )
+        for lead in leads:
+            ensure_lead_reference(s, lead)
+        s.commit()
+        return leads
 
 
 def get_lead_detail_for_run(
     target_run_type: str,
     target_run_id: int,
-    lead_id: int,
+    lead_id: int | None = None,
+    lead_reference: str | None = None,
 ) -> dict | None:
     """Return complete actionable detail only for a lead owned by this run."""
     normalized_type = (target_run_type or "").strip().lower()
     with Session(get_engine(), expire_on_commit=False) as s:
-        lead = s.exec(
+        query = (
             select(ScanLead)
-            .where(ScanLead.id == lead_id)
             .where(ScanLead.imported_into_run_type == normalized_type)
             .where(ScanLead.imported_into_run_id == target_run_id)
-        ).first()
+        )
+        if lead_reference:
+            query = query.where(ScanLead.public_reference == lead_reference)
+        else:
+            query = query.where(ScanLead.id == lead_id)
+        lead = s.exec(query).first()
         if lead is None:
             return None
         return {
             "id": lead.id,
+            "reference": lead.reference,
             "source_sast_run_id": lead.producer_run_id,
             "source": lead.source,
             "fingerprint": lead.fingerprint,
@@ -669,6 +697,7 @@ def _promote_lead_to_finding(
         .where(ScanFinding.title == title)
     ).first()
     if existing is not None:
+        inherit_lead_reference(s, existing, lead)
         return existing.id
 
     cat_raw = (lead.category or "").strip().upper()
@@ -690,6 +719,7 @@ def _promote_lead_to_finding(
     )
     s.add(finding)
     s.flush()  # populate finding.id within this transaction
+    inherit_lead_reference(s, finding, lead)
     log.info(
         "update_lead: auto-promoted confirmed lead %d to finding %s (run_type=%s run_id=%s)",
         lead.id,
@@ -854,6 +884,7 @@ def update_lead(
                         owner_run_id,
                     )
                     return None
+                inherit_lead_reference(s, finding, lead)
         lead.status = status
         if note:
             lead.note = note
@@ -944,7 +975,7 @@ def format_lead_index_for_validation(
         "=== SAST VALIDATION LEAD INDEX ===",
         "Every entry below is an unproven static-analysis hypothesis. "
         "Before investigating a lead, call context_tool with "
-        'tool=lead_detail and args={"lead_id": <id>} to retrieve its complete '
+        'tool=lead_detail and args={"lead_reference": "<reference>"} to retrieve its complete '
         "evidence, traces, proof gaps, reasoning, and attack path.",
         "",
     ]
@@ -952,7 +983,7 @@ def format_lead_index_for_validation(
         attack_path = decode_attack_path(lead.attack_path_json)
         objective = _prompt_text(attack_path.get("dynamic_test"), 240)
         lines.append(
-            f"[Lead #{lead.id}] [{(lead.severity or 'medium').upper()}] "
+            f"[Lead {lead.reference or f'#{lead.id}'}] [{(lead.severity or 'medium').upper()}] "
             f"[{int((lead.confidence or 0) * 100)}% confidence] {lead.title}"
         )
         lines.append(
@@ -963,7 +994,7 @@ def format_lead_index_for_validation(
         lines.append(f"  Dynamic-test objective: {objective or 'retrieve lead_detail'}")
         lines.append(
             f"  Required first action: context_tool(tool=lead_detail, "
-            f'args={{"lead_id": {lead.id}}})'
+            f'args={{"lead_reference": "{lead.reference}"}})'
         )
         lines.append("")
     return "\n".join(lines)
@@ -985,7 +1016,7 @@ def _format_leads_block(leads: list[ScanLead]) -> str:
     for lead in leads:
         sev = (lead.severity or "medium").upper()
         conf_pct = int((lead.confidence or 0) * 100)
-        lines.append(f"[Lead #{lead.id}] [{sev}] {lead.title}")
+        lines.append(f"[Lead {lead.reference or f'#{lead.id}'}] [{sev}] {lead.title}")
         lines.append(
             f"  Category: {lead.category or 'unknown'}  Confidence: {conf_pct}%"
         )

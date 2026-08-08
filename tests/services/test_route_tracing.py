@@ -239,6 +239,85 @@ def test_resolver_preserves_approved_path_and_uses_only_live_evidence():
     assert final["mutation_points"] == ["price"]
 
 
+def test_resolver_does_not_attach_crawl_evidence_to_plain_sast_path():
+    approved = {
+        "dynamic_test": "Use the leaked secret to forge a token.",
+        "nodes": ["secret is used by the token provider"],
+    }
+    live_context = {
+        "crawl_status": "completed",
+        "pages": [{"id": 1, "url": "https://app.test/", "route": "/"}],
+        "actions": [{"id": 2, "page_id": 1, "action_kind": "navigate"}],
+        "requests": [
+            {"id": 3, "page_id": 1, "method": "GET", "url": "https://app.test/"}
+        ],
+    }
+
+    assert resolve_approved_path(approved, live_context) == approved
+
+
+def test_resolver_uses_cross_component_frontend_request_metadata():
+    approved = {
+        "frontend_entrypoint": {
+            "method": "POST",
+            "path": "/api/orders/{order_id}",
+        },
+        "backend_route": {"method": "POST", "path": "/api/orders/{id}"},
+    }
+    final = resolve_approved_path(
+        approved,
+        {
+            "crawl_status": "completed",
+            "pages": [
+                {"id": 4, "url": "https://app.test/checkout", "route": "/checkout"}
+            ],
+            "actions": [],
+            "requests": [
+                {
+                    "id": 9,
+                    "page_id": 4,
+                    "method": "POST",
+                    "url": "https://app.test/api/orders/42",
+                },
+                {
+                    "id": 10,
+                    "page_id": 4,
+                    "method": "GET",
+                    "url": "https://app.test/",
+                },
+            ],
+        },
+    )
+
+    assert final["live_frontend_context"]["resolution_status"] == "matched"
+    assert final["live_frontend_context"]["route"] == "/checkout"
+    assert final["live_frontend_context"]["request"] == {
+        "method": "POST",
+        "path": "/api/orders/42",
+        "evidence_id": "traffic:9",
+    }
+    assert final["live_frontend_context"]["evidence_ids"] == [
+        "page:4",
+        "traffic:9",
+    ]
+
+
+@pytest.mark.anyio
+async def test_llm_rewrite_skips_plain_sast_path(monkeypatch):
+    async def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("LLM must not rewrite a non-frontend SAST path")
+
+    monkeypatch.setattr(
+        "aespa.services.frontend_path_resolver.llm_svc.plain_completion",
+        fail_if_called,
+    )
+    approved = {"dynamic_test": "Use the SAST evidence."}
+    revised, warning = await revise_path_with_llm(approved, approved, object())
+
+    assert revised == approved
+    assert warning is None
+
+
 def test_crawl_discovered_path_is_saved_as_unapproved_proposal(isolated_db_engine):
     with Session(isolated_db_engine) as session:
         lead = ScanLead(
@@ -335,7 +414,13 @@ async def test_llm_rewrite_rejects_unknown_evidence(monkeypatch):
         fake_completion,
     )
     approved = {"live_frontend_context": {"evidence_ids": ["page:1"]}}
-    final = {**approved, "live_frontend_context": {"evidence_ids": ["page:1"]}}
+    final = {
+        **approved,
+        "live_frontend_context": {
+            "evidence_ids": ["page:1"],
+            "resolution_status": "matched",
+        },
+    }
     revised, warning = await revise_path_with_llm(approved, final, object())
 
     assert revised == final

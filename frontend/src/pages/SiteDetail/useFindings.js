@@ -4,6 +4,18 @@ import { useColResize } from "./_helpers";
 import { ALICE_DEDUP_DIRECTIVE } from "./_constants";
 import { findingsToMarkdown, downloadTextFile, markdownExportFilename, parseFindingsMarkdown } from "../../lib/utilities";
 
+function cleanReference(value) {
+  const reference = value?.trim();
+  return reference ? reference.replace(/[.,;:!?]+$/, "") : "";
+}
+
+function findingGroupKey(finding) {
+  if (finding.finding_source === "deterministic_probe" && finding.title !== "TLS/SSL configuration weaknesses") return "__deterministic__";
+  if (finding.validation_status === "false_positive" || finding.validation_status === "low_confidence") return "__low_confidence__";
+  if (finding.validation_status === "unconfirmed") return "__unconfirmed__";
+  return finding.title;
+}
+
 // Owns everything the Findings tab needs: the findings list, validation +
 // dedup status, per-row edit/expand UI state, and the handlers that mutate
 // them. Extracted from TestRunDetail so the tab is driven by one cohesive
@@ -16,7 +28,8 @@ export function useFindings(runId, activeTab, {
   aliceIsThinking,
   setRun,
   setGraph,
-  setError
+  setError,
+  initialFindingRef
 }) {
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy] = useState(false);
@@ -34,17 +47,26 @@ export function useFindings(runId, activeTab, {
     return next;
   });
   const issueImportInputRef = useRef(null);
-  const [findColW, startFindResize] = useColResize("colw:findings", [80, 52, null, 28, 60]);
+  const [findColW, startFindResize] = useColResize("colw:findings:v2", [120, 52, null, 28, 60]);
 
   // Poll findings when on findings tab.
   useEffect(() => {
     if (activeTab !== "findings") return;
-    api.getFindings(runId).then(setFindings).catch(() => {});
+    api.getFindings(runId).then(data => {
+      setFindings(data);
+      if (initialFindingRef) {
+        const match = data.find(f => cleanReference(f.reference) === cleanReference(initialFindingRef));
+        if (match) {
+          setExpandedFinding(match.id);
+          setExpandedGroups(previous => new Set(previous).add(findingGroupKey(match)));
+        }
+      }
+    }).catch(() => {});
     const iv = setInterval(() => {
       api.getFindings(runId).then(setFindings).catch(() => {});
     }, 4000);
     return () => clearInterval(iv);
-  }, [runId, activeTab]);
+  }, [runId, activeTab, initialFindingRef]);
 
   // Poll validation status while validating is running. Keep polling while the
   // local busy flag is true too, because the final SSE event can race with the

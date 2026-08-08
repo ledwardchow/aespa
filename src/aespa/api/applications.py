@@ -18,7 +18,16 @@ import zipfile
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 
@@ -69,6 +78,11 @@ from aespa.services import campaigns as campaigns_svc
 from aespa.services import correlation as correlation_svc
 from aespa.services import events as events_svc
 from aespa.services import scan_leads as scan_leads_svc
+from aespa.services.references import (
+    ensure_campaign_finding_reference,
+    ensure_finding_reference,
+    ensure_lead_references,
+)
 
 router = APIRouter(prefix="/api/applications", tags=["applications"])
 
@@ -1066,6 +1080,7 @@ def _enrich_mappings(
             select(ScanLead).where(ScanLead.id.in_(lead_ids))
         ).all()
     }
+    ensure_lead_references(session, leads_by_id.values())
 
     component_id_by_sast_run_id = _component_id_by_sast_run_id(session, campaign_id)
 
@@ -1105,6 +1120,7 @@ def _enrich_mappings(
         enriched.append(
             base.model_copy(
                 update={
+                    "lead_reference": lead.reference,
                     "lead_title": lead.title,
                     "lead_description": lead.description,
                     "lead_severity": lead.severity,
@@ -1116,6 +1132,7 @@ def _enrich_mappings(
                     "lead_source": lead.source,
                     "lead_fingerprint": lead.fingerprint,
                     "lead_origin_lead_id": lead.origin_lead_id,
+                    "lead_origin_reference": lead.origin_reference,
                     "lead_trace_path_key": lead.trace_path_key,
                     "lead_trace_status": lead.trace_status,
                     "lead_trace_confidence": lead.trace_confidence,
@@ -1141,6 +1158,7 @@ def _enrich_mappings(
                 }
             )
         )
+    session.commit()
     return enriched
 
 
@@ -1358,6 +1376,13 @@ def campaign_findings(
         )
         target_name = applications_svc.target_display_name(session, target)
         for finding in findings:
+            ensure_finding_reference(session, finding)
+            campaign_reference = ensure_campaign_finding_reference(
+                session,
+                campaign_id=campaign_id,
+                finding_id=finding.id,
+                target_member_id=target_member.id,
+            )
             component_ids = _component_ids_for_finding(finding)
             finding_lead = lead_by_finding_id.get(finding.id)
             attack_path = (
@@ -1379,6 +1404,8 @@ def campaign_findings(
             rows.append(
                 CampaignFindingRow(
                     finding_id=finding.id,
+                    reference=campaign_reference.public_reference,
+                    run_reference=finding.reference,
                     target_type=target_member.target_type,
                     target_run_id=run_id,
                     component_id=component_ids[0] if component_ids else None,
@@ -1389,6 +1416,24 @@ def campaign_findings(
                     component_names=component_names,
                     target_name=target_name,
                     title=finding.title,
+                    description=finding.description,
+                    impact=finding.impact,
+                    likelihood=finding.likelihood,
+                    recommendation=finding.recommendation,
+                    cvss_score=finding.cvss_score,
+                    cvss_vector=finding.cvss_vector,
+                    affected_url=finding.affected_url,
+                    evidence=finding.evidence,
+                    request_evidence=finding.request_evidence,
+                    response_evidence=finding.response_evidence,
+                    evidence_items=finding.evidence_items,
+                    validation_note=finding.validation_note,
+                    merged_instances=finding.merged_instances,
+                    poc_command=finding.poc_command,
+                    poc_setup=finding.poc_setup,
+                    finding_source=finding.finding_source,
+                    origin=finding.origin,
+                    validated_by=finding.validated_by,
                     severity=finding.severity,
                     status=finding.validation_status,
                     frontend_attack_path=frontend_path,
@@ -1397,4 +1442,5 @@ def campaign_findings(
                     else None,
                 )
             )
+    session.commit()
     return rows

@@ -34,6 +34,9 @@ export function sourceLabel(source) {
     deterministic_probe: "Deterministic",
     manual_import: "Imported",
     debug_reporter: "Debug Reporter",
+    sast: "SAST",
+    sast_lead: "SAST",
+    alice_api: "A.L.I.C.E",
     unknown: "Unknown",
   };
   return labels[source] || String(source || "Unknown").replace(/_/g, " ");
@@ -209,7 +212,8 @@ export function sastCandidatesToMarkdown(leads, meta = {}) {
     lines.push(
       `## ${index + 1}. ${markdownListValue(lead.title || "Untitled candidate")}`,
       "",
-      `- Lead: #${lead.id ?? "—"}`,
+      `- Lead reference: ${markdownListValue(lead.reference || "—")}`,
+      ...(lead.origin_reference ? [`- Origin lead: ${markdownListValue(lead.origin_reference)}`] : []),
       `- Category: ${markdownListValue(lead.category || "Unclassified")}`,
       `- Severity: ${markdownListValue((lead.severity || "medium").toUpperCase())}`,
       `- Confidence: ${Math.round((lead.confidence || 0) * 100)}%`,
@@ -279,10 +283,11 @@ export function findingsToMarkdown(findings, meta = {}) {
     lines.push(
       `## ${idx + 1}. ${markdownListValue(f.title)}`,
       "",
+      `- Finding reference: ${markdownListValue(f.reference || "—")}`,
       `- Severity: ${markdownListValue(f.severity)}`,
       `- OWASP: ${markdownListValue(f.owasp_category)}`,
       ...(f.owasp_api_category ? [`- OWASP API: ${markdownListValue(f.owasp_api_category)}`] : []),
-      `- Source: ${markdownListValue(sourceLabel(f.finding_source))}`,
+      `- Source: ${markdownListValue(sourceLabel(f.origin?.label || f.finding_source))}`,
 
       `- Validation: ${markdownListValue(f.validation_status)}`,
       `- Affected URL: ${markdownListValue(f.affected_url)}`,
@@ -377,7 +382,7 @@ export function workProgramToMarkdown(matrix, { cats, labels = {}, kind = "web",
   if (findingRows.length) {
     lines.push("## Findings by cell", "");
     findingRows.forEach(({ loc, cat, f }) =>
-      lines.push(`- **${cat}** \`${loc}\` — [${f.severity||"info"}] ${f.title} (#${f.id}${f.validation_status ? `, ${f.validation_status}` : ""})`));
+      lines.push(`- **${cat}** \`${loc}\` — [${f.severity||"info"}] ${f.title} (${f.reference || `#${f.id}`}${f.validation_status ? `, ${f.validation_status}` : ""})`));
     lines.push("");
   }
 
@@ -468,4 +473,3 @@ export function stripMarkdownFence(value) {
   const match = text.match(/^(`{3,4})\n([\s\S]*)\n\1$/);
   return match ? match[2] : text;
 }
-

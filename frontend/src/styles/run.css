@@ -45,6 +45,7 @@
 .finding-row:hover { background: var(--hover); }
 .finding-row td { padding: 8px 12px; border-bottom: 1px solid var(--border-subtle, var(--border)); vertical-align: middle; }
 .finding-title { font-weight: 500; }
+.findings-table .finding-reference-cell { width: 120px; overflow: visible; text-overflow: clip; white-space: nowrap; }
 .finding-url { color: var(--muted); font-size: 11px; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .finding-evidence-row td { padding: 0; }
 .finding-edit-form { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }

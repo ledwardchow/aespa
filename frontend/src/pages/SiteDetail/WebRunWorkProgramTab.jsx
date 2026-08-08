@@ -8,6 +8,7 @@ import { usePolling } from "../../hooks/usePolling";
 import { useEventStream } from "../../hooks/useEventStream";
 import { LoadingState } from "../../components/LoadingState";
 import { CoverageStatusBadges } from "../../components/CoverageStatusBadges";
+import { FindingReferenceLink } from "../../components/FindingReferenceLink";
 
 export function WebRunWorkProgramTab({
   runId,
@@ -323,10 +324,10 @@ export function WebRunWorkProgramTab({
             fontSize: 11,
             color: "var(--muted)",
             marginTop: 2
-          }}>Finding #{f.id} — view in the Findings tab.</div>
+          }}><FindingReferenceLink reference={f.reference} title={f.title} description={f.description} severity={f.severity} validation_status={f.validation_status} href={`#/runs/${runId}/findings?finding=${encodeURIComponent(f.reference || "")}`} /> — view in the Findings tab.</div>
                   </div>) : <div style={{
           fontSize: 12
-        }}>Finding IDs: {selectedCell.fids.join(", ")} — view in the Findings tab.</div>}
+        }}>Finding references: {selectedCell.findings?.map(f => f.reference).filter(Boolean).join(", ") || selectedCell.fids.map(id => `#${id}`).join(", ")} — view in the Findings tab.</div>}
           </div>}
       </>}
     </div>;

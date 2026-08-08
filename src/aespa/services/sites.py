@@ -366,6 +366,7 @@ def import_site(session: Session, bundle: dict) -> Site:
         TestRun,
         TrafficEntry,
     )
+    from aespa.services.references import ensure_finding_reference
 
     if bundle.get("export_version") != 1:
         raise SiteServiceError(
@@ -502,10 +503,13 @@ def import_site(session: Session, bundle: dict) -> Site:
             old_pid = f.get("page_id")
             if old_pid is not None:
                 f["page_id"] = page_id_map.get(old_pid)
+            # Imported bundles get a fresh run namespace on this installation.
+            f["public_reference"] = None
             _parse_datetimes(f, "created_at")
             finding = ScanFinding(**f)
             session.add(finding)
             session.flush()
+            ensure_finding_reference(session, finding)
             finding_id_map[old_fid] = finding.id  # type: ignore[index]
 
         # ── ScanLogs ────────────────────────────────────────────────────────

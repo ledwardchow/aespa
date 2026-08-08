@@ -44,6 +44,7 @@ from aespa.services.prompts.test_lead import (
     get_sast_validate_system,
     get_sast_validate_tools,
 )
+from aespa.services.references import ensure_finding_reference
 
 log = logging.getLogger(__name__)
 
@@ -621,7 +622,7 @@ def _make_enforce_prober(api_run_id: int, llm_cfg, base_url: str):
 
 def get_coverage_matrix(api_run_id: int) -> dict:
     """Return the full coverage matrix for an ApiTestRun as a dict."""
-    with Session(get_engine()) as s:
+    with Session(get_engine(), expire_on_commit=False) as s:
         run = s.get(ApiTestRun, api_run_id)
         if run is None:
             return {}
@@ -645,6 +646,9 @@ def get_coverage_matrix(api_run_id: int) -> dict:
                 select(ScanFinding).where(ScanFinding.api_test_run_id == api_run_id)
             ).all()
         )
+        for finding in findings:
+            ensure_finding_reference(s, finding)
+        s.commit()
 
     # Build a lookup: (endpoint_id, category) → cell
     cell_lookup: dict[tuple[int, str], ApiEndpointTest] = {
@@ -654,6 +658,7 @@ def get_coverage_matrix(api_run_id: int) -> dict:
     finding_lookup: dict[int, dict] = {
         f.id: {
             "id": f.id,
+            "reference": f.reference or (f"#{f.id}" if f.id is not None else ""),
             "title": f.title,
             "severity": f.severity,
             "owasp_api_category": f.owasp_api_category,
@@ -988,6 +993,7 @@ def _make_post_finding_fn(api_run_id: int, *, update_coverage: bool = True):
                 f.owasp_api_category = owasp.upper()
             elif owasp.upper() in _OWASP_WEB_TO_API:
                 f.owasp_api_category = _OWASP_WEB_TO_API[owasp.upper()]
+            ensure_finding_reference(s, f)
             s.add(f)
             s.commit()
             s.refresh(f)

@@ -53,6 +53,23 @@ class RunIdentity(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class PublicReferenceNamespace(SQLModel, table=True):
+    """Persistent public-reference namespace for one user-facing run."""
+
+    __tablename__ = "public_reference_namespace"
+    __table_args__ = (
+        UniqueConstraint("owner_type", "owner_id", name="uq_public_ref_owner"),
+        UniqueConstraint("prefix", name="uq_public_ref_prefix"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    owner_type: str = Field(index=True)  # web | api | sast | campaign
+    owner_id: int = Field(index=True)
+    prefix: str = Field(index=True, min_length=4, max_length=4)
+    next_number: int = Field(default=1)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 # ── Site / Credential ─────────────────────────────────────────────────────────
 
 
@@ -994,6 +1011,17 @@ class ScanFinding(SQLModel, table=True):
     __tablename__ = "scan_finding"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    # Stable user-facing reference. Database ``id`` remains the internal key
+    # used by existing API mutation endpoints and scanner bookkeeping.
+    public_reference: Optional[str] = Field(default=None, index=True)
+    # Structured origin/provenance for findings that came from SAST or another
+    # lead source. The owning test_run/api_test_run remains the run that holds
+    # and, where applicable, validated the finding.
+    origin_type: Optional[str] = Field(default=None, index=True)
+    origin_run_type: Optional[str] = Field(default=None, index=True)
+    origin_run_id: Optional[int] = Field(default=None, index=True)
+    origin_lead_id: Optional[int] = Field(default=None, index=True)
+    origin_reference: Optional[str] = Field(default=None)
     # Nullable: a finding belongs to EITHER a web TestRun (test_run_id) OR an
     # ApiTestRun (api_test_run_id), never both.  The two tables have independent
     # Both columns now reference the single global run-identity namespace.
@@ -1056,6 +1084,60 @@ class ScanFinding(SQLModel, table=True):
             return parsed if isinstance(parsed, list) else []
         except Exception:
             return []
+
+    @property
+    def reference(self) -> str:
+        return self.public_reference or ""
+
+    @property
+    def origin(self) -> dict | None:
+        if not self.origin_type and not self.origin_reference:
+            return None
+        label = {
+            "sast": "SAST",
+            "campaign": "Campaign",
+            "dynamic": "Dynamic",
+            "api": "API",
+        }.get(self.origin_type or "", self.origin_type or "Unknown")
+        return {
+            "type": self.origin_type,
+            "label": label,
+            "run_type": self.origin_run_type,
+            "run_id": self.origin_run_id,
+            "lead_id": self.origin_lead_id,
+            "reference": self.origin_reference,
+        }
+
+    @property
+    def validated_by(self) -> dict | None:
+        if self.origin_type not in {"sast", "campaign"}:
+            return None
+        if self.test_run_id is not None:
+            return {"type": "web", "label": "Dynamic scan", "run_id": self.test_run_id}
+        if self.api_test_run_id is not None:
+            return {"type": "api", "label": "API scan", "run_id": self.api_test_run_id}
+        return None
+
+
+class CampaignFindingReference(SQLModel, table=True):
+    """Stable campaign-local alias for a finding owned by a child run."""
+
+    __tablename__ = "campaign_finding_reference"
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id", "finding_id", name="uq_campaign_finding_reference"
+        ),
+        UniqueConstraint(
+            "campaign_id", "public_reference", name="uq_campaign_public_reference"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    campaign_id: int = Field(sa_column=_run_identity_fk())
+    finding_id: int = Field(foreign_key="scan_finding.id", index=True)
+    target_member_id: int = Field(foreign_key="campaign_target_member.id", index=True)
+    public_reference: str = Field(index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
 
 
 class ScanLog(SQLModel, table=True):
@@ -1218,6 +1300,10 @@ class ScanLead(SQLModel, table=True):
     linked_finding_id: Optional[int] = Field(
         default=None
     )  # set when promoted to a finding
+    # Stable user-facing reference. Original leads use producer_run_* as their
+    # namespace; imported copies use imported_into_run_* as their namespace.
+    public_reference: Optional[str] = Field(default=None, index=True)
+    origin_reference: Optional[str] = Field(default=None)
     # Set on a *copy* imported into a dynamic run (e.g. a web TestRun). Originals
     # leave these NULL; producer_run_id on a copy still points at the source SAST
     # run for provenance. Copies are owned by (imported_into_run_type, _run_id).
@@ -1231,6 +1317,10 @@ class ScanLead(SQLModel, table=True):
     trace_confidence: Optional[float] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+    @property
+    def reference(self) -> str:
+        return self.public_reference or ""
 
 
 # ── Applications & multi-repository campaigns ───────────────────────────────

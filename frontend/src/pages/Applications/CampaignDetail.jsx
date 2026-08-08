@@ -25,7 +25,7 @@ const CAMPAIGN_TABS = [
 // controls, then the seven tabs. Each tab owns its own data/state — this
 // shell only owns the campaign record and the actions that mutate its
 // lifecycle, so it never grows into a prop-bag monolith.
-export function CampaignDetail({ applicationId, campaignId, initialTab }) {
+export function CampaignDetail({ applicationId, campaignId, initialTab, initialFindingRef }) {
   const { campaign, error, busy, load, start, stop, retry, resumeSource, resumeTarget, rebuildConnections, continueToLive, isActive } = useCampaign(applicationId, campaignId);
   const tab = initialTab || "overview";
 
@@ -61,7 +61,7 @@ export function CampaignDetail({ applicationId, campaignId, initialTab }) {
       {tab === "connections" && <CampaignConnectionsTab applicationId={applicationId} campaignId={campaignId} campaign={campaign} rebuildConnections={rebuildConnections} busy={busy} />}
       {tab === "review" && <CampaignReviewTab applicationId={applicationId} campaignId={campaignId} campaign={campaign} onSubmitted={load} canContinue={canContinue} continueToLive={continueToLive} continueBusy={busy} />}
       {tab === "runs" && <CampaignRunsTab applicationId={applicationId} campaign={campaign} resumeSource={resumeSource} resumeTarget={resumeTarget} busy={busy} />}
-      {tab === "findings" && <CampaignFindingsTab applicationId={applicationId} campaignId={campaignId} />}
+      {tab === "findings" && <CampaignFindingsTab applicationId={applicationId} campaignId={campaignId} initialFindingRef={initialFindingRef} />}
       {tab === "activity" && <CampaignActivityTab applicationId={applicationId} campaignId={campaignId} campaign={campaign} />}
     </div>
   </>;

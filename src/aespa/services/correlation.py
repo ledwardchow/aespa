@@ -46,9 +46,11 @@ from aespa.models import (
 )
 from aespa.services import events as events_svc
 from aespa.services.frontend_path_resolver import (
+    is_frontend_path,
     resolve_approved_path,
     revise_path_with_llm,
 )
+from aespa.services.references import ensure_lead_reference
 from aespa.services.route_tracing import attack_path_for_trace, trace_lead_paths
 from aespa.services.scan_leads import (
     copy_lead_to_run,
@@ -2149,7 +2151,7 @@ def enrich_copied_web_leads_for_target(
             path = json.loads(approved_path or "{}")
         except (TypeError, json.JSONDecodeError):
             path = {}
-        if path:
+        if path and is_frontend_path(path):
             final_path = resolve_approved_path(path, context or {})
             if warning:
                 final_path.setdefault("warnings", []).append(warning)
@@ -2392,6 +2394,7 @@ def propose_crawl_discovered_paths(
                     )
                     session.add(lead)
                     session.flush()
+                    ensure_lead_reference(session, lead)
                     session.add(
                         LeadTargetMapping(
                             campaign_id=campaign_id,
@@ -2467,6 +2470,8 @@ async def enrich_copied_web_leads_for_target_with_llm(
         except (TypeError, json.JSONDecodeError):
             continue
         if not isinstance(approved_path, dict) or not isinstance(final_path, dict):
+            continue
+        if not is_frontend_path(approved_path):
             continue
         revised, rewrite_warning = await revise_path_with_llm(
             approved_path,
