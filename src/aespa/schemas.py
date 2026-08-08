@@ -823,7 +823,7 @@ class CrawlerConfigOut(CrawlerConfigBase):
 class ComponentMapperConfigBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    max_tool_calls: int = Field(default=100, ge=1, le=1000)
+    max_tool_calls: int = Field(default=250, ge=1, le=1000)
     max_source_files: int = Field(default=500, ge=1, le=10000)
     max_source_bytes: int = Field(
         default=50 * 1024 * 1024,

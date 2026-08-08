@@ -18,7 +18,7 @@ import zipfile
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 
@@ -908,17 +908,21 @@ async def _stream_campaign_activity(
     response_model=list[ComponentConnectionOut],
 )
 def campaign_connections(
-    application_id: int, campaign_id: int, session: Session = Depends(get_session)
+    application_id: int,
+    campaign_id: int,
+    scope: str = Query(default="cross_component"),
+    session: Session = Depends(get_session),
 ) -> list[ComponentConnectionOut]:
     try:
         campaigns_svc.get_campaign(session, application_id, campaign_id)
     except campaigns_svc.CampaignNotFound as exc:
         raise _not_found(exc) from exc
-    connections = session.exec(
-        select(ComponentConnection).where(
-            ComponentConnection.campaign_id == campaign_id
-        )
-    ).all()
+    stmt = select(ComponentConnection).where(
+        ComponentConnection.campaign_id == campaign_id
+    )
+    if scope != "all":
+        stmt = stmt.where(ComponentConnection.path_scope == scope)
+    connections = session.exec(stmt).all()
     component_ids = {
         component_id
         for connection in connections
