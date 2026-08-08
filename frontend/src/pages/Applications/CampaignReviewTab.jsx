@@ -3,6 +3,7 @@ import { useReviewLeads } from "./useReviewLeads";
 import { api } from "../../lib/api";
 import { EmptyState } from "../../components/EmptyState";
 import { SastLeadDetails } from "../../components/SastLeadDetails";
+import { LeadReferenceLink } from "../../components/FindingReferenceLink";
 import { severityClass, confidencePct, safeParseJson } from "./_helpers";
 
 const HIGH_CONFIDENCE = 0.8;
@@ -238,6 +239,8 @@ function LeadGroup({ mappings, targets, decisions, selected, onSetDecision, onTo
   const componentNames = componentNamesFor(first);
   const leadObj = {
     id: first.lead_id,
+    reference: first.lead_reference,
+    origin_reference: first.lead_origin_reference,
     title: first.lead_title,
     description: first.lead_description,
     severity: first.lead_severity,
@@ -267,7 +270,17 @@ function LeadGroup({ mappings, targets, decisions, selected, onSetDecision, onTo
     <div className="row spread" style={{ gap: 8, alignItems: "center" }}>
       <div className="row" style={{ gap: 8, alignItems: "center", flex: 1, flexWrap: "wrap" }}>
         <span className={"sev-badge " + severityClass(first.lead_severity || "medium")}>{first.lead_severity || "unknown"}</span>
-        <span style={{ fontWeight: 700 }}>{first.lead_title || `Lead #${first.lead_id}`}</span>
+        {first.lead_reference && <LeadReferenceLink
+          reference={first.lead_reference}
+          title={first.lead_title}
+          description={first.lead_description}
+          severity={first.lead_severity}
+          finding_source={first.lead_source}
+          href={first.lead_producer_run_type === "sast" && first.lead_producer_run_id
+            ? `#/sast-runs/${first.lead_producer_run_id}/candidates?lead=${encodeURIComponent(first.lead_reference)}`
+            : undefined}
+        />}
+        <span style={{ fontWeight: 700 }}>{first.lead_title || "Untitled lead"}</span>
         <span className="subtle" style={{ fontSize: 12 }}>
           {componentNames.join(", ")}{first.lead_location ? ` · ${first.lead_location}` : ""}
         </span>

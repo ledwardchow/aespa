@@ -2,6 +2,7 @@ import { TokenUsageBar } from "../../components/TokenUsageBar";
 import { api } from "../../lib/api";
 import { truncUrl } from "../../lib/utilities";
 import { AliceChatPanel } from "./AliceChatPanel";
+import { FindingReferenceLink } from "../../components/FindingReferenceLink";
 export function WebRunActivityTab(props) {
   const { activityLog, tokenUsage, setTokenExpanded, tokenExpanded, activitySubTab, setActivitySubTab, agents, normalizeAgentForRun, activityFeedRef, runId, clearBusy, setClearBusy, setClearError, setActivityLog, setSitePlanData, setTokenUsage, sitePlanData, expandedLogIds, toggleLogId, collapsedAgentIds, toggleAgentId, defaultAgentRoster, representsAgent, aliceChats, activeAliceTabId, setActiveAliceTabId, deleteAliceTab, createAliceTab, aliceChatHeight, aliceMessages, aliceExpandedThinkIds, setAliceExpandedThinkIds, aliceThinkingTabId, aliceIsThinking, startAliceResize, aliceInputText, handleAliceSend, setAliceInputText, handleAliceStop, agentRoleLabel, agentCurrentTask, agentCrawlEvents, agentTaskHistory, agentStatusLabel } = props;
   return (
@@ -364,7 +365,7 @@ export function WebRunActivityTab(props) {
                       const findingNum = va.id.replace("validator-", "");
                       return <div key={va.id} className={"agent-thread-row" + (vaActive ? " agent-thread-row--active" : "")}>
                                 <span className={"agent-dot agent-dot--sm" + (vaActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
-                                <span className="agent-thread-id">Finding #{findingNum}</span>
+                                <FindingReferenceLink reference={va.findingReference || `#${findingNum}`} href={va.findingReference ? `#/runs/${runId}/findings?finding=${encodeURIComponent(va.findingReference)}` : undefined} />
                                 <span className={"agent-badge agent-badge--sm" + (vaActive ? " agent-badge-active" : " agent-badge-complete")}>
                                   {vaActive ? "ACTIVE" : "DONE"}
                                 </span>

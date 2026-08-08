@@ -410,6 +410,7 @@ class ScanLeadOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    reference: str = ""
     collection_id: int | None
     producer_run_type: str
     producer_run_id: int
@@ -437,6 +438,8 @@ class ScanLeadOut(BaseModel):
     investigated_by_run_type: str | None
     investigated_by_run_id: int | None
     linked_finding_id: int | None
+    linked_finding_reference: str | None = None
+    origin_reference: str | None = None
     imported_into_run_type: str | None
     imported_into_run_id: int | None
     origin_lead_id: int | None = None
@@ -1223,6 +1226,8 @@ class ActiveJobSummary(BaseModel):
     run_id: int
     site_id: Optional[int] = None
     site_name: Optional[str] = None
+    application_id: Optional[int] = None
+    application_name: Optional[str] = None
     run_name: str
     job_type: str
     status: str
@@ -1449,6 +1454,7 @@ class ScanFindingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    reference: str = ""
     test_run_id: int | None = None
     page_id: int | None
     owasp_category: str
@@ -1470,6 +1476,8 @@ class ScanFindingOut(BaseModel):
     finding_source: str = "unknown"
     validation_status: str
     validation_note: str | None
+    origin: dict | None = None
+    validated_by: dict | None = None
     merged_instances: str = "[]"
     poc_command: str = ""
     poc_setup: str = ""
@@ -1808,6 +1816,7 @@ class LeadTargetMappingOut(BaseModel):
     # backward compatible: existing consumers reading only the fields above
     # are unaffected. Populated best-effort; left None/empty if the lead row
     # (or its component provenance) cannot be resolved for any reason.
+    lead_reference: str | None = None
     lead_title: str | None = None
     lead_description: str | None = None
     lead_severity: str | None = None
@@ -1819,6 +1828,7 @@ class LeadTargetMappingOut(BaseModel):
     lead_source: str | None = None
     lead_fingerprint: str | None = None
     lead_origin_lead_id: int | None = None
+    lead_origin_reference: str | None = None
     lead_trace_path_key: str | None = None
     lead_trace_status: str | None = None
     lead_trace_confidence: float | None = None
@@ -1870,6 +1880,8 @@ class CampaignFindingRow(BaseModel):
     """One combined-findings row: a ScanFinding plus its component/target context."""
 
     finding_id: int
+    reference: str = ""
+    run_reference: str = ""
     target_type: str
     target_run_id: int
     # First contributing component id (kept for backward compatibility);
@@ -1882,6 +1894,24 @@ class CampaignFindingRow(BaseModel):
     component_names: list[str] = Field(default_factory=list)
     target_name: str | None
     title: str
+    description: str = ""
+    impact: str = ""
+    likelihood: str = ""
+    recommendation: str = ""
+    cvss_score: float = 0.0
+    cvss_vector: str = ""
+    affected_url: str = ""
+    evidence: str = ""
+    request_evidence: str = ""
+    response_evidence: str = ""
+    evidence_items: list[dict] = Field(default_factory=list)
+    validation_note: str | None = None
+    merged_instances: str = "[]"
+    poc_command: str = ""
+    poc_setup: str = ""
+    finding_source: str = "unknown"
+    origin: dict | None = None
+    validated_by: dict | None = None
     severity: str
     status: str
     frontend_attack_path: dict | None = None

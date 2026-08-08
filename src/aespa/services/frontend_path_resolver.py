@@ -29,12 +29,24 @@ def _route(value: str | None) -> str:
 
 
 def _request_method_path(value: dict) -> tuple[str, str]:
-    request = value.get("request") or value.get("request_transition") or {}
-    if not isinstance(request, dict):
-        return "", ""
-    method = str(request.get("method") or "").upper()
-    path = _route(str(request.get("path") or request.get("url") or ""))
-    return method, path
+    for candidate in (value.get("request"), value.get("request_transition")):
+        if not isinstance(candidate, dict):
+            continue
+        method = str(candidate.get("method") or "").upper()
+        path = _route(str(candidate.get("path") or candidate.get("url") or ""))
+        if method or path:
+            return method, path
+
+    # Cross-component paths use the frontend entrypoint itself as the request
+    # description.  Older code only understood request_transition, so those
+    # paths silently fell back to the first request in the crawl.
+    frontend = value.get("frontend_entrypoint")
+    if isinstance(frontend, dict):
+        return (
+            str(frontend.get("method") or "").upper(),
+            _route(str(frontend.get("path") or frontend.get("url") or "")),
+        )
+    return "", ""
 
 
 def _approved_entry(path: dict) -> str:
@@ -48,10 +60,51 @@ def _approved_entry(path: dict) -> str:
                 frontend.get("route")
                 or frontend.get("route_template")
                 or frontend.get("url")
+                or frontend.get("path")
                 or ""
             )
         )
     return ""
+
+
+def is_frontend_path(path: object) -> bool:
+    """Return whether a path contains an explicit frontend-rooted trace."""
+    if not isinstance(path, dict):
+        return False
+    if path.get("perspective") == "frontend":
+        return True
+    if isinstance(path.get("live_frontend_context"), dict):
+        return True
+    frontend = path.get("frontend_entrypoint")
+    if not isinstance(frontend, dict):
+        return False
+    return any(
+        str(frontend.get(key) or "").strip()
+        for key in (
+            "route",
+            "route_template",
+            "url",
+            "path",
+            "method",
+            "action",
+            "trigger",
+        )
+    )
+
+
+def _route_matches(observed: str, approved: str) -> bool:
+    """Match literal routes and simple ``{parameter}`` route templates."""
+    if observed == approved:
+        return True
+    approved_parts = approved.strip("/").split("/") if approved != "/" else []
+    observed_parts = observed.strip("/").split("/") if observed != "/" else []
+    if len(approved_parts) != len(observed_parts):
+        return False
+    return all(
+        approved_part.startswith("{") and approved_part.endswith("}")
+        or approved_part == observed_part
+        for approved_part, observed_part in zip(approved_parts, observed_parts)
+    )
 
 
 def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
@@ -63,6 +116,12 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
     """
 
     path = deepcopy(approved_path or {})
+    # A normal SAST lead can be imported into a web run without having a
+    # frontend-rooted trace.  It must keep its original attack path; attaching
+    # arbitrary crawl evidence would make an unrelated page/request appear to
+    # be the lead's entrypoint.
+    if not is_frontend_path(path):
+        return path
     pages = [page for page in live_context.get("pages", []) if isinstance(page, dict)]
     requests = [
         item for item in live_context.get("requests", []) if isinstance(item, dict)
@@ -92,8 +151,10 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
             candidate
             for candidate in pages
             if entry
-            and _route(str(candidate.get("route") or candidate.get("url") or ""))
-            == entry
+            and _route_matches(
+                _route(str(candidate.get("route") or candidate.get("url") or "")),
+                entry,
+            )
         ),
         None,
     )
@@ -104,7 +165,9 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
             if (not method or str(candidate.get("method") or "").upper() == method)
             and (
                 not request_path
-                or _route(str(candidate.get("url") or "")) == request_path
+                or _route_matches(
+                    _route(str(candidate.get("url") or "")), request_path
+                )
             )
             and (
                 page is None
@@ -126,25 +189,33 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
             ),
             None,
         )
-    action = next(
-        (
-            candidate
-            for candidate in actions
-            if (
-                not action_label
-                or action_label
-                in str(
-                    candidate.get("label") or candidate.get("action_kind") or ""
-                ).casefold()
-            )
-            and (
-                not action_kind
-                or action_kind == str(candidate.get("action_kind") or "").casefold()
-            )
-            and (page is None or candidate.get("page_id") == page.get("id"))
-        ),
-        None,
-    )
+    action = None
+    if action_label or action_kind or approved_interaction_id:
+        action = next(
+            (
+                candidate
+                for candidate in actions
+                if (
+                    not action_label
+                    or action_label
+                    in str(
+                        candidate.get("label") or candidate.get("action_kind") or ""
+                    ).casefold()
+                )
+                and (
+                    not action_kind
+                    or action_kind
+                    == str(candidate.get("action_kind") or "").casefold()
+                )
+                and (page is None or candidate.get("page_id") == page.get("id"))
+                and (
+                    not approved_interaction_id
+                    or str(candidate.get("interaction_id") or "").strip()
+                    == approved_interaction_id
+                )
+            ),
+            None,
+        )
 
     # If the approved path names an action, it is not enough to find a page and
     # an unrelated request.  The action must exist and, when the crawler has a
@@ -352,9 +423,11 @@ async def revise_path_with_llm(
 ) -> tuple[dict, str | None]:
     """Rewrite only evidence-bounded frontend wording after crawl resolution."""
     if (
-        not llm_config
+        not is_frontend_path(approved_path)
+        or not is_frontend_path(final_path)
+        or not llm_config
         or final_path.get("live_frontend_context", {}).get("resolution_status")
-        == "unavailable"
+        != "matched"
     ):
         return final_path, None
     prompt = (

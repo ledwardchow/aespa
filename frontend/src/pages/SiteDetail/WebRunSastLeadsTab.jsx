@@ -3,11 +3,13 @@ import { api } from "../../lib/api";
 import { leadsExportFilename, leadsToMarkdown, downloadTextFile } from "../../lib/utilities";
 import { usePolling } from "../../hooks/usePolling";
 import { SastLeadDetails } from "../../components/SastLeadDetails";
+import { LeadReferenceLink } from "../../components/FindingReferenceLink";
 
 export function WebRunSastLeadsTab({
   runId,
   scanRunning,
-  runKind = "web"
+  runKind = "web",
+  initialLeadRef
 }) {
   const isApi = runKind === "api";
   const [available, setAvailable] = useState([]);
@@ -24,6 +26,12 @@ export function WebRunSastLeadsTab({
   usePolling(loadLeads, { enabled: scanRunning, intervalMs: 3000 });
   usePolling(loadAvailable, { enabled: false });
   // Final refresh when the scan stops so the last investigation outcomes appear.
+  useEffect(() => {
+    if (initialLeadRef) {
+      const match = leads.find(lead => lead.reference === initialLeadRef);
+      if (match) setExpanded(previous => new Set(previous).add(match.id));
+    }
+  }, [initialLeadRef, leads]);
   useEffect(() => {
     if (prevScanRunning.current && !scanRunning) {
       loadLeads();
@@ -176,7 +184,7 @@ export function WebRunSastLeadsTab({
                   <td><span className={"sev-badge " + sevCls(l.severity)}>{l.severity || "medium"}</span></td>
                   <td style={{
               fontWeight: 600
-            }}>{l.title}</td>
+            }}><LeadReferenceLink reference={l.reference} title={l.title} description={l.description} severity={l.severity} href={`#/runs/${runId}/leads?lead=${encodeURIComponent(l.reference || "")}`} /> <span>{l.title}</span></td>
                   <td>{l.category || "—"}</td>
                   <td>{Math.round((l.confidence || 0) * 100)}%</td>
                   <td className="subtle" style={{

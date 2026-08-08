@@ -815,7 +815,7 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "write_finding and before moving to the next lead — do NOT batch all update_lead calls "
     "at the end of the scan. Use context_tool with tool=lead_list to see all leads and "
     "their current statuses.\n"
-    "- remove_finding: delete a finding by ID if written in error or duplicate.\n"
+    "- remove_finding: delete a finding by its public reference if written in error or duplicate.\n"
     "- reauthenticate: if the primary authenticated session appears expired, evicted, or "
     "soft-blocked (e.g. a route that used to return 2xx now returns 401/403/419/440 with the "
     "same session, or a browser step lands back on a login page), call reauthenticate instead "
@@ -1071,7 +1071,11 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "properties": {
                 "lead_id": {
                     "type": "integer",
-                    "description": "The lead ID from the investigation leads block.",
+                    "description": "Legacy internal lead ID. Prefer lead_reference.",
+                },
+                "lead_reference": {
+                    "type": "string",
+                    "description": "Public lead reference from the investigation leads block, for example ABCD-001.",
                 },
                 "outcome": {
                     "type": "string",
@@ -1088,10 +1092,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 },
                 "finding_id": {
                     "type": "integer",
-                    "description": "The ScanFinding ID raised, if outcome=confirmed.",
+                    "description": "Legacy internal finding ID. The created finding reference is returned after writing.",
+                },
+                "finding_reference": {
+                    "type": "string",
+                    "description": "Public finding reference from this run, for example ABCD-001.",
                 },
             },
-            "required": ["lead_id", "outcome", "note"],
+            "required": ["outcome", "note"],
         },
     },
     {
@@ -1326,22 +1334,27 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "Delete a previously recorded finding from this scan. "
             "Use only when a finding was written in error, is a confirmed duplicate, "
             "or has been invalidated by subsequent testing. "
-            "Provide the finding_id returned by write_finding or report_finding, "
-            "or obtained via finding_list / context_tool(finding_list)."
+            "Provide the finding_reference shown by write_finding, report_finding, "
+            "or finding_list / context_tool(finding_list). A legacy finding_id is "
+            "accepted only for older context that has no public reference."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                "finding_reference": {
+                    "type": "string",
+                    "description": "Public finding reference, for example ABCD-001.",
+                },
                 "finding_id": {
                     "type": "integer",
-                    "description": "The numeric ID of the finding to delete.",
+                    "description": "Legacy internal finding ID; use finding_reference for new output.",
                 },
                 "reason": {
                     "type": "string",
                     "description": "Brief reason for removal (e.g. duplicate, false positive).",
                 },
             },
-            "required": ["finding_id"],
+            "required": ["finding_reference"],
         },
     },
 ]
@@ -1382,7 +1395,7 @@ not a general penetration test: do not enumerate unrelated routes, pursue covera
 or test hypotheses that are not part of a listed lead.
 
 The lead index is compact and incomplete. Before investigating each lead, call
-context_tool with tool=lead_detail and args={"lead_id": <id>}. Read the complete static
+context_tool with tool=lead_detail and args={"lead_reference": "ABCD-001"}. Read the complete static
 evidence, source/control/sink traces, counterevidence, proof gaps, validation reasoning,
 and ordered attack path. Treat every path hop as an unproven hypothesis and verify it
 with focused live evidence, following the attack path's dynamic-test objective.
@@ -1393,7 +1406,7 @@ browser sessions, and reauthenticate when the configured login flow is needed. N
 perform credential attacks, spraying, account registration, or JWT forging.
 
 Work through leads one at a time. A confirmed lead requires concrete live evidence and
-write_finding, followed immediately by update_lead with finding_id. Dismiss or mark
+write_finding, followed immediately by update_lead with finding_reference. Dismiss or mark
 inconclusive when the live evidence does not prove exploitability. Resolve every
 imported lead before calling done.
 
@@ -1412,7 +1425,7 @@ is not a general API penetration test: do not enumerate unrelated endpoints, pur
 coverage gaps, or test hypotheses that are not part of a listed lead.
 
 The lead index is compact and incomplete. Before investigating each lead, call
-context_tool with tool=lead_detail and args={"lead_id": <id>}. Read the complete static
+context_tool with tool=lead_detail and args={"lead_reference": "ABCD-001"}. Read the complete static
 evidence, source/control/sink traces, counterevidence, proof gaps, validation reasoning,
 and ordered attack path. Treat every path hop as an unproven hypothesis and verify it
 with focused live evidence, following the attack path's dynamic-test objective.
@@ -1422,7 +1435,7 @@ reach protected functionality described by the attack path. Do not perform crede
 attacks, spraying, account registration, or JWT forging.
 
 Work through leads one at a time. A confirmed lead requires concrete live evidence and
-write_finding, followed immediately by update_lead with finding_id. Dismiss or mark
+write_finding, followed immediately by update_lead with finding_reference. Dismiss or mark
 inconclusive when the live evidence does not prove exploitability. Resolve every
 imported lead before calling done.
 

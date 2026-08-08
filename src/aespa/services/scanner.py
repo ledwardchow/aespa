@@ -69,6 +69,7 @@ from aespa.services.prompts.test_lead import (
     get_sast_validate_tools,
     get_thinking_agent_system,
 )
+from aespa.services.references import ensure_finding_reference
 from aespa.services.scan_completion import ScanCompletionPolicy
 from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import (
@@ -2241,13 +2242,17 @@ def _load_findings_snapshot(
     ``is_api_run=True`` for ApiTestRun ids so the snapshot keys on
     ``api_test_run_id`` rather than ``test_run_id``.
     """
-    with Session(get_engine()) as s:
+    with Session(get_engine(), expire_on_commit=False) as s:
         existing = s.exec(
             select(ScanFinding).where(_finding_run_filter(run_id, is_api_run))
         ).all()
+        for finding in existing:
+            ensure_finding_reference(s, finding)
+        s.commit()
     return [
         {
             "id": f.id,
+            "reference": f.reference or (f"#{f.id}" if f.id is not None else ""),
             "title": f.title,
             "severity": f.severity,
             "owasp": f.owasp_category,
@@ -2655,6 +2660,8 @@ def _run_thinking_context_tool(
                     "status": ld.status or "open",
                     "note": ld.note or "",
                     "linked_finding_id": ld.linked_finding_id,
+                    "reference": ld.reference
+                    or (f"#{ld.id}" if ld.id is not None else ""),
                     "attack_path": decode_attack_path(ld.attack_path_json),
                 }
                 for ld in leads_out
@@ -2664,20 +2671,28 @@ def _run_thinking_context_tool(
     if tool_name == "lead_detail":
         owner_type = "api" if api_run_id is not None else "web"
         raw_lead_id = args.get("lead_id")
+        lead_reference = str(args.get("lead_reference") or "").strip()
         if isinstance(raw_lead_id, bool):
             return {"tool": "lead_detail", "error": "lead_id must be an integer"}
-        try:
-            lead_id = int(raw_lead_id)
-        except (TypeError, ValueError, OverflowError):
-            return {"tool": "lead_detail", "error": "lead_id must be an integer"}
-        if isinstance(raw_lead_id, float) and not raw_lead_id.is_integer():
-            return {"tool": "lead_detail", "error": "lead_id must be an integer"}
+        lead_id = None
+        if not lead_reference:
+            try:
+                lead_id = int(raw_lead_id)
+            except (TypeError, ValueError, OverflowError):
+                return {
+                    "tool": "lead_detail",
+                    "error": "lead_reference is required",
+                }
+            if isinstance(raw_lead_id, float) and not raw_lead_id.is_integer():
+                return {"tool": "lead_detail", "error": "lead_reference is required"}
         owner_id = api_run_id if api_run_id is not None else run_id
         if owner_id is None:
             return {"tool": "lead_detail", "error": "run_id unavailable"}
         from aespa.services.scan_leads import get_lead_detail_for_run
 
-        detail = get_lead_detail_for_run(owner_type, owner_id, lead_id)
+        detail = get_lead_detail_for_run(
+            owner_type, owner_id, lead_id=lead_id, lead_reference=lead_reference or None
+        )
         if detail is None:
             return {
                 "tool": "lead_detail",
@@ -3857,6 +3872,7 @@ def _save_deterministic_findings(
             ):
                 continue
             s.add(finding)
+            ensure_finding_reference(s, finding)
             saved += 1
         s.commit()
     return saved
@@ -4518,6 +4534,7 @@ async def _run_burp_active_scan_for_target(
                 created_at=_utcnow(),
             )
             s.add(new_finding)
+            ensure_finding_reference(s, new_finding)
             saved_count += 1
         if saved_count:
             s.commit()
@@ -5475,6 +5492,7 @@ async def _persist_dynamic_finding(
                 is_api_run=is_api_run,
             )
             s.add(finding)
+            ensure_finding_reference(s, finding)
             s.commit()
             s.refresh(finding)
             _capture_dynamic_writeup_if_enabled(
@@ -6107,8 +6125,13 @@ async def _run_post_scan_llm_review(
         if baseline_max_id > 0:
             q = q.where(ScanFinding.id > baseline_max_id)
         candidates = s.exec(q).all()
+        reference_by_id = {}
+        for candidate in candidates:
+            ensure_finding_reference(s, candidate)
+            reference_by_id[candidate.id] = candidate.reference
         for f in candidates:
             s.expunge(f)
+        s.commit()
 
     if not candidates:
         return
@@ -6147,7 +6170,7 @@ async def _run_post_scan_llm_review(
             ep = f.affected_url or "(no URL)"
             evidence_preview = (f.evidence or "")[:300].replace("\n", " ")
             batch_lines.append(
-                f"ID:{f.id} | {f.severity.upper()} | {f.owasp_category} | {f.title}\n"
+                f"REF:{reference_by_id.get(f.id) or f'#{f.id}'} | {f.severity.upper()} | {f.owasp_category} | {f.title}\n"
                 f"  URL: {ep}\n"
                 f"  Evidence: {evidence_preview}"
             )
@@ -6163,8 +6186,8 @@ async def _run_post_scan_llm_review(
             "FINDINGS TO REVIEW:\n"
             + "\n\n".join(batch_lines)
             + "\n\nFor EACH finding respond with exactly one line:\n"
-            "  <ID> | ACCEPT\n"
-            "  <ID> | LOW_CONFIDENCE:<short reason>\n"
+            "  <REF> | ACCEPT\n"
+            "  <REF> | LOW_CONFIDENCE:<short reason>\n"
             "Do NOT include any other text."
         )
         batch_low_confidence: list[int] = []
@@ -6193,8 +6216,13 @@ async def _run_post_scan_llm_review(
             if len(parts) != 2:
                 continue
             try:
-                fid = int(parts[0].replace("ID:", "").strip())
-            except ValueError:
+                reference = parts[0].replace("REF:", "").strip()
+                fid = next(
+                    candidate_id
+                    for candidate_id, candidate_reference in reference_by_id.items()
+                    if candidate_reference == reference
+                )
+            except (StopIteration, ValueError):
                 continue
             verdict = parts[1].strip()
             if verdict.upper().startswith("LOW_CONFIDENCE"):
@@ -6262,6 +6290,7 @@ async def _run_post_scan_llm_review(
                 {
                     "type": "finding_validation_update",
                     "finding_id": fid,
+                    "finding_reference": reference_by_id.get(fid),
                     "validation_status": "low_confidence",
                     "validation_note": reasons.get(
                         fid, "Pre-screen flagged as low confidence."
@@ -6366,6 +6395,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         findings_snapshot = [
             {
                 "id": f.id,
+                "reference": f.reference or (f"#{f.id}" if f.id is not None else ""),
                 "title": f.title,
                 "severity": f.severity,
                 "owasp": f.owasp_category,
@@ -7049,7 +7079,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     "method": "DONE_REJECTED",
                                     "response_status": 409,
                                     "response_body": (
-                                        f"Lead #{unresolved[0].id} ({unresolved[0].title}) "
+                                        f"Lead {unresolved[0].reference or f'#{unresolved[0].id}'} ({unresolved[0].title}) "
                                         "is not terminal; resolve every imported lead."
                                     ),
                                 }
@@ -8413,6 +8443,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     )
                     s.add(finding)
                     s.flush()
+                    ensure_finding_reference(s, finding)
                     if finding.id is not None:
                         saved_finding_ids.append(finding.id)
                     saved_count += 1
@@ -8556,9 +8587,7 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                 unresolved = [
                     lead
-                    for lead in get_all_leads_for_run(
-                        "web", run_id
-                    )
+                    for lead in get_all_leads_for_run("web", run_id)
                     if (lead.status or "open")
                     not in {"confirmed", "dismissed", "inconclusive"}
                 ]
@@ -8896,7 +8925,7 @@ async def _do_agentic_thinking_loop(
             if unresolved:
                 first = unresolved[0]
                 message = (
-                    f"Lead #{first.id} ({first.title}) is still "
+                    f"Lead {first.reference or f'#{first.id}'} ({first.title}) is still "
                     f"{first.status or 'open'}; resolve every imported SAST lead "
                     "with update_lead before calling done."
                 )
@@ -9141,9 +9170,12 @@ async def _do_agentic_thinking_loop(
         # ── update_lead ───────────────────────────────────────────────────────
         if tool_name == "update_lead":
             lead_id = tool_input.get("lead_id")
+            lead_reference = str(tool_input.get("lead_reference") or "").strip()
             outcome = str(tool_input.get("outcome") or "")
             lead_note = str(tool_input.get("note") or "")
             finding_id = tool_input.get("finding_id")
+            finding_reference = str(tool_input.get("finding_reference") or "").strip()
+            lead_detail = None
             try:
                 from aespa.services.scan_leads import (
                     get_lead_detail_for_run,
@@ -9156,16 +9188,24 @@ async def _do_agentic_thinking_loop(
                     lead_detail = get_lead_detail_for_run(
                         "api" if is_api_run else "web",
                         run_id,
-                        int(lead_id),
+                        lead_id=int(lead_id) if not lead_reference else None,
+                        lead_reference=lead_reference or None,
                     )
                     if (
                         lead_detail is None
                         or (lead_detail.get("status") or "open") != "open"
                     ):
                         return (
-                            f"Lead #{lead_id} is not an open SAST lead available "
+                            f"Lead {lead_reference or f'#{lead_id}'} is not an open SAST lead available "
                             "for validation."
                         )
+
+                if lead_reference and lead_detail is None:
+                    lead_detail = get_lead_detail_for_run(
+                        "api" if is_api_run else "web",
+                        run_id,
+                        lead_reference=lead_reference,
+                    )
 
                 # Map outcome string to ScanLead.status
                 status_map = {
@@ -9174,8 +9214,20 @@ async def _do_agentic_thinking_loop(
                     "inconclusive": "inconclusive",
                 }
                 lead_status = status_map.get(outcome, "inconclusive")
+                resolved_lead_id = int(lead_detail["id"]) if lead_detail else int(lead_id)
+                if finding_reference and not finding_id:
+                    from aespa.services.references import find_finding_by_reference
+
+                    with Session(get_engine()) as lookup_session:
+                        resolved_finding = find_finding_by_reference(
+                            lookup_session,
+                            "api" if is_api_run else "web",
+                            run_id,
+                            finding_reference,
+                        )
+                        finding_id = resolved_finding.id if resolved_finding else None
                 updated = _update_lead(
-                    int(lead_id),
+                    resolved_lead_id,
                     status=lead_status,
                     note=lead_note,
                     owner_run_type="api" if is_api_run else "web",
@@ -9186,15 +9238,20 @@ async def _do_agentic_thinking_loop(
                     link_coverage=coverage_mode != "sast_validate",
                 )
                 if updated is None:
-                    return f"Lead #{lead_id} not found."
-                completion_policy.record_progress(f"lead:{lead_id}:{lead_status}")
+                    return f"Lead {lead_reference or f'#{lead_id}'} not found."
+                completion_policy.record_progress(f"lead:{resolved_lead_id}:{lead_status}")
+                linked_reference = None
+                if finding_id:
+                    with Session(get_engine()) as lookup_session:
+                        linked = lookup_session.get(ScanFinding, int(finding_id))
+                        linked_reference = linked.reference if linked is not None else None
                 return (
-                    f"Lead #{lead_id} updated: outcome={outcome}, status={lead_status}."
-                    + (f" Linked to finding #{finding_id}." if finding_id else "")
+                    f"Lead {updated.reference or lead_reference or f'#{lead_id}'} updated: outcome={outcome}, status={lead_status}."
+                    + (f" Linked to finding {linked_reference or finding_reference or f'#{finding_id}'}." if finding_id else "")
                 )
             except Exception as _ul_exc:
                 log.warning("update_lead error: %s", _ul_exc)
-                return f"Error updating lead #{lead_id}: {_ul_exc}"
+                return f"Error updating lead {lead_reference or f'#{lead_id}'}: {_ul_exc}"
 
         # ── write_finding ─────────────────────────────────────────────────────
         if tool_name == "write_finding":
@@ -9239,6 +9296,7 @@ async def _do_agentic_thinking_loop(
                 findings_snapshot.append(
                     {
                         "id": saved.id,
+                        "reference": saved.reference or (f"#{saved.id}" if saved.id is not None else ""),
                         "title": saved.title,
                         "severity": saved.severity,
                         "owasp": saved.owasp_category,
@@ -9297,7 +9355,7 @@ async def _do_agentic_thinking_loop(
                     "status": "idle",
                     "current_task": f"Wrote: {_fw_title}",
                     "outcome": (
-                        f"Saved [{tool_input.get('severity', '?')}] {_fw_title} (ID: {saved.id})"
+                        f"Saved [{tool_input.get('severity', '?')}] {_fw_title} ({saved.reference or f'#{saved.id}'})"
                         if saved is not None
                         else f"Duplicate skipped: {_fw_title}"
                     ),
@@ -9315,11 +9373,12 @@ async def _do_agentic_thinking_loop(
                         f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
                         f"{_fw_title}"
                     ),
-                    "data": {
-                        "step": step,
-                        "affected_url": affected,
-                        "finding_id": saved.id if saved is not None else None,
-                        "note": note,
+                        "data": {
+                            "step": step,
+                            "affected_url": affected,
+                            "finding_id": saved.id if saved is not None else None,
+                            "finding_reference": saved.reference if saved is not None else None,
+                            "note": note,
                     },
                 },
             )
@@ -9327,7 +9386,7 @@ async def _do_agentic_thinking_loop(
                 return (
                     f'Finding recorded: "{tool_input.get("title")}" '
                     f"(severity: {tool_input.get('severity')}, "
-                    f"OWASP: {tool_input.get('owasp_category')}, ID: {saved.id})"
+                    f"OWASP: {tool_input.get('owasp_category')}, reference: {saved.reference or f'#{saved.id}'})"
                 )
             return (
                 f'Duplicate skipped: "{tool_input.get("title")}" already exists. '

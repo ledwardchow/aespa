@@ -55,6 +55,7 @@ from aespa.services import scanner as scanner_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services import settings as settings_service
 from aespa.services import validator as validator_svc
+from aespa.services.references import ensure_finding_reference, ensure_lead_reference
 from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["test_runs"])
@@ -496,7 +497,7 @@ def list_test_runs(
 
 @router.get("/api/test-runs/active", response_model=list[ActiveJobSummary])
 def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobSummary]:
-    from aespa.models import Site
+    from aespa.models import Application, AssessmentCampaign, Site
     from aespa.services import scanner as scanner_svc
     from aespa.services import validator as validator_svc
 
@@ -583,6 +584,41 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
                     created_at=run.created_at,
                 )
             )
+
+    # ── Campaign orchestrator jobs ───────────────────────────────────────────
+    # Campaigns coordinate their own SAST/correlation/live-testing children,
+    # so they do not appear in any of the run-specific registries above. Keep
+    # the campaign itself visible while its durable stage is active, including
+    # short windows where the in-memory orchestrator task is not the source of
+    # truth (for example, during correlation or a graceful transition).
+    campaigns = session.exec(
+        select(AssessmentCampaign)
+        .where(
+            AssessmentCampaign.status.in_(
+                ("sast_running", "correlating", "dast_running")
+            )
+        )
+        .order_by(AssessmentCampaign.created_at.desc())
+    ).all()
+    for campaign in campaigns:
+        application = session.get(Application, campaign.application_id)
+        jobs.append(
+            ActiveJobSummary(
+                run_id=campaign.id,
+                run_name=campaign.name,
+                job_type="Campaign Scan",
+                status=campaign.status,
+                started_at=campaign.started_at,
+                created_at=campaign.created_at,
+                run_type="campaign",
+                application_id=campaign.application_id,
+                application_name=(
+                    application.name
+                    if application
+                    else f"Application #{campaign.application_id}"
+                ),
+            )
+        )
 
     # ── API test run jobs ─────────────────────────────────────────────────────
     from aespa.models import ApiCollection, ApiTestRun
@@ -780,7 +816,24 @@ def get_test_run_leads(
         .where(ScanLead.imported_into_run_id == run_id)
         .order_by(ScanLead.id)
     ).all()
-    return [ScanLeadOut.model_validate(lead) for lead in leads]
+    finding_ids = {lead.linked_finding_id for lead in leads if lead.linked_finding_id}
+    linked_findings = (
+        session.exec(select(ScanFinding).where(ScanFinding.id.in_(finding_ids))).all()
+        if finding_ids
+        else []
+    )
+    for finding in linked_findings:
+        ensure_finding_reference(session, finding)
+    finding_refs = {finding.id: finding.reference for finding in linked_findings}
+    for lead in leads:
+        ensure_lead_reference(session, lead)
+    session.commit()
+    return [
+        ScanLeadOut.model_validate(lead).model_copy(
+            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+        )
+        for lead in leads
+    ]
 
 
 @router.delete("/api/test-runs/{run_id}/leads", status_code=status.HTTP_204_NO_CONTENT)

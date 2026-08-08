@@ -53,7 +53,8 @@ export function SastLeadDetails({ lead, showSummary = true, findingHref }) {
       </div>
       <h3>{lead.title || "Untitled candidate"}</h3>
       <div className="sast-lead-meta-grid">
-        <MetaItem label="Lead" value={lead.id ? `#${lead.id}` : null} />
+        <MetaItem label="Lead" value={lead.reference || null} />
+        {lead.origin_reference && <MetaItem label="Origin lead" value={lead.origin_reference} />}
         <MetaItem label="Source" value={lead.source} />
         <MetaItem label="Source SAST run" value={lead.producer_run_id ? `${lead.producer_run_type || "run"} #${lead.producer_run_id}` : null} />
         <MetaItem label="Confidence" value={lead.confidence == null ? null : `${Math.round(lead.confidence * 100)}%`} />
@@ -99,8 +100,9 @@ export function SastLeadDetails({ lead, showSummary = true, findingHref }) {
       <p>{lead.note}</p>
     </div>}
     {(lead.linked_finding_id || lead.investigated_by_run_id) && <div className="sast-lead-investigation-meta">
-      {lead.linked_finding_id && <span>Linked finding {findingHref ? <a href={findingHref}>#{lead.linked_finding_id}</a> : `#${lead.linked_finding_id}`}</span>}
+      {lead.linked_finding_id && <span>Linked finding <FindingReferenceLink reference={lead.linked_finding_reference || `#${lead.linked_finding_id}`} title={lead.title} severity={lead.severity} href={findingHref} /></span>}
       {lead.investigated_by_run_id && <span>Investigated by {lead.investigated_by_run_type || "run"} #{lead.investigated_by_run_id}</span>}
     </div>}
   </div>;
 }
+import { FindingReferenceLink } from "./FindingReferenceLink";

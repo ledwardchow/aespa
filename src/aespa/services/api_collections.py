@@ -389,6 +389,10 @@ def import_collection(session: Session, bundle: dict) -> ApiCollection:
         TrafficEntry,
     )
     from aespa.services.api_documents import _storage_dir
+    from aespa.services.references import (
+        ensure_finding_reference,
+        ensure_lead_reference,
+    )
     from aespa.services.sites import _parse_datetimes
 
     if bundle.get("export_version") != 1 or bundle.get("kind") != "api-collection":
@@ -494,10 +498,13 @@ def import_collection(session: Session, bundle: dict) -> ApiCollection:
             f["api_test_run_id"] = new_run_id
             f["test_run_id"] = None  # API findings never key on a web run
             f["page_id"] = None
+            # Imported bundles get a fresh run namespace on this installation.
+            f["public_reference"] = None
             _parse_datetimes(f, "created_at")
             finding = ScanFinding(**f)
             session.add(finding)
             session.flush()
+            ensure_finding_reference(session, finding)
             finding_id_map[old_fid] = finding.id  # type: ignore[index]
 
         for t in rb.get("traffic_entries", []):
@@ -630,8 +637,12 @@ def import_collection(session: Session, bundle: dict) -> ApiCollection:
             ld["linked_finding_id"] = finding_id_map.get(
                 old_link
             )  # None if cross-bundle
+        ld["public_reference"] = None
         _parse_datetimes(ld, "created_at", "updated_at")
-        session.add(ScanLead(**ld))
+        lead = ScanLead(**ld)
+        session.add(lead)
+        session.flush()
+        ensure_lead_reference(session, lead)
 
     # ── Back-patch ApiTestRun.sast_run_id now that SAST ids are known ──────────────
     for run, old_sast_id in sast_backpatch:

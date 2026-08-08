@@ -3,6 +3,7 @@ import { api } from "../../lib/api";
 import { renderMarkdown } from "../../lib/aliceRender";
 import { sourceLabel } from "../../lib/utilities";
 import { isDynamicScanActive } from "./_helpers";
+import { FindingReferenceLink } from "../../components/FindingReferenceLink";
 export function WebRunFindingsTab(props) {
   const { thinkingStatus, thinkingStopRequested, validateStatus, onStopValidation, dedupeBusy, findings, onExportFindingsMarkdown, onImportFindingsClick, issueImportInputRef, onImportFindingsFile, validateBusy, onValidateAll, aliceIsThinking, onDeduplicateFindings, clearBusy, setClearBusy, setClearError, runId, setFindings, editingFinding, setExpandedFinding, expandedFinding, onValidateFinding, onEditFinding, onDeleteFinding, editDraft, setEditDraft, editBusy, onCancelEditFinding, onSaveEditFinding, toggleGroup, expandedGroups, findColW, startFindResize, onDeleteFindingGroup } = props;
   return (
@@ -106,7 +107,7 @@ export function WebRunFindingsTab(props) {
                 items: sortedItems,
                 topSev,
                 count: items.length,
-                source: items[0].finding_source || "unknown"
+                source: items[0].origin?.label || items[0].finding_source || "unknown"
               };
             }).sort((a, b) => {
               return (SEV_ORDER[a.topSev] ?? 99) - (SEV_ORDER[b.topSev] ?? 99);
@@ -139,7 +140,20 @@ export function WebRunFindingsTab(props) {
                 if (editingFinding === f.id) return;
                 setExpandedFinding(expandedFinding === f.id ? null : f.id);
               }}>
-                    <td>
+                    <td className="finding-reference-cell">
+                      <FindingReferenceLink
+                        reference={f.reference}
+                        title={f.title}
+                        description={f.description}
+                        severity={f.severity}
+                        cvss_score={f.cvss_score}
+                        validation_status={f.validation_status}
+                        validation_note={f.validation_note}
+                        finding_source={f.finding_source}
+                        origin={f.origin}
+                        validated_by={f.validated_by}
+                        href={`#/runs/${runId}/findings?finding=${encodeURIComponent(f.reference || "")}`}
+                      />
                       {f.validation_status === "confirmed" && <span className="val-badge val-confirmed">confirmed</span>}
                       {f.validation_status === "unconfirmed" && <span className="val-badge val-unconfirmed">unconfirmed</span>}
                       {f.validation_status === "skipped" && <span className="val-badge val-skipped">not validated</span>}

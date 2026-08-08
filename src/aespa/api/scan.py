@@ -34,6 +34,7 @@ from aespa.services import findings as findings_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
+from aespa.services.references import ensure_finding_reference
 
 router = APIRouter(tags=["scan"])
 
@@ -290,6 +291,9 @@ def get_findings(
     # Sort: critical → high → medium → low → info
     _order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings = sorted(findings, key=lambda f: _order.get(f.severity, 5))
+    for finding in findings:
+        ensure_finding_reference(session, finding)
+    session.commit()
     return [ScanFindingOut.model_validate(f) for f in findings]
 
 
@@ -384,6 +388,7 @@ def import_findings(
         )
         session.add(finding)
         session.flush()
+        ensure_finding_reference(session, finding)
         imported.append(finding)
 
     session.commit()
@@ -608,6 +613,7 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         payload_purp = main_d.get("payload_purpose", "")
         payload_sum = main_d.get("payload_summary", "")
         finding_id = complete_d.get("finding_id")
+        finding_reference = complete_d.get("finding_reference")
         affected_url = complete_d.get("affected_url", "")
         ts = main_e.created_at.strftime("%H:%M:%S") if main_e.created_at else ""
 
@@ -641,7 +647,7 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         if finding_id and affected_url:
             lines += [
                 f"**Affected URL:** {affected_url}  ",
-                f"**Finding ID:** {finding_id}",
+                f"**Finding reference:** {finding_reference or f'#{finding_id}'}",
                 "",
             ]
 

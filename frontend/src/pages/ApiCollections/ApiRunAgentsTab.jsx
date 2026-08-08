@@ -1,6 +1,7 @@
 import { _buildAgentsFromLog } from "./_buildAgentsFromLog";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "../../lib/api";
+import { FindingReferenceLink } from "../../components/FindingReferenceLink";
 import { renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox, normalizeAliceText } from "../../lib/aliceRender";
 import { IconSend } from "../../components/Icons";
 
@@ -85,6 +86,7 @@ export function ApiRunAgentsTab({
             name: evt.role || existing.name,
             status: evt.status,
             task: evt.current_task || "",
+            findingReference: evt.finding_reference || existing.findingReference,
             taskHistory: [...(existing.taskHistory || []), histEntry]
           };
           if (idx >= 0) {
@@ -586,7 +588,7 @@ export function ApiRunAgentsTab({
               const vaOutcome = (va.taskHistory || []).slice(-1)[0]?.outcome;
               return <div key={va.id} className={"agent-thread-row" + (vaActive ? " agent-thread-row--active" : "")}>
                         <span className={"agent-dot agent-dot--sm" + (vaActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
-                        <span className="agent-thread-id">Finding #{va.id.replace("validator-", "")}</span>
+                        <FindingReferenceLink reference={va.findingReference || `#${va.id.replace("validator-", "")}`} href={va.findingReference ? `#/api-runs/${runId}/findings?finding=${encodeURIComponent(va.findingReference)}` : undefined} />
                         <span className={"agent-badge agent-badge--sm" + (vaActive ? " agent-badge-active" : " agent-badge-complete")}>
                           {vaActive ? "ACTIVE" : "DONE"}
                         </span>
