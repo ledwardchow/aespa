@@ -5873,6 +5873,34 @@ async def start_thinking_scan_resume(run_id: int) -> None:
     task.add_done_callback(lambda _: _thinking_tasks.pop(run_id, None))
 
 
+async def start_sast_validation_resume(run_id: int) -> None:
+    """Safely continue an Applications SAST-validation child run.
+
+    The existing child run and imported leads are reused.  If an agent
+    checkpoint exists, the normal resume path restores it; otherwise the
+    validator starts a new pass whose context contains only currently open
+    imported leads.
+    """
+    with Session(get_engine()) as session:
+        run = session.get(TestRun, run_id)
+        if run is None:
+            raise ValueError(f"TestRun {run_id} not found")
+        was_incomplete = run.status == "incomplete" or run.outcome == "incomplete"
+        run.coverage_mode = "sast_validate"
+        if was_incomplete:
+            run.status = "running"
+            run.phase = "scanning"
+            run.outcome = None
+            run.terminal_reason = None
+            run.completed_at = None
+        session.add(run)
+        session.commit()
+    if checkpoint_svc.load_checkpoint(run_id) is not None:
+        await start_thinking_scan_resume(run_id)
+    else:
+        await start_thinking_scan(run_id)
+
+
 # ── Thinking-scan task wrapper & core ─────────────────────────────────────────
 
 
@@ -8520,9 +8548,25 @@ async def _do_thinking_scan(run_id: int) -> None:
                 _run.outcome = "stopped"
                 _run.terminal_reason = "user_stop"
             elif has_unresolved_obligations:
-                _run.status = "complete"
+                _run.status = "incomplete"
                 _run.outcome = "incomplete"
                 _run.terminal_reason = "coverage_budget_exhausted"
+            elif coverage_mode == "sast_validate":
+                from aespa.services.scan_leads import get_all_leads_for_run
+
+                unresolved = [
+                    lead
+                    for lead in get_all_leads_for_run(
+                        "web", run_id
+                    )
+                    if (lead.status or "open")
+                    not in {"confirmed", "dismissed", "inconclusive"}
+                ]
+                _run.status = "incomplete" if unresolved else "complete"
+                _run.outcome = "incomplete" if unresolved else "complete"
+                _run.terminal_reason = (
+                    "unresolved_sast_leads" if unresolved else "coverage_complete"
+                )
             else:
                 _run.status = "complete"
                 _run.outcome = "complete"

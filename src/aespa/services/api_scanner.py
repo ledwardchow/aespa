@@ -1437,14 +1437,28 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     # Remove endpoint cache.
     _endpoint_cache.pop(api_run_id, None)
 
-    # Mark run completed.
+    # A validation pass is incomplete when any imported lead is still open or
+    # investigating.  Preserve that state so the UI can offer a safe retry.
+    unresolved_sast = False
+    if coverage_mode == "sast_validate":
+        from aespa.services.scan_leads import get_all_leads_for_run
+
+        unresolved_sast = any(
+            (lead.status or "open")
+            not in {"confirmed", "dismissed", "inconclusive"}
+            for lead in get_all_leads_for_run("api", api_run_id)
+        )
+
+    # Mark run completed (or explicitly incomplete).
     with Session(get_engine()) as s:
         r = s.get(ApiTestRun, api_run_id)
         if r is not None and r.status in ("scanning", "running"):
-            r.status = "completed"
+            r.status = "incomplete" if unresolved_sast else "completed"
             r.phase = "finished"
-            r.outcome = "complete"
-            r.terminal_reason = "coverage_complete"
+            r.outcome = "incomplete" if unresolved_sast else "complete"
+            r.terminal_reason = (
+                "unresolved_sast_leads" if unresolved_sast else "coverage_complete"
+            )
             r.completed_at = datetime.now(_UTC)
             r.updated_at = datetime.now(_UTC)
             s.add(r)
@@ -1615,6 +1629,23 @@ async def start_api_scan(api_run_id: int) -> None:
             name=f"api-scan-{api_run_id}",
         )
         _scan_tasks[api_run_id] = task
+
+
+async def start_sast_validation_resume(api_run_id: int) -> None:
+    """Resume an Applications API child using its existing lead work list."""
+    with Session(get_engine()) as session:
+        run = session.get(ApiTestRun, api_run_id)
+        if run is None:
+            raise ValueError(f"ApiTestRun {api_run_id} not found")
+        run.coverage_mode = "sast_validate"
+        run.status = "running"
+        run.phase = "scanning"
+        run.outcome = None
+        run.terminal_reason = None
+        run.completed_at = None
+        session.add(run)
+        session.commit()
+    await start_api_scan(api_run_id)
 
 
 async def stop_api_scan(api_run_id: int) -> bool:

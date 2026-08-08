@@ -1,16 +1,16 @@
-"""Campaign CRUD + the durable multi-repository scan orchestrator.
+"""Campaign CRUD + the durable multi-repository SAST validation orchestrator.
 
-A campaign coordinates ordinary child ``SastRun``/``TestRun``/``ApiTestRun``
-scans for one ``Application`` through:
+A campaign coordinates SAST runs and lead-only live-target validation for one
+``Application`` through:
 
     draft -> sast_running -> correlating -> awaiting_review -> dast_running
     -> completed | failed | stopped
 
 It never re-implements crawling, dynamic scanning, or SAST analysis — it only
-creates the child rows, starts/awaits the existing entry points
-(``sast_scanner.run_sast_scan``, ``crawler.start_crawl``,
-``scanner.start_thinking_scan``, ``api_scanner.start_api_scan``), and applies
-bounded concurrency + sequencing rules on top.
+creates the child rows, starts/awaits the existing entry points, and applies
+bounded concurrency + sequencing rules on top. Site targets crawl for
+frontend evidence, then use ``sast_validate`` to validate imported leads;
+API targets validate their imported leads without a normal coverage scan.
 """
 
 from __future__ import annotations
@@ -165,6 +165,7 @@ def _crawl_frontend_context(
                 "status": entry.status,
                 "page_id": entry.page_id,
                 "session_label": entry.session_label,
+                "interaction_id": entry.interaction_id,
                 "fields": _request_fields(entry),
             }
             for entry in traffic
@@ -177,6 +178,7 @@ def _crawl_frontend_context(
                 "action_kind": link.action_kind,
                 "label": link.link_text,
                 "action_data": _action_data(link),
+                "interaction_id": link.interaction_id,
             }
             for link in links
         ],
@@ -471,6 +473,40 @@ def _update_target_member_status(member_id: int, status: str) -> None:
             member.updated_at = _utcnow()
             s.add(member)
             s.commit()
+
+
+def _validation_summary(run_type: str, run_id: int | None) -> dict:
+    """Summarise imported SAST leads for a target member's progress row."""
+    if run_id is None:
+        return {"total": 0, "open": 0, "investigating": 0, "confirmed": 0, "dismissed": 0, "inconclusive": 0}
+    from aespa.services.scan_leads import get_all_leads_for_run
+
+    leads = get_all_leads_for_run(run_type, run_id)
+    counts = {status: 0 for status in ("open", "investigating", "confirmed", "dismissed", "inconclusive")}
+    for lead in leads:
+        status = lead.status or "open"
+        counts[status] = counts.get(status, 0) + 1
+    return {"total": len(leads), **counts}
+
+
+def _set_target_validation_status(
+    member_id: int,
+    status: str,
+    *,
+    message: str | None = None,
+    summary: dict | None = None,
+) -> None:
+    with Session(get_engine()) as s:
+        member = s.get(CampaignTargetMember, member_id)
+        if member is None:
+            return
+        member.status = status
+        member.status_message = message
+        if summary is not None:
+            member.validation_summary_json = json.dumps(summary, separators=(",", ":"))
+        member.updated_at = _utcnow()
+        s.add(member)
+        s.commit()
 
 
 def _normalize_running_members_after_stop(campaign_id: int) -> None:
@@ -879,21 +915,49 @@ async def _execute_target_member(
         )
     if already_terminal:
         return member.status == "completed", None
-    _update_target_member_status(member_id, "running")
+    _set_target_validation_status(member_id, "running", message="Validating imported SAST leads…")
     try:
         if target_type == "site":
             if test_run_id is None:
                 raise ValueError("Web target has no child test run")
-            await crawler_svc.start_crawl(test_run_id)
-            while crawler_svc.is_running(test_run_id):
-                if campaign_id in _campaign_stop_requested:
-                    return False, None
-                await asyncio.sleep(1.0)
-            if campaign_id in _campaign_stop_requested:
-                return False, None
             with Session(get_engine()) as s:
                 run = s.get(TestRun, test_run_id)
-                crawl_ok = run is not None and run.phase == "crawled"
+                if run is not None:
+                    run.coverage_mode = "sast_validate"
+                    s.add(run)
+                    s.commit()
+                crawl_ok = bool(
+                    run is not None
+                    and run.phase in {"crawled", "finished"}
+                    and run.status == "complete"
+                )
+                has_existing_crawl = bool(
+                    run is not None
+                    and run.phase in {"crawled", "finished"}
+                    and s.exec(
+                        select(CrawledPage.id).where(
+                            CrawledPage.test_run_id == test_run_id,
+                            CrawledPage.status == "crawled",
+                        )
+                    ).first()
+                )
+            # A resume reuses the existing crawl.  Only a child without usable
+            # pages starts a new crawl; this avoids duplicating traffic/pages.
+            if not crawl_ok and not has_existing_crawl:
+                await crawler_svc.start_crawl(test_run_id)
+                while crawler_svc.is_running(test_run_id):
+                    if campaign_id in _campaign_stop_requested:
+                        return False, None
+                    await asyncio.sleep(1.0)
+                if campaign_id in _campaign_stop_requested:
+                    return False, None
+                with Session(get_engine()) as s:
+                    run = s.get(TestRun, test_run_id)
+                    crawl_ok = bool(
+                        run is not None
+                        and run.phase == "crawled"
+                        and run.status == "complete"
+                    )
             if not crawl_ok:
                 with Session(get_engine()) as s:
                     approved_count = len(
@@ -909,7 +973,11 @@ async def _execute_target_member(
                         "A web target's crawl did not finish and no approved SAST "
                         "paths were available — its dynamic scan was skipped."
                     )
-                    _update_target_member_status(member_id, "failed")
+                    _set_target_validation_status(
+                        member_id,
+                        "failed",
+                        message="The crawl did not finish and no approved SAST path was available.",
+                    )
                     return False, warning
                 warning = (
                     "A web target's crawl did not finish; dynamic testing continued "
@@ -973,7 +1041,7 @@ async def _execute_target_member(
             )
             if rewrite_warnings:
                 _append_campaign_warnings(campaign_id, rewrite_warnings)
-            await scanner_svc.start_thinking_scan(test_run_id)
+            await scanner_svc.start_sast_validation_resume(test_run_id)
             while scanner_svc.is_thinking_running(test_run_id):
                 if campaign_id in _campaign_stop_requested:
                     return False, None
@@ -983,25 +1051,42 @@ async def _execute_target_member(
             with Session(get_engine()) as s:
                 run = s.get(TestRun, test_run_id)
                 scan_ok = run is not None and run.status == "complete"
+                incomplete = run is not None and run.status == "incomplete"
+            summary = _validation_summary("web", test_run_id)
             if scan_ok:
-                _update_target_member_status(member_id, "completed")
+                _set_target_validation_status(member_id, "completed", message="All imported SAST leads were resolved.", summary=summary)
                 return True, warning
+            if incomplete:
+                message = "Validation stopped before every imported SAST lead was resolved. Resume to continue."
+                _set_target_validation_status(member_id, "incomplete", message=message, summary=summary)
+                return False, message
             warning = (
                 "A web target's dynamic scan did not finish successfully — its "
                 "results may be incomplete."
             )
-            _update_target_member_status(member_id, "failed")
+            _set_target_validation_status(
+                member_id,
+                "failed",
+                message="The web SAST validation did not finish successfully.",
+                summary=summary,
+            )
             return False, warning
 
         if api_test_run_id is None:
             raise ValueError("API target has no child test run")
+        with Session(get_engine()) as s:
+            run = s.get(ApiTestRun, api_test_run_id)
+            if run is not None:
+                run.coverage_mode = "sast_validate"
+                s.add(run)
+                s.commit()
         correlation_svc.copy_explicit_component_leads_for_target(
             campaign_id, target_id, "api", api_test_run_id
         )
         correlation_svc.copy_approved_mappings_for_target(
             campaign_id, target_id, "api", api_test_run_id
         )
-        await api_scanner_svc.start_api_scan(api_test_run_id)
+        await api_scanner_svc.start_sast_validation_resume(api_test_run_id)
         while api_scanner_svc.is_api_scan_running(api_test_run_id):
             if campaign_id in _campaign_stop_requested:
                 return False, None
@@ -1011,19 +1096,34 @@ async def _execute_target_member(
         with Session(get_engine()) as s:
             run = s.get(ApiTestRun, api_test_run_id)
             scan_ok = run is not None and run.status == "completed"
+            incomplete = run is not None and run.status == "incomplete"
+        summary = _validation_summary("api", api_test_run_id)
         if scan_ok:
-            _update_target_member_status(member_id, "completed")
+            _set_target_validation_status(member_id, "completed", message="All imported SAST leads were resolved.", summary=summary)
             return True, None
+        if incomplete:
+            message = "Validation stopped before every imported SAST lead was resolved. Resume to continue."
+            _set_target_validation_status(member_id, "incomplete", message=message, summary=summary)
+            return False, message
         warning = (
             "An API target's dynamic scan did not finish successfully — its "
             "results may be incomplete."
         )
-        _update_target_member_status(member_id, "failed")
+        _set_target_validation_status(
+            member_id,
+            "failed",
+            message="The API SAST validation did not finish successfully.",
+            summary=summary,
+        )
         return False, warning
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 — isolate one target
-        _update_target_member_status(member_id, "failed")
+        _set_target_validation_status(
+            member_id,
+            "failed",
+            message="The live-target SAST validation raised an error.",
+        )
         return False, f"A live-target scan failed: {exc}"
 
 
@@ -1114,6 +1214,7 @@ async def resume_target_member(campaign_id: int, member_id: int) -> None:
                     name=f"{site.name} — {campaign.name}",
                     llm_config_id=campaign.llm_config_id,
                     llm_profile_id=campaign.llm_profile_id,
+                    coverage_mode="sast_validate",
                 )
                 s.add(run)
                 s.flush()
@@ -1476,16 +1577,30 @@ async def _run_dast_wrapper(campaign_id: int) -> None:
         any_target_completed = await _run_dast_stage(campaign_id)
         if campaign_id in _campaign_stop_requested:
             _finish_campaign(campaign_id, "stopped")
-        elif any_target_completed:
-            _finish_campaign(campaign_id, "completed")
         else:
-            # Every live target failed its dynamic scan (or none existed) —
-            # reporting "completed" here would be a false success.
-            _finish_campaign(
-                campaign_id,
-                "failed",
-                error="No live target completed its dynamic scan.",
-            )
+            with Session(get_engine()) as s:
+                has_incomplete = bool(
+                    s.exec(
+                        select(CampaignTargetMember.id)
+                        .where(CampaignTargetMember.campaign_id == campaign_id)
+                        .where(CampaignTargetMember.status == "incomplete")
+                    ).first()
+                )
+            if has_incomplete:
+                _finish_campaign(
+                    campaign_id,
+                    "incomplete",
+                    error="One or more target validations stopped with unresolved SAST leads. Resume to continue.",
+                )
+            elif any_target_completed:
+                _finish_campaign(campaign_id, "completed")
+            else:
+                # Every live target failed its validation (or none existed).
+                _finish_campaign(
+                    campaign_id,
+                    "failed",
+                    error="No live target completed its SAST validation.",
+                )
     except asyncio.CancelledError:
         _finish_campaign(campaign_id, "stopped")
         raise
@@ -1523,6 +1638,7 @@ async def _run_dast_stage(campaign_id: int) -> bool:
                         name=f"{site.name} — {campaign.name}",
                         llm_config_id=campaign.llm_config_id,
                         llm_profile_id=campaign.llm_profile_id,
+                        coverage_mode="sast_validate",
                     )
                     s.add(run)
                     s.flush()
@@ -1536,6 +1652,7 @@ async def _run_dast_stage(campaign_id: int) -> bool:
                         name=f"{collection.name} — {campaign.name}",
                         llm_config_id=campaign.llm_config_id,
                         llm_profile_id=campaign.llm_profile_id,
+                        coverage_mode="sast_validate",
                     )
                     s.add(run)
                     s.flush()

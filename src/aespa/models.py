@@ -238,7 +238,7 @@ class ApiTestRun(SQLModel, table=True):
     id: Optional[int] = Field(default=None, sa_column=_run_identity_pk())
     collection_id: int = Field(foreign_key="api_collection.id", index=True)
     name: str
-    status: str = Field(default="pending")  # pending|running|completed|failed|cancelled
+    status: str = Field(default="pending")  # pending|running|completed|incomplete|failed|cancelled
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     # Per-run model-mixing profile (null = use the globally active profile).
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
@@ -677,6 +677,7 @@ class TestRunStatus(str, Enum):
     pending = "pending"
     running = "running"
     complete = "complete"
+    incomplete = "incomplete"
     failed = "failed"
     stopped = "stopped"
 
@@ -859,6 +860,9 @@ class PageLink(SQLModel, table=True):
     link_text: Optional[str] = Field(default=None)
     action_kind: str = Field(default="navigate")
     action_data_json: str = Field(default="{}")
+    # Shared with traffic rows so an interactive browser action can be tied to
+    # the requests it caused, rather than to any request on the same page.
+    interaction_id: Optional[str] = Field(default=None, index=True)
 
 
 class TrafficEntry(SQLModel, table=True):
@@ -895,6 +899,8 @@ class TrafficEntry(SQLModel, table=True):
         index=True,
     )
     session_label: Optional[str] = Field(default=None, index=True)
+    # Opaque id for one replayed browser action. Page-load traffic has no id.
+    interaction_id: Optional[str] = Field(default=None, index=True)
 
 
 class ScannerSession(SQLModel, table=True):
@@ -1346,7 +1352,7 @@ class AssessmentCampaign(SQLModel, table=True):
     name: str
     status: str = Field(default="draft", index=True)
     # draft -> sast_running -> correlating -> awaiting_review -> dast_running
-    # -> completed | failed | stopped | interrupted
+    # -> completed | incomplete | failed | stopped | interrupted
     max_parallel_sast: int = Field(default=2)
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
@@ -1383,7 +1389,7 @@ class CampaignSourceMember(SQLModel, table=True):
     component_id: int = Field(foreign_key="application_component.id", index=True)
     snapshot_id: int = Field(foreign_key="component_snapshot.id", index=True)
     sast_run_id: Optional[int] = Field(default=None, index=True)
-    status: str = Field(default="pending")  # pending|running|completed|failed|skipped
+    status: str = Field(default="pending")  # pending|running|completed|incomplete|failed|skipped
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -1402,7 +1408,9 @@ class CampaignTargetMember(SQLModel, table=True):
     target_type: str = Field(index=True)  # "site" | "api_collection"
     test_run_id: Optional[int] = Field(default=None, index=True)  # web child
     api_test_run_id: Optional[int] = Field(default=None, index=True)  # api child
-    status: str = Field(default="pending")  # pending|running|completed|failed|skipped
+    status: str = Field(default="pending")  # pending|running|completed|incomplete|failed|skipped
+    status_message: Optional[str] = Field(default=None)
+    validation_summary_json: str = Field(default="{}")
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

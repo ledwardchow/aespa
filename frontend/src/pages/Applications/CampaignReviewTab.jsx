@@ -79,6 +79,13 @@ export function CampaignReviewTab({ applicationId, campaignId, campaign, canCont
     });
   };
 
+  const proposedCount = filtered.filter(m => m.status === "proposed").length;
+  const bulkApproveAll = () => {
+    filtered.forEach(m => {
+      if (m.status === "proposed") setDecision(m.id, "approve");
+    });
+  };
+
   const pendingDecisionCount = Object.keys(decisions).length;
   const supplementalTargets = useMemo(() => {
     const byTarget = new Map();
@@ -185,6 +192,9 @@ export function CampaignReviewTab({ applicationId, campaignId, campaign, canCont
         <button className="btn danger-outline sm" disabled={selected.size === 0} onClick={rejectSelected}>Reject selected</button>
         <button className="btn secondary sm" disabled={highConfidenceCount === 0} onClick={bulkApproveHighConfidence} title="Only mappings scored 80% or higher">
           Approve all high-confidence ({highConfidenceCount})
+        </button>
+        <button className="btn secondary sm" disabled={proposedCount === 0} onClick={bulkApproveAll} title="Approve every proposed mapping currently shown">
+          Approve all ({proposedCount})
         </button>
       </div>
       <button className="btn" disabled={submitting || pendingDecisionCount === 0} onClick={onSubmit}>

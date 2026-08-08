@@ -10,7 +10,7 @@ export function WebRunFindingsTab(props) {
       <div className="findings-panel">
           <div className="findings-status-bar">
             {thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle" && <span className={"scan-status-badge scan-status-" + (thinkingStopRequested ? "stopping" : thinkingStatus.status)}>
-                {thinkingStopRequested ? "Stopping Dynamic Scan…" : thinkingStatus.status === "running" ? "Dynamic Scan running…" : thinkingStatus.status === "analysing" || thinkingStatus.status === "analyzing" ? "Dynamic Scan analysing…" : thinkingStatus.status === "stopping" ? "Dynamic Scan stopping…" : thinkingStatus.status === "complete" ? "Dynamic Scan complete" : thinkingStatus.status === "stopped" ? "Dynamic Scan stopped" : thinkingStatus.status === "failed" ? "Dynamic Scan failed" : "Dynamic Scan"}
+                {thinkingStopRequested ? "Stopping Dynamic Scan…" : thinkingStatus.run_outcome === "incomplete" ? "Validation incomplete — resume available" : thinkingStatus.status === "running" ? "Dynamic Scan running…" : thinkingStatus.status === "analysing" || thinkingStatus.status === "analyzing" ? "Dynamic Scan analysing…" : thinkingStatus.status === "stopping" ? "Dynamic Scan stopping…" : thinkingStatus.status === "complete" ? "Dynamic Scan complete" : thinkingStatus.status === "stopped" ? "Dynamic Scan stopped" : thinkingStatus.status === "failed" ? "Dynamic Scan failed" : "Dynamic Scan"}
               </span>}
             <div style={{
             flex: 1
@@ -272,6 +272,9 @@ export function WebRunFindingsTab(props) {
                         </div>
                         {f.validation_note && <div className={"finding-validation-note val-note-" + f.validation_status}>
                             <strong>Validation ({f.validation_status}):</strong> {f.validation_note}
+                          </div>}
+                        {(f.validation_status === "unvalidated" || f.validation_status === "skipped" || f.validation_status === "unconfirmed" || f.validation_status === "false_positive" || f.validation_status === "low_confidence") && <div className="row" style={{ marginTop: 12 }}>
+                            <button className="btn secondary sm" onClick={e => onValidateFinding(e, f.id)}>Retry validation</button>
                           </div>}
                         {f.poc_command && <div className="finding-poc" style={{
                     marginTop: 12
