@@ -70,9 +70,10 @@ function App() {
   });
   const [showApplications, setShowApplications] = useState(() => {
     try {
-      return localStorage.getItem("aespa_show_applications") === "true";
+      const val = localStorage.getItem("aespa_show_applications");
+      return val === null ? true : val === "true";
     } catch {
-      return false;
+      return true;
     }
   });
   const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 700);
