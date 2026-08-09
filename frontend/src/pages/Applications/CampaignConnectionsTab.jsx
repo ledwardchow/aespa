@@ -8,6 +8,16 @@ const ORIGIN_LABEL = {
   llm_assisted: "LLM-resolved match"
 };
 
+const EVIDENCE_KEY_LABELS = {
+  call: "Outbound call",
+  route: "Matched route",
+  action: "UI action",
+  handler: "Backend handler",
+  source: "Source evidence",
+  target: "Target evidence",
+  lead_anchor: "SAST lead anchor"
+};
+
 // ── CampaignConnectionsTab ───────────────────────────────────────────────────
 // A detailed connection diagram view — folds confidence, evidence, source facts,
 // and origin type directly into each row.
@@ -19,7 +29,7 @@ export function CampaignConnectionsTab({ applicationId, campaignId, campaign, re
   useEffect(() => {
     let cancelled = false;
     Promise.all([
-      api.getCampaignConnections(applicationId, campaignId),
+      api.getCampaignConnections(applicationId, campaignId, "cross_component"),
       api.listAppComponents(applicationId)
     ]).then(([conns, comps]) => {
       if (cancelled) return;
@@ -78,6 +88,10 @@ function ConnectionCard({ connection, sourceName, targetName }) {
     <div key={location} className="mono subtle" style={{ fontSize: 12 }}>{location}</div>
   );
 
+  const evidenceEntries = Object.entries(evidence).filter(([_, value]) =>
+    value && (value.evidence_location || (Array.isArray(value.supporting_locations) && value.supporting_locations.length > 0) || value.method || value.path)
+  );
+
   return <div className="connection-card">
     <div className="connection-card-header">
       <div className="connection-flow">
@@ -87,29 +101,28 @@ function ConnectionCard({ connection, sourceName, targetName }) {
       </div>
       <div className="connection-badges">
         <span className="badge neutral">{confidencePct(connection.confidence)}</span>
+        <span className="badge neutral" style={{ marginLeft: 6 }}>{connection.edge_kind || "calls"}</span>
         <span className="badge info" style={{ marginLeft: 6 }}>{ORIGIN_LABEL[connection.match_kind] || connection.match_kind}</span>
       </div>
     </div>
 
-    {(connection.rationale || evidence.call || evidence.route) && <div className="connection-card-body">
+    {(connection.rationale || evidenceEntries.length > 0) && <div className="connection-card-body">
       {connection.rationale && <div className="connection-rationale">
         <strong>Why:</strong> {connection.rationale}
       </div>}
-      {(evidence.call || evidence.route) && <div className="connection-evidence-grid">
-        {evidence.call && <div className="connection-evidence-item">
-          <span className="evidence-label">Outbound call ({sourceName})</span>
-          <div className="mono subtle" style={{ fontSize: 12, marginTop: 2 }}>
-            <strong>{evidence.call.method}</strong> {evidence.call.path}{evidence.call.host ? ` @ ${evidence.call.host}` : ""}
-          </div>
-          {renderLocations(evidence.call)}
-        </div>}
-        {evidence.route && <div className="connection-evidence-item">
-          <span className="evidence-label">Matched route ({targetName})</span>
-          <div className="mono subtle" style={{ fontSize: 12, marginTop: 2 }}>
-            <strong>{evidence.route.method}</strong> {evidence.route.path}
-          </div>
-          {renderLocations(evidence.route)}
-        </div>}
+      {evidenceEntries.length > 0 && <div className="connection-evidence-grid">
+        {evidenceEntries.map(([key, item]) => {
+          const defaultLabel = EVIDENCE_KEY_LABELS[key] || key;
+          const componentOwner = (key === "call" || key === "source" || key === "action") ? sourceName : targetName;
+          const label = `${defaultLabel} (${componentOwner})`;
+          return <div key={key} className="connection-evidence-item">
+            <span className="evidence-label">{label}</span>
+            {(item.method || item.path) && <div className="mono subtle" style={{ fontSize: 12, marginTop: 2 }}>
+              <strong>{item.method}</strong> {item.path}{item.host ? ` @ ${item.host}` : ""}
+            </div>}
+            {renderLocations(item)}
+          </div>;
+        })}
       </div>}
     </div>}
   </div>;

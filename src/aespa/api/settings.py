@@ -316,6 +316,7 @@ async def upsert_crawler_config(
 def get_component_mapper_config(
     session: Session = Depends(get_session),
 ) -> ComponentMapperConfigOut:
+    """Return component-mapper budgets, including bounded trace settings."""
     return settings_service.get_component_mapper_config(session)
 
 
@@ -324,6 +325,7 @@ def upsert_component_mapper_config(
     payload: ComponentMapperConfigIn,
     session: Session = Depends(get_session),
 ) -> ComponentMapperConfigOut:
+    """Persist component-mapper budgets and attack-path trace limits."""
     return settings_service.upsert_component_mapper_config(session, payload)
 
 

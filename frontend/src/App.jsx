@@ -70,9 +70,10 @@ function App() {
   });
   const [showApplications, setShowApplications] = useState(() => {
     try {
-      return localStorage.getItem("aespa_show_applications") === "true";
+      const val = localStorage.getItem("aespa_show_applications");
+      return val === null ? true : val === "true";
     } catch {
-      return false;
+      return true;
     }
   });
   const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 700);
@@ -198,20 +199,20 @@ function App() {
           {route.name === "api-detail" && <ApiCollectionDetail key={route.id} collectionId={route.id} />}
           {route.name === "api-files" && <ApiFilesManager key={route.id} collectionId={route.id} />}
           {route.name === "api-run-new" && <ApiTestRunForm key={route.id} collectionId={route.id} />}
-          {route.name === "api-run-detail" && <ApiTestRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
+          {route.name === "api-run-detail" && <ApiTestRunDetail key={route.id} runId={route.id} initialTab={route.tab} initialFindingRef={route.findingRef} />}
           {route.name === "sast-list" && <SastRunsListPage />}
           {route.name === "sast-run-new" && <SastRunForm key="sast-new" />}
-          {route.name === "sast-run-detail" && <SastRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
+          {route.name === "sast-run-detail" && <SastRunDetail key={route.id} runId={route.id} initialTab={route.tab} initialLeadRef={route.leadRef} />}
           {route.name === "app-list" && <ApplicationsList />}
           {route.name === "app-new" && <ApplicationForm key="app-new" />}
           {route.name === "app-edit" && <ApplicationForm key={route.id} applicationId={route.id} />}
           {route.name === "app-detail" && <ApplicationDetail key={route.id} applicationId={route.id} initialTab={route.tab} />}
           {route.name === "campaign-new" && <CampaignNewForm key={route.id} applicationId={route.id} />}
-          {route.name === "campaign-detail" && <CampaignDetail key={`${route.id}-${route.campaignId}`} applicationId={route.id} campaignId={route.campaignId} initialTab={route.tab} />}
+          {route.name === "campaign-detail" && <CampaignDetail key={`${route.id}-${route.campaignId}`} applicationId={route.id} campaignId={route.campaignId} initialTab={route.tab} initialFindingRef={route.findingRef} />}
           {route.name === "active-jobs" && <ActiveJobsPage />}
           {route.name === "stats" && <StatisticsPage />}
           {route.name === "run-new" && <TestRunForm key={route.siteId} siteId={route.siteId} />}
-          {route.name === "run-detail" && <TestRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
+          {route.name === "run-detail" && <TestRunDetail key={route.id} runId={route.id} initialTab={route.tab} initialFindingRef={route.findingRef} initialLeadRef={route.leadRef} />}
           {route.name === "settings" && <SettingsPage />}
           {route.name === "scan-policy" && <ScanPolicyPage />}
           {route.name === "external-integrations" && <ExternalIntegrationsPage />}

@@ -6,6 +6,7 @@ import { SastLeadDetails } from "../components/SastLeadDetails";
 import { PageHeader, Crumb, Sep } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { TokenUsageBar } from "../components/TokenUsageBar";
+import { LeadReferenceLink } from "../components/FindingReferenceLink";
 
 const PHASES = [
   { key: "scope", label: "Scope", short: "Archive and inventory", view: "coverage" },
@@ -221,7 +222,7 @@ function LeadEvidence({ lead, targets, onQueue, queueBusy }) {
   if (!lead) return <aside className="sast-evidence-panel"><div className="sast-panel-empty">Select a candidate to inspect its evidence chain.</div></aside>;
   const selectedTarget = targets.find(target => `${target.run_type}:${target.run_id}` === targetKey);
   return <aside className="sast-evidence-panel">
-    <div className="sast-panel-header"><div><div className="sast-panel-title">Evidence chain</div><div className="sast-panel-sub">Lead #{lead.id} · {lead.fingerprint?.slice(0, 10) || "unfingerprinted"}</div></div><span className={`sast-state sast-state-${lead.validation_status || "pending"}`}>{lead.validation_status || "pending"}</span></div>
+    <div className="sast-panel-header"><div><div className="sast-panel-title">Evidence chain</div><div className="sast-panel-sub"><LeadReferenceLink reference={lead.reference || `#${lead.id}`} title={lead.title} description={lead.description} severity={lead.severity} /> · {lead.fingerprint?.slice(0, 10) || "unfingerprinted"}</div></div><span className={`sast-state sast-state-${lead.validation_status || "pending"}`}>{lead.validation_status || "pending"}</span></div>
     <div className="sast-evidence-body">
       <SastLeadDetails lead={lead} showSummary={false} />
       <div className="sast-handoff-box">
@@ -273,7 +274,7 @@ function ActivityView({ logs, agentLog, scanRunning, tokenUsage, tokenExpanded, 
   </div>;
 }
 
-export function SastRunDetailExperience({ runId, initialTab }) {
+export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const [run, setRun] = useState(null);
   const [analysis, setAnalysis] = useState({ phases: {}, coverage: { files: [], summary: {} }, report: {} });
   const [logs, setLogs] = useState([]);
@@ -300,9 +301,9 @@ export function SastRunDetailExperience({ runId, initialTab }) {
         api.getSastRun(runId), api.getSastScanStatus(runId), api.getSastAnalysis(runId), api.getSastScanLog(runId), api.getSastAgentLog(runId), api.getSastLeads(runId), api.getSastTokenUsage(runId), api.getSastHandoffTargets(runId),
       ]);
       setRun(runData); setScanRunning(status.running); setAnalysis(analysisData); setLogs(logData || []); setAgentLog(agentData || []); setLeads(leadData || []); setTokenUsage(usage); setTargets(targetData || []);
-      setSelectedLeadId(previous => previous ?? leadData?.[0]?.id ?? null);
+      setSelectedLeadId(previous => previous ?? leadData?.find(lead => lead.reference === initialLeadRef)?.id ?? leadData?.[0]?.id ?? null);
     } catch (err) { setError(err.message); }
-  }, [runId]);
+  }, [runId, initialLeadRef]);
 
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => { api.listLLMProfiles().then(items => setProfiles(items || [])).catch(err => setError(err.message)); }, []);
@@ -320,7 +321,7 @@ export function SastRunDetailExperience({ runId, initialTab }) {
   const onStart = async () => { setStartBusy(true); setError(null); try { await api.startSastScan(runId); setActivePhase(null); setScanRunning(true); await loadData(); } catch (err) { setError(err.message); } finally { setStartBusy(false); } };
   const onStop = async () => { try { await api.stopSastScan(runId); await loadData(); } catch (err) { setError(err.message); } };
   const onDelete = async () => { if (!confirm("Delete this SAST run and all its leads?")) return; try { const collId = run?.collection_id; await api.deleteSastRun(runId); nav(collId ? `#/apis/${collId}/files` : "#/sast-runs"); } catch (err) { setError(err.message); } };
-  const onQueue = async (lead, target) => { setQueueBusy(true); setError(null); setNotice(null); try { const result = await api.handoffSastLead(runId, lead.id, { run_type: target.run_type, run_id: target.run_id }); setNotice(`Lead #${lead.id} queued as dynamic lead #${result.lead_id} in ${target.run_type.toUpperCase()} run #${target.run_id}.`); } catch (err) { setError(err.message); } finally { setQueueBusy(false); } };
+  const onQueue = async (lead, target) => { setQueueBusy(true); setError(null); setNotice(null); try { const result = await api.handoffSastLead(runId, lead.id, { run_type: target.run_type, run_id: target.run_id }); setNotice(`Lead ${lead.reference || `#${lead.id}`} queued as ${result.lead_reference || `#${result.lead_id}`} in ${target.run_type.toUpperCase()} run #${target.run_id}.`); } catch (err) { setError(err.message); } finally { setQueueBusy(false); } };
   const onExportReport = () => downloadTextFile(sastReportFilename(run?.name, runId), sastCandidatesToMarkdown(leads, { runName: run?.name, generatedAt: new Date() }), "text/markdown;charset=utf-8");
   const onProfileChange = async llmProfileId => { setProfileBusy(true); setError(null); setNotice(null); try { const updated = await api.updateSastRun(runId, { llm_profile_id: llmProfileId }); setRun(updated); const selected = profiles.find(profile => profile.id === llmProfileId); setNotice(llmProfileId ? `Model profile changed to ${profileLabel(selected)}. It will be used by the next scan.` : "This run now follows the globally active model profile for its next scan."); } catch (err) { setError(err.message); } finally { setProfileBusy(false); } };
   const canStart = run && !scanRunning && ["pending", "completed", "failed", "cancelled"].includes(run.status);

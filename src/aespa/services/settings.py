@@ -730,6 +730,10 @@ def get_component_mapper_config(session: Session) -> ComponentMapperConfigOut:
         max_source_bytes=cfg.max_source_bytes,
         max_facts=cfg.max_facts,
         max_concurrent=cfg.max_concurrent,
+        max_trace_edges=cfg.max_trace_edges,
+        max_trace_components=cfg.max_trace_components,
+        max_paths_per_lead=cfg.max_paths_per_lead,
+        min_trace_confidence=cfg.min_trace_confidence,
         updated_at=cfg.updated_at,
     )
 
@@ -745,6 +749,10 @@ def upsert_component_mapper_config(
     cfg.max_source_bytes = payload.max_source_bytes
     cfg.max_facts = payload.max_facts
     cfg.max_concurrent = payload.max_concurrent
+    cfg.max_trace_edges = payload.max_trace_edges
+    cfg.max_trace_components = payload.max_trace_components
+    cfg.max_paths_per_lead = payload.max_paths_per_lead
+    cfg.min_trace_confidence = payload.min_trace_confidence
     cfg.updated_at = _utcnow()
     session.add(cfg)
     session.commit()

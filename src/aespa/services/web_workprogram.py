@@ -21,6 +21,7 @@ from aespa.models import (
 )
 from aespa.services import events as events_svc
 from aespa.services.llm import OWASP_WEB_CATEGORIES, OWASP_WEB_LABELS
+from aespa.services.references import ensure_finding_reference
 
 log = logging.getLogger(__name__)
 
@@ -1616,6 +1617,9 @@ def get_web_coverage_matrix(run_id: int) -> dict:
         findings = list(
             s.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all()
         )
+        for finding in findings:
+            ensure_finding_reference(s, finding)
+        s.commit()
         coverage_mode = getattr(run, "coverage_mode", "track") or "track"
 
     # Build (page_id, owasp_category) → finding list; exclude deterministic probes
@@ -1626,6 +1630,7 @@ def get_web_coverage_matrix(run_id: int) -> dict:
             continue
         fd = {
             "id": f.id,
+            "reference": f.reference or (f"#{f.id}" if f.id is not None else ""),
             "title": f.title,
             "severity": f.severity,
             "owasp_category": f.owasp_category,

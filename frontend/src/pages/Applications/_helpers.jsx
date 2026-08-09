@@ -37,8 +37,44 @@ export function stageIndex(status) {
   return idx;
 }
 
+const ACTIVE_RUN_STATUSES = new Set(["running", "scanning", "analysing", "analyzing", "crawling", "stopping"]);
+
+export function campaignMemberDisplayStatus(member) {
+  return member?.run_status || member?.status;
+}
+
+function campaignMemberIsRunning(member) {
+  return member?.status === "running" || ACTIVE_RUN_STATUSES.has(member?.run_status);
+}
+
+function campaignMemberIsComplete(member) {
+  return ["complete", "completed"].includes(campaignMemberDisplayStatus(member));
+}
+
+// A manually resumed child scan updates its member row before the parent
+// campaign status. The linked child run can also be resumed from its own
+// page, so use its current status when the campaign payload provides it.
+export function campaignDisplayStatus(campaign) {
+  if (!campaign) return undefined;
+
+  const sourceMembers = campaign.source_members || [];
+  const targetMembers = campaign.target_members || [];
+  if (targetMembers.some(campaignMemberIsRunning)) {
+    return "dast_running";
+  }
+  if (sourceMembers.some(campaignMemberIsRunning)) {
+    return "sast_running";
+  }
+
+  const allMembers = [...sourceMembers, ...targetMembers];
+  if (allMembers.length > 0 && allMembers.every(campaignMemberIsComplete)) {
+    return "completed";
+  }
+  return campaign.status;
+}
+
 export function isTerminalPause(status) {
-  return status === "stopped" || status === "failed" || status === "interrupted";
+  return status === "stopped" || status === "failed" || status === "interrupted" || status === "incomplete";
 }
 
 export const MEMBER_STATUS_LABEL = {
@@ -46,7 +82,8 @@ export const MEMBER_STATUS_LABEL = {
   running: "running",
   completed: "completed",
   failed: "failed",
-  skipped: "skipped"
+  skipped: "skipped",
+  incomplete: "incomplete — resume available"
 };
 
 export function severityClass(sev) {

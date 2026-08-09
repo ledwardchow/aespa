@@ -21,6 +21,10 @@ export function CampaignNewForm({ applicationId }) {
   const [includedTargets, setIncludedTargets] = useState(new Set());
   const [llmProfileId, setLlmProfileId] = useState("");
   const [maxParallel, setMaxParallel] = useState(2);
+  const [traceEdges, setTraceEdges] = useState("");
+  const [traceComponents, setTraceComponents] = useState("");
+  const [tracePaths, setTracePaths] = useState("");
+  const [traceConfidence, setTraceConfidence] = useState("");
   const [saving, setSaving] = useState(false);
   // Set the instant POST /campaigns succeeds, before the start call — this
   // is what makes a retry after a failed start safe: onCreate below never
@@ -76,7 +80,11 @@ export function CampaignNewForm({ applicationId }) {
           source_members: sourceMembers,
           target_members: targetMembers,
           llm_profile_id: llmProfileId ? +llmProfileId : null,
-          max_parallel_sast: maxParallel
+          max_parallel_sast: maxParallel,
+          max_trace_edges: traceEdges ? +traceEdges : null,
+          max_trace_components: traceComponents ? +traceComponents : null,
+          max_paths_per_lead: tracePaths ? +tracePaths : null,
+          min_trace_confidence: traceConfidence ? +traceConfidence : null
         };
         const campaign = await api.createCampaign(applicationId, body);
         id = campaign.id;
@@ -86,14 +94,14 @@ export function CampaignNewForm({ applicationId }) {
         setCreatedCampaignId(id);
       }
       await api.startCampaign(applicationId, id);
-      nav(`#/applications/${applicationId}/campaigns/${id}/overview`);
+      nav(`#/applications/${applicationId}/campaigns/${id}/runs`);
     } catch (e) {
       setError(e.message);
       setSaving(false);
     }
   };
 
-  const onOpenDraft = () => nav(`#/applications/${applicationId}/campaigns/${createdCampaignId}/overview`);
+  const onOpenDraft = () => nav(`#/applications/${applicationId}/campaigns/${createdCampaignId}/runs`);
 
   if (components === null || targets === null) {
     return <div className="content scroll-content">{error ? <div className="alert error">{error}</div> : <div className="subtle">Loading…</div>}</div>;
@@ -167,6 +175,22 @@ export function CampaignNewForm({ applicationId }) {
               <label>Max parallel code scans</label>
               <input type="number" min={1} max={8} value={maxParallel} onChange={e => setMaxParallel(Math.min(8, Math.max(1, +e.target.value || 1)))} />
             </div>
+            <div className="field" style={{ minWidth: 180 }}>
+              <label>Trace edges <span className="subtle">(optional)</span></label>
+              <input type="number" min={1} max={64} value={traceEdges} onChange={e => setTraceEdges(e.target.value)} placeholder="Global default" />
+            </div>
+            <div className="field" style={{ minWidth: 180 }}>
+              <label>Trace components <span className="subtle">(optional)</span></label>
+              <input type="number" min={1} max={32} value={traceComponents} onChange={e => setTraceComponents(e.target.value)} placeholder="Global default" />
+            </div>
+            <div className="field" style={{ minWidth: 180 }}>
+              <label>Paths per lead <span className="subtle">(optional)</span></label>
+              <input type="number" min={1} max={100} value={tracePaths} onChange={e => setTracePaths(e.target.value)} placeholder="Global default" />
+            </div>
+            <div className="field" style={{ minWidth: 180 }}>
+              <label>Min trace confidence <span className="subtle">(optional)</span></label>
+              <input type="number" min={0} max={1} step={0.05} value={traceConfidence} onChange={e => setTraceConfidence(e.target.value)} placeholder="Global default" />
+            </div>
           </div>
         </div>
 
@@ -184,6 +208,7 @@ export function CampaignNewForm({ applicationId }) {
         targetMembers={targetMembers}
         llmProfile={profiles.find(p => String(p.id) === String(llmProfileId))}
         maxParallel={maxParallel}
+        traceOverrides={{ traceEdges, traceComponents, tracePaths, traceConfidence }}
         saving={saving}
         createdCampaignId={createdCampaignId}
         onBack={() => setStep("configure")}
@@ -194,7 +219,7 @@ export function CampaignNewForm({ applicationId }) {
   </>;
 }
 
-function ReviewStep({ name, components, sourceMembers, targets, targetMembers, llmProfile, maxParallel, saving, createdCampaignId, onBack, onCreate, onOpenDraft }) {
+function ReviewStep({ name, components, sourceMembers, targets, targetMembers, llmProfile, maxParallel, traceOverrides, saving, createdCampaignId, onBack, onCreate, onOpenDraft }) {
   const componentName = id => (components.find(c => c.id === id) || {}).name || `#${id}`;
   const targetById = id => targets.find(t => t.id === id);
   const created = createdCampaignId != null;
@@ -222,7 +247,7 @@ function ReviewStep({ name, components, sourceMembers, targets, targetMembers, l
       })}
     </div>
     <div className="subtle">
-      LLM profile: {llmProfile ? `${llmProfile.name}${llmProfile.default_model_name ? ` · ${llmProfile.default_model_name}` : ""}` : "global active profile"} · Max parallel scans: {maxParallel}
+      LLM profile: {llmProfile ? `${llmProfile.name}${llmProfile.default_model_name ? ` · ${llmProfile.default_model_name}` : ""}` : "global active profile"} · Max parallel scans: {maxParallel} · Trace overrides: {Object.values(traceOverrides).some(Boolean) ? "custom" : "global defaults"}
     </div>
     <div className="row spread">
       <button type="button" className="btn ghost" onClick={onBack} disabled={saving || created} title={created ? "This draft is already created — go to the application's Campaigns tab for a fresh attempt instead." : undefined}>Back</button>

@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "../../lib/api";
 import { usePolling } from "../../hooks/usePolling";
+import { campaignDisplayStatus } from "./_helpers";
 
 const ACTIVE_STAGES = new Set(["sast_running", "correlating", "dast_running"]);
 
 // Loads the campaign, keeps it fresh while a stage is active, and exposes the
-// start/stop/retry/continue actions the header and Overview tab need. Kept
-// separate from any one tab's own state so every tab can share one source of
-// truth without re-fetching independently.
+// start/stop/retry/continue actions the header and tabs need. Kept separate
+// from any one tab's own state so every tab can share one source of truth
+// without re-fetching independently.
 export function useCampaign(applicationId, campaignId) {
   const [campaign, setCampaign] = useState(null);
   const [error, setError] = useState(null);
@@ -34,9 +35,10 @@ export function useCampaign(applicationId, campaignId) {
 
   const hasRunningMember = campaign
     ? [...(campaign.source_members || []), ...(campaign.target_members || [])]
-        .some(member => member.status === "running")
+        .some(member => member.status === "running" || ["running", "scanning", "analysing", "analyzing", "crawling", "stopping"].includes(member.run_status))
     : false;
-  usePolling(load, { enabled: campaign ? ACTIVE_STAGES.has(campaign.status) || hasRunningMember : true, intervalMs: 4000 });
+  const displayedStatus = campaignDisplayStatus(campaign);
+  usePolling(load, { enabled: campaign ? ACTIVE_STAGES.has(campaign.status) || ACTIVE_STAGES.has(displayedStatus) || hasRunningMember : true, intervalMs: 4000 });
 
   const runAction = useCallback(async (action, confirmMsg) => {
     if (confirmMsg && !confirm(confirmMsg)) return;
@@ -60,5 +62,5 @@ export function useCampaign(applicationId, campaignId) {
   const rebuildConnections = useCallback(() => runAction(() => api.rebuildCampaignConnections(applicationId, campaignId)), [runAction, applicationId, campaignId]);
   const continueToLive = useCallback(() => runAction(() => api.continueCampaign(applicationId, campaignId)), [runAction, applicationId, campaignId]);
 
-  return { campaign, error, setError, busy, load, start, stop, retry, resumeSource, resumeTarget, rebuildConnections, continueToLive, isActive: campaign ? ACTIVE_STAGES.has(campaign.status) : false };
+  return { campaign, error, setError, busy, load, start, stop, retry, resumeSource, resumeTarget, rebuildConnections, continueToLive, isActive: campaign ? ACTIVE_STAGES.has(campaign.status) || ACTIVE_STAGES.has(displayedStatus) : false };
 }

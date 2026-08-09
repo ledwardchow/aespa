@@ -264,7 +264,11 @@ SAST_TOOLS: list[dict] = [
             "properties": {
                 "lead_id": {
                     "type": "integer",
-                    "description": "The candidate ID returned by write_lead.",
+                    "description": "Legacy internal candidate ID returned by write_lead.",
+                },
+                "lead_reference": {
+                    "type": "string",
+                    "description": "Public lead reference returned by write_lead, for example ABCD-001.",
                 },
                 "confidence": {
                     "type": "number",
@@ -280,7 +284,7 @@ SAST_TOOLS: list[dict] = [
                     "description": "Brief explanation of the confidence score.",
                 },
             },
-            "required": ["lead_id", "confidence", "reasoning"],
+            "required": ["lead_reference", "confidence", "reasoning"],
         },
     },
     {

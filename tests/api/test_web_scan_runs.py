@@ -9,7 +9,12 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa import models
 from aespa.db import get_session
-from aespa.models import ScannerSession, TargetIntelItem
+from aespa.models import (
+    Application,
+    AssessmentCampaign,
+    ScannerSession,
+    TargetIntelItem,
+)
 
 
 def _make_site(client: TestClient, **kw):
@@ -207,6 +212,39 @@ def test_list_active_jobs_includes_one_validation_job_per_run(
     assert validation_jobs[0]["run_id"] == run["id"]
     assert validation_jobs[0]["pages_done"] == 4
     assert validation_jobs[0]["total_pages"] == 8
+
+
+def test_list_active_jobs_includes_active_campaign_scan(
+    client: TestClient, isolated_db_engine
+):
+    with Session(isolated_db_engine) as session:
+        application = Application(name="Checkout")
+        session.add(application)
+        session.flush()
+        campaign = AssessmentCampaign(
+            application_id=application.id,
+            name="Release validation",
+            status="dast_running",
+        )
+        session.add(campaign)
+        session.commit()
+        session.refresh(campaign)
+
+        campaign_id = campaign.id
+        application_id = application.id
+
+    response = client.get("/api/test-runs/active")
+
+    assert response.status_code == 200
+    campaign_jobs = [
+        job for job in response.json() if job["run_type"] == "campaign"
+    ]
+    assert len(campaign_jobs) == 1
+    assert campaign_jobs[0]["run_id"] == campaign_id
+    assert campaign_jobs[0]["application_id"] == application_id
+    assert campaign_jobs[0]["application_name"] == "Checkout"
+    assert campaign_jobs[0]["job_type"] == "Campaign Scan"
+    assert campaign_jobs[0]["status"] == "dast_running"
 
 
 def test_get_web_scan_run(client: TestClient):
