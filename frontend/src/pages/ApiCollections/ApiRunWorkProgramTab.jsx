@@ -97,7 +97,7 @@ export function ApiRunWorkProgramTab({
     });
     downloadTextFile(`${slugForFilename(run?.name || `api-run-${runId}`)}-owasp-coverage-${new Date().toISOString().slice(0, 10)}.md`, md, "text/markdown;charset=utf-8");
   };
-  return <div style={{
+  return <div className="run-work-program-tab" style={{
     padding: 16
   }}>
       <div style={{
@@ -139,7 +139,7 @@ export function ApiRunWorkProgramTab({
           </span>)}
       </div>
 
-      <div style={{
+      <div className="run-work-program-table-wrap" style={{
       overflowX: "auto"
     }}>
         <table className="coverage-matrix" style={{

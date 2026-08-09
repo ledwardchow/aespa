@@ -131,7 +131,7 @@ export function WebRunWorkProgramTab({
   const coveredCount = (totals.covered || 0) + (totals.finding || 0) + (totals.skipped || 0);
   const pct = totalCells > 0 ? Math.round(coveredCount / totalCells * 100) : 0;
   const effectiveCoverageMode = matrix?.coverage_mode || run?.coverage_mode || "track";
-  return <div style={{
+  return <div className="run-work-program-tab" style={{
     padding: 16
   }}>
       <div style={{
@@ -145,9 +145,6 @@ export function WebRunWorkProgramTab({
         margin: 0
       }}>OWASP Coverage Matrix</h3>
         <CoverageStatusBadges mode={effectiveCoverageMode} percent={pct} covered={coveredCount} total={totalCells} live={scanRunning} enforce={enforce} />
-        <div style={{
-        flex: 1
-      }}></div>
         {matrix?.pages?.length > 0 && <button className="btn sm" onClick={onExportMarkdown}>Export Markdown</button>}
         <button className="btn sm" disabled={seeding} onClick={onSeed}>
           {seeding ? "Populating…" : "Populate from Site Map"}
@@ -190,7 +187,7 @@ export function WebRunWorkProgramTab({
               {label} ({totals[s] || 0})
             </span>)}
         </div>
-        <div style={{
+        <div className="run-work-program-table-wrap" style={{
         overflowX: "auto"
       }}>
           <table className="coverage-matrix" style={{

@@ -441,6 +441,28 @@ a:hover { color: var(--accent-hover); }
   background: var(--panel-2);
 }
 
+/* Keep long list tables inside the content viewport so their headers stay
+   visible while the rows scroll. Short tables keep their natural height. */
+.content.scroll-content > .table-wrap {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 100%;
+}
+
+/* Detail pages can have several table sections above one another. Give each
+   long section its own body scroller instead of letting it push the page. */
+.content.scroll-content.stack .table-wrap {
+  max-height: min(520px, 60vh);
+}
+
+/* Run tabs with a direct table use the content viewport as their scroll area. */
+.content.scroll-content table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel-2);
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

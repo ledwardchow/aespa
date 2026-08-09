@@ -2,6 +2,23 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## August 9 Update — Applications and multi-repository campaign scanning
+
+### "Applications" targets
+
+A completely new scan mode alongside the existing "Sites", "APIs" and "SAST".  This mode is designed for a situation which is common in enterprise application development where code for one application is spread between numerous repositories, and the application may talk to several layers of upstream APIs (in their own repositories). A vulnerability in a upstream API might be exploitable in the ultimate frontend application but you'd never know, because no one would think to test it even if SAST finds something in the API's repository. 
+
+This mode allows you to upload code and (optionally) map it to a live testing target (Site or API mode). SAST scans will run on uploaded code and then a mapping step is performed, which determines what calls are made cross-repository (traces API calls/API routes and matches them up. 
+
+You can specify which target is the "ultimate frontend" for any repo. SAST findings in a repository are then traced through these route maps all the way through to that frontend, loaded into the DAST scan for that target and attack paths regenerated to validate that vulnerability on a live target.
+
+DAST scans run via this mode will run in "SAST Validate" mode.
+
+### SAST validation mode
+
+- **Validate imported SAST leads directly** (`coverage_mode="sast_validate"`, web/API scan UI): Web and API runs can now focus only on imported SAST leads. The Test Lead fetches each lead's full evidence, follows its attack path against the live target, and cannot finish until every imported lead is confirmed, dismissed, or marked inconclusive. Normal coverage work, specialist dispatch, and general post-scan reporting are skipped for this mode.
+
+
 ## [PR #257] August 2 Update - SAST/Crawler "2.0", usage statistics and schema cleanup
 
 ### Significant SAST improvements
