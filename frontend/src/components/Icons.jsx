@@ -61,3 +61,13 @@ export const IconBrain = () => <svg width="14" height="14" viewBox="0 0 24 24" f
   <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1 0-3.12 3 3 0 0 1 0-3.88 2.5 2.5 0 0 1 0-3.12A2.5 2.5 0 0 1 9.5 2Z" />
   <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 0-3.12 3 3 0 0 0 0-3.88 2.5 2.5 0 0 0 0-3.12A2.5 2.5 0 0 0 14.5 2Z" />
 </svg>;
+// A grouped-boxes glyph: several separate components (like Sites' 2x2 grid)
+// drawn wrapped inside one outer boundary — represents an Application as the
+// grouping of several repos/targets into one product.
+export const IconApplications = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.3" />
+  <rect x="3.3" y="3.3" width="4" height="4" rx="1" stroke="currentColor" stroke-width="1.3" />
+  <rect x="8.7" y="3.3" width="4" height="4" rx="1" stroke="currentColor" stroke-width="1.3" />
+  <rect x="3.3" y="8.7" width="4" height="4" rx="1" stroke="currentColor" stroke-width="1.3" />
+  <rect x="8.7" y="8.7" width="4" height="4" rx="1" stroke="currentColor" stroke-width="1.3" />
+</svg>;

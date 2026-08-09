@@ -109,6 +109,10 @@ def delete_site(site_id: int, session: Session = Depends(get_session)) -> None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
         ) from exc
+    except sites_service.SiteReferencedByApplication as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
 
 
 class _ScopeHostsPayload(_BaseModel):

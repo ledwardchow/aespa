@@ -35,12 +35,13 @@ export function ApiRunEndpointsTab({
   }}>✔</span> : <span style={{
     color: "var(--danger,#f44336)"
   }}>✘</span>;
-  return <div style={{
+  return <div className="run-endpoints-tab" style={{
     padding: "16px"
   }}>
       <h3 style={{
       marginBottom: 12
     }}>Endpoint Prerequisites</h3>
+      <div className="run-endpoints-table-wrap">
       <table className="data-table" style={{
       width: "100%",
       borderCollapse: "collapse"
@@ -80,6 +81,7 @@ export function ApiRunEndpointsTab({
         })}
         </tbody>
       </table>
+      </div>
     </div>;
 }
 

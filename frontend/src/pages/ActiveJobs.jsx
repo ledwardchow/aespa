@@ -9,8 +9,9 @@ import { usePolling } from "../hooks/usePolling";
 
 function activeJobBadge(job) {
   const status = job.status || "running";
-  const key = status === "failed" ? "danger" : status === "stopping" ? "stopping" : status === "complete" ? "ok" : ["running", "analysing", "analyzing"].includes(status) ? "running" : "neutral";
-  return <span className={"badge " + key}>{status === "analyzing" ? "analysing" : status}</span>;
+  const key = status === "failed" ? "danger" : status === "stopping" ? "stopping" : status === "complete" ? "ok" : ["running", "analysing", "analyzing", "sast_running", "correlating", "dast_running"].includes(status) ? "running" : "neutral";
+  const label = { sast_running: "source scan", correlating: "correlating", dast_running: "live testing" }[status] || status;
+  return <span className={"badge " + key}>{label === "analyzing" ? "analysing" : label}</span>;
 }
 function activeJobProgress(job) {
   if (job.total_pages !== null && job.total_pages !== undefined) {
@@ -47,8 +48,8 @@ export function ActiveJobsPage() {
       let valB = b[sortField];
 
       if (sortField === "site_name") {
-        valA = a.site_name || a.collection_name || "";
-        valB = b.site_name || b.collection_name || "";
+        valA = a.site_name || a.collection_name || a.application_name || "";
+        valB = b.site_name || b.collection_name || b.application_name || "";
       } else if (sortField === "pages_done") {
         valA = a.pages_done || 0;
         valB = b.pages_done || 0;
@@ -86,7 +87,9 @@ export function ActiveJobsPage() {
       [key]: true
     }));
     try {
-      if (j.run_type === "sast") {
+      if (j.run_type === "campaign") {
+        await api.stopCampaign(j.application_id, j.run_id);
+      } else if (j.run_type === "sast") {
         await api.stopSastScan(j.run_id);
       } else if (j.run_type === "api") {
         if (j.job_type === "A.L.I.C.E.") {
@@ -173,16 +176,27 @@ export function ActiveJobsPage() {
             <tbody>{sortedJobs.map(j => {
               const key = `${j.job_type}-${j.run_id}`;
               const isStopping = !!stopping[key];
+              const runLink = j.run_type === "campaign"
+                ? `#/applications/${j.application_id}/campaigns/${j.run_id}`
+                : j.run_type === "sast"
+                  ? `#/sast-runs/${j.run_id}/progress`
+                  : j.run_type === "api"
+                    ? `#/api-runs/${j.run_id}/status`
+                    : `#/runs/${j.run_id}`;
               return <tr key={key}>
                 <td>
-                  <a href={j.run_type === "sast" ? `#/sast-runs/${j.run_id}/progress` : j.run_type === "api" ? `#/api-runs/${j.run_id}/status` : `#/runs/${j.run_id}`} style={{
+                  <a href={runLink} style={{
                     fontWeight: 600
                   }}>{j.run_name}</a>
                   {j.current_url && <div className="url" style={{
                     marginTop: 3
                   }}>{truncUrl(j.current_url, 54)}</div>}
                 </td>
-                <td>{j.run_type === "sast" || j.run_type === "api" ? <a href={`#/apis/${j.collection_id}`}>{j.collection_name}</a> : <a href={`#/sites/${j.site_id}`}>{j.site_name}</a>}</td>
+                <td>{j.run_type === "campaign"
+                  ? <a href={`#/applications/${j.application_id}/campaigns/${j.run_id}`}>{j.application_name}</a>
+                  : j.run_type === "sast" || j.run_type === "api"
+                    ? <a href={`#/apis/${j.collection_id}`}>{j.collection_name}</a>
+                    : <a href={`#/sites/${j.site_id}`}>{j.site_name}</a>}</td>
                 <td>{j.job_type}</td>
                 <td>{activeJobBadge(j)}</td>
                 <td>{activeJobProgress(j)}</td>
@@ -193,7 +207,7 @@ export function ActiveJobsPage() {
                     justifyContent: "flex-end",
                     gap: "6px"
                   }}>
-                    <button className="btn secondary sm" onClick={() => nav(j.run_type === "sast" ? `#/sast-runs/${j.run_id}/progress` : j.run_type === "api" ? `#/api-runs/${j.run_id}/status` : `#/runs/${j.run_id}`)}>Open</button>
+                    <button className="btn secondary sm" onClick={() => nav(runLink)}>Open</button>
                     <button className="btn danger sm" onClick={() => stopJob(j)} disabled={isStopping}>{isStopping ? "Stopping…" : "Stop"}</button>
                   </div>
                 </td>

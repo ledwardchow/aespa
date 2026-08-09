@@ -62,12 +62,13 @@ export function ApiTestRunForm({
           </select>
         </div>
         <div className="field">
-          <label>Coverage mode</label>
+          <label>Scan mode</label>
           <select value={form.coverage_mode} onChange={e => upd({
             coverage_mode: e.target.value
           })}>
             <option value="track">Quick — adaptive scan with coverage tracking</option>
             <option value="enforce">Full — test every applicable coverage obligation</option>
+            <option value="sast_validate">SAST Validate — test only imported SAST leads</option>
           </select>
         </div>
         <div className="row spread" style={{

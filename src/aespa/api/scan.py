@@ -21,6 +21,7 @@ from aespa.models import (
     TestRunStatus,
 )
 from aespa.schemas import (
+    CoverageModeLiteral,
     ScanCheckpointStatusOut,
     ScanFindingImportIn,
     ScanFindingImportResult,
@@ -33,6 +34,7 @@ from aespa.services import findings as findings_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
+from aespa.services.references import ensure_finding_reference
 
 router = APIRouter(tags=["scan"])
 
@@ -45,7 +47,7 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
 
 
 class _StartScanBody(BaseModel):
-    coverage_mode: Optional[str] = None  # "track" | "enforce"
+    coverage_mode: Optional[CoverageModeLiteral] = None
     target_page_id: Optional[int] = None
     target_page_ids: Optional[list[int]] = None
     use_session: Optional[str] = None
@@ -65,7 +67,7 @@ async def start_thinking_scan(
         )
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-    if body and body.coverage_mode in ("track", "enforce"):
+    if body and body.coverage_mode is not None:
         run.coverage_mode = body.coverage_mode
     if body:
         target_ids = body.target_page_ids or (
@@ -83,13 +85,22 @@ async def start_thinking_scan(
             run.target_session_label = body.use_session or None
         session.add(run)
         session.commit()
-    # Seed workprogram synchronously so it's populated before the response returns.
-    try:
-        from aespa.services.web_workprogram import seed_web_workprogram
+    if run.coverage_mode != "sast_validate":
+        # Seed workprogram synchronously so it's populated before the response returns.
+        try:
+            from aespa.services.web_workprogram import seed_web_workprogram
 
-        seed_web_workprogram(run_id)
-    except Exception as _se:
-        pass  # non-fatal
+            seed_web_workprogram(run_id)
+        except Exception:
+            pass  # non-fatal
+    if run.coverage_mode == "sast_validate":
+        from aespa.services.scan_leads import get_leads_for_run
+
+        if not get_leads_for_run("web", run_id):
+            raise HTTPException(
+                status_code=409,
+                detail="No open imported SAST leads are available to validate",
+            )
     await scanner_svc.start_thinking_scan(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
@@ -180,12 +191,21 @@ async def resume_thinking_scan(
     status = checkpoint_svc.checkpoint_status(run_id)
     if not status["exists"]:
         raise HTTPException(status_code=404, detail="No checkpoint found for this run")
-    try:
-        from aespa.services.web_workprogram import seed_web_workprogram
+    if run.coverage_mode == "sast_validate":
+        from aespa.services.scan_leads import get_leads_for_run
 
-        seed_web_workprogram(run_id)
-    except Exception:
-        pass
+        if not get_leads_for_run("web", run_id):
+            raise HTTPException(
+                status_code=409,
+                detail="No open imported SAST leads are available to validate",
+            )
+    else:
+        try:
+            from aespa.services.web_workprogram import seed_web_workprogram
+
+            seed_web_workprogram(run_id)
+        except Exception:
+            pass
     await scanner_svc.start_thinking_scan_resume(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
@@ -271,6 +291,9 @@ def get_findings(
     # Sort: critical → high → medium → low → info
     _order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings = sorted(findings, key=lambda f: _order.get(f.severity, 5))
+    for finding in findings:
+        ensure_finding_reference(session, finding)
+    session.commit()
     return [ScanFindingOut.model_validate(f) for f in findings]
 
 
@@ -365,6 +388,7 @@ def import_findings(
         )
         session.add(finding)
         session.flush()
+        ensure_finding_reference(session, finding)
         imported.append(finding)
 
     session.commit()
@@ -589,6 +613,7 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         payload_purp = main_d.get("payload_purpose", "")
         payload_sum = main_d.get("payload_summary", "")
         finding_id = complete_d.get("finding_id")
+        finding_reference = complete_d.get("finding_reference")
         affected_url = complete_d.get("affected_url", "")
         ts = main_e.created_at.strftime("%H:%M:%S") if main_e.created_at else ""
 
@@ -622,7 +647,7 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         if finding_id and affected_url:
             lines += [
                 f"**Affected URL:** {affected_url}  ",
-                f"**Finding ID:** {finding_id}",
+                f"**Finding reference:** {finding_reference or f'#{finding_id}'}",
                 "",
             ]
 

@@ -2,11 +2,14 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "../../lib/api";
 import { leadsExportFilename, leadsToMarkdown, downloadTextFile } from "../../lib/utilities";
 import { usePolling } from "../../hooks/usePolling";
+import { SastLeadDetails } from "../../components/SastLeadDetails";
+import { LeadReferenceLink } from "../../components/FindingReferenceLink";
 
 export function WebRunSastLeadsTab({
   runId,
   scanRunning,
-  runKind = "web"
+  runKind = "web",
+  initialLeadRef
 }) {
   const isApi = runKind === "api";
   const [available, setAvailable] = useState([]);
@@ -23,6 +26,12 @@ export function WebRunSastLeadsTab({
   usePolling(loadLeads, { enabled: scanRunning, intervalMs: 3000 });
   usePolling(loadAvailable, { enabled: false });
   // Final refresh when the scan stops so the last investigation outcomes appear.
+  useEffect(() => {
+    if (initialLeadRef) {
+      const match = leads.find(lead => lead.reference === initialLeadRef);
+      if (match) setExpanded(previous => new Set(previous).add(match.id));
+    }
+  }, [initialLeadRef, leads]);
   useEffect(() => {
     if (prevScanRunning.current && !scanRunning) {
       loadLeads();
@@ -175,7 +184,7 @@ export function WebRunSastLeadsTab({
                   <td><span className={"sev-badge " + sevCls(l.severity)}>{l.severity || "medium"}</span></td>
                   <td style={{
               fontWeight: 600
-            }}>{l.title}</td>
+            }}><LeadReferenceLink reference={l.reference} title={l.title} description={l.description} severity={l.severity} href={`#/runs/${runId}/leads?lead=${encodeURIComponent(l.reference || "")}`} /> <span>{l.title}</span></td>
                   <td>{l.category || "—"}</td>
                   <td>{Math.round((l.confidence || 0) * 100)}%</td>
                   <td className="subtle" style={{
@@ -190,50 +199,25 @@ export function WebRunSastLeadsTab({
               gap: 4,
               justifyContent: "flex-end"
             }}>
-                    {investigated && <span className="subtle" style={{
+                   <span className="subtle" style={{
                 fontSize: 11
-              }}>{isExpanded ? "▲" : "▼"}</span>}
+              }}>{isExpanded ? "▲" : "▼"}</span>
                     <button className="btn ghost sm" title="Delete lead" onClick={e => {
                 e.stopPropagation();
                 onDeleteRow(l.id);
               }}>✕</button>
                   </td>
                 </tr>,
-            isExpanded && investigated && <tr key={l.id + "-detail"} className="findings-detail-row">
+            isExpanded && <tr key={l.id + "-detail"} className="findings-detail-row">
                     <td colSpan={7} style={{
                 padding: "12px 16px",
                 background: "var(--bg, rgba(0,0,0,0.15))",
                 borderTop: "1px solid var(--border, rgba(255,255,255,0.06))"
               }}>
-                      {l.note && <div style={{
-                  marginBottom: 8
-                }}><b>Investigation note:</b> {l.note}</div>}
-                      {l.linked_finding_id && <div style={{
-                  marginBottom: 8
-                  }}><b>Linked finding:</b> <a href={`#/${isApi ? "api-runs" : "runs"}/${runId}/findings`} style={{
-                    color: "var(--success, #4caf50)"
-                  }}>Finding #{l.linked_finding_id}</a></div>}
-                      {l.investigated_by_run_id && <div style={{
-                  marginBottom: 8,
-                  fontSize: 11,
-                  color: "var(--muted)"
-                }}>Investigated by {l.investigated_by_run_type || "run"} #{l.investigated_by_run_id}</div>}
-                      {l.description && <div style={{
-                  marginBottom: 8
-                }}><b>Description:</b> {l.description}</div>}
-                      {l.evidence && <div><b>Code evidence:</b>
-                          <pre style={{
-                      fontSize: 11,
-                      background: "var(--code-bg,#1e1e2e)",
-                      color: "var(--code-fg,#cdd6f4)",
-                      padding: 8,
-                      borderRadius: 4,
-                      overflow: "auto",
-                      maxHeight: 220,
-                      whiteSpace: "pre-wrap",
-                      marginTop: 4
-                    }}>{l.evidence}</pre>
-                        </div>}
+                      <SastLeadDetails
+                        lead={l}
+                        findingHref={`#/${isApi ? "api-runs" : "runs"}/${runId}/findings`}
+                      />
                     </td>
                   </tr>
           ];

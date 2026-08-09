@@ -99,6 +99,56 @@ export const api = {
   getRunLeads:         (id)       => req(`/api/test-runs/${id}/leads`),
   clearRunLeads:       (id)       => req(`/api/test-runs/${id}/leads`, { method:"DELETE" }),
   deleteRunLead:       (id,lid)   => req(`/api/test-runs/${id}/leads/${lid}`, { method:"DELETE" }),
+  // Applications (multi-repository campaigns)
+  listApplications:    ()          => req("/api/applications"),
+  createApplication:   (b)         => req("/api/applications", { method:"POST", body:b }),
+  getApplication:      (id)        => req(`/api/applications/${id}`),
+  updateApplication:   (id,b)      => req(`/api/applications/${id}`, { method:"PATCH", body:b }),
+  deleteApplication:   (id)        => req(`/api/applications/${id}`, { method:"DELETE" }),
+  listAppComponents:   (id)        => req(`/api/applications/${id}/components`),
+  createAppComponent:  (id,b)      => req(`/api/applications/${id}/components`, { method:"POST", body:b }),
+  updateAppComponent:  (id,cid,b)  => req(`/api/applications/${id}/components/${cid}`, { method:"PATCH", body:b }),
+  deleteAppComponent:  (id,cid)    => req(`/api/applications/${id}/components/${cid}`, { method:"DELETE" }),
+  listComponentSnapshots: (id,cid) => req(`/api/applications/${id}/components/${cid}/snapshots`),
+  uploadComponentSnapshot: (id,cid,file) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return fetch(`/api/applications/${id}/components/${cid}/snapshots`, { method:"POST", body:fd })
+      .then(async r => { const t = await r.text(); const d = t?JSON.parse(t):null; if(!r.ok){ const e=new Error(formatError(d)||`${r.status} ${r.statusText}`); e.status=r.status; throw e; } return d; });
+  },
+  deleteComponentSnapshot: (id,cid,sid) => req(`/api/applications/${id}/components/${cid}/snapshots/${sid}`, { method:"DELETE" }),
+  listAppTargets:      (id)        => req(`/api/applications/${id}/targets`),
+  attachAppTarget:     (id,b)      => req(`/api/applications/${id}/targets`, { method:"POST", body:b }),
+  updateAppTarget:     (id,tid,b)  => req(`/api/applications/${id}/targets/${tid}`, { method:"PATCH", body:b }),
+  detachAppTarget:     (id,tid)   => req(`/api/applications/${id}/targets/${tid}`, { method:"DELETE" }),
+  listAppHints:        (id)        => req(`/api/applications/${id}/hints`),
+  createAppHint:       (id,b)      => req(`/api/applications/${id}/hints`, { method:"POST", body:b }),
+  deleteAppHint:       (id,hid)    => req(`/api/applications/${id}/hints/${hid}`, { method:"DELETE" }),
+  listCampaigns:       (id)        => req(`/api/applications/${id}/campaigns`),
+  createCampaign:      (id,b)      => req(`/api/applications/${id}/campaigns`, { method:"POST", body:b }),
+  getCampaign:         (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}`),
+  deleteCampaign:      (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}`, { method:"DELETE" }),
+  startCampaign:       (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/start`, { method:"POST" }),
+  stopCampaign:        (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/stop`, { method:"POST" }),
+  retryCampaign:       (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/retry`, { method:"POST" }),
+  resumeCampaignSource:(id,cid,mid) => req(`/api/applications/${id}/campaigns/${cid}/sources/${mid}/resume`, { method:"POST" }),
+  resumeCampaignTarget:(id,cid,mid) => req(`/api/applications/${id}/campaigns/${cid}/targets/${mid}/resume`, { method:"POST" }),
+  getCampaignStatus:   (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/status`),
+  getCampaignActivity: (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/activity`),
+  // URL builder (not a fetch call) — EventSource needs a raw URL, not the
+  // req() wrapper. cursor is the opaque event_id ("<agent_wm>.<scan_wm>")
+  // from a previously received CampaignActivityEntry; omit to replay full
+  // history. This is the cursor-safe replay-then-follow feed (no
+  // fetch→subscribe gap) — prefer it over the plain /events stream.
+  getCampaignActivityStreamUrl: (id,cid,cursor) => `/api/applications/${id}/campaigns/${cid}/activity/stream${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+  getCampaignConnections: (id,cid,scope="cross_component") => req(`/api/applications/${id}/campaigns/${cid}/connections${scope ? `?scope=${scope}` : ""}`),
+  rebuildCampaignConnections: (id,cid) => req(`/api/applications/${id}/campaigns/${cid}/connections/rebuild`, { method:"POST" }),
+  getCampaignMappings: (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/mappings`),
+  editCampaignMapping: (id,cid,mid,b) => req(`/api/applications/${id}/campaigns/${cid}/mappings/${mid}`, { method:"PUT", body:b }),
+  reviewCampaignMappings: (id,cid,b) => req(`/api/applications/${id}/campaigns/${cid}/review`, { method:"POST", body:b }),
+  supplementalValidateCampaignTarget: (id,cid,tid,b) => req(`/api/applications/${id}/campaigns/${cid}/targets/${tid}/supplemental-validate`, { method:"POST", body:b }),
+  continueCampaign:    (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/continue`, { method:"POST" }),
+  getCampaignFindings: (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/findings`),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMModels:    ()            => req("/api/settings/llm/model-configs"),
@@ -123,6 +173,8 @@ export const api = {
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
   getCrawlerConfig: ()            => req("/api/settings/crawler-config"),
   upsertCrawlerConfig: (b)        => req("/api/settings/crawler-config", { method:"PUT", body:b }),
+  getComponentMapperConfig: ()    => req("/api/settings/component-mapper-config"),
+  upsertComponentMapperConfig:(b) => req("/api/settings/component-mapper-config", { method:"PUT", body:b }),
   getBurpRestApiConfig: ()        => req("/api/settings/burp-rest-api"),
   upsertBurpRestApiConfig: (b)    => req("/api/settings/burp-rest-api", { method:"PUT", body:b }),
   testBurpConnection: ()          => req("/api/settings/burp-rest-api/test-connection", { method:"POST" }),

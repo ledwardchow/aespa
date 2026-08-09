@@ -5,7 +5,7 @@ import React, { useEffect, useState } from "react";
 
 import { api } from "./lib/api";
 import { useRoute } from "./lib/router";
-import { IconSites, IconApis, IconSettings, IconPlay, IconShield, IconChevronLeft, IconChevronRight, IconBug, IconChart } from "./components/Icons";
+import { IconSites, IconApis, IconSettings, IconPlay, IconShield, IconChevronLeft, IconChevronRight, IconBug, IconChart, IconApplications } from "./components/Icons";
 
 const lazyNamed = (loader, name) => React.lazy(() => loader().then(module => ({
   default: module[name]
@@ -14,6 +14,7 @@ const loadApiPages = () => import("./pages/ApiCollections");
 const loadSastPages = () => import("./pages/SastRuns");
 const loadSitePages = () => import("./pages/SiteDetail");
 const loadSettingsPages = () => import("./pages/Settings");
+const loadApplicationsPages = () => import("./pages/Applications");
 
 const ApiCollectionsList = lazyNamed(loadApiPages, "ApiCollectionsList");
 const ApiCollectionForm = lazyNamed(loadApiPages, "ApiCollectionForm");
@@ -36,6 +37,11 @@ const DebugPage = lazyNamed(loadSettingsPages, "DebugPage");
 const ReportingDebugPage = lazyNamed(loadSettingsPages, "ReportingDebugPage");
 const ActiveJobsPage = lazyNamed(() => import("./pages/ActiveJobs"), "ActiveJobsPage");
 const StatisticsPage = lazyNamed(() => import("./pages/Statistics"), "StatisticsPage");
+const ApplicationsList = lazyNamed(loadApplicationsPages, "ApplicationsList");
+const ApplicationForm = lazyNamed(loadApplicationsPages, "ApplicationForm");
+const ApplicationDetail = lazyNamed(loadApplicationsPages, "ApplicationDetail");
+const CampaignNewForm = lazyNamed(loadApplicationsPages, "CampaignNewForm");
+const CampaignDetail = lazyNamed(loadApplicationsPages, "CampaignDetail");
 
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
@@ -43,6 +49,7 @@ function App() {
   const route = useRoute();
   const onSites = ["list", "site-new", "site-edit", "site-detail", "run-new", "run-detail"].includes(route.name);
   const onApis = ["api-list", "api-new", "api-edit", "api-detail", "api-files"].includes(route.name);
+  const onApplications = ["app-list", "app-new", "app-edit", "app-detail", "campaign-new", "campaign-detail"].includes(route.name);
   const onActiveJobs = route.name === "active-jobs";
   const onSettings = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
@@ -58,6 +65,14 @@ function App() {
       const val = localStorage.getItem("aespa_show_username");
       return val === null ? true : val === "true";
     } catch  {
+      return true;
+    }
+  });
+  const [showApplications, setShowApplications] = useState(() => {
+    try {
+      const val = localStorage.getItem("aespa_show_applications");
+      return val === null ? true : val === "true";
+    } catch {
       return true;
     }
   });
@@ -125,6 +140,11 @@ function App() {
         </div>
         <nav className="sidebar-nav">
           {!collapsed && <div className="nav-section-label">Targets</div>}
+          {showApplications && (
+            <a href="#/applications" className={"nav-item" + (onApplications ? " active" : "")} title="Applications">
+              <span className="nav-icon"><IconApplications /></span>{!collapsed && " Applications"}
+            </a>
+          )}
           <a href="#/" className={"nav-item" + (onSites ? " active" : "")} title="Sites">
             <span className="nav-icon"><IconSites /></span>{!collapsed && " Sites"}
           </a>
@@ -153,8 +173,8 @@ function App() {
           <a href="#/external-integrations" className={"nav-item" + (onExternalIntegrations ? " active" : "")} title="External Integrations">
             <span className="nav-icon"><IconShield /></span>{!collapsed && " External Integrations"}
           </a>
-          <a href="#/debug" className={"nav-item" + (onDebug ? " active" : "")} title="Debug">
-            <span className="nav-icon"><IconBug /></span>{!collapsed && " Debug"}
+          <a href="#/debug" className={"nav-item" + (onDebug ? " active" : "")} title="System Settings">
+            <span className="nav-icon"><IconBug /></span>{!collapsed && " System Settings"}
           </a>
           {reportingDebugCfg?.panel_enabled && <>
             {!collapsed && <div className="nav-section-label" style={{
@@ -179,18 +199,24 @@ function App() {
           {route.name === "api-detail" && <ApiCollectionDetail key={route.id} collectionId={route.id} />}
           {route.name === "api-files" && <ApiFilesManager key={route.id} collectionId={route.id} />}
           {route.name === "api-run-new" && <ApiTestRunForm key={route.id} collectionId={route.id} />}
-          {route.name === "api-run-detail" && <ApiTestRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
+          {route.name === "api-run-detail" && <ApiTestRunDetail key={route.id} runId={route.id} initialTab={route.tab} initialFindingRef={route.findingRef} />}
           {route.name === "sast-list" && <SastRunsListPage />}
           {route.name === "sast-run-new" && <SastRunForm key="sast-new" />}
-          {route.name === "sast-run-detail" && <SastRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
+          {route.name === "sast-run-detail" && <SastRunDetail key={route.id} runId={route.id} initialTab={route.tab} initialLeadRef={route.leadRef} />}
+          {route.name === "app-list" && <ApplicationsList />}
+          {route.name === "app-new" && <ApplicationForm key="app-new" />}
+          {route.name === "app-edit" && <ApplicationForm key={route.id} applicationId={route.id} />}
+          {route.name === "app-detail" && <ApplicationDetail key={route.id} applicationId={route.id} initialTab={route.tab} />}
+          {route.name === "campaign-new" && <CampaignNewForm key={route.id} applicationId={route.id} />}
+          {route.name === "campaign-detail" && <CampaignDetail key={`${route.id}-${route.campaignId}`} applicationId={route.id} campaignId={route.campaignId} initialTab={route.tab} initialFindingRef={route.findingRef} />}
           {route.name === "active-jobs" && <ActiveJobsPage />}
           {route.name === "stats" && <StatisticsPage />}
           {route.name === "run-new" && <TestRunForm key={route.siteId} siteId={route.siteId} />}
-          {route.name === "run-detail" && <TestRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
+          {route.name === "run-detail" && <TestRunDetail key={route.id} runId={route.id} initialTab={route.tab} initialFindingRef={route.findingRef} initialLeadRef={route.leadRef} />}
           {route.name === "settings" && <SettingsPage />}
           {route.name === "scan-policy" && <ScanPolicyPage />}
           {route.name === "external-integrations" && <ExternalIntegrationsPage />}
-          {route.name === "debug" && <DebugPage showUsername={showUsername} setShowUsername={setShowUsername} username={username} reportingDebugCfg={reportingDebugCfg} setReportingDebugCfg={setReportingDebugCfg} />}
+          {route.name === "debug" && <DebugPage showUsername={showUsername} setShowUsername={setShowUsername} showApplications={showApplications} setShowApplications={setShowApplications} username={username} reportingDebugCfg={reportingDebugCfg} setReportingDebugCfg={setReportingDebugCfg} />}
           {route.name === "reporting-debug" && <ReportingDebugPage />}
         </React.Suspense>
       </div>

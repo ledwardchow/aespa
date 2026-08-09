@@ -302,6 +302,8 @@ class ApiCredentialCreate(BaseModel):
 
 # ── API Test Run schemas ──────────────────────────────────────────────────────
 
+CoverageModeLiteral = Literal["track", "enforce", "sast_validate"]
+
 
 class ApiTestRunCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -309,7 +311,7 @@ class ApiTestRunCreate(BaseModel):
     name: str | None = None  # auto-generated if omitted
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
-    coverage_mode: str = "track"  # track|enforce
+    coverage_mode: CoverageModeLiteral = "track"
 
 
 class ApiTestRunSummary(BaseModel):
@@ -408,6 +410,7 @@ class ScanLeadOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    reference: str = ""
     collection_id: int | None
     producer_run_type: str
     producer_run_id: int
@@ -435,8 +438,14 @@ class ScanLeadOut(BaseModel):
     investigated_by_run_type: str | None
     investigated_by_run_id: int | None
     linked_finding_id: int | None
+    linked_finding_reference: str | None = None
+    origin_reference: str | None = None
     imported_into_run_type: str | None
     imported_into_run_id: int | None
+    origin_lead_id: int | None = None
+    trace_path_key: str | None = None
+    trace_status: str = "none"
+    trace_confidence: float | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -811,6 +820,32 @@ class CrawlerConfigIn(CrawlerConfigBase):
 
 
 class CrawlerConfigOut(CrawlerConfigBase):
+    updated_at: datetime
+
+
+class ComponentMapperConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    max_tool_calls: int = Field(default=250, ge=1, le=1000)
+    max_source_files: int = Field(default=500, ge=1, le=10000)
+    max_source_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        ge=1 * 1024 * 1024,
+        le=250 * 1024 * 1024,
+    )
+    max_facts: int = Field(default=500, ge=1, le=1000)
+    max_concurrent: int = Field(default=4, ge=1, le=32)
+    max_trace_edges: int = Field(default=8, ge=1, le=100)
+    max_trace_components: int = Field(default=6, ge=1, le=50)
+    max_paths_per_lead: int = Field(default=10, ge=1, le=100)
+    min_trace_confidence: float = Field(default=0.50, ge=0.0, le=1.0)
+
+
+class ComponentMapperConfigIn(ComponentMapperConfigBase):
+    pass
+
+
+class ComponentMapperConfigOut(ComponentMapperConfigBase):
     updated_at: datetime
 
 
@@ -1191,6 +1226,8 @@ class ActiveJobSummary(BaseModel):
     run_id: int
     site_id: Optional[int] = None
     site_name: Optional[str] = None
+    application_id: Optional[int] = None
+    application_name: Optional[str] = None
     run_name: str
     job_type: str
     status: str
@@ -1284,7 +1321,9 @@ class GraphNode(BaseModel):
     status: str
     error_message: str | None = None
     context: str | None
-    analysis_status: str = "pending"  # pending | queued | analyzing | complete | skipped
+    analysis_status: str = (
+        "pending"  # pending | queued | analyzing | complete | skipped
+    )
     in_scope: bool = True
     scan_status: str = "pending"
     accessible_by: list[int] = []
@@ -1406,12 +1445,16 @@ class TrafficEntryOut(BaseModel):
     response_body: str | None
     duration_ms: int | None
     username: str | None
+    page_id: int | None = None
+    session_label: str | None = None
+    interaction_id: str | None = None
 
 
 class ScanFindingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    reference: str = ""
     test_run_id: int | None = None
     page_id: int | None
     owasp_category: str
@@ -1433,6 +1476,8 @@ class ScanFindingOut(BaseModel):
     finding_source: str = "unknown"
     validation_status: str
     validation_note: str | None
+    origin: dict | None = None
+    validated_by: dict | None = None
     merged_instances: str = "[]"
     poc_command: str = ""
     poc_setup: str = ""
@@ -1531,3 +1576,381 @@ class ScanCheckpointStatusOut(BaseModel):
     exists: bool
     step_count: int | None = None
     updated_at: datetime | None = None
+
+
+# ── Applications & multi-repository campaigns ────────────────────────────────
+
+
+class ApplicationCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+
+
+class ApplicationUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+
+
+class ApplicationSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+    component_count: int = 0
+    site_count: int = 0
+    api_collection_count: int = 0
+    last_campaign_status: str | None = None
+
+
+class ApplicationDetail(ApplicationSummary):
+    pass
+
+
+class ApplicationComponentCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    role: str | None = None
+    description: str | None = None
+
+
+class ApplicationComponentUpdate(BaseModel):
+    role: str | None = None
+    description: str | None = None
+
+
+class ApplicationComponentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    application_id: int
+    name: str
+    role: str | None
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+    latest_snapshot: "ComponentSnapshotOut | None" = None
+    snapshot_count: int = 0
+
+
+class ComponentSnapshotOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    component_id: int
+    filename: str
+    size_bytes: int
+    sha256: str
+    created_at: datetime
+
+
+class ApplicationTargetCreate(BaseModel):
+    target_type: Literal["site", "api_collection"]
+    target_id: int
+
+
+class ApplicationTargetUpdate(BaseModel):
+    component_id: int | None = None
+
+
+class ApplicationTargetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    application_id: int
+    target_type: str
+    target_id: int
+    component_id: int | None = None
+    created_at: datetime
+    name: str | None = None  # resolved Site/ApiCollection name for convenience
+
+
+class ComponentTargetHintCreate(BaseModel):
+    component_id: int
+    target_id: int
+    note: str | None = None
+
+
+class ComponentTargetHintOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    application_id: int
+    component_id: int
+    target_id: int
+    note: str | None
+    created_at: datetime
+
+
+class CampaignSourceMemberCreate(BaseModel):
+    component_id: int
+    snapshot_id: int
+
+
+class CampaignTargetMemberCreate(BaseModel):
+    target_id: int
+
+
+class CampaignCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    source_members: list[CampaignSourceMemberCreate] = Field(min_length=1)
+    target_members: list[CampaignTargetMemberCreate] = Field(min_length=1)
+    llm_config_id: int | None = None
+    llm_profile_id: int | None = None
+    max_parallel_sast: int = Field(default=2, ge=1, le=8)
+    max_trace_edges: int | None = Field(default=None, ge=1, le=64)
+    max_trace_components: int | None = Field(default=None, ge=1, le=32)
+    max_paths_per_lead: int | None = Field(default=None, ge=1, le=100)
+    min_trace_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class CampaignSourceMemberOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    component_id: int
+    snapshot_id: int
+    sast_run_id: int | None
+    # Current status of the linked SastRun. This can differ from the campaign
+    # member status when the run is resumed from its standalone page.
+    run_status: str | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignTargetMemberOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    target_id: int
+    target_type: str
+    test_run_id: int | None
+    api_test_run_id: int | None
+    # Current status of the linked web/API run, rather than only the campaign
+    # orchestration status.
+    run_status: str | None = None
+    status: str
+    status_message: str | None = None
+    validation_summary_json: str = "{}"
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    application_id: int
+    name: str
+    status: str
+    max_parallel_sast: int
+    warnings_json: str = "[]"
+    review_submitted_at: datetime | None
+    error_message: str | None
+    # Set only while status == "interrupted"; the stage retry will resume.
+    interrupted_stage: str | None = None
+    max_trace_edges: int | None = None
+    max_trace_components: int | None = None
+    max_paths_per_lead: int | None = None
+    min_trace_confidence: float | None = None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignDetail(CampaignSummary):
+    source_members: list[CampaignSourceMemberOut] = []
+    target_members: list[CampaignTargetMemberOut] = []
+
+
+class ComponentConnectionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    source_component_id: int
+    source_fact_id: int
+    target_component_id: int
+    target_fact_id: int
+    match_kind: str
+    confidence: float
+    rationale: str
+    evidence_json: str
+    edge_kind: str = "calls"
+    source_sast_run_id: int | None = None
+    target_sast_run_id: int | None = None
+    path_scope: str = "cross_component"
+    source_component_name: str | None = None
+    target_component_name: str | None = None
+    source_fact_summary: dict = Field(default_factory=dict)
+    target_fact_summary: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class LeadTargetMappingOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    lead_id: int
+    target_id: int
+    target_type: str
+    score: float
+    rationale: str
+    evidence_json: str
+    status: str
+    copied_lead_id: int | None
+    reviewed_at: datetime | None
+    auto_approved: bool = False
+    approved: bool | None = None
+    final_score: float | None = None
+    change_reason: str | None = None
+    path_json: str = "{}"
+    approved_attack_path_json: str = "{}"
+    final_attack_path_json: str = "{}"
+    attack_path_changes_json: str = "[]"
+    path_status: str | None = None
+    edited_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    # Lead context for the review UI, added on top of the raw mapping row —
+    # backward compatible: existing consumers reading only the fields above
+    # are unaffected. Populated best-effort; left None/empty if the lead row
+    # (or its component provenance) cannot be resolved for any reason.
+    lead_reference: str | None = None
+    lead_title: str | None = None
+    lead_description: str | None = None
+    lead_severity: str | None = None
+    lead_location: str | None = None
+    lead_producer_run_type: str | None = None
+    lead_producer_run_id: int | None = None
+    lead_category: str | None = None
+    lead_confidence: float | None = None
+    lead_source: str | None = None
+    lead_fingerprint: str | None = None
+    lead_origin_lead_id: int | None = None
+    lead_origin_reference: str | None = None
+    lead_trace_path_key: str | None = None
+    lead_trace_status: str | None = None
+    lead_trace_confidence: float | None = None
+    lead_suggested_endpoint: str | None = None
+    lead_status: str | None = None
+    lead_validation_status: str | None = None
+    lead_validation_reasoning: str | None = None
+    lead_reportable: bool | None = None
+    lead_evidence: str | None = None
+    lead_note: str | None = None
+    lead_source_trace_json: str | None = None
+    lead_control_trace_json: str | None = None
+    lead_sink_trace_json: str | None = None
+    lead_counterevidence_json: str | None = None
+    lead_proof_gaps_json: str | None = None
+    lead_attack_path_json: str | None = None
+    component_ids: list[int] = Field(default_factory=list)
+    component_names: list[str] = Field(default_factory=list)
+
+
+class LeadTargetMappingReviewItem(BaseModel):
+    mapping_id: int
+    approve: bool
+
+
+class LeadTargetMappingReviewRequest(BaseModel):
+    """A batch of approve/reject decisions. May be empty, but only when the
+    campaign has zero pending proposals — validated server-side."""
+
+    decisions: list[LeadTargetMappingReviewItem] = Field(default_factory=list)
+
+
+class LeadTargetMappingReviewResult(BaseModel):
+    approved: int
+    rejected: int
+    copied: int
+
+
+class LeadTargetMappingEditRequest(BaseModel):
+    expected_updated_at: datetime | None = None
+    path: dict = Field(default_factory=dict)
+
+
+class CampaignSupplementalValidationRequest(BaseModel):
+    mapping_ids: list[int] = Field(min_length=1)
+
+
+class CampaignFindingRow(BaseModel):
+    """One combined-findings row: a ScanFinding plus its component/target context."""
+
+    finding_id: int
+    reference: str = ""
+    run_reference: str = ""
+    target_type: str
+    target_run_id: int
+    # First contributing component id (kept for backward compatibility);
+    # component_name is comma-joined when a cross-repo lead has more than
+    # one contributing component. Both stay None when the finding has no
+    # linked campaign lead — never guessed from target/host matching.
+    component_id: int | None
+    component_name: str | None
+    component_ids: list[int] = Field(default_factory=list)
+    component_names: list[str] = Field(default_factory=list)
+    target_name: str | None
+    title: str
+    description: str = ""
+    impact: str = ""
+    likelihood: str = ""
+    recommendation: str = ""
+    cvss_score: float = 0.0
+    cvss_vector: str = ""
+    affected_url: str = ""
+    evidence: str = ""
+    request_evidence: str = ""
+    response_evidence: str = ""
+    evidence_items: list[dict] = Field(default_factory=list)
+    validation_note: str | None = None
+    merged_instances: str = "[]"
+    poc_command: str = ""
+    poc_setup: str = ""
+    finding_source: str = "unknown"
+    origin: dict | None = None
+    validated_by: dict | None = None
+    severity: str
+    status: str
+    frontend_attack_path: dict | None = None
+    backend_attack_path: dict | None = None
+
+
+class CampaignActivityEntry(BaseModel):
+    """One persisted campaign activity row — an AgentLog or ScanLog entry
+    tagged run_kind='campaign', merged into one stable chronological feed
+    that matches what the live SSE stream shows in real time.
+
+    ``event_id`` is a stable, monotonically-advancing cursor: the composite
+    "<max agent_log.id seen>.<max scan_log.id seen>" watermark immediately
+    after this entry, in the order this feed emits entries. Passing it back
+    as the ``cursor`` query param (or ``Last-Event-ID`` header) on
+    ``.../activity/stream`` resumes exactly after it — never repeating and
+    never skipping an entry, even though AgentLog and ScanLog are two
+    independently-numbered tables merged into one feed.
+    """
+
+    event_id: str = ""
+    timestamp: datetime
+    type: str  # "agent_status" | "scanner_phase"
+    status: str
+    role: str | None = None  # agent_status only
+    phase: str | None = None  # scanner_phase only
+    message: str | None = None  # scanner_phase only
+    task: str | None = None  # agent_status only (AgentLog.current_task)
+    outcome: str | None = None  # agent_status only
+
+
+class CampaignProgress(BaseModel):
+    status: str
+    warnings: list[str] = []
+    source_members: list[CampaignSourceMemberOut] = []
+    target_members: list[CampaignTargetMemberOut] = []
