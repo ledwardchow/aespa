@@ -62,8 +62,10 @@ from aespa.schemas import (
     CampaignDetail,
     CampaignFindingRow,
     CampaignProgress,
+    CampaignSourceMemberOut,
     CampaignSummary,
     CampaignSupplementalValidationRequest,
+    CampaignTargetMemberOut,
     ComponentConnectionOut,
     ComponentSnapshotOut,
     ComponentTargetHintCreate,
@@ -652,8 +654,30 @@ def _to_campaign_detail(session: Session, campaign) -> CampaignDetail:
     ).all()
     return CampaignDetail(
         **CampaignSummary.model_validate(campaign).model_dump(),
-        source_members=list(source_members),
-        target_members=list(target_members),
+        source_members=[
+            _to_campaign_source_member(session, member) for member in source_members
+        ],
+        target_members=[
+            _to_campaign_target_member(session, member) for member in target_members
+        ],
+    )
+
+
+def _to_campaign_source_member(session: Session, member) -> CampaignSourceMemberOut:
+    result = CampaignSourceMemberOut.model_validate(member)
+    return result.model_copy(
+        update={
+            "run_status": campaigns_svc.get_campaign_member_run_status(session, member)
+        }
+    )
+
+
+def _to_campaign_target_member(session: Session, member) -> CampaignTargetMemberOut:
+    result = CampaignTargetMemberOut.model_validate(member)
+    return result.model_copy(
+        update={
+            "run_status": campaigns_svc.get_campaign_member_run_status(session, member)
+        }
     )
 
 
@@ -793,7 +817,18 @@ def campaign_status(
         progress = campaigns_svc.get_campaign_progress(session, campaign_id)
     except campaigns_svc.CampaignNotFound as exc:
         raise _not_found(exc) from exc
-    return CampaignProgress(**progress)
+    return CampaignProgress(
+        status=progress["status"],
+        warnings=progress["warnings"],
+        source_members=[
+            _to_campaign_source_member(session, member)
+            for member in progress["source_members"]
+        ],
+        target_members=[
+            _to_campaign_target_member(session, member)
+            for member in progress["target_members"]
+        ],
+    )
 
 
 @router.get("/{application_id}/campaigns/{campaign_id}/events")

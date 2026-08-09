@@ -152,6 +152,16 @@
 
 /* ── Review leads ───────────────────────────────────────────── */
 
+.app-review-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(220px, 1.2fr);
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.app-review-filters > .select { width: 100%; min-width: 0; }
+.app-review-filters > label { min-width: 0; white-space: nowrap; }
+
 .app-review-lead-card table { width: 100%; }
 .app-review-mappings-table { table-layout: fixed; min-width: 680px; }
 .app-review-mappings-table .review-select-col { width: 4%; }
@@ -195,4 +205,8 @@
 .finding-detail-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .campaign-finding-meta-line { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 12px; color: var(--muted); font-size: 11px; }
 .campaign-finding-meta-line code { color: var(--text-2); }
+@media (max-width: 760px) {
+  .app-review-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .app-review-filters > label { grid-column: 1 / -1; }
+}
 @media (max-width: 760px) { .campaign-finding-detail-grid { grid-template-columns: 1fr; } }

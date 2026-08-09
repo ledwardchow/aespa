@@ -120,7 +120,6 @@ function UsageSummary({ title, stats = {}, headerContent }) {
       <div className="stat-card"><span>Output</span><strong>{fmtCount(stats.output_tokens)}</strong></div>
       <div className="stat-card"><span>Cache read</span><strong>{fmtCount(stats.cache_read_tokens)}</strong></div>
       <div className="stat-card"><span>Cache write</span><strong>{fmtCount(stats.cache_write_tokens)}</strong></div>
-      <div className="stat-card"><span>Estimated token cost</span><strong>{fmtUsd(stats.estimated_token_cost_usd)}</strong></div>
       <div className="stat-card"><span>Estimated total</span><strong>{fmtUsd(stats.estimated_total_cost_usd)}</strong></div>
     </div>
     {(stats.ai_credits > 0 || stats.factory_credits > 0) && <div className="subtle" style={{ marginTop: 12 }}>

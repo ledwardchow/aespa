@@ -23,7 +23,7 @@ export function ApiRunTrafficTab({
     }
   }, [traffic.length, autoScroll]);
   const filtered = filter ? traffic.filter(entry => (entry.url + entry.method + (entry.status ?? "") + entry.source).toLowerCase().includes(filter.toLowerCase())) : traffic;
-  return <div className="traffic-panel" style={{ height: "calc(100vh - 130px)" }}>
+  return <div className="traffic-panel">
     <div className="traffic-toolbar"><input className="traffic-filter" placeholder="Filter…" value={filter} onInput={event => setFilter(event.target.value)} /><span className="traffic-count-label">{filtered.length} shown{total > filtered.length ? ` of ${total}` : ""}</span><label className="traffic-autoscroll"><input type="checkbox" checked={autoScroll} onChange={event => setAutoScroll(event.target.checked)} />Auto-scroll</label><button className="btn ghost sm" onClick={() => { reset(); setSelected(null); }}>Clear</button></div>
     <div className="traffic-table-wrap" ref={tableRef}><TrafficTable entries={filtered} selected={selected} onSelect={setSelected} sequenceFor={(_, index) => index + 1} />{filtered.length === 0 && <div className="subtle" style={{ padding: 24, textAlign: "center" }}>{scanRunning ? "Capturing traffic…" : "No traffic recorded yet. Start a scan to generate traffic."}</div>}</div>
     <TrafficDetail entry={selected} onClose={() => setSelected(null)} />

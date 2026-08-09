@@ -1,12 +1,15 @@
-import { CAMPAIGN_STAGES, stageIndex, isTerminalPause } from "./_helpers";
+import { CAMPAIGN_STAGES, campaignDisplayStatus, stageIndex, isTerminalPause } from "./_helpers";
 import { StatusBadge } from "../../components/StatusBadge";
 
 // The user-visible stage sequence from the plan:
 // Draft -> Scanning code -> Matching context -> Waiting for review ->
 // Testing live targets -> Complete. A stopped/failed/interrupted campaign
 // keeps the position it paused at, badged separately, rather than a false
-// "still progressing" look.
-export function StageBanner({ status }) {
+// "still progressing" look. Member status can advance independently when a
+// user resumes an individual scan, so derive the displayed stage from the
+// complete campaign record.
+export function StageBanner({ campaign }) {
+  const status = campaignDisplayStatus(campaign);
   const paused = isTerminalPause(status);
   const currentIdx = paused ? -1 : stageIndex(status);
   return <div className="campaign-stage-banner">
