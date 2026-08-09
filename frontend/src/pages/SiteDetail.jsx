@@ -333,7 +333,9 @@ export function SiteDetail({
 
 export function TestRunDetail({
   runId,
-  initialTab
+  initialTab,
+  initialFindingRef,
+  initialLeadRef
 }) {
   const [run, setRun] = useState(null);
   const [siteName, setSiteName] = useState(null);
@@ -484,7 +486,8 @@ export function TestRunDetail({
     aliceIsThinking,
     setRun,
     setGraph,
-    setError
+    setError,
+    initialFindingRef
   });
   // Activity log, agent roster + its label/task helpers, and token usage. The
   // SSE stream below writes through the setters this returns.
@@ -892,6 +895,6 @@ export function TestRunDetail({
         runStatus={run?.status}
         onTotalChange={setTrafficTotal}
       />
-      {activeTab === "leads" && <WebRunSastLeadsTab runId={runId} scanRunning={isDynamicScanActive(thinkingStatus?.status)} />}
+      {activeTab === "leads" && <WebRunSastLeadsTab runId={runId} scanRunning={isDynamicScanActive(thinkingStatus?.status)} initialLeadRef={initialLeadRef} />}
     </div></>;
 }

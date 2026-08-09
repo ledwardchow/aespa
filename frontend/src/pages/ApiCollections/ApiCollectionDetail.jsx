@@ -375,8 +375,7 @@ export function ApiCollectionDetail({
                   {["Method", "Path", "Summary", "Auth", "Tags", "Ready", "In scope"].map(h => <th key={h} style={{
                     overflow: "hidden",
                     whiteSpace: "nowrap",
-                    resize: "horizontal",
-                    position: "relative"
+                    resize: "horizontal"
                   }}>{h}</th>)}
                 </tr></thead>
                 <tbody>{endpoints.map(ep => <tr key={ep.id} style={{
@@ -431,9 +430,10 @@ export function ApiCollectionDetail({
           }}>
               No test runs yet. Click <strong>+ New test run</strong> to start one.
             </div>}
-          {apiRuns !== null && apiRuns.length > 0 && <table style={{
-            width: "100%"
-          }}>
+          {apiRuns !== null && apiRuns.length > 0 && <div className="table-wrap">
+            <table style={{
+              width: "100%"
+            }}>
               <thead>
                 <tr>
                   <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("name")}>Name {sortArrow("name")}</th>
@@ -456,7 +456,8 @@ export function ApiCollectionDetail({
                   <td><a href={`#/api-runs/${r.id}/status`} className="btn secondary sm">Open</a></td>
                 </tr>)}
               </tbody>
-            </table>}
+            </table>
+          </div>}
         </div></>}
     </div>
   </>;

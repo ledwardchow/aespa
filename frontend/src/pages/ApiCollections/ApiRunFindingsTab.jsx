@@ -4,12 +4,14 @@ import { useState, useRef, useCallback } from "react";
 import { api } from "../../lib/api";
 import { markdownExportFilename, downloadTextFile, findingsToMarkdown, parseFindingsMarkdown } from "../../lib/utilities";
 import { usePolling } from "../../hooks/usePolling";
+import { FindingReferenceLink } from "../../components/FindingReferenceLink";
 
 
 export function ApiRunFindingsTab({
   runId,
   scanRunning,
-  run
+  run,
+  initialFindingRef
 }) {
   const [findings, setFindings] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -25,12 +27,16 @@ export function ApiRunFindingsTab({
     try {
       const data = await api.getApiFindings(runId);
       setFindings(data);
+      if (initialFindingRef) {
+        const match = data.find(f => f.reference === initialFindingRef);
+        if (match) setExpanded(previous => new Set(previous).add(match.id));
+      }
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
-  }, [runId]);
+  }, [runId, initialFindingRef]);
   usePolling(load, { enabled: scanRunning, intervalMs: 8000 });
   const toggle = id => {
     setExpanded(prev => {
@@ -293,6 +299,18 @@ export function ApiRunFindingsTab({
         if (editingFinding === f.id) return;
         toggle(f.id);
       }}>
+              <FindingReferenceLink
+                reference={f.reference}
+                title={f.title}
+                description={f.description}
+                severity={f.severity}
+                cvss_score={f.cvss_score}
+                validation_status={f.validation_status}
+                validation_note={f.validation_note}
+                origin={f.origin}
+                validated_by={f.validated_by}
+                href={`#/api-runs/${runId}/findings?finding=${encodeURIComponent(f.reference || "")}`}
+              />
               <span className={"sev-badge " + sevCls(f.severity)}>{f.severity}</span>
               <span style={{
           fontWeight: 600,
@@ -415,7 +433,7 @@ export function ApiRunFindingsTab({
                 <div style={{
           fontSize: 11,
           color: "var(--muted)"
-        }}>{f.validation_status} · {f.finding_source}</div>
+        }}>{f.validation_status} · {f.origin?.label || f.finding_source}</div>
               </div>}
           </div>)}
     </div>;

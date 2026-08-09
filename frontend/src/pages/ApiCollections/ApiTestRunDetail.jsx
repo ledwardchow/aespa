@@ -88,7 +88,8 @@ export function useApiAliceSession(runId) {
 }
 export function ApiTestRunDetail({
   runId,
-  initialTab
+  initialTab,
+  initialFindingRef
 }) {
   const [run, setRun] = useState(null);
   const [error, setError] = useState(null);
@@ -212,7 +213,7 @@ export function ApiTestRunDetail({
     <div className={"content no-padding" + (tab === "status" ? " flex-fill-noscroll" : " scroll-content")}>
       {error && <div className="alert error">{error}</div>}
       {tab === "status" && <ApiRunStatusTab runId={runId} scanRunning={scanRunning} />}
-      {tab === "findings" && <ApiRunFindingsTab runId={runId} scanRunning={scanRunning} run={run} />}
+      {tab === "findings" && <ApiRunFindingsTab runId={runId} scanRunning={scanRunning} run={run} initialFindingRef={initialFindingRef} />}
       {tab === "leads" && <ApiRunLeadsTab runId={runId} scanRunning={scanRunning} />}
       {tab === "sessions" && <ApiRunSessionsTab runId={runId} scanRunning={scanRunning} />}
       {tab === "traffic" && <ApiRunTrafficTab runId={runId} scanRunning={scanRunning} />}

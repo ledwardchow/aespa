@@ -84,8 +84,14 @@ _ROUTE_PATTERNS = [
 # ── Outbound HTTP calls ───────────────────────────────────────────────────────
 _HTTP_CALL_PATTERNS = [
     re.compile(
-        r"\b(?:requests|httpx|http)\.(?P<method>get|post|put|patch|delete)\(\s*"
+        r"\b(?:requests|httpx|http|axios)\.(?P<method>get|post|put|patch|delete)\(\s*"
         r"[\"'](?P<url>https?://[^\"']+|/[^\"']*)[\"']",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\baxios\.request\(\s*\{[^}]*?\burl\s*:\s*[\"']"
+        r"(?P<url>https?://[^\"']+|/[^\"']*)[\"'][^}]*?"
+        r"\bmethod\s*:\s*[\"'](?P<method>\w+)[\"']",
         re.IGNORECASE,
     ),
     re.compile(
@@ -93,6 +99,27 @@ _HTTP_CALL_PATTERNS = [
         r"(?:\s*,\s*\{[^}]*method\s*:\s*[\"'](?P<method>\w+)[\"'])?",
         re.IGNORECASE,
     ),
+]
+
+_UI_ROUTE_PATTERNS = [
+    re.compile(
+        r"(?:<Route|route)\s*(?:[^>]*?)path\s*=\s*[\"'](?P<path>/[^\"']*)[\"']",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:createBrowserRouter|createHashRouter)\s*\(\s*\[(?P<body>.*)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bpath\s*:\s*[\"'](?P<path>/[^\"']*)[\"']",
+        re.IGNORECASE,
+    ),
+]
+
+_UI_ACTION_PATTERNS = [
+    re.compile(r"\bonSubmit\s*=\s*\{?(?P<handler>[\w$]+)", re.IGNORECASE),
+    re.compile(r"\bonClick\s*=\s*\{?(?P<handler>[\w$]+)", re.IGNORECASE),
+    re.compile(r"<button\b[^>]*>(?P<label>[^<]{1,120})</button>", re.IGNORECASE),
 ]
 
 _AUTH_MARKERS = re.compile(
@@ -242,10 +269,107 @@ def extract_component_facts(root: Path) -> list[dict]:
             continue
         rel = path.relative_to(root).as_posix()
 
+        # Next.js file-system routes are concrete browser roots even when no
+        # JSX route declaration exists in the file.
+        normalized_parts = rel.split("/")
+        if path.name in {"page.js", "page.jsx", "page.ts", "page.tsx"} and (
+            "app" in normalized_parts
+        ):
+            route_parts = normalized_parts[:-1]
+            if route_parts and route_parts[0] == "src":
+                route_parts = route_parts[1:]
+            if route_parts and route_parts[0] == "app":
+                route_parts = route_parts[1:]
+            route = "/" + "/".join(
+                part
+                for part in route_parts
+                if part and not (part.startswith("(") and part.endswith(")"))
+            )
+            _add(
+                {
+                    "fact_type": "ui_route",
+                    "method": None,
+                    "path": route.rstrip("/") or "/",
+                    "host": None,
+                    "name": "Next.js App Router page",
+                    "detail": {"route_kind": "next_app", "trigger": "page_load"},
+                    "evidence_location": f"{rel}:1",
+                }
+            )
+        elif path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"} and (
+            "pages" in normalized_parts
+        ):
+            page_index = normalized_parts.index("pages")
+            route_parts = normalized_parts[page_index + 1 :]
+            if route_parts and route_parts[-1].split(".")[0] in {"index"}:
+                route_parts = route_parts[:-1]
+            else:
+                route_parts[-1] = route_parts[-1].rsplit(".", 1)[0]
+            route = "/" + "/".join(
+                part[1:-1] if part.startswith("[") and part.endswith("]") else part
+                for part in route_parts
+                if part
+            )
+            _add(
+                {
+                    "fact_type": "ui_route",
+                    "method": None,
+                    "path": route.rstrip("/") or "/",
+                    "host": None,
+                    "name": "Next.js Pages Router page",
+                    "detail": {"route_kind": "next_pages", "trigger": "page_load"},
+                    "evidence_location": f"{rel}:1",
+                }
+            )
+
         for line_no, line in enumerate(text.splitlines(), start=1):
             if len(facts) >= _MAX_FACTS:
                 break
             location = f"{rel}:{line_no}"
+            is_frontend_source = path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}
+
+            if is_frontend_source:
+                for pattern in _UI_ROUTE_PATTERNS:
+                    m = pattern.search(line)
+                    if m and m.groupdict().get("path"):
+                        _add(
+                            {
+                                "fact_type": "ui_route",
+                                "method": None,
+                                "path": m.group("path"),
+                                "host": None,
+                                "name": "React Router route",
+                                "detail": {
+                                    "route_kind": "react_router",
+                                    "trigger": "page_load",
+                                },
+                                "evidence_location": location,
+                            }
+                        )
+                        break
+
+                for pattern in _UI_ACTION_PATTERNS:
+                    m = pattern.search(line)
+                    if m:
+                        detail = {
+                            "action_kind": (
+                                "form_submit" if "submit" in line.lower() else "click"
+                            ),
+                            "handler": m.groupdict().get("handler"),
+                            "label": (m.groupdict().get("label") or "").strip() or None,
+                        }
+                        _add(
+                            {
+                                "fact_type": "ui_action",
+                                "method": None,
+                                "path": None,
+                                "host": None,
+                                "name": detail.get("handler") or detail.get("label"),
+                                "detail": detail,
+                                "evidence_location": location,
+                            }
+                        )
+                        break
 
             for pattern in _ROUTE_PATTERNS:
                 m = pattern.search(line)
@@ -279,7 +403,10 @@ def extract_component_facts(root: Path) -> list[dict]:
                             "path": url,
                             "host": _host_from_url(url),
                             "name": None,
-                            "detail": {},
+                            "detail": {
+                                "frontend": path.suffix.lower()
+                                in {".js", ".jsx", ".ts", ".tsx"}
+                            },
                             "evidence_location": location,
                         }
                     )

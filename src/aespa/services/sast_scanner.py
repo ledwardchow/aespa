@@ -540,18 +540,29 @@ def _make_tool_executor(
                     "message": f"Candidate: {candidate['title']}",
                 },
             )
-            return (
-                f"Candidate #{cid} recorded. Now call filter_lead with lead_id={cid}."
-            )
+            reference = candidate.get("reference") or f"#{cid}"
+            return f"Lead {reference} recorded. Now call filter_lead with lead_reference={reference}."
 
         if tool_name == "filter_lead":
-            cid = int(tool_input.get("lead_id", -1))
+            lead_reference = str(tool_input.get("lead_reference") or "").strip()
+            try:
+                cid = int(tool_input.get("lead_id", -1))
+            except (TypeError, ValueError):
+                cid = -1
             confidence = float(tool_input.get("confidence", 0.0))
             reasoning = str(tool_input.get("reasoning", ""))
             candidates = _candidates.get(sast_run_id, [])
-            match = next((c for c in candidates if c["candidate_id"] == cid), None)
+            match = next(
+                (
+                    c
+                    for c in candidates
+                    if (lead_reference and c.get("reference") == lead_reference)
+                    or (not lead_reference and c["candidate_id"] == cid)
+                ),
+                None,
+            )
             if match is None:
-                return f"Error: no candidate #{cid} found."
+                return f"Error: no lead {lead_reference or f'#{cid}'} found."
             match["confidence"] = confidence
             match["filter_reasoning"] = reasoning
             _sync_candidates_to_db(sast_run_id, collection_id)
@@ -563,7 +574,8 @@ def _make_tool_executor(
                     "phase": "sast_filter",
                     "status": "running",
                     "message": (
-                        f"Discovery {'SUPPORTED' if kept else 'LOW CONFIDENCE'} candidate #{cid}: "
+                        f"Discovery {'SUPPORTED' if kept else 'LOW CONFIDENCE'} lead "
+                        f"{match.get('reference') or f'#{cid}'}: "
                         f"{match['title']} (confidence={confidence:.0%})"
                     ),
                 },
@@ -575,7 +587,7 @@ def _make_tool_executor(
                 if kept
                 else "flagged as low-confidence for the validator"
             )
-            return f"Candidate #{cid}: confidence={confidence:.0%} — {outcome}."
+            return f"Lead {match.get('reference') or f'#{cid}'}: confidence={confidence:.0%} — {outcome}."
 
         if tool_name == "done":
             # Persisted by the caller — just return the summary.
@@ -621,19 +633,23 @@ def _make_review_executor(
             in {"get_candidate", "validate_candidate", "record_attack_path"}
             and candidate_id != assigned_candidate_id
         ):
+            assigned = _candidate_for_id(sast_run_id, assigned_candidate_id)
+            assigned_reference = assigned.get("reference") if assigned else None
+            candidate_reference = candidate.get("reference") if candidate else None
             return (
-                f"Error: this validator is assigned to candidate "
-                f"#{assigned_candidate_id}, not candidate #{candidate_id}."
+                f"Error: this validator is assigned to lead "
+                f"{assigned_reference or f'#{assigned_candidate_id}'}, "
+                f"not lead {candidate_reference or f'#{candidate_id}'}."
             )
         if tool_name == "get_candidate":
             if candidate is None:
-                return f"Error: no candidate #{candidate_id} found."
+                return f"Error: no lead {candidate.get('reference') if candidate else f'#{candidate_id}'} found."
             return json.dumps(candidate, ensure_ascii=False)
         if candidate is None and tool_name in {
             "validate_candidate",
             "record_attack_path",
         }:
-            return f"Error: no candidate #{candidate_id} found."
+            return f"Error: no lead {candidate.get('reference') if candidate else f'#{candidate_id}'} found."
         if tool_name == "validate_candidate":
             verdict = str(tool_input.get("verdict", "inconclusive"))
             confidence = min(1.0, max(0.0, float(tool_input.get("confidence", 0))))
@@ -655,17 +671,17 @@ def _make_review_executor(
             _sync_candidate_to_db(sast_run_id, collection_id, candidate)
             _persist_coverage(sast_run_id, coverage)
             _emit_validation_result(sast_run_id, candidate)
-            return f"Candidate #{candidate_id} validation recorded as {verdict}."
+            return f"Lead {candidate.get('reference') or f'#{candidate_id}'} validation recorded as {verdict}."
         if tool_name == "record_attack_path":
             if not candidate.get("reportable"):
-                return f"Error: candidate #{candidate_id} is not reportable."
+                return f"Error: lead {candidate.get('reference') or f'#{candidate_id}'} is not reportable."
             candidate["attack_path"] = {
                 "nodes": list(tool_input.get("nodes") or []),
                 "impact": str(tool_input.get("impact", "")),
                 "severity_reasoning": str(tool_input.get("severity_reasoning", "")),
                 "dynamic_test": str(tool_input.get("dynamic_test", "")),
             }
-            return f"Candidate #{candidate_id} attack path recorded."
+            return f"Lead {candidate.get('reference') or f'#{candidate_id}'} attack path recorded."
         if tool_name == "done":
             return str(tool_input.get("summary", ""))
         return f"Unknown tool: {tool_name!r}"
@@ -682,7 +698,10 @@ def _candidate_brief(candidates: list[dict], *, reportable_only: bool = False) -
     return json.dumps(
         [
             {
+                # The numeric key is private validator bookkeeping. Public
+                # output and lead references use ``reference``.
                 "candidate_id": c["candidate_id"],
+                "reference": c.get("reference"),
                 "title": c["title"],
                 "category": c.get("category", ""),
                 "severity": c.get("severity", "medium"),
@@ -700,9 +719,11 @@ def _candidate_brief(candidates: list[dict], *, reportable_only: bool = False) -
 
 def _candidate_validation_message(candidate: dict) -> str:
     candidate_id = int(candidate["candidate_id"])
+    reference = candidate.get("reference") or f"#{candidate_id}"
     return (
-        f"Validate only candidate #{candidate_id}. Do not validate any other "
-        "candidate in the run. Call get_candidate for this candidate, inspect "
+        f"Validate only lead {reference} (internal candidate #{candidate_id}). "
+        "Do not validate any other "
+        "lead in the run. Call get_candidate for this candidate, inspect "
         "the relevant source with the read-only file tools, then call "
         "validate_candidate exactly once followed by done.\n\n"
         "Assigned candidate:\n" + json.dumps(candidate, ensure_ascii=False, indent=2)
@@ -713,15 +734,17 @@ def _emit_validation_result(
     sast_run_id: int, candidate: dict, *, error: str | None = None
 ) -> None:
     candidate_id = int(candidate["candidate_id"])
+    reference = candidate.get("reference") or f"#{candidate_id}"
     validation_status = str(candidate.get("validation_status") or "inconclusive")
     title = candidate.get("title", "")
     message = (
-        f"Candidate #{candidate_id} validation failed and was marked inconclusive: {title}"
+        f"Lead {reference} validation failed and was marked inconclusive: {title}"
         if error
-        else f"Candidate #{candidate_id} validated as {validation_status}: {title}"
+        else f"Lead {reference} validated as {validation_status}: {title}"
     )
     data = {
         "candidate_id": candidate_id,
+        "lead_reference": reference,
         "validation_status": validation_status,
         "confidence": float(candidate.get("confidence") or 0.0),
         "reportable": bool(candidate.get("reportable")),
@@ -757,7 +780,7 @@ def _sync_candidate_to_db(
     title = str(candidate.get("title", ""))
     category = str(candidate.get("category", ""))
     location = str(candidate.get("location", ""))
-    create_lead(
+    lead = create_lead(
         producer_run_id=sast_run_id,
         producer_run_type="sast",
         collection_id=collection_id,
@@ -785,6 +808,7 @@ def _sync_candidate_to_db(
         attack_path=candidate.get("attack_path") or {},
         reportable=bool(candidate.get("reportable")),
     )
+    candidate["reference"] = lead.reference
 
 
 # ── SAST scan task ─────────────────────────────────────────────────────────────

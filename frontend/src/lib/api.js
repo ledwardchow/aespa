@@ -141,10 +141,12 @@ export const api = {
   // history. This is the cursor-safe replay-then-follow feed (no
   // fetch→subscribe gap) — prefer it over the plain /events stream.
   getCampaignActivityStreamUrl: (id,cid,cursor) => `/api/applications/${id}/campaigns/${cid}/activity/stream${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
-  getCampaignConnections: (id,cid) => req(`/api/applications/${id}/campaigns/${cid}/connections`),
+  getCampaignConnections: (id,cid,scope="cross_component") => req(`/api/applications/${id}/campaigns/${cid}/connections${scope ? `?scope=${scope}` : ""}`),
   rebuildCampaignConnections: (id,cid) => req(`/api/applications/${id}/campaigns/${cid}/connections/rebuild`, { method:"POST" }),
   getCampaignMappings: (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/mappings`),
+  editCampaignMapping: (id,cid,mid,b) => req(`/api/applications/${id}/campaigns/${cid}/mappings/${mid}`, { method:"PUT", body:b }),
   reviewCampaignMappings: (id,cid,b) => req(`/api/applications/${id}/campaigns/${cid}/review`, { method:"POST", body:b }),
+  supplementalValidateCampaignTarget: (id,cid,tid,b) => req(`/api/applications/${id}/campaigns/${cid}/targets/${tid}/supplemental-validate`, { method:"POST", body:b }),
   continueCampaign:    (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/continue`, { method:"POST" }),
   getCampaignFindings: (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/findings`),
   getLLMConfig:     ()            => req("/api/settings/llm"),

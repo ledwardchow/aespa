@@ -53,6 +53,23 @@ class RunIdentity(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class PublicReferenceNamespace(SQLModel, table=True):
+    """Persistent public-reference namespace for one user-facing run."""
+
+    __tablename__ = "public_reference_namespace"
+    __table_args__ = (
+        UniqueConstraint("owner_type", "owner_id", name="uq_public_ref_owner"),
+        UniqueConstraint("prefix", name="uq_public_ref_prefix"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    owner_type: str = Field(index=True)  # web | api | sast | campaign
+    owner_id: int = Field(index=True)
+    prefix: str = Field(index=True, min_length=4, max_length=4)
+    next_number: int = Field(default=1)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 # ── Site / Credential ─────────────────────────────────────────────────────────
 
 
@@ -238,7 +255,7 @@ class ApiTestRun(SQLModel, table=True):
     id: Optional[int] = Field(default=None, sa_column=_run_identity_pk())
     collection_id: int = Field(foreign_key="api_collection.id", index=True)
     name: str
-    status: str = Field(default="pending")  # pending|running|completed|failed|cancelled
+    status: str = Field(default="pending")  # pending|running|completed|incomplete|failed|cancelled
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     # Per-run model-mixing profile (null = use the globally active profile).
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
@@ -520,11 +537,15 @@ class ComponentMapperConfig(SQLModel, table=True):
     __tablename__ = "component_mapper_config"
 
     id: Optional[int] = Field(default=1, primary_key=True)
-    max_tool_calls: int = Field(default=120)
+    max_tool_calls: int = Field(default=250)
     max_source_files: int = Field(default=500)
     max_source_bytes: int = Field(default=50 * 1024 * 1024)
-    max_facts: int = Field(default=200)
+    max_facts: int = Field(default=500)
     max_concurrent: int = Field(default=4)
+    max_trace_edges: int = Field(default=8)
+    max_trace_components: int = Field(default=6)
+    max_paths_per_lead: int = Field(default=10)
+    min_trace_confidence: float = Field(default=0.50)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -673,6 +694,7 @@ class TestRunStatus(str, Enum):
     pending = "pending"
     running = "running"
     complete = "complete"
+    incomplete = "incomplete"
     failed = "failed"
     stopped = "stopped"
 
@@ -855,6 +877,9 @@ class PageLink(SQLModel, table=True):
     link_text: Optional[str] = Field(default=None)
     action_kind: str = Field(default="navigate")
     action_data_json: str = Field(default="{}")
+    # Shared with traffic rows so an interactive browser action can be tied to
+    # the requests it caused, rather than to any request on the same page.
+    interaction_id: Optional[str] = Field(default=None, index=True)
 
 
 class TrafficEntry(SQLModel, table=True):
@@ -891,6 +916,8 @@ class TrafficEntry(SQLModel, table=True):
         index=True,
     )
     session_label: Optional[str] = Field(default=None, index=True)
+    # Opaque id for one replayed browser action. Page-load traffic has no id.
+    interaction_id: Optional[str] = Field(default=None, index=True)
 
 
 class ScannerSession(SQLModel, table=True):
@@ -984,6 +1011,17 @@ class ScanFinding(SQLModel, table=True):
     __tablename__ = "scan_finding"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    # Stable user-facing reference. Database ``id`` remains the internal key
+    # used by existing API mutation endpoints and scanner bookkeeping.
+    public_reference: Optional[str] = Field(default=None, index=True)
+    # Structured origin/provenance for findings that came from SAST or another
+    # lead source. The owning test_run/api_test_run remains the run that holds
+    # and, where applicable, validated the finding.
+    origin_type: Optional[str] = Field(default=None, index=True)
+    origin_run_type: Optional[str] = Field(default=None, index=True)
+    origin_run_id: Optional[int] = Field(default=None, index=True)
+    origin_lead_id: Optional[int] = Field(default=None, index=True)
+    origin_reference: Optional[str] = Field(default=None)
     # Nullable: a finding belongs to EITHER a web TestRun (test_run_id) OR an
     # ApiTestRun (api_test_run_id), never both.  The two tables have independent
     # Both columns now reference the single global run-identity namespace.
@@ -1046,6 +1084,60 @@ class ScanFinding(SQLModel, table=True):
             return parsed if isinstance(parsed, list) else []
         except Exception:
             return []
+
+    @property
+    def reference(self) -> str:
+        return self.public_reference or ""
+
+    @property
+    def origin(self) -> dict | None:
+        if not self.origin_type and not self.origin_reference:
+            return None
+        label = {
+            "sast": "SAST",
+            "campaign": "Campaign",
+            "dynamic": "Dynamic",
+            "api": "API",
+        }.get(self.origin_type or "", self.origin_type or "Unknown")
+        return {
+            "type": self.origin_type,
+            "label": label,
+            "run_type": self.origin_run_type,
+            "run_id": self.origin_run_id,
+            "lead_id": self.origin_lead_id,
+            "reference": self.origin_reference,
+        }
+
+    @property
+    def validated_by(self) -> dict | None:
+        if self.origin_type not in {"sast", "campaign"}:
+            return None
+        if self.test_run_id is not None:
+            return {"type": "web", "label": "Dynamic scan", "run_id": self.test_run_id}
+        if self.api_test_run_id is not None:
+            return {"type": "api", "label": "API scan", "run_id": self.api_test_run_id}
+        return None
+
+
+class CampaignFindingReference(SQLModel, table=True):
+    """Stable campaign-local alias for a finding owned by a child run."""
+
+    __tablename__ = "campaign_finding_reference"
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id", "finding_id", name="uq_campaign_finding_reference"
+        ),
+        UniqueConstraint(
+            "campaign_id", "public_reference", name="uq_campaign_public_reference"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    campaign_id: int = Field(sa_column=_run_identity_fk())
+    finding_id: int = Field(foreign_key="scan_finding.id", index=True)
+    target_member_id: int = Field(foreign_key="campaign_target_member.id", index=True)
+    public_reference: str = Field(index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
 
 
 class ScanLog(SQLModel, table=True):
@@ -1208,13 +1300,27 @@ class ScanLead(SQLModel, table=True):
     linked_finding_id: Optional[int] = Field(
         default=None
     )  # set when promoted to a finding
+    # Stable user-facing reference. Original leads use producer_run_* as their
+    # namespace; imported copies use imported_into_run_* as their namespace.
+    public_reference: Optional[str] = Field(default=None, index=True)
+    origin_reference: Optional[str] = Field(default=None)
     # Set on a *copy* imported into a dynamic run (e.g. a web TestRun). Originals
     # leave these NULL; producer_run_id on a copy still points at the source SAST
     # run for provenance. Copies are owned by (imported_into_run_type, _run_id).
     imported_into_run_type: Optional[str] = Field(default=None, index=True)  # "web"
     imported_into_run_id: Optional[int] = Field(default=None, index=True)
+    # Origin and bounded path metadata used by campaign/frontend attack-path
+    # views. These remain nullable so older standalone leads keep their meaning.
+    origin_lead_id: Optional[int] = Field(default=None, index=True)
+    trace_path_key: Optional[str] = Field(default=None, index=True)
+    trace_status: str = Field(default="none")
+    trace_confidence: Optional[float] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+    @property
+    def reference(self) -> str:
+        return self.public_reference or ""
 
 
 # ── Applications & multi-repository campaigns ───────────────────────────────
@@ -1336,7 +1442,7 @@ class AssessmentCampaign(SQLModel, table=True):
     name: str
     status: str = Field(default="draft", index=True)
     # draft -> sast_running -> correlating -> awaiting_review -> dast_running
-    # -> completed | failed | stopped | interrupted
+    # -> completed | incomplete | failed | stopped | interrupted
     max_parallel_sast: int = Field(default=2)
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
@@ -1348,6 +1454,12 @@ class AssessmentCampaign(SQLModel, table=True):
     # reads this to resume the exact stage without recreating any child run.
     # Cleared once a retry is issued.
     interrupted_stage: Optional[str] = Field(default=None)
+    # Optional per-campaign overrides for the component mapper's trace budget.
+    # NULL means use the singleton ComponentMapperConfig value.
+    max_trace_edges: Optional[int] = Field(default=None)
+    max_trace_components: Optional[int] = Field(default=None)
+    max_paths_per_lead: Optional[int] = Field(default=None)
+    min_trace_confidence: Optional[float] = Field(default=None)
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
@@ -1367,7 +1479,7 @@ class CampaignSourceMember(SQLModel, table=True):
     component_id: int = Field(foreign_key="application_component.id", index=True)
     snapshot_id: int = Field(foreign_key="component_snapshot.id", index=True)
     sast_run_id: Optional[int] = Field(default=None, index=True)
-    status: str = Field(default="pending")  # pending|running|completed|failed|skipped
+    status: str = Field(default="pending")  # pending|running|completed|incomplete|failed|skipped
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -1386,7 +1498,9 @@ class CampaignTargetMember(SQLModel, table=True):
     target_type: str = Field(index=True)  # "site" | "api_collection"
     test_run_id: Optional[int] = Field(default=None, index=True)  # web child
     api_test_run_id: Optional[int] = Field(default=None, index=True)  # api child
-    status: str = Field(default="pending")  # pending|running|completed|failed|skipped
+    status: str = Field(default="pending")  # pending|running|completed|incomplete|failed|skipped
+    status_message: Optional[str] = Field(default=None)
+    validation_summary_json: str = Field(default="{}")
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -1425,6 +1539,15 @@ class ComponentConnection(SQLModel, table=True):
     """One matched edge in a campaign's cross-repository application map."""
 
     __tablename__ = "component_connection"
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id",
+            "source_fact_id",
+            "target_fact_id",
+            "edge_kind",
+            name="uq_component_connection_edge",
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     campaign_id: int = Field(sa_column=_run_identity_fk())
@@ -1436,6 +1559,13 @@ class ComponentConnection(SQLModel, table=True):
     confidence: float = Field(default=0.0)
     rationale: str = Field(default="")
     evidence_json: str = Field(default="{}")
+    # ``same_component`` edges are directed call/route hops within one SAST
+    # run. Run ids make the edge unambiguous when a component has snapshots
+    # from multiple campaigns.
+    edge_kind: str = Field(default="calls", index=True)
+    source_sast_run_id: Optional[int] = Field(default=None, index=True)
+    target_sast_run_id: Optional[int] = Field(default=None, index=True)
+    path_scope: str = Field(default="cross_component", index=True)
     created_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -1458,6 +1588,16 @@ class LeadTargetMapping(SQLModel, table=True):
     status: str = Field(default="proposed", index=True)  # proposed|approved|rejected
     copied_lead_id: Optional[int] = Field(default=None)  # set once approved+copied
     reviewed_at: Optional[datetime] = Field(default=None)
+    auto_approved: bool = Field(default=False)
+    approved: Optional[bool] = Field(default=None)
+    final_score: Optional[float] = Field(default=None)
+    change_reason: Optional[str] = Field(default=None)
+    path_json: str = Field(default="{}")
+    approved_attack_path_json: str = Field(default="{}")
+    final_attack_path_json: str = Field(default="{}")
+    attack_path_changes_json: str = Field(default="[]")
+    path_status: Optional[str] = Field(default=None, index=True)
+    edited_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

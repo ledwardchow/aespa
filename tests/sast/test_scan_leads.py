@@ -347,7 +347,7 @@ def test_explicit_imports_are_fresh_and_independent_for_each_api_run(engine):
     assert second_copy.status == "open"
     assert second_copy.note == ""
     assert second_copy.investigated_by_run_id is None
-    assert "Lead #" + str(second_copy.id) in format_leads_for_run("api", 42)
+    assert f"Lead {second_copy.reference}" in format_leads_for_run("api", 42)
 
     with Session(engine) as s:
         original = s.get(ScanLead, original_id)
@@ -373,7 +373,7 @@ def test_dynamic_context_includes_sast_attack_path(engine):
     copy = get_leads_for_run("web", 7)[0]
     context = format_leads_for_run("web", 7)
 
-    assert f"Lead #{copy.id}" in context
+    assert f"Lead {copy.reference}" in context
     assert "Static attack path" in context
     assert "GET /orders/{id} → order lookup → missing owner check" in context
     assert "Read another user's order." in context

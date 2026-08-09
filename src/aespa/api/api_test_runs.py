@@ -45,6 +45,7 @@ from aespa.schemas import (
 from aespa.services import alice_tasks, run_cleanup
 from aespa.services import findings as findings_svc
 from aespa.services import scanner_sessions as scanner_session_svc
+from aespa.services.references import ensure_finding_reference
 
 _UTC = timezone.utc
 
@@ -429,6 +430,9 @@ def get_api_findings(
     ).all()
     _order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings = sorted(findings, key=lambda f: _order.get(f.severity, 5))
+    for finding in findings:
+        ensure_finding_reference(session, finding)
+    session.commit()
     return [ScanFindingOut.model_validate(f) for f in findings]
 
 
@@ -538,6 +542,7 @@ def import_api_findings(
         )
         session.add(finding)
         session.flush()
+        ensure_finding_reference(session, finding)
         imported.append(finding)
     session.commit()
     for f in imported:

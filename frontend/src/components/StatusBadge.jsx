@@ -24,6 +24,7 @@ const VARIANT = {
   awaiting_review: "warning",
   stopped: "danger",
   interrupted: "warning",
+  incomplete: "warning",
   skipped: "neutral",
   proposed: "neutral",
   approved: "ok",
@@ -35,7 +36,8 @@ const LABEL_OVERRIDE = {
   sast_running: "scanning code",
   correlating: "matching context",
   awaiting_review: "awaiting review",
-  dast_running: "testing live targets"
+  dast_running: "testing live targets",
+  incomplete: "incomplete — resume available"
 };
 
 export function StatusBadge({ status, className = "" }) {

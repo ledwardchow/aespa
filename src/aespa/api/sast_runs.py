@@ -21,6 +21,7 @@ from aespa.models import (
     ApiCollection,
     ApiTestRun,
     SastRun,
+    ScanFinding,
     ScanLead,
     ScanLog,
     Site,
@@ -30,6 +31,7 @@ from aespa.schemas import SastRunSummary, SastRunUpdate, ScanLeadOut
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import run_cleanup
+from aespa.services.references import ensure_finding_reference, ensure_lead_reference
 
 _UTC = timezone.utc
 
@@ -414,7 +416,24 @@ def get_sast_leads(
         .where(ScanLead.imported_into_run_id == None)  # noqa: E711 — originals only
         .order_by(ScanLead.id)
     ).all()
-    return [ScanLeadOut.model_validate(lead) for lead in leads]
+    finding_ids = {lead.linked_finding_id for lead in leads if lead.linked_finding_id}
+    linked_findings = (
+        session.exec(select(ScanFinding).where(ScanFinding.id.in_(finding_ids))).all()
+        if finding_ids
+        else []
+    )
+    for finding in linked_findings:
+        ensure_finding_reference(session, finding)
+    finding_refs = {finding.id: finding.reference for finding in linked_findings}
+    for lead in leads:
+        ensure_lead_reference(session, lead)
+    session.commit()
+    return [
+        ScanLeadOut.model_validate(lead).model_copy(
+            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+        )
+        for lead in leads
+    ]
 
 
 @router.get("/api/sast-runs/{run_id}/handoff-targets")
@@ -504,6 +523,8 @@ def handoff_sast_lead(
     return {
         "queued": True,
         "lead_id": copied.id,
+        "lead_reference": copied.reference,
+        "source_reference": lead.reference,
         "run_type": body.run_type,
         "run_id": body.run_id,
     }
@@ -524,7 +545,24 @@ def get_api_run_leads(
         .where(ScanLead.imported_into_run_id == run_id)
         .order_by(ScanLead.id)
     ).all()
-    return [ScanLeadOut.model_validate(lead) for lead in leads]
+    finding_ids = {lead.linked_finding_id for lead in leads if lead.linked_finding_id}
+    linked_findings = (
+        session.exec(select(ScanFinding).where(ScanFinding.id.in_(finding_ids))).all()
+        if finding_ids
+        else []
+    )
+    for finding in linked_findings:
+        ensure_finding_reference(session, finding)
+    finding_refs = {finding.id: finding.reference for finding in linked_findings}
+    for lead in leads:
+        ensure_lead_reference(session, lead)
+    session.commit()
+    return [
+        ScanLeadOut.model_validate(lead).model_copy(
+            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+        )
+        for lead in leads
+    ]
 
 
 @router.get("/api/api-test-runs/{run_id}/sast-runs/available")

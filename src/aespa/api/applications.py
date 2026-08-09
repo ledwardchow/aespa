@@ -18,7 +18,16 @@ import zipfile
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 
@@ -31,6 +40,7 @@ from aespa.models import (
     CampaignSourceMember,
     CampaignTargetMember,
     ComponentConnection,
+    ComponentFact,
     LeadTargetMapping,
     ScanFinding,
     ScanLead,
@@ -52,18 +62,29 @@ from aespa.schemas import (
     CampaignDetail,
     CampaignFindingRow,
     CampaignProgress,
+    CampaignSourceMemberOut,
     CampaignSummary,
+    CampaignSupplementalValidationRequest,
+    CampaignTargetMemberOut,
     ComponentConnectionOut,
     ComponentSnapshotOut,
     ComponentTargetHintCreate,
     ComponentTargetHintOut,
+    LeadTargetMappingEditRequest,
     LeadTargetMappingOut,
     LeadTargetMappingReviewRequest,
     LeadTargetMappingReviewResult,
 )
 from aespa.services import applications as applications_svc
 from aespa.services import campaigns as campaigns_svc
+from aespa.services import correlation as correlation_svc
 from aespa.services import events as events_svc
+from aespa.services import scan_leads as scan_leads_svc
+from aespa.services.references import (
+    ensure_campaign_finding_reference,
+    ensure_finding_reference,
+    ensure_lead_references,
+)
 
 router = APIRouter(prefix="/api/applications", tags=["applications"])
 
@@ -633,8 +654,30 @@ def _to_campaign_detail(session: Session, campaign) -> CampaignDetail:
     ).all()
     return CampaignDetail(
         **CampaignSummary.model_validate(campaign).model_dump(),
-        source_members=list(source_members),
-        target_members=list(target_members),
+        source_members=[
+            _to_campaign_source_member(session, member) for member in source_members
+        ],
+        target_members=[
+            _to_campaign_target_member(session, member) for member in target_members
+        ],
+    )
+
+
+def _to_campaign_source_member(session: Session, member) -> CampaignSourceMemberOut:
+    result = CampaignSourceMemberOut.model_validate(member)
+    return result.model_copy(
+        update={
+            "run_status": campaigns_svc.get_campaign_member_run_status(session, member)
+        }
+    )
+
+
+def _to_campaign_target_member(session: Session, member) -> CampaignTargetMemberOut:
+    result = CampaignTargetMemberOut.model_validate(member)
+    return result.model_copy(
+        update={
+            "run_status": campaigns_svc.get_campaign_member_run_status(session, member)
+        }
     )
 
 
@@ -774,7 +817,18 @@ def campaign_status(
         progress = campaigns_svc.get_campaign_progress(session, campaign_id)
     except campaigns_svc.CampaignNotFound as exc:
         raise _not_found(exc) from exc
-    return CampaignProgress(**progress)
+    return CampaignProgress(
+        status=progress["status"],
+        warnings=progress["warnings"],
+        source_members=[
+            _to_campaign_source_member(session, member)
+            for member in progress["source_members"]
+        ],
+        target_members=[
+            _to_campaign_target_member(session, member)
+            for member in progress["target_members"]
+        ],
+    )
 
 
 @router.get("/{application_id}/campaigns/{campaign_id}/events")
@@ -903,18 +957,82 @@ async def _stream_campaign_activity(
     response_model=list[ComponentConnectionOut],
 )
 def campaign_connections(
-    application_id: int, campaign_id: int, session: Session = Depends(get_session)
+    application_id: int,
+    campaign_id: int,
+    scope: str = Query(default="cross_component"),
+    session: Session = Depends(get_session),
 ) -> list[ComponentConnectionOut]:
     try:
         campaigns_svc.get_campaign(session, application_id, campaign_id)
     except campaigns_svc.CampaignNotFound as exc:
         raise _not_found(exc) from exc
-    connections = session.exec(
-        select(ComponentConnection).where(
-            ComponentConnection.campaign_id == campaign_id
+    stmt = select(ComponentConnection).where(
+        ComponentConnection.campaign_id == campaign_id
+    )
+    if scope != "all":
+        stmt = stmt.where(ComponentConnection.path_scope == scope)
+    connections = session.exec(stmt).all()
+    component_ids = {
+        component_id
+        for connection in connections
+        for component_id in (
+            connection.source_component_id,
+            connection.target_component_id,
         )
-    ).all()
-    return [ComponentConnectionOut.model_validate(c) for c in connections]
+    }
+    component_names = {
+        component.id: component.name
+        for component in session.exec(
+            select(ApplicationComponent).where(
+                ApplicationComponent.id.in_(component_ids)
+            )
+        ).all()
+    }
+    fact_ids = {
+        fact_id
+        for connection in connections
+        for fact_id in (connection.source_fact_id, connection.target_fact_id)
+    }
+    facts = {
+        fact.id: fact
+        for fact in session.exec(
+            select(ComponentFact).where(ComponentFact.id.in_(fact_ids))
+        ).all()
+    }
+
+    def fact_summary(fact: ComponentFact | None) -> dict:
+        if fact is None:
+            return {}
+        return {
+            "id": fact.id,
+            "fact_type": fact.fact_type,
+            "method": fact.method,
+            "path": fact.path,
+            "host": fact.host,
+            "name": fact.name,
+            "evidence_location": fact.evidence_location,
+            "detail_json": fact.detail_json,
+        }
+
+    return [
+        ComponentConnectionOut.model_validate(connection).model_copy(
+            update={
+                "source_component_name": component_names.get(
+                    connection.source_component_id
+                ),
+                "target_component_name": component_names.get(
+                    connection.target_component_id
+                ),
+                "source_fact_summary": fact_summary(
+                    facts.get(connection.source_fact_id)
+                ),
+                "target_fact_summary": fact_summary(
+                    facts.get(connection.target_fact_id)
+                ),
+            }
+        )
+        for connection in connections
+    ]
 
 
 @router.post(
@@ -997,6 +1115,7 @@ def _enrich_mappings(
             select(ScanLead).where(ScanLead.id.in_(lead_ids))
         ).all()
     }
+    ensure_lead_references(session, leads_by_id.values())
 
     component_id_by_sast_run_id = _component_id_by_sast_run_id(session, campaign_id)
 
@@ -1036,6 +1155,7 @@ def _enrich_mappings(
         enriched.append(
             base.model_copy(
                 update={
+                    "lead_reference": lead.reference,
                     "lead_title": lead.title,
                     "lead_description": lead.description,
                     "lead_severity": lead.severity,
@@ -1046,6 +1166,11 @@ def _enrich_mappings(
                     "lead_confidence": lead.confidence,
                     "lead_source": lead.source,
                     "lead_fingerprint": lead.fingerprint,
+                    "lead_origin_lead_id": lead.origin_lead_id,
+                    "lead_origin_reference": lead.origin_reference,
+                    "lead_trace_path_key": lead.trace_path_key,
+                    "lead_trace_status": lead.trace_status,
+                    "lead_trace_confidence": lead.trace_confidence,
                     "lead_suggested_endpoint": lead.suggested_endpoint,
                     "lead_status": lead.status,
                     "lead_validation_status": lead.validation_status,
@@ -1068,6 +1193,7 @@ def _enrich_mappings(
                 }
             )
         )
+    session.commit()
     return enriched
 
 
@@ -1096,6 +1222,58 @@ def review_campaign_mappings(
     return LeadTargetMappingReviewResult(
         approved=result["approved"], rejected=result["rejected"], copied=0
     )
+
+
+@router.put(
+    "/{application_id}/campaigns/{campaign_id}/mappings/{mapping_id}",
+    response_model=LeadTargetMappingOut,
+)
+def edit_campaign_mapping(
+    application_id: int,
+    campaign_id: int,
+    mapping_id: int,
+    payload: LeadTargetMappingEditRequest,
+    session: Session = Depends(get_session),
+) -> LeadTargetMappingOut:
+    try:
+        campaigns_svc.get_campaign(session, application_id, campaign_id)
+        mapping = correlation_svc.edit_mapping_path(
+            campaign_id,
+            mapping_id,
+            payload.path,
+            expected_updated_at=payload.expected_updated_at,
+        )
+    except campaigns_svc.CampaignNotFound as exc:
+        raise _not_found(exc) from exc
+    except correlation_svc.UnknownMappingError as exc:
+        raise _conflict(exc) from exc
+    return _enrich_mappings(session, campaign_id, [mapping])[0]
+
+
+@router.post(
+    "/{application_id}/campaigns/{campaign_id}/targets/{target_id}/supplemental-validate",
+    response_model=CampaignDetail,
+)
+async def supplemental_validate_campaign_target(
+    application_id: int,
+    campaign_id: int,
+    target_id: int,
+    payload: CampaignSupplementalValidationRequest,
+    session: Session = Depends(get_session),
+) -> CampaignDetail:
+    try:
+        campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
+        await campaigns_svc.supplemental_validate_target(
+            campaign_id,
+            target_id,
+            set(payload.mapping_ids),
+        )
+    except campaigns_svc.CampaignNotFound as exc:
+        raise _not_found(exc) from exc
+    except campaigns_svc.InvalidCampaignState as exc:
+        raise _conflict(exc) from exc
+    session.refresh(campaign)
+    return _to_campaign_detail(session, campaign)
 
 
 @router.post(
@@ -1233,7 +1411,26 @@ def campaign_findings(
         )
         target_name = applications_svc.target_display_name(session, target)
         for finding in findings:
+            ensure_finding_reference(session, finding)
+            campaign_reference = ensure_campaign_finding_reference(
+                session,
+                campaign_id=campaign_id,
+                finding_id=finding.id,
+                target_member_id=target_member.id,
+            )
             component_ids = _component_ids_for_finding(finding)
+            finding_lead = lead_by_finding_id.get(finding.id)
+            attack_path = (
+                scan_leads_svc.decode_attack_path(finding_lead.attack_path_json)
+                if finding_lead is not None
+                else {}
+            )
+            frontend_path = (
+                attack_path if attack_path.get("perspective") == "frontend" else None
+            )
+            backend_path = (
+                attack_path.get("origin_attack_path") if frontend_path else attack_path
+            )
             component_names = [
                 component_name_by_id[cid]
                 for cid in component_ids
@@ -1242,6 +1439,8 @@ def campaign_findings(
             rows.append(
                 CampaignFindingRow(
                     finding_id=finding.id,
+                    reference=campaign_reference.public_reference,
+                    run_reference=finding.reference,
                     target_type=target_member.target_type,
                     target_run_id=run_id,
                     component_id=component_ids[0] if component_ids else None,
@@ -1252,8 +1451,31 @@ def campaign_findings(
                     component_names=component_names,
                     target_name=target_name,
                     title=finding.title,
+                    description=finding.description,
+                    impact=finding.impact,
+                    likelihood=finding.likelihood,
+                    recommendation=finding.recommendation,
+                    cvss_score=finding.cvss_score,
+                    cvss_vector=finding.cvss_vector,
+                    affected_url=finding.affected_url,
+                    evidence=finding.evidence,
+                    request_evidence=finding.request_evidence,
+                    response_evidence=finding.response_evidence,
+                    evidence_items=finding.evidence_items,
+                    validation_note=finding.validation_note,
+                    merged_instances=finding.merged_instances,
+                    poc_command=finding.poc_command,
+                    poc_setup=finding.poc_setup,
+                    finding_source=finding.finding_source,
+                    origin=finding.origin,
+                    validated_by=finding.validated_by,
                     severity=finding.severity,
                     status=finding.validation_status,
+                    frontend_attack_path=frontend_path,
+                    backend_attack_path=backend_path
+                    if isinstance(backend_path, dict)
+                    else None,
                 )
             )
+    session.commit()
     return rows

@@ -120,7 +120,6 @@ function UsageSummary({ title, stats = {}, headerContent }) {
       <div className="stat-card"><span>Output</span><strong>{fmtCount(stats.output_tokens)}</strong></div>
       <div className="stat-card"><span>Cache read</span><strong>{fmtCount(stats.cache_read_tokens)}</strong></div>
       <div className="stat-card"><span>Cache write</span><strong>{fmtCount(stats.cache_write_tokens)}</strong></div>
-      <div className="stat-card"><span>Estimated token cost</span><strong>{fmtUsd(stats.estimated_token_cost_usd)}</strong></div>
       <div className="stat-card"><span>Estimated total</span><strong>{fmtUsd(stats.estimated_total_cost_usd)}</strong></div>
     </div>
     {(stats.ai_credits > 0 || stats.factory_credits > 0) && <div className="subtle" style={{ marginTop: 12 }}>
@@ -216,20 +215,18 @@ export function StatisticsPage() {
               <col className="stats-token-col" />
               <col className="stats-credit-col" />
               <col className="stats-cost-col" />
-              <col className="stats-cost-col" />
-              <col className="stats-cost-col" />
               <col className="stats-action-col" />
             </colgroup>
-            <thead><tr><th>Provider / model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>Native credits</th><th>Token cost</th><th>Credit cost</th><th>Total</th><th></th></tr></thead>
+            <thead><tr><th>Provider / model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>Native credits</th><th>Cost</th><th></th></tr></thead>
             <tbody>{data.rows.map(row => <React.Fragment key={`${row.provider}:${row.model}`}>
               <tr>
                 <td><div>{providerLabel(row.provider)}</div><div className="mono subtle">{row.model}</div>{row.base_url && <div className="mono subtle stats-base-url" title={row.base_url}>{row.base_url}</div>}</td>
                 <td>{fmtCount(row.requests)}</td><td>{fmtTok(row.input_tokens)}</td><td>{fmtTok(row.output_tokens)}</td><td>{fmtTok(row.cache_read_tokens)}</td><td>{fmtTok(row.cache_write_tokens)}</td>
                 <td>{row.ai_credits > 0 ? `${fmtCount(row.ai_credits)} Copilot` : row.factory_credits > 0 ? `${fmtCount(row.factory_credits)} Factory` : "—"}</td>
-                <td title={row.prices?.confidence || ""}>{fmtUsd(row.estimated_token_cost_usd)}</td><td>{fmtUsd(row.estimated_credit_cost_usd)}</td><td>{fmtUsd(row.estimated_total_cost_usd)}</td>
+                <td title={row.prices?.confidence || ""}>{fmtUsd(row.estimated_total_cost_usd)}</td>
                 <td><button className="btn ghost sm" onClick={() => setEditing(editing === `${row.provider}:${row.model}` ? null : `${row.provider}:${row.model}`)}>Prices</button></td>
               </tr>
-              {editing === `${row.provider}:${row.model}` && <tr><td colSpan="11"><PriceEditor row={row} month={month} onSaved={() => { setEditing(null); load(); }} onCancel={() => setEditing(null)} /></td></tr>}
+              {editing === `${row.provider}:${row.model}` && <tr><td colSpan="9"><PriceEditor row={row} month={month} onSaved={() => { setEditing(null); load(); }} onCancel={() => setEditing(null)} /></td></tr>}
             </React.Fragment>)}</tbody>
           </table>
         </div>}
