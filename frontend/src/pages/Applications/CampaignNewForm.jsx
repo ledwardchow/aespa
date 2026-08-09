@@ -94,14 +94,14 @@ export function CampaignNewForm({ applicationId }) {
         setCreatedCampaignId(id);
       }
       await api.startCampaign(applicationId, id);
-      nav(`#/applications/${applicationId}/campaigns/${id}/overview`);
+      nav(`#/applications/${applicationId}/campaigns/${id}/runs`);
     } catch (e) {
       setError(e.message);
       setSaving(false);
     }
   };
 
-  const onOpenDraft = () => nav(`#/applications/${applicationId}/campaigns/${createdCampaignId}/overview`);
+  const onOpenDraft = () => nav(`#/applications/${applicationId}/campaigns/${createdCampaignId}/runs`);
 
   if (components === null || targets === null) {
     return <div className="content scroll-content">{error ? <div className="alert error">{error}</div> : <div className="subtle">Loading…</div>}</div>;

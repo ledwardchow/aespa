@@ -5,7 +5,7 @@
 .sast-model-selector > span { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; }
 .sast-model-selector .select { width: 245px; min-width: 150px; padding-top: 6px; padding-bottom: 6px; font-size: 11px; }
 .sast-model-selector em { position: absolute; right: 9px; bottom: -13px; color: var(--muted); font-size: 9px; font-style: normal; }
-.sast-run-shell { min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.sast-run-shell { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
 .sast-phase-rail { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-bottom: 1px solid var(--border); background: var(--panel); }
 .sast-phase-rail, .sast-view-tabs { scrollbar-width: none; }
 .sast-phase-rail::-webkit-scrollbar, .sast-view-tabs::-webkit-scrollbar { display: none; }
@@ -24,7 +24,7 @@
 .sast-view-tabs button { padding: 10px 0 9px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: none; cursor: pointer; font-size: 12px; font-weight: 600; }
 .sast-view-tabs button:hover { color: var(--text); }
 .sast-view-tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
-.sast-run-content { min-height: 0; padding: 14px 16px 22px; overflow-y: auto; }
+.sast-run-content { flex: 1 1 auto; min-width: 0; min-height: 0; padding: 14px 16px 22px; overflow-y: auto; }
 .sast-inline-notice { margin-bottom: 10px; }
 .sast-phase-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid rgba(91,141,239,.35); border-radius: 6px; background: rgba(91,141,239,.08); }
 .sast-phase-banner > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px; min-width: 0; }
@@ -66,6 +66,7 @@
   .sast-run-shell .agent-dot--active { animation: none; }
 }
 .sast-panel-empty, .sast-empty-state { padding: 26px 18px; color: var(--muted); font-size: 12px; text-align: center; }
+.sast-runs-list-table-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
 .sast-table-wrap { width: 100%; overflow-x: auto; }
 .sast-candidate-table { width: 100%; min-width: 560px; border-collapse: collapse; table-layout: fixed; font-size: 11px; }
 .sast-candidate-table th { position: relative; overflow: hidden; padding: 8px 10px; color: var(--muted); background: var(--panel-2); font-size: 10px; font-weight: 700; letter-spacing: .35px; text-align: left; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }

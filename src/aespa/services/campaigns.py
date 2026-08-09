@@ -213,6 +213,54 @@ def get_campaign(
     return campaign
 
 
+def get_campaign_member_run_status(session: Session, member) -> str | None:
+    """Read the current status of the child run linked to a campaign member.
+
+    The campaign member status describes orchestration work. A user can also
+    resume the linked child run from its standalone page, so the campaign UI
+    must read that run's live status as well.
+    """
+    if isinstance(member, CampaignSourceMember):
+        if member.sast_run_id is None:
+            return None
+        run = session.get(SastRun, member.sast_run_id)
+        if run is None:
+            return None
+        from aespa.services import sast_scanner as sast_scanner_svc
+
+        return sast_scanner_svc.get_sast_status(run.id).get("status") or run.status
+
+    if not isinstance(member, CampaignTargetMember):
+        return None
+
+    if member.target_type == "site":
+        if member.test_run_id is None:
+            return None
+        run = session.get(TestRun, member.test_run_id)
+        if run is None:
+            return None
+        from aespa.services import crawler as crawler_svc
+        from aespa.services import scanner as scanner_svc
+
+        if crawler_svc.is_running(run.id):
+            return "running"
+        if scanner_svc.is_thinking_running(run.id):
+            return (
+                scanner_svc.get_thinking_scan_status(run.id).get("status")
+                or "running"
+            )
+        return run.status
+
+    if member.api_test_run_id is None:
+        return None
+    run = session.get(ApiTestRun, member.api_test_run_id)
+    if run is None:
+        return None
+    from aespa.services import api_scanner as api_scanner_svc
+
+    return api_scanner_svc.get_scan_status(run.id).get("status") or run.status
+
+
 def create_campaign(
     session: Session, application_id: int, payload: CampaignCreate
 ) -> AssessmentCampaign:

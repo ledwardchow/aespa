@@ -167,7 +167,7 @@ export function CampaignReviewTab({ applicationId, campaignId, campaign, canCont
       Review recorded — {result.approved} approved, {result.rejected} rejected.
       {canContinue && <> <button className="btn sm" style={{ marginLeft: 10 }} disabled={continueBusy} onClick={continueToLive}>Continue to live testing</button></>}
     </div>}
-    <div className="row" style={{ gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+    <div className="app-review-filters">
       <select className="select" value={severityFilter} onChange={e => setSeverityFilter(e.target.value)}>
         <option value="">All severities</option>
         {severityOptions.map(s => <option key={s} value={s}>{s}</option>)}
@@ -334,9 +334,6 @@ function MappingRow({ mapping, targets, decisions, selected, onSetDecision, onTo
       <td><input type="checkbox" checked={selected.has(mapping.id)} onChange={() => onToggleSelected(mapping.id)} /></td>
       <td>
         {targets[mapping.target_id] || `#${mapping.target_id}`}
-        {mapping.lead_trace_status && <div className="subtle" style={{ fontSize: 11 }}>
-          {mapping.lead_trace_status} path{mapping.lead_trace_confidence != null ? ` · ${confidencePct(mapping.lead_trace_confidence)}` : ""}
-        </div>}
       </td>
       <td>{confidencePct(mapping.lead_trace_confidence ?? mapping.score)}</td>
       <td className="subtle" style={{ fontSize: 12 }}>{why}</td>

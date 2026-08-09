@@ -9,7 +9,14 @@ import zipfile
 
 from sqlmodel import Session
 
-from aespa.models import ApplicationTarget, ComponentSnapshot
+from aespa.models import (
+    ApplicationTarget,
+    CampaignSourceMember,
+    CampaignTargetMember,
+    ComponentSnapshot,
+    SastRun,
+    TestRun,
+)
 
 
 def _zip_bytes(contents: str = "def handler():\n    pass\n") -> bytes:
@@ -163,6 +170,55 @@ def test_delete_snapshot_blocked_while_referenced_by_campaign(
 
     with Session(isolated_db_engine) as s:
         assert s.get(ComponentSnapshot, snapshot["id"]) is not None
+
+
+def test_campaign_detail_reports_linked_child_run_status(
+    client, isolated_db_engine, tmp_path, monkeypatch
+):
+    """Campaign status must reflect a child run resumed from its own page."""
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    app = _create_application(client)
+    component = _create_component(client, app["id"])
+    snapshot = _upload_snapshot(client, app["id"], component["id"])
+    site_id = client.post(
+        "/api/sites", json={"name": "Campaign target", "base_url": "http://target.local"}
+    ).json()["id"]
+    target = client.post(
+        f"/api/applications/{app['id']}/targets",
+        json={"target_type": "site", "target_id": site_id},
+    ).json()
+    campaign = client.post(
+        f"/api/applications/{app['id']}/campaigns",
+        json={
+            "name": "status-sync",
+            "source_members": [
+                {"component_id": component["id"], "snapshot_id": snapshot["id"]}
+            ],
+            "target_members": [{"target_id": target["id"]}],
+        },
+    ).json()
+
+    with Session(isolated_db_engine) as s:
+        source_member = s.get(CampaignSourceMember, campaign["source_members"][0]["id"])
+        target_member = s.get(CampaignTargetMember, campaign["target_members"][0]["id"])
+        sast_run = SastRun(name="source", status="scanning")
+        test_run = TestRun(site_id=site_id, name="target", status="running")
+        s.add(sast_run)
+        s.add(test_run)
+        s.flush()
+        source_member.sast_run_id = sast_run.id
+        target_member.test_run_id = test_run.id
+        s.add(source_member)
+        s.add(target_member)
+        s.commit()
+
+    response = client.get(
+        f"/api/applications/{app['id']}/campaigns/{campaign['id']}"
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["source_members"][0]["run_status"] == "scanning"
+    assert payload["target_members"][0]["run_status"] == "running"
 
 
 def test_delete_unreferenced_snapshot_succeeds(client, tmp_path, monkeypatch):

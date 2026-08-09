@@ -8,12 +8,7 @@ export function ApiRunStatusTab({
   scanRunning
 }) {
   const [subTab, setSubTab] = useState("agents");
-  return <div style={{
-    display: "flex",
-    flexDirection: "column",
-    height: "100%",
-    overflow: "hidden"
-  }}>
+  return <div className="api-run-status-content">
       <div className="activity-sub-tab-bar" style={{
       padding: "8px 16px 0",
       flexShrink: 0,
@@ -26,11 +21,7 @@ export function ApiRunStatusTab({
         <button className={"activity-sub-tab-btn" + (subTab === "agents" ? " active" : "")} onClick={() => setSubTab("agents")}>Agents</button>
         <button className={"activity-sub-tab-btn" + (subTab === "log" ? " active" : "")} onClick={() => setSubTab("log")}>Log</button>
       </div>
-      <div style={{
-      flex: 1,
-      overflow: "auto",
-      minHeight: 0
-    }}>
+      <div className="api-run-status-scroll">
         {subTab === "agents" && <ApiRunAgentsTab runId={runId} scanRunning={scanRunning} />}
         {subTab === "log" && <ApiRunLogTab runId={runId} scanRunning={scanRunning} />}
       </div>
@@ -38,4 +29,3 @@ export function ApiRunStatusTab({
 }
 
 // ── ApiRunLogTab ───────────────────────────────────────────────────────────────
-

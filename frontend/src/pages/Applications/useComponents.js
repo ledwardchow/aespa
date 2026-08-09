@@ -5,8 +5,8 @@ import { api } from "../../lib/api";
 // given component is fetched lazily (only when its card is expanded) so
 // opening the tab with many components stays cheap. `onChanged` (optional) is
 // invoked after any mutation that changes the application's composition —
-// ApplicationDetail uses it to keep its Overview counts/warnings fresh
-// without the tab having to be revisited first.
+// ApplicationDetail uses it to keep its application data fresh without the
+// tab having to be revisited first.
 export function useComponents(applicationId, onChanged) {
   const [components, setComponents] = useState(null);
   const [error, setError] = useState(null);

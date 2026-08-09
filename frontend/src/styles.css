@@ -314,6 +314,7 @@ a:hover { color: var(--accent-hover); }
   padding: 28px;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -430,8 +431,14 @@ a:hover { color: var(--accent-hover); }
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
-  overflow: hidden;
-  overflow-x: auto;        /* allow horizontal scroll instead of crushing columns */
+  overflow: auto;          /* scroll table content without moving the header */
+}
+
+.table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel-2);
 }
 
 table {

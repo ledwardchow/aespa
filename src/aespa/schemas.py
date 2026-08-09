@@ -1713,6 +1713,9 @@ class CampaignSourceMemberOut(BaseModel):
     component_id: int
     snapshot_id: int
     sast_run_id: int | None
+    # Current status of the linked SastRun. This can differ from the campaign
+    # member status when the run is resumed from its standalone page.
+    run_status: str | None = None
     status: str
     created_at: datetime
     updated_at: datetime
@@ -1727,6 +1730,9 @@ class CampaignTargetMemberOut(BaseModel):
     target_type: str
     test_run_id: int | None
     api_test_run_id: int | None
+    # Current status of the linked web/API run, rather than only the campaign
+    # orchestration status.
+    run_status: str | None = None
     status: str
     status_message: str | None = None
     validation_summary_json: str = "{}"

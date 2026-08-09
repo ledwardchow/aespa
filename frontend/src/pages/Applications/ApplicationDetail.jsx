@@ -7,25 +7,19 @@ import { TargetsTab } from "./TargetsTab";
 import { CampaignsTab } from "./CampaignsTab";
 
 const APP_TABS = [
-  { key: "overview", label: "Overview" },
+  { key: "campaigns", label: "Campaigns" },
   { key: "components", label: "Code Components" },
-  { key: "targets", label: "Live Targets" },
-  { key: "campaigns", label: "Campaigns" }
+  { key: "targets", label: "Live Targets" }
 ];
 
 // ── ApplicationDetail ────────────────────────────────────────────────────────
-// Shell for the four application-management sections. Overview shows
-// name/description + a quick summary; the other tabs delegate to their own
-// focused components rather than one monolith holding all their state.
+// Shell for the three application-management sections. Each tab delegates to
+// its own focused component rather than one monolith holding all its state.
 export function ApplicationDetail({ applicationId, initialTab }) {
   const [app, setApp] = useState(null);
   const [components, setComponents] = useState([]);
   const [error, setError] = useState(null);
-  const tab = initialTab || "overview";
-  // Bumped by ComponentsTab/TargetsTab (via useComponents/useTargets/useHints'
-  // onChanged) after any composition-changing mutation, so Overview's counts
-  // and "missing snapshot" warning refresh immediately rather than only on
-  // the next tab switch. A single counter prop — not a wider prop bag.
+  const tab = APP_TABS.some(t => t.key === initialTab) ? initialTab : "campaigns";
   const [compositionVersion, setCompositionVersion] = useState(0);
   const bumpComposition = useCallback(() => setCompositionVersion(v => v + 1), []);
 
@@ -33,9 +27,8 @@ export function ApplicationDetail({ applicationId, initialTab }) {
     api.getApplication(applicationId).then(setApp).catch(e => setError(e.message));
   }, [applicationId]);
 
-  // Reload the application summary (counts, last campaign status) whenever
-  // the id changes, the user switches tabs (so returning to Overview is
-  // always fresh), or a child tab reports a composition change.
+  // Reload the application summary whenever the id changes, the user switches
+  // tabs, or a child tab reports a composition change.
   useEffect(() => { loadApp(); }, [loadApp, tab, compositionVersion]);
 
   // Components are needed by both the Components tab and the Targets tab's
@@ -74,27 +67,9 @@ export function ApplicationDetail({ applicationId, initialTab }) {
     </div>
     <div className="content scroll-content">
       {error && <div className="alert error" style={{ marginBottom: 16 }}>{error}</div>}
-      {tab === "overview" && <OverviewTab app={app} components={components} />}
       {tab === "components" && <ComponentsTab applicationId={applicationId} onChanged={bumpComposition} />}
       {tab === "targets" && <TargetsTab applicationId={applicationId} components={components} onChanged={bumpComposition} />}
       {tab === "campaigns" && <CampaignsTab applicationId={applicationId} />}
     </div>
   </>;
-}
-
-function OverviewTab({ app, components }) {
-  return <div>
-    <div className="card" style={{ maxWidth: 640 }}>
-      <div className="form-section-title">Overview</div>
-      <div style={{ marginTop: 8 }}>{app.description || <span className="subtle">No description yet.</span>}</div>
-      <div className="row" style={{ gap: 24, marginTop: 16, flexWrap: "wrap" }}>
-        <div className="stat-card"><span>Code components</span><strong>{app.component_count}</strong></div>
-        <div className="stat-card"><span>Sites</span><strong>{app.site_count}</strong></div>
-        <div className="stat-card"><span>API collections</span><strong>{app.api_collection_count}</strong></div>
-      </div>
-      {app.component_count > 0 && components.some(c => !c.latest_snapshot) && <div className="alert" style={{ marginTop: 16 }}>
-        {components.filter(c => !c.latest_snapshot).length} component(s) have no uploaded snapshot yet — upload one before starting a campaign.
-      </div>}
-    </div>
-  </div>;
 }
