@@ -2,7 +2,7 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## August 9 Update — Applications and multi-repository campaign scanning
+## [PR #262] August 9 Update — Applications and multi-repository campaign scanning
 
 ### "Applications" targets
 
