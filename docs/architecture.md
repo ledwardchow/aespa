@@ -2,9 +2,10 @@
 
 AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security scanner. It covers three distinct surfaces:
 
-- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage with Track/Enforce modes.
+- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage with Track/Enforce modes, while SAST Validate focuses only on imported SAST leads.
 - **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
 - **SAST assistance** — a standalone agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
+- **Multi-repository applications** — when a product's code is split across several repositories/micro-frontends, an **Application** groups them (with immutable uploaded ZIP snapshots) alongside the existing Sites/API Collections that make up the live product. An **AssessmentCampaign** coordinates ordinary SAST/web/API child runs for that application, joins compact per-repository interface facts into a cross-repository map, and proposes which live target should receive each SAST lead — subject to human review before any dynamic scan starts.
 
 ---
 
@@ -60,6 +61,10 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 17. [SAST Scanner & Scan Leads](#17-sast-scanner--scan-leads)
     - [Architecture overview](#architecture-overview-1) · [File tools](#file-tools-all-path-jailed-to-the-extraction-root) · [Lead lifecycle](#lead-lifecycle)
     - [ScanLead entity](#scanlead-entity-servicesscan_leadspy) · [Lead consumption (API vs web)](#lead-consumption-api-vs-web) · [Concurrency](#concurrency)
+18. [Applications & Multi-Repository Campaigns](#18-applications--multi-repository-campaigns)
+    - [Data model](#data-model) · [Component facts](#component-facts-servicescomponent_factspy)
+    - [Correlation](#correlation-servicescorrelationpy) · [Review gate](#review-gate) · [Campaign lifecycle](#campaign-lifecycle-servicescampaignspy)
+    - [Cleanup & restart recovery](#cleanup--restart-recovery)
 
 ---
 
@@ -680,6 +685,19 @@ never reject `done` indefinitely.
 | `tool` | Call a read-only context tool (see below) |
 | `done` | Finish the scan with a summary |
 
+The existing `coverage_mode` selector has three values: `track` (Quick), `enforce`
+(Full), and `sast_validate` (SAST Validate). SAST Validate does not seed or resolve
+normal coverage obligations, dispatch specialists, schedule Burp work, or run the
+general post-scan reporting pass. It loads every open imported lead as a compact
+index, requires the Test Lead to fetch each lead's complete evidence with
+`context_tool` → `lead_detail`, and cannot finish until every imported lead is
+`confirmed`, `dismissed`, or `inconclusive`. The Test Lead must follow the lead's
+attack path and may use configured credentials and sessions to reach protected
+functionality. A finding is allowed only when the lead is confirmed or when an
+incidental issue is directly evidenced by traffic already generated for that lead;
+incidental issues receive no follow-up probes. The existing deterministic TLS
+posture check still runs for HTTPS targets unless deterministic checks are disabled.
+
 ### WAF detection and request transport
 
 WAF detection is passive. The traffic logger looks at normal response headers,
@@ -735,6 +753,7 @@ targeted scan round will change the next action.
 | `auth_matrix` | Test a set of endpoints across auth boundaries |
 | `extract_entities` | Parse URLs, IDs, JWTs, error strings from text |
 | `coverage_gaps` | Compact live list of high-value uncovered web route/category cells |
+| `lead_detail` | Full evidence, traces, validation data, and attack path for an imported SAST lead owned by the current run |
 
 ### Web OWASP Coverage (OWASP Top-10 matrix)
 
@@ -747,7 +766,7 @@ Input-bearing A03 cells additionally persist class-level states in `test_classes
 - `seed_web_workprogram(run_id)` creates the cells; it runs synchronously when a dynamic scan starts (and on resume) via `api/scan.py`, and can be re-triggered through `POST /api/test-runs/{id}/coverage/seed`.
 - `_make_web_post_probe_fn` / `_make_web_post_finding_fn` update cells as the agentic loop probes pages and writes findings (findings flip the cell to `finding` and record the `ScanFinding.id`).
 - `web_route_inventory.enrich_dynamic_route` classifies routes first observed during the dynamic scan from their request/response evidence. It OR-merges deterministic and LLM-derived applicability into the canonical `CrawledPage`, reseeds newly applicable cells, and leaves the current probe hook to mark the exercised category `in_progress`. Browser-observed routes are enriched too; passive JavaScript route literals remain target intelligence until actively reached.
-- `TestRun.coverage_mode` selects **Track** (observe only) or **Enforce**; in Enforce mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop, classifying each `(page, category)` as probe-worthy or skippable up to a budget.
+- `TestRun.coverage_mode` selects **Track** (`track`, the Quick mode), **Enforce** (`enforce`, the Full mode), or **SAST Validate** (`sast_validate`). In Enforce mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop, classifying each `(page, category)` as probe-worthy or skippable up to a budget. SAST Validate does not use the work program; it validates only open imported SAST leads and retains the HTTPS TLS posture check.
 - `get_web_coverage_matrix(run_id)` powers the **OWASP Coverage** UI tab (`GET /api/test-runs/{id}/coverage`).
 
 ---
@@ -812,7 +831,7 @@ See [§4 Configuration](#4-configuration) for the full `SpecialistAgentConfig` f
 
 ### Adversarial validator
 
-After any finding is written, the validator service (`validator.py`) can run an independent **adversarial validation** pass. The validator agent is given a different system prompt with an explicit mandate to disprove the finding — it re-runs the probe and looks for counter-evidence. This reduces false positives more effectively than self-review by the same agent.
+After a normal web finding is written, the validator service (`validator.py`) can run an independent check. The validator is told to try to disprove the finding and records the evidence it used. A timeout, provider error, missing verdict, or malformed verdict is saved as **unconfirmed**, never as confirmed; the finding can be retried from the finding row's **Retry validation** button. Applications SAST validation keeps its existing lead workflow and does not run this separate validator.
 
 Validation outcomes:
 - **confirmed** — vulnerability is reproducible and real
@@ -1062,6 +1081,16 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/statistics/llm/prices/refresh` | `statistics.py` | Download the latest LiteLLM price map |
 | `/api/statistics/llm/prices` | `statistics.py` | Save a monthly or future price override |
 | `/api/statistics/llm` (`DELETE`) | `statistics.py` | Reset all usage months while retaining price data |
+| `/api/applications/` | `applications.py` | CRUD for applications, code components, ZIP snapshots, targets, explicit target component links, and code-to-target routing associations |
+| `/api/applications/{id}/campaigns/` | `applications.py` | Create/list/get/delete campaigns; `start`/`stop`/`retry`/`continue` lifecycle actions |
+| `/api/applications/{id}/campaigns/{id}/status` | `applications.py` | Campaign progress (status, warnings, source/target member states) |
+| `/api/applications/{id}/campaigns/{id}/events` | `applications.py` | Live SSE stream (same event bus as web/API/SAST runs, scoped `run_kind="campaign"`) |
+| `/api/applications/{id}/campaigns/{id}/activity` | `applications.py` | Persisted campaign activity — merged, chronological `AgentLog`/`ScanLog` history (§18) |
+| `/api/applications/{id}/campaigns/{id}/activity/stream` | `applications.py` | Cursor-safe SSE replay-then-follow of the same activity feed — no fetch→subscribe gap (§18) |
+| `/api/applications/{id}/campaigns/{id}/connections` | `applications.py` | The campaign's cross-repository application map (`ComponentConnection` rows) |
+| `/api/applications/{id}/campaigns/{id}/mappings` | `applications.py` | Lead-target mapping proposals, enriched with lead/component context for review (§18) |
+| `/api/applications/{id}/campaigns/{id}/review` | `applications.py` | Submit approve/reject decisions for pending mappings |
+| `/api/applications/{id}/campaigns/{id}/findings` | `applications.py` | Combined findings across every child run, with resolved component provenance (§18) |
 
 ---
 
@@ -1376,6 +1405,11 @@ Cell statuses: `uncovered` → `in_progress` → `covered` (finding attached) / 
 **Track mode** — the agentic loop steers itself; cells are updated as probes are made.  
 **Enforce mode** — after the main loop, `_enforce_coverage_loop` drives every still-uncovered cell to a terminal state. An LLM classifier decides per `(endpoint, category)` whether to probe or record a skip reason, up to a configurable budget.
 
+**SAST Validate mode** (`coverage_mode="sast_validate"`) does not seed, probe, or
+resolve the API coverage matrix. It validates only open imported SAST leads, using
+the lead's attack path and configured sessions; the existing HTTPS TLS posture
+check remains enabled unless deterministic checks are disabled.
+
 ### API scan engine (`services/api_scanner.py`)
 
 The entry point `start_api_scan(api_run_id)` launches `_api_scan_task` as a background `asyncio.Task`.
@@ -1385,7 +1419,7 @@ _api_scan_task(api_run_id)
   └─ _do_api_thinking_scan(api_run_id)
        1. Load ApiTestRun, LLM config, scanner policy, collection
        2. seed_sessions_from_credentials — load ApiCredentials into scanner session vault
-       3. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs
+       3. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs (Track/Enforce only)
        4. _build_api_crawl_context — build LLM opening context from collection metadata + explicitly imported SAST leads
        5. _do_agentic_thinking_loop (shared with web scanner)
             • get_api_test_lead_tools supplies only API-aware top-level tools; browser,
@@ -1398,6 +1432,11 @@ _api_scan_task(api_run_id)
             • _make_post_probe_fn updates the coverage matrix cell for each probe (endpoint, category)
             • _make_post_finding_fn stamps api_test_run_id and OWASP category on each finding
        7. (enforce mode only) _enforce_coverage_loop — drive uncovered cells to terminal state
+
+In SAST Validate, the API prompt and tool list are restricted to context lookup,
+HTTP requests, finding/lead updates, and completion. Coverage probe hooks and
+final untouched-cell resolution are disabled. `lead_detail` is available in all
+API scan modes and enforces ownership by `(run_kind, run_id, lead_id)`.
 ```
 
 ### Scope enforcement
@@ -1502,7 +1541,7 @@ The dynamic loop investigates leads via the shared `update_lead` action, which s
 - **API scans** consume *explicitly imported copies*: the user picks a completed SAST run on the API run's **Scan Leads** tab and `copy_leads_to_run(sast_run_id, "api", run_id)` creates fresh rows owned only by that API run. API scan startup never creates a SAST run or imports collection leads automatically. `_build_api_crawl_context` and API A.L.I.C.E. inject only `format_leads_for_run("api", run_id)`.
 - **Web scans** consume *copies*: the user picks a completed SAST run on the **SAST Leads** tab and `copy_leads_to_run(sast_run_id, "web", run_id)` duplicates its originals into new rows tagged `imported_into_*` (idempotent per source run; originals stay `open`). At scan start `scanner._do_thinking_scan` injects them via `format_leads_for_run("web", run_id)`. Because copies are independent, investigating them never mutates the source SAST run's leads, and deleting a SAST run leaves the copies intact (only `imported_into_run_id IS NULL` originals are cascade-deleted).
 
-The dynamic context includes each lead's ordered reachability, impact, severity reasoning, and dynamic-test objective. The web and API Test Leads use that path to choose focused probes, but must verify every hop against live responses before calling `update_lead`. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
+The dynamic context includes each lead's ordered reachability, impact, severity reasoning, and dynamic-test objective. The web and API Test Leads use that path to choose focused probes, but must verify every hop against live responses before calling `update_lead`. In SAST Validate, the opening prompt contains only a compact index; `lead_detail` retrieves the complete lead one at a time. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
 
 Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import.
 
@@ -1515,3 +1554,97 @@ test unless that persisted copy succeeds.
 ### Concurrency
 
 SAST scans use the same task-registry pattern as web and API scans: `_sast_tasks: dict[int, asyncio.Task]` and `_sast_stop_requested: set[int]`. A stop request causes the agentic loop to exit cleanly at the next step boundary.
+
+---
+
+## 18. Applications & Multi-Repository Campaigns
+
+**Files**: `src/aespa/services/applications.py`, `src/aespa/services/campaigns.py`, `src/aespa/services/correlation.py`, `src/aespa/services/component_facts.py`, `src/aespa/services/component_mapper.py`, `src/aespa/services/source_tools.py`, `src/aespa/api/applications.py`
+
+An **Application** groups named code components (repositories or micro-frontends), their fixed ZIP snapshots, and the live Sites/API Collections that make up the product. An **AssessmentCampaign** freezes those inputs, runs SAST for each component, connects the resulting leads to live targets, and asks a human to review inferred routes before testing starts.
+
+Applications live-target children are deliberately different from normal scans: a Site is crawled to collect frontend evidence, then the child run validates only the imported SAST leads. It does not start the normal Quick/Full coverage scan. API children validate their imported leads directly. A child reports **incomplete** when any imported lead is still open; retry reuses the same child run, crawl, and lead rows and continues the remaining work.
+
+This layer never replaces the standalone SAST/web/API workflows described in sections 6, 7, and 17. It reuses their services, with the campaign child runs set to `coverage_mode="sast_validate"`.
+
+### Data model
+
+| Table | Purpose |
+|---|---|
+| `application` | A named product/system being assessed |
+| `application_component` | A named repository/micro-frontend belonging to an application (unique name per application) |
+| `component_snapshot` | One immutable uploaded ZIP version for a component (filename, stored path, size, SHA-256) — never edited in place |
+| `application_target` | An existing `Site` or `ApiCollection` attached to an application (reused, never copied) |
+| `application_target.component_id` | An optional explicit code-component owner for a live target; linked component SAST leads are auto-imported into that target's child run |
+| `component_target_hint` | An optional user-supplied code-to-target routing association that boosts inferred correlation confidence |
+| `assessment_campaign` | One coordinated test; its `id` comes from the same global `run_identity` namespace as web/API/SAST runs (`kind="campaign"`), so its events/logs never collide with a run id |
+| `campaign_source_member` | One frozen `(component, snapshot)` pair selected for a campaign, plus the `SastRun` id it spawned |
+| `campaign_target_member` | One frozen live target selected for a campaign, plus the child run id, validation summary, and a message explaining incomplete work |
+| `component_fact` | A compact interface fact recorded by a SAST run (deterministic baseline or evidence-backed LLM mapping) |
+| `component_connection` | One directed, evidence-backed graph edge (`contains`, `triggers`, `dispatches`, `calls`, or `reaches`) within or across component snapshots |
+| `lead_target_mapping` | A proposed (then reviewed) routing of one `ScanLead` to one live target, including approved and final frontend attack-path versions |
+| `scan_lead_component_provenance` | Many-component provenance for a campaign-generated cross-repository `ScanLead` (which components contributed, and which role) |
+
+A ZIP snapshot or an application target cannot be deleted while a campaign still references it (the same "referenced" guard the rest of the app uses for uploaded documents). Deleting an application is blocked while it still owns any campaign; deleting a campaign cascades into every child run it created (`run_cleanup.cascade_delete_campaign`) using the same helpers sections 6/7/17 already rely on for cleanup — a campaign never leaves an orphaned child run or a duplicate finding behind.
+
+### Component facts (`services/component_facts.py`)
+
+Alongside its usual leads, every SAST run also records a short, bounded deterministic baseline of facts about how the code talks to the outside world. After campaign SAST children complete, the correlation stage runs a separate **Component Mapper** LLM once per immutable component snapshot. The mapper is language/framework agnostic and uses only path-jailed, read-only source tools; it follows wrappers, configuration, prefixes, and interpolation that regex extraction cannot reliably compose:
+
+- **routes** it serves (Flask/FastAPI/Django decorators, Express-style handlers) with method + path
+- **outbound HTTP calls** it makes (`requests`/`httpx`/`axios`/`fetch`) with method + host + path
+- **browser roots and actions** (`ui_route`, `ui_action`, and handler facts for React Router, Next.js Pages/App Router, clicks, and form submissions)
+- **auth/session boundaries** (`@login_required`, `Depends(get_current_user)`, `passport.authenticate`, …)
+- **queues/topics** and **shared datastores** referenced by name
+- **framework markers** from manifest files (`package.json`, `requirements.txt`, `pyproject.toml`, `go.mod`)
+
+Each fact carries a `file:line` evidence pointer and a semantic fingerprint that excludes evidence lines, so deterministic and LLM evidence for one interface merge into one row. Deterministic persistence replaces only deterministic-origin rows; mapper-origin provenance and supporting locations survive SAST retries. `component_facts.persist_component_facts(sast_run_id, root)` is called once, right after the SAST report phase, for **every** SAST run — standalone or campaign. It looks up the owning component only via `CampaignSourceMember` (`component_id` stays `NULL` for a standalone run); a SAST run never needs to know campaigns exist, which is how facts extraction and campaign start/stop remain compatible with the plain SAST screen. The mapper accepts at most 500 facts and 100 tool calls per component, validates that primary evidence was read and points to a real line, and records origin, confidence, reasoning, and supporting locations in `detail_json`.
+
+### Correlation (`services/correlation.py`)
+
+Once a campaign's SAST child runs finish, `correlate_campaign_with_llm(campaign_id)` builds the map. It maps components with bounded concurrency, runs deterministic matching first, then sends only unresolved calls and at most 20 candidate routes per call to a compact ambiguity matcher. The matcher may select only supplied fact IDs and proposals below confidence 0.70 are discarded. `correlate_campaign(campaign_id)` remains the synchronous deterministic helper for tests and legacy callers.
+
+1. **Directed component connections** — internal UI route/action/request and handler/request edges are built first, then an outbound-call fact in one component is matched against a route fact in another by HTTP method + normalized path (query strings stripped, `{param}`/`:param` placeholders collapsed). Validated SAST leads also receive immutable `lead_anchor` facts so a vulnerability in a helper/service file can join the graph without pretending the helper is itself a browser route.
+2. **Lead-target routing** — every reportable lead from a campaign source's SAST run is scored against every campaign target: a direct `component_target_hint` (+0.6), a host match against the target's base URL (+0.2), or an exact method/path match against the target's own parsed `ApiEndpoint` rows (+0.3). An optional `application_target.component_id` is an explicit ownership decision: that component's own SAST leads bypass review and are copied automatically into the target's child run. Only genuinely inferred or cross-component matches become review proposals; a lead with no evidence for any target gets none, rather than a fabricated low-confidence guess.
+3. **Frontend path leads** — bounded reverse traversal starts at each lead anchor and follows incoming edges toward every known browser root. Complete UI-rooted paths and incomplete frontend-call paths are ranked by completeness, weakest-edge confidence, proof gaps, hop count, and stable path key. Each retained path becomes a distinct campaign lead/fingerprint and mapping; Site targets receive these frontend leads instead of a duplicate backend-only proposal, while API targets retain backend-oriented routing.
+
+Mapping/provider failures do not advance a campaign to `awaiting_review`: transient provider/protocol failures are persisted as `interrupted` with `interrupted_stage="correlating"` so the existing retry action resumes without rerunning completed SAST children, while missing snapshots and ownership invariants are terminal failures. Stop requests are honored between mapper operations and matcher batches. A campaign without any explicitly selected or active LLM profile retains the legacy deterministic baseline with a visible activity warning; configured mapper failures are never silently converted to an empty map.
+
+### Review gate
+
+`services/campaigns.submit_review(campaign_id, decisions)` applies a list of `(mapping_id, approve)` decisions idempotently — resubmitting the same decision twice does not toggle counters or create duplicates — and records `review_submitted_at` on the campaign. Approving a mapping here does **not** copy anything yet: the live target's `TestRun`/`ApiTestRun` does not exist until the DAST stage starts. `continue_to_live_testing(campaign_id)` is explicitly gated on `status == "awaiting_review"` **and** `review_submitted_at` being set — this is the mechanism that keeps DAST from starting before a human has reviewed inferred lead routing. Once each target's child run exists, the DAST stage first copies reportable leads from the target's explicitly assigned `component_id` (if any), then `correlation.copy_approved_mappings_for_target` copies approved inferred/cross-component mappings into that exact run via the existing `scan_leads` copy helpers. A rejected mapping is never copied. Completed campaigns may review later crawl-discovered proposals; approval does not mutate the original scan, and the separate supplemental-validation action copies only the selected paths into the existing web run and starts a lead-only `sast_validate` pass.
+
+`GET .../mappings` gives the review screen everything it needs in one call — each `LeadTargetMappingOut` row carries the raw mapping fields plus linked lead context, trace status/confidence, origin vulnerability id, and contributing component ids/names. Path cards are grouped under their originating SAST vulnerability but approved independently. Reviewers may edit only frontend guidance fields; backend source/sink evidence is immutable and edited field names are retained as reviewer-supplied guidance. `approved_attack_path_json` is preserved byte-for-byte, while crawl resolution writes `final_attack_path_json` and a bounded `attack_path_changes_json` audit record. A matched path must use the same page for its route, action, and request. Interactive browser replays store an opaque interaction id on both the action link and the traffic rows, so a request from another page or action cannot be substituted.
+
+### Campaign lifecycle (`services/campaigns.py`)
+
+```
+draft ─start─▶ sast_running ─▶ correlating ─▶ awaiting_review
+                                                    │ (review submitted)
+                                                    ▼
+                                              dast_running ─▶ completed
+                                                    │
+                                          (any stage) ─▶ incomplete ─▶ resume
+                                                    │
+                                          (any stage) ─▶ stopped | failed | interrupted
+```
+
+- **`sast_running`** — `start_campaign` creates one `SastRun` per frozen `(component, snapshot)` pair inside one transaction (the "frozen child manifest"), then awaits them under a bounded `asyncio.Semaphore(max_parallel_sast)`. A single component's scan failing does not fail the campaign — it is recorded on that `CampaignSourceMember` and surfaced as a plain-language warning on the campaign (`warnings_json`), and the campaign still reaches review with the results it has. A member already `completed`/`failed` (from an earlier run or a retry) is never rerun.
+- **`correlating`** — runs `correlate_campaign` (synchronous, deterministic). Facts are looked up by each `CampaignSourceMember`'s own `sast_run_id` — never by `component_id` alone — so a component reused across two campaigns/snapshots never leaks the other campaign's facts into this one.
+- **`awaiting_review`** — paused until the review gate is satisfied: `submit_review` rejects an unknown/foreign `mapping_id` outright (all-or-nothing per batch) and only accepts an empty decision list when the campaign genuinely has zero proposals; `review_submitted_at` is stamped only once every proposed mapping — across one or more submissions — has an approved/rejected decision.
+- **`dast_running`** — for each frozen target, a `TestRun`/`ApiTestRun` is created (once, rerun-safe) and driven the same way the standalone screens do. A successful web crawl resolves each approved frontend path against exact page/request artifacts before copying it to the web run. Crawl artifacts that reveal an additional page/action/request combination are stored as unapproved `proposed` mappings and are never injected into the active scan. If a campaign web crawl is partial or fails but has an approved path, the normal web scanner still starts with pre-crawl/partial evidence and a prominent warning; a crawl failure without an approved path retains the old skip behavior. Standalone web scans are unchanged. An API target copies its backend-oriented approved leads and calls `api_scanner.start_api_scan` directly. Every target runs concurrently. A target is only marked `completed` after reloading its `TestRun`/`ApiTestRun` and confirming a genuine success status (`"complete"`/`"completed"`) — the wait loop exiting only means the task is done, not that it succeeded. Later-approved crawl paths use `POST .../targets/{target_id}/supplemental-validate`; this reuses the existing web run, copies only those path leads, and runs `coverage_mode="sast_validate"` without recrawling or rerunning general coverage.
+- **Independent child retry** — once the campaign orchestrator is idle, `POST .../sources/{member_id}/resume` and `POST .../targets/{member_id}/resume` retry only the selected failed/pending/skipped child. The existing child run is reused when available, completed siblings and the campaign stage are left untouched (except that a failed no-target campaign is promoted to `completed` when a target retry succeeds), and the retry is tracked separately so stopping or deleting a campaign cannot race an in-flight member retry. The same child run remains directly manageable from its ordinary SAST, web, or API screen; deleting a child detaches that member and allows the campaign resume action to create a replacement child from the frozen snapshot or target.
+- **Context matching retry** — the Connections tab exposes `Resume context matching` for failed/interrupted correlation and `Re-run context matching` for completed review/live stages. It reuses the collected SAST facts and immutable snapshots without rerunning child scans; downstream review/mapping data is preserved once the campaign has moved past correlation, and concurrent campaign actions are rejected.
+- **Stop propagation** — `stop_campaign` marks a cooperative stop flag, then awaits each running child's own `stop_*_and_wait` barrier (`sast_scanner.stop_sast_scan_and_wait`, `crawler.stop_and_wait`, `scanner.stop_thinking_and_wait`, `api_scanner.stop_api_scan_and_wait`) — not just a fire-and-forget stop request — before cancelling and awaiting the orchestrator task itself (bounded, shielded). Once every barrier has settled, `_normalize_running_members_after_stop` force-sets any `CampaignSourceMember`/`CampaignTargetMember` still reading `running` to `skipped` — a per-member coroutine's own stop-requested check (inside a polling loop, or a bare `CancelledError` re-raise) can return/unwind without itself recording a terminal status, and a member must never keep claiming to be in progress after the campaign is done stopping. By the time `stop_campaign` returns, the campaign is genuinely persisted `stopped`, no member is left `running`, and it is safe for `delete_campaign` to cascade immediately. This is a distinct, more final state than the restart-`interrupted` reset in `reconcile_campaigns` below — `retry_campaign` only ever resumes from `interrupted`, never from an explicitly `stopped` campaign.
+- **Findings** stay owned by their child run exactly as before — `GET .../findings` reads across children rather than creating a second finding copy — and each row resolves its contributing component(s) the same way mappings do: through the finding's linked `ScanLead` (`ScanLead.linked_finding_id`), never guessed from target/host matching. A SAST-produced lead's component comes from `CampaignSourceMember`; a campaign-produced cross-repo lead's components come from `ScanLeadComponentProvenance` on the *original* lead — the finding's linked row is itself a copy imported into the dynamic run, so it is matched back to its original by fingerprint (the same identity `copy_lead_to_run` uses for its own idempotency). `component_name` stays a comma-joined string for backward compatibility; `component_ids`/`component_names` give the same information as lists.
+- **Activity** — `GET .../activity` replays the campaign's persisted `AgentLog`/`ScanLog` rows (filtered `run_kind == "campaign"` and this campaign's id) as one stable, chronological feed — the reload/replay counterpart to the live `GET .../events` SSE stream, which keeps working unchanged for real-time updates. `GET .../activity/stream` is a third option: a cursor-safe SSE stream that replays persisted history after a cursor and then keeps following new persisted rows, with **no fetch→subscribe gap window** — every message it emits, "replayed" or "new", comes from re-querying `AgentLog`/`ScanLog` on a ~1s poll (`_ACTIVITY_STREAM_POLL_SECONDS`), so there is no in-memory subscribe step that could start after a row has already committed. Each `CampaignActivityEntry` carries `event_id`, a composite `"<max AgentLog.id seen>.<max ScanLog.id seen>"` watermark (the two tables have independent id sequences, so a single counter cannot capture "everything seen so far" on its own). Pass it back as `Last-Event-ID` (checked first, browser `EventSource` reconnects do this automatically) or the `?cursor=` query param (checked second) to resume exactly after it; omit both to replay full history. Every SSE frame includes an `id: <event_id>` line for this purpose.
+
+### Cleanup & restart recovery
+
+Deleting a campaign (`run_cleanup.cascade_delete_campaign`) removes rows in FK-safe order: every join/mapping row that references a `ScanLead`/`ComponentFact` (`ComponentConnection`, `LeadTargetMapping`, `ScanLeadComponentProvenance`) is deleted and flushed *before* the child-run cascades remove the facts/leads they point to — verified with SQLite foreign-key enforcement genuinely on in tests. It also never deletes a `ComponentSnapshot`'s ZIP file: `cascade_delete_sast_run` only removes a run's `source_archive_path` when that path is *not* a known snapshot's `stored_path` — a campaign-created `SastRun`'s archive is always a shared, immutable snapshot another campaign may still select, while a standalone SAST run's own upload is still removed as before.
+
+Campaign child runs are intentionally not subject to a separate ownership lock. Their ordinary SAST, web, and API detail screens can start/stop, edit, validate, clear, and delete them directly, including when the run is listed inside a campaign. Deleting a child clears its run id from the campaign member and returns that member to `pending`; a later campaign resume recreates the child from the frozen source snapshot or live target. Deleting the underlying `Site`/`ApiCollection` behind an application target is still blocked while any `ApplicationTarget` attaches it — detach it from every application first.
+
+`db._stamp_legacy_db_if_needed` picks a legacy database's Alembic stamp from *actual table presence*, not a fixed assumption: a pre-Alembic database with `run_identity` but not yet `assessment_campaign` (a genuine legacy database predating this feature) is stamped at the revision immediately before it so those two migrations replay for real, instead of the previous behavior of stamping straight at the symbolic `"head"` — which was correct only until the next migration was added, after which it silently skipped every migration since for this exact database shape. A database that already has every current table (e.g. a dev/test database built via `metadata.create_all()`) is still recognized as already current and stamped at `head` directly, so replaying migrations never tries to re-create a table that already exists.
+
+`campaigns.reconcile_campaigns()` runs once at process startup (alongside `validator_svc.resume_interrupted_validations()`). Because every in-memory task registry starts empty after a restart, any campaign still marked as an active stage (`sast_running`/`correlating`/`dast_running`) could not have a live orchestrator — rather than a dead-end `failed` status, it is moved to `interrupted` with `interrupted_stage` recording exactly which stage was running, and any member left `running` is reset to `pending` (a member already `completed`/`failed` is left alone). `POST /api/applications/{id}/campaigns/{id}/retry` resumes from that exact stage: it never recreates a child `SastRun`/`TestRun`/`ApiTestRun` (member ids are only ever set once) and never reruns an already-terminal member, so retrying is safe to call as many times as needed without duplicating a child run or a lead.

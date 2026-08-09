@@ -3,6 +3,7 @@ import { api } from "../../lib/api";
 import { renderMarkdown } from "../../lib/aliceRender";
 import { sourceLabel } from "../../lib/utilities";
 import { isDynamicScanActive } from "./_helpers";
+import { FindingReferenceLink } from "../../components/FindingReferenceLink";
 export function WebRunFindingsTab(props) {
   const { thinkingStatus, thinkingStopRequested, validateStatus, onStopValidation, dedupeBusy, findings, onExportFindingsMarkdown, onImportFindingsClick, issueImportInputRef, onImportFindingsFile, validateBusy, onValidateAll, aliceIsThinking, onDeduplicateFindings, clearBusy, setClearBusy, setClearError, runId, setFindings, editingFinding, setExpandedFinding, expandedFinding, onValidateFinding, onEditFinding, onDeleteFinding, editDraft, setEditDraft, editBusy, onCancelEditFinding, onSaveEditFinding, toggleGroup, expandedGroups, findColW, startFindResize, onDeleteFindingGroup } = props;
   return (
@@ -10,7 +11,7 @@ export function WebRunFindingsTab(props) {
       <div className="findings-panel">
           <div className="findings-status-bar">
             {thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle" && <span className={"scan-status-badge scan-status-" + (thinkingStopRequested ? "stopping" : thinkingStatus.status)}>
-                {thinkingStopRequested ? "Stopping Dynamic Scan…" : thinkingStatus.status === "running" ? "Dynamic Scan running…" : thinkingStatus.status === "analysing" || thinkingStatus.status === "analyzing" ? "Dynamic Scan analysing…" : thinkingStatus.status === "stopping" ? "Dynamic Scan stopping…" : thinkingStatus.status === "complete" ? "Dynamic Scan complete" : thinkingStatus.status === "stopped" ? "Dynamic Scan stopped" : thinkingStatus.status === "failed" ? "Dynamic Scan failed" : "Dynamic Scan"}
+                {thinkingStopRequested ? "Stopping Dynamic Scan…" : thinkingStatus.run_outcome === "incomplete" ? "Validation incomplete — resume available" : thinkingStatus.status === "running" ? "Dynamic Scan running…" : thinkingStatus.status === "analysing" || thinkingStatus.status === "analyzing" ? "Dynamic Scan analysing…" : thinkingStatus.status === "stopping" ? "Dynamic Scan stopping…" : thinkingStatus.status === "complete" ? "Dynamic Scan complete" : thinkingStatus.status === "stopped" ? "Dynamic Scan stopped" : thinkingStatus.status === "failed" ? "Dynamic Scan failed" : "Dynamic Scan"}
               </span>}
             <div style={{
             flex: 1
@@ -106,7 +107,7 @@ export function WebRunFindingsTab(props) {
                 items: sortedItems,
                 topSev,
                 count: items.length,
-                source: items[0].finding_source || "unknown"
+                source: items[0].origin?.label || items[0].finding_source || "unknown"
               };
             }).sort((a, b) => {
               return (SEV_ORDER[a.topSev] ?? 99) - (SEV_ORDER[b.topSev] ?? 99);
@@ -139,7 +140,20 @@ export function WebRunFindingsTab(props) {
                 if (editingFinding === f.id) return;
                 setExpandedFinding(expandedFinding === f.id ? null : f.id);
               }}>
-                    <td>
+                    <td className="finding-reference-cell">
+                      <FindingReferenceLink
+                        reference={f.reference}
+                        title={f.title}
+                        description={f.description}
+                        severity={f.severity}
+                        cvss_score={f.cvss_score}
+                        validation_status={f.validation_status}
+                        validation_note={f.validation_note}
+                        finding_source={f.finding_source}
+                        origin={f.origin}
+                        validated_by={f.validated_by}
+                        href={`#/runs/${runId}/findings?finding=${encodeURIComponent(f.reference || "")}`}
+                      />
                       {f.validation_status === "confirmed" && <span className="val-badge val-confirmed">confirmed</span>}
                       {f.validation_status === "unconfirmed" && <span className="val-badge val-unconfirmed">unconfirmed</span>}
                       {f.validation_status === "skipped" && <span className="val-badge val-skipped">not validated</span>}
@@ -272,6 +286,9 @@ export function WebRunFindingsTab(props) {
                         </div>
                         {f.validation_note && <div className={"finding-validation-note val-note-" + f.validation_status}>
                             <strong>Validation ({f.validation_status}):</strong> {f.validation_note}
+                          </div>}
+                        {(f.validation_status === "unvalidated" || f.validation_status === "skipped" || f.validation_status === "unconfirmed" || f.validation_status === "false_positive" || f.validation_status === "low_confidence") && <div className="row" style={{ marginTop: 12 }}>
+                            <button className="btn secondary sm" onClick={e => onValidateFinding(e, f.id)}>Retry validation</button>
                           </div>}
                         {f.poc_command && <div className="finding-poc" style={{
                     marginTop: 12

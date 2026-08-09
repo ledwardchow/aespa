@@ -88,7 +88,8 @@ export function useApiAliceSession(runId) {
 }
 export function ApiTestRunDetail({
   runId,
-  initialTab
+  initialTab,
+  initialFindingRef
 }) {
   const [run, setRun] = useState(null);
   const [error, setError] = useState(null);
@@ -193,11 +194,12 @@ export function ApiTestRunDetail({
             alignItems: "center",
             gap: 6,
             fontSize: 12
-          }} title="Track: observe coverage as the scan runs. Enforce: drive every applicable endpoint × category to covered or skipped-with-reason.">
-              Coverage:
+          }} title="Quick: observe coverage as the scan runs. Full: drive every applicable endpoint × category to covered or skipped-with-reason. SAST Validate: validate only imported SAST leads.">
+              Scan mode:
               <select value={coverageMode} disabled={scanBusy} onChange={e => setCoverageMode(e.target.value)}>
                 <option value="track">Quick</option>
                 <option value="enforce">Full</option>
+                <option value="sast_validate">SAST Validate</option>
               </select>
             </label>
             <button className="btn" disabled={scanBusy} onClick={onStartScan}>
@@ -211,7 +213,7 @@ export function ApiTestRunDetail({
     <div className={"content no-padding" + (tab === "status" ? " flex-fill-noscroll" : " scroll-content")}>
       {error && <div className="alert error">{error}</div>}
       {tab === "status" && <ApiRunStatusTab runId={runId} scanRunning={scanRunning} />}
-      {tab === "findings" && <ApiRunFindingsTab runId={runId} scanRunning={scanRunning} run={run} />}
+      {tab === "findings" && <ApiRunFindingsTab runId={runId} scanRunning={scanRunning} run={run} initialFindingRef={initialFindingRef} />}
       {tab === "leads" && <ApiRunLeadsTab runId={runId} scanRunning={scanRunning} />}
       {tab === "sessions" && <ApiRunSessionsTab runId={runId} scanRunning={scanRunning} />}
       {tab === "traffic" && <ApiRunTrafficTab runId={runId} scanRunning={scanRunning} />}

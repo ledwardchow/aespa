@@ -5,6 +5,7 @@ import { slugForFilename, downloadTextFile, workProgramToMarkdown } from "../../
 import { usePolling } from "../../hooks/usePolling";
 import { LoadingState } from "../../components/LoadingState";
 import { CoverageStatusBadges } from "../../components/CoverageStatusBadges";
+import { FindingReferenceLink } from "../../components/FindingReferenceLink";
 
 
 export function ApiRunWorkProgramTab({
@@ -96,7 +97,7 @@ export function ApiRunWorkProgramTab({
     });
     downloadTextFile(`${slugForFilename(run?.name || `api-run-${runId}`)}-owasp-coverage-${new Date().toISOString().slice(0, 10)}.md`, md, "text/markdown;charset=utf-8");
   };
-  return <div style={{
+  return <div className="run-work-program-tab" style={{
     padding: 16
   }}>
       <div style={{
@@ -138,7 +139,7 @@ export function ApiRunWorkProgramTab({
           </span>)}
       </div>
 
-      <div style={{
+      <div className="run-work-program-table-wrap" style={{
       overflowX: "auto"
     }}>
         <table className="coverage-matrix" style={{
@@ -277,10 +278,10 @@ export function ApiRunWorkProgramTab({
           fontSize: 11,
           color: "var(--muted)",
           marginTop: 2
-        }}>Finding #{f.id} — view in the Findings tab.</div>
+                }}><FindingReferenceLink reference={f.reference} title={f.title} description={f.description} severity={f.severity} validation_status={f.validation_status} href={`#/api-runs/${runId}/findings?finding=${encodeURIComponent(f.reference || "")}`} /> — view in the Findings tab.</div>
                 </div>) : <div style={{
         fontSize: 12
-      }}>Finding IDs: {selectedCell.fids.join(", ")} — view in the Findings tab.</div>}
+      }}>Finding references: {selectedCell.findings?.map(f => f.reference).filter(Boolean).join(", ") || selectedCell.fids.map(id => `#${id}`).join(", ")} — view in the Findings tab.</div>}
         </div>}
     </div>;
 }

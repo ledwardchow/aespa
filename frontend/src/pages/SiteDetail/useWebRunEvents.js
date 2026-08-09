@@ -250,7 +250,8 @@ export function useWebRunEvents(options) {
             role: evt.role,
             status: evt.status,
             currentTask: evt.current_task,
-            outcome: evt.outcome
+            outcome: evt.outcome,
+            findingReference: evt.finding_reference
           }, histEntry);
         });
       } else if (evt.type === "specialist_step") {

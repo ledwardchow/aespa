@@ -4,6 +4,7 @@ import { GlobalPolicySettings, GlobalPolicySubTabs, ScannerPolicySettings } from
 import { SpecialistAgentSettings } from "./SpecialistAgentSettings";
 import { ReportingSettings } from "./ReportingSettings";
 import { CrawlerSettings } from "./CrawlerSettings";
+import { ComponentMapperSettings } from "./ComponentMapperSettings";
 
 
 export function ScanPolicyPage() {
@@ -12,6 +13,7 @@ export function ScanPolicyPage() {
   return <>
     <div className="topbar"><div className="topbar-title">Agent Settings</div></div>
     <div className="content" style={{
+      paddingTop: 0,
       paddingLeft: 16,
       paddingRight: 0,
       paddingBottom: 0,
@@ -27,6 +29,7 @@ export function ScanPolicyPage() {
         <button className={"tab-btn" + (tab === "specialists" ? " active" : "")} onClick={() => setTab("specialists")}>Specialist Agents</button>
         <button className={"tab-btn" + (tab === "validator" ? " active" : "")} onClick={() => setTab("validator")}>Validator</button>
         <button className={"tab-btn" + (tab === "reporting" ? " active" : "")} onClick={() => setTab("reporting")}>Reporting</button>
+        <button className={"tab-btn" + (tab === "mapper" ? " active" : "")} onClick={() => setTab("mapper")}>Component Mapper</button>
       </div>
       {tab === "global" && <GlobalPolicySubTabs tab={globalTab} setTab={setGlobalTab} />}
       <div className="scroll-content" style={{
@@ -39,6 +42,7 @@ export function ScanPolicyPage() {
       }}>
         {tab === "global" && <GlobalPolicySettings tab={globalTab} />}
         {tab === "crawler" && <CrawlerSettings />}
+        {tab === "mapper" && <ComponentMapperSettings />}
         {tab === "scanner" && <ScannerPolicySettings />}
         {tab === "specialists" && <SpecialistAgentSettings />}
         {tab === "validator" && <ValidatorSettings />}

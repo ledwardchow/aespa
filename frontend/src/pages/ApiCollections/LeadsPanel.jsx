@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { leadsExportFilename, leadsToMarkdown, downloadTextFile } from "../../lib/utilities";
+import { FindingReferenceLink, LeadReferenceLink } from "../../components/FindingReferenceLink";
 
 
 export function LeadsPanel({
@@ -85,7 +86,7 @@ export function LeadsPanel({
           <span style={{
           fontWeight: 600,
           flex: 1
-        }}>{lead.title}</span>
+        }}><LeadReferenceLink reference={lead.reference} title={lead.title} description={lead.description} severity={lead.severity} /> <span>{lead.title}</span></span>
           {lead.category && <span className="badge neutral" style={{
           fontSize: 11
         }}>{lead.category}</span>}
@@ -137,18 +138,19 @@ export function LeadsPanel({
           marginBottom: 8,
           color: "var(--success,#4caf50)"
         }}>
-              ✔ Confirmed as <a href="#" onClick={e => {
-            e.preventDefault();
-          }} style={{
-            color: "inherit"
-          }}>Finding #{lead.linked_finding_id}</a>
+              ✔ Confirmed as <FindingReferenceLink
+                reference={lead.linked_finding_reference}
+                title={lead.title}
+                severity={lead.severity}
+                href={lead.investigated_by_run_id ? `#/${lead.investigated_by_run_type === "api" ? "api-runs" : "runs"}/${lead.investigated_by_run_id}/findings?finding=${encodeURIComponent(lead.linked_finding_reference || "")}` : undefined}
+              />
             </div>}
             <div style={{
           fontSize: 11,
           color: "var(--muted)",
           marginTop: 4
         }}>
-              Lead #{lead.id} · source: {lead.source || "sast"}
+              Lead {lead.reference || `#${lead.id}`} · source: {lead.source || "sast"}
               {lead.investigated_by_run_id ? ` · investigated by ${lead.investigated_by_run_type || "run"} #${lead.investigated_by_run_id}` : ""}
             </div>
           </div>}

@@ -1452,15 +1452,18 @@ async def _execute_alice_tool(
 
     # ── update_lead ───────────────────────────────────────────────────────────
     if tool_name == "update_lead":
+        from aespa.services.scan_leads import get_lead_detail_for_run
         from aespa.services.scan_leads import update_lead as _update_lead
 
         lead_id = tool_input.get("lead_id")
+        lead_reference = str(tool_input.get("lead_reference") or "").strip()
         outcome = str(tool_input.get("outcome") or "")
         note = str(tool_input.get("note") or "")
         finding_id = tool_input.get("finding_id")
+        finding_reference = str(tool_input.get("finding_reference") or "").strip()
 
-        if lead_id is None or not outcome:
-            return "update_lead requires lead_id and outcome."
+        if (lead_id is None and not lead_reference) or not outcome:
+            return "update_lead requires lead_reference and outcome."
 
         # Map outcome → status (same mapping as scanner.py)
         status_map = {
@@ -1473,8 +1476,31 @@ async def _execute_alice_tool(
             return f"Invalid outcome '{outcome}'. Must be confirmed, dismissed, or inconclusive."
 
         try:
+            if lead_reference:
+                lead_detail = get_lead_detail_for_run(
+                    "api" if api_run_id is not None else "web",
+                    run_id,
+                    lead_reference=lead_reference,
+                )
+            else:
+                # Numeric IDs remain a compatibility path for historical
+                # agent context; all new context and output uses references.
+                lead_detail = {"id": int(lead_id), "reference": None}
+            if lead_detail is None:
+                return f"Lead {lead_reference or f'#{lead_id}'} not found."
+            if finding_reference and finding_id is None:
+                from aespa.services.references import find_finding_by_reference
+
+                with Session(get_engine()) as lookup_session:
+                    linked = find_finding_by_reference(
+                        lookup_session,
+                        "api" if api_run_id is not None else "web",
+                        run_id,
+                        finding_reference,
+                    )
+                    finding_id = linked.id if linked is not None else None
             updated = _update_lead(
-                int(lead_id),
+                int(lead_detail["id"]),
                 status=status,
                 note=note,
                 owner_run_type="api" if api_run_id is not None else "web",
@@ -1484,11 +1510,16 @@ async def _execute_alice_tool(
                 linked_finding_id=int(finding_id) if finding_id is not None else None,
             )
             if updated is None:
-                return f"Lead #{lead_id} not found."
+                return f"Lead {lead_reference or f'#{lead_id}'} not found."
+            public_reference = getattr(updated, "reference", None)
+            if not isinstance(public_reference, str):
+                public_reference = None
             return json.dumps(
                 {
                     "ok": True,
                     "lead_id": updated.id,
+                    "lead_reference": public_reference,
+                    "finding_reference": finding_reference or None,
                     "status": updated.status,
                     "note": updated.note,
                 }
@@ -1502,19 +1533,30 @@ async def _execute_alice_tool(
         from aespa.models import ScanFinding as _SF
 
         finding_id = tool_input.get("finding_id")
+        finding_reference = str(tool_input.get("finding_reference") or "").strip()
         reason = str(tool_input.get("reason") or "").strip()
 
-        if finding_id is None:
-            return "remove_finding requires finding_id."
-        try:
-            finding_id = int(finding_id)
-        except (TypeError, ValueError):
-            return "remove_finding: finding_id must be an integer."
+        if finding_id is None and not finding_reference:
+            return "remove_finding requires finding_reference."
 
         with Session(get_engine()) as s:
-            finding = s.get(_SF, finding_id)
+            if finding_reference:
+                from aespa.services.references import find_finding_by_reference
+
+                finding = find_finding_by_reference(
+                    s,
+                    "api" if api_run_id is not None else "web",
+                    run_id,
+                    finding_reference,
+                )
+            else:
+                try:
+                    finding_id = int(finding_id)
+                except (TypeError, ValueError):
+                    return "remove_finding: finding_reference must be valid."
+                finding = s.get(_SF, finding_id)
             if finding is None:
-                return f"remove_finding: finding #{finding_id} not found for this run."
+                return f"remove_finding: finding {finding_reference or f'#{finding_id}'} not found for this run."
 
             # Web TestRun.id and ApiTestRun.id live in independent integer
             # spaces.  Match against the column for the active ALICE mode only,
@@ -1527,8 +1569,10 @@ async def _execute_alice_tool(
                 else finding.test_run_id == run_id and finding.api_test_run_id is None
             )
             if not belongs_to_run:
-                return f"remove_finding: finding #{finding_id} not found for this run."
+                return f"remove_finding: finding {finding_reference or f'#{finding_id}'} not found for this run."
             title = finding.title
+            public_reference = finding.reference
+            finding_id = finding.id
             s.delete(finding)
             s.commit()
 
@@ -1539,7 +1583,7 @@ async def _execute_alice_tool(
             title,
             reason,
         )
-        return f"Finding #{finding_id} '{title}' deleted successfully."
+        return f"Finding {public_reference or f'#{finding_id}'} '{title}' deleted successfully."
 
     return f"Tool '{tool_name}' is not supported in the A.L.I.C.E. context."
 
@@ -2435,7 +2479,10 @@ def _run_api_context_tool(
             validation_status="unvalidated",
         )
         with _Session(_ge()) as s:
+            from aespa.services.references import ensure_finding_reference
+
             s.add(finding)
+            ensure_finding_reference(s, finding)
             s.commit()
             s.refresh(finding)
 
@@ -2480,6 +2527,7 @@ def _run_api_context_tool(
             "tool": "report_finding",
             "ok": True,
             "finding_id": finding.id,
+            "finding_reference": finding.reference,
             "title": finding.title,
             "severity": finding.severity,
             "coverage_cell": cell_linked,

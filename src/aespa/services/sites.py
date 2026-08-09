@@ -45,6 +45,10 @@ class DuplicateSiteName(SiteServiceError):
     pass
 
 
+class SiteReferencedByApplication(SiteServiceError):
+    """Raised when a Site is still attached to an Application as a target."""
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -144,10 +148,19 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
 
 
 def delete_site(session: Session, site_id: int) -> None:
-    from aespa.models import TestRun
+    from aespa.models import ApplicationTarget, TestRun
     from aespa.services import run_cleanup
 
     site = get_site(session, site_id)
+    referenced = session.exec(
+        select(ApplicationTarget.id)
+        .where(ApplicationTarget.target_type == "site")
+        .where(ApplicationTarget.target_id == site_id)
+    ).first()
+    if referenced is not None:
+        raise SiteReferencedByApplication(
+            "This site is attached to an application — detach it there first."
+        )
     runs = session.exec(select(TestRun).where(TestRun.site_id == site_id)).all()
     for run in runs:
         run_cleanup.cascade_delete_web_run(session, run.id)
@@ -353,6 +366,7 @@ def import_site(session: Session, bundle: dict) -> Site:
         TestRun,
         TrafficEntry,
     )
+    from aespa.services.references import ensure_finding_reference
 
     if bundle.get("export_version") != 1:
         raise SiteServiceError(
@@ -489,10 +503,13 @@ def import_site(session: Session, bundle: dict) -> Site:
             old_pid = f.get("page_id")
             if old_pid is not None:
                 f["page_id"] = page_id_map.get(old_pid)
+            # Imported bundles get a fresh run namespace on this installation.
+            f["public_reference"] = None
             _parse_datetimes(f, "created_at")
             finding = ScanFinding(**f)
             session.add(finding)
             session.flush()
+            ensure_finding_reference(session, finding)
             finding_id_map[old_fid] = finding.id  # type: ignore[index]
 
         # ── ScanLogs ────────────────────────────────────────────────────────

@@ -21,6 +21,7 @@ from aespa.models import (
     ApiCollection,
     ApiTestRun,
     SastRun,
+    ScanFinding,
     ScanLead,
     ScanLog,
     Site,
@@ -30,6 +31,7 @@ from aespa.schemas import SastRunSummary, SastRunUpdate, ScanLeadOut
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import run_cleanup
+from aespa.services.references import ensure_finding_reference, ensure_lead_reference
 
 _UTC = timezone.utc
 
@@ -219,8 +221,14 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
 
 
 @router.delete("/api/sast-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
+async def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
+    from aespa.services import campaigns as campaigns_svc
+    from aespa.services import sast_scanner
+
+    await campaigns_svc.stop_member_tasks_for_run("sast", run_id)
+    if sast_scanner.is_sast_scan_running(run_id):
+        await sast_scanner.stop_sast_scan_and_wait(run_id)
     run_cleanup.cascade_delete_sast_run(session, run_id)
     session.commit()
 
@@ -408,7 +416,24 @@ def get_sast_leads(
         .where(ScanLead.imported_into_run_id == None)  # noqa: E711 — originals only
         .order_by(ScanLead.id)
     ).all()
-    return [ScanLeadOut.model_validate(lead) for lead in leads]
+    finding_ids = {lead.linked_finding_id for lead in leads if lead.linked_finding_id}
+    linked_findings = (
+        session.exec(select(ScanFinding).where(ScanFinding.id.in_(finding_ids))).all()
+        if finding_ids
+        else []
+    )
+    for finding in linked_findings:
+        ensure_finding_reference(session, finding)
+    finding_refs = {finding.id: finding.reference for finding in linked_findings}
+    for lead in leads:
+        ensure_lead_reference(session, lead)
+    session.commit()
+    return [
+        ScanLeadOut.model_validate(lead).model_copy(
+            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+        )
+        for lead in leads
+    ]
 
 
 @router.get("/api/sast-runs/{run_id}/handoff-targets")
@@ -465,7 +490,11 @@ def handoff_sast_lead(
     body: SastLeadHandoffRequest,
     session: Session = Depends(get_session),
 ) -> dict:
-    """Queue one validated lead into an explicitly selected dynamic run."""
+    """Queue one validated lead into an explicitly selected dynamic run.
+
+    Campaign-owned sources and targets are valid because this only creates an
+    independent lead copy; it does not alter the run lifecycle or source lead.
+    """
     _get_run_or_404(session, run_id)
     lead = session.get(ScanLead, lead_id)
     if (
@@ -494,6 +523,8 @@ def handoff_sast_lead(
     return {
         "queued": True,
         "lead_id": copied.id,
+        "lead_reference": copied.reference,
+        "source_reference": lead.reference,
         "run_type": body.run_type,
         "run_id": body.run_id,
     }
@@ -514,7 +545,24 @@ def get_api_run_leads(
         .where(ScanLead.imported_into_run_id == run_id)
         .order_by(ScanLead.id)
     ).all()
-    return [ScanLeadOut.model_validate(lead) for lead in leads]
+    finding_ids = {lead.linked_finding_id for lead in leads if lead.linked_finding_id}
+    linked_findings = (
+        session.exec(select(ScanFinding).where(ScanFinding.id.in_(finding_ids))).all()
+        if finding_ids
+        else []
+    )
+    for finding in linked_findings:
+        ensure_finding_reference(session, finding)
+    finding_refs = {finding.id: finding.reference for finding in linked_findings}
+    for lead in leads:
+        ensure_lead_reference(session, lead)
+    session.commit()
+    return [
+        ScanLeadOut.model_validate(lead).model_copy(
+            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+        )
+        for lead in leads
+    ]
 
 
 @router.get("/api/api-test-runs/{run_id}/sast-runs/available")
@@ -555,7 +603,11 @@ def import_api_run_sast_leads(
     body: ApiImportLeadsRequest,
     session: Session = Depends(get_session),
 ) -> dict:
-    """Copy one completed SAST run's leads into an API test run."""
+    """Copy one completed SAST run's leads into an API test run.
+
+    Campaign ownership does not block lead copies: the source remains
+    immutable and the destination receives separately owned investigation rows.
+    """
     if session.get(ApiTestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="API test run not found")
     sast_run = session.get(SastRun, body.sast_run_id)

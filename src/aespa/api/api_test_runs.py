@@ -32,6 +32,7 @@ from aespa.models import (
 )
 from aespa.schemas import (
     ApiTestRunSummary,
+    CoverageModeLiteral,
     ScanFindingImportIn,
     ScanFindingImportResult,
     ScanFindingOut,
@@ -44,6 +45,7 @@ from aespa.schemas import (
 from aespa.services import alice_tasks, run_cleanup
 from aespa.services import findings as findings_svc
 from aespa.services import scanner_sessions as scanner_session_svc
+from aespa.services.references import ensure_finding_reference
 
 _UTC = timezone.utc
 
@@ -77,8 +79,17 @@ def get_api_test_run(
 
 
 @router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_api_test_run(run_id: int, session: Session = Depends(get_session)) -> None:
+async def delete_api_test_run(
+    run_id: int, session: Session = Depends(get_session)
+) -> None:
     _get_run_or_404(session, run_id)
+    from aespa.services import api_scanner
+    from aespa.services import campaigns as campaigns_svc
+
+    await campaigns_svc.stop_member_tasks_for_run("api", run_id)
+    if api_scanner.is_api_scan_running(run_id):
+        await api_scanner.stop_api_scan_and_wait(run_id)
+    await alice_tasks.stop(run_id, run_type="api")
     run_cleanup.cascade_delete_api_run(session, run_id)
     session.commit()
 
@@ -358,7 +369,7 @@ def export_api_agent_log(
 
 
 class ScanStartIn(BaseModel):
-    coverage_mode: str | None = None  # "track" | "enforce"; overrides the run setting
+    coverage_mode: CoverageModeLiteral | None = None
 
 
 @router.post("/{run_id}/scan/start")
@@ -369,11 +380,19 @@ async def start_api_scan(
 ) -> dict:
     run = _get_run_or_404(session, run_id)
     # Allow the scan-start control to override the run's coverage mode.
-    if body and body.coverage_mode in ("track", "enforce"):
+    if body and body.coverage_mode is not None:
         run.coverage_mode = body.coverage_mode
         run.updated_at = datetime.now(timezone.utc)
         session.add(run)
         session.commit()
+    if run.coverage_mode == "sast_validate":
+        from aespa.services.scan_leads import get_leads_for_run
+
+        if not get_leads_for_run("api", run_id):
+            raise HTTPException(
+                status_code=409,
+                detail="No open imported SAST leads are available to validate",
+            )
     from aespa.services import api_scanner
 
     await api_scanner.start_api_scan(run_id)
@@ -411,6 +430,9 @@ def get_api_findings(
     ).all()
     _order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings = sorted(findings, key=lambda f: _order.get(f.severity, 5))
+    for finding in findings:
+        ensure_finding_reference(session, finding)
+    session.commit()
     return [ScanFindingOut.model_validate(f) for f in findings]
 
 
@@ -520,6 +542,7 @@ def import_api_findings(
         )
         session.add(finding)
         session.flush()
+        ensure_finding_reference(session, finding)
         imported.append(finding)
     session.commit()
     for f in imported:

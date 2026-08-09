@@ -375,8 +375,7 @@ export function ApiCollectionDetail({
                   {["Method", "Path", "Summary", "Auth", "Tags", "Ready", "In scope"].map(h => <th key={h} style={{
                     overflow: "hidden",
                     whiteSpace: "nowrap",
-                    resize: "horizontal",
-                    position: "relative"
+                    resize: "horizontal"
                   }}>{h}</th>)}
                 </tr></thead>
                 <tbody>{endpoints.map(ep => <tr key={ep.id} style={{
@@ -431,14 +430,15 @@ export function ApiCollectionDetail({
           }}>
               No test runs yet. Click <strong>+ New test run</strong> to start one.
             </div>}
-          {apiRuns !== null && apiRuns.length > 0 && <table style={{
-            width: "100%"
-          }}>
+          {apiRuns !== null && apiRuns.length > 0 && <div className="table-wrap">
+            <table style={{
+              width: "100%"
+            }}>
               <thead>
                 <tr>
                   <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("name")}>Name {sortArrow("name")}</th>
                   <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("status")}>Status {sortArrow("status")}</th>
-                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("coverage_mode")}>Coverage {sortArrow("coverage_mode")}</th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("coverage_mode")}>Scan mode {sortArrow("coverage_mode")}</th>
                   <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("created_at")}>Created {sortArrow("created_at")}</th>
                   <th></th>
                 </tr>
@@ -448,7 +448,7 @@ export function ApiCollectionDetail({
                     fontWeight: 600
                   }}>{r.name}</a></td>
                   <td><StatusBadge status={r.status} /></td>
-                  <td>{r.coverage_mode === "enforce" ? "Full" : "Quick"}</td>
+                  <td>{r.coverage_mode === "enforce" ? "Full" : r.coverage_mode === "sast_validate" ? "SAST Validate" : "Quick"}</td>
                   <td style={{
                   fontSize: 12,
                   color: "var(--muted)"
@@ -456,7 +456,8 @@ export function ApiCollectionDetail({
                   <td><a href={`#/api-runs/${r.id}/status`} className="btn secondary sm">Open</a></td>
                 </tr>)}
               </tbody>
-            </table>}
+            </table>
+          </div>}
         </div></>}
     </div>
   </>;

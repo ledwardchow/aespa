@@ -12,9 +12,15 @@ disambiguated by ``run_kind`` / ``producer_run_type``.
 
 The helpers ``session.delete`` rows but do not commit — the caller commits once,
 so a collection delete can cascade many runs atomically.
+
+**Campaign child runs** can also be changed or deleted from their ordinary
+run screens. Deleting one detaches its campaign member and returns that member
+to ``pending`` so the campaign can resume the action without a stale run id.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 from sqlalchemy import delete, text
 from sqlmodel import Session, select
@@ -25,8 +31,15 @@ from aespa.models import (
     AliceChatSession,
     ApiEndpointTest,
     ApiTestRun,
+    AssessmentCampaign,
+    CampaignSourceMember,
+    CampaignTargetMember,
+    ComponentConnection,
+    ComponentFact,
+    ComponentSnapshot,
     CoverageEvidence,
     CrawledPage,
+    LeadTargetMapping,
     PageCredentialView,
     PageLink,
     PageOwaspTest,
@@ -37,6 +50,7 @@ from aespa.models import (
     ScanCheckpoint,
     ScanFinding,
     ScanLead,
+    ScanLeadComponentProvenance,
     ScanLog,
     ScannerSession,
     ScanObligation,
@@ -69,6 +83,14 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
     ``run_kind`` or the dedicated API run column so a colliding API id is not
     removed accidentally.
     """
+    for member in session.exec(
+        select(CampaignTargetMember).where(CampaignTargetMember.test_run_id == run_id)
+    ).all():
+        member.test_run_id = None
+        member.status = "pending"
+        member.updated_at = datetime.now(timezone.utc)
+        session.add(member)
+
     # Capture IDs before deleting their parents so dependent rows can be removed
     # in a foreign-key-safe order.
     pages = session.exec(
@@ -90,9 +112,6 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         execution.id for execution in executions if execution.id is not None
     ]
 
-    # A SAST lead is owned by its original SAST run, but an imported copy is
-    # owned by the dynamic run.  Remove copies and clear references from source
-    # leads before deleting the findings they may point to.
     for lead in session.exec(
         select(ScanLead)
         .where(ScanLead.imported_into_run_type == "web")
@@ -233,6 +252,16 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
 
 def cascade_delete_api_run(session: Session, run_id: int) -> None:
     """Delete an ``ApiTestRun`` and every row that keys on it."""
+    for member in session.exec(
+        select(CampaignTargetMember).where(
+            CampaignTargetMember.api_test_run_id == run_id
+        )
+    ).all():
+        member.api_test_run_id = None
+        member.status = "pending"
+        member.updated_at = datetime.now(timezone.utc)
+        session.add(member)
+
     for finding in session.exec(
         select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
     ).all():
@@ -290,6 +319,14 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
     copies imported into a dynamic run keep ``producer_run_id`` pointing here but
     belong to that run and are cleaned up when the run is deleted instead.
     """
+    for member in session.exec(
+        select(CampaignSourceMember).where(CampaignSourceMember.sast_run_id == run_id)
+    ).all():
+        member.sast_run_id = None
+        member.status = "pending"
+        member.updated_at = datetime.now(timezone.utc)
+        session.add(member)
+
     for lead in session.exec(
         select(ScanLead)
         .where(ScanLead.producer_run_id == run_id)
@@ -309,15 +346,115 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         .where(AgentLog.run_kind == "sast")
     ).all():
         session.delete(log)
+    for fact in session.exec(
+        select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
+    ).all():
+        session.delete(fact)
     run = session.get(SastRun, run_id)
     if run is not None:
-        # Best-effort removal of a standalone run's stored source archive.
+        # Remove the stored archive only when this run owns it exclusively.
+        # A campaign-created run's ``source_archive_path`` points at a shared,
+        # immutable ``ComponentSnapshot`` file that other campaigns may still
+        # reference — deleting a run must never delete that file out from
+        # under the snapshot row. Only a run whose archive path is NOT a
+        # known snapshot (i.e. a standalone upload under sast_uploads/) is
+        # safe to remove here.
         if run.source_archive_path:
-            try:
-                import os
+            is_shared_snapshot = (
+                session.exec(
+                    select(ComponentSnapshot.id).where(
+                        ComponentSnapshot.stored_path == run.source_archive_path
+                    )
+                ).first()
+                is not None
+            )
+            if not is_shared_snapshot:
+                try:
+                    import os
 
-                if os.path.isfile(run.source_archive_path):
-                    os.remove(run.source_archive_path)
-            except Exception:
-                pass
+                    if os.path.isfile(run.source_archive_path):
+                        os.remove(run.source_archive_path)
+                except OSError:
+                    pass
         _delete_run_identity(session, run_id, run)
+
+
+def cascade_delete_campaign(session: Session, campaign_id: int) -> None:
+    """Delete an ``AssessmentCampaign`` and every row/child run it owns.
+
+    A campaign wholly owns the child SAST/web/API runs it created (they exist
+    only because the campaign asked for them), so deleting it cascades into
+    those runs' own cascade helpers instead of leaving them orphaned. Original
+    cross-repository leads it authored (``producer_run_type == "campaign"``)
+    are removed directly; their imported copies are already covered by the
+    child dynamic-run cascades below.
+
+    FK-safe order matters here (verified with SQLite foreign-key enforcement
+    on): every row that references a ``ScanLead``/``ComponentFact`` —
+    ``LeadTargetMapping``, ``ComponentConnection``, and
+    ``ScanLeadComponentProvenance`` — is deleted and flushed *before* the
+    child-run cascades remove the leads/facts they point to. Deleting a
+    ``ComponentFact`` while a ``ComponentConnection`` still references it (or
+    a ``ScanLead`` while a ``LeadTargetMapping``/``ScanLeadComponentProvenance``
+    still references it) would otherwise violate their foreign keys.
+    """
+    for connection in session.exec(
+        select(ComponentConnection).where(
+            ComponentConnection.campaign_id == campaign_id
+        )
+    ).all():
+        session.delete(connection)
+
+    for mapping in session.exec(
+        select(LeadTargetMapping).where(LeadTargetMapping.campaign_id == campaign_id)
+    ).all():
+        session.delete(mapping)
+
+    campaign_leads = session.exec(
+        select(ScanLead)
+        .where(ScanLead.producer_run_type == "campaign")
+        .where(ScanLead.producer_run_id == campaign_id)
+        .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+    ).all()
+    campaign_lead_ids = [lead.id for lead in campaign_leads if lead.id is not None]
+    if campaign_lead_ids:
+        for provenance in session.exec(
+            select(ScanLeadComponentProvenance).where(
+                ScanLeadComponentProvenance.scan_lead_id.in_(campaign_lead_ids)
+            )
+        ).all():
+            session.delete(provenance)
+
+    # Flush now: the rows referencing facts/leads are gone from the session's
+    # pending state, so the child-run cascades below can safely delete the
+    # ComponentFact/ScanLead rows those references pointed to.
+    session.flush()
+
+    for source in session.exec(
+        select(CampaignSourceMember).where(
+            CampaignSourceMember.campaign_id == campaign_id
+        )
+    ).all():
+        if source.sast_run_id is not None:
+            cascade_delete_sast_run(session, source.sast_run_id)
+        session.delete(source)
+
+    for target in session.exec(
+        select(CampaignTargetMember).where(
+            CampaignTargetMember.campaign_id == campaign_id
+        )
+    ).all():
+        if target.test_run_id is not None:
+            cascade_delete_web_run(session, target.test_run_id)
+        if target.api_test_run_id is not None:
+            cascade_delete_api_run(session, target.api_test_run_id)
+        session.delete(target)
+
+    # The campaign-owned cross-repo leads themselves can now go — their
+    # provenance rows were already removed above.
+    for lead in campaign_leads:
+        session.delete(lead)
+    session.flush()
+
+    campaign = session.get(AssessmentCampaign, campaign_id)
+    _delete_run_identity(session, campaign_id, campaign)

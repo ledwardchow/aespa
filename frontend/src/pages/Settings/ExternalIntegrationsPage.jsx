@@ -10,6 +10,7 @@ export function ExternalIntegrationsPage() {
       <div className="topbar-title">External Integrations</div>
     </div>
     <div className="content" style={{
+      paddingTop: 0,
       paddingLeft: 16,
       paddingRight: 0,
       paddingBottom: 0,

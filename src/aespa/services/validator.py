@@ -39,6 +39,7 @@ from aespa.models import (
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
+from aespa.services.references import ensure_finding_reference
 from aespa.services.settings import (
     get_adversarial_validator_config,
     get_llm_config_for_role,
@@ -271,6 +272,8 @@ async def _validate_finding_inline(
         if scanner_policy is None:
             scanner_policy = get_run_scanner_policy(s, run)
         validator_cfg = get_adversarial_validator_config(s)
+        ensure_finding_reference(s, finding)
+        finding_reference = finding.reference
         creds = list(site.credentials) if site else []
         finding.validation_status = "validating"
         finding.validation_note = "Validation running."
@@ -294,6 +297,7 @@ async def _validate_finding_inline(
         {
             "type": "finding_validation_update",
             "finding_id": finding_id,
+            "finding_reference": finding_reference,
             "validation_status": "validating",
             "validation_note": "Validation running.",
         },
@@ -303,6 +307,7 @@ async def _validate_finding_inline(
         {
             "type": "agent_status",
             "agent_id": f"validator-{finding_id}",
+            "finding_reference": finding_reference,
             "role": "Validator",
             "status": "active",
             "current_task": f"Validating: {finding.title[:80]}",
@@ -448,10 +453,13 @@ async def _do_validate(
         return
 
     # Mark all target findings as "validating" immediately.
+    finding_references: dict[int, str] = {}
     with Session(get_engine()) as s:
         for f in findings:
             row = s.get(ScanFinding, f.id)
             if row:
+                ensure_finding_reference(s, row)
+                finding_references[f.id] = row.reference
                 row.validation_status = "validating"
                 s.add(row)
         s.commit()
@@ -461,6 +469,7 @@ async def _do_validate(
             {
                 "type": "finding_validation_update",
                 "finding_id": f.id,
+                "finding_reference": finding_references.get(f.id),
                 "validation_status": "validating",
             },
         )
@@ -469,6 +478,7 @@ async def _do_validate(
             {
                 "type": "agent_status",
                 "agent_id": f"validator-{f.id}",
+                "finding_reference": finding_references.get(f.id),
                 "role": "Validator",
                 "status": "active",
                 "current_task": f"Validating: {f.title[:80]}",
@@ -611,7 +621,15 @@ async def _run_adversarial_validator_loop(
         if tool_name == "context_tool":
             return await _validator_context_tool(tool_input, run_id, finding)
         if tool_name == "done":
-            verdict = tool_input.get("verdict", "confirmed")
+            verdict = tool_input.get("verdict") or "unconfirmed"
+            if verdict not in {
+                "confirmed",
+                "false_positive",
+                "low_confidence",
+                "unconfirmed",
+                "skipped",
+            }:
+                verdict = "unconfirmed"
             reasoning = tool_input.get("reasoning", "")
             confidence = tool_input.get("confidence", "medium")
             verdict_holder.append((verdict, reasoning, confidence, dict(tool_input)))
@@ -645,11 +663,13 @@ async def _run_adversarial_validator_loop(
 
     if verdict_holder:
         return verdict_holder[0]
-    # Step budget exhausted without a verdict.
+    # Step budget exhausted without a verdict.  A validator that did not reach
+    # an explicit conclusion has not proved exploitability; keep the finding
+    # uncertain so a retry can be requested instead of silently confirming it.
     return (
-        "confirmed",
-        "Adversarial validator exhausted the step budget without finding a disproof.",
-        "low",
+        "unconfirmed",
+        "Adversarial validator stopped before reaching a verdict; retry validation to continue.",
+        "none",
         {},
     )
 
@@ -792,6 +812,9 @@ async def _validate_one(
     validator_cfg=None,
 ) -> None:
     log.info("Validating finding id=%s: %s", finding.id, finding.title)
+    finding_reference = finding.reference or (
+        f"#{finding.id}" if finding.id is not None else ""
+    )
     events_svc.emit(
         run_id,
         {
@@ -799,7 +822,7 @@ async def _validate_one(
             "phase": "thinking_step",
             "status": "start",
             "message": f"Validating finding: {finding.title!r} — {finding.affected_url or 'no URL'}",
-            "data": {"finding_id": finding.id},
+            "data": {"finding_id": finding.id, "finding_reference": finding_reference},
         },
     )
 
@@ -873,10 +896,10 @@ async def _validate_one(
                 "Adversarial validator loop failed for finding %s: %s", finding.id, e
             )
             verdict, reasoning = (
-                "confirmed",
-                f"Adversarial validator encountered an error: {e}",
+                "unconfirmed",
+                f"Adversarial validator encountered an error: {e}. Retry validation to try again.",
             )
-            confidence = "low"
+            confidence = "none"
         log.info(
             "  Finding %s adversarial verdict: %s (confidence: %s)",
             finding.id,
@@ -955,9 +978,29 @@ async def _validate_one(
         )
     except Exception as e:
         log.warning("validate_finding_result failed for finding %s: %s", finding.id, e)
-        verdict_data = {"verdict": "confirmed", "reasoning": f"Validation error: {e}"}
+        verdict_data = {
+            "verdict": "unconfirmed",
+            "reasoning": f"Validation could not complete: {e}. Retry validation to try again.",
+        }
 
-    verdict = verdict_data.get("verdict", "confirmed")
+    if not isinstance(verdict_data, dict):
+        verdict_data = {
+            "verdict": "unconfirmed",
+            "reasoning": "Validator returned an unusable response. Retry validation to try again.",
+        }
+    verdict = verdict_data.get("verdict")
+    if verdict not in {
+        "confirmed",
+        "false_positive",
+        "low_confidence",
+        "unconfirmed",
+        "skipped",
+    }:
+        verdict = "unconfirmed"
+        verdict_data = {
+            **verdict_data,
+            "reasoning": "Validator returned no usable verdict. Retry validation to try again.",
+        }
     reasoning = verdict_data.get("reasoning", "")
     log.info("  Finding %s verdict: %s", finding.id, verdict)
 
@@ -1096,12 +1139,27 @@ async def _persist_verdict(
     validation_results: list[dict] | None = None,
     source: str = "validation",
 ) -> None:
+    allowed_verdicts = {
+        "confirmed",
+        "false_positive",
+        "low_confidence",
+        "unconfirmed",
+        "skipped",
+    }
+    if verdict not in allowed_verdicts:
+        verdict = "unconfirmed"
+        reasoning = reasoning or "Validator returned no usable verdict."
+        if "retry" not in reasoning.casefold():
+            reasoning = f"{reasoning} Retry validation to try again."
     evidence_json = "[]"
     evidence_items: list[dict[str, Any]] = []
     finding_title = f"Finding #{finding_id}"
+    finding_reference = None
     with Session(get_engine()) as s:
         row = s.get(ScanFinding, finding_id)
         if row:
+            ensure_finding_reference(s, row)
+            finding_reference = row.reference
             finding_title = row.title or finding_title
             existing_items = _evidence_items_from_json(row.evidence_json)
             evidence_items = existing_items + _validation_evidence_items(
@@ -1122,6 +1180,7 @@ async def _persist_verdict(
         {
             "type": "finding_validation_update",
             "finding_id": finding_id,
+            "finding_reference": finding_reference,
             "validation_status": verdict,
             "validation_note": reasoning,
             "evidence_json": evidence_json,
@@ -1140,6 +1199,7 @@ async def _persist_verdict(
         {
             "type": "agent_status",
             "agent_id": f"validator-{finding_id}",
+            "finding_reference": finding_reference,
             "role": "Validator",
             "status": "complete",
             "current_task": finding_title,
