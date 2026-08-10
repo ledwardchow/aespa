@@ -736,7 +736,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
     try:
         from aespa import models as _models  # noqa: F401
 
-        db.run_migrations(engine)
+        was_pre_alembic = db.run_migrations(engine)
 
         with engine.connect() as conn:
             tables = {
@@ -752,8 +752,46 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "alembic_version" in tables
         assert "site" in tables
         assert "test_run" in tables
+        assert was_pre_alembic is False
         # The migration chain now includes replay/session provenance fields.
         assert version == "a1b2c3d4e5f6"
+    finally:
+        engine.dispose()
+
+
+def test_migrate_skips_legacy_schema_repair_for_versioned_database(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    calls = []
+    try:
+        monkeypatch.setattr(db, "run_migrations", lambda _engine: False)
+        monkeypatch.setattr(
+            db,
+            "_upgrade_pre_alembic_schema",
+            lambda _engine: calls.append("legacy_schema"),
+        )
+        monkeypatch.setattr(
+            db,
+            "_reset_orphaned_validating_findings",
+            lambda _engine: calls.append("validations"),
+        )
+        monkeypatch.setattr(
+            db,
+            "_reset_orphaned_running_runs",
+            lambda _engine: calls.append("runs"),
+        )
+        monkeypatch.setattr(
+            db,
+            "_cleanup_orphaned_sast_extractions",
+            lambda: calls.append("workspaces"),
+        )
+
+        db._migrate(engine)
+
+        assert calls == ["validations", "runs", "workspaces"]
     finally:
         engine.dispose()
 
@@ -982,7 +1020,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
         assert "application" not in tables_before
         assert "assessment_campaign" not in tables_before
 
-        db.run_migrations(engine)
+        was_pre_alembic = db.run_migrations(engine)
 
         with engine.connect() as conn:
             tables_after = {
@@ -1014,6 +1052,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
             "lead_target_mapping",
             "scan_lead_component_provenance",
         } <= tables_after
+        assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
         assert version == "a1b2c3d4e5f6"

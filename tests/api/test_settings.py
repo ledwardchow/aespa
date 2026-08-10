@@ -141,7 +141,7 @@ def test_global_http_headers_round_trip(client: TestClient):
 def test_component_mapper_config_round_trip(client: TestClient):
     initial = client.get("/api/settings/component-mapper-config")
     assert initial.status_code == 200
-    assert initial.json()["max_tool_calls"] == 100
+    assert initial.json()["max_tool_calls"] == 250
     assert initial.json()["max_source_files"] == 500
     assert initial.json()["max_source_bytes"] == 50 * 1024 * 1024
     assert initial.json()["max_facts"] == 500

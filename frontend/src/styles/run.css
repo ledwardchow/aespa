@@ -821,13 +821,14 @@
 .phase-thinking  { background:rgba(251,191,36,0.12);  color:#fbbf24; }
 .phase-reporting { background:rgba(139,92,246,0.15);  color:#a78bfa; }
 /* Token counter bar (replaces old activity-toolbar) */
-.activity-token-bar { display:flex; align-items:center; gap:7px; padding:6px 14px; border-bottom:1px solid var(--border); background:var(--panel); flex-shrink:0; min-height:34px; }
+.activity-token-bar { display:flex; align-items:center; flex-wrap:wrap; gap:7px; padding:6px 14px; border-bottom:1px solid var(--border); background:var(--panel); flex-shrink:0; min-height:34px; }
 .token-bar-label { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-right:2px; }
 .token-bar-in  { font-size:12px; font-weight:600; color:#34d399; font-variant-numeric:tabular-nums; }
 .token-bar-out { font-size:12px; font-weight:600; color:#60a5fa; font-variant-numeric:tabular-nums; }
 .token-bar-sep { color:var(--muted); font-size:12px; }
 .token-bar-cache-read  { font-size:12px; font-weight:600; color:#f59e0b; font-variant-numeric:tabular-nums; }
 .token-bar-cache-write { font-size:12px; font-weight:600; color:#a78bfa; font-variant-numeric:tabular-nums; }
+.token-bar-cost { font-size:12px; font-weight:600; color:#fbbf24; font-variant-numeric:tabular-nums; }
 .token-bar-empty { font-size:11px; color:var(--muted); font-style:italic; }
 .token-breakdown { background:var(--panel); border-bottom:1px solid var(--border); padding:6px 14px 8px; flex-shrink:0; }
 .token-breakdown-row { display:flex; align-items:center; gap:8px; padding:2px 0; }
@@ -836,6 +837,7 @@
 .token-out { font-size:11px; color:#60a5fa; font-variant-numeric:tabular-nums; min-width:56px; text-align:right; }
 .token-cache-read  { font-size:11px; color:#f59e0b; font-variant-numeric:tabular-nums; min-width:50px; text-align:right; }
 .token-cache-write { font-size:11px; color:#a78bfa; font-variant-numeric:tabular-nums; min-width:50px; text-align:right; }
+.token-cost { font-size:11px; color:#fbbf24; font-variant-numeric:tabular-nums; min-width:70px; text-align:right; }
 /* Log sub-tab mini toolbar */
 .activity-log-toolbar { display:flex; align-items:center; gap:8px; padding:5px 14px; border-bottom:1px solid var(--border); background:var(--bg,#141519); flex-shrink:0; }
 .activity-toolbar { display:flex; align-items:center; gap:8px; padding:7px 16px; border-bottom:1px solid var(--border); background:var(--panel); flex-shrink:0; }

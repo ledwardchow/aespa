@@ -62,6 +62,10 @@ _campaign_member_tasks: dict[tuple[int, str, int], asyncio.Task] = {}
 _campaign_stop_requested: set[int] = set()
 
 _ACTIVE_STATUSES = ("sast_running", "correlating", "dast_running")
+_SOURCE_FAILURE_WARNING_MARKERS = (
+    "A source-code scan did not finish successfully",
+    "A resumed source-code scan did not finish successfully",
+)
 
 
 class CampaignServiceError(Exception):
@@ -442,11 +446,156 @@ def _append_campaign_warnings(campaign_id: int, warnings: list[str]) -> None:
             existing = json.loads(campaign.warnings_json or "[]")
         except (TypeError, ValueError):
             existing = []
-        existing.extend(warnings)
+        if not isinstance(existing, list):
+            existing = []
+        for warning in warnings:
+            if warning not in existing:
+                existing.append(warning)
         campaign.warnings_json = json.dumps(existing)
         campaign.updated_at = _utcnow()
         s.add(campaign)
         s.commit()
+
+
+def _clear_resolved_source_warnings(session: Session, campaign: AssessmentCampaign) -> None:
+    """Remove source-failure notes once no source run is failed.
+
+    A source run can be restarted from its normal SAST page. In that case the
+    old campaign warning is no longer current while the restarted run is
+    scanning, and should not remain in the campaign's partial-results banner.
+    The restart warning is intentionally retained because it explains why the
+    campaign had to be resumed.
+    """
+    try:
+        warnings = json.loads(campaign.warnings_json or "[]")
+    except (TypeError, ValueError):
+        warnings = []
+    if not isinstance(warnings, list):
+        warnings = []
+    source_runs = session.exec(
+        select(SastRun)
+        .join(
+            CampaignSourceMember,
+            CampaignSourceMember.sast_run_id == SastRun.id,
+        )
+        .where(CampaignSourceMember.campaign_id == campaign.id)
+    ).all()
+    if any(run.status in {"failed", "cancelled"} for run in source_runs):
+        return
+    filtered = [
+        warning
+        for warning in warnings
+        if not any(marker in str(warning) for marker in _SOURCE_FAILURE_WARNING_MARKERS)
+    ]
+    if filtered != warnings:
+        campaign.warnings_json = json.dumps(filtered)
+
+
+def notify_source_run_started(sast_run_id: int) -> None:
+    """Sync a campaign when a linked SAST run starts from any UI.
+
+    Campaign children are also exposed on the normal SAST screen. Starting a
+    child there must be equivalent to resuming its source member; otherwise the
+    campaign keeps showing a stale failure while the linked scan is active.
+    """
+    with Session(get_engine()) as s:
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.sast_run_id == sast_run_id
+            )
+        ).first()
+        if member is None:
+            return
+        campaign = s.get(AssessmentCampaign, member.campaign_id)
+        if campaign is None:
+            return
+        member.status = "running"
+        member.updated_at = _utcnow()
+        if campaign.status in {
+            "failed",
+            "interrupted",
+            "awaiting_review",
+            "completed",
+            "incomplete",
+        }:
+            campaign.status = "sast_running"
+            campaign.interrupted_stage = None
+            campaign.completed_at = None
+            campaign.error_message = None
+            campaign.review_submitted_at = None
+        _clear_resolved_source_warnings(s, campaign)
+        campaign.updated_at = _utcnow()
+        s.add(member)
+        s.add(campaign)
+        s.commit()
+
+
+def notify_source_run_finished(sast_run_id: int, status: str) -> None:
+    """Sync a campaign after a linked SAST run reaches a terminal status.
+
+    If all source runs are terminal and no campaign orchestrator is alive,
+    resume the SAST-to-correlation pipeline. This covers scans started from a
+    child SAST page after a campaign was interrupted or failed.
+    """
+    campaign_id: int | None = None
+    should_resume = False
+    warning = (
+        "A source-code scan did not finish successfully — matches involving "
+        "that component may be incomplete."
+    )
+    with Session(get_engine()) as s:
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.sast_run_id == sast_run_id
+            )
+        ).first()
+        if member is None:
+            return
+        campaign = s.get(AssessmentCampaign, member.campaign_id)
+        if campaign is None:
+            return
+        campaign_id = campaign.id
+        member.status = "completed" if status == "completed" else "failed"
+        member.updated_at = _utcnow()
+        source_members = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign.id
+            )
+        ).all()
+        source_runs = [
+            s.get(SastRun, source.sast_run_id)
+            for source in source_members
+            if source.sast_run_id is not None
+        ]
+        all_terminal = bool(source_runs) and all(
+            run is not None and run.status in {"completed", "failed", "cancelled"}
+            for run in source_runs
+        )
+        if status == "completed":
+            _clear_resolved_source_warnings(s, campaign)
+        campaign.updated_at = _utcnow()
+        s.add(member)
+        s.add(campaign)
+        s.commit()
+        should_resume = (
+            campaign.status == "sast_running"
+            and all_terminal
+            and not is_campaign_running(campaign.id)
+        )
+
+    if status != "completed":
+        _append_campaign_warnings(campaign_id, [warning])
+    if not should_resume or campaign_id is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if is_campaign_running(campaign_id):
+        return
+    _campaign_tasks[campaign_id] = loop.create_task(
+        _run_campaign(campaign_id), name=f"campaign-{campaign_id}"
+    )
 
 
 def _finish_campaign(
