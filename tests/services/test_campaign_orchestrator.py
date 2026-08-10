@@ -244,6 +244,78 @@ async def test_partial_sast_failure_produces_warning_but_still_reaches_review(
 
 
 @pytest.mark.anyio
+async def test_child_sast_page_resume_reactivates_failed_campaign(
+    isolated_db_engine,
+):
+    """Starting a campaign child from the SAST page resumes its parent."""
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        campaign = _create_draft_campaign(s, ctx)
+        sast_run = SastRun(name="child", status="failed")
+        s.add(sast_run)
+        s.flush()
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign.id
+            )
+        ).one()
+        member.sast_run_id = sast_run.id
+        member.status = "failed"
+        campaign.status = "failed"
+        campaign.error_message = "SAST run is not completed"
+        campaign.warnings_json = (
+            '["The application restarted while this stage was running. ", '
+            '"A source-code scan did not finish successfully — matches involving '
+            'that component may be incomplete.", '
+            '"A source-code scan did not finish successfully — matches involving '
+            'that component may be incomplete."]'
+        )
+        s.add(member)
+        s.add(campaign)
+        s.commit()
+        campaign_id = campaign.id
+        sast_run_id = sast_run.id
+
+    with Session(isolated_db_engine) as s:
+        run = s.get(SastRun, sast_run_id)
+        run.status = "scanning"
+        s.add(run)
+        s.commit()
+    campaigns_svc.notify_source_run_started(sast_run_id)
+
+    with Session(isolated_db_engine) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign_id
+            )
+        ).one()
+        assert campaign.status == "sast_running"
+        assert campaign.error_message is None
+        assert member.status == "running"
+        assert campaign.warnings_json.count("did not finish successfully") == 0
+
+    with Session(isolated_db_engine) as s:
+        run = s.get(SastRun, sast_run_id)
+        run.status = "completed"
+        s.add(run)
+        s.commit()
+    campaigns_svc.notify_source_run_finished(sast_run_id, "completed")
+    task = campaigns_svc._campaign_tasks[campaign_id]
+    await task
+
+    with Session(isolated_db_engine) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign_id
+            )
+        ).one()
+        assert campaign.status == "awaiting_review"
+        assert member.status == "completed"
+
+
+@pytest.mark.anyio
 async def test_resume_source_member_retries_only_selected_child(
     isolated_db_engine, monkeypatch
 ):

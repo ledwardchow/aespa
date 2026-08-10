@@ -75,6 +75,32 @@ _PHASES = ("scope", "discovery", "validation", "attack_path", "report")
 _SAST_VALIDATOR_MAX_CONCURRENT = 4
 
 
+def _notify_campaign_source_started(sast_run_id: int) -> None:
+    """Keep a campaign child in sync when the SAST page starts its scan."""
+    try:
+        from aespa.services import campaigns as campaigns_svc
+
+        campaigns_svc.notify_source_run_started(sast_run_id)
+    except Exception:  # noqa: BLE001 - a campaign sync must not stop SAST
+        log.exception(
+            "Could not sync campaign source member for started SAST run %s",
+            sast_run_id,
+        )
+
+
+def _notify_campaign_source_finished(sast_run_id: int, status: str) -> None:
+    """Keep a campaign child in sync when its SAST task reaches a terminal state."""
+    try:
+        from aespa.services import campaigns as campaigns_svc
+
+        campaigns_svc.notify_source_run_finished(sast_run_id, status)
+    except Exception:  # noqa: BLE001 - a campaign sync must not stop SAST
+        log.exception(
+            "Could not sync campaign source member for finished SAST run %s",
+            sast_run_id,
+        )
+
+
 def _empty_phase_state() -> dict[str, dict]:
     return {
         phase: {"status": "pending", "message": "", "data": {}} for phase in _PHASES
@@ -1359,6 +1385,8 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 s.add(r)
                 s.commit()
 
+        _notify_campaign_source_finished(sast_run_id, "completed")
+
         # Deterministic, bounded interface-fact extraction (routes, outbound
         # calls, auth boundaries, queues, datastores, framework markers).
         # Runs for every SAST run — component_id stays NULL unless this run
@@ -1387,6 +1415,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                     s.add(r)
                     s.commit()
         _update_sast_run_status(sast_run_id, "cancelled")
+        _notify_campaign_source_finished(sast_run_id, "cancelled")
         _set_phase(
             sast_run_id,
             current_phase,
@@ -1426,6 +1455,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             except Exception:
                 pass
         _update_sast_run_status(sast_run_id, "failed", str(exc))
+        _notify_campaign_source_finished(sast_run_id, "failed")
         _set_phase(
             sast_run_id,
             current_phase,
@@ -1575,6 +1605,7 @@ async def start_sast_scan(sast_run_id: int) -> None:
                 name=f"sast-scan-{sast_run_id}",
             )
             _sast_tasks[sast_run_id] = task
+            _notify_campaign_source_started(sast_run_id)
     except Exception:
         _sast_workspace_leases.pop(sast_run_id, None)
         lease.release()

@@ -739,7 +739,7 @@ class TestRun(SQLModel, table=True):
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
     # Cached JSON attack-surface/coverage projection; the UI rebuilds it live.
     recon_summary: Optional[str] = Field(default=None)
-    # Persisted token usage: {model: {input, output, cache_read, cache_write}}
+    # Persisted token usage, including per-model estimated costs.
     token_usage_json: Optional[str] = Field(default=None)
     # Reproducibility metadata captured when the dynamic scan starts. Secrets and
     # provider connection details are intentionally excluded.

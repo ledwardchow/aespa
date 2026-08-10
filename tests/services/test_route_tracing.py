@@ -367,8 +367,8 @@ def test_crawl_discovered_path_is_saved_as_unapproved_proposal(isolated_db_engin
                 {
                     "id": 3,
                     "page_id": 2,
-                    "method": "GET",
-                    "url": "https://app.test/api/cart",
+                    "method": "POST",
+                    "url": "https://app.test/api/orders",
                     "fields": ["coupon"],
                 }
             ],

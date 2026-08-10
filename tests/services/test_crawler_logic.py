@@ -1351,17 +1351,20 @@ def test_selection_only_state_is_reused_but_enabled_next_is_explored(monkeypatch
 
     assert created == []
     assert replayed == [[select_action], [select_action, next_action]]
-    assert discoveries == [
-        {
-            "url": "https://target.local/product/step-2",
-            "source_page_id": 1,
-            "link_text": "Next",
-            "action_kind": "click",
-            "action_data": {
-                "replay_steps": [select_action, next_action],
-            },
-        }
-    ]
+    assert len(discoveries) == 1
+    discovery = discoveries[0]
+    assert discovery.get("interaction_id")
+    assert {
+        key: value for key, value in discovery.items() if key != "interaction_id"
+    } == {
+        "url": "https://target.local/product/step-2",
+        "source_page_id": 1,
+        "link_text": "Next",
+        "action_kind": "click",
+        "action_data": {
+            "replay_steps": [select_action, next_action],
+        },
+    }
 
 
 class _DelayedBootstrapPage:
@@ -1519,15 +1522,18 @@ def test_interactive_workflow_detects_javascript_url_navigation(monkeypatch):
         )
     )
 
-    assert discoveries == [
-        {
-            "url": "https://target.local/product/step-2",
-            "source_page_id": 1,
-            "link_text": "Next",
-            "action_kind": "click",
-            "action_data": {"replay_steps": [next_action]},
-        }
-    ]
+    assert len(discoveries) == 1
+    discovery = discoveries[0]
+    assert discovery.get("interaction_id")
+    assert {
+        key: value for key, value in discovery.items() if key != "interaction_id"
+    } == {
+        "url": "https://target.local/product/step-2",
+        "source_page_id": 1,
+        "link_text": "Next",
+        "action_kind": "click",
+        "action_data": {"replay_steps": [next_action]},
+    }
 
 
 class _PopupPage:
@@ -1596,15 +1602,18 @@ def test_interactive_workflow_detects_same_origin_popup(monkeypatch):
         )
     )
 
-    assert discoveries == [
-        {
-            "url": "https://target.local/product/help",
-            "source_page_id": 1,
-            "link_text": "Help",
-            "action_kind": "popup",
-            "action_data": {"replay_steps": [help_action]},
-        }
-    ]
+    assert len(discoveries) == 1
+    discovery = discoveries[0]
+    assert discovery.get("interaction_id")
+    assert {
+        key: value for key, value in discovery.items() if key != "interaction_id"
+    } == {
+        "url": "https://target.local/product/help",
+        "source_page_id": 1,
+        "link_text": "Help",
+        "action_kind": "popup",
+        "action_data": {"replay_steps": [help_action]},
+    }
     assert popup.closed is True
 
 

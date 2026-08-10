@@ -14,6 +14,13 @@ export function fmtCredits(n) {
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+export function fmtUsd(n) {
+  const value = Number(n);
+  if (!Number.isFinite(value)) return "—";
+  if (value === 0) return "$0.00";
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}
+
 export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
   const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
   const providers = new Set(Object.values(tokenUsage?.by_model || {}).map(v => v.provider));
@@ -26,6 +33,7 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
     tokenUsage.total_premium_requests > 0
   );
   const hasUsage = hasTokens || hasProviderUsage;
+  const hasEstimatedCost = tokenUsage?.estimated_cost_available && tokenUsage.estimated_total_cost_usd != null;
   const usageLabel = hasDroid && !hasCopilot ? "Droid usage" : hasCopilot && !hasDroid ? "Copilot usage" : "LLM usage";
   const quota = tokenUsage?.copilot_quota;
 
@@ -93,6 +101,14 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
                 ) : null}
               </>
             ) : null}
+            {hasEstimatedCost ? (
+              <>
+                <span className="token-bar-sep">·</span>
+                <span className="token-bar-cost" title="Estimated cost based on recorded usage and model pricing">
+                  ≈{fmtUsd(tokenUsage.estimated_total_cost_usd)} est. cost
+                </span>
+              </>
+            ) : null}
             <span className="activity-expand-chevron" style={{ marginLeft: 4 }}>
               {tokenExpanded ? "▲" : "▼"}
             </span>
@@ -136,6 +152,11 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
                     </span>
                   ) : null}
                 </>
+              ) : null}
+              {v.estimated_cost_available && v.estimated_total_cost_usd != null ? (
+                <span className="token-cost" title="Estimated cost based on recorded usage and model pricing">
+                  ≈{fmtUsd(v.estimated_total_cost_usd)} est.
+                </span>
               ) : null}
             </div>
           ))}

@@ -40,6 +40,7 @@ from aespa.models import (
     ComponentMapperConfig,
     ComponentTargetHint,
     LeadTargetMapping,
+    SastRun,
     ScanLead,
     ScanLeadComponentProvenance,
     Site,
@@ -1695,6 +1696,22 @@ async def correlate_campaign_with_llm(
             mapper_config = get_component_mapper_config(session)
             max_parallel = mapper_config.max_concurrent
 
+            # A campaign continues with the source evidence it has when one
+            # component scan fails. Do not ask the mapper to reopen a failed
+            # SAST run: its extracted workspace may already have been cleaned
+            # up, and one component must not prevent the other components from
+            # reaching review.
+            mappable_members = [
+                member
+                for member in source_members
+                if member.sast_run_id is not None
+                and (
+                    sast_run := session.get(SastRun, member.sast_run_id)
+                ) is not None
+                and sast_run.status == "completed"
+            ]
+            skipped_members = len(source_members) - len(mappable_members)
+
         if llm_config is None:
             if not has_explicit_mapper_config:
                 result = (
@@ -1726,8 +1743,20 @@ async def correlate_campaign_with_llm(
                 "type": "scanner_phase",
                 "phase": "component_mapping",
                 "status": "running",
-                "message": f"Mapping interfaces for {len(source_members)} component(s).",
-                "data": {"components": len(source_members)},
+                "message": (
+                    f"Mapping interfaces for {len(mappable_members)} completed "
+                    "component(s)."
+                    if not skipped_members
+                    else (
+                        f"Mapping interfaces for {len(mappable_members)} completed "
+                        f"component(s); skipped {skipped_members} unfinished "
+                        "source scan(s)."
+                    )
+                ),
+                "data": {
+                    "components": len(mappable_members),
+                    "skipped_components": skipped_members,
+                },
             },
         )
         semaphore = asyncio.Semaphore(max_parallel)
@@ -1745,7 +1774,7 @@ async def correlate_campaign_with_llm(
 
         mapping_tasks = [
             asyncio.create_task(_map(member), name=f"component-map-{member.id}")
-            for member in source_members
+            for member in mappable_members
         ]
         try:
             await asyncio.gather(*mapping_tasks)

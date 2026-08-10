@@ -282,12 +282,14 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
 def _load_bucket_from_db(
     run_id: int, run_kind: str = "web"
 ) -> dict[str, dict[str, Any]]:
-    """Load persisted token usage for a run from the DB (best-effort)."""
+    """Load and backfill persisted token usage for a run (best-effort)."""
     try:
         from sqlmodel import Session as _Session
+        from sqlmodel import select as _select
 
         from aespa.db import get_engine
-        from aespa.models import ApiTestRun, SastRun, TestRun
+        from aespa.models import ApiTestRun, LLMUsageMonth, SastRun, TestRun
+        from aespa.services import statistics as statistics_service
 
         with _Session(get_engine()) as s:
             model_cls = (
@@ -299,10 +301,83 @@ def _load_bucket_from_db(
             )
             run = s.get(model_cls, run_id)
             if run and run.token_usage_json:
-                return json.loads(run.token_usage_json)
+                bucket = json.loads(run.token_usage_json)
+                if not isinstance(bucket, dict):
+                    return {}
+                changed = False
+                for model, counts in bucket.items():
+                    if not isinstance(counts, dict):
+                        continue
+                    explicit_provider = str(counts.get("provider") or "").strip()
+                    provider = explicit_provider if explicit_provider != "unknown" else ""
+                    if not provider:
+                        providers = set(
+                            s.exec(
+                                _select(LLMUsageMonth.provider).where(
+                                    LLMUsageMonth.model == model
+                                )
+                            ).all()
+                        )
+                        if len(providers) == 1:
+                            provider = next(iter(providers))
+                    if not provider:
+                        provider = _snapshot_provider_for_model(run, model) or ""
+                    if provider and counts.get("provider") != provider:
+                        counts["provider"] = provider
+                        changed = True
+                    if not provider:
+                        continue
+                    if counts.get("estimated_cost_available") is True:
+                        continue
+                    rates = statistics_service._rates_for(s, provider, model)
+                    cost = statistics_service.estimate_usage_cost(
+                        provider,
+                        input_tokens=counts.get("input", 0),
+                        output_tokens=counts.get("output", 0),
+                        cache_read_tokens=counts.get("cache_read", 0),
+                        cache_write_tokens=counts.get("cache_write", 0),
+                        ai_credits=counts.get("ai_credits", 0),
+                        factory_credits=counts.get("factory_credits", 0),
+                        rates=rates,
+                    )
+                    for key, value in cost.items():
+                        if counts.get(key) != value:
+                            counts[key] = value
+                            changed = True
+                if changed:
+                    run.token_usage_json = json.dumps(bucket)
+                    s.add(run)
+                    s.commit()
+                return bucket
     except Exception:
         pass
     return {}
+
+
+def _snapshot_provider_for_model(run: Any, model: str) -> str | None:
+    """Find a model's provider in the run snapshot, including old snapshots."""
+
+    try:
+        snapshot = json.loads(getattr(run, "execution_snapshot_json", None) or "")
+    except (TypeError, ValueError):
+        return None
+
+    def find(value: Any) -> str | None:
+        if isinstance(value, dict):
+            if value.get("model") == model and value.get("provider"):
+                return str(value["provider"])
+            for nested in value.values():
+                match = find(nested)
+                if match:
+                    return match
+        elif isinstance(value, list):
+            for nested in value:
+                match = find(nested)
+                if match:
+                    return match
+        return None
+
+    return find(snapshot)
 
 
 def _persist_bucket_to_db(run_id: int, bucket: dict, run_kind: str = "web") -> None:
@@ -392,6 +467,15 @@ def _capture_usage_context() -> _UsageContext:
     )
 
 
+def _cost_total(bucket: dict[str, dict[str, Any]], key: str) -> float | None:
+    values = [
+        value.get(key, 0)
+        for value in bucket.values()
+        if value.get("estimated_cost_available", False)
+    ]
+    return sum(values) if values else None
+
+
 def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
     quotas = [
         value["copilot_quota"]
@@ -416,6 +500,12 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
             v.get("premium_requests", 0) for v in bucket.values()
         ),
         "total_requests": sum(v.get("requests", 0) for v in bucket.values()),
+        "estimated_token_cost_usd": _cost_total(bucket, "estimated_token_cost_usd"),
+        "estimated_credit_cost_usd": _cost_total(bucket, "estimated_credit_cost_usd"),
+        "estimated_total_cost_usd": _cost_total(bucket, "estimated_total_cost_usd"),
+        "estimated_cost_available": any(
+            v.get("estimated_cost_available", False) for v in bucket.values()
+        ),
         "copilot_quota": quota,
         "by_model": {m: dict(v) for m, v in bucket.items()},
     }
@@ -457,10 +547,11 @@ def _record_usage(
     normalized_input = max(0, input_tokens)
     if usage_provider in inclusive_input_providers:
         normalized_input = max(0, input_tokens - cache_read_tokens - cache_write_tokens)
+    usage_rates: dict[str, Any] = {}
     try:
         from aespa.services import statistics as statistics_service
 
-        statistics_service.record_usage(
+        usage_rates = statistics_service.record_usage(
             usage_provider,
             model,
             base_url=usage_base_url,
@@ -488,12 +579,33 @@ def _record_usage(
     entry["output"] += output_tokens
     entry["cache_read"] += cache_read_tokens
     entry["cache_write"] += cache_write_tokens
-    if provider:
-        entry["provider"] = provider
+    entry["provider"] = usage_provider
     entry["ai_credits"] = entry.get("ai_credits", 0) + ai_credits
     entry["factory_credits"] = entry.get("factory_credits", 0) + factory_credits
     entry["premium_requests"] = entry.get("premium_requests", 0) + premium_requests
     entry["requests"] = entry.get("requests", 0) + requests
+    try:
+        from aespa.services import statistics as statistics_service
+
+        usage_cost = statistics_service.estimate_usage_cost(
+            usage_provider,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            ai_credits=ai_credits,
+            factory_credits=factory_credits,
+            rates=usage_rates,
+        )
+        entry["estimated_cost_available"] = (
+            entry.get("estimated_cost_available", False)
+            or usage_cost.pop("estimated_cost_available", False)
+        )
+        for key, value in usage_cost.items():
+            entry[key] = entry.get(key, 0) + value
+    except Exception:
+        # Cost telemetry must never make an otherwise successful LLM response fail.
+        log.debug("Failed to estimate per-run LLM cost", exc_info=True)
     if copilot_quota:
         entry["copilot_quota"] = copilot_quota
     _persist_bucket_to_db(run_id, bucket, run_kind)
