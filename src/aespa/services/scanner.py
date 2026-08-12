@@ -2361,12 +2361,13 @@ def _run_thinking_context_tool(
             if is_thinking_running(run_id)
             else _thinking_scan_status.get(run_id, "idle")
         )
+        effective_status = "running" if is_thinking_running(run_id) else run.status
         return {
             "tool": "run_status",
             "run_kind": "web",
             "run_id": run_id,
             "name": run.name,
-            "status": run.status,
+            "status": effective_status,
             "phase": run.phase,
             "outcome": run.outcome,
             "terminal_reason": run.terminal_reason,
@@ -5890,6 +5891,16 @@ async def start_thinking_scan(run_id: int) -> None:
     """Start an LLM-directed (thinking) scan that dynamically decides what to test."""
     if run_id in _thinking_tasks:
         return
+    with Session(get_engine()) as session:
+        run = session.get(TestRun, run_id)
+        if run is not None:
+            run.status = "running"
+            run.phase = "scanning"
+            run.outcome = None
+            run.terminal_reason = None
+            run.completed_at = None
+            session.add(run)
+            session.commit()
     # Clear any stale checkpoint so the scan starts fresh.
     checkpoint_svc.clear_checkpoint(run_id)
     # Tag this run's events as run_kind='web'.  The scope — snapshotted by
