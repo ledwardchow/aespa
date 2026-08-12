@@ -26,7 +26,8 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
   const providers = new Set(Object.values(tokenUsage?.by_model || {}).map(v => v.provider));
   const hasCopilot = providers.has("github_copilot");
   const hasDroid = providers.has("factory_droid");
-  const hasProviderUsage = hasCopilot || hasDroid;
+  const hasCodex = providers.has("openai_codex");
+  const hasProviderUsage = hasCopilot || hasDroid || hasCodex;
   const hasBilledUsage = tokenUsage && (
     tokenUsage.total_ai_credits > 0 ||
     tokenUsage.total_factory_credits > 0 ||
@@ -34,8 +35,8 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
   );
   const hasUsage = hasTokens || hasProviderUsage;
   const hasEstimatedCost = tokenUsage?.estimated_cost_available && tokenUsage.estimated_total_cost_usd != null;
-  const usageLabel = hasDroid && !hasCopilot ? "Droid usage" : hasCopilot && !hasDroid ? "Copilot usage" : "LLM usage";
-  const quota = tokenUsage?.copilot_quota;
+  const usageLabel = hasCodex && !hasDroid && !hasCopilot ? "Codex usage" : hasDroid && !hasCopilot ? "Droid usage" : hasCopilot && !hasDroid ? "Copilot usage" : "LLM usage";
+  const quota = tokenUsage?.codex_quota || tokenUsage?.copilot_quota;
 
   return (
     <>
@@ -121,7 +122,7 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
         <div className="token-breakdown">
           {quota && Number.isFinite(Number(quota.remaining_percentage)) ? (
             <div className="token-breakdown-row">
-              <span className="token-model-name">Copilot allowance</span>
+              <span className="token-model-name">{hasCodex ? "Codex allowance" : "Copilot allowance"}</span>
               <span className="token-in">{Number(quota.remaining_percentage).toFixed(0)}% remaining</span>
               {quota.reset_at ? (
                 <span className="token-out" title={quota.reset_at}>

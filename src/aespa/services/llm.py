@@ -7,12 +7,16 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
+import tempfile
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 from urllib.parse import quote
 
@@ -58,6 +62,21 @@ REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
 
 class LLMRefusalError(RuntimeError):
     """The provider refused to process an agentic scan request."""
+
+
+class LLMQuotaPauseError(RuntimeError):
+    """A subscription allowance is exhausted and the owning run should pause."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reset_at: datetime | None = None,
+        snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reset_at = reset_at
+        self.snapshot = snapshot or {}
 
 
 _REFUSAL_MARKERS = (
@@ -144,21 +163,54 @@ _run_token_seeded: set[tuple[str, int]] = set()
 
 
 class AsyncTokenBucketLimiter:
-    def __init__(self, tpm: int, rpm: Optional[int] = None):
+    def __init__(
+        self,
+        tpm: int,
+        rpm: Optional[int] = None,
+        *,
+        burst_seconds: float = 60.0,
+        burst_requests: Optional[int] = None,
+    ):
         self.tpm = tpm
         self.rpm = rpm
+        # TPM is a sustained rate, not permission to send a full minute's
+        # worth of work in one burst.  Most providers retain the historical
+        # full-bucket behavior; subscription-backed Codex passes
+        # ``burst_seconds=0`` below so a restart or idle period cannot replay a
+        # large burst into the shared organization window.
+        self.burst_seconds = max(0.0, float(burst_seconds))
 
         self.max_tokens = float(tpm)
         self.tokens_per_second = tpm / 60.0
-        self.available_tokens = float(tpm)
+        self.token_capacity = max(
+            1.0,
+            min(self.max_tokens, self.max_tokens * self.burst_seconds / 60.0),
+        )
+        self.available_tokens = self.token_capacity
         self.last_token_update = time.monotonic()
 
         self.max_requests = float(rpm) if rpm else 0.0
         self.requests_per_second = (rpm / 60.0) if rpm else 0.0
-        self.available_requests = float(rpm) if rpm else 0.0
+        self.request_capacity = (
+            min(self.max_requests, float(burst_requests))
+            if self.max_requests and burst_requests is not None
+            else self.max_requests
+        )
+        self.request_capacity = (
+            max(1.0, self.request_capacity) if self.max_requests else 0.0
+        )
+        self.available_requests = self.request_capacity
         self.last_request_update = time.monotonic()
+        self.blocked_until = 0.0
 
         self._lock = asyncio.Lock()
+
+    async def block_for(self, seconds: float) -> None:
+        """Hold new requests briefly after an upstream limit response."""
+        if seconds <= 0:
+            return
+        async with self._lock:
+            self.blocked_until = max(self.blocked_until, time.monotonic() + seconds)
 
     async def acquire(self, estimated_tokens: int, on_wait=None) -> bool:
         # A single request can never need more than the entire per-minute budget;
@@ -169,9 +221,14 @@ class AsyncTokenBucketLimiter:
         while True:
             async with self._lock:
                 now = time.monotonic()
+                if est > self.token_capacity:
+                    # A Codex one-request burst starts with a tiny capacity.
+                    # Grow it to fit this request, but never back up to a full
+                    # minute of tokens merely because the process was idle.
+                    self.token_capacity = min(self.max_tokens, est)
                 elapsed = now - self.last_token_update
                 self.available_tokens = min(
-                    self.max_tokens,
+                    self.token_capacity,
                     self.available_tokens + elapsed * self.tokens_per_second,
                 )
                 self.last_token_update = now
@@ -179,7 +236,7 @@ class AsyncTokenBucketLimiter:
                 if self.max_requests > 0:
                     req_elapsed = now - self.last_request_update
                     self.available_requests = min(
-                        self.max_requests,
+                        self.request_capacity,
                         self.available_requests
                         + req_elapsed * self.requests_per_second,
                     )
@@ -187,8 +244,9 @@ class AsyncTokenBucketLimiter:
 
                 has_tokens = self.available_tokens >= est
                 has_reqs = self.max_requests == 0 or self.available_requests >= 1.0
+                blocked_for = max(0.0, self.blocked_until - now)
 
-                if has_tokens and has_reqs:
+                if has_tokens and has_reqs and blocked_for <= 0:
                     self.available_tokens -= est
                     if self.max_requests > 0:
                         self.available_requests -= 1.0
@@ -204,7 +262,7 @@ class AsyncTokenBucketLimiter:
                     if not has_reqs and self.requests_per_second > 0
                     else 0.0
                 )
-                wait_time = max(wait_tokens, wait_reqs)
+                wait_time = max(wait_tokens, wait_reqs, blocked_for)
                 slept = True
 
             if on_wait and not notified:
@@ -222,23 +280,98 @@ class AsyncTokenBucketLimiter:
             reserved = min(float(estimated_tokens), self.max_tokens)
             difference = reserved - actual_tokens
             self.available_tokens = min(
-                self.max_tokens, max(0.0, self.available_tokens + difference)
+                self.token_capacity, max(0.0, self.available_tokens + difference)
             )
 
 
+@lru_cache(maxsize=64)
+def _token_encoder(model: str | None = None) -> Any | None:
+    """Return a local tokenizer, with a safe fallback for Codex aliases."""
+    try:
+        import tiktoken
+    except ImportError:
+        return None
+
+    # tiktoken downloads its BPE tables on first use. Never allow that hidden
+    # network request in a scan: only use a table already in its local cache.
+    cache_dir = Path(
+        os.environ.get("TIKTOKEN_CACHE_DIR")
+        or os.environ.get("DATA_GYM_CACHE_DIR")
+        or (Path(tempfile.gettempdir()) / "data-gym-cache")
+    )
+    encoding_urls = {
+        "o200k_base": "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken",
+        "cl100k_base": "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken",
+    }
+    encoding_hashes = {
+        "o200k_base": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d",
+        "cl100k_base": "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
+    }
+    candidate = str(model or "").strip().lower()
+    preferred = "cl100k_base" if candidate.startswith(("gpt-3.5", "gpt-4-")) else "o200k_base"
+    for encoding_name in (preferred, "o200k_base", "cl100k_base"):
+        cache_key = hashlib.sha1(encoding_urls[encoding_name].encode()).hexdigest()
+        cache_path = cache_dir / cache_key
+        if not cache_path.is_file():
+            continue
+        try:
+            if hashlib.sha256(cache_path.read_bytes()).hexdigest() != encoding_hashes[
+                encoding_name
+            ]:
+                continue
+        except OSError:
+            continue
+        try:
+            return tiktoken.get_encoding(encoding_name)
+        except Exception:
+            # Do not let a corrupted/unreadable cache table interrupt a scan.
+            continue
+    return None
+
+
+def _count_text_tokens(text: str, model: str | None = None) -> int:
+    if not text:
+        return 0
+    encoder = _token_encoder(model)
+    if encoder is not None:
+        try:
+            return len(encoder.encode(text, disallowed_special=()))
+        except (TypeError, ValueError):
+            # Keep a deterministic local fallback for malformed text or an old
+            # tiktoken API. A scan should not fail just because counting failed.
+            pass
+    # Conservative, deterministic approximation. It is intentionally local and
+    # handles JSON/tool schemas better than a single chars/4 division by keeping
+    # punctuation and long words separate.
+    pieces = re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE)
+    return max(1, sum(max(1, math.ceil(len(piece.encode("utf-8")) / 4.0)) for piece in pieces))
+
+
 def estimate_tokens(
-    prompt: str, screenshot_b64: Optional[str] = None, provider: str = "openai"
+    prompt: str,
+    screenshot_b64: Optional[str] = None,
+    provider: str = "openai",
+    model: str | None = None,
 ) -> int:
-    text_tokens = int((len(prompt) / 4.0) * 1.1)
+    """Estimate input tokens without making a network request.
+
+    ``tiktoken`` is used when available. Codex aliases can be unknown to the
+    tokenizer package, so they use ``o200k_base`` and are corrected by the
+    authoritative post-turn usage event when the app-server reports it.
+    """
+    text_tokens = _count_text_tokens(prompt, model)
     vision_tokens = 0
+    provider_value = getattr(provider, "value", provider)
+    provider_name = str(provider_value or "")
     if screenshot_b64:
-        if provider == "anthropic":
+        if provider_name == "anthropic":
             vision_tokens = 1600
-        elif provider in (
+        elif provider_name in (
             "openai",
             "azure_openai",
             "openrouter",
             "github_copilot",
+            "openai_codex",
         ):
             vision_tokens = 765
         else:
@@ -271,8 +404,24 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
             rpm = provider.max_rpm
 
             limiter = _limiters.get(key)
-            if not limiter or limiter.tpm != tpm or limiter.rpm != rpm:
-                _limiters[key] = AsyncTokenBucketLimiter(tpm=tpm, rpm=rpm)
+            burst_seconds = 0.0 if config.provider == "openai_codex" else 60.0
+            burst_requests = 1 if config.provider == "openai_codex" else None
+            if (
+                not limiter
+                or limiter.tpm != tpm
+                or limiter.rpm != rpm
+                or limiter.burst_seconds != burst_seconds
+                or (
+                    config.provider == "openai_codex"
+                    and limiter.request_capacity != 1.0
+                )
+            ):
+                _limiters[key] = AsyncTokenBucketLimiter(
+                    tpm=tpm,
+                    rpm=rpm,
+                    burst_seconds=burst_seconds,
+                    burst_requests=burst_requests,
+                )
     except Exception as e:
         log.warning(f"Failed to lookup rate limit for provider: {e}")
 
@@ -477,16 +626,14 @@ def _cost_total(bucket: dict[str, dict[str, Any]], key: str) -> float | None:
 
 
 def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    quotas = [
-        value["copilot_quota"]
-        for value in bucket.values()
-        if value.get("copilot_quota")
-    ]
-    quota = max(
-        quotas,
-        key=lambda value: str(value.get("observed_at") or ""),
-        default=None,
-    )
+    def latest_quota(key: str) -> dict[str, Any] | None:
+        quotas = [value[key] for value in bucket.values() if value.get(key)]
+        return max(
+            quotas,
+            key=lambda value: str(value.get("observed_at") or ""),
+            default=None,
+        )
+
     return {
         "total_input": sum(v.get("input", 0) for v in bucket.values()),
         "total_output": sum(v.get("output", 0) for v in bucket.values()),
@@ -506,7 +653,8 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "estimated_cost_available": any(
             v.get("estimated_cost_available", False) for v in bucket.values()
         ),
-        "copilot_quota": quota,
+        "copilot_quota": latest_quota("copilot_quota"),
+        "codex_quota": latest_quota("codex_quota"),
         "by_model": {m: dict(v) for m, v in bucket.items()},
     }
 
@@ -526,10 +674,21 @@ def _record_usage(
     premium_requests: float = 0,
     requests: int = 0,
     copilot_quota: dict[str, Any] | None = None,
+    codex_quota: dict[str, Any] | None = None,
 ) -> None:
     """Accumulate provider usage for a run and the independent monthly ledger."""
+    # A provider can emit several usage notifications for one turn (Codex does
+    # this as its cumulative ``thread/tokenUsage/updated`` stream advances).
+    # Keep a per-call total so the limiter reconciles the whole turn rather than
+    # only the final notification.
+    previous_call_usage = _last_call_tokens_var.get() or {"input": 0, "output": 0}
     _last_call_tokens_var.set(
-        {"input": input_tokens + cache_read_tokens, "output": output_tokens}
+        {
+            "input": previous_call_usage.get("input", 0)
+            + input_tokens
+            + cache_read_tokens,
+            "output": previous_call_usage.get("output", 0) + output_tokens,
+        }
     )
     context = usage_context or _capture_usage_context()
     usage_provider = provider or _provider_var.get() or "unknown"
@@ -543,6 +702,7 @@ def _record_usage(
         "azure_foundry_openai",
         "bedrock_mantle",
         "google",
+        "openai_codex",
     }
     normalized_input = max(0, input_tokens)
     if usage_provider in inclusive_input_providers:
@@ -608,6 +768,8 @@ def _record_usage(
         log.debug("Failed to estimate per-run LLM cost", exc_info=True)
     if copilot_quota:
         entry["copilot_quota"] = copilot_quota
+    if codex_quota:
+        entry["codex_quota"] = codex_quota
     _persist_bucket_to_db(run_id, bucket, run_kind)
     emit_fn = context.emit_fn
     if emit_fn:
@@ -717,6 +879,23 @@ def _emit_rate_limit_cleared(model: str, used_tokens: int) -> None:
             ),
         }
     )
+
+
+def _codex_cooldown_seconds(exc: BaseException) -> float:
+    """Return a safe local cooldown after an upstream Codex limit response."""
+    reset_at = getattr(exc, "reset_at", None)
+    if isinstance(reset_at, datetime):
+        remaining = (reset_at - datetime.now(timezone.utc)).total_seconds()
+        if remaining > 0:
+            return remaining
+    snapshot = getattr(exc, "snapshot", {})
+    text = json.dumps(snapshot, default=str).lower()
+    if "rate limit" in text or "tokens per min" in text or "tokens per minute" in text:
+        # Codex's error can include a 47ms reconnect hint even when its rolling
+        # one-minute organization bucket is full. A minute-long local hold keeps
+        # AESPA from immediately starting another burst that will be rejected.
+        return 60.0
+    return 0.0
 
 
 # Identifying headers attached to every outbound LLM request (e.g. for OpenRouter attribution).
@@ -1203,12 +1382,15 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
+    _last_call_tokens_var.set(None)
     limiter = get_limiter_for_config(config)
     if limiter is None:
         if config.provider == "factory_droid":
             return await _factory_droid(config, prompt, screenshot_b64)
         if config.provider == "github_copilot":
             return await _github_copilot(config, prompt, screenshot_b64)
+        if config.provider == "openai_codex":
+            return await _openai_codex(config, prompt, screenshot_b64)
         if config.provider == "anthropic":
             return await _anthropic(config, prompt, screenshot_b64)
         if config.provider == "google":
@@ -1227,11 +1409,12 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             return await _openai_responses(config, prompt, screenshot_b64)
         return await _openai_compat(config, prompt, screenshot_b64)
 
-    estimated_input = estimate_tokens(prompt, screenshot_b64, config.provider)
+    estimated_input = estimate_tokens(
+        prompt, screenshot_b64, config.provider, model=config.model
+    )
     estimated_output = config.max_tokens or 4096
     total_estimated = estimated_input + estimated_output
 
-    _last_call_tokens_var.set(None)
     # Notify the user the moment pacing starts (on_wait fires before the sleep),
     # so a rate-limited scan never looks frozen.
     slept = await limiter.acquire(
@@ -1246,6 +1429,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             resp = await _factory_droid(config, prompt, screenshot_b64)
         elif config.provider == "github_copilot":
             resp = await _github_copilot(config, prompt, screenshot_b64)
+        elif config.provider == "openai_codex":
+            resp = await _openai_codex(config, prompt, screenshot_b64)
         elif config.provider == "anthropic":
             resp = await _anthropic(config, prompt, screenshot_b64)
         elif config.provider == "google":
@@ -1277,7 +1462,11 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             _emit_rate_limit_cleared(config.model, actual_total)
 
         return resp
-    except Exception:
+    except Exception as exc:
+        if config.provider == "openai_codex" and isinstance(
+            exc, LLMQuotaPauseError
+        ):
+            await limiter.block_for(_codex_cooldown_seconds(exc))
         await limiter.reconcile(total_estimated, 0)
         raise
 
@@ -1298,7 +1487,7 @@ async def stream_chat_completion(
     """Stream a chat completion from the configured LLM provider in real-time."""
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
-    if config.provider in ("factory_droid", "github_copilot"):
+    if config.provider in ("factory_droid", "github_copilot", "openai_codex"):
         # Copilot's full response still travels through the same provider adapter.
         # Yielding it as one chunk preserves this public generator contract.
         combined = "\n\n".join(
@@ -1313,8 +1502,10 @@ async def stream_chat_completion(
         )
         if config.provider == "factory_droid":
             yield await _factory_droid(config, combined, None)
-        else:
+        elif config.provider == "github_copilot":
             yield await _github_copilot(config, combined, None)
+        else:
+            yield await _openai_codex(config, combined, None)
     elif config.provider == "anthropic":
         import anthropic as _ant
 
@@ -1905,6 +2096,25 @@ async def _factory_droid(
     )
 
 
+async def _openai_codex(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    from aespa.services import codex_provider
+
+    try:
+        return await codex_provider.plain_completion(
+            config,
+            prompt,
+            screenshot_b64,
+            _codex_usage_callback(),
+            _llm_proxy_var.get(),
+        )
+    except codex_provider.CodexQuotaError as exc:
+        raise LLMQuotaPauseError(
+            str(exc), reset_at=exc.reset_at, snapshot=exc.snapshot
+        ) from exc
+
+
 def _droid_usage_callback() -> Any:
     usage_context = _capture_usage_context()
 
@@ -1950,6 +2160,32 @@ def _copilot_usage_callback() -> Any:
             cache_write_tokens,
             usage_context=usage_context,
             provider="github_copilot",
+            **details,
+        )
+
+    return record
+
+
+def _codex_usage_callback() -> Any:
+    usage_context = _capture_usage_context()
+
+    def record(
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        **details: Any,
+    ) -> None:
+        _record_usage(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            usage_context=usage_context,
+            provider="openai_codex",
+            codex_quota=details.pop("codex_quota", None),
             **details,
         )
 
@@ -3067,7 +3303,15 @@ async def rewrite_finding_writeup(
         evidence=evidence_dict,
     )
     raw = await _call(config, prompt, None)
-    return parse_reporting_finding(raw or "")
+    try:
+        return parse_reporting_finding(raw or "")
+    except (TypeError, ValueError) as exc:
+        # A provider may return a refusal or ordinary prose instead of the
+        # requested object. Rewriting is an optional presentation step: keep
+        # the persisted finding and let the caller continue without a noisy
+        # warning or a second rate-limited request.
+        log.debug("finding writeup response was not valid JSON: %s", exc)
+        return {}
 
 
 async def replay_reporting_writeup_capture(
@@ -3596,6 +3840,7 @@ AGENTIC_LOOP_PROVIDERS = frozenset(
     {
         "factory_droid",
         "github_copilot",
+        "openai_codex",
         "anthropic",
         "azure_foundry_anthropic",
         "bedrock",
@@ -3651,12 +3896,21 @@ def _with_anthropic_cache(
     return cached_messages, cached_tools
 
 
-def _estimate_tools_call_tokens(system_message: str, messages: list[dict]) -> int:
-    """Rough input-token estimate for an agentic (tool-using) call.
+def _estimate_tools_call_tokens(
+    system_message: str,
+    messages: list[dict],
+    *,
+    tools: list[dict] | None = None,
+    model: str | None = None,
+    provider: str = "openai",
+) -> int:
+    """Count a tool-using request locally, including tool schemas.
 
-    The messages list is Anthropic-format; content is either a string or a list
-    of blocks. We only need an order-of-magnitude figure to drive pacing, so flatten
-    everything to text and reuse the same ~chars/4 heuristic as ``estimate_tokens``.
+    The previous estimate discarded tool definitions and serialized only a
+    subset of content fields. That can undercount an agentic request by many
+    thousands of tokens. The canonical transcript plus compact JSON tool
+    schemas is close to what each provider sends and the small framing allowance
+    covers role/message separators.
     """
     parts: list[str] = [system_message or ""]
     for m in messages:
@@ -3679,7 +3933,15 @@ def _estimate_tools_call_tokens(system_message: str, messages: list[dict]) -> in
                     )
         elif content is not None:
             parts.append(str(content))
-    return estimate_tokens("\n".join(parts))
+    if tools:
+        parts.append(
+            json.dumps(tools, sort_keys=True, separators=(",", ":"), default=str)
+        )
+    estimated = estimate_tokens("\n".join(parts), provider=provider, model=model)
+    # Provider wire formats add a few tokens per message and a wrapper around
+    # the tool list. Keep this explicit rather than hiding another character
+    # heuristic inside the tokenizer count.
+    return estimated + 8 + (4 * len(messages)) + (8 if tools else 0)
 
 
 async def _call_with_tools(
@@ -3696,16 +3958,23 @@ async def _call_with_tools(
     active run's log the moment pacing begins, then dispatches to the per-provider
     implementation.
     """
+    _last_call_tokens_var.set(None)
     limiter = get_limiter_for_config(config)
     if limiter is None:
         return await _call_with_tools_impl(
             config, system_message, messages, tools=tools
         )
 
-    estimated = _estimate_tools_call_tokens(system_message, messages) + (
+    active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    estimated = _estimate_tools_call_tokens(
+        system_message,
+        messages,
+        tools=active_tools,
+        model=config.model,
+        provider=str(getattr(config.provider, "value", config.provider)),
+    ) + (
         config.max_tokens or 4096
     )
-    _last_call_tokens_var.set(None)
     slept = await limiter.acquire(
         estimated,
         on_wait=lambda wt: _emit_rate_limit_waiting(
@@ -3722,7 +3991,11 @@ async def _call_with_tools(
         if slept:
             _emit_rate_limit_cleared(config.model, actual_total)
         return result
-    except Exception:
+    except Exception as exc:
+        if config.provider == "openai_codex" and isinstance(
+            exc, LLMQuotaPauseError
+        ):
+            await limiter.block_for(_codex_cooldown_seconds(exc))
         await limiter.reconcile(estimated, 0)
         raise
 
@@ -3771,6 +4044,22 @@ async def _call_with_tools_impl(
             _copilot_usage_callback(),
             _llm_proxy_var.get(),
         )
+    if config.provider == "openai_codex":
+        from aespa.services import codex_provider
+
+        try:
+            return await codex_provider.completion_with_tools(
+                config,
+                system_message,
+                messages,
+                _active_tools,
+                _codex_usage_callback(),
+                _llm_proxy_var.get(),
+            )
+        except codex_provider.CodexQuotaError as exc:
+            raise LLMQuotaPauseError(
+                str(exc), reset_at=exc.reset_at, snapshot=exc.snapshot
+            ) from exc
     # ── Anthropic (direct) ────────────────────────────────────────────────────
     if config.provider == "anthropic":
         import anthropic as _ant
@@ -4764,6 +5053,7 @@ async def thinking_agentic_loop(
                     exc,
                 )
                 _is_refusal = _is_llm_refusal(exc)
+                _is_quota_pause = isinstance(exc, LLMQuotaPauseError)
                 _exc_resp = getattr(exc, "response", None)
                 _exc_code = (
                     _exc_resp.get("Error", {}).get("Code", "")
@@ -4784,13 +5074,17 @@ async def thinking_agentic_loop(
                             )
                         elif _is_refusal:
                             _msg = f"Step {tool_call_count + 1}: LLM provider refused the scan request — {exc}"
+                        elif _is_quota_pause:
+                            _msg = (
+                                f"Step {tool_call_count + 1}: scan paused because the Codex allowance or rate-limit window is exhausted — {exc}"
+                            )
                         else:
                             _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
                         emit_fn(
                             {
                                 "type": "scanner_phase",
                                 "phase": "llm_response",
-                                "status": "error",
+                                "status": "warning" if _is_quota_pause else "error",
                                 "message": _msg,
                                 "data": {
                                     "step": tool_call_count + 1,
@@ -5098,16 +5392,20 @@ async def thinking_agentic_loop(
                 break
 
     finally:
-        if config.provider in ("factory_droid", "github_copilot"):
+        if config.provider in ("factory_droid", "github_copilot", "openai_codex"):
             try:
                 if config.provider == "factory_droid":
                     from aespa.services import droid_provider
 
                     await droid_provider.close_conversation(messages)
-                else:
+                elif config.provider == "github_copilot":
                     from aespa.services import copilot_provider
 
                     await copilot_provider.close_conversation(messages)
+                else:
+                    from aespa.services import codex_provider
+
+                    await codex_provider.close_conversation(messages)
             except Exception:
                 log.debug("Failed to close provider conversation", exc_info=True)
         # Save a final checkpoint on any exit — including CancelledError raised

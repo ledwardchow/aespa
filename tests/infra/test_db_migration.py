@@ -754,7 +754,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "test_run" in tables
         assert was_pre_alembic is False
         # The migration chain now includes replay/session provenance fields.
-        assert version == "a1b2c3d4e5f6"
+        assert version == "b2c3d4e5f6a7"
     finally:
         engine.dispose()
 
@@ -904,7 +904,7 @@ def test_replay_provenance_repair_migration_handles_existing_c4_database():
         assert "replay_credential_id" in columns["crawled_page"]
         assert {"page_id", "session_label"} <= columns["traffic_entry"]
         assert "page_id" in columns["target_intel_item"]
-        assert version == "a1b2c3d4e5f6"
+        assert version == "b2c3d4e5f6a7"
     finally:
         engine.dispose()
 
@@ -1055,7 +1055,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "a1b2c3d4e5f6"
+        assert version == "b2c3d4e5f6a7"
     finally:
         engine.dispose()
 
@@ -1092,7 +1092,7 @@ def test_current_db_with_applications_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "a1b2c3d4e5f6"
+        assert version == "b2c3d4e5f6a7"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -1136,6 +1136,6 @@ def test_explicit_target_component_migration_adds_nullable_column():
             ).scalar_one()
 
         assert "component_id" in columns
-        assert version == "a1b2c3d4e5f6"
+        assert version == "b2c3d4e5f6a7"
     finally:
         engine.dispose()

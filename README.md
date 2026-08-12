@@ -21,7 +21,7 @@ You will need to provide:
 - For web app testing - URL and (optionally) credentials
 - For API testing - documentation so that the scanner can understand the structure of the APIs in scope (OpenAPI YAML, text dumps of Confluence pages, markdown, free text files containing API credentials; just upload whatever you have and the scanner will figure it out!)
 - (Optionally) ZIP of the source code for the web app/API. You can run SAST as a standalone operation or load the SAST findings into a web or API scan, which will validate the finding with dynamic testing
-- An API key for a supported LLM provider, AWS credentials, or a GitHub Copilot subscription
+- An API key for a supported LLM provider, AWS credentials, a GitHub Copilot subscription, or a ChatGPT/Codex subscription with Codex installed separately
 
 ## Performance
 
@@ -47,7 +47,7 @@ The [User Guide](docs/guide/index.md)!
 ## Requirements
 
 - Burp Suite Professional, if you want to use the active scan integration
-- One of: an Anthropic/OpenAI/Google/AWS Bedrock API key, a GitHub Copilot subscription, or a local model
+- One of: an Anthropic/OpenAI/Google/AWS Bedrock API key, a GitHub Copilot subscription, a ChatGPT/Codex subscription with the Codex CLI installed, or a local model
 
 Note, this was developed/tested mostly on Bedrock/Sonnet 4.6. Your results may vary on a different setup.
 

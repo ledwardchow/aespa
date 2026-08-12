@@ -456,6 +456,7 @@ LLMProviderAPILiteral = Literal[
     "anthropic",
     "factory_droid",
     "github_copilot",
+    "openai_codex",
     "openai",
     "openai_compatible",
     "openrouter",
@@ -470,6 +471,7 @@ LLMProviderAPILiteral = Literal[
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
     "factory_droid": [],
+    "openai_codex": ["auto"],
     "github_copilot": [
         "auto",
         "gpt-5.6-luna",
@@ -612,6 +614,15 @@ class LLMProviderConfigIn(BaseModel):
             raise ValueError("base_url must start with http:// or https://")
         return v
 
+    @model_validator(mode="after")
+    def _validate_codex_connection(self) -> "LLMProviderConfigIn":
+        if self.api_format == "openai_codex":
+            self.api_key = None
+            self.base_url = None
+            self.username = None
+            self.project_id = None
+        return self
+
 
 class LLMProviderConfigOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -636,6 +647,22 @@ class LLMModelDiscoveryRequest(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     username: str | None = None
+
+
+class CodexIntegrationConfigIn(BaseModel):
+    executable_path: str | None = Field(default=None, max_length=1000)
+
+
+class CodexIntegrationConfigOut(BaseModel):
+    executable_path: str | None = None
+    detected_executable: str | None = None
+    installed: bool = False
+    version: str | None = None
+    running: bool = False
+    compatible: bool = False
+    account: dict[str, Any] | None = None
+    rate_limits: dict[str, Any] | None = None
+    error: str | None = None
 
 
 class LLMConfigIn(BaseModel):

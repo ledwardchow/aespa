@@ -260,6 +260,32 @@ async def stop_sast_scan(
     return {"ok": True, "stopped": stopped}
 
 
+@router.post("/api/sast-runs/{run_id}/scan/resume")
+async def resume_sast_scan(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Manually resume a quota-paused SAST scan without clearing its state."""
+    from aespa.services import sast_scanner
+    _get_run_or_404(session, run_id)
+    from aespa.services import run_pause as run_pause_svc
+
+    run = session.get(SastRun, run_id)
+    pause = run_pause_svc.get_pause("sast", run_id)
+    if run is None or pause is None or run.status != "paused":
+        raise HTTPException(status_code=409, detail="SAST scan is not paused")
+    if sast_scanner.is_sast_scan_running(run_id):
+        raise HTTPException(status_code=409, detail="SAST scan is already running")
+    if pause.reset_at and pause.reset_at > datetime.now(_UTC):
+        raise HTTPException(
+            status_code=409,
+            detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
+        )
+    await sast_scanner.start_sast_scan(run_id, resume=True)
+    run_pause_svc.clear_pause("sast", run_id)
+    return sast_scanner.get_sast_status(run_id)
+
+
 @router.get("/api/sast-runs/{run_id}/scan/status")
 def sast_scan_status(
     run_id: int,

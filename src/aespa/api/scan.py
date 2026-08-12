@@ -182,6 +182,18 @@ async def resume_thinking_scan(
 ) -> dict:
     """Resume an interrupted dynamic scan from the last saved checkpoint."""
     run = _get_run_or_404(session, run_id)
+    from aespa.services import run_pause as run_pause_svc
+
+    pause = run_pause_svc.get_pause("web", run_id)
+    if pause is not None:
+        if pause.reset_at and pause.reset_at > datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": pause.message,
+                    "reset_at": pause.reset_at.isoformat(),
+                },
+            )
     if run.status == TestRunStatus.running:
         raise HTTPException(
             status_code=409, detail="Crawl is still running — wait for it to finish"
@@ -207,6 +219,8 @@ async def resume_thinking_scan(
         except Exception:
             pass
     await scanner_svc.start_thinking_scan_resume(run_id)
+    if pause is not None:
+        run_pause_svc.clear_pause("web", run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
 

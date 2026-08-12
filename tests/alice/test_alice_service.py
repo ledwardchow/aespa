@@ -331,6 +331,35 @@ async def test_run_alice_turn_stream_yields_correct_chunks(db_session, test_data
 
 
 @pytest.mark.anyio
+async def test_alice_quota_pause_is_emitted_as_warning_and_chat_message(
+    db_session, test_data
+):
+    run = test_data["run"]
+    from aespa.services import llm as llm_service
+
+    async def mock_call_with_tools(*args, **kwargs):
+        raise llm_service.LLMQuotaPauseError(
+            "Codex upstream rate limit persisted; resume after the window resets."
+        )
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        chunks = []
+        async for line in run_alice_turn_stream(run.id, "Check the target", []):
+            if line.startswith("data: "):
+                chunks.append(json.loads(line[6:].strip()))
+
+    warnings = [chunk for chunk in chunks if chunk.get("type") == "warning"]
+    messages = [chunk for chunk in chunks if chunk.get("type") == "message_chunk"]
+    done = [chunk for chunk in chunks if chunk.get("type") == "done"]
+
+    assert len(warnings) == 1
+    assert "paused this ALICE turn" in warnings[0]["message"]
+    assert any("rate-limit window" in chunk["delta"] for chunk in messages)
+    assert len(done) == 1
+    assert "paused this ALICE turn" in done[0]["message"]
+
+
+@pytest.mark.anyio
 async def test_run_alice_turn_stream_routes_inline_think_tags_to_trace(
     db_session, test_data
 ):

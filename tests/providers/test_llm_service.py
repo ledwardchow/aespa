@@ -4,8 +4,9 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from sqlmodel import Session, select
 
-from aespa.models import LLMConfig
+from aespa.models import LLMConfig, LLMUsageMonth
 from aespa.services import llm
 
 
@@ -90,6 +91,26 @@ def test_limiter_reconcile_only_credits_what_was_reserved():
 
     avail = asyncio.run(_run())
     assert 850 <= avail <= 1000
+
+
+def test_codex_limiter_starts_with_one_request_burst_not_a_full_minute():
+    limiter = llm.AsyncTokenBucketLimiter(
+        tpm=40_000_000,
+        rpm=60,
+        burst_seconds=0,
+        burst_requests=1,
+    )
+    assert limiter.available_tokens <= 1
+    assert limiter.token_capacity <= 1
+    assert limiter.available_requests == 1
+
+
+def test_codex_cooldown_defaults_to_a_full_window_for_upstream_rate_limit():
+    error = llm.LLMQuotaPauseError(
+        "Codex rate limit",
+        snapshot={"error": {"message": "tokens per min limit reached"}},
+    )
+    assert llm._codex_cooldown_seconds(error) == 60
 
 
 def test_agentic_loop_recovers_from_text_only_turn(monkeypatch):
@@ -737,6 +758,66 @@ def test_agentic_loop_propagates_generic_api_error_instead_of_completing(monkeyp
     ]
     assert len(error_events) == 1
     assert "LLM API error" in error_events[0]["message"]
+
+
+def test_agentic_loop_reports_quota_pause_as_warning(monkeypatch):
+    config = LLMConfig(provider="openai_codex", model="auto", max_tokens=2048)
+    emitted: list[dict] = []
+
+    async def fake_call_with_tools(*args, **kwargs):
+        raise llm.LLMQuotaPauseError(
+            "Codex upstream rate limit persisted; resume after the window resets."
+        )
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(llm.LLMQuotaPauseError, match="rate limit persisted"):
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                config,
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=lambda *args: None,
+                emit_fn=emitted.append,
+            )
+        )
+
+    pause_events = [
+        event
+        for event in emitted
+        if event.get("phase") == "llm_response"
+        and event.get("status") == "warning"
+    ]
+    assert len(pause_events) == 1
+    assert "scan paused" in pause_events[0]["message"]
+
+
+def test_token_estimate_uses_local_encoder_and_counts_tool_schemas(monkeypatch):
+    class FakeEncoder:
+        def encode(self, text, disallowed_special=()):
+            return list(range(len(text.split())))
+
+    monkeypatch.setattr(llm, "_token_encoder", lambda model=None: FakeEncoder())
+
+    plain = llm.estimate_tokens("one two", model="gpt-5.6-sol")
+    with_tools = llm._estimate_tools_call_tokens(
+        "system",
+        [{"role": "user", "content": "one two"}],
+        tools=[{"name": "http_request", "input_schema": {"type": "object"}}],
+        model="gpt-5.6-sol",
+    )
+
+    assert plain == 2
+    assert with_tools > plain
+
+
+def test_usage_reconciliation_accumulates_multiple_provider_events():
+    llm._last_call_tokens_var.set(None)
+    llm._record_usage("gpt-5.6-sol", input_tokens=100, output_tokens=10)
+    llm._record_usage(
+        "gpt-5.6-sol", input_tokens=25, output_tokens=5, cache_read_tokens=15
+    )
+    assert llm._last_call_tokens_var.get() == {"input": 140, "output": 15}
 
 
 def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
@@ -2508,6 +2589,25 @@ def test_replay_reporting_writeup_capture_uses_writeup_prompt(monkeypatch):
     assert result["findings"][0]["title"] == "IDOR exposes account statement"
 
 
+def test_rewrite_finding_writeup_skips_non_json_provider_response(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        return "I cannot provide that report."
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    config = LLMConfig(provider="openai_compatible", model="local")
+    result = asyncio.run(
+        llm.rewrite_finding_writeup(
+            config,
+            source="test_lead",
+            base_url="https://target.local",
+            finding_dict={"title": "Finding", "affected_url": "https://target.local"},
+            evidence_dict={},
+        )
+    )
+
+    assert result == {}
+
+
 def test_analyse_probes_chunks_large_result_sets(monkeypatch):
     prompts: list[str] = []
 
@@ -3448,6 +3548,45 @@ def test_droid_usage_callback_records_factory_credits():
     usage = llm.get_run_token_usage(run_id)
     assert usage["total_factory_credits"] == 434
     assert usage["by_model"]["claude-sonnet-4-6"]["provider"] == "factory_droid"
+
+
+def test_codex_usage_callback_keeps_run_context_and_token_counts(
+    isolated_db_engine,
+):
+    run_id = 888891
+    events = []
+    llm.set_run_context(run_id, emit_fn=events.append, run_kind="web")
+    callback = llm._codex_usage_callback()
+    llm.clear_run_context()
+
+    callback(
+        "gpt-5.6-sol",
+        1_200,
+        300,
+        800,
+        10,
+        requests=1,
+        codex_quota={"remaining_percentage": 68, "reset_at": None},
+    )
+
+    usage = llm.get_run_token_usage(run_id)
+    assert usage["total_input"] == 1_200
+    assert usage["total_output"] == 300
+    assert usage["total_cache_read"] == 800
+    assert usage["total_cache_write"] == 10
+    assert usage["total_requests"] == 1
+    assert usage["codex_quota"]["remaining_percentage"] == 68
+    assert usage["by_model"]["gpt-5.6-sol"]["provider"] == "openai_codex"
+    assert events[-1]["totals"] == usage
+    with Session(isolated_db_engine) as session:
+        global_usage = session.exec(select(LLMUsageMonth)).one()
+        assert global_usage.provider == "openai_codex"
+        assert global_usage.model == "gpt-5.6-sol"
+        assert global_usage.input_tokens == 390
+        assert global_usage.output_tokens == 300
+        assert global_usage.cache_read_tokens == 800
+        assert global_usage.cache_write_tokens == 10
+        assert global_usage.requests == 1
 
 
 def test_google_usage_treats_none_counters_as_zero(monkeypatch):
