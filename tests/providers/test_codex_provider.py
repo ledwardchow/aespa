@@ -312,6 +312,99 @@ def test_codex_turn_timeout_has_a_useful_error(monkeypatch):
     assert "stalled turn" in str(raised.value)
 
 
+def test_codex_flushes_terminal_tool_result_before_thread_close(monkeypatch):
+    messages = [
+        {"role": "user", "content": "validate the finding"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "done-call",
+                    "name": "done",
+                    "input": {"summary": "complete"},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "done-call",
+                    "content": "Assessment complete.",
+                }
+            ],
+        },
+    ]
+    sent = []
+
+    class FakeClient:
+        async def _send_response(self, request_id, result):
+            sent.append((request_id, result))
+
+    conversation = codex_provider._Conversation(
+        thread_id="thread-1",
+        last_message_count=1,
+        pending_calls={"done-call": (42, {"tool": "done"})},
+    )
+    monkeypatch.setattr(codex_provider, "_client", FakeClient())
+    codex_provider._conversations[id(messages)] = conversation
+    try:
+        resolved = asyncio.run(codex_provider.flush_pending_tool_results(messages))
+    finally:
+        codex_provider._conversations.pop(id(messages), None)
+
+    assert resolved == 1
+    assert conversation.pending_calls == {}
+    assert conversation.last_message_count == len(messages)
+    assert sent == [
+        (
+            42,
+            {
+                "success": True,
+                "contentItems": [
+                    {"type": "inputText", "text": "Assessment complete."}
+                ],
+            },
+        )
+    ]
+
+
+def test_codex_close_fails_unresolved_dynamic_callbacks(monkeypatch):
+    messages = [{"role": "user", "content": "start"}]
+    sent = []
+    requests = []
+
+    class FakeClient:
+        def __init__(self):
+            self._conversations = {"thread-1": conversation}
+
+        async def _send_response(self, request_id, result):
+            sent.append((request_id, result))
+
+        async def request(self, method, params):
+            requests.append((method, params))
+
+    conversation = codex_provider._Conversation(
+        thread_id="thread-1",
+        last_message_count=1,
+        pending_calls={"request-call": (77, {"tool": "http_request"})},
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(codex_provider, "_client", fake_client)
+    codex_provider._conversations[id(messages)] = conversation
+
+    asyncio.run(codex_provider.close_conversation(messages))
+
+    assert sent[0][0] == 77
+    assert sent[0][1]["success"] is False
+    assert conversation.pending_calls == {}
+    assert requests == [("thread/delete", {"threadId": "thread-1"})]
+    assert id(messages) not in codex_provider._conversations
+    assert "thread-1" not in fake_client._conversations
+
+
 def test_codex_subscription_usage_has_no_dollar_estimate():
     result = statistics.estimate_usage_cost(
         "openai_codex", input_tokens=1000, output_tokens=1000

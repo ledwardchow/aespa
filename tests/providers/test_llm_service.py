@@ -236,6 +236,116 @@ def test_agentic_loop_accepts_mapper_text_only_repair_message(monkeypatch):
     assert repair_messages
 
 
+def test_codex_agentic_done_flushes_terminal_tool_result(monkeypatch):
+    from aespa.services import codex_provider
+
+    config = LLMConfig(
+        provider="openai_codex",
+        model="gpt-daybreak-blue-latest",
+        max_tokens=2048,
+    )
+    flushed = []
+
+    async def fake_call_with_tools(*args, **kwargs):  # noqa: ARG001
+        block = {
+            "type": "tool_use",
+            "id": "done-1",
+            "name": "done",
+            "input": {"summary": "Complete."},
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_flush(messages):
+        flushed.append(messages[-1])
+        return 1
+
+    async def fake_close(messages):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    monkeypatch.setattr(codex_provider, "flush_pending_tool_results", fake_flush)
+    monkeypatch.setattr(codex_provider, "close_conversation", fake_close)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *_args: "unused",
+        )
+    )
+
+    assert summary == "Complete."
+    assert flushed == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "done-1",
+                    "content": "Assessment complete.",
+                }
+            ],
+        }
+    ]
+
+
+def test_codex_agentic_loop_flushes_each_nonterminal_result_immediately(monkeypatch):
+    from aespa.services import codex_provider
+
+    config = LLMConfig(
+        provider="openai_codex",
+        model="gpt-daybreak-blue-latest",
+        max_tokens=2048,
+    )
+    calls = 0
+    flushed = []
+
+    async def fake_call_with_tools(*args, **kwargs):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            block = {
+                "type": "tool_use",
+                "id": "context-1",
+                "name": "context_tool",
+                "input": {"tool": "run_status"},
+            }
+        else:
+            block = {
+                "type": "tool_use",
+                "id": "done-1",
+                "name": "done",
+                "input": {"summary": "Complete."},
+            }
+        return [block], "tool_use", [block]
+
+    async def fake_flush(messages):
+        flushed.append(messages[-1]["content"][0]["tool_use_id"])
+        return 1
+
+    async def fake_close(messages):  # noqa: ARG001
+        return None
+
+    async def fake_executor(*args):  # noqa: ARG001
+        return "status result"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    monkeypatch.setattr(codex_provider, "flush_pending_tool_results", fake_flush)
+    monkeypatch.setattr(codex_provider, "close_conversation", fake_close)
+
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_executor,
+        )
+    )
+
+    assert flushed == ["context-1", "done-1"]
+
+
 def test_agentic_loop_can_reject_premature_done(monkeypatch):
     config = LLMConfig(
         provider="azure_foundry_openai",

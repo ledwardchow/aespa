@@ -2135,6 +2135,10 @@ async def run_alice_turn_stream(
 
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
+                if llm_cfg.provider == "openai_codex":
+                    from aespa.services import codex_provider
+
+                    await codex_provider.flush_pending_tool_results(messages)
 
             if session_done:
                 break
@@ -3260,6 +3264,10 @@ async def run_api_alice_turn_stream(
 
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
+                if llm_cfg.provider == "openai_codex":
+                    from aespa.services import codex_provider
+
+                    await codex_provider.flush_pending_tool_results(messages)
 
             if session_done:
                 break

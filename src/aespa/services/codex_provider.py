@@ -799,6 +799,63 @@ async def _send_turn(
     )
 
 
+async def _send_pending_tool_results(
+    client: _JsonRpcClient,
+    conversation: _Conversation,
+    messages: list[dict],
+    start_at: int,
+) -> int:
+    """Complete app-server callbacks represented by new tool-result blocks."""
+    resolved = 0
+    for message in messages[start_at:]:
+        if message.get("role") != "user":
+            continue
+        for block in message.get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            call_id = str(block.get("tool_use_id") or block.get("id") or "")
+            pending = conversation.pending_calls.pop(call_id, None)
+            if not pending:
+                continue
+            request_id, _params = pending
+            result = block.get("content") or ""
+            if not isinstance(result, str):
+                result = json.dumps(result, default=str)
+            await client._send_response(
+                request_id,
+                {
+                    "success": not bool(block.get("is_error")),
+                    "contentItems": [{"type": "inputText", "text": result}],
+                },
+            )
+            resolved += 1
+    return resolved
+
+
+async def flush_pending_tool_results(messages: list[dict]) -> int:
+    """Acknowledge completed dynamic tools without starting another model turn.
+
+    Codex runs AESPA dynamic tools inside an exec cell. Delaying the callback
+    response until the next model request makes that cell poll with ``wait`` and
+    can deadlock if the owning loop stops first.
+    """
+    conversation = _conversations.get(id(messages))
+    if conversation is None or _client is None:
+        return 0
+    resolved = await _send_pending_tool_results(
+        _client,
+        conversation,
+        messages,
+        conversation.last_message_count,
+    )
+    conversation.last_message_count = len(messages)
+    if resolved:
+        # Let the stdout reader consume the resulting completion notification
+        # before close_conversation queues thread/delete on the same connection.
+        await asyncio.sleep(0)
+    return resolved
+
+
 async def _completion_with_tools_once(
     config: LLMConfig,
     system_message: str,
@@ -842,26 +899,12 @@ async def _completion_with_tools_once(
         # Resolve tool calls held open by the app-server until AESPA supplied a
         # result.  The server then continues the same turn.
         previous_message_count = conversation.last_message_count
-        for message in messages[previous_message_count:]:
-            if message.get("role") != "user":
-                continue
-            for block in message.get("content") or []:
-                if not isinstance(block, dict) or block.get("type") != "tool_result":
-                    continue
-                call_id = str(block.get("tool_use_id") or block.get("id") or "")
-                pending = conversation.pending_calls.pop(call_id, None)
-                if pending:
-                    request_id, _params = pending
-                    result = block.get("content") or ""
-                    if not isinstance(result, str):
-                        result = json.dumps(result, default=str)
-                    await client._send_response(
-                        request_id,
-                        {
-                            "success": not bool(block.get("is_error")),
-                            "contentItems": [{"type": "inputText", "text": result}],
-                        },
-                    )
+        await _send_pending_tool_results(
+            client,
+            conversation,
+            messages,
+            previous_message_count,
+        )
 
         user_messages = []
         for message in messages[previous_message_count:]:
@@ -1075,10 +1118,33 @@ async def plain_completion(
 
 async def close_conversation(messages: list[dict]) -> None:
     key = id(messages)
-    conversation = _conversations.pop(key, None)
-    _usage_callbacks.pop(key, None)
+    conversation = _conversations.get(key)
     if conversation is None or _client is None:
+        _conversations.pop(key, None)
+        _usage_callbacks.pop(key, None)
         return
+    # Deliver any results appended immediately before cancellation, a budget
+    # stop, or another early exit. Then explicitly fail callbacks whose tool
+    # execution never produced a result so no Codex exec cell remains waiting.
+    with contextlib.suppress(Exception):
+        await flush_pending_tool_results(messages)
+    for call_id, (request_id, _params) in list(conversation.pending_calls.items()):
+        with contextlib.suppress(Exception):
+            await _client._send_response(
+                request_id,
+                {
+                    "success": False,
+                    "contentItems": [
+                        {
+                            "type": "inputText",
+                            "text": "AESPA closed the agent turn before this tool completed.",
+                        }
+                    ],
+                },
+            )
+        conversation.pending_calls.pop(call_id, None)
+    _conversations.pop(key, None)
+    _usage_callbacks.pop(key, None)
     _client._conversations.pop(conversation.thread_id, None)
     with contextlib.suppress(Exception):
         await _client.request("thread/delete", {"threadId": conversation.thread_id})

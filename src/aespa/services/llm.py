@@ -5381,6 +5381,10 @@ async def thinking_agentic_loop(
 
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
+                if config.provider == "openai_codex":
+                    from aespa.services import codex_provider
+
+                    await codex_provider.flush_pending_tool_results(messages)
 
             if on_checkpoint:
                 try:
