@@ -600,6 +600,34 @@ async def _run_adversarial_validator_loop(
     verdict_holder: list[tuple[str, str, str, dict]] = []
     step_counter: list[int] = [0]
 
+    def _record_verdict(tool_input: dict) -> tuple[str, str, str, dict]:
+        verdict = tool_input.get("verdict") or "unconfirmed"
+        if verdict not in {
+            "confirmed",
+            "false_positive",
+            "low_confidence",
+            "unconfirmed",
+            "skipped",
+        }:
+            verdict = "unconfirmed"
+        reasoning = tool_input.get("reasoning", "")
+        confidence = tool_input.get("confidence", "medium")
+        recorded = (verdict, reasoning, confidence, dict(tool_input))
+        verdict_holder.append(recorded)
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": f"validator-{finding.id}",
+                "role": "Validator",
+                "status": "active",
+                "current_task": f"Verdict reached: {verdict}",
+                "outcome": None,
+                "_persist": True,
+            },
+        )
+        return recorded
+
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> Any:  # noqa: ANN401
         step_counter[0] = step
         if tool_name == "http_request":
@@ -620,34 +648,13 @@ async def _run_adversarial_validator_loop(
             )
         if tool_name == "context_tool":
             return await _validator_context_tool(tool_input, run_id, finding)
-        if tool_name == "done":
-            verdict = tool_input.get("verdict") or "unconfirmed"
-            if verdict not in {
-                "confirmed",
-                "false_positive",
-                "low_confidence",
-                "unconfirmed",
-                "skipped",
-            }:
-                verdict = "unconfirmed"
-            reasoning = tool_input.get("reasoning", "")
-            confidence = tool_input.get("confidence", "medium")
-            verdict_holder.append((verdict, reasoning, confidence, dict(tool_input)))
-            events_svc.emit(
-                run_id,
-                {
-                    "type": "agent_status",
-                    "agent_id": f"validator-{finding.id}",
-                    "role": "Validator",
-                    "status": "active",
-                    "current_task": f"Verdict reached: {verdict}",
-                    "outcome": None,
-                    "_persist": True,
-                },
-            )
-            return {"verdict": verdict, "reasoning": reasoning}
         log.warning("Adversarial validator: unknown tool call '%s'", tool_name)
         return {"error": f"Unknown tool: {tool_name}"}
+
+    def _done_check(tool_input: dict, step: int) -> tuple[bool, str]:
+        step_counter[0] = step
+        _record_verdict(tool_input)
+        return True, ""
 
     def _stop_check() -> bool:
         return len(verdict_holder) > 0 or step_counter[0] >= validator_cfg.max_steps
@@ -658,6 +665,7 @@ async def _run_adversarial_validator_loop(
         initial_user_message=initial_message,
         tool_executor=_tool_executor,
         stop_check=_stop_check,
+        done_check=_done_check,
         tools=llm_svc.VALIDATOR_AGENT_TOOLS,
     )
 
