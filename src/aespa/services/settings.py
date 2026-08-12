@@ -251,6 +251,10 @@ async def discover_models_for_format(
         from aespa.services import droid_provider
 
         return await droid_provider.discover_models()
+    elif api_format == "openai_codex":
+        from aespa.services import codex_provider
+
+        return await codex_provider.discover_models()
     elif api_format == "github_copilot":
         from aespa.services import copilot_provider
 
@@ -338,20 +342,20 @@ def _apply_llm_provider(
     _ensure_unique_llm_provider_name(session, payload.name, provider.id)
     provider.name = payload.name
     provider.api_format = payload.api_format
-    if payload.api_format == "factory_droid":
+    if payload.api_format in {"factory_droid", "openai_codex"}:
         provider.api_key = None
     elif payload.api_key is not None:
         key_str = payload.api_key.strip()
         provider.api_key = key_str if key_str else None
     provider.base_url = (
-        None if payload.api_format == "factory_droid" else payload.base_url
+        None if payload.api_format in {"factory_droid", "openai_codex"} else payload.base_url
     )
     username = (payload.username or "").strip()
     provider.username = (
         username or None if payload.api_format == "github_copilot" else None
     )
     provider.project_id = (
-        None if payload.api_format == "factory_droid" else payload.project_id
+        None if payload.api_format in {"factory_droid", "openai_codex"} else payload.project_id
     )
     provider.models_json = _json_dumps(payload.models)
     provider.max_tpm = payload.max_tpm

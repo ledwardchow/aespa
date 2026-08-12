@@ -319,6 +319,7 @@ class LLMProviderAPI(str, Enum):
     anthropic = "anthropic"
     factory_droid = "factory_droid"
     github_copilot = "github_copilot"
+    openai_codex = "openai_codex"
     openai = "openai"
     openai_compatible = "openai_compatible"
     openrouter = "openrouter"
@@ -349,6 +350,20 @@ class LLMProviderConfig(SQLModel, table=True):
     models_json: str = Field(default="[]")
     max_tpm: Optional[int] = Field(default=None, nullable=True)
     max_rpm: Optional[int] = Field(default=None, nullable=True)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class CodexIntegrationConfig(SQLModel, table=True):
+    """Global local Codex CLI setting.
+
+    Codex owns the ChatGPT credentials in its normal CLI home. AESPA only
+    remembers an optional executable path.
+    """
+
+    __tablename__ = "codex_integration_config"
+
+    id: Optional[int] = Field(default=1, primary_key=True)
+    executable_path: Optional[str] = Field(default=None)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -697,6 +712,7 @@ class TestRunStatus(str, Enum):
     incomplete = "incomplete"
     failed = "failed"
     stopped = "stopped"
+    paused = "paused"
 
 
 class TestRun(SQLModel, table=True):
@@ -1194,6 +1210,24 @@ class ScanCheckpoint(SQLModel, table=True):
     completion_state_json: str = Field(default="{}")
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class RunPause(SQLModel, table=True):
+    """A manually resumable pause, usually caused by a subscription quota."""
+
+    __tablename__ = "run_pause"
+    __table_args__ = (UniqueConstraint("run_kind", "run_id", name="uq_run_pause"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_kind: str = Field(index=True)  # web | api | sast | crawl
+    run_id: int = Field(index=True)
+    provider: str = Field(default="")
+    reason: str = Field(default="quota")
+    reset_at: Optional[datetime] = Field(default=None)
+    message: str = Field(default="")
+    snapshot_json: str = Field(default="{}")
+    resume_stage: Optional[str] = Field(default=None)
+    paused_at: datetime = Field(default_factory=_utcnow)
 
 
 class AliceChatSession(SQLModel, table=True):

@@ -24,6 +24,8 @@ DEFAULT_CREDIT_PRICES: dict[str, tuple[float, str]] = {
     "factory_droid": (7.0, "Factory credits per 1,000,000 credits"),
 }
 
+SUBSCRIPTION_PROVIDERS = {"openai_codex"}
+
 _INCLUSIVE_INPUT_PROVIDERS = {
     "openai",
     "openai_compatible",
@@ -33,6 +35,7 @@ _INCLUSIVE_INPUT_PROVIDERS = {
     "azure_foundry_openai",
     "bedrock_mantle",
     "google",
+    "openai_codex",
 }
 
 
@@ -166,6 +169,18 @@ def _feed(session: Session) -> dict[str, Any]:
 
 
 def _rates_for(session: Session, provider: str, model: str) -> dict[str, Any]:
+    if provider in SUBSCRIPTION_PROVIDERS:
+        return {
+            "input_price_usd_per_million": None,
+            "output_price_usd_per_million": None,
+            "cache_read_price_usd_per_million": None,
+            "cache_write_price_usd_per_million": None,
+            "credit_price_usd_per_million": None,
+            "credit_unit": "Included with subscription",
+            "price_source": "subscription",
+            "price_confidence": "not_applicable",
+            "manual_override": False,
+        }
     catalog = session.exec(
         select(LLMPriceCatalog).where(
             LLMPriceCatalog.provider == provider,
@@ -237,6 +252,14 @@ def estimate_usage_cost(
     rates: dict[str, Any] | None = None,
 ) -> dict[str, float | bool]:
     """Estimate the cost for one run-usage delta using resolved model rates."""
+
+    if provider in SUBSCRIPTION_PROVIDERS:
+        return {
+            "estimated_token_cost_usd": 0.0,
+            "estimated_credit_cost_usd": 0.0,
+            "estimated_total_cost_usd": 0.0,
+            "estimated_cost_available": False,
+        }
 
     rates = rates or {}
     billable_input = max(0, int(input_tokens))

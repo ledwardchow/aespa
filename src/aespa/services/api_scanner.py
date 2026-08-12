@@ -1530,6 +1530,29 @@ async def _api_scan_task(api_run_id: int) -> None:
                 "_persist": True,
             },
         )
+    except llm_svc.LLMQuotaPauseError as exc:
+        log.warning("API scan paused for api_run_id=%s: %s", api_run_id, exc)
+        from aespa.services import run_pause as run_pause_svc
+
+        _update_run_status(api_run_id, "paused", str(exc))
+        run_pause_svc.save_pause(
+            "api",
+            api_run_id,
+            provider="openai_codex",
+            message=str(exc),
+            reset_at=exc.reset_at,
+            snapshot=exc.snapshot,
+            resume_stage="api_scan",
+        )
+        events_svc.emit(
+            api_run_id,
+            {
+                "type": "scan_paused",
+                "reason": "quota",
+                "message": str(exc),
+                "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
+            },
+        )
     except Exception as exc:
         log.exception("API scan error: api_run_id=%s", api_run_id)
         _update_run_status(api_run_id, "failed", str(exc))

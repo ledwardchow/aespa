@@ -1064,6 +1064,8 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                     _raise_if_stopped()
                 except asyncio.CancelledError:
                     raise
+                except llm_svc.LLMQuotaPauseError:
+                    raise
                 except Exception as exc:
                     log.exception(
                         "SAST validator failed: sast_run_id=%s candidate_id=%s",
@@ -1434,6 +1436,38 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 "_persist": True,
             },
         )
+    except llm_svc.LLMQuotaPauseError as exc:
+        log.warning("SAST scan paused: sast_run_id=%s: %s", sast_run_id, exc)
+        from aespa.services import run_pause as run_pause_svc
+
+        if run is not None:
+            with Session(get_engine()) as s:
+                current = s.get(SastRun, sast_run_id)
+                if current is not None:
+                    current.status = "paused"
+                    current.error_message = str(exc)[:2000]
+                    current.updated_at = datetime.now(_UTC)
+                    s.add(current)
+                    s.commit()
+        run_pause_svc.save_pause(
+            "sast",
+            sast_run_id,
+            provider="openai_codex",
+            message=str(exc),
+            reset_at=exc.reset_at,
+            snapshot=exc.snapshot,
+            resume_stage=current_phase,
+        )
+        _set_phase(sast_run_id, current_phase, "paused", str(exc))
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "scan_paused",
+                "reason": "quota",
+                "message": str(exc),
+                "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
+            },
+        )
     except Exception as exc:
         log.exception("SAST scan error: sast_run_id=%s", sast_run_id)
         if run is not None:
@@ -1540,7 +1574,7 @@ def create_sast_run(
     return run
 
 
-async def start_sast_scan(sast_run_id: int) -> None:
+async def start_sast_scan(sast_run_id: int, *, resume: bool = False) -> None:
     """Start a background SAST scan task for an existing SastRun."""
     if sast_run_id in _sast_tasks:
         log.info("start_sast_scan: already running for sast_run_id=%s", sast_run_id)
@@ -1566,13 +1600,14 @@ async def start_sast_scan(sast_run_id: int) -> None:
                 if run is None:
                     raise ValueError(f"SastRun {sast_run_id} not found")
                 run.status = "scanning"
-                run.started_at = datetime.now(_UTC)
+                run.started_at = run.started_at or datetime.now(_UTC)
                 run.completed_at = None
                 run.error_message = None
-                run.leads_count = 0
-                run.phase_state_json = json.dumps(_empty_phase_state())
-                run.coverage_json = None
-                run.report_json = None
+                if not resume:
+                    run.leads_count = 0
+                    run.phase_state_json = json.dumps(_empty_phase_state())
+                    run.coverage_json = None
+                    run.report_json = None
                 run.updated_at = datetime.now(_UTC)
                 s.add(run)
                 for lead in s.exec(

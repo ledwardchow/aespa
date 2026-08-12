@@ -1,8 +1,107 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { PROVIDER_MODEL_PLACEHOLDERS, PROVIDER_BASE_URL_PLACEHOLDERS } from "./BurpRestApiSettings";
 import { providerPayload, providerToForm } from "../Settings";
 import { api } from "../../lib/api";
 import { IconCheck } from "../../components/Icons";
+
+function CodexConnectionCard() {
+  const [state, setState] = useState(null);
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [loginChallenge, setLoginChallenge] = useState(null);
+  const refresh = useCallback(async () => {
+    try {
+      const next = await api.getCodexStatus();
+      setState(next);
+      setPath(next.executable_path || "");
+    } catch (e) { setError(e.message); }
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!loginChallenge) return undefined;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const next = await api.getCodexStatus();
+        if (stopped) return;
+        setState(next);
+        if (next.account) {
+          setLoginChallenge(null);
+          setBusy(false);
+        }
+      } catch (e) {
+        if (!stopped) setError(e.message);
+      }
+    };
+    const timer = window.setInterval(poll, 2000);
+    poll();
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [loginChallenge]);
+  const save = async () => {
+    setBusy(true); setError(null);
+    try { await api.saveCodexConfig({ executable_path: path.trim() || null }); await refresh(); }
+    catch (e) { setError(e.message); } finally { setBusy(false); }
+  };
+  const login = async () => {
+    setBusy(true); setError(null);
+    let pending = false;
+    try {
+      const result = await api.startCodexLogin();
+      if (result.verificationUrl && result.userCode) {
+        setLoginChallenge(result);
+        pending = true;
+      } else {
+        throw new Error("Codex did not return a device-code login. Upgrade Codex CLI and try again.");
+      }
+    } catch (e) { setError(e.message); } finally { setBusy(false); }
+    if (pending) setBusy(true);
+  };
+  const cancelLogin = async () => {
+    if (!loginChallenge?.loginId) return;
+    setBusy(true); setError(null);
+    try {
+      await api.cancelCodexLogin({ loginId: loginChallenge.loginId });
+      setLoginChallenge(null);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+  const logout = async () => {
+    setBusy(true); setError(null);
+    try { await api.logoutCodex(); await refresh(); }
+    catch (e) { setError(e.message); } finally { setBusy(false); }
+  };
+  return <div className="form-section" style={{ marginTop: 12 }}>
+    <div className="form-section-title">Codex connection</div>
+    <div className="field-hint">Install Codex separately. AESPA uses the default account already signed in through the local Codex CLI and never copies those credentials into its database.</div>
+    <div className="field"><label>Codex executable path <span className="field-optional">(optional)</span></label>
+      <input value={path} placeholder="Leave blank to use codex from PATH" onChange={e => setPath(e.target.value)} />
+    </div>
+    <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+      <button type="button" className="btn secondary sm" disabled={busy} onClick={save}>Save path</button>
+      <button type="button" className="btn secondary sm" disabled={busy || !state?.installed} onClick={login}>Sign in with ChatGPT</button>
+      {state?.account && <button type="button" className="btn ghost sm" disabled={busy} onClick={logout}>Sign out</button>}
+      <button type="button" className="btn ghost sm" disabled={busy} onClick={refresh}>Refresh</button>
+    </div>
+    {loginChallenge && <div className="form-section" style={{ marginTop: 12 }}>
+      <div className="form-section-title">Finish signing in</div>
+      <div className="field-hint">Open the OpenAI verification page, enter this one-time code, and return to AESPA. This page checks the login automatically.</div>
+      <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <code style={{ fontSize: 18, letterSpacing: 1 }}>{loginChallenge.userCode}</code>
+        <a className="btn secondary sm" href={loginChallenge.verificationUrl} target="_blank" rel="noreferrer">Open verification page</a>
+        <button type="button" className="btn ghost sm" onClick={cancelLogin}>Cancel</button>
+      </div>
+    </div>}
+    {state && <div className="field-hint" style={{ marginTop: 8 }}>
+      {state.installed ? `Detected ${state.version || "Codex"} at ${state.detected_executable || "configured path"}.` : "Codex CLI was not found."}
+      {state.account ? ` Signed in${state.account.planType ? ` with ${state.account.planType}` : ""}.` : " Not signed in."}
+    </div>}
+    {error && <div className="alert error" style={{ marginTop: 8 }}>{error}</div>}
+  </div>;
+}
 
 
 export function LLMProviderForm({
@@ -91,6 +190,7 @@ export function LLMProviderForm({
           <option value="anthropic">Anthropic API</option>
           <option value="factory_droid">Factory Droid subscription</option>
           <option value="github_copilot">GitHub Copilot subscription</option>
+          <option value="openai_codex">OpenAI Codex subscription</option>
           <option value="openai">OpenAI API</option>
           <option value="openai_compatible">OpenAI-compatible API</option>
           <option value="openrouter">OpenRouter</option>
@@ -102,7 +202,7 @@ export function LLMProviderForm({
           <option value="azure_foundry_anthropic">Azure AI Foundry (Anthropic API)</option>
         </select>
       </div>
-      {form.api_format !== "factory_droid" && <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
+      {!(["factory_droid", "openai_codex"].includes(form.api_format)) && <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
         <input type="url" value={form.base_url} placeholder={PROVIDER_BASE_URL_PLACEHOLDERS[form.api_format] || ""} onChange={e => upd({
           base_url: e.target.value
         })} />
@@ -111,6 +211,10 @@ export function LLMProviderForm({
         {form.api_format === "bedrock_mantle" && <div className="field-hint">Best left blank — AESPA picks the endpoint per model (the <code>/openai/v1</code> path for <code>openai.gpt-5.x</code>, <code>/v1</code> for <code>gpt-oss</code>) and defaults to the us-east-2 region (or BEDROCK_MANTLE_REGION / AWS_REGION). Set only to point at another region's host, e.g. https://bedrock-mantle.us-west-2.api.aws.</div>}
       </div>}
       {form.api_format === "factory_droid" && <div className="field-hint">Uses the account signed in through Droid CLI. AESPA does not read or store Factory credentials.</div>}
+      {form.api_format === "openai_codex" && <>
+        <div className="field-hint">Uses the local Codex CLI's default ChatGPT sign-in through the installed Codex app-server. No API key or base URL is used.</div>
+        <CodexConnectionCard />
+      </>}
       {form.api_format === "bedrock_mantle" && <div className="field"><label>Project ID <span className="field-optional">(optional)</span></label>
         <input type="text" value={form.project_id} placeholder="proj_5d5ykleja6cwpirysbb7" onChange={e => upd({
           project_id: e.target.value
@@ -143,7 +247,7 @@ export function LLMProviderForm({
         {loadMessage && <div className="field-hint" style={{ color: "var(--accent)", marginBottom: "4px" }}>{loadMessage}</div>}
         <div className="field-hint">Enter one model per line, or separate models with commas. Leave blank to use the models shown in the placeholder.</div>
       </div>
-      {form.api_format !== "factory_droid" && <div className="field">
+      {!(["factory_droid", "openai_codex"].includes(form.api_format)) && <div className="field">
         <label>{form.api_format === "github_copilot" ? "GitHub token" : "API Key"} <span className="field-optional">(optional)</span></label>
         <div className="row" style={{ gap: "8px" }}>
           <input

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import LLMProviderConfig
+from aespa.models import CodexIntegrationConfig, LLMProviderConfig
 from aespa.schemas import (
     PROVIDER_DEFAULT_MODELS,
     BrowserDebugConfigIn,
@@ -15,6 +15,8 @@ from aespa.schemas import (
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
+    CodexIntegrationConfigIn,
+    CodexIntegrationConfigOut,
     ComponentMapperConfigIn,
     ComponentMapperConfigOut,
     CrawlerConfigIn,
@@ -48,6 +50,67 @@ from aespa.services import settings as settings_service
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+@router.get("/llm/codex/status", response_model=CodexIntegrationConfigOut)
+async def codex_status(
+    session: Session = Depends(get_session),
+) -> CodexIntegrationConfigOut:
+    from aespa.services import codex_provider
+
+    config = session.get(CodexIntegrationConfig, 1)
+    state = await codex_provider.status()
+    return CodexIntegrationConfigOut(
+        executable_path=config.executable_path if config else None,
+        detected_executable=state.get("executable"),
+        installed=bool(state.get("installed")),
+        version=state.get("version"),
+        running=bool(state.get("running")),
+        compatible=bool(state.get("compatible")),
+        account=state.get("account") if isinstance(state.get("account"), dict) else None,
+        rate_limits=state.get("rate_limits") if isinstance(state.get("rate_limits"), dict) else None,
+        error=state.get("error"),
+    )
+
+
+@router.put("/llm/codex/config", response_model=CodexIntegrationConfigOut)
+async def update_codex_config(
+    payload: CodexIntegrationConfigIn,
+    session: Session = Depends(get_session),
+) -> CodexIntegrationConfigOut:
+    from aespa.services import codex_provider
+
+    config = session.get(CodexIntegrationConfig, 1)
+    if config is None:
+        config = CodexIntegrationConfig(id=1)
+    config.executable_path = (
+        payload.executable_path.strip() if payload.executable_path else None
+    )
+    session.add(config)
+    session.commit()
+    await codex_provider.close_clients()
+    return await codex_status(session)
+
+
+@router.post("/llm/codex/login")
+async def start_codex_login() -> dict:
+    from aespa.services import codex_provider
+
+    return await codex_provider.login_start()
+
+
+@router.post("/llm/codex/login/cancel")
+async def cancel_codex_login(payload: dict[str, str]) -> dict:
+    from aespa.services import codex_provider
+
+    return await codex_provider.login_cancel(payload.get("loginId", ""))
+
+
+@router.post("/llm/codex/logout")
+async def logout_codex() -> dict:
+    from aespa.services import codex_provider
+
+    return await codex_provider.logout()
 
 
 @router.get("/llm", response_model=LLMConfigOut | None)

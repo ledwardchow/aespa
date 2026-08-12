@@ -126,7 +126,7 @@ export function providerToForm(provider) {
   };
 }
 export function providerPayload(form) {
-  const usesCliCredentials = form.api_format === "factory_droid";
+  const usesCliCredentials = ["factory_droid", "openai_codex"].includes(form.api_format);
   let apiKeyPayload = null;
   if (usesCliCredentials) {
     apiKeyPayload = "";
@@ -150,6 +150,7 @@ export function providerPayload(form) {
     max_rpm: form.max_rpm !== "" ? Number(form.max_rpm) : null
   };
 }
+
 export function llmProfileToForm(cfg, providers = []) {
   const providerId = cfg?.provider_id || providers[0]?.id || "";
   const provider = providers.find(p => p.id === providerId) || providers[0];

@@ -1864,6 +1864,10 @@ async def run_alice_turn_stream(
                 ) = await llm_svc._call_with_tools(
                     llm_cfg, system_message, messages, tools=alice_tools
                 )
+            except llm_svc.LLMQuotaPauseError:
+                # Preserve the structured pause so the outer handler emits a
+                # visible warning and chat reply instead of a generic step error.
+                raise
             except Exception as exc:
                 log.exception(
                     "ALICE agentic loop: LLM call failed at step %d", step_count
@@ -2059,17 +2063,29 @@ async def run_alice_turn_stream(
             if session_done:
                 break
 
+    except llm_svc.LLMQuotaPauseError as exc:
+        log.info("ALICE Codex allowance exhausted: %s", exc)
+        err_msg = (
+            "ChatGPT/Codex is temporarily unavailable because its allowance or "
+            "rate-limit window is full. AESPA paused this ALICE turn. Come back "
+            f"after the window resets and try again. Details: {exc}"
+        )
+        yield f"data: {json.dumps({'type': 'warning', 'message': err_msg})}\n\n"
+        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err_msg}'})}\n\n"
+        accumulated_message += err_msg
     except Exception as exc:
         log.exception("ALICE agentic loop failed")
         err_msg = f"I encountered an error in the agentic loop: {exc}"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
         accumulated_message += err_msg
     finally:
-        if llm_cfg.provider in ("factory_droid", "github_copilot"):
+        if llm_cfg.provider in ("factory_droid", "github_copilot", "openai_codex"):
             if llm_cfg.provider == "factory_droid":
                 from aespa.services import droid_provider as provider_adapter
-            else:
+            elif llm_cfg.provider == "github_copilot":
                 from aespa.services import copilot_provider as provider_adapter
+            else:
+                from aespa.services import codex_provider as provider_adapter
 
             await provider_adapter.close_conversation(messages)
         # Always unregister the workprogram finding hook, even on early exit
@@ -2982,6 +2998,10 @@ async def run_api_alice_turn_stream(
                 ) = await llm_svc._call_with_tools(
                     llm_cfg, system_message, messages, tools=alice_tools
                 )
+            except llm_svc.LLMQuotaPauseError:
+                # Preserve the structured pause so the outer handler emits a
+                # visible warning and chat reply instead of a generic step error.
+                raise
             except Exception as exc:
                 log.exception("ALICE API loop: LLM call failed at step %d", step_count)
                 err = f"LLM error at step {step_count}: {exc}"
@@ -3168,17 +3188,29 @@ async def run_api_alice_turn_stream(
             if session_done:
                 break
 
+    except llm_svc.LLMQuotaPauseError as exc:
+        log.info("ALICE API Codex allowance exhausted: %s", exc)
+        err_msg = (
+            "ChatGPT/Codex is temporarily unavailable because its allowance or "
+            "rate-limit window is full. AESPA paused this ALICE turn. Come back "
+            f"after the window resets and try again. Details: {exc}"
+        )
+        yield f"data: {json.dumps({'type': 'warning', 'message': err_msg})}\n\n"
+        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err_msg}'})}\n\n"
+        accumulated_message += err_msg
     except Exception as exc:
         log.exception("ALICE API agentic loop failed")
         err_msg = f"I encountered an error in the agentic loop: {exc}"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
         accumulated_message += err_msg
     finally:
-        if llm_cfg.provider in ("factory_droid", "github_copilot"):
+        if llm_cfg.provider in ("factory_droid", "github_copilot", "openai_codex"):
             if llm_cfg.provider == "factory_droid":
                 from aespa.services import droid_provider as provider_adapter
-            else:
+            elif llm_cfg.provider == "github_copilot":
                 from aespa.services import copilot_provider as provider_adapter
+            else:
+                from aespa.services import codex_provider as provider_adapter
 
             await provider_adapter.close_conversation(messages)
 
