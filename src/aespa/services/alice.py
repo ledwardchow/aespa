@@ -90,6 +90,20 @@ _ALICE_TOOL_NAMES = {
     "remove_finding",
 }
 
+_RERUN_VALIDATION_TOOL = {
+    "name": "rerun_validation",
+    "description": (
+        "Start AESPA's managed validator for every finding in this web run whose "
+        "validation status is not confirmed. Use this when the user asks to run "
+        "or re-run validation; do not substitute manual HTTP probes."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+}
+
 
 # Live Playwright browsers for ALICE's interactive `browser` tool, keyed by run_id.
 # One headless browser per run, launched lazily on first browser action and closed
@@ -218,6 +232,9 @@ def _is_alice_operational_question(instruction: str) -> bool:
         "idor",
         "ssrf",
         "csrf",
+        "validate",
+        "validation",
+        "revalidate",
     )
     return not any(marker in security_request for marker in explicit_test_markers)
 
@@ -295,6 +312,8 @@ def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
     exclude = exclude or set()
     allowed = _ALICE_TOOL_NAMES - exclude
     tools = [t for t in THINKING_AGENT_TOOLS if t["name"] in allowed]
+    if "rerun_validation" not in exclude:
+        tools.append(_RERUN_VALIDATION_TOOL)
     if "tls_scan" not in exclude:
         tools.append(TLS_SCAN_TOOL)
     return tools
@@ -466,6 +485,62 @@ async def _execute_alice_tool(
     # Traffic keying: for API runs the traffic table is keyed on the API column,
     # with test_run_id left NULL because API traffic has no web-run owner.
     _traffic_run_id = None if api_run_id is not None else run_id
+
+    # ── rerun_validation ─────────────────────────────────────────────────────
+    if tool_name == "rerun_validation":
+        if api_run_id is not None:
+            return "rerun_validation is currently available only for web findings."
+
+        from aespa.models import ScanFinding
+        from aespa.services import validator as validator_svc
+
+        if validator_svc.is_validating(run_id):
+            status = validator_svc.get_validation_status(run_id)
+            return json.dumps(
+                {
+                    "ok": False,
+                    "status": "already_running",
+                    "message": "The managed validator is already running for this run.",
+                    "validation": status,
+                }
+            )
+
+        with Session(get_engine()) as s:
+            findings = list(
+                s.exec(
+                    select(ScanFinding).where(
+                        ScanFinding.test_run_id == run_id,
+                        ScanFinding.api_test_run_id == None,  # noqa: E711
+                        ScanFinding.validation_status != "confirmed",
+                    )
+                ).all()
+            )
+        finding_ids = [finding.id for finding in findings if finding.id is not None]
+        if not finding_ids:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "status": "nothing_to_validate",
+                    "queued": 0,
+                    "message": "Every finding is already confirmed.",
+                }
+            )
+
+        await validator_svc.start_validation(run_id, finding_ids=finding_ids)
+        return json.dumps(
+            {
+                "ok": True,
+                "status": "started",
+                "queued": len(finding_ids),
+                "finding_references": [
+                    finding.reference or f"#{finding.id}" for finding in findings
+                ],
+                "message": (
+                    f"Managed validation started for {len(finding_ids)} "
+                    "non-confirmed finding(s)."
+                ),
+            }
+        )
 
     # ── http_request ─────────────────────────────────────────────────────────
     if tool_name == "http_request":
@@ -1787,8 +1862,9 @@ async def run_alice_turn_stream(
     # of the crawl?": those are AESPA operational questions, not test requests.
     run_status = _get_web_alice_run_status(run_id, base_url)
     run_status_block = (
-        "CURRENT AESPA RUN STATUS (read-only operational context; captured at the "
-        "start of this turn):\n" + json.dumps(run_status, default=str, indent=2)
+        "CURRENT AESPA RUN STATUS (live informational context captured at the "
+        "start of this turn; this context does not restrict testing tools):\n"
+        + json.dumps(run_status, default=str, indent=2)
     )
 
     if intent == "operational":
@@ -1964,7 +2040,7 @@ async def run_alice_turn_stream(
                                 "text": (
                                     "Your previous response did not call a tool. "
                                     "Please continue by calling exactly one tool now — "
-                                    "http_request, context_tool, write_finding, forge_jwt, "
+                                    "http_request, context_tool, rerun_validation, write_finding, forge_jwt, "
                                     "decode_jwt, credential_check, browser, agent_dispatch, or done."
                                 ),
                             }
