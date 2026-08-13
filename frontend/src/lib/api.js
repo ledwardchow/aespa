@@ -219,6 +219,7 @@ export const api = {
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
   getRun:           (id)          => req(`/api/test-runs/${id}`),
+  getCrawlStatus:   (id)          => req(`/api/test-runs/${id}/crawl/status`),
   deleteRun:        (id)          => req(`/api/test-runs/${id}`,  { method:"DELETE" }),
   startRun:         (id, body)    => req(`/api/test-runs/${id}/start`,   { method:"POST", body: body || undefined }),
   stopRun:          (id)          => req(`/api/test-runs/${id}/stop`,    { method:"POST" }),

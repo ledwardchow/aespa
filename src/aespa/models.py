@@ -637,7 +637,7 @@ class AdversarialValidatorConfig(SQLModel, table=True):
     max_steps: int = Field(default=20)
     # Skip validation for findings below this severity: critical|high|medium|low|info
     min_severity: str = Field(default="low")
-    # Maximum simultaneous validators for the end-of-scan Reporting batch.
+    # Maximum simultaneous validators for manual and end-of-scan validation.
     end_scan_max_concurrent: int = Field(default=4)
     # When True, automatically validate each finding immediately after it is written
     # during a dynamic scan.  When False, validation is only triggered manually.
