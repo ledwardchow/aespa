@@ -331,7 +331,7 @@ Singleton row (id = 1). Controls the adversarial validation agent that attempts 
 | `enabled` | `true` | Use adversarial agent mode; `false` falls back to legacy static-probe validation |
 | `max_steps` | `20` | Step budget per validation pass |
 | `min_severity` | `low` | Skip validation for findings below this severity (`critical`\|`high`\|`medium`\|`low`\|`info`) |
-| `end_scan_max_concurrent` | `4` | Maximum simultaneous validators for end-of-scan batch review |
+| `end_scan_max_concurrent` | `4` | Maximum simultaneous validators for manual and end-of-scan review |
 | `auto_validate_inline` | `true` | Automatically validate each finding immediately after it is written |
 | `require_concrete_disproof` | `true` | Strict mode — only return `false_positive` when concrete innocent explanation is found |
 
@@ -833,6 +833,8 @@ See [§4 Configuration](#4-configuration) for the full `SpecialistAgentConfig` f
 
 After a normal web finding is written, the validator service (`validator.py`) can run an independent check. The validator is told to try to disprove the finding and records the evidence it used. A timeout, provider error, missing verdict, or malformed verdict is saved as **unconfirmed**, never as confirmed; the finding can be retried from the finding row's **Retry validation** button. Applications SAST validation keeps its existing lead workflow and does not run this separate validator.
 
+Manual finding validation uses the same inline validator as scan-time findings. Each clicked finding is tracked separately, repeated clicks for the same finding are ignored, and more findings can be added while validation is already running. Manual validators run concurrently up to `end_scan_max_concurrent`; the run-level status and stop action cover both these inline tasks and the managed end-of-scan batch.
+
 Validation outcomes:
 - **confirmed** — vulnerability is reproducible and real
 - **unconfirmed** — could not be reproduced
@@ -1181,6 +1183,7 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 - **Parallel crawl workers** — multiple Playwright browser instances share a `_CrawlShared` state object (asyncio locks around the URL frontier and seen-set)
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
 - **Specialist agents** — each specialist runs as its own `asyncio.Task`; tracked in `_specialist_tasks[run_id]` so they are cancelled when the parent scan is stopped; concurrency is capped by `_specialist_running[run_id]` vs `SpecialistAgentConfig.max_concurrent`
+- **Finding validation** — end-of-scan findings use one managed bounded batch; manual finding actions use tracked inline tasks capped by `AdversarialValidatorConfig.end_scan_max_concurrent`. Both appear as one run-level validation job and are stopped together.
 - **ALICE background tasks** — `alice_tasks.py` holds a module-level `_registry: dict[int, AliceTask]` (one entry per run). Each task runs `run_alice_turn_stream` as an `asyncio.create_task`, decoupled from the HTTP connection; all emitted events are buffered in `AliceTask.events` so clients can replay from any cursor on reconnect
 - **Scan checkpointing** — the LLM conversation history is serialised to the DB at regular intervals by `checkpoint.py`; `start_thinking_scan_resume` restores it on restart
 - **Bounded scan completion** — `scan_completion.py` tracks structural progress across agentic turns to enforce termination policy and prevent non-terminating tool loops

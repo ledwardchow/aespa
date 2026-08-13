@@ -362,6 +362,118 @@ def test_validation_batch_respects_concurrency_limit():
     assert peak == 3
 
 
+def test_manual_inline_validation_is_bounded_and_deduplicated(monkeypatch):
+    run_id = 98001
+    active = 0
+    peak = 0
+    calls = []
+    release = None
+
+    async def fake_validate(_run_id, finding_id):
+        nonlocal active, peak
+        assert _run_id == run_id
+        calls.append(finding_id)
+        active += 1
+        peak = max(peak, active)
+        await release.wait()
+        active -= 1
+
+    monkeypatch.setattr(
+        validator,
+        "get_adversarial_validator_config",
+        lambda _session: SimpleNamespace(end_scan_max_concurrent=2),
+    )
+    monkeypatch.setattr(validator, "validate_finding_inline", fake_validate)
+    monkeypatch.setattr(validator.llm_svc, "set_run_context", lambda *args: None)
+    monkeypatch.setattr(validator.llm_svc, "clear_run_context", lambda: None)
+    monkeypatch.setattr(validator.events_svc, "emit", lambda *args: None)
+    monkeypatch.setattr(
+        validator,
+        "get_validation_status",
+        lambda _run_id: {"status": "complete"},
+    )
+
+    async def scenario():
+        nonlocal release
+        release = asyncio.Event()
+        assert await validator.start_inline_validation(run_id, 11) is True
+        assert await validator.start_inline_validation(run_id, 11) is False
+        assert await validator.start_inline_validation(run_id, 12) is True
+        assert await validator.start_inline_validation(run_id, 13) is True
+
+        for _ in range(20):
+            if active == 2:
+                break
+            await asyncio.sleep(0)
+        assert active == 2
+        assert validator.is_validating(run_id) is True
+
+        tasks = list(validator._inline_validation_tasks[run_id].values())
+        release.set()
+        await asyncio.gather(*tasks)
+        await asyncio.sleep(0)
+
+    try:
+        asyncio.run(scenario())
+        assert peak == 2
+        assert calls.count(11) == 1
+        assert sorted(calls) == [11, 12, 13]
+        assert validator.is_validating(run_id) is False
+    finally:
+        validator._inline_validation_tasks.pop(run_id, None)
+        validator._inline_validation_limits.pop(run_id, None)
+        validator._stop_requested.discard(run_id)
+
+
+def test_request_stop_cancels_inline_validations(monkeypatch):
+    run_id = 98002
+    started = None
+
+    async def fake_validate(_run_id, _finding_id):
+        started.set()
+        await asyncio.Event().wait()
+
+    reset_calls = []
+    monkeypatch.setattr(
+        validator,
+        "get_adversarial_validator_config",
+        lambda _session: SimpleNamespace(end_scan_max_concurrent=2),
+    )
+    monkeypatch.setattr(validator, "validate_finding_inline", fake_validate)
+    monkeypatch.setattr(validator.llm_svc, "set_run_context", lambda *args: None)
+    monkeypatch.setattr(validator.llm_svc, "clear_run_context", lambda: None)
+    monkeypatch.setattr(validator.events_svc, "emit", lambda *args: None)
+    monkeypatch.setattr(
+        validator,
+        "get_validation_status",
+        lambda _run_id: {"status": "stopped"},
+    )
+    monkeypatch.setattr(
+        validator,
+        "_reset_validating_findings",
+        lambda _run_id, note: reset_calls.append((_run_id, note)),
+    )
+
+    async def scenario():
+        nonlocal started
+        started = asyncio.Event()
+        await validator.start_inline_validation(run_id, 21)
+        await started.wait()
+        task = validator._inline_validation_tasks[run_id][21]
+        assert validator.request_stop(run_id) is True
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+    try:
+        asyncio.run(scenario())
+        assert reset_calls == [(run_id, "Validation stopped by user.")]
+        assert validator.is_validating(run_id) is False
+    finally:
+        validator._inline_validation_tasks.pop(run_id, None)
+        validator._inline_validation_limits.pop(run_id, None)
+        validator._stop_requested.discard(run_id)
+
+
 def test_resume_interrupted_validations_requeues_only_orphaned_work(monkeypatch):
     from aespa import models as _models  # noqa: F401
 

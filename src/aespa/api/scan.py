@@ -433,7 +433,7 @@ async def start_validation(
 @router.post(
     "/api/test-runs/{run_id}/validate/stop", response_model=ValidationStatusOut
 )
-def stop_validation(
+async def stop_validation(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> ValidationStatusOut:
@@ -452,22 +452,29 @@ async def validate_single_finding(
     finding_id: int,
     session: Session = Depends(get_session),
 ) -> ScanFindingOut:
-    """Start background validation of a single finding. Returns immediately with status 'validating'."""
+    """Start tracked inline validation of one finding."""
     _get_run_or_404(session, run_id)
     finding = session.get(ScanFinding, finding_id)
     if finding is None or finding.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Finding not found")
-    if validator_svc.is_validating(run_id):
-        raise HTTPException(
-            status_code=409, detail="Validation already running for this run"
-        )
+    if finding.validation_status == "validating":
+        return ScanFindingOut.model_validate(finding)
+    previous_status = finding.validation_status
+    previous_note = finding.validation_note
     # Mark as validating immediately so the UI updates before the task starts.
     finding.validation_status = "validating"
     finding.validation_note = None
     session.add(finding)
     session.commit()
     session.refresh(finding)
-    await validator_svc.start_validation(run_id, finding_ids=[finding_id])
+    try:
+        await validator_svc.start_inline_validation(run_id, finding_id)
+    except Exception:
+        finding.validation_status = previous_status
+        finding.validation_note = previous_note
+        session.add(finding)
+        session.commit()
+        raise
     return ScanFindingOut.model_validate(finding)
 
 

@@ -922,6 +922,16 @@ def update_test_run(
 # ── Crawl control ─────────────────────────────────────────────────────────────
 
 
+@router.get("/api/test-runs/{run_id}/crawl/status")
+def test_run_crawl_status(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict[str, bool]:
+    """Return the crawler task state independently of the overall run phase."""
+    _get_run_or_404(session, run_id)
+    return {"running": crawler_svc.is_running(run_id)}
+
+
 @router.post("/api/test-runs/{run_id}/start", response_model=TestRunSummary)
 async def start_test_run(
     run_id: int,

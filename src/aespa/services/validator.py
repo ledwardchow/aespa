@@ -76,12 +76,19 @@ def _static_attack_path_for_finding(finding_id: int | None) -> dict:
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
-_validation_tasks: dict[int, asyncio.Task] = {}  # run_id → running task
+_validation_tasks: dict[int, asyncio.Task] = {}  # run_id → managed batch task
+_inline_validation_tasks: dict[int, dict[int, asyncio.Task]] = {}
+_inline_validation_limits: dict[int, asyncio.Semaphore] = {}
 _stop_requested: set[int] = set()
 
 
 def is_validating(run_id: int) -> bool:
-    return run_id in _validation_tasks
+    return run_id in _validation_tasks or bool(_inline_validation_tasks.get(run_id))
+
+
+def is_finding_validating(run_id: int, finding_id: int) -> bool:
+    task = _inline_validation_tasks.get(run_id, {}).get(finding_id)
+    return task is not None and not task.done()
 
 
 def get_validation_status(run_id: int) -> dict:
@@ -98,7 +105,7 @@ def get_validation_status(run_id: int) -> dict:
     unvalidated = sum(1 for f in findings if f.validation_status == "unvalidated")
     if run_id in _stop_requested:
         status = "stopped"
-    elif run_id in _validation_tasks:
+    elif is_validating(run_id):
         status = "running"
     elif total > 0 and unvalidated == 0 and validating == 0:
         status = "complete"
@@ -165,6 +172,69 @@ async def start_validation(
     task.add_done_callback(_on_validation_done)
 
 
+async def start_inline_validation(run_id: int, finding_id: int) -> bool:
+    """Start one tracked manual validation without blocking other findings."""
+    if is_finding_validating(run_id, finding_id):
+        return False
+
+    with Session(get_engine()) as s:
+        validator_cfg = get_adversarial_validator_config(s)
+    max_concurrent = max(1, validator_cfg.end_scan_max_concurrent)
+    semaphore = _inline_validation_limits.get(run_id)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(max_concurrent)
+        _inline_validation_limits[run_id] = semaphore
+
+    _stop_requested.discard(run_id)
+
+    async def _run() -> None:
+        llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
+        try:
+            async with semaphore:
+                if run_id in _stop_requested:
+                    return
+                await validate_finding_inline(run_id, finding_id)
+        finally:
+            llm_svc.clear_run_context()
+
+    with events_svc.run_kind_scope("web"):
+        task = asyncio.create_task(
+            _run(),
+            name=f"validate-inline-{run_id}-{finding_id}",
+        )
+    run_tasks = _inline_validation_tasks.setdefault(run_id, {})
+    run_tasks[finding_id] = task
+
+    def _on_inline_validation_done(done_task: asyncio.Task) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            done_task.exception()
+        current_tasks = _inline_validation_tasks.get(run_id)
+        if current_tasks is not None and current_tasks.get(finding_id) is done_task:
+            current_tasks.pop(finding_id, None)
+            if not current_tasks:
+                _inline_validation_tasks.pop(run_id, None)
+                _inline_validation_limits.pop(run_id, None)
+        if not is_validating(run_id):
+            _stop_requested.discard(run_id)
+            try:
+                events_svc.emit(
+                    run_id,
+                    {
+                        "type": "validation_status_update",
+                        **get_validation_status(run_id),
+                    },
+                )
+            except Exception:
+                log.debug(
+                    "Failed to emit final inline validation status for run_id=%s",
+                    run_id,
+                    exc_info=True,
+                )
+
+    task.add_done_callback(_on_inline_validation_done)
+    return True
+
+
 async def resume_interrupted_validations() -> None:
     """Re-enqueue only validation work orphaned by a previous process shutdown."""
     with Session(get_engine()) as s:
@@ -190,23 +260,33 @@ async def resume_interrupted_validations() -> None:
 
 def request_stop(run_id: int) -> bool:
     """Request cancellation of background validation for a run."""
-    task = _validation_tasks.get(run_id)
-    if task is None:
+    batch_task = _validation_tasks.get(run_id)
+    inline_tasks = list(_inline_validation_tasks.get(run_id, {}).values())
+    if batch_task is None and not inline_tasks:
         return False
     _stop_requested.add(run_id)
     _reset_validating_findings(run_id, "Validation stopped by user.")
-    task.cancel()
+    if batch_task is not None:
+        batch_task.cancel()
+    for task in inline_tasks:
+        task.cancel()
     return True
 
 
 async def stop_and_wait(run_id: int, timeout: float = 5.0) -> bool:
     """Cancel validation and wait briefly for its cleanup handlers."""
-    task = _validation_tasks.get(run_id)
-    if task is None:
+    tasks = [
+        *([_validation_tasks[run_id]] if run_id in _validation_tasks else []),
+        *_inline_validation_tasks.get(run_id, {}).values(),
+    ]
+    if not tasks:
         return False
     request_stop(run_id)
     with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-        await asyncio.wait_for(asyncio.shield(task), timeout)
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout,
+        )
     return True
 
 
@@ -389,7 +469,8 @@ async def _validation_task(
             run_id, "Validation failed before a verdict was reached."
         )
     finally:
-        _stop_requested.discard(run_id)
+        if not _inline_validation_tasks.get(run_id):
+            _stop_requested.discard(run_id)
         llm_svc.clear_run_context()
 
 
