@@ -250,8 +250,7 @@ def get_campaign_member_run_status(session: Session, member) -> str | None:
             return "running"
         if scanner_svc.is_thinking_running(run.id):
             return (
-                scanner_svc.get_thinking_scan_status(run.id).get("status")
-                or "running"
+                scanner_svc.get_thinking_scan_status(run.id).get("status") or "running"
             )
         return run.status
 
@@ -457,7 +456,9 @@ def _append_campaign_warnings(campaign_id: int, warnings: list[str]) -> None:
         s.commit()
 
 
-def _clear_resolved_source_warnings(session: Session, campaign: AssessmentCampaign) -> None:
+def _clear_resolved_source_warnings(
+    session: Session, campaign: AssessmentCampaign
+) -> None:
     """Remove source-failure notes once no source run is failed.
 
     A source run can be restarted from its normal SAST page. In that case the
@@ -675,11 +676,27 @@ def _update_target_member_status(member_id: int, status: str) -> None:
 def _validation_summary(run_type: str, run_id: int | None) -> dict:
     """Summarise imported SAST leads for a target member's progress row."""
     if run_id is None:
-        return {"total": 0, "open": 0, "investigating": 0, "confirmed": 0, "dismissed": 0, "inconclusive": 0}
+        return {
+            "total": 0,
+            "open": 0,
+            "investigating": 0,
+            "confirmed": 0,
+            "dismissed": 0,
+            "inconclusive": 0,
+        }
     from aespa.services.scan_leads import get_all_leads_for_run
 
     leads = get_all_leads_for_run(run_type, run_id)
-    counts = {status: 0 for status in ("open", "investigating", "confirmed", "dismissed", "inconclusive")}
+    counts = {
+        status: 0
+        for status in (
+            "open",
+            "investigating",
+            "confirmed",
+            "dismissed",
+            "inconclusive",
+        )
+    }
     for lead in leads:
         status = lead.status or "open"
         counts[status] = counts.get(status, 0) + 1
@@ -1112,7 +1129,9 @@ async def _execute_target_member(
         )
     if already_terminal:
         return member.status == "completed", None
-    _set_target_validation_status(member_id, "running", message="Validating imported SAST leads…")
+    _set_target_validation_status(
+        member_id, "running", message="Validating imported SAST leads…"
+    )
     try:
         if target_type == "site":
             if test_run_id is None:
@@ -1251,11 +1270,18 @@ async def _execute_target_member(
                 incomplete = run is not None and run.status == "incomplete"
             summary = _validation_summary("web", test_run_id)
             if scan_ok:
-                _set_target_validation_status(member_id, "completed", message="All imported SAST leads were resolved.", summary=summary)
+                _set_target_validation_status(
+                    member_id,
+                    "completed",
+                    message="All imported SAST leads were resolved.",
+                    summary=summary,
+                )
                 return True, warning
             if incomplete:
                 message = "Validation stopped before every imported SAST lead was resolved. Resume to continue."
-                _set_target_validation_status(member_id, "incomplete", message=message, summary=summary)
+                _set_target_validation_status(
+                    member_id, "incomplete", message=message, summary=summary
+                )
                 return False, message
             warning = (
                 "A web target's dynamic scan did not finish successfully — its "
@@ -1296,11 +1322,18 @@ async def _execute_target_member(
             incomplete = run is not None and run.status == "incomplete"
         summary = _validation_summary("api", api_test_run_id)
         if scan_ok:
-            _set_target_validation_status(member_id, "completed", message="All imported SAST leads were resolved.", summary=summary)
+            _set_target_validation_status(
+                member_id,
+                "completed",
+                message="All imported SAST leads were resolved.",
+                summary=summary,
+            )
             return True, None
         if incomplete:
             message = "Validation stopped before every imported SAST lead was resolved. Resume to continue."
-            _set_target_validation_status(member_id, "incomplete", message=message, summary=summary)
+            _set_target_validation_status(
+                member_id, "incomplete", message=message, summary=summary
+            )
             return False, message
         warning = (
             "An API target's dynamic scan did not finish successfully — its "
@@ -1520,9 +1553,7 @@ async def supplemental_validate_target(
         test_run_id = run.id
         target_member_id = member.id
 
-        live_context = _crawl_frontend_context(
-            session, test_run_id, crawl_ok=crawl_ok
-        )
+        live_context = _crawl_frontend_context(session, test_run_id, crawl_ok=crawl_ok)
 
     correlation_svc.copy_approved_mappings_for_target(
         campaign_id,

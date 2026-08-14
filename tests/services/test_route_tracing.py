@@ -208,7 +208,9 @@ def test_resolver_preserves_approved_path_and_uses_only_live_evidence():
         approved,
         {
             "crawl_status": "completed",
-            "pages": [{"id": 4, "url": "https://app.test/checkout", "route": "/checkout"}],
+            "pages": [
+                {"id": 4, "url": "https://app.test/checkout", "route": "/checkout"}
+            ],
             "actions": [
                 {
                     "id": 8,

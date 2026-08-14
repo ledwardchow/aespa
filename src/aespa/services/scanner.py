@@ -5611,8 +5611,7 @@ async def _persist_dynamic_finding(
                         title,
                         cvss_score,
                         cvss_vector,
-                        _as_text(rewritten.get("severity"))
-                        or db_finding.severity,
+                        _as_text(rewritten.get("severity")) or db_finding.severity,
                     )
 
                     db_finding.cvss_score = cvss_score
@@ -9302,7 +9301,9 @@ async def _do_agentic_thinking_loop(
                     "inconclusive": "inconclusive",
                 }
                 lead_status = status_map.get(outcome, "inconclusive")
-                resolved_lead_id = int(lead_detail["id"]) if lead_detail else int(lead_id)
+                resolved_lead_id = (
+                    int(lead_detail["id"]) if lead_detail else int(lead_id)
+                )
                 if finding_reference and not finding_id:
                     from aespa.services.references import find_finding_by_reference
 
@@ -9327,19 +9328,29 @@ async def _do_agentic_thinking_loop(
                 )
                 if updated is None:
                     return f"Lead {lead_reference or f'#{lead_id}'} not found."
-                completion_policy.record_progress(f"lead:{resolved_lead_id}:{lead_status}")
+                completion_policy.record_progress(
+                    f"lead:{resolved_lead_id}:{lead_status}"
+                )
                 linked_reference = None
                 if finding_id:
                     with Session(get_engine()) as lookup_session:
                         linked = lookup_session.get(ScanFinding, int(finding_id))
-                        linked_reference = linked.reference if linked is not None else None
+                        linked_reference = (
+                            linked.reference if linked is not None else None
+                        )
                 return (
                     f"Lead {updated.reference or lead_reference or f'#{lead_id}'} updated: outcome={outcome}, status={lead_status}."
-                    + (f" Linked to finding {linked_reference or finding_reference or f'#{finding_id}'}." if finding_id else "")
+                    + (
+                        f" Linked to finding {linked_reference or finding_reference or f'#{finding_id}'}."
+                        if finding_id
+                        else ""
+                    )
                 )
             except Exception as _ul_exc:
                 log.warning("update_lead error: %s", _ul_exc)
-                return f"Error updating lead {lead_reference or f'#{lead_id}'}: {_ul_exc}"
+                return (
+                    f"Error updating lead {lead_reference or f'#{lead_id}'}: {_ul_exc}"
+                )
 
         # ── write_finding ─────────────────────────────────────────────────────
         if tool_name == "write_finding":
@@ -9384,7 +9395,8 @@ async def _do_agentic_thinking_loop(
                 findings_snapshot.append(
                     {
                         "id": saved.id,
-                        "reference": saved.reference or (f"#{saved.id}" if saved.id is not None else ""),
+                        "reference": saved.reference
+                        or (f"#{saved.id}" if saved.id is not None else ""),
                         "title": saved.title,
                         "severity": saved.severity,
                         "owasp": saved.owasp_category,
@@ -9461,12 +9473,14 @@ async def _do_agentic_thinking_loop(
                         f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
                         f"{_fw_title}"
                     ),
-                        "data": {
-                            "step": step,
-                            "affected_url": affected,
-                            "finding_id": saved.id if saved is not None else None,
-                            "finding_reference": saved.reference if saved is not None else None,
-                            "note": note,
+                    "data": {
+                        "step": step,
+                        "affected_url": affected,
+                        "finding_id": saved.id if saved is not None else None,
+                        "finding_reference": saved.reference
+                        if saved is not None
+                        else None,
+                        "note": note,
                     },
                 },
             )

@@ -163,9 +163,7 @@ def test_alice_operational_question_tool_gate_preserves_explicit_testing():
     )
     assert _classify_alice_intent("Test the crawl for XSS") == "testing"
     assert _classify_alice_intent("Probe the API for IDOR") == "testing"
-    assert (
-        _classify_alice_intent("Re-run validation for all findings") == "testing"
-    )
+    assert _classify_alice_intent("Re-run validation for all findings") == "testing"
 
 
 def test_alice_run_status_prefers_live_scan_state(db_session, test_data):
@@ -193,9 +191,7 @@ def test_alice_run_status_prefers_live_scan_state(db_session, test_data):
 
 
 @pytest.mark.anyio
-async def test_alice_rerun_validation_uses_managed_validator(
-    db_session, test_data
-):
+async def test_alice_rerun_validation_uses_managed_validator(db_session, test_data):
     from aespa.models import ScanFinding
     from aespa.services.alice import _execute_alice_tool
 

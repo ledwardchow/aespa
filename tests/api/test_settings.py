@@ -271,7 +271,9 @@ def test_create_provider_and_profile(client: TestClient):
 
 
 def test_create_model_defaults_name_to_provider_model(client: TestClient):
-    provider_r = _make_provider(client, name="OpenAI Prod", models=["gpt-4o", "gpt-4o-mini"])
+    provider_r = _make_provider(
+        client, name="OpenAI Prod", models=["gpt-4o", "gpt-4o-mini"]
+    )
     assert provider_r.status_code == 200
     provider = provider_r.json()
 

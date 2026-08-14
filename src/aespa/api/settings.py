@@ -67,8 +67,12 @@ async def codex_status(
         version=state.get("version"),
         running=bool(state.get("running")),
         compatible=bool(state.get("compatible")),
-        account=state.get("account") if isinstance(state.get("account"), dict) else None,
-        rate_limits=state.get("rate_limits") if isinstance(state.get("rate_limits"), dict) else None,
+        account=state.get("account")
+        if isinstance(state.get("account"), dict)
+        else None,
+        rate_limits=state.get("rate_limits")
+        if isinstance(state.get("rate_limits"), dict)
+        else None,
         error=state.get("error"),
     )
 

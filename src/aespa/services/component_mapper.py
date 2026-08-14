@@ -72,6 +72,7 @@ def _format_tool_desc(tool_name: str, tool_input: dict) -> str:
         return "completed interface mapping"
     return f"executed {tool_name}"
 
+
 _FACT_TYPES = {
     "route",
     "http_call",

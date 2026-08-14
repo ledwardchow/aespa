@@ -27,6 +27,7 @@ from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
 from aespa.config import Settings, get_settings
 from aespa.db import get_session, init_db
+from aespa.services import antigravity_provider as antigravity_provider_svc
 from aespa.services import campaigns as campaigns_svc
 from aespa.services import codex_provider as codex_provider_svc
 from aespa.services import copilot_provider as copilot_provider_svc
@@ -46,6 +47,7 @@ async def _lifespan(app: FastAPI):  # noqa: ARG001
         await copilot_provider_svc.close_clients()
         await droid_provider_svc.close_clients()
         await codex_provider_svc.close_clients()
+        await antigravity_provider_svc.close_clients()
 
 
 _JWKS_CACHE: dict[str, tuple[dict, float]] = {}

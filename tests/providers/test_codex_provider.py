@@ -363,9 +363,7 @@ def test_codex_flushes_terminal_tool_result_before_thread_close(monkeypatch):
             42,
             {
                 "success": True,
-                "contentItems": [
-                    {"type": "inputText", "text": "Assessment complete."}
-                ],
+                "contentItems": [{"type": "inputText", "text": "Assessment complete."}],
             },
         )
     ]

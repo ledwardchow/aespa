@@ -895,8 +895,7 @@ def test_agentic_loop_reports_quota_pause_as_warning(monkeypatch):
     pause_events = [
         event
         for event in emitted
-        if event.get("phase") == "llm_response"
-        and event.get("status") == "warning"
+        if event.get("phase") == "llm_response" and event.get("status") == "warning"
     ]
     assert len(pause_events) == 1
     assert "scan paused" in pause_events[0]["message"]

@@ -169,9 +169,8 @@ def test_correlate_campaign_builds_deterministic_connection(isolated_db_engine):
 
     with Session(isolated_db_engine) as s:
         connections = s.exec(
-            select(ComponentConnection).where(
-                ComponentConnection.campaign_id == ctx["campaign_id"]
-            )
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
             .where(ComponentConnection.edge_kind == "calls")
         ).all()
     assert len(connections) == 1
@@ -232,11 +231,14 @@ def test_purge_llm_component_facts_clears_dependent_rows_with_fk_enforcement(
 
     with Session(fk_engine) as session:
         assert session.get(ComponentFact, llm_fact_id) is None
-        assert session.exec(
-            select(ComponentConnection).where(
-                ComponentConnection.source_fact_id == llm_fact_id
-            )
-        ).first() is None
+        assert (
+            session.exec(
+                select(ComponentConnection).where(
+                    ComponentConnection.source_fact_id == llm_fact_id
+                )
+            ).first()
+            is None
+        )
         provenance = session.exec(
             select(ScanLeadComponentProvenance).where(
                 ScanLeadComponentProvenance.scan_lead_id == campaign_lead_id
@@ -274,19 +276,25 @@ def test_persist_facts_clears_stale_graph_references_with_fk_enforcement(fk_engi
         )
         session.commit()
 
-    assert _persist_facts(
-        sast_run_id=9001,
-        component_id=ctx["ui_component_id"],
-        facts=[],
-    ) == 0
+    assert (
+        _persist_facts(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            facts=[],
+        )
+        == 0
+    )
 
     with Session(fk_engine) as session:
         assert session.get(ComponentFact, llm_fact_id) is None
-        assert session.exec(
-            select(ComponentConnection).where(
-                ComponentConnection.source_fact_id == llm_fact_id
-            )
-        ).first() is None
+        assert (
+            session.exec(
+                select(ComponentConnection).where(
+                    ComponentConnection.source_fact_id == llm_fact_id
+                )
+            ).first()
+            is None
+        )
 
 
 @pytest.mark.anyio
@@ -330,9 +338,8 @@ async def test_llm_correlation_persists_valid_ambiguous_match(
     assert result["connections"] == 2  # internal anchor edge plus the LLM hop
     with Session(isolated_db_engine) as session:
         connection = session.exec(
-            select(ComponentConnection).where(
-                ComponentConnection.campaign_id == ctx["campaign_id"]
-            )
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
             .where(ComponentConnection.edge_kind == "calls")
         ).one()
         assert connection.match_kind == "llm_assisted"
@@ -400,11 +407,15 @@ async def test_llm_correlation_skips_failed_source_scan(
         )
         session.commit()
         campaign_id = campaign.id
-        good_member_id = session.exec(
-            select(CampaignSourceMember)
-            .where(CampaignSourceMember.campaign_id == campaign_id)
-            .where(CampaignSourceMember.component_id == good_component.id)
-        ).one().id
+        good_member_id = (
+            session.exec(
+                select(CampaignSourceMember)
+                .where(CampaignSourceMember.campaign_id == campaign_id)
+                .where(CampaignSourceMember.component_id == good_component.id)
+            )
+            .one()
+            .id
+        )
 
     from aespa.services import component_mapper, settings
 

@@ -191,6 +191,7 @@ export function LLMProviderForm({
           <option value="factory_droid">Factory Droid subscription</option>
           <option value="github_copilot">GitHub Copilot subscription</option>
           <option value="openai_codex">OpenAI Codex subscription</option>
+          <option value="google_antigravity">Google Antigravity subscription</option>
           <option value="openai">OpenAI API</option>
           <option value="openai_compatible">OpenAI-compatible API</option>
           <option value="openrouter">OpenRouter</option>
@@ -202,7 +203,7 @@ export function LLMProviderForm({
           <option value="azure_foundry_anthropic">Azure AI Foundry (Anthropic API)</option>
         </select>
       </div>
-      {!(["factory_droid", "openai_codex"].includes(form.api_format)) && <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
+      {!(["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format)) && <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
         <input type="url" value={form.base_url} placeholder={PROVIDER_BASE_URL_PLACEHOLDERS[form.api_format] || ""} onChange={e => upd({
           base_url: e.target.value
         })} />
@@ -211,6 +212,7 @@ export function LLMProviderForm({
         {form.api_format === "bedrock_mantle" && <div className="field-hint">Best left blank — AESPA picks the endpoint per model (the <code>/openai/v1</code> path for <code>openai.gpt-5.x</code>, <code>/v1</code> for <code>gpt-oss</code>) and defaults to the us-east-2 region (or BEDROCK_MANTLE_REGION / AWS_REGION). Set only to point at another region's host, e.g. https://bedrock-mantle.us-west-2.api.aws.</div>}
       </div>}
       {form.api_format === "factory_droid" && <div className="field-hint">Uses the account signed in through Droid CLI. AESPA does not read or store Factory credentials.</div>}
+      {form.api_format === "google_antigravity" && <div className="field-hint">Uses the active Antigravity CLI / Google account login. No API key or base URL is required.</div>}
       {form.api_format === "openai_codex" && <>
         <div className="field-hint">Uses the local Codex CLI's default ChatGPT sign-in through the installed Codex app-server. No API key or base URL is used.</div>
         <CodexConnectionCard />
@@ -247,7 +249,7 @@ export function LLMProviderForm({
         {loadMessage && <div className="field-hint" style={{ color: "var(--accent)", marginBottom: "4px" }}>{loadMessage}</div>}
         <div className="field-hint">Enter one model per line, or separate models with commas. Leave blank to use the models shown in the placeholder.</div>
       </div>
-      {!(["factory_droid", "openai_codex"].includes(form.api_format)) && <div className="field">
+      {!(["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format)) && <div className="field">
         <label>{form.api_format === "github_copilot" ? "GitHub token" : "API Key"} <span className="field-optional">(optional)</span></label>
         <div className="row" style={{ gap: "8px" }}>
           <input

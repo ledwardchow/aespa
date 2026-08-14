@@ -2159,13 +2159,20 @@ async def run_alice_turn_stream(
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
         accumulated_message += err_msg
     finally:
-        if llm_cfg.provider in ("factory_droid", "github_copilot", "openai_codex"):
+        if llm_cfg.provider in (
+            "factory_droid",
+            "github_copilot",
+            "openai_codex",
+            "google_antigravity",
+        ):
             if llm_cfg.provider == "factory_droid":
                 from aespa.services import droid_provider as provider_adapter
             elif llm_cfg.provider == "github_copilot":
                 from aespa.services import copilot_provider as provider_adapter
-            else:
+            elif llm_cfg.provider == "openai_codex":
                 from aespa.services import codex_provider as provider_adapter
+            else:
+                from aespa.services import antigravity_provider as provider_adapter
 
             await provider_adapter.close_conversation(messages)
         # Always unregister the workprogram finding hook, even on early exit
@@ -3288,13 +3295,20 @@ async def run_api_alice_turn_stream(
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
         accumulated_message += err_msg
     finally:
-        if llm_cfg.provider in ("factory_droid", "github_copilot", "openai_codex"):
+        if llm_cfg.provider in (
+            "factory_droid",
+            "github_copilot",
+            "openai_codex",
+            "google_antigravity",
+        ):
             if llm_cfg.provider == "factory_droid":
                 from aespa.services import droid_provider as provider_adapter
             elif llm_cfg.provider == "github_copilot":
                 from aespa.services import copilot_provider as provider_adapter
-            else:
+            elif llm_cfg.provider == "openai_codex":
                 from aespa.services import codex_provider as provider_adapter
+            else:
+                from aespa.services import antigravity_provider as provider_adapter
 
             await provider_adapter.close_conversation(messages)
 

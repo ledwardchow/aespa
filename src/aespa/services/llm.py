@@ -308,16 +308,19 @@ def _token_encoder(model: str | None = None) -> Any | None:
         "cl100k_base": "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
     }
     candidate = str(model or "").strip().lower()
-    preferred = "cl100k_base" if candidate.startswith(("gpt-3.5", "gpt-4-")) else "o200k_base"
+    preferred = (
+        "cl100k_base" if candidate.startswith(("gpt-3.5", "gpt-4-")) else "o200k_base"
+    )
     for encoding_name in (preferred, "o200k_base", "cl100k_base"):
         cache_key = hashlib.sha1(encoding_urls[encoding_name].encode()).hexdigest()
         cache_path = cache_dir / cache_key
         if not cache_path.is_file():
             continue
         try:
-            if hashlib.sha256(cache_path.read_bytes()).hexdigest() != encoding_hashes[
-                encoding_name
-            ]:
+            if (
+                hashlib.sha256(cache_path.read_bytes()).hexdigest()
+                != encoding_hashes[encoding_name]
+            ):
                 continue
         except OSError:
             continue
@@ -344,7 +347,9 @@ def _count_text_tokens(text: str, model: str | None = None) -> int:
     # handles JSON/tool schemas better than a single chars/4 division by keeping
     # punctuation and long words separate.
     pieces = re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE)
-    return max(1, sum(max(1, math.ceil(len(piece.encode("utf-8")) / 4.0)) for piece in pieces))
+    return max(
+        1, sum(max(1, math.ceil(len(piece.encode("utf-8")) / 4.0)) for piece in pieces)
+    )
 
 
 def estimate_tokens(
@@ -372,6 +377,7 @@ def estimate_tokens(
             "openrouter",
             "github_copilot",
             "openai_codex",
+            "google_antigravity",
         ):
             vision_tokens = 765
         else:
@@ -458,7 +464,9 @@ def _load_bucket_from_db(
                     if not isinstance(counts, dict):
                         continue
                     explicit_provider = str(counts.get("provider") or "").strip()
-                    provider = explicit_provider if explicit_provider != "unknown" else ""
+                    provider = (
+                        explicit_provider if explicit_provider != "unknown" else ""
+                    )
                     if not provider:
                         providers = set(
                             s.exec(
@@ -675,6 +683,8 @@ def _record_usage(
     requests: int = 0,
     copilot_quota: dict[str, Any] | None = None,
     codex_quota: dict[str, Any] | None = None,
+    thinking_tokens: int = 0,
+    **kwargs: Any,
 ) -> None:
     """Accumulate provider usage for a run and the independent monthly ledger."""
     # A provider can emit several usage notifications for one turn (Codex does
@@ -703,6 +713,7 @@ def _record_usage(
         "bedrock_mantle",
         "google",
         "openai_codex",
+        "google_antigravity",
     }
     normalized_input = max(0, input_tokens)
     if usage_provider in inclusive_input_providers:
@@ -757,10 +768,9 @@ def _record_usage(
             factory_credits=factory_credits,
             rates=usage_rates,
         )
-        entry["estimated_cost_available"] = (
-            entry.get("estimated_cost_available", False)
-            or usage_cost.pop("estimated_cost_available", False)
-        )
+        entry["estimated_cost_available"] = entry.get(
+            "estimated_cost_available", False
+        ) or usage_cost.pop("estimated_cost_available", False)
         for key, value in usage_cost.items():
             entry[key] = entry.get(key, 0) + value
     except Exception:
@@ -1391,6 +1401,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             return await _github_copilot(config, prompt, screenshot_b64)
         if config.provider == "openai_codex":
             return await _openai_codex(config, prompt, screenshot_b64)
+        if config.provider == "google_antigravity":
+            return await _google_antigravity(config, prompt, screenshot_b64)
         if config.provider == "anthropic":
             return await _anthropic(config, prompt, screenshot_b64)
         if config.provider == "google":
@@ -1431,6 +1443,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             resp = await _github_copilot(config, prompt, screenshot_b64)
         elif config.provider == "openai_codex":
             resp = await _openai_codex(config, prompt, screenshot_b64)
+        elif config.provider == "google_antigravity":
+            resp = await _google_antigravity(config, prompt, screenshot_b64)
         elif config.provider == "anthropic":
             resp = await _anthropic(config, prompt, screenshot_b64)
         elif config.provider == "google":
@@ -1463,9 +1477,7 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
 
         return resp
     except Exception as exc:
-        if config.provider == "openai_codex" and isinstance(
-            exc, LLMQuotaPauseError
-        ):
+        if config.provider == "openai_codex" and isinstance(exc, LLMQuotaPauseError):
             await limiter.block_for(_codex_cooldown_seconds(exc))
         await limiter.reconcile(total_estimated, 0)
         raise
@@ -1487,7 +1499,12 @@ async def stream_chat_completion(
     """Stream a chat completion from the configured LLM provider in real-time."""
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
-    if config.provider in ("factory_droid", "github_copilot", "openai_codex"):
+    if config.provider in (
+        "factory_droid",
+        "github_copilot",
+        "openai_codex",
+        "google_antigravity",
+    ):
         # Copilot's full response still travels through the same provider adapter.
         # Yielding it as one chunk preserves this public generator contract.
         combined = "\n\n".join(
@@ -1504,8 +1521,10 @@ async def stream_chat_completion(
             yield await _factory_droid(config, combined, None)
         elif config.provider == "github_copilot":
             yield await _github_copilot(config, combined, None)
-        else:
+        elif config.provider == "openai_codex":
             yield await _openai_codex(config, combined, None)
+        else:
+            yield await _google_antigravity(config, combined, None)
     elif config.provider == "anthropic":
         import anthropic as _ant
 
@@ -2096,6 +2115,25 @@ async def _factory_droid(
     )
 
 
+async def _google_antigravity(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    from aespa.services import antigravity_provider
+
+    try:
+        return await antigravity_provider.plain_completion(
+            config,
+            prompt,
+            screenshot_b64,
+            _antigravity_usage_callback(),
+            _llm_proxy_var.get(),
+        )
+    except antigravity_provider.AntigravityQuotaError as exc:
+        raise LLMQuotaPauseError(
+            str(exc), reset_at=exc.reset_at, snapshot=exc.snapshot
+        ) from exc
+
+
 async def _openai_codex(
     config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
 ) -> str:
@@ -2160,6 +2198,31 @@ def _copilot_usage_callback() -> Any:
             cache_write_tokens,
             usage_context=usage_context,
             provider="github_copilot",
+            **details,
+        )
+
+    return record
+
+
+def _antigravity_usage_callback() -> Any:
+    usage_context = _capture_usage_context()
+
+    def record(
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        **details: Any,
+    ) -> None:
+        _record_usage(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            usage_context=usage_context,
+            provider="google_antigravity",
             **details,
         )
 
@@ -3841,6 +3904,7 @@ AGENTIC_LOOP_PROVIDERS = frozenset(
         "factory_droid",
         "github_copilot",
         "openai_codex",
+        "google_antigravity",
         "anthropic",
         "azure_foundry_anthropic",
         "bedrock",
@@ -3972,9 +4036,7 @@ async def _call_with_tools(
         tools=active_tools,
         model=config.model,
         provider=str(getattr(config.provider, "value", config.provider)),
-    ) + (
-        config.max_tokens or 4096
-    )
+    ) + (config.max_tokens or 4096)
     slept = await limiter.acquire(
         estimated,
         on_wait=lambda wt: _emit_rate_limit_waiting(
@@ -3992,9 +4054,7 @@ async def _call_with_tools(
             _emit_rate_limit_cleared(config.model, actual_total)
         return result
     except Exception as exc:
-        if config.provider == "openai_codex" and isinstance(
-            exc, LLMQuotaPauseError
-        ):
+        if config.provider == "openai_codex" and isinstance(exc, LLMQuotaPauseError):
             await limiter.block_for(_codex_cooldown_seconds(exc))
         await limiter.reconcile(estimated, 0)
         raise
@@ -4044,6 +4104,22 @@ async def _call_with_tools_impl(
             _copilot_usage_callback(),
             _llm_proxy_var.get(),
         )
+    if config.provider == "google_antigravity":
+        from aespa.services import antigravity_provider
+
+        try:
+            return await antigravity_provider.completion_with_tools(
+                config,
+                system_message,
+                messages,
+                _active_tools,
+                _antigravity_usage_callback(),
+                _llm_proxy_var.get(),
+            )
+        except antigravity_provider.AntigravityQuotaError as exc:
+            raise LLMQuotaPauseError(
+                str(exc), reset_at=exc.reset_at, snapshot=exc.snapshot
+            ) from exc
     if config.provider == "openai_codex":
         from aespa.services import codex_provider
 
@@ -5075,9 +5151,7 @@ async def thinking_agentic_loop(
                         elif _is_refusal:
                             _msg = f"Step {tool_call_count + 1}: LLM provider refused the scan request — {exc}"
                         elif _is_quota_pause:
-                            _msg = (
-                                f"Step {tool_call_count + 1}: scan paused because the Codex allowance or rate-limit window is exhausted — {exc}"
-                            )
+                            _msg = f"Step {tool_call_count + 1}: scan paused because the Codex allowance or rate-limit window is exhausted — {exc}"
                         else:
                             _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
                         emit_fn(
@@ -5396,7 +5470,12 @@ async def thinking_agentic_loop(
                 break
 
     finally:
-        if config.provider in ("factory_droid", "github_copilot", "openai_codex"):
+        if config.provider in (
+            "factory_droid",
+            "github_copilot",
+            "openai_codex",
+            "google_antigravity",
+        ):
             try:
                 if config.provider == "factory_droid":
                     from aespa.services import droid_provider
@@ -5406,10 +5485,14 @@ async def thinking_agentic_loop(
                     from aespa.services import copilot_provider
 
                     await copilot_provider.close_conversation(messages)
-                else:
+                elif config.provider == "openai_codex":
                     from aespa.services import codex_provider
 
                     await codex_provider.close_conversation(messages)
+                else:
+                    from aespa.services import antigravity_provider
+
+                    await antigravity_provider.close_conversation(messages)
             except Exception:
                 log.debug("Failed to close provider conversation", exc_info=True)
         # Save a final checkpoint on any exit — including CancelledError raised

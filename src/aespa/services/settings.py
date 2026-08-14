@@ -255,6 +255,10 @@ async def discover_models_for_format(
         from aespa.services import codex_provider
 
         return await codex_provider.discover_models()
+    elif api_format == "google_antigravity":
+        from aespa.services import antigravity_provider
+
+        return await antigravity_provider.discover_models()
     elif api_format == "github_copilot":
         from aespa.services import copilot_provider
 
@@ -348,14 +352,18 @@ def _apply_llm_provider(
         key_str = payload.api_key.strip()
         provider.api_key = key_str if key_str else None
     provider.base_url = (
-        None if payload.api_format in {"factory_droid", "openai_codex"} else payload.base_url
+        None
+        if payload.api_format in {"factory_droid", "openai_codex"}
+        else payload.base_url
     )
     username = (payload.username or "").strip()
     provider.username = (
         username or None if payload.api_format == "github_copilot" else None
     )
     provider.project_id = (
-        None if payload.api_format in {"factory_droid", "openai_codex"} else payload.project_id
+        None
+        if payload.api_format in {"factory_droid", "openai_codex"}
+        else payload.project_id
     )
     provider.models_json = _json_dumps(payload.models)
     provider.max_tpm = payload.max_tpm
