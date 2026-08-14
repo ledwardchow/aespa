@@ -498,6 +498,7 @@ def list_test_runs(
 @router.get("/api/test-runs/active", response_model=list[ActiveJobSummary])
 def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobSummary]:
     from aespa.models import Application, AssessmentCampaign, Site
+    from aespa.services import crawler as crawler_svc
     from aespa.services import scanner as scanner_svc
     from aespa.services import validator as validator_svc
 
@@ -507,7 +508,7 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
         site = session.get(Site, run.site_id)
         site_name = site.name if site else f"Site #{run.site_id}"
 
-        if run.status == TestRunStatus.running:
+        if crawler_svc.is_running(run.id):
             jobs.append(
                 ActiveJobSummary(
                     run_id=run.id,
@@ -830,7 +831,9 @@ def get_test_run_leads(
     session.commit()
     return [
         ScanLeadOut.model_validate(lead).model_copy(
-            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+            update={
+                "linked_finding_reference": finding_refs.get(lead.linked_finding_id)
+            }
         )
         for lead in leads
     ]

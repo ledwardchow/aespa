@@ -157,7 +157,7 @@ export function llmProfileToForm(cfg, providers = []) {
   if (cfg) {
     const hasTemp = cfg.temperature !== null && cfg.temperature !== undefined;
     return {
-      name: cfg.name ?? "Default",
+      name: cfg.name ?? (provider?.name && cfg.model ? `${provider.name}/${cfg.model}` : "Default"),
       provider_id: providerId,
       model: cfg.model,
       max_tokens: cfg.max_tokens,
@@ -167,10 +167,13 @@ export function llmProfileToForm(cfg, providers = []) {
       force_tool_choice: cfg.force_tool_choice ?? false
     };
   }
+  const defaultModel = provider?.models?.[0] || "";
+  const defaultName = provider?.name && defaultModel ? `${provider.name}/${defaultModel}` : defaultModel;
   return {
     ...DEFAULT_LLM_FORM,
+    name: defaultName,
     provider_id: provider?.id || "",
-    model: provider?.models?.[0] || ""
+    model: defaultModel
   };
 }
 export function llmPayload(form) {

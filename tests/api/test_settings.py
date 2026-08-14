@@ -270,6 +270,27 @@ def test_create_provider_and_profile(client: TestClient):
     assert active["provider"] == "openai"
 
 
+def test_create_model_defaults_name_to_provider_model(client: TestClient):
+    provider_r = _make_provider(client, name="OpenAI Prod", models=["gpt-4o", "gpt-4o-mini"])
+    assert provider_r.status_code == 200
+    provider = provider_r.json()
+
+    # Pass name=None or omit name
+    res = client.post(
+        "/api/settings/llm/model-configs",
+        json={
+            "provider_id": provider["id"],
+            "model": "gpt-4o-mini",
+            "max_tokens": 4096,
+        },
+    )
+    assert res.status_code == 200
+    model_cfg = res.json()
+    assert model_cfg["name"] == "OpenAI Prod/gpt-4o-mini"
+    assert model_cfg["provider_name"] == "OpenAI Prod"
+    assert model_cfg["model"] == "gpt-4o-mini"
+
+
 def test_create_profile_with_optional_temperature(client: TestClient):
     provider_r = _make_provider(client)
     assert provider_r.status_code == 200
