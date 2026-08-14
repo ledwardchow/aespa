@@ -125,6 +125,74 @@ def test_plain_completion_quota_error():
     asyncio.run(run())
 
 
+def test_parse_tool_response_code_fence():
+    raw = 'I will navigate to the page:\n```json\n{\n  "name": "nav_goto",\n  "arguments": {"url": "http://example.com"}\n}\n```'
+    tools = [
+        {"name": "nav_goto", "input_schema": {"type": "object"}},
+        {"name": "done", "input_schema": {"type": "object"}},
+    ]
+    blocks, stop_reason, raw_content = antigravity_provider._parse_tool_response(
+        raw, tools
+    )
+
+    assert stop_reason == "tool_use"
+    assert len(blocks) == 2
+    assert blocks[0]["type"] == "text"
+    assert blocks[0]["text"] == "I will navigate to the page:"
+    assert blocks[1]["type"] == "tool_use"
+    assert blocks[1]["name"] == "nav_goto"
+    assert blocks[1]["input"] == {"url": "http://example.com"}
+
+
+def test_parse_tool_response_plain_text():
+    raw = "The scan is complete. No vulnerabilities found."
+    tools = [{"name": "nav_goto"}, {"name": "done"}]
+    blocks, stop_reason, raw_content = antigravity_provider._parse_tool_response(
+        raw, tools
+    )
+
+    assert stop_reason == "end_turn"
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "text"
+    assert blocks[0]["text"] == raw
+
+
+def test_completion_with_tools_dispatch():
+    async def run():
+        fake_response = (
+            '```json\n{"name": "done", "arguments": {"summary": "Finished"}}\n```'
+        )
+        tools = [{"name": "done", "input_schema": {"type": "object"}}]
+
+        with patch(
+            "aespa.services.antigravity_provider.plain_completion",
+            new=AsyncMock(return_value=fake_response),
+        ):
+            config = LLMConfig(provider="google_antigravity", model="auto")
+            (
+                blocks,
+                stop_reason,
+                raw_content,
+            ) = await antigravity_provider.completion_with_tools(
+                config, "system msg", [{"role": "user", "content": "hi"}], tools
+            )
+
+            assert stop_reason == "tool_use"
+            assert len(blocks) == 1
+            assert blocks[0]["type"] == "tool_use"
+            assert blocks[0]["name"] == "done"
+            assert blocks[0]["input"] == {"summary": "Finished"}
+
+            # Also verify via llm._call_with_tools_impl
+            res_blocks, res_stop, _ = await llm._call_with_tools_impl(
+                config, "system msg", [{"role": "user", "content": "hi"}], tools
+            )
+            assert res_stop == "tool_use"
+            assert res_blocks[0]["name"] == "done"
+
+    asyncio.run(run())
+
+
 def test_llm_service_dispatch_google_antigravity():
     async def run():
         with patch(

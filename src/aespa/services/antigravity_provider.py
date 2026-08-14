@@ -6,8 +6,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -288,6 +290,8 @@ async def plain_completion(
             except json.JSONDecodeError:
                 return raw_stdout
 
+            response_text = str(data.get("response") or "").strip()
+
             if data.get("status") == "ERROR":
                 err_msg = data.get("error") or "Unknown error"
                 if any(
@@ -303,21 +307,24 @@ async def plain_completion(
                     raise AntigravityQuotaError(
                         f"Antigravity quota limit exceeded: {err_msg}"
                     )
-                if attempt < max_retries and any(
-                    marker in err_msg.lower() for marker in _TRANSIENT_NETWORK_MARKERS
-                ):
-                    log.info(
-                        "Antigravity CLI transient error on attempt %d/%d; retrying in %0.1fs: %s",
-                        attempt + 1,
-                        max_retries + 1,
-                        1.5 * (attempt + 1),
-                        err_msg[:200],
-                    )
-                    await asyncio.sleep(1.5 * (attempt + 1))
-                    continue
-                raise AntigravityUnavailableError(f"Antigravity error: {err_msg}")
-
-            response_text = data.get("response") or ""
+                if not response_text:
+                    if attempt < max_retries and any(
+                        marker in err_msg.lower()
+                        for marker in _TRANSIENT_NETWORK_MARKERS
+                    ):
+                        log.info(
+                            "Antigravity CLI transient error on attempt %d/%d; retrying in %0.1fs: %s",
+                            attempt + 1,
+                            max_retries + 1,
+                            1.5 * (attempt + 1),
+                            err_msg[:200],
+                        )
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                        continue
+                    raise AntigravityUnavailableError(f"Antigravity error: {err_msg}")
+                log.debug(
+                    "Antigravity returned response with non-fatal notice: %s", err_msg
+                )
             usage = data.get("usage") or {}
 
             if usage_callback:
@@ -338,6 +345,95 @@ async def plain_completion(
         raise AntigravityUnavailableError("Antigravity CLI failed after retries")
 
 
+def _parse_tool_response(
+    raw_text: str, tools: list[dict]
+) -> tuple[list[dict], str, list[dict]]:
+    """Parse raw text from model into Anthropic-format content blocks and stop_reason."""
+    tool_names = {t.get("name") for t in tools if t.get("name")}
+    blocks: list[dict] = []
+
+    # Match JSON blocks in markdown code blocks: ```json ... ``` or ``` ... ```
+    pattern = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+    matches = list(pattern.finditer(raw_text))
+
+    found_tool = False
+    last_end = 0
+
+    for match in matches:
+        json_str = match.group(1)
+        try:
+            parsed = json.loads(json_str)
+        except Exception:
+            continue
+
+        if isinstance(parsed, dict):
+            name = parsed.get("name") or parsed.get("tool") or parsed.get("action")
+            inp = (
+                parsed.get("arguments")
+                or parsed.get("input")
+                or parsed.get("parameters")
+                or {}
+            )
+            if name in tool_names:
+                text_before = raw_text[last_end : match.start()].strip()
+                if text_before:
+                    blocks.append({"type": "text", "text": text_before})
+                call_id = f"call_{uuid.uuid4().hex[:8]}"
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": name,
+                        "input": inp if isinstance(inp, dict) else {},
+                        "text": None,
+                    }
+                )
+                last_end = match.end()
+                found_tool = True
+
+    if not found_tool:
+        # Check if the entire raw text is a JSON object
+        stripped = raw_text.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict):
+                    name = (
+                        parsed.get("name") or parsed.get("tool") or parsed.get("action")
+                    )
+                    inp = (
+                        parsed.get("arguments")
+                        or parsed.get("input")
+                        or parsed.get("parameters")
+                        or {}
+                    )
+                    if name in tool_names:
+                        call_id = f"call_{uuid.uuid4().hex[:8]}"
+                        blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": call_id,
+                                "name": name,
+                                "input": inp if isinstance(inp, dict) else {},
+                                "text": None,
+                            }
+                        )
+                        found_tool = True
+            except Exception:
+                pass
+
+    if not found_tool:
+        blocks = [{"type": "text", "text": raw_text}]
+        stop_reason = "end_turn"
+    else:
+        trailing_text = raw_text[last_end:].strip()
+        if trailing_text and not trailing_text.startswith("```"):
+            blocks.append({"type": "text", "text": trailing_text})
+        stop_reason = "tool_use"
+
+    return blocks, stop_reason, blocks
+
+
 async def completion_with_tools(
     config: LLMConfig,
     system_message: str,
@@ -345,7 +441,7 @@ async def completion_with_tools(
     tools: list[dict],
     usage_callback: Callable[..., None] | None = None,
     proxy_url: str | None = None,
-) -> str:
+) -> tuple[list[dict], str, list[dict]]:
     """Execute a tool-enabled turn by encoding tool schemas and history into the prompt."""
     tools_formatted = json.dumps(
         [
@@ -361,18 +457,20 @@ async def completion_with_tools(
 
     combined_prompt = (
         f"{system_message}\n\n"
-        f"Available tools (respond with a JSON tool call if you need to use a tool):\n"
+        f"Available tools (respond with a JSON tool call block if you need to use a tool):\n"
         f"{tools_formatted}\n\n"
         f"Conversation History:\n"
         f"{_conversation_prompt(messages)}"
     )
 
-    return await plain_completion(
+    raw_text = await plain_completion(
         config=config,
         prompt=combined_prompt,
         usage_callback=usage_callback,
         proxy_url=proxy_url,
     )
+
+    return _parse_tool_response(raw_text, tools)
 
 
 async def close_conversation(messages: list[dict]) -> None:
