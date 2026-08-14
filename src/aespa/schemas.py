@@ -457,6 +457,7 @@ LLMProviderAPILiteral = Literal[
     "factory_droid",
     "github_copilot",
     "openai_codex",
+    "google_antigravity",
     "openai",
     "openai_compatible",
     "openrouter",
@@ -472,6 +473,20 @@ LLMProviderAPILiteral = Literal[
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
     "factory_droid": [],
     "openai_codex": ["auto"],
+    "google_antigravity": [
+        "auto",
+        "Gemini 3.7 Flash (High)",
+        "Gemini 3.7 Flash (Medium)",
+        "Gemini 3.7 Flash (Low)",
+        "Gemini 3.6 Flash (High)",
+        "Gemini 3.6 Flash (Medium)",
+        "Gemini 3.5 Flash (High)",
+        "Gemini 3.1 Pro (High)",
+        "Gemini 3.1 Pro (Low)",
+        "Claude Sonnet 4.6 (Thinking)",
+        "Claude Opus 4.6 (Thinking)",
+        "GPT-OSS 120B (Medium)",
+    ],
     "github_copilot": [
         "auto",
         "gpt-5.6-luna",

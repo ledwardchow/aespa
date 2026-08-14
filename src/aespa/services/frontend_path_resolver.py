@@ -101,7 +101,8 @@ def _route_matches(observed: str, approved: str) -> bool:
     if len(approved_parts) != len(observed_parts):
         return False
     return all(
-        approved_part.startswith("{") and approved_part.endswith("}")
+        approved_part.startswith("{")
+        and approved_part.endswith("}")
         or approved_part == observed_part
         for approved_part, observed_part in zip(approved_parts, observed_parts)
     )
@@ -141,9 +142,7 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
         str(entrypoint.get("trigger") or path.get("trigger") or "").strip().casefold()
     )
     approved_interaction_id = str(
-        entrypoint.get("interaction_id")
-        or path.get("interaction_id")
-        or ""
+        entrypoint.get("interaction_id") or path.get("interaction_id") or ""
     ).strip()
 
     page = next(
@@ -165,14 +164,9 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
             if (not method or str(candidate.get("method") or "").upper() == method)
             and (
                 not request_path
-                or _route_matches(
-                    _route(str(candidate.get("url") or "")), request_path
-                )
+                or _route_matches(_route(str(candidate.get("url") or "")), request_path)
             )
-            and (
-                page is None
-                or candidate.get("page_id") == page.get("id")
-            )
+            and (page is None or candidate.get("page_id") == page.get("id"))
             and (
                 not approved_interaction_id
                 or candidate.get("interaction_id") == approved_interaction_id
@@ -204,8 +198,7 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
                 )
                 and (
                     not action_kind
-                    or action_kind
-                    == str(candidate.get("action_kind") or "").casefold()
+                    or action_kind == str(candidate.get("action_kind") or "").casefold()
                 )
                 and (page is None or candidate.get("page_id") == page.get("id"))
                 and (

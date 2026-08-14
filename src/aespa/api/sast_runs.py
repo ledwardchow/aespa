@@ -267,6 +267,7 @@ async def resume_sast_scan(
 ) -> dict:
     """Manually resume a quota-paused SAST scan without clearing its state."""
     from aespa.services import sast_scanner
+
     _get_run_or_404(session, run_id)
     from aespa.services import run_pause as run_pause_svc
 
@@ -456,7 +457,9 @@ def get_sast_leads(
     session.commit()
     return [
         ScanLeadOut.model_validate(lead).model_copy(
-            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+            update={
+                "linked_finding_reference": finding_refs.get(lead.linked_finding_id)
+            }
         )
         for lead in leads
     ]
@@ -585,7 +588,9 @@ def get_api_run_leads(
     session.commit()
     return [
         ScanLeadOut.model_validate(lead).model_copy(
-            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+            update={
+                "linked_finding_reference": finding_refs.get(lead.linked_finding_id)
+            }
         )
         for lead in leads
     ]

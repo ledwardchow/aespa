@@ -181,7 +181,8 @@ def test_campaign_detail_reports_linked_child_run_status(
     component = _create_component(client, app["id"])
     snapshot = _upload_snapshot(client, app["id"], component["id"])
     site_id = client.post(
-        "/api/sites", json={"name": "Campaign target", "base_url": "http://target.local"}
+        "/api/sites",
+        json={"name": "Campaign target", "base_url": "http://target.local"},
     ).json()["id"]
     target = client.post(
         f"/api/applications/{app['id']}/targets",
@@ -212,9 +213,7 @@ def test_campaign_detail_reports_linked_child_run_status(
         s.add(target_member)
         s.commit()
 
-    response = client.get(
-        f"/api/applications/{app['id']}/campaigns/{campaign['id']}"
-    )
+    response = client.get(f"/api/applications/{app['id']}/campaigns/{campaign['id']}")
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["source_members"][0]["run_status"] == "scanning"

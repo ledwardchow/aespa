@@ -24,7 +24,7 @@ DEFAULT_CREDIT_PRICES: dict[str, tuple[float, str]] = {
     "factory_droid": (7.0, "Factory credits per 1,000,000 credits"),
 }
 
-SUBSCRIPTION_PROVIDERS = {"openai_codex"}
+SUBSCRIPTION_PROVIDERS = {"openai_codex", "google_antigravity"}
 
 _INCLUSIVE_INPUT_PROVIDERS = {
     "openai",
@@ -36,6 +36,7 @@ _INCLUSIVE_INPUT_PROVIDERS = {
     "bedrock_mantle",
     "google",
     "openai_codex",
+    "google_antigravity",
 }
 
 
@@ -266,7 +267,9 @@ def estimate_usage_cost(
     if provider in _INCLUSIVE_INPUT_PROVIDERS:
         billable_input = max(
             0,
-            billable_input - max(0, int(cache_read_tokens)) - max(0, int(cache_write_tokens)),
+            billable_input
+            - max(0, int(cache_read_tokens))
+            - max(0, int(cache_write_tokens)),
         )
     input_rate = rates.get("input_price_usd_per_million")
     output_rate = rates.get("output_price_usd_per_million")
@@ -297,11 +300,7 @@ def estimate_usage_cost(
         + cache_read_count * (cache_read_rate or 0)
         + cache_write_count * (cache_write_rate or 0)
     ) / 1_000_000
-    credit_cost = (
-        credit_count
-        * (credit_rate or 0)
-        / 1_000_000
-    )
+    credit_cost = credit_count * (credit_rate or 0) / 1_000_000
     return {
         "estimated_token_cost_usd": token_cost,
         "estimated_credit_cost_usd": credit_cost,

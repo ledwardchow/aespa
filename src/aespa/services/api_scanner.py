@@ -1450,8 +1450,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         from aespa.services.scan_leads import get_all_leads_for_run
 
         unresolved_sast = any(
-            (lead.status or "open")
-            not in {"confirmed", "dismissed", "inconclusive"}
+            (lead.status or "open") not in {"confirmed", "dismissed", "inconclusive"}
             for lead in get_all_leads_for_run("api", api_run_id)
         )
 

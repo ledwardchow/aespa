@@ -126,7 +126,7 @@ export function providerToForm(provider) {
   };
 }
 export function providerPayload(form) {
-  const usesCliCredentials = ["factory_droid", "openai_codex"].includes(form.api_format);
+  const usesCliCredentials = ["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format);
   let apiKeyPayload = null;
   if (usesCliCredentials) {
     apiKeyPayload = "";

@@ -27,7 +27,8 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
   const hasCopilot = providers.has("github_copilot");
   const hasDroid = providers.has("factory_droid");
   const hasCodex = providers.has("openai_codex");
-  const hasProviderUsage = hasCopilot || hasDroid || hasCodex;
+  const hasAntigravity = providers.has("google_antigravity");
+  const hasProviderUsage = hasCopilot || hasDroid || hasCodex || hasAntigravity;
   const hasBilledUsage = tokenUsage && (
     tokenUsage.total_ai_credits > 0 ||
     tokenUsage.total_factory_credits > 0 ||
@@ -35,7 +36,7 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
   );
   const hasUsage = hasTokens || hasProviderUsage;
   const hasEstimatedCost = tokenUsage?.estimated_cost_available && tokenUsage.estimated_total_cost_usd != null;
-  const usageLabel = hasCodex && !hasDroid && !hasCopilot ? "Codex usage" : hasDroid && !hasCopilot ? "Droid usage" : hasCopilot && !hasDroid ? "Copilot usage" : "LLM usage";
+  const usageLabel = hasAntigravity && !hasCodex && !hasDroid && !hasCopilot ? "Antigravity usage" : hasCodex && !hasDroid && !hasCopilot ? "Codex usage" : hasDroid && !hasCopilot ? "Droid usage" : hasCopilot && !hasDroid ? "Copilot usage" : "LLM usage";
   const quota = tokenUsage?.codex_quota || tokenUsage?.copilot_quota;
 
   return (

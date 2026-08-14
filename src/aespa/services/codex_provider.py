@@ -733,8 +733,7 @@ async def _start_thread(
         "baseInstructions": (
             "You are embedded in AESPA as a model and tool caller, not as a "
             "coding agent. Never use Codex-owned tools such as exec, shell, "
-            "wait, sleep, collaboration, file editing, MCP, or web search. "
-            + tool_rule
+            "wait, sleep, collaboration, file editing, MCP, or web search. " + tool_rule
         ),
         "developerInstructions": system_message,
         "serviceName": "aespa",

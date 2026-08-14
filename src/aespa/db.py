@@ -106,9 +106,8 @@ def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> bool:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     is_pre_alembic = (
-        ("site" in tables or "test_run" in tables)
-        and "alembic_version" not in tables
-    )
+        "site" in tables or "test_run" in tables
+    ) and "alembic_version" not in tables
     if not is_pre_alembic:
         return False
 
@@ -1373,6 +1372,7 @@ def _upgrade_pre_alembic_schema(engine: Engine) -> None:
     # settings/statistics tables available on those databases as well.
     _ensure_browser_debug_config_table(engine)
     _ensure_llm_statistics_tables(engine)
+
 
 def _ensure_llm_statistics_tables(engine: Engine) -> None:
     from sqlmodel import SQLModel
