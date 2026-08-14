@@ -214,7 +214,7 @@ export const DEFAULT_PROVIDER_FORM = {
   max_rpm: ""
 };
 export const DEFAULT_LLM_FORM = {
-  name: "Default",
+  name: "",
   provider_id: "",
   model: "",
   max_tokens: 70000,

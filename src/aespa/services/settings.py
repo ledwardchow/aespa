@@ -543,14 +543,19 @@ def llm_profile_out(session: Session, prof: LLMProfile) -> LLMProfileOut:
 def _apply_llm_config(
     session: Session, cfg: LLMConfig, payload: LLMConfigIn, activate: bool
 ) -> LLMConfig:
-    _ensure_unique_llm_profile_name(session, payload.name, cfg.id)
     provider = get_llm_provider(session, payload.provider_id)
     if payload.model not in _provider_models(provider):
         raise HTTPException(
             status_code=422, detail="Model is not configured for the selected provider"
         )
 
-    cfg.name = payload.name
+    name = (payload.name or "").strip()
+    if not name:
+        name = f"{provider.name}/{payload.model}"
+
+    _ensure_unique_llm_profile_name(session, name, cfg.id)
+
+    cfg.name = name
     cfg.is_active = bool(activate)
 
     cfg.provider_id = payload.provider_id

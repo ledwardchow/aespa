@@ -13,6 +13,7 @@ export function LLMModelForm({
   onCancel
 }) {
   const [form, setForm] = useState(() => llmProfileToForm(profile, providers));
+  const [nameTouched, setNameTouched] = useState(mode === "edit");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
@@ -46,25 +47,57 @@ export function LLMModelForm({
     <form className="card" onSubmit={onSubmit}>
       <div className="form-section-title">Model</div>
       <div className="field"><label>Name</label>
-        <input type="text" required maxLength="120" value={form.name} onChange={e => upd({
-          name: e.target.value
-        })} /></div>
+        <input
+          type="text"
+          required
+          maxLength="120"
+          value={form.name}
+          onChange={e => {
+            setNameTouched(true);
+            upd({ name: e.target.value });
+          }}
+        />
+      </div>
       <div className="field">
         <label>Provider</label>
-        <select className="select" required value={form.provider_id} onChange={e => {
-          const provider = providers.find(p => p.id === Number(e.target.value));
-          upd({
-            provider_id: e.target.value,
-            model: provider?.models?.[0] || ""
-          });
-        }}>
+        <select
+          className="select"
+          required
+          value={form.provider_id}
+          onChange={e => {
+            const newProviderId = e.target.value;
+            const provider = providers.find(p => p.id === Number(newProviderId));
+            const newModel = provider?.models?.[0] || "";
+            const updates = {
+              provider_id: newProviderId,
+              model: newModel
+            };
+            if (!nameTouched || !form.name.trim()) {
+              updates.name = provider?.name && newModel ? `${provider.name}/${newModel}` : newModel;
+            }
+            upd(updates);
+          }}
+        >
           {providers.map(p => <option key={p.id} value={p.id}>{p.name} ({API_FORMAT_LABELS[p.api_format] || p.api_format})</option>)}
         </select>
       </div>
       <div className="field"><label>Model</label>
-        <select className="select" required value={form.model} onChange={e => upd({
-          model: e.target.value
-        })}>
+        <select
+          className="select"
+          required
+          value={form.model}
+          onChange={e => {
+            const newModel = e.target.value;
+            const updates = {
+              model: newModel
+            };
+            if (!nameTouched || !form.name.trim()) {
+              const provider = providers.find(p => p.id === Number(form.provider_id));
+              updates.name = provider?.name && newModel ? `${provider.name}/${newModel}` : newModel;
+            }
+            upd(updates);
+          }}
+        >
           {models.map(m => <option key={m} value={m}>{m}</option>)}
         </select>
       </div>

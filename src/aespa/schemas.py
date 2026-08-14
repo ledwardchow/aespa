@@ -668,7 +668,7 @@ class CodexIntegrationConfigOut(BaseModel):
 class LLMConfigIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    name: str = Field(default="Default", min_length=1, max_length=120)
+    name: Optional[str] = Field(default=None, max_length=120)
     provider_id: int
     model: str = Field(min_length=1)
     max_tokens: int = Field(default=70000, ge=1, le=256000)
