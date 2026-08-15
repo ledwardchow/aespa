@@ -18,6 +18,18 @@ async def discover_openai_models(
     proxy_url: str | None = None,
 ) -> list[str]:
     """Return model IDs available from OpenAI or OpenAI-compatible endpoints."""
+    records = await discover_openai_model_options(
+        api_key=api_key, base_url=base_url, proxy_url=proxy_url
+    )
+    return [record["id"] for record in records]
+
+
+async def discover_openai_model_options(
+    api_key: str | None = None,
+    base_url: str | None = None,
+    proxy_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return raw OpenAI-compatible model records for capability inspection."""
     url = (base_url or "https://api.openai.com/v1").rstrip("/") + "/models"
     headers: dict[str, str] = {"Accept": "application/json"}
     if api_key and api_key.strip():
@@ -31,12 +43,43 @@ async def discover_openai_models(
         res = await client.get(url)
         res.raise_for_status()
         data = res.json().get("data") or []
-        ids = [
-            m.get("id")
+        return [
+            m
             for m in data
             if isinstance(m, dict) and isinstance(m.get("id"), str) and m.get("id")
         ]
-        return ids
+
+
+async def discover_azure_openai_model_options(
+    api_key: str | None = None,
+    base_url: str | None = None,
+    proxy_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """Discover Azure OpenAI/Foundry models using Azure's model-list route."""
+    root = (base_url or "").rstrip("/")
+    if "/openai/v1" in root:
+        url = root + "/models"
+    else:
+        if not root.endswith("/openai"):
+            root += "/openai"
+        url = root + "/models?api-version=2024-10-21"
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if api_key and api_key.strip():
+        headers["api-key"] = api_key.strip()
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+    client_kwargs: dict[str, Any] = {"timeout": 10.0, "headers": headers}
+    if proxy_url:
+        client_kwargs["proxy"] = proxy_url
+    async with httpx.AsyncClient(**client_kwargs) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        payload = response.json()
+    rows = (
+        payload.get("data", payload.get("models", []))
+        if isinstance(payload, dict)
+        else []
+    )
+    return [row for row in rows if isinstance(row, dict) and row.get("id")]
 
 
 async def discover_anthropic_models(
@@ -45,7 +88,20 @@ async def discover_anthropic_models(
     proxy_url: str | None = None,
 ) -> list[str]:
     """Return model IDs available from the Anthropic API."""
-    url = (base_url or "https://api.anthropic.com").rstrip("/") + "/v1/models"
+    records = await discover_anthropic_model_options(
+        api_key=api_key, base_url=base_url, proxy_url=proxy_url
+    )
+    return [record["id"] for record in records]
+
+
+async def discover_anthropic_model_options(
+    api_key: str | None = None,
+    base_url: str | None = None,
+    proxy_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return raw Anthropic model records for capability inspection."""
+    root_url = (base_url or "https://api.anthropic.com").rstrip("/")
+    url = root_url + "/models" if root_url.endswith("/v1") else root_url + "/v1/models"
     headers: dict[str, str] = {
         "Accept": "application/json",
         "anthropic-version": "2023-06-01",
@@ -61,12 +117,11 @@ async def discover_anthropic_models(
         res = await client.get(url)
         res.raise_for_status()
         data = res.json().get("data") or []
-        ids = [
-            m.get("id")
+        return [
+            m
             for m in data
             if isinstance(m, dict) and isinstance(m.get("id"), str) and m.get("id")
         ]
-        return ids
 
 
 async def discover_google_models(
@@ -75,6 +130,18 @@ async def discover_google_models(
     proxy_url: str | None = None,
 ) -> list[str]:
     """Return model IDs available from the Google Gemini API."""
+    records = await discover_google_model_options(
+        api_key=api_key, base_url=base_url, proxy_url=proxy_url
+    )
+    return [record["id"] for record in records]
+
+
+async def discover_google_model_options(
+    api_key: str | None = None,
+    base_url: str | None = None,
+    proxy_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return normalized Google model records for capability inspection."""
     root_url = (base_url or "https://generativelanguage.googleapis.com").rstrip("/")
     url = f"{root_url}/v1beta/models"
     headers: dict[str, str] = {"Accept": "application/json"}
@@ -95,7 +162,7 @@ async def discover_google_models(
         res = await client.get(url)
         res.raise_for_status()
         data = res.json().get("models") or []
-        ids: list[str] = []
+        records: list[dict[str, Any]] = []
         for m in data:
             if not isinstance(m, dict):
                 continue
@@ -104,8 +171,8 @@ async def discover_google_models(
                 name = name[7:]
             methods = m.get("supportedGenerationMethods") or []
             if name and (not methods or "generateContent" in methods):
-                ids.append(name)
-        return ids
+                records.append({**m, "id": name})
+        return records
 
 
 async def discover_bedrock_models(

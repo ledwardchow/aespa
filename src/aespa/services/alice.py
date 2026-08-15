@@ -2226,42 +2226,42 @@ async def run_alice_turn(
 
 
 def _check_api_scope(url: str, collection) -> str | None:
-    """Host-level scope check for API collections (no DB read needed).
+    """Host-and-port scope check for API collections (no DB read needed).
 
     Derives allowed hosts from the collection's ``base_url`` and ``servers``
     list.  Returns a rejection message or ``None`` if the URL is in scope.
     """
     import json as _json
-    from urllib.parse import urlparse as _up
 
-    parsed = _up(url)
-    hostname = (parsed.hostname or "").lower()
-    if not hostname:
+    from aespa.services.scope import authority_is_allowed, scope_authority
+
+    authority = scope_authority(url)
+    if not authority:
         return None
 
     # Explicit scope_hosts list takes precedence when configured.
     explicit: list[str] = _json.loads(collection.scope_hosts or "[]")
     if explicit:
-        if hostname not in explicit:
+        if not authority_is_allowed(url, explicit, default_url=collection.base_url):
             allowed = ", ".join(explicit)
             return (
-                f"Host '{hostname}' is outside the API collection scope "
+                f"Host and port '{authority}' are outside the API collection scope "
                 f"(allowed: {allowed})."
             )
         return None
 
     # Fall back to base_url host + any additional servers.
-    base_host = (_up(collection.base_url).hostname or "").lower()
-    server_hosts = [
-        (_up(s).hostname or "").lower()
-        for s in _json.loads(collection.servers or "[]")
-        if s
+    allowed_servers = [
+        value
+        for value in [collection.base_url, *_json.loads(collection.servers or "[]")]
+        if value
     ]
-    allowed_hosts = {h for h in [base_host, *server_hosts] if h}
-    if allowed_hosts and hostname not in allowed_hosts:
+    if allowed_servers and not authority_is_allowed(
+        url, allowed_servers, default_url=collection.base_url
+    ):
         return (
-            f"Host '{hostname}' is outside the API collection scope "
-            f"(allowed: {', '.join(sorted(allowed_hosts))})."
+            f"Host and port '{authority}' are outside the API collection scope "
+            f"(allowed: {', '.join(sorted(allowed_servers))})."
         )
     return None
 

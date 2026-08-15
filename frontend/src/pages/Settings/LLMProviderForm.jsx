@@ -128,15 +128,16 @@ export function LLMProviderForm({
     setLoadingModels(true);
     setLoadMessage(null);
     try {
-      const fetched = await api.discoverModels({
+      const fetched = await api.discoverModelOptions({
+        provider_id: provider?.id || null,
         api_format: form.api_format,
         api_key: form.api_key,
         base_url: form.base_url,
         username: form.username
       });
-      if (fetched && fetched.length > 0) {
-        upd({ models: fetched.join("\n") });
-        setLoadMessage(`Loaded ${fetched.length} model(s) from API.`);
+      if (fetched?.models?.length > 0) {
+        upd({ models: fetched.models.join("\n"), model_capabilities: fetched.capabilities || {} });
+        setLoadMessage(`Loaded ${fetched.models.length} model(s) and capability metadata from API.`);
       } else {
         setLoadMessage("No models returned for this provider.");
       }
@@ -148,7 +149,7 @@ export function LLMProviderForm({
   };
 
   const onFormatChange = async api_format => {
-    upd({ api_format });
+    upd({ api_format, model_capabilities: {} });
     if (form.models.trim()) return;
     try {
       const defaults = await api.getDefaultModels();

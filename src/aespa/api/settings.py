@@ -27,6 +27,7 @@ from aespa.schemas import (
     LLMConfigIn,
     LLMConfigOut,
     LLMImportResult,
+    LLMModelDiscoveryOut,
     LLMModelDiscoveryRequest,
     LLMProfileIn,
     LLMProfileOut,
@@ -46,6 +47,7 @@ from aespa.schemas import (
 from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import crawler as crawler_svc
 from aespa.services import settings as settings_service
+from aespa.services.model_capabilities import documented_model_capability
 
 log = logging.getLogger(__name__)
 
@@ -304,9 +306,15 @@ async def discover_llm_models(
     username = payload.username
 
     if not api_key or api_key.startswith("••"):
-        db_prov = session.exec(
-            select(LLMProviderConfig).where(LLMProviderConfig.api_format == api_format)
-        ).first()
+        db_prov = (
+            session.get(LLMProviderConfig, payload.provider_id)
+            if payload.provider_id
+            else session.exec(
+                select(LLMProviderConfig).where(
+                    LLMProviderConfig.api_format == api_format
+                )
+            ).first()
+        )
         if db_prov:
             api_key = db_prov.api_key or api_key
             if not base_url:
@@ -329,6 +337,61 @@ async def discover_llm_models(
         )
 
     return list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
+
+
+@router.post("/llm/discover-model-options", response_model=LLMModelDiscoveryOut)
+async def discover_llm_model_options(
+    payload: LLMModelDiscoveryRequest,
+    session: Session = Depends(get_session),
+) -> LLMModelDiscoveryOut:
+    """Discover models plus selectable thinking levels for each model."""
+    api_format = payload.api_format
+    api_key = payload.api_key
+    base_url = payload.base_url
+    username = payload.username
+    if not api_key or api_key.startswith("••"):
+        db_prov = (
+            session.get(LLMProviderConfig, payload.provider_id)
+            if payload.provider_id
+            else session.exec(
+                select(LLMProviderConfig).where(
+                    LLMProviderConfig.api_format == api_format
+                )
+            ).first()
+        )
+        if db_prov:
+            api_key = db_prov.api_key or api_key
+            base_url = base_url or db_prov.base_url
+            username = username or db_prov.username
+    try:
+        result = await settings_service.discover_model_options_for_format(
+            api_format=api_format,
+            api_key=api_key,
+            base_url=base_url,
+            username=username,
+        )
+        capabilities = dict(result.get("capabilities", {}))
+        for model in payload.models:
+            if model not in capabilities:
+                capability = documented_model_capability(api_format, model)
+                if capability is not None:
+                    capabilities[model] = capability
+        return LLMModelDiscoveryOut(
+            models=list(result.get("models", [])),
+            capabilities=capabilities,
+        )
+    except Exception as exc:
+        log.warning(
+            "Structured model discovery for format '%s' failed: %s", api_format, exc
+        )
+        models = payload.models or list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
+        capabilities = {
+            model: capability
+            for model in models
+            if (capability := documented_model_capability(api_format, model))
+            is not None
+        }
+        return LLMModelDiscoveryOut(models=models, capabilities=capabilities)
 
 
 @router.get("/llm/export", response_model=LLMConfigExport)

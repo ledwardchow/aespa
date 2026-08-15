@@ -210,6 +210,7 @@ export const DEFAULT_PROVIDER_FORM = {
   username: "",
   project_id: "",
   models: "",
+  model_capabilities: {},
   api_key: "",
   max_tpm: "",
   max_rpm: ""
@@ -222,7 +223,8 @@ export const DEFAULT_LLM_FORM = {
   temperature: 0.2,
   use_temperature: true,
   use_vision: false,
-  force_tool_choice: false
+  force_tool_choice: false,
+  reasoning_effort: ""
 };
 export const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic: "https://api.anthropic.com",

@@ -214,6 +214,11 @@ def _capture_factory_credits(conversation: _Conversation, message: dict) -> None
 
 async def discover_models(proxy_url: str | None = None) -> list[str]:
     """Return models available to the account currently signed in through Droid CLI."""
+    return [item["id"] for item in await discover_model_options(proxy_url=proxy_url)]
+
+
+async def discover_model_options(proxy_url: str | None = None) -> list[dict[str, Any]]:
+    """Return Droid models with native reasoning-effort metadata."""
     from droid_sdk import DroidClient
 
     directory = _workspace_directory()
@@ -225,7 +230,23 @@ async def discover_models(proxy_url: str | None = None) -> list[str]:
             client.initialize_session(machine_id="aespa", cwd=str(directory)),
             timeout=30,
         )
-        return [model.id for model in result.available_models or []]
+        options = []
+        for model in result.available_models or []:
+            model_id = getattr(model, "id", None)
+            if not model_id:
+                continue
+            options.append(
+                {
+                    "id": model_id,
+                    "supported_reasoning_efforts": getattr(
+                        model, "supported_reasoning_efforts", None
+                    ),
+                    "default_reasoning_effort": getattr(
+                        model, "default_reasoning_effort", None
+                    ),
+                }
+            )
+        return options
     finally:
         await client.close()
 
@@ -360,6 +381,11 @@ async def _create_conversation(
             machine_id="aespa",
             cwd=str(directory),
             model_id=config.model,
+            **(
+                {"reasoning_effort": config.reasoning_effort}
+                if config.reasoning_effort
+                else {}
+            ),
             mcp_servers=[
                 {
                     "name": "aespa",

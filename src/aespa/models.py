@@ -91,7 +91,7 @@ class Site(SQLModel, table=True):
     login_url: Optional[str] = Field(default=None)
     notes: Optional[str] = Field(default=None)
     scan_guidance: Optional[str] = Field(default=None)  # Test Lead guidance
-    scope_hosts: Optional[str] = Field(default=None)  # JSON list of in-scope hostnames
+    scope_hosts: Optional[str] = Field(default=None)  # JSON list of host:port authorities
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -143,7 +143,7 @@ class ApiCollection(SQLModel, table=True):
     servers: Optional[str] = Field(
         default=None
     )  # JSON list of additional server base URLs
-    scope_hosts: Optional[str] = Field(default=None)  # JSON list of in-scope hostnames
+    scope_hosts: Optional[str] = Field(default=None)  # JSON list of host:port authorities
     auth_summary_json: Optional[str] = Field(
         default=None
     )  # security schemes from parsed specs
@@ -351,6 +351,9 @@ class LLMProviderConfig(SQLModel, table=True):
     # cost/usage attribution. Ignored by other provider formats.
     project_id: Optional[str] = Field(default=None)
     models_json: str = Field(default="[]")
+    # Per-model capability metadata discovered from the provider or OpenRouter.
+    # Kept as JSON so providers can add metadata without another migration.
+    model_capabilities_json: str = Field(default="{}")
     max_tpm: Optional[int] = Field(default=None, nullable=True)
     max_rpm: Optional[int] = Field(default=None, nullable=True)
     updated_at: datetime = Field(default_factory=_utcnow)
@@ -473,6 +476,8 @@ class LLMConfig(SQLModel, table=True):
     model: str = Field(default="claude-opus-4-5")
     max_tokens: int = Field(default=70000)
     temperature: Optional[float] = Field(default=None)
+    # Explicit reasoning/thinking level. None means provider default (legacy behavior).
+    reasoning_effort: Optional[str] = Field(default=None, nullable=True)
     # Whether to include page screenshots in LLM prompts (requires vision model)
     use_vision: bool = Field(default=False)
     # Whether to force tool choice using the wire format tool_choice: required/any

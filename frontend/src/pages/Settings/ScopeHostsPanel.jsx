@@ -13,8 +13,8 @@ export function ScopeHostsPanel({
     const next = hosts.filter(h => h !== host);
     setSaving(true);
     try {
-      await api.updateScopeHosts(siteId, next);
-      onChange(next);
+      const result = await api.updateScopeHosts(siteId, next);
+      onChange(result.scope_hosts || next);
     } catch (e) {
       alert(e.message);
     } finally {
@@ -30,8 +30,8 @@ export function ScopeHostsPanel({
     const next = [...hosts, host];
     setSaving(true);
     try {
-      await api.updateScopeHosts(siteId, next);
-      onChange(next);
+      const result = await api.updateScopeHosts(siteId, next);
+      onChange(result.scope_hosts || next);
       setInput("");
     } catch (e) {
       alert(e.message);
@@ -55,7 +55,7 @@ export function ScopeHostsPanel({
           </span>)}
       </div>
       <div className="scope-hosts-add">
-        <input className="scope-hosts-input" placeholder="Add hostname…" value={input} onInput={e => setInput(e.target.value)} onKeyDown={onKey} disabled={saving} />
+        <input className="scope-hosts-input" placeholder="Add hostname and port…" value={input} onInput={e => setInput(e.target.value)} onKeyDown={onKey} disabled={saving} />
         <button className="btn sm" onClick={add} disabled={saving || !input.trim()}>Add</button>
       </div>
     </div>;

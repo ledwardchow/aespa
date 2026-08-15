@@ -1151,6 +1151,61 @@ def test_thinking_scan_start_blocked_when_already_running(
     assert r.json()["detail"] == "Dynamic Scan already running"
 
 
+def test_thinking_scan_start_allows_stale_running_scan_status(
+    client: TestClient, monkeypatch, isolated_db_engine
+):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    with Session(isolated_db_engine) as session:
+        db_run = session.get(models.TestRun, run["id"])
+        db_run.status = "running"
+        db_run.phase = "scanning"
+        session.add(db_run)
+        session.commit()
+
+    started = []
+
+    async def fake_start(run_id: int) -> None:
+        started.append(run_id)
+
+    monkeypatch.setattr(scan_api.crawler_svc, "is_running", lambda run_id: False)
+    monkeypatch.setattr(
+        scan_api.scanner_svc, "is_thinking_running", lambda run_id: False
+    )
+    monkeypatch.setattr(scan_api.scanner_svc, "start_thinking_scan", fake_start)
+    monkeypatch.setattr(
+        scan_api.scanner_svc,
+        "get_thinking_scan_status",
+        lambda run_id: {"status": "running", "findings_count": 0},
+    )
+
+    response = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
+
+    assert response.status_code == 200
+    assert started == [run["id"]]
+
+
+def test_thinking_scan_start_blocked_when_crawler_task_is_running(
+    client: TestClient, monkeypatch
+):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    monkeypatch.setattr(scan_api.crawler_svc, "is_running", lambda run_id: True)
+
+    response = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Crawl is still running — wait for it to finish"
+    )
+
+
 # ── Graph / pages on empty run ────────────────────────────────────────────────
 
 

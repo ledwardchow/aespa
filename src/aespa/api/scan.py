@@ -18,7 +18,6 @@ from aespa.models import (
     ScanFinding,
     ScanLog,
     TestRun,
-    TestRunStatus,
 )
 from aespa.schemas import (
     CoverageModeLiteral,
@@ -30,6 +29,7 @@ from aespa.schemas import (
     ValidationStatusOut,
 )
 from aespa.services import checkpoint as checkpoint_svc
+from aespa.services import crawler as crawler_svc
 from aespa.services import findings as findings_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
@@ -61,7 +61,7 @@ async def start_thinking_scan(
 ) -> dict:
     """Start an LLM-directed scan that dynamically chooses what to test next."""
     run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
+    if crawler_svc.is_running(run_id):
         raise HTTPException(
             status_code=409, detail="Crawl is still running — wait for it to finish"
         )
@@ -114,9 +114,7 @@ async def test_page_state(
 ) -> dict:
     """Queue a focused Test Lead scan for one persisted URL/SPA page state."""
     run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running and not scanner_svc.is_thinking_running(
-        run_id
-    ):
+    if crawler_svc.is_running(run_id):
         raise HTTPException(
             status_code=409,
             detail="Crawl is still running — wait for the page state to persist",
@@ -194,7 +192,7 @@ async def resume_thinking_scan(
                     "reset_at": pause.reset_at.isoformat(),
                 },
             )
-    if run.status == TestRunStatus.running:
+    if crawler_svc.is_running(run_id):
         raise HTTPException(
             status_code=409, detail="Crawl is still running — wait for it to finish"
         )

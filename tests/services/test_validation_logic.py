@@ -2,6 +2,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -778,6 +779,61 @@ def test_dynamic_scan_task_does_not_write_error_message(monkeypatch):
         with Session(engine) as session:
             refreshed_run = session.get(RunModel, run_id)
 
+        assert refreshed_run.error_message is None
+    finally:
+        scanner._thinking_scan_status.pop(locals().get("run_id", 0), None)
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_cancelled_dynamic_scan_persists_stopped_run_state(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    async def fake_do_thinking_scan(run_id: int) -> None:
+        raise asyncio.CancelledError
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = RunModel(
+                site_id=site.id,
+                name="Run #1",
+                status="running",
+                phase="scanning",
+                error_message="Last crawl interrupted prior to completion",
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            run_id = run.id
+
+        monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+        monkeypatch.setattr(scanner, "_do_thinking_scan", fake_do_thinking_scan)
+        monkeypatch.setattr(scanner.events_svc, "emit", lambda *args, **kwargs: None)
+
+        scanner._thinking_scan_status.pop(run_id, None)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(scanner._thinking_scan_task(run_id))
+
+        with Session(engine) as session:
+            refreshed_run = session.get(RunModel, run_id)
+
+        assert refreshed_run.status == "stopped"
+        assert refreshed_run.phase == "finished"
+        assert refreshed_run.outcome == "stopped"
+        assert refreshed_run.terminal_reason == "user_stop"
+        assert refreshed_run.completed_at is not None
         assert refreshed_run.error_message is None
     finally:
         scanner._thinking_scan_status.pop(locals().get("run_id", 0), None)

@@ -199,8 +199,10 @@ def _maybe_record_waf(
         if detection is None:
             return
 
-        req_hostname = (urlparse(url).hostname or "").lower() if url else ""
-        if not req_hostname:
+        from aespa.services.scope import authority_is_allowed, scope_authority
+
+        req_authority = scope_authority(url) if url else ""
+        if not req_authority:
             return
 
         cache_key = ("api", api_run_id) if api_run_id is not None else ("web", run_id)
@@ -234,13 +236,19 @@ def _maybe_record_waf(
                 scope_hosts = json.loads((site.scope_hosts if site else None) or "[]")
                 base_url = site.base_url if site else None
 
-            # Enforce scope check: only attribute WAF to in-scope hostnames
+            # Enforce scope check: only attribute a WAF to an in-scope host and port.
             if scope_hosts:
-                if req_hostname not in scope_hosts:
+                if not authority_is_allowed(
+                    url, scope_hosts, default_url=base_url or url
+                ):
                     return
             elif base_url:
+                req_hostname = (urlparse(url).hostname or "").lower()
                 base_hostname = (urlparse(base_url).hostname or "").lower()
-                if base_hostname and not _same_root_domain(req_hostname, base_hostname):
+                if base_hostname and (
+                    not _same_root_domain(req_hostname, base_hostname)
+                    or not authority_is_allowed(url, [base_url], default_url=base_url)
+                ):
                     return
 
             if run.waf_provider == detection["provider"]:

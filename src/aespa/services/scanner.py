@@ -5898,6 +5898,7 @@ async def start_thinking_scan(run_id: int) -> None:
             run.outcome = None
             run.terminal_reason = None
             run.completed_at = None
+            run.error_message = None
             session.add(run)
             session.commit()
     # Clear any stale checkpoint so the scan starts fresh.
@@ -5929,6 +5930,8 @@ async def start_thinking_scan_resume(run_id: int) -> None:
             run.phase = "scanning"
             run.outcome = None
             run.terminal_reason = None
+            run.completed_at = None
+            run.error_message = None
             session.add(run)
             session.commit()
 
@@ -6084,6 +6087,17 @@ async def _thinking_scan_task(run_id: int) -> None:
     except asyncio.CancelledError:
         log.info("Thinking scan task cancelled for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "stopped"
+        with Session(get_engine()) as _s:
+            _run = _s.get(TestRun, run_id)
+            if _run is not None:
+                _run.status = "stopped"
+                _run.phase = "finished"
+                _run.outcome = "stopped"
+                _run.terminal_reason = "user_stop"
+                _run.completed_at = datetime.now(timezone.utc)
+                _run.error_message = None
+                _s.add(_run)
+                _s.commit()
         _emit_thinking_status(run_id)
         events_svc.emit(
             run_id,

@@ -114,6 +114,7 @@ export function providerToForm(provider) {
     username: provider.username || "",
     project_id: provider.project_id || "",
     models: (provider.models || []).join("\n"),
+    model_capabilities: provider.model_capabilities || {},
     api_key: "",
     has_api_key: provider.has_api_key ?? false,
     clear_api_key: false,
@@ -147,7 +148,8 @@ export function providerPayload(form) {
     models: modelText.split(/\r?\n|,/).map(m => m.trim()).filter(Boolean),
     api_key: apiKeyPayload,
     max_tpm: form.max_tpm !== "" ? Number(form.max_tpm) : null,
-    max_rpm: form.max_rpm !== "" ? Number(form.max_rpm) : null
+    max_rpm: form.max_rpm !== "" ? Number(form.max_rpm) : null,
+    model_capabilities: form.model_capabilities || {}
   };
 }
 
@@ -164,7 +166,8 @@ export function llmProfileToForm(cfg, providers = []) {
       temperature: hasTemp ? cfg.temperature : 0.2,
       use_temperature: hasTemp,
       use_vision: cfg.use_vision ?? false,
-      force_tool_choice: cfg.force_tool_choice ?? false
+      force_tool_choice: cfg.force_tool_choice ?? false,
+      reasoning_effort: cfg.reasoning_effort || ""
     };
   }
   const defaultModel = provider?.models?.[0] || "";
@@ -184,7 +187,8 @@ export function llmPayload(form) {
     max_tokens: Number(form.max_tokens),
     temperature: form.use_temperature ? Number(form.temperature) : null,
     use_vision: form.use_vision,
-    force_tool_choice: form.force_tool_choice
+    force_tool_choice: form.force_tool_choice,
+    reasoning_effort: form.reasoning_effort || null
   };
 }
 export function scanProfileToForm(profile) {
@@ -210,7 +214,7 @@ export function SettingsPage() {
   const importRef = useRef(null);
 
   const [profileSort, setProfileSort] = useState({ field: "name", dir: "asc" });
-  const [modelSort, setModelSort] = useState({ field: "name", dir: "asc" });
+  const [modelSort, setModelSort] = useState({ field: "provider_name", dir: "asc" });
   const [providerSort, setProviderSort] = useState({ field: "name", dir: "asc" });
 
   const toggleSort = (setter, field) => {
@@ -265,6 +269,13 @@ export function SettingsPage() {
       let cmp = typeof valA === "number" && typeof valB === "number"
         ? valA - valB
         : String(valA).localeCompare(String(valB), undefined, { sensitivity: "base", numeric: true });
+      // Keep models in a predictable name order when providers compare equal.
+      if (cmp === 0 && field === "provider_name") {
+        return String(a.name || "").localeCompare(String(b.name || ""), undefined, {
+          sensitivity: "base",
+          numeric: true,
+        });
+      }
       return dir === "asc" ? cmp : -cmp;
     });
   }, [models, modelSort]);
@@ -334,7 +345,7 @@ export function SettingsPage() {
     setBusyId(item.id);
     setError(null);
     try {
-      if (tab === "profiles") await api.activateLLMProfile(item.id);else await api.activateLLMModel(item.id);
+      await api.activateLLMProfile(item.id);
       await load();
     } catch (e) {
       setError(e.message);
@@ -481,7 +492,6 @@ export function SettingsPage() {
             <div className="sortable" onClick={() => toggleSort(setModelSort, "provider_name")}>Provider {sortArrow(modelSort, "provider_name")}</div>
             <div className="sortable" onClick={() => toggleSort(setModelSort, "model")}>Model {sortArrow(modelSort, "model")}</div>
             <div className="sortable" onClick={() => toggleSort(setModelSort, "use_vision")}>Vision {sortArrow(modelSort, "use_vision")}</div>
-            <div className="sortable" onClick={() => toggleSort(setModelSort, "is_active")}>Status {sortArrow(modelSort, "is_active")}</div>
             <div></div>
           </div>
           {sortedModels.map(p => <div className="settings-list-row" key={p.id}>
@@ -489,9 +499,7 @@ export function SettingsPage() {
               <div>{p.provider_name || `Provider #${p.provider_id}`}</div>
               <div className="mono">{p.model}</div>
               <div>{p.use_vision ? "On" : "Off"}</div>
-              <div>{p.is_active ? <span className="badge ok">Active</span> : <span className="subtle">Inactive</span>}</div>
               <div className="row settings-list-actions">
-                {!p.is_active && <button className="btn sm secondary" disabled={busyId === p.id} onClick={() => onActivate(p)}>Use</button>}
                 <button className="btn sm" disabled={busyId === p.id} onClick={() => onEdit(p)}>Edit</button>
                 <button className="btn danger-outline sm" disabled={busyId === p.id} onClick={() => onDelete(p)}>Delete</button>
               </div>

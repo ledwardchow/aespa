@@ -598,6 +598,7 @@ class LLMProviderConfigIn(BaseModel):
     username: str | None = Field(default=None, max_length=255)
     project_id: str | None = Field(default=None, max_length=120)
     models: list[str] = Field(default_factory=list, min_length=1)
+    model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     api_key: str | None = None
     max_tpm: int | None = Field(default=None, ge=1)
     max_rpm: int | None = Field(default=None, ge=1)
@@ -649,6 +650,7 @@ class LLMProviderConfigOut(BaseModel):
     username: str | None = None
     project_id: str | None = None
     models: list[str] = Field(default_factory=list)
+    model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key: str | None = None
     max_tpm: int | None = None
@@ -659,9 +661,16 @@ class LLMModelDiscoveryRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     api_format: str
+    provider_id: int | None = None
+    models: list[str] = Field(default_factory=list)
     api_key: str | None = None
     base_url: str | None = None
     username: str | None = None
+
+
+class LLMModelDiscoveryOut(BaseModel):
+    models: list[str] = Field(default_factory=list)
+    capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class CodexIntegrationConfigIn(BaseModel):
@@ -688,6 +697,7 @@ class LLMConfigIn(BaseModel):
     model: str = Field(min_length=1)
     max_tokens: int = Field(default=70000, ge=1, le=256000)
     temperature: Optional[float] = Field(default=None)
+    reasoning_effort: str | None = Field(default=None, max_length=32)
     use_vision: bool = False
     force_tool_choice: bool = False
 
@@ -716,6 +726,7 @@ class LLMConfigOut(BaseModel):
     model: str
     max_tokens: int
     temperature: Optional[float] = None
+    reasoning_effort: str | None = None
     use_vision: bool
     force_tool_choice: bool
     updated_at: datetime
@@ -1124,6 +1135,7 @@ class LLMExportProviderItem(BaseModel):
     username: str | None = None
     project_id: str | None = None
     models: list[str]
+    model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key: str | None = None
     max_tpm: int | None = None
@@ -1136,6 +1148,7 @@ class LLMExportProfileItem(BaseModel):
     model: str
     max_tokens: int = 70000
     temperature: Optional[float] = None
+    reasoning_effort: str | None = None
     use_vision: bool = False
     force_tool_choice: bool = False
     is_active: bool = False

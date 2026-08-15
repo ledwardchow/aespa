@@ -103,14 +103,20 @@ def _ensure_unique_name(
 
 def create_site(session: Session, payload: SiteCreate) -> Site:
     _ensure_unique_name(session, payload.name)
+    from aespa.services.scope import normalize_scope_entries
+
+    base_url = str(payload.base_url)
 
     site = Site(
         name=payload.name,
-        base_url=str(payload.base_url),
+        base_url=base_url,
         requires_auth=payload.requires_auth,
         login_url=str(payload.login_url) if payload.login_url else None,
         notes=payload.notes,
         scan_guidance=payload.scan_guidance,
+        scope_hosts=json.dumps(
+            normalize_scope_entries(payload.scope_hosts, default_url=base_url)
+        ),
     )
     for cred in payload.credentials:
         site.credentials.append(Credential(**_credential_values(cred)))
@@ -126,12 +132,17 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     site = get_site(session, site_id)
     _ensure_unique_name(session, payload.name, ignore_id=site.id)
 
+    from aespa.services.scope import normalize_scope_entries
+
     site.name = payload.name
     site.base_url = str(payload.base_url)
     site.requires_auth = payload.requires_auth
     site.login_url = str(payload.login_url) if payload.login_url else None
     site.notes = payload.notes
     site.scan_guidance = payload.scan_guidance
+    site.scope_hosts = json.dumps(
+        normalize_scope_entries(payload.scope_hosts, default_url=site.base_url)
+    )
     site.updated_at = _utcnow()
 
     # Replace credentials list wholesale.
