@@ -706,7 +706,6 @@ def _record_usage(
     inclusive_input_providers = {
         "openai",
         "openai_compatible",
-        "openrouter",
         "azure_openai",
         "azure_foundry",
         "azure_foundry_openai",
@@ -1537,6 +1536,7 @@ async def stream_chat_completion(
         async with client.messages.stream(
             model=config.model,
             max_tokens=config.max_tokens,
+            **_anthropic_reasoning_kwargs(config),
             **(
                 {"temperature": config.temperature}
                 if config.temperature is not None
@@ -1571,6 +1571,7 @@ async def stream_chat_completion(
                 "system": system_list,
                 "inferenceConfig": infer_cfg,
             }
+            _add_bedrock_reasoning_fields(config, payload)
             headers = {
                 "Authorization": f"Bearer {config.api_key}",
                 "Content-Type": "application/json",
@@ -1638,6 +1639,7 @@ async def stream_chat_completion(
                     system=_system,
                     messages=_messages,
                     inferenceConfig=_infer,
+                    **_bedrock_sdk_reasoning_kwargs(config),
                 )
 
             q = asyncio.Queue()
@@ -1719,6 +1721,7 @@ async def stream_chat_completion(
             "messages": formatted_messages,
             "stream": True,
         }
+        call_kwargs.update(_chat_completion_reasoning_kwargs(config, config.provider))
         if _openai_reasoning_split_enabled(config):
             call_kwargs["extra_body"] = {"reasoning_split": True}
 
@@ -1955,7 +1958,7 @@ def _chat_completion_kwargs(
     uses_reasoning_params = (
         provider in openai_reasoning_providers
         and _model_needs_reasoning_params(config.model)
-    )
+    ) or bool(config.reasoning_effort)
     if uses_reasoning_params:
         kwargs["max_completion_tokens"] = token_limit
     else:
@@ -1968,7 +1971,74 @@ def _chat_completion_kwargs(
         # final answer.  That lets the caller preserve reasoning for tool-turn
         # continuity without rendering it as user-facing Markdown.
         kwargs["extra_body"] = {"reasoning_split": True}
+    kwargs.update(_chat_completion_reasoning_kwargs(config, provider))
     return kwargs
+
+
+def _chat_completion_reasoning_kwargs(
+    config: LLMConfig, provider: str
+) -> dict[str, Any]:
+    if not config.reasoning_effort:
+        return {}
+    if provider == "openrouter":
+        return {"reasoning": {"effort": config.reasoning_effort}}
+    return {"reasoning_effort": config.reasoning_effort}
+
+
+def _anthropic_reasoning_kwargs(config: LLMConfig) -> dict[str, Any]:
+    if not config.reasoning_effort:
+        return {}
+    # Anthropic's current adaptive-thinking models accept effort in output_config.
+    # Older models simply omit this block when the profile is left at Default.
+    result: dict[str, Any] = {"output_config": {"effort": config.reasoning_effort}}
+    if any(
+        marker in (config.model or "").lower()
+        for marker in ("claude-opus-4-6", "claude-sonnet-4-6", "claude-4-6")
+    ):
+        result["thinking"] = {"type": "adaptive"}
+    return result
+
+
+def _google_thinking_config(types_module: Any, config: LLMConfig) -> dict[str, Any]:
+    """Map the shared level names to Gemini 2.5 budgets or Gemini 3 levels."""
+    if not config.reasoning_effort:
+        return {}
+    model = (config.model or "").lower()
+    if "2.5" in model or "2-5" in model:
+        budgets = {
+            "none": 0,
+            "minimal": 1024,
+            "low": 1024,
+            "medium": 8192,
+            "high": 24576,
+        }
+        budget = budgets.get(config.reasoning_effort, budgets["high"])
+        return {"thinking_config": types_module.ThinkingConfig(thinking_budget=budget)}
+    return {
+        "thinking_config": types_module.ThinkingConfig(
+            thinking_level=config.reasoning_effort.upper()
+        )
+    }
+
+
+def _bedrock_reasoning_fields(config: LLMConfig) -> dict[str, Any]:
+    if not config.reasoning_effort or "claude" not in (config.model or "").lower():
+        return {}
+    return {
+        "thinking": {"type": "adaptive"},
+        "outputConfig": {"effort": config.reasoning_effort},
+    }
+
+
+def _add_bedrock_reasoning_fields(config: LLMConfig, payload: dict[str, Any]) -> None:
+    fields = _bedrock_reasoning_fields(config)
+    if fields:
+        payload["additionalModelRequestFields"] = fields
+
+
+def _bedrock_sdk_reasoning_kwargs(config: LLMConfig) -> dict[str, Any]:
+    fields = _bedrock_reasoning_fields(config)
+    return {"additionalModelRequestFields": fields} if fields else {}
 
 
 async def _create_chat_completion(client: Any, kwargs: dict[str, Any]) -> Any:
@@ -2028,6 +2098,7 @@ async def _anthropic(
     resp = await client.messages.create(
         model=config.model,
         max_tokens=config.max_tokens,
+        **_anthropic_reasoning_kwargs(config),
         **(
             {"temperature": config.temperature}
             if config.temperature is not None
@@ -2074,6 +2145,7 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
         contents=parts,
         config=types.GenerateContentConfig(
             max_output_tokens=config.max_tokens,
+            **_google_thinking_config(types, config),
             **(
                 {"temperature": config.temperature}
                 if config.temperature is not None
@@ -2399,6 +2471,8 @@ def _mantle_response_kwargs(
     }
     if instructions is not None:
         kwargs["instructions"] = instructions
+    if config.reasoning_effort:
+        kwargs["reasoning"] = {"effort": config.reasoning_effort}
     # Reasoning models (gpt-5.x / o-series) reject a custom temperature; skip it
     # for them rather than pay a failed round-trip (the retry below is a backstop).
     if config.temperature is not None and not _is_mantle_reasoning_model(config.model):
@@ -2912,6 +2986,7 @@ async def _bedrock(
         "messages": [{"role": "user", "content": content}],
         "inferenceConfig": _infer_cfg,
     }
+    _add_bedrock_reasoning_fields(config, payload)
     if not config.api_key:
         import asyncio as _aio
 
@@ -2949,6 +3024,7 @@ async def _bedrock(
                 modelId=_model,
                 messages=_messages,
                 inferenceConfig=_infer,
+                **_bedrock_sdk_reasoning_kwargs(config),
             )
 
         loop = _aio.get_event_loop()
@@ -4145,6 +4221,7 @@ async def _call_with_tools_impl(
         resp = await client.messages.create(
             model=config.model,
             max_tokens=config.max_tokens,
+            **_anthropic_reasoning_kwargs(config),
             **(
                 {"temperature": config.temperature}
                 if config.temperature is not None
@@ -4198,6 +4275,7 @@ async def _call_with_tools_impl(
         }
         if config.temperature is not None:
             payload["temperature"] = config.temperature
+        payload.update(_anthropic_reasoning_kwargs(config))
         hdrs = {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -4372,6 +4450,7 @@ async def _call_with_tools_impl(
                 "toolConfig": tool_config,
                 "inferenceConfig": _infer_agent,
             }
+            _add_bedrock_reasoning_fields(config, payload)
             headers = {
                 "Authorization": f"Bearer {config.api_key}",
                 "Content-Type": "application/json",
@@ -4427,6 +4506,7 @@ async def _call_with_tools_impl(
                     messages=converse_messages,
                     toolConfig=tool_config,
                     inferenceConfig=_infer_converse,
+                    **_bedrock_sdk_reasoning_kwargs(config),
                 )
 
             loop = _asyncio.get_event_loop()
@@ -4830,6 +4910,7 @@ async def _call_with_tools_impl(
                 system_instruction=system_message,
                 tools=g_tools,
                 max_output_tokens=config.max_tokens,
+                **_google_thinking_config(_gtypes, config),
                 **(
                     {"temperature": config.temperature}
                     if config.temperature is not None

@@ -778,13 +778,21 @@ def _scope_hosts_for_run(api_run_id: int) -> list[str]:
 def _api_check_scope(url: str, api_run_id: int) -> str | None:
     """Return an error string if ``url`` is out of scope, else None."""
     hosts = _scope_hosts_for_run(api_run_id)
-    if not hosts:
-        return None  # no scope restriction
-    from urllib.parse import urlparse
+    from aespa.services.scope import authority_is_allowed
 
-    host = urlparse(url).hostname or ""
-    if not any(host == h or host.endswith("." + h) for h in hosts):
-        return f"Out of scope: {url} (allowed: {hosts})"
+    with Session(get_engine()) as s:
+        run = s.get(ApiTestRun, api_run_id)
+        coll = s.get(ApiCollection, run.collection_id) if run else None
+        base_url = coll.base_url if coll else url
+        allowed = hosts or (
+            [coll.base_url, *json.loads(coll.servers or "[]")] if coll else []
+        )
+    if not allowed:
+        return None
+    if not authority_is_allowed(
+        url, allowed, default_url=base_url, allow_subdomains=bool(hosts)
+    ):
+        return f"Out of scope: {url} (allowed: {allowed})"
     return None
 
 

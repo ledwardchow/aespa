@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { llmProfileToForm, llmPayload } from "../Settings";
 import { API_FORMAT_LABELS } from "./BurpRestApiSettings";
 import { api } from "../../lib/api";
@@ -17,6 +17,8 @@ export function LLMModelForm({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
+  const [discoveredCapabilities, setDiscoveredCapabilities] = useState({});
+  const [loadingCapabilities, setLoadingCapabilities] = useState(false);
   const upd = p => {
     setSaved(false);
     setForm(f => ({
@@ -42,6 +44,34 @@ export function LLMModelForm({
   };
   const selectedProvider = providers.find(p => p.id === Number(form.provider_id));
   const models = selectedProvider?.models || [];
+  const storedCapabilities = selectedProvider?.model_capabilities || {};
+  const hasStoredCapability = Object.prototype.hasOwnProperty.call(storedCapabilities, form.model);
+  useEffect(() => {
+    if (!selectedProvider || !form.model || hasStoredCapability) {
+      setDiscoveredCapabilities({});
+      setLoadingCapabilities(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setLoadingCapabilities(true);
+    api.discoverModelOptions({
+      provider_id: selectedProvider.id,
+      api_format: selectedProvider.api_format,
+      api_key: "",
+      base_url: selectedProvider.base_url || null,
+      username: selectedProvider.username || null,
+      models
+    }).then(result => {
+      if (!cancelled) setDiscoveredCapabilities(result?.capabilities || {});
+    }).catch(() => {
+      if (!cancelled) setDiscoveredCapabilities({});
+    }).finally(() => {
+      if (!cancelled) setLoadingCapabilities(false);
+    });
+    return () => { cancelled = true; };
+  }, [selectedProvider?.id, selectedProvider?.api_format, selectedProvider?.base_url, selectedProvider?.username, form.model, hasStoredCapability]);
+  const capability = hasStoredCapability ? storedCapabilities[form.model] || {} : discoveredCapabilities[form.model] || {};
+  const levels = Array.isArray(capability.supported_efforts) ? capability.supported_efforts : [];
   return <>
     {error && <div className="alert error">{error}</div>}
     <form className="card" onSubmit={onSubmit}>
@@ -70,7 +100,8 @@ export function LLMModelForm({
             const newModel = provider?.models?.[0] || "";
             const updates = {
               provider_id: newProviderId,
-              model: newModel
+              model: newModel,
+              reasoning_effort: ""
             };
             if (!nameTouched || !form.name.trim()) {
               updates.name = provider?.name && newModel ? `${provider.name}/${newModel}` : newModel;
@@ -89,7 +120,8 @@ export function LLMModelForm({
           onChange={e => {
             const newModel = e.target.value;
             const updates = {
-              model: newModel
+              model: newModel,
+              reasoning_effort: ""
             };
             if (!nameTouched || !form.name.trim()) {
               const provider = providers.find(p => p.id === Number(form.provider_id));
@@ -100,6 +132,18 @@ export function LLMModelForm({
         >
           {models.map(m => <option key={m} value={m}>{m}</option>)}
         </select>
+      </div>
+      <div className="field">
+        <label>Thinking level <span className="field-optional">(optional)</span></label>
+        <select className="select" value={form.reasoning_effort || ""} onChange={e => upd({ reasoning_effort: e.target.value })}>
+          <option value="">Default{capability.default_effort ? ` (${capability.default_effort})` : " (provider decides)"}</option>
+          {levels.map(level => <option key={level} value={level}>{level}</option>)}
+          {form.reasoning_effort && !levels.includes(form.reasoning_effort) && <option value={form.reasoning_effort}>{form.reasoning_effort} (saved)</option>}
+        </select>
+        <div className="field-hint">Leave this at Default to keep the provider's current behavior.</div>
+        {loadingCapabilities && <div className="field-hint">Loading available levels…</div>}
+        {capability.strategy === "documented_registry" && <div className="field-hint">Levels from the provider's documented model family.</div>}
+        {capability.source === "openrouter" && <div className="field-hint">Levels matched from OpenRouter because this provider did not expose them directly.</div>}
       </div>
       <div className="divider" />
       <div className="form-section-title">Sampling</div>

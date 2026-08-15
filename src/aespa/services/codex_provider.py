@@ -788,13 +788,16 @@ async def _send_turn(
     config: LLMConfig,
     prompt: str,
 ) -> None:
+    params = {
+        "threadId": conversation.thread_id,
+        "input": [{"type": "text", "text": prompt}],
+        "model": config.model,
+    }
+    if config.reasoning_effort:
+        params["effort"] = config.reasoning_effort
     await client.request(
         "turn/start",
-        {
-            "threadId": conversation.thread_id,
-            "input": [{"type": "text", "text": prompt}],
-            "model": config.model,
-        },
+        params,
     )
 
 
@@ -1224,8 +1227,12 @@ async def status() -> dict[str, Any]:
 
 
 async def discover_models() -> list[str]:
+    return [item["id"] for item in await discover_model_options()]
+
+
+async def discover_model_options() -> list[dict[str, Any]]:
     client = await _get_client()
-    models: list[str] = []
+    models: list[dict[str, Any]] = []
     cursor: str | None = None
     for _ in range(20):
         result = await client.request(
@@ -1234,16 +1241,28 @@ async def discover_models() -> list[str]:
         if not isinstance(result, dict):
             break
         rows = result.get("data", result.get("models", []))
-        models.extend(
-            str(row.get("id"))
-            for row in rows
-            if isinstance(row, dict) and row.get("id") and not row.get("hidden", False)
-        )
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or not row.get("id")
+                or row.get("hidden", False)
+            ):
+                continue
+            models.append(
+                {
+                    "id": str(row["id"]),
+                    "supportedReasoningEfforts": row.get("supportedReasoningEfforts"),
+                    "defaultReasoningEffort": row.get("defaultReasoningEffort"),
+                }
+            )
         next_cursor = result.get("nextCursor") or result.get("next_cursor")
         if not next_cursor or next_cursor == cursor:
             break
         cursor = str(next_cursor)
-    return list(dict.fromkeys(models))
+    unique = {}
+    for item in models:
+        unique.setdefault(item["id"], item)
+    return list(unique.values())
 
 
 async def read_rate_limits() -> dict[str, Any]:

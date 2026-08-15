@@ -228,6 +228,8 @@ async def plain_completion(
         "--output-format",
         "json",
     ]
+    if config.reasoning_effort in {"low", "medium", "high"}:
+        cmd.extend(["--effort", config.reasoning_effort])
 
     max_retries = 2
 
@@ -491,6 +493,11 @@ async def close_clients() -> None:
 
 async def discover_models(proxy_url: str | None = None) -> list[str]:
     """Return model IDs available through Antigravity CLI."""
+    return [item["id"] for item in await discover_model_options(proxy_url=proxy_url)]
+
+
+async def discover_model_options(proxy_url: str | None = None) -> list[dict[str, Any]]:
+    """Return Antigravity display models and their CLI-supported levels."""
     default_models = [
         "auto",
         "Gemini 3.7 Flash (High)",
@@ -505,4 +512,21 @@ async def discover_models(proxy_url: str | None = None) -> list[str]:
         "Claude Opus 4.6 (Thinking)",
         "GPT-OSS 120B (Medium)",
     ]
-    return default_models
+    options = []
+    for model in default_models:
+        level = next(
+            (
+                candidate
+                for candidate in ("low", "medium", "high")
+                if f"({candidate.title()})" in model
+            ),
+            None,
+        )
+        if level:
+            capability = {"supported_efforts": [level]}
+        elif "(Thinking)" in model:
+            capability = {"supported_efforts": ["low", "medium", "high"]}
+        else:
+            capability = {}
+        options.append({"id": model, **capability})
+    return options

@@ -28,6 +28,7 @@ from aespa.models import (
     UpstreamProxyConfig,
 )
 from aespa.schemas import (
+    PROVIDER_DEFAULT_MODELS,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
     BurpRestApiConfigIn,
@@ -62,6 +63,11 @@ from aespa.schemas import (
     ValidatorConfigIn,
     ValidatorConfigOut,
 )
+from aespa.services.model_capabilities import (
+    documented_model_capability,
+    enrich_model_options,
+    validate_effort,
+)
 
 _SINGLETON_ID = 1
 
@@ -90,6 +96,11 @@ def _provider_models(provider: LLMProviderConfig) -> list[str]:
     return [m for m in models if isinstance(m, str) and m.strip()]
 
 
+def _provider_capabilities(provider: LLMProviderConfig) -> dict[str, dict]:
+    value = _json_loads(getattr(provider, "model_capabilities_json", "{}"), {})
+    return value if isinstance(value, dict) else {}
+
+
 def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
     return LLMProviderConfigOut(
         id=provider.id,
@@ -99,6 +110,7 @@ def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
         username=provider.username,
         project_id=provider.project_id,
         models=_provider_models(provider),
+        model_capabilities=_provider_capabilities(provider),
         has_api_key=bool(provider.api_key and provider.api_key.strip()),
         api_key=None,
         max_tpm=provider.max_tpm,
@@ -144,6 +156,7 @@ def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
         temperature=resolved.temperature,
         use_vision=resolved.use_vision,
         force_tool_choice=resolved.force_tool_choice,
+        reasoning_effort=resolved.reasoning_effort,
         updated_at=resolved.updated_at,
     )
 
@@ -247,60 +260,160 @@ async def discover_models_for_format(
     base_url: str | None = None,
     username: str | None = None,
 ) -> list[str]:
+    options = await discover_model_options_for_format(
+        api_format=api_format,
+        api_key=api_key,
+        base_url=base_url,
+        username=username,
+    )
+    return list(options["models"])
+
+
+async def discover_model_options_for_format(
+    api_format: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    username: str | None = None,
+) -> dict[str, object]:
+    """Discover model names and per-model reasoning capability metadata."""
+    native: dict[str, object] = {}
+    discovered: list[str] = []
     if api_format == "factory_droid":
         from aespa.services import droid_provider
 
-        return await droid_provider.discover_models()
+        fn = getattr(droid_provider, "discover_model_options", None)
+        if fn:
+            raw = await fn()
+            discovered = [item["id"] for item in raw if item.get("id")]
+            native = {item["id"]: item for item in raw if item.get("id")}
+        else:
+            discovered = await droid_provider.discover_models()
     elif api_format == "openai_codex":
         from aespa.services import codex_provider
 
-        return await codex_provider.discover_models()
+        fn = getattr(codex_provider, "discover_model_options", None)
+        if fn:
+            raw = await fn()
+            discovered = [item["id"] for item in raw if item.get("id")]
+            native = {item["id"]: item for item in raw if item.get("id")}
+        else:
+            discovered = await codex_provider.discover_models()
     elif api_format == "google_antigravity":
         from aespa.services import antigravity_provider
 
-        return await antigravity_provider.discover_models()
+        raw = await antigravity_provider.discover_model_options()
+        discovered = [item["id"] for item in raw if item.get("id")]
+        native = {item["id"]: item for item in raw if item.get("id")}
     elif api_format == "github_copilot":
         from aespa.services import copilot_provider
 
-        return await copilot_provider.discover_models()
+        fn = getattr(copilot_provider, "discover_model_options", None)
+        if fn:
+            raw = await fn()
+            discovered = [item["id"] for item in raw if item.get("id")]
+            native = {item["id"]: item for item in raw if item.get("id")}
+        else:
+            discovered = await copilot_provider.discover_models()
     elif api_format == "openrouter":
         from aespa.services import openrouter_provider
 
         key = api_key or os.getenv("OPENROUTER_API_KEY")
-        return await openrouter_provider.discover_models(api_key=key, base_url=base_url)
+        raw = await openrouter_provider.discover_model_options(
+            api_key=key, base_url=base_url
+        )
+        discovered = [item["id"] for item in raw if item.get("id")]
+        native = {item["id"]: item for item in raw if item.get("id")}
     elif api_format == "openai":
         from aespa.services import model_discovery
 
         key = api_key or os.getenv("OPENAI_API_KEY")
-        return await model_discovery.discover_openai_models(
+        raw = await model_discovery.discover_openai_model_options(
             api_key=key, base_url=base_url
         )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
     elif api_format == "openai_compatible":
         from aespa.services import model_discovery
 
         url = base_url or "http://localhost:1234/v1"
-        return await model_discovery.discover_openai_models(
+        raw = await model_discovery.discover_openai_model_options(
             api_key=api_key, base_url=url
         )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
     elif api_format == "anthropic":
         from aespa.services import model_discovery
 
         key = api_key or os.getenv("ANTHROPIC_API_KEY")
-        return await model_discovery.discover_anthropic_models(
+        raw = await model_discovery.discover_anthropic_model_options(
             api_key=key, base_url=base_url
         )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
     elif api_format == "google":
         from aespa.services import model_discovery
 
         key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        return await model_discovery.discover_google_models(
+        raw = await model_discovery.discover_google_model_options(
             api_key=key, base_url=base_url
         )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
+        for model in discovered:
+            capability = documented_model_capability("google", model)
+            if capability is not None:
+                native[model] = native.get(model) or capability
+    elif api_format in {"azure_openai", "azure_foundry", "azure_foundry_openai"}:
+        from aespa.services import model_discovery
+
+        key = api_key or os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("AZURE_API_KEY")
+        raw = await model_discovery.discover_azure_openai_model_options(
+            api_key=key, base_url=base_url
+        )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
+    elif api_format == "azure_foundry_anthropic":
+        from aespa.services import model_discovery
+
+        key = api_key or os.getenv("AZURE_API_KEY")
+        raw = await model_discovery.discover_anthropic_model_options(
+            api_key=key, base_url=base_url
+        )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
     elif api_format == "bedrock":
         from aespa.services import model_discovery
 
-        return await model_discovery.discover_bedrock_models(region_name=base_url)
-    return []
+        discovered = await model_discovery.discover_bedrock_models(region_name=base_url)
+        native = {
+            model: capability
+            for model in discovered
+            if (capability := documented_model_capability("bedrock", model)) is not None
+        }
+    elif api_format == "bedrock_mantle":
+        discovered = list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
+        native = {
+            model: capability
+            for model in discovered
+            if (capability := documented_model_capability("bedrock_mantle", model))
+            is not None
+        }
+    for model in discovered:
+        capability = documented_model_capability(api_format, model)
+        existing = native.get(model)
+        has_native_fields = isinstance(existing, dict) and any(
+            key in existing
+            for key in (
+                "supported_efforts",
+                "supported_reasoning_efforts",
+                "supportedReasoningEfforts",
+                "reasoning",
+            )
+        )
+        if capability is not None and not has_native_fields:
+            native[model] = capability
+    capabilities = await enrich_model_options(api_format, discovered, native)
+    return {"models": discovered, "capabilities": capabilities}
 
 
 def get_llm_provider(session: Session, provider_id: int) -> LLMProviderConfig:
@@ -366,6 +479,13 @@ def _apply_llm_provider(
         else payload.project_id
     )
     provider.models_json = _json_dumps(payload.models)
+    provider.model_capabilities_json = _json_dumps(
+        {
+            model: payload.model_capabilities.get(model, {})
+            for model in payload.models
+            if model in payload.model_capabilities
+        }
+    )
     provider.max_tpm = payload.max_tpm
     provider.max_rpm = payload.max_rpm
     provider.updated_at = _utcnow()
@@ -577,6 +697,11 @@ def _apply_llm_config(
     cfg.temperature = payload.temperature
     cfg.use_vision = payload.use_vision
     cfg.force_tool_choice = payload.force_tool_choice
+    capability = _provider_capabilities(provider).get(payload.model)
+    try:
+        cfg.reasoning_effort = validate_effort(capability, payload.reasoning_effort)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     cfg.updated_at = _utcnow()
 
     if cfg.is_active:
@@ -1142,6 +1267,7 @@ def export_llm_config(
             username=p.username,
             project_id=p.project_id,
             models=_provider_models(p),
+            model_capabilities=_provider_capabilities(p),
             has_api_key=bool(p.api_key and p.api_key.strip()),
             api_key=p.api_key if include_raw_keys else None,
             max_tpm=p.max_tpm,
@@ -1159,6 +1285,7 @@ def export_llm_config(
             model=c.model,
             max_tokens=c.max_tokens,
             temperature=c.temperature,
+            reasoning_effort=c.reasoning_effort,
             use_vision=c.use_vision,
             force_tool_choice=c.force_tool_choice,
             is_active=c.is_active,
@@ -1235,6 +1362,7 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             key_str = item.api_key.strip()
             provider.api_key = key_str if key_str else None
         provider.models_json = _json_dumps(item.models)
+        provider.model_capabilities_json = _json_dumps(item.model_capabilities)
         provider.max_tpm = item.max_tpm
         provider.max_rpm = item.max_rpm
         provider.updated_at = _utcnow()
@@ -1293,6 +1421,13 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         cfg.model = item.model
         cfg.max_tokens = item.max_tokens
         cfg.temperature = item.temperature
+        try:
+            cfg.reasoning_effort = validate_effort(
+                _provider_capabilities(provider).get(item.model),
+                item.reasoning_effort,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         cfg.use_vision = item.use_vision
         cfg.force_tool_choice = item.force_tool_choice
         cfg.is_active = False  # we handle activation below
