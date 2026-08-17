@@ -73,6 +73,7 @@ export const api = {
   listAllSastRuns:     ()         => req(`/api/sast-runs`),
   getSastScanLog:      (id)       => req(`/api/sast-runs/${id}/scan-log`),
   getSastRun:          (id)       => req(`/api/sast-runs/${id}`),
+  importSastRun:       (text)     => fetch("/api/sast-runs/import", { method:"POST", headers:{"Content-Type":"application/json"}, body:text }).then(async r => { const t = await r.text(); const d = t ? JSON.parse(t) : null; if(!r.ok){ const e=new Error(formatError(d)||`${r.status} ${r.statusText}`); e.status=r.status; throw e; } return d; }),
   updateSastRun:       (id,b)     => req(`/api/sast-runs/${id}`, { method:"PATCH", body:b }),
   getSastAnalysis:     (id)       => req(`/api/sast-runs/${id}/analysis`),
   getSastHandoffTargets:(id)      => req(`/api/sast-runs/${id}/handoff-targets`),

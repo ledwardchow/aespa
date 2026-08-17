@@ -546,6 +546,12 @@ def _upgrade_pre_alembic_schema(engine: Engine) -> None:
     _ensure_column(engine, "test_run", "execution_snapshot_json", "TEXT")
     _ensure_column(engine, "test_run", "scan_metrics_json", "TEXT")
     _ensure_llm_provider_config_migration(engine)
+    _ensure_column(
+        engine,
+        "llm_config",
+        "reasoning_effort",
+        "TEXT",
+    )
     _ensure_llm_config_temperature_nullable(engine)
     _ensure_column(
         engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'"
@@ -1418,6 +1424,7 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
                 base_url TEXT,
                 username TEXT,
                 models_json TEXT NOT NULL DEFAULT '[]',
+                model_capabilities_json TEXT NOT NULL DEFAULT '{}',
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
             )
         """)
@@ -1431,6 +1438,16 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
         """)
         )
         conn.commit()
+
+        # The provider split predates the model capability metadata migration.
+        # Add the column before copying profiles so old provider tables can
+        # accept the current schema.
+        _ensure_column(
+            engine,
+            "llm_provider_config",
+            "model_capabilities_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )
 
         applied = conn.execute(
             sql(
@@ -1493,8 +1510,14 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
                 provider_name = f"{profile['name']} {label} Provider".strip()
                 result = conn.execute(
                     sql("""
-                    INSERT INTO llm_provider_config (name, api_format, api_key, base_url, models_json, updated_at)
-                    VALUES (:name, :api_format, :api_key, :base_url, :models_json, COALESCE(:updated_at, datetime('now')))
+                    INSERT INTO llm_provider_config (
+                        name, api_format, api_key, base_url, models_json,
+                        model_capabilities_json, updated_at
+                    )
+                    VALUES (
+                        :name, :api_format, :api_key, :base_url, :models_json,
+                        '{}', COALESCE(:updated_at, datetime('now'))
+                    )
                 """),
                     {
                         "name": provider_name,

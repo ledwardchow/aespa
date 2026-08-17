@@ -153,6 +153,21 @@ export function SpecialistAgentSettings() {
         </label>
 
         <div className="divider" />
+        <div className="form-section-title">Burp Active Scan</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked={form.trigger_specialist_on_burp} onChange={e => upd({
+          trigger_specialist_on_burp: e.target.checked
+        })} />
+          <span>Trigger a specialist agent whenever a Burp active scan is triggered</span>
+        </label>
+        <div className="field-hint" style={{
+        marginTop: "8px"
+      }}>
+          When enabled, a specialist agent is dispatched immediately alongside every Burp active scan,
+          independently investigating the same URL.
+        </div>
+
+        <div className="divider" />
         <div className="row spread">
           <div>{saved && <span className="save-confirm"><IconCheck /> Saved</span>}</div>
           <button type="submit" className="btn" disabled={saving}>{saving ? "Saving…" : "Save Specialist Settings"}</button>
