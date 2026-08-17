@@ -115,6 +115,7 @@ src/aespa/
     ├── recon_summary.py   # Structured attack-surface summary from crawl data
     ├── reporting_debug.py # Reporting-prompt version store & write-up replay harness
     ├── run_cleanup.py     # Scoped database row deletion per run kind
+    ├── sast_export.py     # Complete SAST run export and import bundles
     ├── sast_scanner.py    # SAST agentic loop over uploaded source archives
     ├── scan_completion.py # Completion state policy & bounded stopping logic
     ├── scan_leads.py      # ScanLead CRUD and confidence-threshold filtering
@@ -1078,6 +1079,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/api-test-runs/{id}/traffic` | `api_test_runs.py` | API scan HTTP traffic log |
 | `/api/api-test-runs/{id}/alice/*` | `api_test_runs.py` | ALICE chat for API runs (same surface as web ALICE) |
 | `/api/sast-runs` | `sast_runs.py` | `POST` (multipart) create a **standalone** SAST run from an uploaded source ZIP; `GET` lists all SAST runs |
+| `/api/sast-runs/{id}/export` · `/api/sast-runs/import` | `sast_runs.py` | Export or restore a complete SAST run, including its source ZIP, saved state, leads, logs, and component facts |
 | `/api/api-test-runs/{id}/import-leads` | `sast_runs.py` | Import independent copies from a completed SAST run into an API test run |
 | `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
 | `/api/sast-runs/{id}/leads` | `sast_runs.py` | List the *original* `ScanLead` rows for a SAST run (imported copies excluded) |
@@ -1549,7 +1551,7 @@ The dynamic loop investigates leads via the shared `update_lead` action, which s
 
 The dynamic context includes each lead's ordered reachability, impact, severity reasoning, and dynamic-test objective. The web and API Test Leads use that path to choose focused probes, but must verify every hop against live responses before calling `update_lead`. In SAST Validate, the opening prompt contains only a compact index; `lead_detail` retrieves the complete lead one at a time. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
 
-Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import.
+Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import. The SAST run view also supports a complete JSON run export and restore. That bundle includes the source ZIP, saved phase/coverage/report state, original leads, activity logs, and component facts.
 
 The SAST workspace reads `GET /api/sast-runs/{id}/analysis` for authoritative
 phase state and deterministic coverage receipts. `GET .../handoff-targets` lists
