@@ -347,6 +347,49 @@ def test_validator_prompt_includes_linked_sast_attack_path(monkeypatch):
     assert "not runtime proof" in prompt
 
 
+def test_validator_done_payload_is_recorded_as_the_verdict(monkeypatch):
+    async def fake_loop(**kwargs):
+        accepted, feedback = kwargs["done_check"](
+            {
+                "verdict": "confirmed",
+                "reasoning": "The disproof probes failed and the issue reproduced.",
+                "confidence": "high",
+            },
+            3,
+        )
+        assert accepted is True
+        assert feedback == ""
+
+    monkeypatch.setattr(validator, "_static_attack_path_for_finding", lambda _: {})
+    monkeypatch.setattr(validator.llm_svc, "thinking_agentic_loop", fake_loop)
+    monkeypatch.setattr(validator.events_svc, "emit", lambda *args, **kwargs: None)
+
+    result = asyncio.run(
+        validator._run_adversarial_validator_loop(
+            run_id=1,
+            finding=SimpleNamespace(
+                id=9,
+                title="BOLA",
+                owasp_category="A01",
+                severity="high",
+                affected_url="https://target.test/orders/2",
+                description="Object access is not restricted.",
+                evidence="Another user's order was returned.",
+            ),
+            validator_cfg=SimpleNamespace(max_steps=5, require_concrete_disproof=False),
+            llm_cfg=object(),
+            cred_sessions={},
+            scanner_policy=SimpleNamespace(),
+        )
+    )
+
+    assert result[:3] == (
+        "confirmed",
+        "The disproof probes failed and the issue reproduced.",
+        "high",
+    )
+
+
 # ── Severity threshold ────────────────────────────────────────────────────────
 
 

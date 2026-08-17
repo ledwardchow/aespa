@@ -59,6 +59,7 @@ if (Test-Path "dist\AESPA") { Remove-Item -Recurse -Force "dist\AESPA" }
     --collect-all webview `
     --collect-all alembic `
     --collect-all uvicorn `
+    --collect-all tiktoken `
     --collect-submodules pystray `
     --collect-submodules aespa `
     src\aespa\desktop_win.py

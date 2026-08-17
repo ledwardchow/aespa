@@ -40,7 +40,7 @@ export function runWorkflowStatus(run, opts = {}) {
     key: "stopping",
     label: "stopping Dynamic Scan"
   };
-  if (run.status === "running") return {
+  if (run.status === "running" && run.phase === "crawling") return {
     key: "running",
     label: "crawling"
   };

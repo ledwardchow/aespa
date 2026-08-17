@@ -940,6 +940,22 @@ def _cvss_score(value: float | int | str | None) -> float:
         return 0.0
 
 
+_SEVERITY_SCORE_FALLBACKS = {
+    "critical": 9.5,
+    "high": 8.0,
+    "medium": 6.0,
+    "low": 3.5,
+    "info": 0.0,
+}
+
+
+def _cvss_score_from_severity(value: str | None) -> float:
+    normalized = str(value or "").strip().lower()
+    if normalized == "informational":
+        normalized = "info"
+    return _SEVERITY_SCORE_FALLBACKS.get(normalized, 0.0)
+
+
 def parse_cvss_vector(vector_str: str) -> dict[str, str]:
     metrics = {}
     if not vector_str:
@@ -1018,14 +1034,28 @@ def calculate_cvss_score(metrics: dict[str, str]) -> float:
 
 
 def _calibrate_finding_rating(
-    title: str, cvss_score: float, vector_str: str
+    title: str,
+    cvss_score: float,
+    vector_str: str,
+    severity_hint: str | None = None,
 ) -> tuple[float, str, str]:
     title_lower = (title or "").lower()
+    supplied_vector = bool(vector_str and "CVSS" in vector_str)
 
     if not vector_str or "CVSS" not in vector_str:
         vector_str = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N"
 
     metrics = parse_cvss_vector(vector_str)
+    # write_finding requires severity but keeps CVSS fields optional. Recover a
+    # meaningful rating when the model omitted cvss_score, using a real vector
+    # first and the explicit severity as a conservative fallback second.
+    if cvss_score <= 0:
+        if supplied_vector:
+            derived_score = calculate_cvss_score(metrics)
+            if derived_score > 0:
+                cvss_score = derived_score
+        if cvss_score <= 0:
+            cvss_score = _cvss_score_from_severity(severity_hint)
     is_calibrated = False
 
     # 1. CORS
@@ -1232,7 +1262,7 @@ def calibrate_all_findings_for_run(run_id: int, is_api_run: bool = False) -> Non
             old_vector = f.cvss_vector
 
             new_score, new_severity, new_vector = _calibrate_finding_rating(
-                f.title, old_score, old_vector
+                f.title, old_score, old_vector, f.severity
             )
 
             if (
@@ -2331,12 +2361,13 @@ def _run_thinking_context_tool(
             if is_thinking_running(run_id)
             else _thinking_scan_status.get(run_id, "idle")
         )
+        effective_status = "running" if is_thinking_running(run_id) else run.status
         return {
             "tool": "run_status",
             "run_kind": "web",
             "run_id": run_id,
             "name": run.name,
-            "status": run.status,
+            "status": effective_status,
             "phase": run.phase,
             "outcome": run.outcome,
             "terminal_reason": run.terminal_reason,
@@ -3795,7 +3826,10 @@ def _finding_from_llm(
     title = _as_text(raw.get("title")) or "Untitled finding"
     cvss_vector = _as_text(raw.get("cvss_vector")) or ""
     cvss_score, severity, cvss_vector = _calibrate_finding_rating(
-        title, cvss_score, cvss_vector
+        title,
+        cvss_score,
+        cvss_vector,
+        _as_text(raw.get("severity")),
     )
 
     prebuilt_items = _evidence_items_from_json(str(matched.get("evidence_json") or ""))
@@ -5258,6 +5292,10 @@ async def _run_specialist_agent(
             },
         )
         raise
+    except llm_svc.LLMQuotaPauseError:
+        # A subscription allowance exhaustion must reach the outer scan task so
+        # it can pause the whole run and preserve a resumable checkpoint.
+        raise
     except Exception as exc:
         log.warning("Specialist agent %s error: %s", agent_id, exc)
         events_svc.emit(
@@ -5570,7 +5608,10 @@ async def _persist_dynamic_finding(
                         or ""
                     )
                     cvss_score, severity, cvss_vector = _calibrate_finding_rating(
-                        title, cvss_score, cvss_vector
+                        title,
+                        cvss_score,
+                        cvss_vector,
+                        _as_text(rewritten.get("severity")) or db_finding.severity,
                     )
 
                     db_finding.cvss_score = cvss_score
@@ -5828,6 +5869,8 @@ def get_thinking_scan_status(run_id: int) -> dict:
         run_phase = run.phase if run else None
         run_outcome = run.outcome if run else None
         run_terminal_reason = run.terminal_reason if run else None
+        if run is not None and run.status == "paused" and status == "idle":
+            status = "paused"
     return {
         "status": status,
         "findings_count": findings_count,
@@ -5847,6 +5890,17 @@ async def start_thinking_scan(run_id: int) -> None:
     """Start an LLM-directed (thinking) scan that dynamically decides what to test."""
     if run_id in _thinking_tasks:
         return
+    with Session(get_engine()) as session:
+        run = session.get(TestRun, run_id)
+        if run is not None:
+            run.status = "running"
+            run.phase = "scanning"
+            run.outcome = None
+            run.terminal_reason = None
+            run.completed_at = None
+            run.error_message = None
+            session.add(run)
+            session.commit()
     # Clear any stale checkpoint so the scan starts fresh.
     checkpoint_svc.clear_checkpoint(run_id)
     # Tag this run's events as run_kind='web'.  The scope — snapshotted by
@@ -5876,6 +5930,8 @@ async def start_thinking_scan_resume(run_id: int) -> None:
             run.phase = "scanning"
             run.outcome = None
             run.terminal_reason = None
+            run.completed_at = None
+            run.error_message = None
             session.add(run)
             session.commit()
 
@@ -6031,6 +6087,17 @@ async def _thinking_scan_task(run_id: int) -> None:
     except asyncio.CancelledError:
         log.info("Thinking scan task cancelled for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "stopped"
+        with Session(get_engine()) as _s:
+            _run = _s.get(TestRun, run_id)
+            if _run is not None:
+                _run.status = "stopped"
+                _run.phase = "finished"
+                _run.outcome = "stopped"
+                _run.terminal_reason = "user_stop"
+                _run.completed_at = datetime.now(timezone.utc)
+                _run.error_message = None
+                _s.add(_run)
+                _s.commit()
         _emit_thinking_status(run_id)
         events_svc.emit(
             run_id,
@@ -6054,6 +6121,40 @@ async def _thinking_scan_task(run_id: int) -> None:
             },
         )
         raise
+    except llm_svc.LLMQuotaPauseError as exc:
+        log.warning("Thinking scan paused for run_id=%s: %s", run_id, exc)
+        _thinking_scan_status[run_id] = "paused"
+        _emit_thinking_status(run_id)
+        from aespa.services import run_pause as run_pause_svc
+
+        run_pause_svc.save_pause(
+            "web",
+            run_id,
+            provider="openai_codex",
+            message=str(exc),
+            reset_at=exc.reset_at,
+            snapshot=exc.snapshot,
+            resume_stage="thinking_scan",
+        )
+        with Session(get_engine()) as _s:
+            _run = _s.get(TestRun, run_id)
+            if _run is not None:
+                _run.status = "paused"
+                _run.phase = "scanning"
+                _run.outcome = "paused"
+                _run.terminal_reason = "provider_quota"
+                _run.error_message = str(exc)[:2000]
+                _s.add(_run)
+                _s.commit()
+        events_svc.emit(
+            run_id,
+            {
+                "type": "scan_paused",
+                "reason": "quota",
+                "message": str(exc),
+                "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
+            },
+        )
     except Exception as exc:
         log.exception("Thinking scan task failed for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "failed"
@@ -9214,7 +9315,9 @@ async def _do_agentic_thinking_loop(
                     "inconclusive": "inconclusive",
                 }
                 lead_status = status_map.get(outcome, "inconclusive")
-                resolved_lead_id = int(lead_detail["id"]) if lead_detail else int(lead_id)
+                resolved_lead_id = (
+                    int(lead_detail["id"]) if lead_detail else int(lead_id)
+                )
                 if finding_reference and not finding_id:
                     from aespa.services.references import find_finding_by_reference
 
@@ -9239,19 +9342,29 @@ async def _do_agentic_thinking_loop(
                 )
                 if updated is None:
                     return f"Lead {lead_reference or f'#{lead_id}'} not found."
-                completion_policy.record_progress(f"lead:{resolved_lead_id}:{lead_status}")
+                completion_policy.record_progress(
+                    f"lead:{resolved_lead_id}:{lead_status}"
+                )
                 linked_reference = None
                 if finding_id:
                     with Session(get_engine()) as lookup_session:
                         linked = lookup_session.get(ScanFinding, int(finding_id))
-                        linked_reference = linked.reference if linked is not None else None
+                        linked_reference = (
+                            linked.reference if linked is not None else None
+                        )
                 return (
                     f"Lead {updated.reference or lead_reference or f'#{lead_id}'} updated: outcome={outcome}, status={lead_status}."
-                    + (f" Linked to finding {linked_reference or finding_reference or f'#{finding_id}'}." if finding_id else "")
+                    + (
+                        f" Linked to finding {linked_reference or finding_reference or f'#{finding_id}'}."
+                        if finding_id
+                        else ""
+                    )
                 )
             except Exception as _ul_exc:
                 log.warning("update_lead error: %s", _ul_exc)
-                return f"Error updating lead {lead_reference or f'#{lead_id}'}: {_ul_exc}"
+                return (
+                    f"Error updating lead {lead_reference or f'#{lead_id}'}: {_ul_exc}"
+                )
 
         # ── write_finding ─────────────────────────────────────────────────────
         if tool_name == "write_finding":
@@ -9296,7 +9409,8 @@ async def _do_agentic_thinking_loop(
                 findings_snapshot.append(
                     {
                         "id": saved.id,
-                        "reference": saved.reference or (f"#{saved.id}" if saved.id is not None else ""),
+                        "reference": saved.reference
+                        or (f"#{saved.id}" if saved.id is not None else ""),
                         "title": saved.title,
                         "severity": saved.severity,
                         "owasp": saved.owasp_category,
@@ -9373,12 +9487,14 @@ async def _do_agentic_thinking_loop(
                         f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
                         f"{_fw_title}"
                     ),
-                        "data": {
-                            "step": step,
-                            "affected_url": affected,
-                            "finding_id": saved.id if saved is not None else None,
-                            "finding_reference": saved.reference if saved is not None else None,
-                            "note": note,
+                    "data": {
+                        "step": step,
+                        "affected_url": affected,
+                        "finding_id": saved.id if saved is not None else None,
+                        "finding_reference": saved.reference
+                        if saved is not None
+                        else None,
+                        "note": note,
                     },
                 },
             )

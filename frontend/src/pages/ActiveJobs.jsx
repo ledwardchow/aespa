@@ -20,6 +20,18 @@ function activeJobProgress(job) {
   if (job.pages_done !== null && job.pages_done !== undefined) return job.pages_done;
   return "—";
 }
+function activeJobScopeName(job) {
+  if (job.run_type === "campaign") return job.application_name || `Application #${job.application_id}`;
+  if (job.run_type === "api") return job.collection_name || `API #${job.collection_id}`;
+  if (job.run_type === "sast") return job.collection_id ? (job.collection_name || `API #${job.collection_id}`) : job.run_name;
+  return job.site_name || `Site #${job.site_id}`;
+}
+function activeJobScopeLink(job) {
+  if (job.run_type === "campaign") return `#/applications/${job.application_id}/campaigns/${job.run_id}`;
+  if (job.run_type === "api") return `#/apis/${job.collection_id}`;
+  if (job.run_type === "sast") return job.collection_id ? `#/apis/${job.collection_id}` : `#/sast-runs/${job.run_id}/progress`;
+  return `#/sites/${job.site_id}`;
+}
 export function ActiveJobsPage() {
   const [jobs, setJobs] = useState(null);
   const [error, setError] = useState(null);
@@ -48,8 +60,8 @@ export function ActiveJobsPage() {
       let valB = b[sortField];
 
       if (sortField === "site_name") {
-        valA = a.site_name || a.collection_name || a.application_name || "";
-        valB = b.site_name || b.collection_name || b.application_name || "";
+        valA = activeJobScopeName(a);
+        valB = activeJobScopeName(b);
       } else if (sortField === "pages_done") {
         valA = a.pages_done || 0;
         valB = b.pages_done || 0;
@@ -164,7 +176,7 @@ export function ActiveJobsPage() {
             <thead>
               <tr>
                 <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("run_name")}>Run {sortArrow("run_name")}</th>
-                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("site_name")}>Target {sortArrow("site_name")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("site_name")}>App / API / SAST {sortArrow("site_name")}</th>
                 <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("job_type")}>Job {sortArrow("job_type")}</th>
                 <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("status")}>Status {sortArrow("status")}</th>
                 <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("pages_done")}>Progress {sortArrow("pages_done")}</th>
@@ -192,11 +204,7 @@ export function ActiveJobsPage() {
                     marginTop: 3
                   }}>{truncUrl(j.current_url, 54)}</div>}
                 </td>
-                <td>{j.run_type === "campaign"
-                  ? <a href={`#/applications/${j.application_id}/campaigns/${j.run_id}`}>{j.application_name}</a>
-                  : j.run_type === "sast" || j.run_type === "api"
-                    ? <a href={`#/apis/${j.collection_id}`}>{j.collection_name}</a>
-                    : <a href={`#/sites/${j.site_id}`}>{j.site_name}</a>}</td>
+                <td><a href={activeJobScopeLink(j)}>{activeJobScopeName(j)}</a></td>
                 <td>{j.job_type}</td>
                 <td>{activeJobBadge(j)}</td>
                 <td>{activeJobProgress(j)}</td>

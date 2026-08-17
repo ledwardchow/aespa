@@ -75,6 +75,32 @@ _PHASES = ("scope", "discovery", "validation", "attack_path", "report")
 _SAST_VALIDATOR_MAX_CONCURRENT = 4
 
 
+def _notify_campaign_source_started(sast_run_id: int) -> None:
+    """Keep a campaign child in sync when the SAST page starts its scan."""
+    try:
+        from aespa.services import campaigns as campaigns_svc
+
+        campaigns_svc.notify_source_run_started(sast_run_id)
+    except Exception:  # noqa: BLE001 - a campaign sync must not stop SAST
+        log.exception(
+            "Could not sync campaign source member for started SAST run %s",
+            sast_run_id,
+        )
+
+
+def _notify_campaign_source_finished(sast_run_id: int, status: str) -> None:
+    """Keep a campaign child in sync when its SAST task reaches a terminal state."""
+    try:
+        from aespa.services import campaigns as campaigns_svc
+
+        campaigns_svc.notify_source_run_finished(sast_run_id, status)
+    except Exception:  # noqa: BLE001 - a campaign sync must not stop SAST
+        log.exception(
+            "Could not sync campaign source member for finished SAST run %s",
+            sast_run_id,
+        )
+
+
 def _empty_phase_state() -> dict[str, dict]:
     return {
         phase: {"status": "pending", "message": "", "data": {}} for phase in _PHASES
@@ -1038,6 +1064,8 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                     _raise_if_stopped()
                 except asyncio.CancelledError:
                     raise
+                except llm_svc.LLMQuotaPauseError:
+                    raise
                 except Exception as exc:
                     log.exception(
                         "SAST validator failed: sast_run_id=%s candidate_id=%s",
@@ -1359,6 +1387,8 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 s.add(r)
                 s.commit()
 
+        _notify_campaign_source_finished(sast_run_id, "completed")
+
         # Deterministic, bounded interface-fact extraction (routes, outbound
         # calls, auth boundaries, queues, datastores, framework markers).
         # Runs for every SAST run — component_id stays NULL unless this run
@@ -1387,6 +1417,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                     s.add(r)
                     s.commit()
         _update_sast_run_status(sast_run_id, "cancelled")
+        _notify_campaign_source_finished(sast_run_id, "cancelled")
         _set_phase(
             sast_run_id,
             current_phase,
@@ -1403,6 +1434,38 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 "current_task": "Scan stopped",
                 "outcome": "cancelled",
                 "_persist": True,
+            },
+        )
+    except llm_svc.LLMQuotaPauseError as exc:
+        log.warning("SAST scan paused: sast_run_id=%s: %s", sast_run_id, exc)
+        from aespa.services import run_pause as run_pause_svc
+
+        if run is not None:
+            with Session(get_engine()) as s:
+                current = s.get(SastRun, sast_run_id)
+                if current is not None:
+                    current.status = "paused"
+                    current.error_message = str(exc)[:2000]
+                    current.updated_at = datetime.now(_UTC)
+                    s.add(current)
+                    s.commit()
+        run_pause_svc.save_pause(
+            "sast",
+            sast_run_id,
+            provider="openai_codex",
+            message=str(exc),
+            reset_at=exc.reset_at,
+            snapshot=exc.snapshot,
+            resume_stage=current_phase,
+        )
+        _set_phase(sast_run_id, current_phase, "paused", str(exc))
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "scan_paused",
+                "reason": "quota",
+                "message": str(exc),
+                "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
             },
         )
     except Exception as exc:
@@ -1426,6 +1489,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             except Exception:
                 pass
         _update_sast_run_status(sast_run_id, "failed", str(exc))
+        _notify_campaign_source_finished(sast_run_id, "failed")
         _set_phase(
             sast_run_id,
             current_phase,
@@ -1510,7 +1574,7 @@ def create_sast_run(
     return run
 
 
-async def start_sast_scan(sast_run_id: int) -> None:
+async def start_sast_scan(sast_run_id: int, *, resume: bool = False) -> None:
     """Start a background SAST scan task for an existing SastRun."""
     if sast_run_id in _sast_tasks:
         log.info("start_sast_scan: already running for sast_run_id=%s", sast_run_id)
@@ -1536,13 +1600,14 @@ async def start_sast_scan(sast_run_id: int) -> None:
                 if run is None:
                     raise ValueError(f"SastRun {sast_run_id} not found")
                 run.status = "scanning"
-                run.started_at = datetime.now(_UTC)
+                run.started_at = run.started_at or datetime.now(_UTC)
                 run.completed_at = None
                 run.error_message = None
-                run.leads_count = 0
-                run.phase_state_json = json.dumps(_empty_phase_state())
-                run.coverage_json = None
-                run.report_json = None
+                if not resume:
+                    run.leads_count = 0
+                    run.phase_state_json = json.dumps(_empty_phase_state())
+                    run.coverage_json = None
+                    run.report_json = None
                 run.updated_at = datetime.now(_UTC)
                 s.add(run)
                 for lead in s.exec(
@@ -1575,6 +1640,7 @@ async def start_sast_scan(sast_run_id: int) -> None:
                 name=f"sast-scan-{sast_run_id}",
             )
             _sast_tasks[sast_run_id] = task
+            _notify_campaign_source_started(sast_run_id)
     except Exception:
         _sast_workspace_leases.pop(sast_run_id, None)
         lease.release()

@@ -8,9 +8,18 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.responses import Response as HTTPResponse
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -30,7 +39,7 @@ from aespa.models import (
 from aespa.schemas import SastRunSummary, SastRunUpdate, ScanLeadOut
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
-from aespa.services import run_cleanup
+from aespa.services import run_cleanup, sast_export
 from aespa.services.references import ensure_finding_reference, ensure_lead_reference
 
 _UTC = timezone.utc
@@ -158,6 +167,52 @@ def list_all_sast_runs(session: Session = Depends(get_session)) -> list[SastRunS
     return [_to_summary(r) for r in runs]
 
 
+@router.get("/api/sast-runs/{run_id}/export")
+def export_sast_run(
+    run_id: int, session: Session = Depends(get_session)
+) -> JSONResponse:
+    """Download a complete, portable SAST run bundle."""
+    try:
+        bundle = sast_export.export_sast_run(session, run_id)
+    except sast_export.SastExportError as exc:
+        detail = str(exc)
+        code = 404 if "does not exist" in detail else 400
+        raise HTTPException(status_code=code, detail=detail) from exc
+    name = bundle["sast_run"].get("name") or f"sast-run-{run_id}"
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+    return JSONResponse(
+        content=bundle,
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe}.aespa-sast.json"'
+        },
+    )
+
+
+@router.post(
+    "/api/sast-runs/import",
+    response_model=SastRunSummary,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_sast_run(
+    request: Request, session: Session = Depends(get_session)
+) -> SastRunSummary:
+    """Restore a complete SAST run from a bundle produced by the export route."""
+    try:
+        bundle = json.loads(await request.body())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid JSON body: {exc}",
+        ) from exc
+    try:
+        run = sast_export.import_sast_run(session, bundle)
+    except sast_export.SastExportError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return _to_summary(run)
+
+
 # ── Single SAST run ────────────────────────────────────────────────────────────
 
 
@@ -258,6 +313,33 @@ async def stop_sast_scan(
 
     stopped = await sast_scanner.stop_sast_scan(run_id)
     return {"ok": True, "stopped": stopped}
+
+
+@router.post("/api/sast-runs/{run_id}/scan/resume")
+async def resume_sast_scan(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Manually resume a quota-paused SAST scan without clearing its state."""
+    from aespa.services import sast_scanner
+
+    _get_run_or_404(session, run_id)
+    from aespa.services import run_pause as run_pause_svc
+
+    run = session.get(SastRun, run_id)
+    pause = run_pause_svc.get_pause("sast", run_id)
+    if run is None or pause is None or run.status != "paused":
+        raise HTTPException(status_code=409, detail="SAST scan is not paused")
+    if sast_scanner.is_sast_scan_running(run_id):
+        raise HTTPException(status_code=409, detail="SAST scan is already running")
+    if pause.reset_at and pause.reset_at > datetime.now(_UTC):
+        raise HTTPException(
+            status_code=409,
+            detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
+        )
+    await sast_scanner.start_sast_scan(run_id, resume=True)
+    run_pause_svc.clear_pause("sast", run_id)
+    return sast_scanner.get_sast_status(run_id)
 
 
 @router.get("/api/sast-runs/{run_id}/scan/status")
@@ -430,7 +512,9 @@ def get_sast_leads(
     session.commit()
     return [
         ScanLeadOut.model_validate(lead).model_copy(
-            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+            update={
+                "linked_finding_reference": finding_refs.get(lead.linked_finding_id)
+            }
         )
         for lead in leads
     ]
@@ -559,7 +643,9 @@ def get_api_run_leads(
     session.commit()
     return [
         ScanLeadOut.model_validate(lead).model_copy(
-            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+            update={
+                "linked_finding_reference": finding_refs.get(lead.linked_finding_id)
+            }
         )
         for lead in leads
     ]

@@ -208,7 +208,9 @@ def test_resolver_preserves_approved_path_and_uses_only_live_evidence():
         approved,
         {
             "crawl_status": "completed",
-            "pages": [{"id": 4, "url": "https://app.test/checkout", "route": "/checkout"}],
+            "pages": [
+                {"id": 4, "url": "https://app.test/checkout", "route": "/checkout"}
+            ],
             "actions": [
                 {
                     "id": 8,
@@ -367,8 +369,8 @@ def test_crawl_discovered_path_is_saved_as_unapproved_proposal(isolated_db_engin
                 {
                     "id": 3,
                     "page_id": 2,
-                    "method": "GET",
-                    "url": "https://app.test/api/cart",
+                    "method": "POST",
+                    "url": "https://app.test/api/orders",
                     "fields": ["coupon"],
                 }
             ],

@@ -41,18 +41,20 @@ export function CampaignRunsTab({ applicationId, campaign, error, resumeSource, 
       }
       const results = await Promise.all(requests);
       if (cancelled) return;
-      const totals = { total_input: 0, total_output: 0, total_cache_read: 0, total_cache_write: 0, total_ai_credits: 0, total_factory_credits: 0, total_premium_requests: 0, total_requests: 0, by_model: {} };
+      const totals = { total_input: 0, total_output: 0, total_cache_read: 0, total_cache_write: 0, total_ai_credits: 0, total_factory_credits: 0, total_premium_requests: 0, total_requests: 0, estimated_token_cost_usd: 0, estimated_credit_cost_usd: 0, estimated_total_cost_usd: 0, estimated_cost_available: false, by_model: {} };
       for (const r of results) {
         if (!r) continue;
         for (const key of Object.keys(totals)) {
           if (key === "by_model") continue;
-          totals[key] += r[key] || 0;
+          if (key === "estimated_cost_available") totals[key] = totals[key] || r[key];
+          else totals[key] += r[key] || 0;
         }
         for (const [model, usage] of Object.entries(r.by_model || {})) {
           const aggregate = totals.by_model[model] ||= { provider: usage.provider };
-          for (const key of ["input", "output", "cache_read", "cache_write", "ai_credits", "factory_credits", "premium_requests", "requests"]) {
+          for (const key of ["input", "output", "cache_read", "cache_write", "ai_credits", "factory_credits", "premium_requests", "requests", "estimated_token_cost_usd", "estimated_credit_cost_usd", "estimated_total_cost_usd"]) {
             aggregate[key] = (aggregate[key] || 0) + (usage[key] || 0);
           }
+          aggregate.estimated_cost_available = aggregate.estimated_cost_available || usage.estimated_cost_available;
         }
       }
       setTokenUsage(totals);

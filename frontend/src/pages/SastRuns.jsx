@@ -119,6 +119,8 @@ export function SastRunsListPage() {
   const [runs, setRuns] = useState(null);
   const [profiles, setProfiles] = useState([]);
   const [error, setError] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const importInputRef = useRef(null);
   const [sortField, setSortField] = useState("started_at");
   const [sortDir, setSortDir] = useState("desc");
 
@@ -139,6 +141,23 @@ export function SastRunsListPage() {
       .then(p => setProfiles(p || []))
       .catch(e => setError(e.message));
   }, []);
+
+  const onImport = async event => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = "";
+    if (!file) return;
+    setImporting(true);
+    setError(null);
+    try {
+      const restored = await api.importSastRun(await file.text());
+      await loadRuns();
+      nav(`#/sast-runs/${restored.id}/coverage`);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const toggleSort = (field) => {
     if (sortField === field) {
@@ -183,6 +202,10 @@ export function SastRunsListPage() {
 
   return <>
     <PageHeader title="SAST Scans" actions={<>
+        <input ref={importInputRef} type="file" accept=".json,.aespa-sast.json" style={{ display: "none" }} onChange={onImport} />
+        <button className="btn ghost sm" disabled={importing} onClick={() => importInputRef.current?.click()}>
+          {importing ? "Importing…" : "Import SAST Run"}
+        </button>
         <button className="btn primary sm" onClick={() => nav("#/sast-runs/new")}>
           New SAST Scan
         </button>

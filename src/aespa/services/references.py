@@ -109,9 +109,7 @@ def ensure_lead_reference(session: Session, lead: ScanLead) -> str:
     return lead.public_reference
 
 
-def ensure_lead_references(
-    session: Session, leads: Iterable[ScanLead]
-) -> None:
+def ensure_lead_references(session: Session, leads: Iterable[ScanLead]) -> None:
     """Backfill a batch of leads with bounded database work.
 
     Read-heavy list endpoints often return many leads from one run. Allocate
@@ -126,7 +124,9 @@ def ensure_lead_references(
     owners = {lead_owner(lead) for lead in missing}
     if None in owners:
         raise ValueError("A lead is missing its reference owner")
-    owner_values = [(owner_type, owner_id) for owner_type, owner_id in owners if owner_type]
+    owner_values = [
+        (owner_type, owner_id) for owner_type, owner_id in owners if owner_type
+    ]
     owner_types = {owner_type for owner_type, _ in owner_values}
     owner_ids = {owner_id for _, owner_id in owner_values}
     namespaces = session.exec(
