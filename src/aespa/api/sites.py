@@ -130,10 +130,13 @@ def update_scope_hosts(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Site not found"
         )
-    site.scope_hosts = json.dumps(payload.scope_hosts)
+    from aespa.services.scope import normalize_scope_entries
+
+    normalized = normalize_scope_entries(payload.scope_hosts, default_url=site.base_url)
+    site.scope_hosts = json.dumps(normalized)
     session.add(site)
     session.commit()
-    return {"scope_hosts": payload.scope_hosts}
+    return {"scope_hosts": normalized}
 
 
 @router.post(

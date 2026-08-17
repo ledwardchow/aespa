@@ -76,7 +76,7 @@ def _get_alembic_config(engine: Engine) -> Config:
     return cfg
 
 
-def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> None:
+def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> bool:
     """Give an unversioned database a safe starting point.
 
     A pre-Alembic database (has tables, no ``alembic_version`` row) needs a
@@ -103,27 +103,29 @@ def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> None:
         it is genuinely at head already. Stamp there directly; replaying
         those migrations would try to create tables that already exist.
     """
-    try:
-        inspector = inspect(engine)
-        tables = set(inspector.get_table_names())
-        if (
-            "site" in tables or "test_run" in tables
-        ) and "alembic_version" not in tables:
-            if "run_identity" not in tables:
-                command.stamp(alembic_cfg, "d2f9a6b1c340")
-            elif "assessment_campaign" in tables:
-                command.stamp(alembic_cfg, "head")
-            else:
-                command.stamp(alembic_cfg, _LAST_PRE_APPLICATIONS_REVISION)
-    except Exception:
-        pass
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    is_pre_alembic = (
+        "site" in tables or "test_run" in tables
+    ) and "alembic_version" not in tables
+    if not is_pre_alembic:
+        return False
+
+    if "run_identity" not in tables:
+        command.stamp(alembic_cfg, "d2f9a6b1c340")
+    elif "assessment_campaign" in tables:
+        command.stamp(alembic_cfg, "head")
+    else:
+        command.stamp(alembic_cfg, _LAST_PRE_APPLICATIONS_REVISION)
+    return True
 
 
-def run_migrations(engine: Engine | None = None) -> None:
+def run_migrations(engine: Engine | None = None) -> bool:
+    """Upgrade with Alembic and report whether this was a pre-Alembic database."""
     if engine is None:
         engine = get_engine()
     alembic_cfg = _get_alembic_config(engine)
-    _stamp_legacy_db_if_needed(engine, alembic_cfg)
+    is_pre_alembic = _stamp_legacy_db_if_needed(engine, alembic_cfg)
     command.upgrade(alembic_cfg, "head")
     if engine.dialect.name == "sqlite" and getattr(
         engine, "_aespa_enforce_foreign_keys", False
@@ -134,6 +136,7 @@ def run_migrations(engine: Engine | None = None) -> None:
         with engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA foreign_keys=ON")
             conn.commit()
+    return is_pre_alembic
 
 
 def init_db() -> None:
@@ -440,8 +443,8 @@ def _cleanup_orphaned_sast_extractions() -> None:
         pass  # never block startup on a best-effort cleanup
 
 
-def _migrate_legacy_columns(engine: Engine) -> None:
-    """Apply runtime startup backfills after Alembic has run."""
+def _upgrade_pre_alembic_schema(engine: Engine) -> None:
+    """Bring an unversioned, pre-Alembic database up to the Alembic baseline."""
     _ensure_column(
         engine,
         "global_http_header_config",
@@ -543,6 +546,12 @@ def _migrate_legacy_columns(engine: Engine) -> None:
     _ensure_column(engine, "test_run", "execution_snapshot_json", "TEXT")
     _ensure_column(engine, "test_run", "scan_metrics_json", "TEXT")
     _ensure_llm_provider_config_migration(engine)
+    _ensure_column(
+        engine,
+        "llm_config",
+        "reasoning_effort",
+        "TEXT",
+    )
     _ensure_llm_config_temperature_nullable(engine)
     _ensure_column(
         engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'"
@@ -620,8 +629,6 @@ def _migrate_legacy_columns(engine: Engine) -> None:
     _ensure_column(engine, "scanner_session", "account_label", "TEXT")
     _backfill_run_kind(engine)
     _backfill_scanner_session_account_labels(engine)
-    _reset_orphaned_validating_findings(engine)
-    _reset_orphaned_running_runs(engine)
     _normalize_threshold_skipped_findings(engine)
     with engine.connect() as conn:
         conn.execute(
@@ -1372,11 +1379,6 @@ def _migrate_legacy_columns(engine: Engine) -> None:
     _ensure_browser_debug_config_table(engine)
     _ensure_llm_statistics_tables(engine)
 
-    # Orphan-extraction sweep last: it queries SastRun via the ORM, so it must
-    # run only after every SastRun column above has been added — otherwise the
-    # first post-upgrade startup raises "no such column" and silently skips.
-    _cleanup_orphaned_sast_extractions()
-
 
 def _ensure_llm_statistics_tables(engine: Engine) -> None:
     from sqlmodel import SQLModel
@@ -1422,6 +1424,7 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
                 base_url TEXT,
                 username TEXT,
                 models_json TEXT NOT NULL DEFAULT '[]',
+                model_capabilities_json TEXT NOT NULL DEFAULT '{}',
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
             )
         """)
@@ -1435,6 +1438,16 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
         """)
         )
         conn.commit()
+
+        # The provider split predates the model capability metadata migration.
+        # Add the column before copying profiles so old provider tables can
+        # accept the current schema.
+        _ensure_column(
+            engine,
+            "llm_provider_config",
+            "model_capabilities_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )
 
         applied = conn.execute(
             sql(
@@ -1497,8 +1510,14 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
                 provider_name = f"{profile['name']} {label} Provider".strip()
                 result = conn.execute(
                     sql("""
-                    INSERT INTO llm_provider_config (name, api_format, api_key, base_url, models_json, updated_at)
-                    VALUES (:name, :api_format, :api_key, :base_url, :models_json, COALESCE(:updated_at, datetime('now')))
+                    INSERT INTO llm_provider_config (
+                        name, api_format, api_key, base_url, models_json,
+                        model_capabilities_json, updated_at
+                    )
+                    VALUES (
+                        :name, :api_format, :api_key, :base_url, :models_json,
+                        '{}', COALESCE(:updated_at, datetime('now'))
+                    )
                 """),
                     {
                         "name": provider_name,
@@ -2037,22 +2056,27 @@ def _ensure_llm_config_temperature_nullable(engine: Engine) -> None:
 
 
 def _migrate(engine: Engine) -> None:
-    """Apply schema migrations and legacy startup repairs."""
-    run_migrations(engine)
+    """Apply Alembic migrations, then reconcile state left by an interrupted run."""
+    is_pre_alembic = run_migrations(engine)
     enforce_foreign_keys = engine.dialect.name == "sqlite" and getattr(
         engine, "_aespa_enforce_foreign_keys", False
     )
-    if enforce_foreign_keys:
-        with engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
-            conn.commit()
-    try:
-        _migrate_legacy_columns(engine)
-    finally:
+    if is_pre_alembic:
         if enforce_foreign_keys:
             with engine.connect() as conn:
-                conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+                conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
                 conn.commit()
+        try:
+            _upgrade_pre_alembic_schema(engine)
+        finally:
+            if enforce_foreign_keys:
+                with engine.connect() as conn:
+                    conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+                    conn.commit()
+
+    _reset_orphaned_validating_findings(engine)
+    _reset_orphaned_running_runs(engine)
+    _cleanup_orphaned_sast_extractions()
 
 
 def get_session() -> Iterator[Session]:

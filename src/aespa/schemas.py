@@ -456,6 +456,8 @@ LLMProviderAPILiteral = Literal[
     "anthropic",
     "factory_droid",
     "github_copilot",
+    "openai_codex",
+    "google_antigravity",
     "openai",
     "openai_compatible",
     "openrouter",
@@ -470,6 +472,21 @@ LLMProviderAPILiteral = Literal[
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
     "factory_droid": [],
+    "openai_codex": ["auto"],
+    "google_antigravity": [
+        "auto",
+        "Gemini 3.7 Flash (High)",
+        "Gemini 3.7 Flash (Medium)",
+        "Gemini 3.7 Flash (Low)",
+        "Gemini 3.6 Flash (High)",
+        "Gemini 3.6 Flash (Medium)",
+        "Gemini 3.5 Flash (High)",
+        "Gemini 3.1 Pro (High)",
+        "Gemini 3.1 Pro (Low)",
+        "Claude Sonnet 4.6 (Thinking)",
+        "Claude Opus 4.6 (Thinking)",
+        "GPT-OSS 120B (Medium)",
+    ],
     "github_copilot": [
         "auto",
         "gpt-5.6-luna",
@@ -581,6 +598,7 @@ class LLMProviderConfigIn(BaseModel):
     username: str | None = Field(default=None, max_length=255)
     project_id: str | None = Field(default=None, max_length=120)
     models: list[str] = Field(default_factory=list, min_length=1)
+    model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     api_key: str | None = None
     max_tpm: int | None = Field(default=None, ge=1)
     max_rpm: int | None = Field(default=None, ge=1)
@@ -612,6 +630,15 @@ class LLMProviderConfigIn(BaseModel):
             raise ValueError("base_url must start with http:// or https://")
         return v
 
+    @model_validator(mode="after")
+    def _validate_codex_connection(self) -> "LLMProviderConfigIn":
+        if self.api_format == "openai_codex":
+            self.api_key = None
+            self.base_url = None
+            self.username = None
+            self.project_id = None
+        return self
+
 
 class LLMProviderConfigOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -623,6 +650,7 @@ class LLMProviderConfigOut(BaseModel):
     username: str | None = None
     project_id: str | None = None
     models: list[str] = Field(default_factory=list)
+    model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key: str | None = None
     max_tpm: int | None = None
@@ -633,19 +661,43 @@ class LLMModelDiscoveryRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     api_format: str
+    provider_id: int | None = None
+    models: list[str] = Field(default_factory=list)
     api_key: str | None = None
     base_url: str | None = None
     username: str | None = None
 
 
+class LLMModelDiscoveryOut(BaseModel):
+    models: list[str] = Field(default_factory=list)
+    capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class CodexIntegrationConfigIn(BaseModel):
+    executable_path: str | None = Field(default=None, max_length=1000)
+
+
+class CodexIntegrationConfigOut(BaseModel):
+    executable_path: str | None = None
+    detected_executable: str | None = None
+    installed: bool = False
+    version: str | None = None
+    running: bool = False
+    compatible: bool = False
+    account: dict[str, Any] | None = None
+    rate_limits: dict[str, Any] | None = None
+    error: str | None = None
+
+
 class LLMConfigIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    name: str = Field(default="Default", min_length=1, max_length=120)
+    name: Optional[str] = Field(default=None, max_length=120)
     provider_id: int
     model: str = Field(min_length=1)
     max_tokens: int = Field(default=70000, ge=1, le=256000)
     temperature: Optional[float] = Field(default=None)
+    reasoning_effort: str | None = Field(default=None, max_length=32)
     use_vision: bool = False
     force_tool_choice: bool = False
 
@@ -674,6 +726,7 @@ class LLMConfigOut(BaseModel):
     model: str
     max_tokens: int
     temperature: Optional[float] = None
+    reasoning_effort: str | None = None
     use_vision: bool
     force_tool_choice: bool
     updated_at: datetime
@@ -1082,6 +1135,7 @@ class LLMExportProviderItem(BaseModel):
     username: str | None = None
     project_id: str | None = None
     models: list[str]
+    model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key: str | None = None
     max_tpm: int | None = None
@@ -1094,6 +1148,7 @@ class LLMExportProfileItem(BaseModel):
     model: str
     max_tokens: int = 70000
     temperature: Optional[float] = None
+    reasoning_effort: str | None = None
     use_vision: bool = False
     force_tool_choice: bool = False
     is_active: bool = False

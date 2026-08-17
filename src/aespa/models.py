@@ -91,7 +91,7 @@ class Site(SQLModel, table=True):
     login_url: Optional[str] = Field(default=None)
     notes: Optional[str] = Field(default=None)
     scan_guidance: Optional[str] = Field(default=None)  # Test Lead guidance
-    scope_hosts: Optional[str] = Field(default=None)  # JSON list of in-scope hostnames
+    scope_hosts: Optional[str] = Field(default=None)  # JSON list of host:port authorities
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -143,7 +143,7 @@ class ApiCollection(SQLModel, table=True):
     servers: Optional[str] = Field(
         default=None
     )  # JSON list of additional server base URLs
-    scope_hosts: Optional[str] = Field(default=None)  # JSON list of in-scope hostnames
+    scope_hosts: Optional[str] = Field(default=None)  # JSON list of host:port authorities
     auth_summary_json: Optional[str] = Field(
         default=None
     )  # security schemes from parsed specs
@@ -255,7 +255,9 @@ class ApiTestRun(SQLModel, table=True):
     id: Optional[int] = Field(default=None, sa_column=_run_identity_pk())
     collection_id: int = Field(foreign_key="api_collection.id", index=True)
     name: str
-    status: str = Field(default="pending")  # pending|running|completed|incomplete|failed|cancelled
+    status: str = Field(
+        default="pending"
+    )  # pending|running|completed|incomplete|failed|cancelled
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     # Per-run model-mixing profile (null = use the globally active profile).
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
@@ -319,6 +321,8 @@ class LLMProviderAPI(str, Enum):
     anthropic = "anthropic"
     factory_droid = "factory_droid"
     github_copilot = "github_copilot"
+    openai_codex = "openai_codex"
+    google_antigravity = "google_antigravity"
     openai = "openai"
     openai_compatible = "openai_compatible"
     openrouter = "openrouter"
@@ -347,8 +351,25 @@ class LLMProviderConfig(SQLModel, table=True):
     # cost/usage attribution. Ignored by other provider formats.
     project_id: Optional[str] = Field(default=None)
     models_json: str = Field(default="[]")
+    # Per-model capability metadata discovered from the provider or OpenRouter.
+    # Kept as JSON so providers can add metadata without another migration.
+    model_capabilities_json: str = Field(default="{}")
     max_tpm: Optional[int] = Field(default=None, nullable=True)
     max_rpm: Optional[int] = Field(default=None, nullable=True)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class CodexIntegrationConfig(SQLModel, table=True):
+    """Global local Codex CLI setting.
+
+    Codex owns the ChatGPT credentials in its normal CLI home. AESPA only
+    remembers an optional executable path.
+    """
+
+    __tablename__ = "codex_integration_config"
+
+    id: Optional[int] = Field(default=1, primary_key=True)
+    executable_path: Optional[str] = Field(default=None)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -455,6 +476,8 @@ class LLMConfig(SQLModel, table=True):
     model: str = Field(default="claude-opus-4-5")
     max_tokens: int = Field(default=70000)
     temperature: Optional[float] = Field(default=None)
+    # Explicit reasoning/thinking level. None means provider default (legacy behavior).
+    reasoning_effort: Optional[str] = Field(default=None, nullable=True)
     # Whether to include page screenshots in LLM prompts (requires vision model)
     use_vision: bool = Field(default=False)
     # Whether to force tool choice using the wire format tool_choice: required/any
@@ -622,7 +645,7 @@ class AdversarialValidatorConfig(SQLModel, table=True):
     max_steps: int = Field(default=20)
     # Skip validation for findings below this severity: critical|high|medium|low|info
     min_severity: str = Field(default="low")
-    # Maximum simultaneous validators for the end-of-scan Reporting batch.
+    # Maximum simultaneous validators for manual and end-of-scan validation.
     end_scan_max_concurrent: int = Field(default=4)
     # When True, automatically validate each finding immediately after it is written
     # during a dynamic scan.  When False, validation is only triggered manually.
@@ -697,6 +720,7 @@ class TestRunStatus(str, Enum):
     incomplete = "incomplete"
     failed = "failed"
     stopped = "stopped"
+    paused = "paused"
 
 
 class TestRun(SQLModel, table=True):
@@ -739,7 +763,7 @@ class TestRun(SQLModel, table=True):
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
     # Cached JSON attack-surface/coverage projection; the UI rebuilds it live.
     recon_summary: Optional[str] = Field(default=None)
-    # Persisted token usage: {model: {input, output, cache_read, cache_write}}
+    # Persisted token usage, including per-model estimated costs.
     token_usage_json: Optional[str] = Field(default=None)
     # Reproducibility metadata captured when the dynamic scan starts. Secrets and
     # provider connection details are intentionally excluded.
@@ -1196,6 +1220,24 @@ class ScanCheckpoint(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class RunPause(SQLModel, table=True):
+    """A manually resumable pause, usually caused by a subscription quota."""
+
+    __tablename__ = "run_pause"
+    __table_args__ = (UniqueConstraint("run_kind", "run_id", name="uq_run_pause"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_kind: str = Field(index=True)  # web | api | sast | crawl
+    run_id: int = Field(index=True)
+    provider: str = Field(default="")
+    reason: str = Field(default="quota")
+    reset_at: Optional[datetime] = Field(default=None)
+    message: str = Field(default="")
+    snapshot_json: str = Field(default="{}")
+    resume_stage: Optional[str] = Field(default=None)
+    paused_at: datetime = Field(default_factory=_utcnow)
+
+
 class AliceChatSession(SQLModel, table=True):
     """One ALICE chat tab per test run (many per run)."""
 
@@ -1479,7 +1521,9 @@ class CampaignSourceMember(SQLModel, table=True):
     component_id: int = Field(foreign_key="application_component.id", index=True)
     snapshot_id: int = Field(foreign_key="component_snapshot.id", index=True)
     sast_run_id: Optional[int] = Field(default=None, index=True)
-    status: str = Field(default="pending")  # pending|running|completed|incomplete|failed|skipped
+    status: str = Field(
+        default="pending"
+    )  # pending|running|completed|incomplete|failed|skipped
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -1498,7 +1542,9 @@ class CampaignTargetMember(SQLModel, table=True):
     target_type: str = Field(index=True)  # "site" | "api_collection"
     test_run_id: Optional[int] = Field(default=None, index=True)  # web child
     api_test_run_id: Optional[int] = Field(default=None, index=True)  # api child
-    status: str = Field(default="pending")  # pending|running|completed|incomplete|failed|skipped
+    status: str = Field(
+        default="pending"
+    )  # pending|running|completed|incomplete|failed|skipped
     status_message: Optional[str] = Field(default=None)
     validation_summary_json: str = Field(default="{}")
     created_at: datetime = Field(default_factory=_utcnow)

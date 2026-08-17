@@ -14,20 +14,30 @@ export function fmtCredits(n) {
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+export function fmtUsd(n) {
+  const value = Number(n);
+  if (!Number.isFinite(value)) return "—";
+  if (value === 0) return "$0.00";
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}
+
 export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
   const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
   const providers = new Set(Object.values(tokenUsage?.by_model || {}).map(v => v.provider));
   const hasCopilot = providers.has("github_copilot");
   const hasDroid = providers.has("factory_droid");
-  const hasProviderUsage = hasCopilot || hasDroid;
+  const hasCodex = providers.has("openai_codex");
+  const hasAntigravity = providers.has("google_antigravity");
+  const hasProviderUsage = hasCopilot || hasDroid || hasCodex || hasAntigravity;
   const hasBilledUsage = tokenUsage && (
     tokenUsage.total_ai_credits > 0 ||
     tokenUsage.total_factory_credits > 0 ||
     tokenUsage.total_premium_requests > 0
   );
   const hasUsage = hasTokens || hasProviderUsage;
-  const usageLabel = hasDroid && !hasCopilot ? "Droid usage" : hasCopilot && !hasDroid ? "Copilot usage" : "LLM usage";
-  const quota = tokenUsage?.copilot_quota;
+  const hasEstimatedCost = tokenUsage?.estimated_cost_available && tokenUsage.estimated_total_cost_usd != null;
+  const usageLabel = hasAntigravity && !hasCodex && !hasDroid && !hasCopilot ? "Antigravity usage" : hasCodex && !hasDroid && !hasCopilot ? "Codex usage" : hasDroid && !hasCopilot ? "Droid usage" : hasCopilot && !hasDroid ? "Copilot usage" : "LLM usage";
+  const quota = tokenUsage?.codex_quota || tokenUsage?.copilot_quota;
 
   return (
     <>
@@ -93,6 +103,14 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
                 ) : null}
               </>
             ) : null}
+            {hasEstimatedCost ? (
+              <>
+                <span className="token-bar-sep">·</span>
+                <span className="token-bar-cost" title="Estimated cost based on recorded usage and model pricing">
+                  ≈{fmtUsd(tokenUsage.estimated_total_cost_usd)} est. cost
+                </span>
+              </>
+            ) : null}
             <span className="activity-expand-chevron" style={{ marginLeft: 4 }}>
               {tokenExpanded ? "▲" : "▼"}
             </span>
@@ -105,7 +123,7 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
         <div className="token-breakdown">
           {quota && Number.isFinite(Number(quota.remaining_percentage)) ? (
             <div className="token-breakdown-row">
-              <span className="token-model-name">Copilot allowance</span>
+              <span className="token-model-name">{hasCodex ? "Codex allowance" : "Copilot allowance"}</span>
               <span className="token-in">{Number(quota.remaining_percentage).toFixed(0)}% remaining</span>
               {quota.reset_at ? (
                 <span className="token-out" title={quota.reset_at}>
@@ -136,6 +154,11 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
                     </span>
                   ) : null}
                 </>
+              ) : null}
+              {v.estimated_cost_available && v.estimated_total_cost_usd != null ? (
+                <span className="token-cost" title="Estimated cost based on recorded usage and model pricing">
+                  ≈{fmtUsd(v.estimated_total_cost_usd)} est.
+                </span>
               ) : null}
             </div>
           ))}

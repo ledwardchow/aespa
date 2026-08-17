@@ -10,8 +10,7 @@ import { parseDate, truncUrl } from "../../lib/utilities";
 export function useActivity(runId, activeTab, {
   run,
   thinkingStatus,
-  aliceIsThinking,
-  lastRunPollOkRef
+  aliceIsThinking
 }) {
   const [activityLog, setActivityLog] = useState([]);
   const [expandedLogIds, setExpandedLogIds] = useState(new Set());
@@ -36,22 +35,7 @@ export function useActivity(runId, activeTab, {
   };
   const normalizeAgentForRun = agent => {
     if (agent?.id !== "crawler") return agent;
-    if (run?.status === "running") return {
-      ...agent,
-      status: "active"
-    };
-    if (Date.now() - lastRunPollOkRef.current > 10000) {
-      return {
-        ...agent,
-        status: "idle",
-        currentTask: "Crawler connection stale"
-      };
-    }
-    return {
-      ...agent,
-      status: agent.status === "failed" ? "failed" : "idle",
-      currentTask: agent.currentTask || "Crawl is not running"
-    };
+    return agent;
   };
   const defaultAgentRoster = () => [{
     id: "alice",
@@ -61,8 +45,8 @@ export function useActivity(runId, activeTab, {
   }, {
     id: "crawler",
     role: "Crawler",
-    status: run?.status === "running" ? "active" : "idle",
-    currentTask: run?.status === "running" ? "" : "Waiting for crawl"
+    status: "idle",
+    currentTask: "Waiting for crawl"
   }, {
     id: "scanner",
     role: "Test Lead",
@@ -269,7 +253,7 @@ export function useActivity(runId, activeTab, {
   // Seed activity log from persisted DB entries on mount so it survives navigation.
   useEffect(() => {
     api.getScanLog(runId).then(entries => {
-      if (!entries || entries.length === 0) return;
+      entries = entries || [];
       setActivityLog(entries.map(e => {
         const ts = e._persisted_at ? parseDate(e._persisted_at).toLocaleTimeString("en-US", {
           hour12: false,
@@ -296,9 +280,10 @@ export function useActivity(runId, activeTab, {
     Promise.all([
       api.getAgentLog(runId),
       api.getThinkingStatus(runId),
-      api.getValidateStatus(runId)
-    ]).then(([entries, scanStatus, validationStatus]) => {
-      if (!entries || entries.length === 0) return;
+      api.getValidateStatus(runId),
+      api.getCrawlStatus(runId).catch(() => null)
+    ]).then(([entries, scanStatus, validationStatus, crawlStatus]) => {
+      entries = entries || [];
       const scanRunning = isDynamicScanActive(scanStatus?.status);
       const validationRunning = validationStatus?.status === "running";
       const agentsMap = new Map();
@@ -327,6 +312,24 @@ export function useActivity(runId, activeTab, {
           outcome: e.outcome
         });
         agentsMap.set(e.agent_id, existing);
+      }
+      const crawler = agentsMap.get("crawler");
+      if (crawlStatus?.running) {
+        agentsMap.set("crawler", {
+          id: "crawler",
+          role: "Crawler",
+          currentTask: crawler?.currentTask || "Crawling application…",
+          taskHistory: crawler?.taskHistory || [],
+          crawlEvents: crawler?.crawlEvents || [],
+          ...crawler,
+          status: "active"
+        });
+      } else if (crawler?.status === "active") {
+        agentsMap.set("crawler", {
+          ...crawler,
+          status: "idle",
+          currentTask: "Crawl is not running"
+        });
       }
       // If no scan is running, reset stale "active" agents to "idle". A
       // validator is an exception: it can legitimately continue after scan

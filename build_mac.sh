@@ -55,6 +55,7 @@ echo "==> Building app bundle with PyInstaller"
     --collect-all playwright \
     --collect-all alembic \
     --collect-all uvicorn \
+    --collect-all tiktoken \
     --collect-submodules aespa \
     src/aespa/desktop.py
 

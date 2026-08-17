@@ -141,7 +141,7 @@ def test_global_http_headers_round_trip(client: TestClient):
 def test_component_mapper_config_round_trip(client: TestClient):
     initial = client.get("/api/settings/component-mapper-config")
     assert initial.status_code == 200
-    assert initial.json()["max_tool_calls"] == 100
+    assert initial.json()["max_tool_calls"] == 250
     assert initial.json()["max_source_files"] == 500
     assert initial.json()["max_source_bytes"] == 50 * 1024 * 1024
     assert initial.json()["max_facts"] == 500
@@ -268,6 +268,29 @@ def test_create_provider_and_profile(client: TestClient):
     active = client.get("/api/settings/llm").json()
     assert active["api_key"] is None
     assert active["provider"] == "openai"
+
+
+def test_create_model_defaults_name_to_provider_model(client: TestClient):
+    provider_r = _make_provider(
+        client, name="OpenAI Prod", models=["gpt-4o", "gpt-4o-mini"]
+    )
+    assert provider_r.status_code == 200
+    provider = provider_r.json()
+
+    # Pass name=None or omit name
+    res = client.post(
+        "/api/settings/llm/model-configs",
+        json={
+            "provider_id": provider["id"],
+            "model": "gpt-4o-mini",
+            "max_tokens": 4096,
+        },
+    )
+    assert res.status_code == 200
+    model_cfg = res.json()
+    assert model_cfg["name"] == "OpenAI Prod/gpt-4o-mini"
+    assert model_cfg["provider_name"] == "OpenAI Prod"
+    assert model_cfg["model"] == "gpt-4o-mini"
 
 
 def test_create_profile_with_optional_temperature(client: TestClient):

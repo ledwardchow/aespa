@@ -843,6 +843,19 @@ def test_check_api_scope_respects_explicit_scope_hosts():
     assert result is not None
 
 
+def test_check_api_scope_blocks_same_host_on_another_port():
+    from aespa.services.alice import _check_api_scope
+
+    class _C:
+        base_url = "https://api.example.com"
+        servers = "[]"
+        scope_hosts = json.dumps(["api.example.com"])
+
+    result = _check_api_scope("https://api.example.com:8443/admin", _C())
+    assert result is not None
+    assert "api.example.com:8443" in result
+
+
 def test_check_api_scope_allows_additional_servers():
     from aespa.services.alice import _check_api_scope
 

@@ -74,7 +74,7 @@ def test_create_collection_with_optional_fields(client):
     data = r.json()
     assert data["description"] == "Order management endpoints"
     assert data["servers"] == ["https://eu.api.example.com"]
-    assert data["scope_hosts"] == ["api.example.com"]
+    assert data["scope_hosts"] == ["api.example.com:443"]
 
 
 def test_create_collection_duplicate_name_conflicts(client):
@@ -133,7 +133,7 @@ def test_update_collection(client):
     assert data["name"] == "Renamed API"
     assert data["base_url"] == "https://v2.api.example.com/"
     assert data["description"] == "Updated"
-    assert data["scope_hosts"] == ["v2.api.example.com"]
+    assert data["scope_hosts"] == ["v2.api.example.com:443"]
 
 
 def test_update_duplicate_name_conflicts(client):
@@ -164,9 +164,15 @@ def test_update_scope_hosts(client):
         json={"scope_hosts": ["api.example.com", "eu.api.example.com"]},
     )
     assert r.status_code == 200
-    assert r.json()["scope_hosts"] == ["api.example.com", "eu.api.example.com"]
+    assert r.json()["scope_hosts"] == [
+        "api.example.com:443",
+        "eu.api.example.com:443",
+    ]
     detail = client.get(f"/api/api-collections/{cid}").json()
-    assert detail["scope_hosts"] == ["api.example.com", "eu.api.example.com"]
+    assert detail["scope_hosts"] == [
+        "api.example.com:443",
+        "eu.api.example.com:443",
+    ]
 
 
 # ---- delete -----------------------------------------------------------------

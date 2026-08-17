@@ -195,10 +195,15 @@ def update_scope_hosts(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
         )
-    collection.scope_hosts = json.dumps(payload.scope_hosts)
+    from aespa.services.scope import normalize_scope_entries
+
+    normalized = normalize_scope_entries(
+        payload.scope_hosts, default_url=collection.base_url
+    )
+    collection.scope_hosts = json.dumps(normalized)
     session.add(collection)
     session.commit()
-    return {"scope_hosts": payload.scope_hosts}
+    return {"scope_hosts": normalized}
 
 
 # ── Documents ────────────────────────────────────────────────────────────────
