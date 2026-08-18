@@ -580,6 +580,28 @@ def test_cannot_delete_provider_used_by_profile(client: TestClient):
     assert r.status_code == 409
 
 
+def test_delete_scan_profile_clears_run_reference(client: TestClient):
+    provider = _make_provider(client).json()
+    model = _make_profile(client, provider["id"]).json()
+    scan_profile = client.post(
+        "/api/settings/llm/profiles",
+        json={"name": "Scan profile", "default_model_id": model["id"]},
+    ).json()
+    site = client.post(
+        "/api/sites",
+        json={"name": "Target", "base_url": "https://target.local"},
+    ).json()
+    run = client.post(
+        f"/api/sites/{site['id']}/test-runs",
+        json={"llm_profile_id": scan_profile["id"]},
+    ).json()
+
+    deleted = client.delete(f"/api/settings/llm/profiles/{scan_profile['id']}")
+
+    assert deleted.status_code == 204
+    assert client.get(f"/api/test-runs/{run['id']}").json()["llm_profile_id"] is None
+
+
 def test_provider_validation(client: TestClient):
     r = _make_provider(client, models=["", "  "])
     assert r.status_code == 422

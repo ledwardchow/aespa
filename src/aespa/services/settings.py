@@ -12,6 +12,8 @@ from sqlmodel import Session, select
 
 from aespa.models import (
     AdversarialValidatorConfig,
+    ApiTestRun,
+    AssessmentCampaign,
     BrowserDebugConfig,
     BurpRestApiConfig,
     CloudflareAccessConfig,
@@ -22,6 +24,7 @@ from aespa.models import (
     LLMProfile,
     LLMProviderConfig,
     ReportingDebugConfig,
+    SastRun,
     ScannerPolicy,
     SpecialistAgentConfig,
     TestRun,
@@ -582,6 +585,17 @@ def activate_scan_profile(session: Session, profile_id: int) -> LLMProfile:
 def delete_scan_profile(session: Session, profile_id: int) -> None:
     prof = get_scan_profile(session, profile_id)
     was_active = prof.is_active
+
+    # A profile can be selected explicitly on any run type (or campaign). The
+    # reference is optional, so clear it before deleting the profile and let
+    # those records fall back to the globally active profile.
+    for run_type in (TestRun, ApiTestRun, SastRun, AssessmentCampaign):
+        for run in session.exec(
+            select(run_type).where(run_type.llm_profile_id == profile_id)
+        ).all():
+            run.llm_profile_id = None
+            session.add(run)
+
     session.delete(prof)
     session.commit()
     if was_active:
