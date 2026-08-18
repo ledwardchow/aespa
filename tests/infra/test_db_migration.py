@@ -754,7 +754,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "test_run" in tables
         assert was_pre_alembic is False
         # The migration chain now includes replay/session provenance fields.
-        assert version == "c7d8e9f0a1b2"
+        assert version == "d4e5f6a7b8c9"
     finally:
         engine.dispose()
 
@@ -904,7 +904,7 @@ def test_replay_provenance_repair_migration_handles_existing_c4_database():
         assert "replay_credential_id" in columns["crawled_page"]
         assert {"page_id", "session_label"} <= columns["traffic_entry"]
         assert "page_id" in columns["target_intel_item"]
-        assert version == "c7d8e9f0a1b2"
+        assert version == "d4e5f6a7b8c9"
     finally:
         engine.dispose()
 
@@ -1055,7 +1055,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "c7d8e9f0a1b2"
+        assert version == "d4e5f6a7b8c9"
     finally:
         engine.dispose()
 
@@ -1092,7 +1092,7 @@ def test_current_db_with_applications_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "c7d8e9f0a1b2"
+        assert version == "d4e5f6a7b8c9"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -1136,6 +1136,79 @@ def test_explicit_target_component_migration_adds_nullable_column():
             ).scalar_one()
 
         assert "component_id" in columns
-        assert version == "c7d8e9f0a1b2"
+        assert version == "d4e5f6a7b8c9"
+    finally:
+        engine.dispose()
+
+
+def test_scope_host_port_migration_backfills_configured_effective_ports():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE site ("
+                    "id INTEGER PRIMARY KEY, base_url TEXT NOT NULL, scope_hosts TEXT)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE TABLE api_collection ("
+                    "id INTEGER PRIMARY KEY, base_url TEXT NOT NULL, scope_hosts TEXT)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE TABLE alembic_version "
+                    "(version_num VARCHAR(32) NOT NULL)"
+                )
+            )
+            conn.execute(
+                text("INSERT INTO alembic_version VALUES ('c7d8e9f0a1b2')")
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO site VALUES "
+                    "(1, 'https://app.example.com:8443', :scope_hosts)"
+                ),
+                {
+                    "scope_hosts": (
+                        '["app.example.com", "other.example.com:9443", '
+                        '"https://secure.example.com"]'
+                    )
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO api_collection VALUES "
+                    "(1, 'http://api.example.com:8080', :scope_hosts)"
+                ),
+                {"scope_hosts": '["api.example.com"]'},
+            )
+            conn.commit()
+
+        db.run_migrations(engine)
+
+        with engine.connect() as conn:
+            site_scope = conn.execute(
+                text("SELECT scope_hosts FROM site WHERE id=1")
+            ).scalar_one()
+            api_scope = conn.execute(
+                text("SELECT scope_hosts FROM api_collection WHERE id=1")
+            ).scalar_one()
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+
+        assert site_scope == (
+            '["app.example.com:8443", "other.example.com:9443", '
+            '"secure.example.com:443"]'
+        )
+        assert api_scope == '["api.example.com:8080"]'
+        assert version == "d4e5f6a7b8c9"
     finally:
         engine.dispose()
