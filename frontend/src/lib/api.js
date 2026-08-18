@@ -291,7 +291,17 @@ export async function req(url, opts = {}) {
   const res  = await fetch(url, init);
   if (res.status === 204) return null;
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // Error pages from a proxy or server may be plain text/HTML. Preserve
+      // the HTTP error below instead of exposing a misleading JSON parse
+      // failure to the user.
+      if (res.ok) throw new Error("The server returned an invalid response");
+    }
+  }
   if (!res.ok) {
     const msg = formatError(data) || `${res.status} ${res.statusText}`;
     const err = new Error(msg); err.status = res.status; throw err;
