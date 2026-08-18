@@ -18,6 +18,19 @@ def test_scope_authority_includes_effective_port():
     )
 
 
+def test_bare_scope_entry_inherits_nonstandard_base_port():
+    default_url = "https://app.example.com:8443"
+
+    assert scope.normalize_scope_entries(
+        ["app.example.com"], default_url=default_url
+    ) == ["app.example.com:8443"]
+    assert scope.authority_is_allowed(
+        "https://app.example.com:8443/account",
+        ["app.example.com"],
+        default_url=default_url,
+    )
+
+
 def test_authority_scope_blocks_same_hostname_on_another_port():
     allowed = ["app.example.com"]
 

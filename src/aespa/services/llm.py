@@ -4795,7 +4795,28 @@ async def _call_with_tools_impl(
         else:
             call_kwargs["tool_choice"] = "required"
         resp = await _create_chat_completion(oai_client, call_kwargs)
-        choice = resp.choices[0]
+        _oai_u = getattr(resp, "usage", None)
+        _oai_cached = (
+            getattr(getattr(_oai_u, "prompt_tokens_details", None), "cached_tokens", 0)
+            if _oai_u
+            else 0
+        )
+        _record_usage(
+            config.model,
+            getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
+            getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0,
+            cache_read_tokens=_oai_cached,
+        )
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            log.warning(
+                "OpenAI-compatible provider returned no completion choices "
+                "(provider=%s, model=%s)",
+                config.provider,
+                config.model,
+            )
+            return [], "end_turn", []
+        choice = choices[0]
         msg = choice.message
         refusal = getattr(msg, "refusal", None)
         if refusal:
@@ -4817,18 +4838,6 @@ async def _call_with_tools_impl(
                 }
             )
         stop_reason = "tool_use" if finish == "tool_calls" else "end_turn"
-        _oai_u = getattr(resp, "usage", None)
-        _oai_cached = (
-            getattr(getattr(_oai_u, "prompt_tokens_details", None), "cached_tokens", 0)
-            if _oai_u
-            else 0
-        )
-        _record_usage(
-            config.model,
-            getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
-            getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0,
-            cache_read_tokens=_oai_cached,
-        )
         return blocks, stop_reason, blocks  # store Anthropic-format in history
 
     # ── Google Gemini (function calling) ──────────────────────────────────────

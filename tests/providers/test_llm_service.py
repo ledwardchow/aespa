@@ -3074,6 +3074,61 @@ def test_call_with_tools_preempts_tool_choice_for_reasoning_models(monkeypatch):
     assert "tool_choice" not in captured["completion"]
 
 
+@pytest.mark.parametrize("choices", [None, []])
+def test_call_with_tools_normalizes_missing_openai_choices(monkeypatch, choices):
+    recorded_usage: dict[str, object] = {}
+
+    def fake_record_usage(model, input_tokens, output_tokens, **kwargs):
+        recorded_usage.update(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            **kwargs,
+        )
+
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            usage = SimpleNamespace(
+                prompt_tokens=123,
+                completion_tokens=0,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=23),
+            )
+            return SimpleNamespace(choices=choices, usage=usage)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):  # noqa: ARG002
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+    config = LLMConfig(
+        provider="openai_compatible",
+        api_key=None,
+        base_url="http://localhost:1234",
+        model="local-model",
+        max_tokens=2048,
+    )
+
+    blocks, stop_reason, raw_content = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        )
+    )
+
+    assert blocks == []
+    assert stop_reason == "end_turn"
+    assert raw_content == []
+    assert recorded_usage == {
+        "model": "local-model",
+        "input_tokens": 123,
+        "output_tokens": 0,
+        "cache_read_tokens": 23,
+    }
+
+
 def test_call_with_tools_normalizes_minimax_reasoning_fields(monkeypatch):
     captured: dict[str, object] = {}
 
