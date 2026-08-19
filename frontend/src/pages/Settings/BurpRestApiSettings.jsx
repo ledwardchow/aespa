@@ -230,7 +230,7 @@ export const PROVIDER_BASE_URL_PLACEHOLDERS = {
   openai_compatible: "http://localhost:1234/v1",
   openrouter: "https://openrouter.ai/api/v1",
   google: "https://generativelanguage.googleapis.com",
-  bedrock: "https://bedrock-runtime.us-east-1.amazonaws.com",
+  bedrock: "https://bedrock-runtime.ap-southeast-2.amazonaws.com",
   bedrock_mantle: "https://bedrock-mantle.us-east-2.api.aws/v1",
   azure_openai: "https://myresource.openai.azure.com",
   azure_foundry: "https://myresource.services.ai.azure.com",
