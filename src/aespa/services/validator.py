@@ -497,6 +497,24 @@ async def _run_validation_batch(
     await asyncio.gather(*(_validate_limited(finding) for finding in findings))
 
 
+def _load_findings_for_validation(
+    run_id: int, finding_ids: list[int] | None = None
+) -> list[ScanFinding]:
+    """Load explicitly requested findings or all findings eligible for bulk validation."""
+    with Session(get_engine()) as s:
+        q = select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        if finding_ids:
+            q = q.where(ScanFinding.id.in_(finding_ids))
+        else:
+            q = q.where(
+                ScanFinding.validation_status.in_(("unvalidated", "unconfirmed"))
+            )
+        findings = list(s.exec(q).all())
+        for finding in findings:
+            s.expunge(finding)
+    return findings
+
+
 async def _do_validate(
     run_id: int,
     finding_ids: list[int] | None = None,
@@ -518,16 +536,7 @@ async def _do_validate(
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
 
-    # Load the findings to validate.
-    with Session(get_engine()) as s:
-        q = select(ScanFinding).where(ScanFinding.test_run_id == run_id)
-        if finding_ids:
-            q = q.where(ScanFinding.id.in_(finding_ids))
-        else:
-            q = q.where(ScanFinding.validation_status == "unvalidated")
-        findings = s.exec(q).all()
-        for f in findings:
-            s.expunge(f)
+    findings = _load_findings_for_validation(run_id, finding_ids)
 
     if not findings:
         log.info("Validation: no findings to validate for run_id=%s", run_id)

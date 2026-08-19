@@ -181,6 +181,145 @@ def test_agentic_loop_recovers_from_text_only_turn(monkeypatch):
     assert "did not call a tool" in correction_messages[-1]["content"][0]["text"]
 
 
+def test_agentic_loop_normalizes_json_string_tool_input(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    received = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        block = {
+            "type": "tool_use",
+            "id": "call_done",
+            "name": "done",
+            "input": '{"verdict":"confirmed","reasoning":"Reproduced."}',
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        raise AssertionError("done must not reach the tool executor")
+
+    def done_check(tool_input, step):
+        received.append(tool_input)
+        return True, ""
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+            done_check=done_check,
+        )
+    )
+
+    assert received == [{"verdict": "confirmed", "reasoning": "Reproduced."}]
+
+
+def test_agentic_loop_rejects_malformed_string_tool_input(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            block = {
+                "type": "tool_use",
+                "id": "call_bad",
+                "name": "done",
+                "input": "not-json",
+                "text": None,
+            }
+            return [block], "tool_use", [block]
+        assert "valid JSON object" in messages[-1]["content"][0]["content"]
+        block = {
+            "type": "tool_use",
+            "id": "call_done",
+            "name": "done",
+            "input": {"summary": "Recovered."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        raise AssertionError("done must not reach the tool executor")
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+        )
+    )
+
+    assert summary == "Recovered."
+    assert calls == 2
+
+
+def test_agentic_loop_serializes_mapping_tool_result_for_next_turn(monkeypatch):
+    config = LLMConfig(
+        provider="bedrock",
+        model="global.anthropic.claude-sonnet-5",
+    )
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            block = {
+                "type": "tool_use",
+                "id": "call_http",
+                "name": "http_request",
+                "input": {"method": "GET", "url": "https://target.local/health"},
+                "text": None,
+            }
+            return [block], "tool_use", [block]
+        tool_result = messages[-1]["content"][0]["content"]
+        assert isinstance(tool_result, str)
+        assert json.loads(tool_result) == {"status": 200, "body": {"ok": True}}
+        block = {
+            "type": "tool_use",
+            "id": "call_done",
+            "name": "done",
+            "input": {"summary": "Complete."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        return {"status": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+        )
+    )
+
+    assert summary == "Complete."
+    assert calls == 2
+
+
 def test_agentic_loop_accepts_mapper_text_only_repair_message(monkeypatch):
     config = LLMConfig(
         provider="azure_foundry_openai",

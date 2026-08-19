@@ -420,7 +420,7 @@ async def start_validation(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> ValidationStatusOut:
-    """Start background validation of all unvalidated findings for this run."""
+    """Start background validation of unvalidated and unconfirmed findings."""
     _get_run_or_404(session, run_id)
     if validator_svc.is_validating(run_id):
         raise HTTPException(status_code=409, detail="Validation already running")

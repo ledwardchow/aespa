@@ -834,7 +834,7 @@ See [§4 Configuration](#4-configuration) for the full `SpecialistAgentConfig` f
 
 After a normal web finding is written, the validator service (`validator.py`) can run an independent check. The validator is told to try to disprove the finding and records the evidence it used. A timeout, provider error, missing verdict, or malformed verdict is saved as **unconfirmed**, never as confirmed; the finding can be retried from the finding row's **Retry validation** button. Applications SAST validation keeps its existing lead workflow and does not run this separate validator.
 
-Manual finding validation uses the same inline validator as scan-time findings. Each clicked finding is tracked separately, repeated clicks for the same finding are ignored, and more findings can be added while validation is already running. Manual validators run concurrently up to `end_scan_max_concurrent`; the run-level status and stop action cover both these inline tasks and the managed end-of-scan batch.
+Manual finding validation uses the same inline validator as scan-time findings. Each clicked finding is tracked separately, repeated clicks for the same finding are ignored, and more findings can be added while validation is already running. The bulk **Validate Issues** action processes both `unvalidated` findings and `unconfirmed` findings that need another attempt. Manual validators run concurrently up to `end_scan_max_concurrent`; the run-level status and stop action cover both these inline tasks and the managed end-of-scan batch.
 
 Validation outcomes:
 - **confirmed** — vulnerability is reproducible and real

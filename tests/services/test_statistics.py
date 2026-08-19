@@ -209,6 +209,54 @@ def test_run_token_usage_includes_cache_aware_estimated_cost(isolated_db_engine)
     assert usage["by_model"]["gpt-cost-test"]["estimated_total_cost_usd"] == 3.82
 
 
+def test_run_cost_is_recalculated_from_totals_on_each_usage_update(
+    isolated_db_engine,
+):
+    model = "gpt-repriced"
+    with Session(isolated_db_engine) as session:
+        session.add(
+            LLMPriceCatalog(
+                provider="openai",
+                model=model,
+                input_price_usd_per_million=1,
+                output_price_usd_per_million=2,
+            )
+        )
+        session.commit()
+
+    run_id = 991002
+    key = ("web", run_id)
+    llm.set_run_context(run_id, emit_fn=None)
+    try:
+        llm._record_usage(
+            model,
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            provider="openai",
+        )
+        with Session(isolated_db_engine) as session:
+            price = session.query(LLMPriceCatalog).one()
+            price.input_price_usd_per_million = 2
+            price.output_price_usd_per_million = 4
+            session.add(price)
+            session.commit()
+        llm._record_usage(
+            model,
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            provider="openai",
+        )
+        usage = llm.get_run_token_usage(run_id)
+    finally:
+        llm.clear_run_context()
+        llm._run_token_usage.pop(key, None)
+        llm._run_token_seeded.discard(key)
+
+    model_usage = usage["by_model"][model]
+    assert model_usage["estimated_cost_available"] is True
+    assert model_usage["estimated_total_cost_usd"] == 8
+
+
 def test_existing_run_token_usage_is_backfilled_and_persisted(isolated_db_engine):
     model = "minimax/minimax-m3"
     old_bucket = {
@@ -221,6 +269,11 @@ def test_existing_run_token_usage_is_backfilled_and_persisted(isolated_db_engine
             "factory_credits": 0,
             "premium_requests": 0,
             "requests": 0,
+            "provider": "openrouter",
+            "estimated_cost_available": True,
+            "estimated_token_cost_usd": 0.09,
+            "estimated_credit_cost_usd": 0,
+            "estimated_total_cost_usd": 0.09,
         }
     }
     with Session(isolated_db_engine) as session:
@@ -251,7 +304,13 @@ def test_existing_run_token_usage_is_backfilled_and_persisted(isolated_db_engine
         session.commit()
         run_id = run.id
 
-    usage = llm.get_run_token_usage(run_id)
+    key = ("web", run_id)
+    llm._run_token_usage[key] = old_bucket
+    try:
+        usage = llm.get_run_token_usage(run_id)
+    finally:
+        llm._run_token_usage.pop(key, None)
+        llm._run_token_seeded.discard(key)
 
     assert usage["by_model"][model]["provider"] == "openrouter"
     assert usage["estimated_cost_available"] is True

@@ -363,6 +363,34 @@ def test_validation_batch_respects_concurrency_limit():
     assert peak == 3
 
 
+def test_bulk_validation_loads_unvalidated_and_unconfirmed_findings(
+    isolated_db_engine, monkeypatch
+):
+    monkeypatch.setattr(validator, "get_engine", lambda: isolated_db_engine)
+    statuses = ("unvalidated", "unconfirmed", "confirmed", "false_positive")
+    with Session(isolated_db_engine) as session:
+        for index, status in enumerate(statuses, start=1):
+            session.add(
+                ScanFinding(
+                    test_run_id=77,
+                    page_id=None,
+                    owasp_category="A05",
+                    severity="medium",
+                    title=f"Finding {index}",
+                    description="Bulk validation selection test.",
+                    validation_status=status,
+                )
+            )
+        session.commit()
+
+    findings = validator._load_findings_for_validation(77)
+
+    assert {finding.validation_status for finding in findings} == {
+        "unvalidated",
+        "unconfirmed",
+    }
+
+
 def test_manual_inline_validation_is_bounded_and_deduplicated(monkeypatch):
     run_id = 98001
     active = 0
