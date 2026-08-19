@@ -153,3 +153,15 @@ Examples:
 
 - New day: `0.5.20261224.7` -> `0.5.20261225.1`
 - Same day: `0.5.20261225.5` -> `0.5.20261225.6`
+
+## Changelog Writing
+
+When updating `CHANGELOG.md`, write for users rather than implementation specialists:
+
+- Use clear, professional release-note language consistent with the surrounding changelog entries.
+- Lead with what changed and what it means for the user.
+- Prefer familiar product terms over internal architecture, provider-protocol, or code-level terminology.
+- Keep technical detail only when it helps users understand behaviour, compatibility, configuration, or risk.
+- Avoid casual phrasing, promotional language, and repetitive sentence patterns that make the entry sound machine-generated.
+- Do not include source file paths or internal function and class names unless they are genuinely useful to the intended reader.
+- Preserve existing changelog text unless the user explicitly asks for it to be revised.
