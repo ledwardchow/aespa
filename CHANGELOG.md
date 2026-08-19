@@ -2,34 +2,34 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## [develop → main] August 19 Update — Codex and Antigravity providers, model controls, and scan reliability
+## [develop → main] August 19 Update — new LLM providers and scan improvements
 
 **Branch:** `develop → main`
 
-### OpenAI Codex and Google Antigravity providers
+### New LLM providers
 
-- **Use subscription-backed Codex models** (`services/codex_provider.py`, LLM settings, packaging): Added an OpenAI Codex provider that authenticates through the local Codex app server, discovers available models, preserves agent conversations, reports subscription usage, and works in packaged macOS and Windows builds.
-- **Use Google Antigravity as an LLM provider** (`services/antigravity_provider.py`, LLM settings): Added local Antigravity authentication, model discovery, streaming tool use, conversation handling, and subscription-aware usage reporting.
-- **Pause cleanly for interactive provider setup** (`services/run_pause.py`, scan services/UI): Web, API, SAST, campaign, and A.L.I.C.E. jobs can pause while a local subscription provider requires authentication, expose the paused state in the run interface, and resume without losing the active scan.
+- **OpenAI Codex**: Scans can now use models available through a Codex subscription. AESPA handles sign-in, model selection, conversation history, and usage reporting. Codex support is included in the packaged macOS and Windows applications.
+- **Google Antigravity**: Antigravity is now available as an LLM provider, with sign-in, model selection, conversation history, and usage reporting.
+- **Scans wait for sign-in when necessary**: If Codex or Antigravity requires the user to sign in, AESPA pauses the scan and shows its current state. The scan continues after sign-in without losing its progress.
 
-### Model discovery and reasoning controls
+### Model selection and settings
 
-- **Provider-aware reasoning effort** (`services/model_capabilities.py`, provider/model settings): Model discovery now records supported reasoning or thinking levels from native provider metadata, documented model families, and OpenRouter fallbacks. Profiles expose only valid effort choices and validate the selected value before saving.
-- **Improved LLM settings** (`Settings/*`, `services/settings.py`): Provider and model forms have clearer discovery and capability controls, profile names can default to `provider/model`, and deleting a profile safely returns any linked web, API, SAST, or campaign runs to the active default profile.
-- **More robust provider interoperability** (`services/llm.py`): Agent loops normalize JSON-string tool arguments and non-string tool results, reject malformed calls with a recoverable tool response, and include fixes for direct OpenAI, Codex, Copilot, Droid, OpenRouter, Azure, and Bedrock-compatible behavior.
+- **Reasoning settings match each model**: AESPA now detects which reasoning levels a model supports and shows only the available choices. Invalid combinations are rejected when a profile is saved.
+- **Simpler LLM configuration**: The provider and model forms have been clarified. Profile names can be generated automatically, and deleting a profile returns affected scans and campaigns to the current default profile.
+- **Improved compatibility between providers**: Tool calls and responses are handled more consistently across OpenAI, Codex, Copilot, Droid, OpenRouter, Azure, and Bedrock. Malformed tool calls are returned to the model for correction instead of ending the scan.
 
-### Validation, SAST, and campaign improvements
+### Validation and SAST improvements
 
-- **Validate findings from A.L.I.C.E.** (`services/alice.py`, validator/scanner prompts): A.L.I.C.E. can request adversarial validation for a finding and return the result in the active conversation. Bulk validation now retries both unvalidated and unconfirmed findings.
-- **Portable SAST results** (`services/sast_export.py`, SAST run UI/API): Completed SAST runs can be exported with their findings, leads, traces, coverage, and supporting metadata for reuse outside the original database.
-- **Reliable structured SAST evidence** (`services/sast_scanner.py`, `SastLeadDetails.jsx`): Validator controls, counterevidence, proof gaps, and attack-path nodes are normalized when providers return JSON strings, preventing list values from being split into individual characters.
-- **Stronger application correlation** (`services/campaigns.py`, correlation and route tracing): Campaign orchestration, cross-repository route matching, source references, frontend path resolution, and campaign progress handling were tightened for multi-repository application scans.
+- **Validation from A.L.I.C.E.**: A.L.I.C.E. can ask the validator to review a finding and report the result in the conversation. The bulk validation action now retries findings that could not previously be confirmed.
+- **Export completed SAST runs**: SAST results can now be exported with their findings, evidence, coverage, and related scan information.
+- **SAST evidence displays correctly**: Controls, counterevidence, missing evidence, and attack paths are now handled correctly when an LLM returns them in an unexpected format.
+- **More reliable application scans**: Cross-repository route matching, source references, campaign progress, and the connection between backend findings and frontend targets have been improved.
 
-### Usage, scope, and interface fixes
+### Usage reporting and other fixes
 
-- **Per-run cost estimates** (`services/statistics.py`, `services/llm.py`, `TokenUsageBar.jsx`): Run usage now shows cache-aware estimated token and credit costs, recalculates totals when pricing changes, and treats Codex and Antigravity usage as included with their subscriptions.
-- **Safer scope host matching** (`services/scope.py`, database migration): Existing scope hosts are backfilled with their ports, and host matching preserves explicit port boundaries instead of silently broadening targets.
-- **Run-state and interface cleanup** (`frontend/src/`): Active-job status, crawl progress, statistics, application campaigns, provider settings, and run transitions received reliability and layout fixes. Playwright and frontend dependencies were also refreshed, with rebuilt served assets included.
+- **Estimated cost for each run**: The usage display now includes estimated token and credit costs and updates earlier estimates when pricing changes. Codex and Antigravity usage is identified as part of the relevant subscription rather than given a separate estimated cost.
+- **More accurate scan scope**: AESPA now preserves port restrictions when matching hosts, preventing a target from being widened unintentionally.
+- **Interface and run-state fixes**: This update includes fixes to job status, crawl progress, statistics, application campaigns, provider settings, and transitions between scan stages. Playwright and frontend dependencies have also been updated.
 
 ---
 
