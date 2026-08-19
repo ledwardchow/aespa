@@ -18,7 +18,6 @@ from aespa.models import (
     ScanFinding,
     ScanLog,
     TestRun,
-    TestRunStatus,
 )
 from aespa.schemas import (
     CoverageModeLiteral,
@@ -30,6 +29,7 @@ from aespa.schemas import (
     ValidationStatusOut,
 )
 from aespa.services import checkpoint as checkpoint_svc
+from aespa.services import crawler as crawler_svc
 from aespa.services import findings as findings_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
@@ -61,7 +61,7 @@ async def start_thinking_scan(
 ) -> dict:
     """Start an LLM-directed scan that dynamically chooses what to test next."""
     run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
+    if crawler_svc.is_running(run_id):
         raise HTTPException(
             status_code=409, detail="Crawl is still running — wait for it to finish"
         )
@@ -114,9 +114,7 @@ async def test_page_state(
 ) -> dict:
     """Queue a focused Test Lead scan for one persisted URL/SPA page state."""
     run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running and not scanner_svc.is_thinking_running(
-        run_id
-    ):
+    if crawler_svc.is_running(run_id):
         raise HTTPException(
             status_code=409,
             detail="Crawl is still running — wait for the page state to persist",
@@ -182,7 +180,19 @@ async def resume_thinking_scan(
 ) -> dict:
     """Resume an interrupted dynamic scan from the last saved checkpoint."""
     run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
+    from aespa.services import run_pause as run_pause_svc
+
+    pause = run_pause_svc.get_pause("web", run_id)
+    if pause is not None:
+        if pause.reset_at and pause.reset_at > datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": pause.message,
+                    "reset_at": pause.reset_at.isoformat(),
+                },
+            )
+    if crawler_svc.is_running(run_id):
         raise HTTPException(
             status_code=409, detail="Crawl is still running — wait for it to finish"
         )
@@ -207,6 +217,8 @@ async def resume_thinking_scan(
         except Exception:
             pass
     await scanner_svc.start_thinking_scan_resume(run_id)
+    if pause is not None:
+        run_pause_svc.clear_pause("web", run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
 
@@ -408,7 +420,7 @@ async def start_validation(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> ValidationStatusOut:
-    """Start background validation of all unvalidated findings for this run."""
+    """Start background validation of unvalidated and unconfirmed findings."""
     _get_run_or_404(session, run_id)
     if validator_svc.is_validating(run_id):
         raise HTTPException(status_code=409, detail="Validation already running")
@@ -419,7 +431,7 @@ async def start_validation(
 @router.post(
     "/api/test-runs/{run_id}/validate/stop", response_model=ValidationStatusOut
 )
-def stop_validation(
+async def stop_validation(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> ValidationStatusOut:
@@ -438,22 +450,29 @@ async def validate_single_finding(
     finding_id: int,
     session: Session = Depends(get_session),
 ) -> ScanFindingOut:
-    """Start background validation of a single finding. Returns immediately with status 'validating'."""
+    """Start tracked inline validation of one finding."""
     _get_run_or_404(session, run_id)
     finding = session.get(ScanFinding, finding_id)
     if finding is None or finding.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Finding not found")
-    if validator_svc.is_validating(run_id):
-        raise HTTPException(
-            status_code=409, detail="Validation already running for this run"
-        )
+    if finding.validation_status == "validating":
+        return ScanFindingOut.model_validate(finding)
+    previous_status = finding.validation_status
+    previous_note = finding.validation_note
     # Mark as validating immediately so the UI updates before the task starts.
     finding.validation_status = "validating"
     finding.validation_note = None
     session.add(finding)
     session.commit()
     session.refresh(finding)
-    await validator_svc.start_validation(run_id, finding_ids=[finding_id])
+    try:
+        await validator_svc.start_inline_validation(run_id, finding_id)
+    except Exception:
+        finding.validation_status = previous_status
+        finding.validation_note = previous_note
+        session.add(finding)
+        session.commit()
+        raise
     return ScanFindingOut.model_validate(finding)
 
 

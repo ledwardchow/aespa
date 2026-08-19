@@ -5,6 +5,7 @@ import { nav } from "../lib/router";
 import { useAliceChat } from "./SiteDetail/useAliceChat";
 import { useFindings } from "./SiteDetail/useFindings";
 import { useActivity } from "./SiteDetail/useActivity";
+import { isCrawlerAgentActive } from "./SiteDetail/runState";
 import { fmtDate } from "../lib/utilities";
 import { IconPlus } from "../components/Icons";
 import { EmptyState } from "../components/EmptyState";
@@ -519,9 +520,12 @@ export function TestRunDetail({
   } = useActivity(runId, activeTab, {
     run,
     thinkingStatus,
-    aliceIsThinking,
-    lastRunPollOkRef
+    aliceIsThinking
   });
+
+  const crawlerAgent = agents.find(agent => agent.id === "crawler");
+  const crawlerTask = crawlerAgent ? agentCurrentTask(crawlerAgent) : null;
+  const crawlerActive = isCrawlerAgentActive(crawlerAgent, crawlStopRequested);
 
   // Initial load
   const loadAll = useCallback(async () => {
@@ -559,19 +563,22 @@ export function TestRunDetail({
   // Poll run metadata (including per_user_progress current URLs) while crawling
   // or while the backend is unwinding after a stop request.
   useEffect(() => {
-    if (run?.status !== "running" && !crawlStopRequested) return;
+    if (!crawlerActive) return;
     const iv = setInterval(() => {
-      api.getRun(runId).then(r => {
+      Promise.all([
+        api.getRun(runId),
+        api.getCrawlStatus(runId).catch(() => null)
+      ]).then(([r, crawlStatus]) => {
         lastRunPollOkRef.current = Date.now();
         setRun(r);
-        if (r.status !== "running") {
+        if (crawlStatus?.running === false) {
           setAgents(prev => prev.map(a => a.id === "crawler" && a.status === "active" ? {
             ...a,
             status: "idle",
             currentTask: "Crawl is not running"
           } : a));
         }
-        if (crawlStopRequested && r.completed_at) setCrawlStopRequested(false);
+        if (crawlStopRequested && crawlStatus?.running === false) setCrawlStopRequested(false);
       }).catch(() => {
         setAgents(prev => prev.map(a => a.id === "crawler" && a.status === "active" ? {
           ...a,
@@ -581,7 +588,7 @@ export function TestRunDetail({
       });
     }, 2000);
     return () => clearInterval(iv);
-  }, [run?.status, runId, crawlStopRequested, setAgents]);
+  }, [crawlerActive, runId, crawlStopRequested, setAgents]);
 
   // Poll thinking-scan status independently.
   useEffect(() => {
@@ -708,15 +715,11 @@ export function TestRunDetail({
     }
   };
   const effectiveThinkingStatus = thinkingStatus?.status || "idle";
-  const crawlerAgent = agents.find(agent => agent.id === "crawler");
-  const crawlerTask = crawlerAgent ? agentCurrentTask(crawlerAgent) : null;
-  
-  const crawlerActive = run?.status === "running" || crawlStopRequested;
   const testLeadActive = isDynamicScanActive(effectiveThinkingStatus) || thinkingStopRequested;
   const canStart = run && !crawlStopRequested && ["pending", "stopped", "failed", "complete"].includes(run.status);
   const canImportCrawl = run?.status === "pending" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const canClearCrawl = run && !crawlStopRequested && ["stopped", "failed", "complete"].includes(run.status);
-  const canStop = run?.status === "running" && !crawlStopRequested;
+  const canStop = isCrawlerAgentActive(crawlerAgent) && !crawlStopRequested;
   const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
   const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const canStartThinking = !thinkingStopRequested && canStartAnyScan && ["idle", "complete", "stopped", "failed", null].includes(effectiveThinkingStatus);
@@ -814,7 +817,7 @@ export function TestRunDetail({
       {activeTab === "sitemap" && run && <>
         <WebRunSitemapMeta run={run} graph={graph} crawlUsername={crawlUsername} profiles={runProfiles} onRunUpdate={setRun} onError={setError} crawlCredentialId={crawlCredentialId} onCrawlCredentialChange={setCrawlCredentialId} />
         {activeTab === "sitemap" && run && <ScopeHostsPanel siteId={run.site_id} hosts={scopeHosts} onChange={setScopeHosts} />}
-        <WebRunCrawlProgress run={run} crawlerTask={crawlerTask} /></>}
+        <WebRunCrawlProgress run={run} crawlerTask={crawlerTask} crawlerActive={crawlerActive} /></>}
 
       <WebRunSitemapGraph
         runId={runId}

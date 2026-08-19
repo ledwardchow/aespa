@@ -90,6 +90,20 @@ _ALICE_TOOL_NAMES = {
     "remove_finding",
 }
 
+_RERUN_VALIDATION_TOOL = {
+    "name": "rerun_validation",
+    "description": (
+        "Start AESPA's managed validator for every finding in this web run whose "
+        "validation status is not confirmed. Use this when the user asks to run "
+        "or re-run validation; do not substitute manual HTTP probes."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+}
+
 
 # Live Playwright browsers for ALICE's interactive `browser` tool, keyed by run_id.
 # One headless browser per run, launched lazily on first browser action and closed
@@ -218,6 +232,9 @@ def _is_alice_operational_question(instruction: str) -> bool:
         "idor",
         "ssrf",
         "csrf",
+        "validate",
+        "validation",
+        "revalidate",
     )
     return not any(marker in security_request for marker in explicit_test_markers)
 
@@ -295,6 +312,8 @@ def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
     exclude = exclude or set()
     allowed = _ALICE_TOOL_NAMES - exclude
     tools = [t for t in THINKING_AGENT_TOOLS if t["name"] in allowed]
+    if "rerun_validation" not in exclude:
+        tools.append(_RERUN_VALIDATION_TOOL)
     if "tls_scan" not in exclude:
         tools.append(TLS_SCAN_TOOL)
     return tools
@@ -466,6 +485,62 @@ async def _execute_alice_tool(
     # Traffic keying: for API runs the traffic table is keyed on the API column,
     # with test_run_id left NULL because API traffic has no web-run owner.
     _traffic_run_id = None if api_run_id is not None else run_id
+
+    # ── rerun_validation ─────────────────────────────────────────────────────
+    if tool_name == "rerun_validation":
+        if api_run_id is not None:
+            return "rerun_validation is currently available only for web findings."
+
+        from aespa.models import ScanFinding
+        from aespa.services import validator as validator_svc
+
+        if validator_svc.is_validating(run_id):
+            status = validator_svc.get_validation_status(run_id)
+            return json.dumps(
+                {
+                    "ok": False,
+                    "status": "already_running",
+                    "message": "The managed validator is already running for this run.",
+                    "validation": status,
+                }
+            )
+
+        with Session(get_engine()) as s:
+            findings = list(
+                s.exec(
+                    select(ScanFinding).where(
+                        ScanFinding.test_run_id == run_id,
+                        ScanFinding.api_test_run_id == None,  # noqa: E711
+                        ScanFinding.validation_status != "confirmed",
+                    )
+                ).all()
+            )
+        finding_ids = [finding.id for finding in findings if finding.id is not None]
+        if not finding_ids:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "status": "nothing_to_validate",
+                    "queued": 0,
+                    "message": "Every finding is already confirmed.",
+                }
+            )
+
+        await validator_svc.start_validation(run_id, finding_ids=finding_ids)
+        return json.dumps(
+            {
+                "ok": True,
+                "status": "started",
+                "queued": len(finding_ids),
+                "finding_references": [
+                    finding.reference or f"#{finding.id}" for finding in findings
+                ],
+                "message": (
+                    f"Managed validation started for {len(finding_ids)} "
+                    "non-confirmed finding(s)."
+                ),
+            }
+        )
 
     # ── http_request ─────────────────────────────────────────────────────────
     if tool_name == "http_request":
@@ -1787,8 +1862,9 @@ async def run_alice_turn_stream(
     # of the crawl?": those are AESPA operational questions, not test requests.
     run_status = _get_web_alice_run_status(run_id, base_url)
     run_status_block = (
-        "CURRENT AESPA RUN STATUS (read-only operational context; captured at the "
-        "start of this turn):\n" + json.dumps(run_status, default=str, indent=2)
+        "CURRENT AESPA RUN STATUS (live informational context captured at the "
+        "start of this turn; this context does not restrict testing tools):\n"
+        + json.dumps(run_status, default=str, indent=2)
     )
 
     if intent == "operational":
@@ -1864,6 +1940,10 @@ async def run_alice_turn_stream(
                 ) = await llm_svc._call_with_tools(
                     llm_cfg, system_message, messages, tools=alice_tools
                 )
+            except llm_svc.LLMQuotaPauseError:
+                # Preserve the structured pause so the outer handler emits a
+                # visible warning and chat reply instead of a generic step error.
+                raise
             except Exception as exc:
                 log.exception(
                     "ALICE agentic loop: LLM call failed at step %d", step_count
@@ -1960,7 +2040,7 @@ async def run_alice_turn_stream(
                                 "text": (
                                     "Your previous response did not call a tool. "
                                     "Please continue by calling exactly one tool now — "
-                                    "http_request, context_tool, write_finding, forge_jwt, "
+                                    "http_request, context_tool, rerun_validation, write_finding, forge_jwt, "
                                     "decode_jwt, credential_check, browser, agent_dispatch, or done."
                                 ),
                             }
@@ -2055,21 +2135,44 @@ async def run_alice_turn_stream(
 
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
+                if llm_cfg.provider == "openai_codex":
+                    from aespa.services import codex_provider
+
+                    await codex_provider.flush_pending_tool_results(messages)
 
             if session_done:
                 break
 
+    except llm_svc.LLMQuotaPauseError as exc:
+        log.info("ALICE Codex allowance exhausted: %s", exc)
+        err_msg = (
+            "ChatGPT/Codex is temporarily unavailable because its allowance or "
+            "rate-limit window is full. AESPA paused this ALICE turn. Come back "
+            f"after the window resets and try again. Details: {exc}"
+        )
+        yield f"data: {json.dumps({'type': 'warning', 'message': err_msg})}\n\n"
+        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err_msg}'})}\n\n"
+        accumulated_message += err_msg
     except Exception as exc:
         log.exception("ALICE agentic loop failed")
         err_msg = f"I encountered an error in the agentic loop: {exc}"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
         accumulated_message += err_msg
     finally:
-        if llm_cfg.provider in ("factory_droid", "github_copilot"):
+        if llm_cfg.provider in (
+            "factory_droid",
+            "github_copilot",
+            "openai_codex",
+            "google_antigravity",
+        ):
             if llm_cfg.provider == "factory_droid":
                 from aespa.services import droid_provider as provider_adapter
-            else:
+            elif llm_cfg.provider == "github_copilot":
                 from aespa.services import copilot_provider as provider_adapter
+            elif llm_cfg.provider == "openai_codex":
+                from aespa.services import codex_provider as provider_adapter
+            else:
+                from aespa.services import antigravity_provider as provider_adapter
 
             await provider_adapter.close_conversation(messages)
         # Always unregister the workprogram finding hook, even on early exit
@@ -2123,42 +2226,42 @@ async def run_alice_turn(
 
 
 def _check_api_scope(url: str, collection) -> str | None:
-    """Host-level scope check for API collections (no DB read needed).
+    """Host-and-port scope check for API collections (no DB read needed).
 
     Derives allowed hosts from the collection's ``base_url`` and ``servers``
     list.  Returns a rejection message or ``None`` if the URL is in scope.
     """
     import json as _json
-    from urllib.parse import urlparse as _up
 
-    parsed = _up(url)
-    hostname = (parsed.hostname or "").lower()
-    if not hostname:
+    from aespa.services.scope import authority_is_allowed, scope_authority
+
+    authority = scope_authority(url)
+    if not authority:
         return None
 
     # Explicit scope_hosts list takes precedence when configured.
     explicit: list[str] = _json.loads(collection.scope_hosts or "[]")
     if explicit:
-        if hostname not in explicit:
+        if not authority_is_allowed(url, explicit, default_url=collection.base_url):
             allowed = ", ".join(explicit)
             return (
-                f"Host '{hostname}' is outside the API collection scope "
+                f"Host and port '{authority}' are outside the API collection scope "
                 f"(allowed: {allowed})."
             )
         return None
 
     # Fall back to base_url host + any additional servers.
-    base_host = (_up(collection.base_url).hostname or "").lower()
-    server_hosts = [
-        (_up(s).hostname or "").lower()
-        for s in _json.loads(collection.servers or "[]")
-        if s
+    allowed_servers = [
+        value
+        for value in [collection.base_url, *_json.loads(collection.servers or "[]")]
+        if value
     ]
-    allowed_hosts = {h for h in [base_host, *server_hosts] if h}
-    if allowed_hosts and hostname not in allowed_hosts:
+    if allowed_servers and not authority_is_allowed(
+        url, allowed_servers, default_url=collection.base_url
+    ):
         return (
-            f"Host '{hostname}' is outside the API collection scope "
-            f"(allowed: {', '.join(sorted(allowed_hosts))})."
+            f"Host and port '{authority}' are outside the API collection scope "
+            f"(allowed: {', '.join(sorted(allowed_servers))})."
         )
     return None
 
@@ -2982,6 +3085,10 @@ async def run_api_alice_turn_stream(
                 ) = await llm_svc._call_with_tools(
                     llm_cfg, system_message, messages, tools=alice_tools
                 )
+            except llm_svc.LLMQuotaPauseError:
+                # Preserve the structured pause so the outer handler emits a
+                # visible warning and chat reply instead of a generic step error.
+                raise
             except Exception as exc:
                 log.exception("ALICE API loop: LLM call failed at step %d", step_count)
                 err = f"LLM error at step {step_count}: {exc}"
@@ -3164,21 +3271,44 @@ async def run_api_alice_turn_stream(
 
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
+                if llm_cfg.provider == "openai_codex":
+                    from aespa.services import codex_provider
+
+                    await codex_provider.flush_pending_tool_results(messages)
 
             if session_done:
                 break
 
+    except llm_svc.LLMQuotaPauseError as exc:
+        log.info("ALICE API Codex allowance exhausted: %s", exc)
+        err_msg = (
+            "ChatGPT/Codex is temporarily unavailable because its allowance or "
+            "rate-limit window is full. AESPA paused this ALICE turn. Come back "
+            f"after the window resets and try again. Details: {exc}"
+        )
+        yield f"data: {json.dumps({'type': 'warning', 'message': err_msg})}\n\n"
+        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err_msg}'})}\n\n"
+        accumulated_message += err_msg
     except Exception as exc:
         log.exception("ALICE API agentic loop failed")
         err_msg = f"I encountered an error in the agentic loop: {exc}"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
         accumulated_message += err_msg
     finally:
-        if llm_cfg.provider in ("factory_droid", "github_copilot"):
+        if llm_cfg.provider in (
+            "factory_droid",
+            "github_copilot",
+            "openai_codex",
+            "google_antigravity",
+        ):
             if llm_cfg.provider == "factory_droid":
                 from aespa.services import droid_provider as provider_adapter
-            else:
+            elif llm_cfg.provider == "github_copilot":
                 from aespa.services import copilot_provider as provider_adapter
+            elif llm_cfg.provider == "openai_codex":
+                from aespa.services import codex_provider as provider_adapter
+            else:
+                from aespa.services import antigravity_provider as provider_adapter
 
             await provider_adapter.close_conversation(messages)
 

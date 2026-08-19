@@ -1,6 +1,6 @@
 [project]
 name = "aespa"
-version = "0.6.20260809.14"
+version = "0.6.20260819.5"
 description = "AI-Enabled Security Pentesting Agent"
 authors = [
     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
@@ -14,7 +14,7 @@ dependencies = [
     "google-genai>=1.74.0",
     "httpx>=0.28.1",
     "openai>=2.33.0",
-    "playwright>=1.59.0",
+    "playwright>=1.62.0",
     "pydantic-settings>=2.14.2",
     "python-multipart>=0.0.31",
     "sqlmodel>=0.0.38",
@@ -25,6 +25,7 @@ dependencies = [
     "prance>=25.4.8.0",
     "github-copilot-sdk>=1.0.7",
     "droid-sdk>=0.1.2",
+    "tiktoken>=0.12.0",
 ]
 
 [project.scripts]

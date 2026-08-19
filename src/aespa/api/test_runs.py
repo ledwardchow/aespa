@@ -498,6 +498,7 @@ def list_test_runs(
 @router.get("/api/test-runs/active", response_model=list[ActiveJobSummary])
 def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobSummary]:
     from aespa.models import Application, AssessmentCampaign, Site
+    from aespa.services import crawler as crawler_svc
     from aespa.services import scanner as scanner_svc
     from aespa.services import validator as validator_svc
 
@@ -507,7 +508,7 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
         site = session.get(Site, run.site_id)
         site_name = site.name if site else f"Site #{run.site_id}"
 
-        if run.status == TestRunStatus.running:
+        if crawler_svc.is_running(run.id):
             jobs.append(
                 ActiveJobSummary(
                     run_id=run.id,
@@ -830,7 +831,9 @@ def get_test_run_leads(
     session.commit()
     return [
         ScanLeadOut.model_validate(lead).model_copy(
-            update={"linked_finding_reference": finding_refs.get(lead.linked_finding_id)}
+            update={
+                "linked_finding_reference": finding_refs.get(lead.linked_finding_id)
+            }
         )
         for lead in leads
     ]
@@ -922,6 +925,16 @@ def update_test_run(
 # ── Crawl control ─────────────────────────────────────────────────────────────
 
 
+@router.get("/api/test-runs/{run_id}/crawl/status")
+def test_run_crawl_status(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict[str, bool]:
+    """Return the crawler task state independently of the overall run phase."""
+    _get_run_or_404(session, run_id)
+    return {"running": crawler_svc.is_running(run_id)}
+
+
 @router.post("/api/test-runs/{run_id}/start", response_model=TestRunSummary)
 async def start_test_run(
     run_id: int,
@@ -1001,6 +1014,29 @@ async def restart_test_run(
     summary = _run_summary(run, session)
     await crawler_svc.start_crawl(run_id)
     return summary
+
+
+@router.post("/api/test-runs/{run_id}/crawl/resume", response_model=TestRunSummary)
+async def resume_test_run_crawl(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> TestRunSummary:
+    """Resume a quota-paused crawl using its persisted crawl artifacts."""
+    run = _get_run_or_404(session, run_id)
+    from aespa.services import run_pause as run_pause_svc
+
+    pause = run_pause_svc.get_pause("crawl", run_id)
+    if pause is None or run.status != "paused":
+        raise HTTPException(status_code=409, detail="Crawl is not paused")
+    if pause.reset_at and pause.reset_at > datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=409,
+            detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
+        )
+    await crawler_svc.start_crawl(run_id)
+    run_pause_svc.clear_pause("crawl", run_id)
+    session.refresh(run)
+    return _run_summary(run, session)
 
 
 @router.post("/api/test-runs/{run_id}/crawl/clear", response_model=TestRunSummary)

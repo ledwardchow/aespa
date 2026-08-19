@@ -590,6 +590,44 @@ def test_dynamic_finding_can_be_saved_without_page_assignment():
         engine.dispose()
 
 
+def test_finding_from_llm_preserves_explicit_severity_when_cvss_is_omitted():
+    finding = scanner._finding_from_llm(
+        run_id=1,
+        page_id=None,
+        page_url="https://target.local",
+        raw={
+            "owasp_category": "A07",
+            "title": "Password reset bypass",
+            "severity": "high",
+            "affected_url": "https://target.local/reset",
+            "evidence": "The reset token was accepted without verification.",
+        },
+        result_by_url={},
+    )
+
+    assert finding.severity == "high"
+    assert finding.cvss_score == 8.0
+
+
+def test_finding_from_llm_calculates_cvss_from_vector_when_score_is_omitted():
+    finding = scanner._finding_from_llm(
+        run_id=1,
+        page_id=None,
+        page_url="https://target.local",
+        raw={
+            "owasp_category": "A03",
+            "title": "SQL injection",
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+            "affected_url": "https://target.local/search",
+            "evidence": "The parameter changed the query result.",
+        },
+        result_by_url={},
+    )
+
+    assert finding.severity == "critical"
+    assert finding.cvss_score == 9.1
+
+
 def test_finding_from_llm_preserves_large_request_response_evidence():
     long_request = "POST /api/search HTTP/1.1\nContent-Type: application/json\n\n" + (
         "A" * 9000
@@ -977,8 +1015,18 @@ def test_calibrate_all_findings_for_run():
                 cvss_score=7.1,
                 cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
             )
+            explicit = ScanFinding(
+                test_run_id=1,
+                owasp_category="A01",
+                severity="high",
+                title="Authorization bypass",
+                description="",
+                cvss_score=0.0,
+                cvss_vector="",
+            )
             session.add(cors)
             session.add(sqli)
+            session.add(explicit)
             session.commit()
 
         # Monkeypatch get_engine to use our memory db
@@ -994,6 +1042,9 @@ def test_calibrate_all_findings_for_run():
                     assert f.severity == "low"
                     assert f.cvss_score == 3.1
                     assert "AC:H" in f.cvss_vector
+                elif f.title == "Authorization bypass":
+                    assert f.severity == "high"
+                    assert f.cvss_score == 8.0
                 else:
                     assert f.severity == "high"
                     assert f.cvss_score == 7.1

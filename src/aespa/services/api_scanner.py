@@ -778,13 +778,21 @@ def _scope_hosts_for_run(api_run_id: int) -> list[str]:
 def _api_check_scope(url: str, api_run_id: int) -> str | None:
     """Return an error string if ``url`` is out of scope, else None."""
     hosts = _scope_hosts_for_run(api_run_id)
-    if not hosts:
-        return None  # no scope restriction
-    from urllib.parse import urlparse
+    from aespa.services.scope import authority_is_allowed
 
-    host = urlparse(url).hostname or ""
-    if not any(host == h or host.endswith("." + h) for h in hosts):
-        return f"Out of scope: {url} (allowed: {hosts})"
+    with Session(get_engine()) as s:
+        run = s.get(ApiTestRun, api_run_id)
+        coll = s.get(ApiCollection, run.collection_id) if run else None
+        base_url = coll.base_url if coll else url
+        allowed = hosts or (
+            [coll.base_url, *json.loads(coll.servers or "[]")] if coll else []
+        )
+    if not allowed:
+        return None
+    if not authority_is_allowed(
+        url, allowed, default_url=base_url, allow_subdomains=bool(hosts)
+    ):
+        return f"Out of scope: {url} (allowed: {allowed})"
     return None
 
 
@@ -1450,8 +1458,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         from aespa.services.scan_leads import get_all_leads_for_run
 
         unresolved_sast = any(
-            (lead.status or "open")
-            not in {"confirmed", "dismissed", "inconclusive"}
+            (lead.status or "open") not in {"confirmed", "dismissed", "inconclusive"}
             for lead in get_all_leads_for_run("api", api_run_id)
         )
 
@@ -1528,6 +1535,29 @@ async def _api_scan_task(api_run_id: int) -> None:
                 "current_task": "Scan stopped",
                 "outcome": "cancelled",
                 "_persist": True,
+            },
+        )
+    except llm_svc.LLMQuotaPauseError as exc:
+        log.warning("API scan paused for api_run_id=%s: %s", api_run_id, exc)
+        from aespa.services import run_pause as run_pause_svc
+
+        _update_run_status(api_run_id, "paused", str(exc))
+        run_pause_svc.save_pause(
+            "api",
+            api_run_id,
+            provider="openai_codex",
+            message=str(exc),
+            reset_at=exc.reset_at,
+            snapshot=exc.snapshot,
+            resume_stage="api_scan",
+        )
+        events_svc.emit(
+            api_run_id,
+            {
+                "type": "scan_paused",
+                "reason": "quota",
+                "message": str(exc),
+                "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
             },
         )
     except Exception as exc:

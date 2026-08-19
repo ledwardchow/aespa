@@ -148,6 +148,14 @@ export function ApiTestRunDetail({
       setScanBusy(false);
     }
   };
+  const onResumeScan = async () => {
+    setScanBusy(true);
+    try {
+      await api.resumeApiScan(runId);
+      setScanStatus(await api.getApiScanStatus(runId));
+      setRun(await api.getApiRun(runId));
+    } catch (e) { setError(e.message); } finally { setScanBusy(false); }
+  };
   const onDelete = async () => {
     if (!run) return;
     if (!confirm(`Delete test run "${run.name}"?`)) return;
@@ -188,6 +196,8 @@ export function ApiTestRunDetail({
       actions={<>
         {scanRunning ? <button className="btn danger-outline" disabled={scanBusy} onClick={onStopScan}>
                    {scanBusy ? "Stopping…" : "Stop Scan"}
+                 </button> : run.status === "paused" ? <button className="btn" disabled={scanBusy} onClick={onResumeScan}>
+                   {scanBusy ? "Resuming…" : "Resume Scan"}
                  </button> : <>
             <label className="subtle" style={{
             display: "flex",

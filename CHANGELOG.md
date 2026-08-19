@@ -2,6 +2,37 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## [PR #265] August 19 Update — new LLM providers and scan improvements
+
+**Branch:** `develop → main`
+
+### New LLM providers
+
+- **OpenAI Codex**: Scans can now use models available through a Codex subscription. AESPA handles sign-in, model selection, conversation history, and usage reporting. Codex support is included in the packaged macOS and Windows applications.
+- **Google Antigravity**: Antigravity is now available as an LLM provider, with sign-in, model selection, conversation history, and usage reporting.
+- **Scans wait for sign-in when necessary**: If Codex or Antigravity requires the user to sign in, AESPA pauses the scan and shows its current state. The scan continues after sign-in without losing its progress.
+
+### Model selection and settings
+
+- **Reasoning settings match each model**: AESPA now detects which reasoning levels a model supports and shows only the available choices. Invalid combinations are rejected when a profile is saved.
+- **Simpler LLM configuration**: The provider and model forms have been clarified. Profile names can be generated automatically, and deleting a profile returns affected scans and campaigns to the current default profile.
+- **Improved compatibility between providers**: Tool calls and responses are handled more consistently across OpenAI, Codex, Copilot, Droid, OpenRouter, Azure, and Bedrock. Malformed tool calls are returned to the model for correction instead of ending the scan.
+
+### Validation and SAST improvements
+
+- **Validation from A.L.I.C.E.**: A.L.I.C.E. can ask the validator to review a finding and report the result in the conversation. The bulk validation action now retries findings that could not previously be confirmed.
+- **Export completed SAST runs**: SAST results can now be exported with their findings, evidence, coverage, and related scan information.
+- **SAST evidence displays correctly**: Controls, counterevidence, missing evidence, and attack paths are now handled correctly when an LLM returns them in an unexpected format.
+- **More reliable application scans**: Cross-repository route matching, source references, campaign progress, and the connection between backend findings and frontend targets have been improved.
+
+### Usage reporting and other fixes
+
+- **Estimated cost for each run**: The usage display now includes estimated token and credit costs and updates earlier estimates when pricing changes. Codex and Antigravity usage is identified as part of the relevant subscription rather than given a separate estimated cost.
+- **More accurate scan scope**: AESPA now preserves port restrictions when matching hosts, preventing a target from being widened unintentionally.
+- **Interface and run-state fixes**: This update includes fixes to job status, crawl progress, statistics, application campaigns, provider settings, and transitions between scan stages. Playwright and frontend dependencies have also been updated.
+
+---
+
 ## [PR #262] August 9 Update — Applications and multi-repository campaign scanning
 
 ### "Applications" targets

@@ -217,7 +217,9 @@ def upgrade() -> None:
                 "imported_into_run_id, origin_lead_id, public_reference, origin_reference "
                 "FROM scan_lead ORDER BY id"
             )
-        ).mappings().all()
+        )
+        .mappings()
+        .all()
         if "scan_lead" in tables
         else []
     )
@@ -270,7 +272,9 @@ def upgrade() -> None:
                 "SELECT id, test_run_id, api_test_run_id, public_reference "
                 "FROM scan_finding ORDER BY id"
             )
-        ).mappings().all()
+        )
+        .mappings()
+        .all()
         if "scan_finding" in tables
         else []
     )
@@ -298,7 +302,9 @@ def upgrade() -> None:
         linked_owner = (
             (linked[3], linked[4])
             if linked is not None and linked[3] and linked[4] is not None
-            else (linked[1], linked[2]) if linked is not None else None
+            else (linked[1], linked[2])
+            if linked is not None
+            else None
         )
         if linked is not None and linked[0] and linked_owner == (owner_type, owner_id):
             reference = linked[0]
@@ -332,17 +338,25 @@ def upgrade() -> None:
         )
 
     if "campaign_target_member" in tables:
-        targets = bind.execute(
-            sa.text(
-                "SELECT id, campaign_id, target_type, test_run_id, api_test_run_id "
-                "FROM campaign_target_member ORDER BY id"
+        targets = (
+            bind.execute(
+                sa.text(
+                    "SELECT id, campaign_id, target_type, test_run_id, api_test_run_id "
+                    "FROM campaign_target_member ORDER BY id"
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         for target in targets:
             run_id = target["test_run_id"] or target["api_test_run_id"]
             if run_id is None:
                 continue
-            owner_column = "test_run_id" if target["test_run_id"] is not None else "api_test_run_id"
+            owner_column = (
+                "test_run_id"
+                if target["test_run_id"] is not None
+                else "api_test_run_id"
+            )
             findings = bind.execute(
                 sa.text(
                     f"SELECT id FROM scan_finding WHERE {owner_column}=:run_id "
@@ -374,7 +388,6 @@ def upgrade() -> None:
                         "reference": _reference(prefix, number),
                     },
                 )
-
 
 
 def downgrade() -> None:

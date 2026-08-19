@@ -232,6 +232,38 @@ async def _crawl_task(run_id: int) -> None:
         events_svc.emit(run_id, {"type": "run_update", "status": "stopped"})
         raise
     except Exception as exc:
+        from aespa.services import llm as llm_svc
+
+        if isinstance(exc, llm_svc.LLMQuotaPauseError):
+            log.warning("Crawl paused for quota: run_id=%s: %s", run_id, exc)
+            from aespa.services import run_pause as run_pause_svc
+
+            run_pause_svc.save_pause(
+                "crawl",
+                run_id,
+                provider="openai_codex",
+                message=str(exc),
+                reset_at=exc.reset_at,
+                snapshot=exc.snapshot,
+                resume_stage="crawl",
+            )
+            with Session(get_engine()) as s:
+                run = s.get(TestRun, run_id)
+                if run is not None and run.status == TestRunStatus.running:
+                    run.status = "paused"
+                    run.error_message = str(exc)[:2000]
+                    s.add(run)
+                    s.commit()
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "scan_paused",
+                    "reason": "quota",
+                    "message": str(exc),
+                    "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
+                },
+            )
+            return
         with Session(get_engine()) as s:
             run = s.get(TestRun, run_id)
             if run and run.status == TestRunStatus.running:

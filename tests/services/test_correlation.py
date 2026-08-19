@@ -26,6 +26,7 @@ from aespa.models import (
     ComponentFact,
     ComponentSnapshot,
     LeadTargetMapping,
+    SastRun,
     ScanLead,
     ScanLeadComponentProvenance,
 )
@@ -168,9 +169,8 @@ def test_correlate_campaign_builds_deterministic_connection(isolated_db_engine):
 
     with Session(isolated_db_engine) as s:
         connections = s.exec(
-            select(ComponentConnection).where(
-                ComponentConnection.campaign_id == ctx["campaign_id"]
-            )
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
             .where(ComponentConnection.edge_kind == "calls")
         ).all()
     assert len(connections) == 1
@@ -231,11 +231,14 @@ def test_purge_llm_component_facts_clears_dependent_rows_with_fk_enforcement(
 
     with Session(fk_engine) as session:
         assert session.get(ComponentFact, llm_fact_id) is None
-        assert session.exec(
-            select(ComponentConnection).where(
-                ComponentConnection.source_fact_id == llm_fact_id
-            )
-        ).first() is None
+        assert (
+            session.exec(
+                select(ComponentConnection).where(
+                    ComponentConnection.source_fact_id == llm_fact_id
+                )
+            ).first()
+            is None
+        )
         provenance = session.exec(
             select(ScanLeadComponentProvenance).where(
                 ScanLeadComponentProvenance.scan_lead_id == campaign_lead_id
@@ -273,19 +276,25 @@ def test_persist_facts_clears_stale_graph_references_with_fk_enforcement(fk_engi
         )
         session.commit()
 
-    assert _persist_facts(
-        sast_run_id=9001,
-        component_id=ctx["ui_component_id"],
-        facts=[],
-    ) == 0
+    assert (
+        _persist_facts(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            facts=[],
+        )
+        == 0
+    )
 
     with Session(fk_engine) as session:
         assert session.get(ComponentFact, llm_fact_id) is None
-        assert session.exec(
-            select(ComponentConnection).where(
-                ComponentConnection.source_fact_id == llm_fact_id
-            )
-        ).first() is None
+        assert (
+            session.exec(
+                select(ComponentConnection).where(
+                    ComponentConnection.source_fact_id == llm_fact_id
+                )
+            ).first()
+            is None
+        )
 
 
 @pytest.mark.anyio
@@ -329,13 +338,99 @@ async def test_llm_correlation_persists_valid_ambiguous_match(
     assert result["connections"] == 2  # internal anchor edge plus the LLM hop
     with Session(isolated_db_engine) as session:
         connection = session.exec(
-            select(ComponentConnection).where(
-                ComponentConnection.campaign_id == ctx["campaign_id"]
-            )
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
             .where(ComponentConnection.edge_kind == "calls")
         ).one()
         assert connection.match_kind == "llm_assisted"
         assert connection.confidence == 0.88
+
+
+@pytest.mark.anyio
+async def test_llm_correlation_skips_failed_source_scan(
+    isolated_db_engine, monkeypatch
+):
+    with Session(isolated_db_engine) as session:
+        app = Application(name="Partial mapping app")
+        session.add(app)
+        session.flush()
+        good_component = ApplicationComponent(
+            application_id=app.id, name="good-component"
+        )
+        failed_component = ApplicationComponent(
+            application_id=app.id, name="failed-component"
+        )
+        session.add(good_component)
+        session.add(failed_component)
+        session.flush()
+        good_snapshot = ComponentSnapshot(
+            component_id=good_component.id,
+            filename="good.zip",
+            stored_path="/tmp/good.zip",
+            size_bytes=1,
+            sha256="c" * 64,
+        )
+        failed_snapshot = ComponentSnapshot(
+            component_id=failed_component.id,
+            filename="failed.zip",
+            stored_path="/tmp/failed.zip",
+            size_bytes=1,
+            sha256="d" * 64,
+        )
+        good_run = SastRun(name="good", status="completed")
+        failed_run = SastRun(name="failed", status="failed")
+        session.add(good_snapshot)
+        session.add(failed_snapshot)
+        session.add(good_run)
+        session.add(failed_run)
+        session.flush()
+        campaign = AssessmentCampaign(application_id=app.id, name="partial")
+        session.add(campaign)
+        session.flush()
+        session.add(
+            CampaignSourceMember(
+                campaign_id=campaign.id,
+                component_id=good_component.id,
+                snapshot_id=good_snapshot.id,
+                sast_run_id=good_run.id,
+                status="completed",
+            )
+        )
+        session.add(
+            CampaignSourceMember(
+                campaign_id=campaign.id,
+                component_id=failed_component.id,
+                snapshot_id=failed_snapshot.id,
+                sast_run_id=failed_run.id,
+                status="failed",
+            )
+        )
+        session.commit()
+        campaign_id = campaign.id
+        good_member_id = (
+            session.exec(
+                select(CampaignSourceMember)
+                .where(CampaignSourceMember.campaign_id == campaign_id)
+                .where(CampaignSourceMember.component_id == good_component.id)
+            )
+            .one()
+            .id
+        )
+
+    from aespa.services import component_mapper, settings
+
+    monkeypatch.setattr(settings, "get_llm_config_for_role", lambda *_args: object())
+    mapped_member_ids: list[int] = []
+
+    async def fake_mapper(_campaign_id, member_id, **_kwargs):
+        mapped_member_ids.append(member_id)
+        return None
+
+    monkeypatch.setattr(component_mapper, "map_campaign_component", fake_mapper)
+    result = await correlate_campaign_with_llm(campaign_id)
+
+    assert result["connections"] == 0
+    assert mapped_member_ids == [good_member_id]
 
 
 def test_correlate_campaign_proposes_lead_target_mapping_via_endpoint_match(

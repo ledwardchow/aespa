@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { api } from "../../lib/api";
 import { truncUrl } from "../../lib/utilities";
 import { isDynamicScanActive } from "./_helpers";
+import { runStatusFromThinkingStatus } from "./runState";
 import { useEventStream } from "../../hooks/useEventStream";
 
 const isHidden404Node = node => (
@@ -179,6 +180,7 @@ export function useWebRunEvents(options) {
         // scan phase started.
         setRun(prev => prev ? {
           ...prev,
+          status: runStatusFromThinkingStatus(evt, prev.status),
           phase: evt.run_phase ?? prev.phase,
           outcome: evt.run_outcome ?? prev.outcome,
           terminal_reason: evt.run_terminal_reason ?? prev.terminal_reason

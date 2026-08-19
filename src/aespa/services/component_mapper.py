@@ -29,6 +29,21 @@ from aespa.models import (
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import settings as settings_svc
+from aespa.services.component_facts import interface_fact_fingerprint
+from aespa.services.prompts.component_mapper import (
+    COMPONENT_MAPPER_SYSTEM_PROMPT,
+    COMPONENT_MAPPER_TOOLS,
+)
+from aespa.services.source_tools import (
+    glob_files,
+    grep,
+    jail,
+    list_files,
+    read_file,
+    safe_unzip,
+)
+
+log = logging.getLogger(__name__)
 
 
 def _format_tool_desc(tool_name: str, tool_input: dict) -> str:
@@ -56,21 +71,7 @@ def _format_tool_desc(tool_name: str, tool_input: dict) -> str:
     if tool_name == "done":
         return "completed interface mapping"
     return f"executed {tool_name}"
-from aespa.services.component_facts import interface_fact_fingerprint
-from aespa.services.prompts.component_mapper import (
-    COMPONENT_MAPPER_SYSTEM_PROMPT,
-    COMPONENT_MAPPER_TOOLS,
-)
-from aespa.services.source_tools import (
-    glob_files,
-    grep,
-    jail,
-    list_files,
-    read_file,
-    safe_unzip,
-)
 
-log = logging.getLogger(__name__)
 
 _FACT_TYPES = {
     "route",
