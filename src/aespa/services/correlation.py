@@ -40,6 +40,7 @@ from aespa.models import (
     ComponentMapperConfig,
     ComponentTargetHint,
     LeadTargetMapping,
+    SastRun,
     ScanLead,
     ScanLeadComponentProvenance,
     Site,
@@ -723,7 +724,11 @@ async def match_ambiguous_connections(
                     "phase": "component_mapping",
                     "status": "running",
                     "message": f"[Connection Matcher] Turn {batch_idx}/{total_batches}: Evaluating LLM disambiguation for {len(batch)} candidate pair(s)",
-                    "data": {"batch": batch_idx, "total_batches": total_batches, "candidates": len(batch)},
+                    "data": {
+                        "batch": batch_idx,
+                        "total_batches": total_batches,
+                        "candidates": len(batch),
+                    },
                 },
             )
         prompt = (
@@ -851,7 +856,8 @@ def _generate_cross_component_leads(
 
         # ── Case 1: SAST lead on the calling component (source_fact) ─────────
         source_leads = [
-            source_lead for source_lead in session.exec(
+            source_lead
+            for source_lead in session.exec(
                 select(ScanLead)
                 .where(ScanLead.producer_run_id == source_fact.sast_run_id)
                 .where(ScanLead.producer_run_type == "sast")
@@ -947,7 +953,8 @@ def _generate_cross_component_leads(
 
         # ── Case 2: SAST lead on the receiving target route (target_fact) ────
         target_leads = [
-            target_lead for target_lead in session.exec(
+            target_lead
+            for target_lead in session.exec(
                 select(ScanLead)
                 .where(ScanLead.producer_run_id == target_fact.sast_run_id)
                 .where(ScanLead.producer_run_type == "sast")
@@ -1285,13 +1292,14 @@ async def _rewrite_pre_crawl_frontend_paths(
                     raise ValueError(f"invalid {key}")
             generated_text = json.dumps(decoded, ensure_ascii=False)
             if any(
-                token.startswith("/")
-                and token not in allowed_values
+                token.startswith("/") and token not in allowed_values
                 for token in re.findall(r"/[A-Za-z0-9_{}.:?=&%/-]+", generated_text)
             ):
                 raise ValueError("response introduced an unsupported route")
         except Exception as exc:
-            warnings.append(f"Lead {lead_id}: pre-crawl path wording was not rewritten ({exc})")
+            warnings.append(
+                f"Lead {lead_id}: pre-crawl path wording was not rewritten ({exc})"
+            )
             continue
 
         with Session(get_engine()) as session:
@@ -1489,11 +1497,7 @@ def _propose_mappings_for_lead(
             score=score,
             rationale=rationale,
             evidence_json=json.dumps(evidence),
-            status=(
-                "approved"
-                if explicitly_owned
-                else "proposed"
-            ),
+            status=("approved" if explicitly_owned else "proposed"),
         )
         if hasattr(mapping, "path_json"):
             mapping.path_json = lead.attack_path_json or "{}"
@@ -1690,10 +1694,25 @@ async def correlate_campaign_with_llm(
                     component_mapper.purge_llm_component_facts(m.sast_run_id)
             llm_config = get_llm_config_for_role(session, campaign, "component_mapper")
             has_explicit_mapper_config = (
-                campaign.llm_config_id is not None or campaign.llm_profile_id is not None
+                campaign.llm_config_id is not None
+                or campaign.llm_profile_id is not None
             )
             mapper_config = get_component_mapper_config(session)
             max_parallel = mapper_config.max_concurrent
+
+            # A campaign continues with the source evidence it has when one
+            # component scan fails. Do not ask the mapper to reopen a failed
+            # SAST run: its extracted workspace may already have been cleaned
+            # up, and one component must not prevent the other components from
+            # reaching review.
+            mappable_members = [
+                member
+                for member in source_members
+                if member.sast_run_id is not None
+                and (sast_run := session.get(SastRun, member.sast_run_id)) is not None
+                and sast_run.status == "completed"
+            ]
+            skipped_members = len(source_members) - len(mappable_members)
 
         if llm_config is None:
             if not has_explicit_mapper_config:
@@ -1726,8 +1745,20 @@ async def correlate_campaign_with_llm(
                 "type": "scanner_phase",
                 "phase": "component_mapping",
                 "status": "running",
-                "message": f"Mapping interfaces for {len(source_members)} component(s).",
-                "data": {"components": len(source_members)},
+                "message": (
+                    f"Mapping interfaces for {len(mappable_members)} completed "
+                    "component(s)."
+                    if not skipped_members
+                    else (
+                        f"Mapping interfaces for {len(mappable_members)} completed "
+                        f"component(s); skipped {skipped_members} unfinished "
+                        "source scan(s)."
+                    )
+                ),
+                "data": {
+                    "components": len(mappable_members),
+                    "skipped_components": skipped_members,
+                },
             },
         )
         semaphore = asyncio.Semaphore(max_parallel)
@@ -1745,7 +1776,7 @@ async def correlate_campaign_with_llm(
 
         mapping_tasks = [
             asyncio.create_task(_map(member), name=f"component-map-{member.id}")
-            for member in source_members
+            for member in mappable_members
         ]
         try:
             await asyncio.gather(*mapping_tasks)
@@ -1816,7 +1847,8 @@ async def correlate_campaign_with_llm(
                     elif fact.fact_type == "route":
                         route_by_fact[fact.id] = fact
             deterministic_call_ids = {
-                connection.source_fact_id for connection in connections
+                connection.source_fact_id
+                for connection in connections
                 if getattr(connection, "edge_kind", "calls") == "calls"
             }
             seen_pairs: set[tuple[int, int]] = set()
@@ -1826,7 +1858,11 @@ async def correlate_campaign_with_llm(
                     continue
                 call = source_by_fact.get(proposal.call_id)
                 route = route_by_fact.get(proposal.route_id)
-                if call is None or route is None or call.component_id == route.component_id:
+                if (
+                    call is None
+                    or route is None
+                    or call.component_id == route.component_id
+                ):
                     continue
                 if proposal.confidence < 0.70:
                     continue
@@ -1900,7 +1936,9 @@ async def correlate_campaign_with_llm(
                         except (TypeError, json.JSONDecodeError):
                             warnings = []
                         warnings.extend(
-                            warning for warning in wording_warnings if warning not in warnings
+                            warning
+                            for warning in wording_warnings
+                            if warning not in warnings
                         )
                         campaign.warnings_json = json.dumps(warnings[-50:])
                         session.add(campaign)
@@ -2243,9 +2281,13 @@ def propose_crawl_discovered_paths(
                 else None
             )
             existing_request_key = (
-                str(existing_request.get("method") or "").upper(),
-                str(existing_request.get("path") or ""),
-            ) if isinstance(existing_request, dict) else ("", "")
+                (
+                    str(existing_request.get("method") or "").upper(),
+                    str(existing_request.get("path") or ""),
+                )
+                if isinstance(existing_request, dict)
+                else ("", "")
+            )
             approved_transition = base_path.get("request_transition")
             if not isinstance(approved_transition, dict):
                 approved_transition = {}
@@ -2266,9 +2308,7 @@ def propose_crawl_discovered_paths(
                 if not page_route:
                     continue
                 page_requests = [
-                    item
-                    for item in requests
-                    if item.get("page_id") == page_id
+                    item for item in requests if item.get("page_id") == page_id
                 ][:10]
                 for request in page_requests:
                     request_key = (
@@ -2283,14 +2323,12 @@ def propose_crawl_discovered_paths(
                     # turned into a vulnerability-specific proposal.
                     if approved_method and request_key[0] != approved_method:
                         continue
-                    if approved_path and _route_key(request_key[1]) != _route_key(approved_path):
+                    if approved_path and _route_key(request_key[1]) != _route_key(
+                        approved_path
+                    ):
                         continue
                     action = next(
-                        (
-                            item
-                            for item in actions
-                            if item.get("page_id") == page_id
-                        ),
+                        (item for item in actions if item.get("page_id") == page_id),
                         None,
                     )
                     evidence_ids = [
@@ -2304,7 +2342,7 @@ def propose_crawl_discovered_paths(
                             ),
                             (
                                 f"action:{action['id']}"
-                    if action and action.get("id") is not None
+                                if action and action.get("id") is not None
                                 else None
                             ),
                         )
@@ -2382,9 +2420,7 @@ def propose_crawl_discovered_paths(
                         control_trace_json=source.control_trace_json,
                         sink_trace_json=source.sink_trace_json,
                         proof_gaps_json=source.proof_gaps_json,
-                        attack_path_json=json.dumps(
-                            discovered, separators=(",", ":")
-                        ),
+                        attack_path_json=json.dumps(discovered, separators=(",", ":")),
                         reportable=True,
                         validation_status="pending",
                         origin_lead_id=source.origin_lead_id or source.id,

@@ -13,10 +13,6 @@ export function DebugPage({
   reportingDebugCfg,
   setReportingDebugCfg
 }) {
-  const [cfg, setCfg] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState(null);
   const [browserCfg, setBrowserCfg] = useState(null);
   const [browserSaving, setBrowserSaving] = useState(false);
   const [browserSaved, setBrowserSaved] = useState(false);
@@ -30,13 +26,6 @@ export function DebugPage({
   const [cfError, setCfError] = useState(null);
   const [sitemapGravity, setSitemapGravityState] = useState(getSitemapGravity);
   useEffect(() => {
-    (async () => {
-      try {
-        setCfg(await api.getSpecialistAgentConfig());
-      } catch (e) {
-        setError(e.message);
-      }
-    })();
     (async () => {
       try {
         setBrowserCfg(await api.getBrowserDebugConfig());
@@ -74,23 +63,6 @@ export function DebugPage({
       setCfError(e.message);
     } finally {
       setCfSaving(false);
-    }
-  };
-  const toggle = async checked => {
-    setSaved(false);
-    setSaving(true);
-    setError(null);
-    try {
-      const updated = await api.upsertSpecialistAgentConfig({
-        ...cfg,
-        trigger_specialist_on_burp: checked
-      });
-      setCfg(updated);
-      setSaved(true);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving(false);
     }
   };
   const toggleReportingDebug = async patch => {
@@ -140,7 +112,7 @@ export function DebugPage({
       <div className="topbar-title">System Settings</div>
     </div>
     <div className="content scroll-content">
-      {!cfg && !browserCfg && !error && !browserError && <div className="subtle">Loading…</div>}
+      {!browserCfg && !browserError && <div className="subtle">Loading…</div>}
 
       <div className="card" style={{ marginTop: 16, maxWidth: 680 }}>
         <div className="form-section-title">Browser</div>
@@ -181,23 +153,6 @@ export function DebugPage({
           {browserSaved && <div className="save-confirm" style={{ marginTop: 8 }}><IconCheck /> Saved</div>}
         </>}
       </div>
-
-      {error && <div className="alert error">{error}</div>}
-      {cfg && <div className="card" style={{ marginTop: 16, maxWidth: 680 }}>
-          <div className="form-section-title">Specialist Agent</div>
-          <label className="toggle-row">
-            <input type="checkbox" checked={cfg.trigger_specialist_on_burp ?? false} disabled={saving} onChange={e => toggle(e.target.checked)} />
-            <span>Trigger a Specialist Agent whenever a Burp active scan is triggered</span>
-          </label>
-          <div className="field-hint">
-            When enabled, a specialist agent is dispatched immediately alongside every Burp active scan,
-            independently investigating the same URL. Use this to force specialist agents to fire for
-            debugging purposes.
-          </div>
-          {saved && <div className="save-confirm" style={{
-          marginTop: 8
-        }}><IconCheck /> Saved</div>}
-        </div>}
 
       <div className="card" style={{
         marginTop: 16,

@@ -78,25 +78,31 @@ def _has_valid_frontend_sequence(
             # browser action calls one specific request or sink.
             return False
         allowed = (
-            kind == "contains"
-            and source.fact_type == "ui_route"
-            and target.fact_type == "ui_action"
-        ) or (
-            kind == "triggers"
-            and source.fact_type in {"ui_route", "ui_action"}
-            and target.fact_type == "http_call"
-        ) or (
-            kind == "calls"
-            and source.fact_type == "http_call"
-            and target.fact_type == "route"
-        ) or (
-            kind == "dispatches"
-            and source.fact_type in {"route", "handler"}
-            and target.fact_type in {"route", "handler", "http_call"}
-        ) or (
-            kind == "reaches"
-            and source.fact_type in {"route", "handler"}
-            and target.fact_type == "lead_anchor"
+            (
+                kind == "contains"
+                and source.fact_type == "ui_route"
+                and target.fact_type == "ui_action"
+            )
+            or (
+                kind == "triggers"
+                and source.fact_type in {"ui_route", "ui_action"}
+                and target.fact_type == "http_call"
+            )
+            or (
+                kind == "calls"
+                and source.fact_type == "http_call"
+                and target.fact_type == "route"
+            )
+            or (
+                kind == "dispatches"
+                and source.fact_type in {"route", "handler"}
+                and target.fact_type in {"route", "handler", "http_call"}
+            )
+            or (
+                kind == "reaches"
+                and source.fact_type in {"route", "handler"}
+                and target.fact_type == "lead_anchor"
+            )
         )
         if not allowed:
             return False

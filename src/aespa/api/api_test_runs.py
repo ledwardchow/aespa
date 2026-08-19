@@ -416,6 +416,31 @@ def api_scan_status(run_id: int, session: Session = Depends(get_session)) -> dic
     return api_scanner.get_scan_status(run_id)
 
 
+@router.post("/{run_id}/scan/resume")
+async def resume_api_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    """Manually resume a quota-paused API scan."""
+    from aespa.services import api_scanner
+    from aespa.services import run_pause as run_pause_svc
+
+    run = _get_run_or_404(session, run_id)
+    pause = run_pause_svc.get_pause("api", run_id)
+    if pause is None or run.status != "paused":
+        raise HTTPException(status_code=409, detail="API scan is not paused")
+    if api_scanner.is_api_scan_running(run_id):
+        raise HTTPException(status_code=409, detail="API scan is already running")
+    if pause.reset_at and pause.reset_at > datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": pause.message,
+                "reset_at": pause.reset_at.isoformat(),
+            },
+        )
+    await api_scanner.start_api_scan(run_id)
+    run_pause_svc.clear_pause("api", run_id)
+    return api_scanner.get_scan_status(run_id)
+
+
 # ── Findings alias ─────────────────────────────────────────────────────────────
 
 

@@ -1,8 +1,9 @@
+import json
 from datetime import datetime, timezone
 
 from sqlmodel import Session
 
-from aespa.models import LLMConfig, LLMPriceCatalog, LLMUsageMonth
+from aespa.models import LLMConfig, LLMPriceCatalog, LLMUsageMonth, Site, TestRun
 from aespa.services import llm, statistics
 
 
@@ -171,3 +172,149 @@ def test_missing_prices_count_as_zero_in_monthly_and_lifetime_costs(
     assert stats["lifetime"]["estimated_token_cost_usd"] == 2
     assert stats["lifetime"]["estimated_credit_cost_usd"] == 0
     assert stats["lifetime"]["estimated_total_cost_usd"] == 2
+
+
+def test_run_token_usage_includes_cache_aware_estimated_cost(isolated_db_engine):
+    with Session(isolated_db_engine) as session:
+        session.add(
+            LLMPriceCatalog(
+                provider="openai",
+                model="gpt-cost-test",
+                input_price_usd_per_million=2,
+                output_price_usd_per_million=4,
+                cache_read_price_usd_per_million=0.2,
+                cache_write_price_usd_per_million=0.4,
+            )
+        )
+        session.commit()
+
+    run_id = 991001
+    llm.set_run_context(run_id, emit_fn=None)
+    try:
+        llm._record_usage(
+            "gpt-cost-test",
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            cache_read_tokens=100_000,
+            provider="openai",
+        )
+    finally:
+        llm.clear_run_context()
+
+    usage = llm.get_run_token_usage(run_id)
+    assert usage["estimated_token_cost_usd"] == 3.82
+    assert usage["estimated_credit_cost_usd"] == 0
+    assert usage["estimated_total_cost_usd"] == 3.82
+    assert usage["estimated_cost_available"] is True
+    assert usage["by_model"]["gpt-cost-test"]["estimated_total_cost_usd"] == 3.82
+
+
+def test_run_cost_is_recalculated_from_totals_on_each_usage_update(
+    isolated_db_engine,
+):
+    model = "gpt-repriced"
+    with Session(isolated_db_engine) as session:
+        session.add(
+            LLMPriceCatalog(
+                provider="openai",
+                model=model,
+                input_price_usd_per_million=1,
+                output_price_usd_per_million=2,
+            )
+        )
+        session.commit()
+
+    run_id = 991002
+    key = ("web", run_id)
+    llm.set_run_context(run_id, emit_fn=None)
+    try:
+        llm._record_usage(
+            model,
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            provider="openai",
+        )
+        with Session(isolated_db_engine) as session:
+            price = session.query(LLMPriceCatalog).one()
+            price.input_price_usd_per_million = 2
+            price.output_price_usd_per_million = 4
+            session.add(price)
+            session.commit()
+        llm._record_usage(
+            model,
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            provider="openai",
+        )
+        usage = llm.get_run_token_usage(run_id)
+    finally:
+        llm.clear_run_context()
+        llm._run_token_usage.pop(key, None)
+        llm._run_token_seeded.discard(key)
+
+    model_usage = usage["by_model"][model]
+    assert model_usage["estimated_cost_available"] is True
+    assert model_usage["estimated_total_cost_usd"] == 8
+
+
+def test_existing_run_token_usage_is_backfilled_and_persisted(isolated_db_engine):
+    model = "minimax/minimax-m3"
+    old_bucket = {
+        model: {
+            "input": 1_000_000,
+            "output": 100_000,
+            "cache_read": 200_000,
+            "cache_write": 0,
+            "ai_credits": 0,
+            "factory_credits": 0,
+            "premium_requests": 0,
+            "requests": 0,
+            "provider": "openrouter",
+            "estimated_cost_available": True,
+            "estimated_token_cost_usd": 0.09,
+            "estimated_credit_cost_usd": 0,
+            "estimated_total_cost_usd": 0.09,
+        }
+    }
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Backfill target", base_url="https://target.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(
+            site_id=site.id,
+            name="Existing scan",
+            status="complete",
+            execution_snapshot_json=json.dumps(
+                {"model": {"model": model, "provider": "openai"}}
+            ),
+            token_usage_json=json.dumps(old_bucket),
+        )
+        session.add(run)
+        session.add(LLMUsageMonth(month="2026-08", provider="openrouter", model=model))
+        session.add(
+            LLMPriceCatalog(
+                provider="openrouter",
+                model=model,
+                input_price_usd_per_million=2,
+                output_price_usd_per_million=3,
+                cache_read_price_usd_per_million=0.2,
+                cache_write_price_usd_per_million=0.4,
+            )
+        )
+        session.commit()
+        run_id = run.id
+
+    key = ("web", run_id)
+    llm._run_token_usage[key] = old_bucket
+    try:
+        usage = llm.get_run_token_usage(run_id)
+    finally:
+        llm._run_token_usage.pop(key, None)
+        llm._run_token_seeded.discard(key)
+
+    assert usage["by_model"][model]["provider"] == "openrouter"
+    assert usage["estimated_cost_available"] is True
+    assert usage["estimated_total_cost_usd"] == 1.94
+    with Session(isolated_db_engine) as session:
+        saved = json.loads(session.get(TestRun, run_id).token_usage_json)
+    assert saved[model]["estimated_total_cost_usd"] == 1.94

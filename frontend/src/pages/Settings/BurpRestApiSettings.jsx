@@ -190,6 +190,8 @@ export const API_FORMAT_LABELS = {
   anthropic: "Anthropic API",
   factory_droid: "Factory Droid subscription",
   github_copilot: "GitHub Copilot subscription",
+  openai_codex: "OpenAI Codex subscription",
+  google_antigravity: "Google Antigravity subscription",
   openai: "OpenAI API",
   openai_compatible: "OpenAI-compatible API",
   openrouter: "OpenRouter",
@@ -208,24 +210,28 @@ export const DEFAULT_PROVIDER_FORM = {
   username: "",
   project_id: "",
   models: "",
+  model_capabilities: {},
   api_key: "",
   max_tpm: "",
   max_rpm: ""
 };
 export const DEFAULT_LLM_FORM = {
-  name: "Default",
+  name: "",
   provider_id: "",
   model: "",
   max_tokens: 70000,
   temperature: 0.2,
   use_temperature: true,
   use_vision: false,
-  force_tool_choice: false
+  force_tool_choice: false,
+  reasoning_effort: ""
 };
 export const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic: "https://api.anthropic.com",
   factory_droid: "Not required",
   github_copilot: "Not required",
+  openai_codex: "Not required",
+  google_antigravity: "Not required",
   openai: "https://api.openai.com/v1",
   openai_compatible: "http://localhost:1234/v1",
   openrouter: "https://openrouter.ai/api/v1",
@@ -242,6 +248,8 @@ export const PROVIDER_DEFAULT_BASE_URLS = {
   anthropic: "https://api.anthropic.com",
   factory_droid: "Droid CLI (signed-in account)",
   github_copilot: "Copilot SDK (selected default account)",
+  openai_codex: "Codex app-server (ChatGPT account)",
+  google_antigravity: "Antigravity CLI (signed-in account)",
   openai: "https://api.openai.com/v1",
   openai_compatible: null,
   // no sensible default — must be set
@@ -259,6 +267,8 @@ export const PROVIDER_MODEL_PLACEHOLDERS = {
   anthropic: "claude-opus-4-8\nclaude-sonnet-4-5",
   factory_droid: "Models are loaded from the signed-in Droid CLI",
   github_copilot: "auto\nModels are loaded from GitHub Copilot API",
+  openai_codex: "auto\nModels are loaded from the signed-in ChatGPT account",
+  google_antigravity: "auto\nGemini 3.7 Flash (High)\nGemini 3.1 Pro (High)",
   openai: "gpt-5.6-luna\ngpt-5.6-terra\ngpt-5.6-sol\ngpt-5.5\ngpt-5.4\ngpt-4.1",
   openai_compatible: "llama-3.1-8b-instruct\nqwen2.5-coder",
   openrouter: "Models are loaded from OpenRouter API",

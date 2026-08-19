@@ -24,6 +24,21 @@ DEFAULT_CREDIT_PRICES: dict[str, tuple[float, str]] = {
     "factory_droid": (7.0, "Factory credits per 1,000,000 credits"),
 }
 
+SUBSCRIPTION_PROVIDERS = {"openai_codex", "google_antigravity"}
+
+_INCLUSIVE_INPUT_PROVIDERS = {
+    "openai",
+    "openai_compatible",
+    "openrouter",
+    "azure_openai",
+    "azure_foundry",
+    "azure_foundry_openai",
+    "bedrock_mantle",
+    "google",
+    "openai_codex",
+    "google_antigravity",
+}
+
 
 def local_month(value: datetime | None = None) -> str:
     """Return the operating system's local calendar month for ``value``."""
@@ -155,6 +170,18 @@ def _feed(session: Session) -> dict[str, Any]:
 
 
 def _rates_for(session: Session, provider: str, model: str) -> dict[str, Any]:
+    if provider in SUBSCRIPTION_PROVIDERS:
+        return {
+            "input_price_usd_per_million": None,
+            "output_price_usd_per_million": None,
+            "cache_read_price_usd_per_million": None,
+            "cache_write_price_usd_per_million": None,
+            "credit_price_usd_per_million": None,
+            "credit_unit": "Included with subscription",
+            "price_source": "subscription",
+            "price_confidence": "not_applicable",
+            "manual_override": False,
+        }
     catalog = session.exec(
         select(LLMPriceCatalog).where(
             LLMPriceCatalog.provider == provider,
@@ -214,6 +241,74 @@ def _cost(row: LLMUsageMonth) -> tuple[float, float, float]:
     return token_cost, credit_cost, token_cost + credit_cost
 
 
+def estimate_usage_cost(
+    provider: str,
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    ai_credits: float = 0,
+    factory_credits: float = 0,
+    rates: dict[str, Any] | None = None,
+) -> dict[str, float | bool]:
+    """Estimate the cost for one run-usage delta using resolved model rates."""
+
+    if provider in SUBSCRIPTION_PROVIDERS:
+        return {
+            "estimated_token_cost_usd": 0.0,
+            "estimated_credit_cost_usd": 0.0,
+            "estimated_total_cost_usd": 0.0,
+            "estimated_cost_available": False,
+        }
+
+    rates = rates or {}
+    billable_input = max(0, int(input_tokens))
+    if provider in _INCLUSIVE_INPUT_PROVIDERS:
+        billable_input = max(
+            0,
+            billable_input
+            - max(0, int(cache_read_tokens))
+            - max(0, int(cache_write_tokens)),
+        )
+    input_rate = rates.get("input_price_usd_per_million")
+    output_rate = rates.get("output_price_usd_per_million")
+    cache_read_rate = rates.get("cache_read_price_usd_per_million")
+    cache_write_rate = rates.get("cache_write_price_usd_per_million")
+    credit_rate = rates.get("credit_price_usd_per_million")
+    input_count = billable_input
+    output_count = max(0, int(output_tokens))
+    cache_read_count = max(0, int(cache_read_tokens))
+    cache_write_count = max(0, int(cache_write_tokens))
+    credit_count = max(
+        0.0,
+        float(ai_credits if provider == "github_copilot" else factory_credits),
+    )
+    cost_available = any(
+        count > 0 and rate is not None
+        for count, rate in (
+            (input_count, input_rate),
+            (output_count, output_rate),
+            (cache_read_count, cache_read_rate),
+            (cache_write_count, cache_write_rate),
+            (credit_count, credit_rate),
+        )
+    )
+    token_cost = (
+        input_count * (input_rate or 0)
+        + output_count * (output_rate or 0)
+        + cache_read_count * (cache_read_rate or 0)
+        + cache_write_count * (cache_write_rate or 0)
+    ) / 1_000_000
+    credit_cost = credit_count * (credit_rate or 0) / 1_000_000
+    return {
+        "estimated_token_cost_usd": token_cost,
+        "estimated_credit_cost_usd": credit_cost,
+        "estimated_total_cost_usd": token_cost + credit_cost,
+        "estimated_cost_available": cost_available,
+    }
+
+
 def _row_dict(row: LLMUsageMonth) -> dict[str, Any]:
     token_cost, credit_cost, total = _cost(row)
     return {
@@ -261,7 +356,7 @@ def record_usage(
     factory_credits: float = 0,
     requests: int = 1,
     month: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Atomically add one provider usage delta to the local monthly ledger."""
 
     provider = str(provider or "unknown")
@@ -313,6 +408,7 @@ def record_usage(
         )
         session.exec(stmt)
         session.commit()
+    return rates
 
 
 def get_statistics(session: Session, month: str | None = None) -> dict[str, Any]:

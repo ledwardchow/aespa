@@ -115,6 +115,7 @@ src/aespa/
     ├── recon_summary.py   # Structured attack-surface summary from crawl data
     ├── reporting_debug.py # Reporting-prompt version store & write-up replay harness
     ├── run_cleanup.py     # Scoped database row deletion per run kind
+    ├── sast_export.py     # Complete SAST run export and import bundles
     ├── sast_scanner.py    # SAST agentic loop over uploaded source archives
     ├── scan_completion.py # Completion state policy & bounded stopping logic
     ├── scan_leads.py      # ScanLead CRUD and confidence-threshold filtering
@@ -331,7 +332,7 @@ Singleton row (id = 1). Controls the adversarial validation agent that attempts 
 | `enabled` | `true` | Use adversarial agent mode; `false` falls back to legacy static-probe validation |
 | `max_steps` | `20` | Step budget per validation pass |
 | `min_severity` | `low` | Skip validation for findings below this severity (`critical`\|`high`\|`medium`\|`low`\|`info`) |
-| `end_scan_max_concurrent` | `4` | Maximum simultaneous validators for end-of-scan batch review |
+| `end_scan_max_concurrent` | `4` | Maximum simultaneous validators for manual and end-of-scan review |
 | `auto_validate_inline` | `true` | Automatically validate each finding immediately after it is written |
 | `require_concrete_disproof` | `true` | Strict mode — only return `false_positive` when concrete innocent explanation is found |
 
@@ -833,6 +834,8 @@ See [§4 Configuration](#4-configuration) for the full `SpecialistAgentConfig` f
 
 After a normal web finding is written, the validator service (`validator.py`) can run an independent check. The validator is told to try to disprove the finding and records the evidence it used. A timeout, provider error, missing verdict, or malformed verdict is saved as **unconfirmed**, never as confirmed; the finding can be retried from the finding row's **Retry validation** button. Applications SAST validation keeps its existing lead workflow and does not run this separate validator.
 
+Manual finding validation uses the same inline validator as scan-time findings. Each clicked finding is tracked separately, repeated clicks for the same finding are ignored, and more findings can be added while validation is already running. The bulk **Validate Issues** action processes both `unvalidated` findings and `unconfirmed` findings that need another attempt. Manual validators run concurrently up to `end_scan_max_concurrent`; the run-level status and stop action cover both these inline tasks and the managed end-of-scan batch.
+
 Validation outcomes:
 - **confirmed** — vulnerability is reproducible and real
 - **unconfirmed** — could not be reproduced
@@ -889,6 +892,7 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 |---|---|
 | `factory_droid` | Official Factory Droid SDK, using the account signed in through Droid CLI |
 | `github_copilot` | Official GitHub Copilot SDK, using Copilot CLI authentication or a GitHub user token |
+| `openai_codex` | External Codex app-server, using the local Codex CLI's default ChatGPT login |
 | `anthropic` | `anthropic` Python SDK (native tool-use supported) |
 | `openai` | `openai` Python SDK |
 | `google` | `google-generativeai` |
@@ -907,6 +911,8 @@ Copilot usage events arrive through the SDK's background JSON-RPC callback, so e
 In addition to the run-level `token_usage_json`, `services/statistics.py` records every provider usage event in an independent monthly ledger. Rows are grouped by the local calendar month, canonical transport provider, and exact model string, while also retaining the endpoint base URL captured at call time. This means deleting a scan or changing a model setting cannot remove historical usage. An OpenRouter endpoint configured through the OpenAI-compatible adapter is labelled as OpenRouter. Input is normalized to mean uncached input; provider adapters subtract cached subsets only for APIs whose input counter includes them. The Statistics page can download the LiteLLM model price map, edit monthly prices, and estimate token and native-credit costs. Statistics reset deletes usage rows but keeps downloaded and manual price data.
 
 Factory Droid uses the installed CLI's encrypted login state; AESPA never reads or stores its credential. The settings endpoint opens a short SDK session and uses `initialize_session().available_models` as the account-specific model catalog, including custom models. Each active AESPA message list owns an isolated persistent Droid session. All sessions use the same empty `aespa-droid-workspace` temporary directory so Factory groups them under one UI project instead of creating a project per loop. The child receives only an environment allowlist needed for CLI authentication, networking, and locale; built-in skills and non-AESPA tools are denied.
+
+Codex uses the same subscription-provider lifecycle through `services/codex_provider.py`, but AESPA starts the user's separately installed `codex app-server` and communicates over JSONL JSON-RPC. The child uses the normal Codex CLI home, including an explicitly configured `CODEX_HOME`, so it automatically uses the CLI's default ChatGPT login when one exists. It still runs in an empty working directory and receives only the environment values needed for CLI authentication, networking, and certificates. Codex dynamic tools are experimental and are required for scans; an incompatible CLI produces an upgrade error. Model discovery, account status, allowance windows, and manual login/logout are exposed through Settings. Codex token and prompt-cache counters are recorded, but subscription usage is never converted into a dollar estimate.
 
 Droid tool calls pass through a minimal authenticated loopback MCP relay. The relay advertises only the current AESPA tool schemas and suspends each call while AESPA performs its existing validation, scope checks, execution, checkpointing, and result truncation. Supplying the canonical `tool_result` resumes the same Droid session. A checkpoint restored into a new process starts a fresh session seeded from the canonical message history. Factory-reported input, output, cache-read, cache-write, and Droid credit counters feed normal AESPA telemetry. AESPA records per-turn deltas from Droid's cumulative session counters, so persistent sessions preserve prompt-cache reporting without double-counting tokens or credits.
 
@@ -1073,6 +1079,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/api-test-runs/{id}/traffic` | `api_test_runs.py` | API scan HTTP traffic log |
 | `/api/api-test-runs/{id}/alice/*` | `api_test_runs.py` | ALICE chat for API runs (same surface as web ALICE) |
 | `/api/sast-runs` | `sast_runs.py` | `POST` (multipart) create a **standalone** SAST run from an uploaded source ZIP; `GET` lists all SAST runs |
+| `/api/sast-runs/{id}/export` · `/api/sast-runs/import` | `sast_runs.py` | Export or restore a complete SAST run, including its source ZIP, saved state, leads, logs, and component facts |
 | `/api/api-test-runs/{id}/import-leads` | `sast_runs.py` | Import independent copies from a completed SAST run into an API test run |
 | `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
 | `/api/sast-runs/{id}/leads` | `sast_runs.py` | List the *original* `ScanLead` rows for a SAST run (imported copies excluded) |
@@ -1178,10 +1185,11 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 - **Parallel crawl workers** — multiple Playwright browser instances share a `_CrawlShared` state object (asyncio locks around the URL frontier and seen-set)
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
 - **Specialist agents** — each specialist runs as its own `asyncio.Task`; tracked in `_specialist_tasks[run_id]` so they are cancelled when the parent scan is stopped; concurrency is capped by `_specialist_running[run_id]` vs `SpecialistAgentConfig.max_concurrent`
+- **Finding validation** — end-of-scan findings use one managed bounded batch; manual finding actions use tracked inline tasks capped by `AdversarialValidatorConfig.end_scan_max_concurrent`. Both appear as one run-level validation job and are stopped together.
 - **ALICE background tasks** — `alice_tasks.py` holds a module-level `_registry: dict[int, AliceTask]` (one entry per run). Each task runs `run_alice_turn_stream` as an `asyncio.create_task`, decoupled from the HTTP connection; all emitted events are buffered in `AliceTask.events` so clients can replay from any cursor on reconnect
 - **Scan checkpointing** — the LLM conversation history is serialised to the DB at regular intervals by `checkpoint.py`; `start_thinking_scan_resume` restores it on restart
 - **Bounded scan completion** — `scan_completion.py` tracks structural progress across agentic turns to enforce termination policy and prevent non-terminating tool loops
-- **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed; all schema changes are applied at startup via `db.py`
+- **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed. Alembic applies schema changes at startup. Databases created before Alembic receive a one-time compatibility upgrade; normal startups only reconcile interrupted jobs and temporary workspaces.
 - **Auth session vault** — `ScannerSession` rows in the DB store serialised cookies/tokens; `scanner_sessions.py` manages load/save/invalidation
 
 ### Run identities and `run_kind`
@@ -1441,7 +1449,7 @@ API scan modes and enforces ownership by `(run_kind, run_id, lead_id)`.
 
 ### Scope enforcement
 
-`_api_check_scope(url, api_run_id)` blocks requests outside the collection's `scope_hosts`. Out-of-scope attempts return an error string to the agent without making the request. The web dynamic scanner enforces the equivalent boundary through `scope.py::check_scope(url, site_id, run_id)` (host must be in `Site.scope_hosts` when set, and the page must not be marked `in_scope=False`).
+`_api_check_scope(url, api_run_id)` blocks requests outside the collection's `scope_hosts`. Scope entries use hostname plus effective port, so services on different ports are treated as different applications. Out-of-scope attempts return an error string to the agent without making the request. The web dynamic scanner enforces the equivalent boundary through `scope.py::check_scope(url, site_id, run_id)` (host and port must be in `Site.scope_hosts` when set, and the page must not be marked `in_scope=False`).
 
 **Redirects are re-checked per hop.** The scanner HTTP client uses `follow_redirects=True`, so a pre-send `check_scope` on the requested URL alone would let a target bounce the scanner to an out-of-scope/internal host (SSRF / scope bypass). `_request_scope_checked` therefore disables auto-follow and validates every `Location` against `check_scope` before following it; an out-of-scope redirect is refused (the unfollowed 3xx is surfaced to the agent with a `[SCOPE BLOCK]` note) so the off-scope host is never contacted. The browser (`browser` tool) path re-checks the **final** post-redirect URL after navigation and refuses to load an off-scope page into the agent's context; the auth flow is exempt so legitimate external-IdP/SSO redirects still work.
 
@@ -1543,7 +1551,7 @@ The dynamic loop investigates leads via the shared `update_lead` action, which s
 
 The dynamic context includes each lead's ordered reachability, impact, severity reasoning, and dynamic-test objective. The web and API Test Leads use that path to choose focused probes, but must verify every hop against live responses before calling `update_lead`. In SAST Validate, the opening prompt contains only a compact index; `lead_detail` retrieves the complete lead one at a time. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
 
-Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import.
+Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import. The SAST run view also supports a complete JSON run export and restore. That bundle includes the source ZIP, saved phase/coverage/report state, original leads, activity logs, and component facts.
 
 The SAST workspace reads `GET /api/sast-runs/{id}/analysis` for authoritative
 phase state and deterministic coverage receipts. `GET .../handoff-targets` lists
@@ -1643,7 +1651,7 @@ draft ─start─▶ sast_running ─▶ correlating ─▶ awaiting_review
 
 Deleting a campaign (`run_cleanup.cascade_delete_campaign`) removes rows in FK-safe order: every join/mapping row that references a `ScanLead`/`ComponentFact` (`ComponentConnection`, `LeadTargetMapping`, `ScanLeadComponentProvenance`) is deleted and flushed *before* the child-run cascades remove the facts/leads they point to — verified with SQLite foreign-key enforcement genuinely on in tests. It also never deletes a `ComponentSnapshot`'s ZIP file: `cascade_delete_sast_run` only removes a run's `source_archive_path` when that path is *not* a known snapshot's `stored_path` — a campaign-created `SastRun`'s archive is always a shared, immutable snapshot another campaign may still select, while a standalone SAST run's own upload is still removed as before.
 
-Campaign child runs are intentionally not subject to a separate ownership lock. Their ordinary SAST, web, and API detail screens can start/stop, edit, validate, clear, and delete them directly, including when the run is listed inside a campaign. Deleting a child clears its run id from the campaign member and returns that member to `pending`; a later campaign resume recreates the child from the frozen source snapshot or live target. Deleting the underlying `Site`/`ApiCollection` behind an application target is still blocked while any `ApplicationTarget` attaches it — detach it from every application first.
+Campaign child runs are intentionally not subject to a separate ownership lock. Their ordinary SAST, web, and API detail screens can start/stop, edit, validate, clear, and delete them directly, including when the run is listed inside a campaign. Starting a campaign SAST child from its normal SAST screen updates the campaign member too; when all source scans finish, the campaign resumes context matching automatically. Deleting a child clears its run id from the campaign member and returns that member to `pending`; a later campaign resume recreates the child from the frozen source snapshot or live target. Deleting the underlying `Site`/`ApiCollection` behind an application target is still blocked while any `ApplicationTarget` attaches it — detach it from every application first.
 
 `db._stamp_legacy_db_if_needed` picks a legacy database's Alembic stamp from *actual table presence*, not a fixed assumption: a pre-Alembic database with `run_identity` but not yet `assessment_campaign` (a genuine legacy database predating this feature) is stamped at the revision immediately before it so those two migrations replay for real, instead of the previous behavior of stamping straight at the symbolic `"head"` — which was correct only until the next migration was added, after which it silently skipped every migration since for this exact database shape. A database that already has every current table (e.g. a dev/test database built via `metadata.create_all()`) is still recognized as already current and stamped at `head` directly, so replaying migrations never tries to re-create a table that already exists.
 

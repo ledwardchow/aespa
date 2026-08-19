@@ -225,17 +225,31 @@ async def close_clients() -> None:
 
 async def discover_models(proxy_url: str | None = None) -> list[str]:
     """Return model IDs available through the GitHub Copilot SDK."""
+    return [item["id"] for item in await discover_model_options(proxy_url=proxy_url)]
+
+
+async def discover_model_options(proxy_url: str | None = None) -> list[dict[str, Any]]:
+    """Return Copilot models with native reasoning-effort metadata."""
     config = LLMConfig(provider="github_copilot", model="auto")
     client = await _get_client(config, proxy_url)
     models = await client.list_models()
-    discovered = [
-        getattr(model, "id", None) or getattr(model, "name", "")
-        for model in models
-        if getattr(model, "id", None) or getattr(model, "name", None)
-    ]
-    discovered = [m for m in discovered if m]
-    if "auto" not in discovered:
-        discovered.insert(0, "auto")
+    discovered = []
+    for model in models:
+        model_id = getattr(model, "id", None) or getattr(model, "name", "")
+        if model_id:
+            discovered.append(
+                {
+                    "id": model_id,
+                    "supported_reasoning_efforts": getattr(
+                        model, "supported_reasoning_efforts", None
+                    ),
+                    "default_reasoning_effort": getattr(
+                        model, "default_reasoning_effort", None
+                    ),
+                }
+            )
+    if not any(item["id"] == "auto" for item in discovered):
+        discovered.insert(0, {"id": "auto"})
     return discovered
 
 
@@ -417,6 +431,11 @@ async def _create_session(
         enable_session_telemetry=False,
         enable_on_demand_instruction_discovery=False,
         memory={"enabled": False},
+        **(
+            {"reasoning_effort": config.reasoning_effort}
+            if config.reasoning_effort
+            else {}
+        ),
         on_event=lambda event: _record_event(state, event, usage_callback),
     )
     return client, session

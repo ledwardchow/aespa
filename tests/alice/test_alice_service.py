@@ -92,6 +92,7 @@ def test_alice_tool_set_includes_auth_and_enforce_coverage_tools():
     names = {tool["name"] for tool in _get_alice_tools()}
     assert "reauthenticate" in names
     assert "skip_coverage" in names
+    assert "rerun_validation" in names
     enforce_names = {
         tool["name"] for tool in _get_alice_tools(exclude={"skip_coverage"})
     }
@@ -162,6 +163,81 @@ def test_alice_operational_question_tool_gate_preserves_explicit_testing():
     )
     assert _classify_alice_intent("Test the crawl for XSS") == "testing"
     assert _classify_alice_intent("Probe the API for IDOR") == "testing"
+    assert _classify_alice_intent("Re-run validation for all findings") == "testing"
+
+
+def test_alice_run_status_prefers_live_scan_state(db_session, test_data):
+    from aespa.services.scanner import _run_thinking_context_tool
+
+    run = test_data["run"]
+    run.status = "stopped"
+    run.phase = "scanning"
+    db_session.add(run)
+    db_session.commit()
+
+    with patch("aespa.services.scanner.is_thinking_running", return_value=True):
+        result = _run_thinking_context_tool(
+            "run_status",
+            {},
+            pages_snapshot=[],
+            findings_snapshot=[],
+            history=[],
+            run_id=run.id,
+            base_url="http://target.local",
+        )
+
+    assert result["status"] == "running"
+    assert result["scan"]["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_alice_rerun_validation_uses_managed_validator(db_session, test_data):
+    from aespa.models import ScanFinding
+    from aespa.services.alice import _execute_alice_tool
+
+    run = test_data["run"]
+    first = ScanFinding(
+        test_run_id=run.id,
+        owasp_category="A01",
+        title="Needs validation",
+        description="Evidence to re-check.",
+        severity="high",
+        validation_status="unconfirmed",
+    )
+    confirmed = ScanFinding(
+        test_run_id=run.id,
+        owasp_category="A02",
+        title="Already confirmed",
+        description="Already verified.",
+        severity="medium",
+        validation_status="confirmed",
+    )
+    db_session.add(first)
+    db_session.add(confirmed)
+    db_session.commit()
+    db_session.refresh(first)
+
+    with (
+        patch("aespa.services.validator.is_validating", return_value=False),
+        patch(
+            "aespa.services.validator.start_validation", new_callable=AsyncMock
+        ) as start_validation,
+    ):
+        result = json.loads(
+            await _execute_alice_tool(
+                run.id,
+                test_data["llm_cfg"],
+                "http://target.local",
+                test_data["site"].id,
+                "rerun_validation",
+                {},
+                1,
+            )
+        )
+
+    assert result["status"] == "started"
+    assert result["queued"] == 1
+    start_validation.assert_awaited_once_with(run.id, finding_ids=[first.id])
 
 
 @pytest.fixture(name="test_client")
@@ -328,6 +404,35 @@ async def test_run_alice_turn_stream_yields_correct_chunks(db_session, test_data
         assert any(mock_reply in c["delta"] for c in message_chunks)
         assert len(done_chunks) == 1
         assert mock_reply in done_chunks[0]["message"]
+
+
+@pytest.mark.anyio
+async def test_alice_quota_pause_is_emitted_as_warning_and_chat_message(
+    db_session, test_data
+):
+    run = test_data["run"]
+    from aespa.services import llm as llm_service
+
+    async def mock_call_with_tools(*args, **kwargs):
+        raise llm_service.LLMQuotaPauseError(
+            "Codex upstream rate limit persisted; resume after the window resets."
+        )
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        chunks = []
+        async for line in run_alice_turn_stream(run.id, "Check the target", []):
+            if line.startswith("data: "):
+                chunks.append(json.loads(line[6:].strip()))
+
+    warnings = [chunk for chunk in chunks if chunk.get("type") == "warning"]
+    messages = [chunk for chunk in chunks if chunk.get("type") == "message_chunk"]
+    done = [chunk for chunk in chunks if chunk.get("type") == "done"]
+
+    assert len(warnings) == 1
+    assert "paused this ALICE turn" in warnings[0]["message"]
+    assert any("rate-limit window" in chunk["delta"] for chunk in messages)
+    assert len(done) == 1
+    assert "paused this ALICE turn" in done[0]["message"]
 
 
 @pytest.mark.anyio

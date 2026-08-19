@@ -62,13 +62,18 @@ def _ensure_unique_name(
 
 def create_collection(session: Session, payload: ApiCollectionCreate) -> ApiCollection:
     _ensure_unique_name(session, payload.name)
+    from aespa.services.scope import normalize_scope_entries
+
+    base_url = str(payload.base_url)
 
     collection = ApiCollection(
         name=payload.name,
-        base_url=str(payload.base_url),
+        base_url=base_url,
         description=payload.description,
         servers=json.dumps([str(s) for s in payload.servers]),
-        scope_hosts=json.dumps(payload.scope_hosts),
+        scope_hosts=json.dumps(
+            normalize_scope_entries(payload.scope_hosts, default_url=base_url)
+        ),
     )
     session.add(collection)
     session.commit()
@@ -82,11 +87,15 @@ def update_collection(
     collection = get_collection(session, collection_id)
     _ensure_unique_name(session, payload.name, ignore_id=collection.id)
 
+    from aespa.services.scope import normalize_scope_entries
+
     collection.name = payload.name
     collection.base_url = str(payload.base_url)
     collection.description = payload.description
     collection.servers = json.dumps([str(s) for s in payload.servers])
-    collection.scope_hosts = json.dumps(payload.scope_hosts)
+    collection.scope_hosts = json.dumps(
+        normalize_scope_entries(payload.scope_hosts, default_url=collection.base_url)
+    )
     collection.updated_at = _utcnow()
 
     session.add(collection)

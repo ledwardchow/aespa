@@ -14,6 +14,7 @@ from aespa.models import (
     AssessmentCampaign,
     ScannerSession,
     TargetIntelItem,
+    TestRun,
 )
 
 
@@ -89,6 +90,19 @@ def test_create_run_defaults_to_500_pages(client: TestClient):
     assert response.json()["max_pages"] == 500
 
 
+def test_crawl_status_uses_crawler_task_state(client: TestClient, monkeypatch):
+    from aespa.services import crawler as crawler_svc
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    monkeypatch.setattr(crawler_svc, "is_running", lambda run_id: run_id == run["id"])
+
+    response = client.get(f"/api/test-runs/{run['id']}/crawl/status")
+
+    assert response.status_code == 200
+    assert response.json() == {"running": True}
+
+
 def test_create_run_custom_name(client: TestClient):
     site = _make_site(client)
     r = _make_run(client, site["id"], name="Initial recon")
@@ -153,12 +167,21 @@ def test_list_runs_unknown_site(client: TestClient):
 
 
 def test_list_active_jobs_includes_running_dynamic_scan(
-    client: TestClient, monkeypatch
+    client: TestClient, monkeypatch, isolated_db_engine
 ):
     from aespa.services import scanner as scanner_svc
 
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
+
+    # Dynamic scan marks run.status as running in the database
+    with Session(isolated_db_engine) as session:
+        db_run = session.get(TestRun, run["id"])
+        assert db_run is not None
+        db_run.status = "running"
+        db_run.phase = "scanning"
+        session.add(db_run)
+        session.commit()
 
     monkeypatch.setattr(
         scanner_svc, "is_thinking_running", lambda run_id: run_id == run["id"]
@@ -180,6 +203,25 @@ def test_list_active_jobs_includes_running_dynamic_scan(
     assert data[0]["job_type"] == "Dynamic Scan"
     assert data[0]["status"] == "analysing"
     assert data[0]["findings_count"] == 1
+
+
+def test_list_active_jobs_includes_running_crawl(client: TestClient, monkeypatch):
+    from aespa.services import crawler as crawler_svc
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    monkeypatch.setattr(crawler_svc, "is_running", lambda run_id: run_id == run["id"])
+
+    r = client.get("/api/test-runs/active")
+
+    assert r.status_code == 200
+    data = r.json()
+    crawl_jobs = [j for j in data if j["job_type"] == "Crawl"]
+    assert len(crawl_jobs) == 1
+    assert crawl_jobs[0]["run_id"] == run["id"]
+    assert crawl_jobs[0]["job_type"] == "Crawl"
+    assert crawl_jobs[0]["status"] == "running"
 
 
 def test_list_active_jobs_includes_one_validation_job_per_run(
@@ -236,9 +278,7 @@ def test_list_active_jobs_includes_active_campaign_scan(
     response = client.get("/api/test-runs/active")
 
     assert response.status_code == 200
-    campaign_jobs = [
-        job for job in response.json() if job["run_type"] == "campaign"
-    ]
+    campaign_jobs = [job for job in response.json() if job["run_type"] == "campaign"]
     assert len(campaign_jobs) == 1
     assert campaign_jobs[0]["run_id"] == campaign_id
     assert campaign_jobs[0]["application_id"] == application_id
@@ -667,6 +707,58 @@ def _import_one_finding(client: TestClient, run_id: int) -> dict:
     return r.json()["findings"][0]
 
 
+def test_manual_finding_validation_accepts_concurrent_requests(
+    client: TestClient, monkeypatch
+):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    payload = [
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": f"Finding {index}",
+            "description": "Needs validation.",
+            "affected_url": f"https://target.local/{index}",
+            "validation_status": "unconfirmed",
+        }
+        for index in (1, 2)
+    ]
+    findings = client.post(
+        f"/api/test-runs/{run['id']}/findings/import", json=payload
+    ).json()["findings"]
+    queued = []
+
+    async def fake_start_inline_validation(run_id, finding_id):
+        queued.append((run_id, finding_id))
+        return True
+
+    monkeypatch.setattr(
+        scan_api.validator_svc,
+        "start_inline_validation",
+        fake_start_inline_validation,
+    )
+
+    responses = [
+        client.post(f"/api/test-runs/{run['id']}/findings/{finding['id']}/validate")
+        for finding in findings
+    ]
+    duplicate = client.post(
+        f"/api/test-runs/{run['id']}/findings/{findings[0]['id']}/validate"
+    )
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert all(
+        response.json()["validation_status"] == "validating" for response in responses
+    )
+    assert duplicate.status_code == 200
+    assert queued == [
+        (run["id"], findings[0]["id"]),
+        (run["id"], findings[1]["id"]),
+    ]
+
+
 def test_update_finding_edits_status_severity_and_text(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
@@ -1057,6 +1149,61 @@ def test_thinking_scan_start_blocked_when_already_running(
     r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
     assert r.status_code == 409
     assert r.json()["detail"] == "Dynamic Scan already running"
+
+
+def test_thinking_scan_start_allows_stale_running_scan_status(
+    client: TestClient, monkeypatch, isolated_db_engine
+):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    with Session(isolated_db_engine) as session:
+        db_run = session.get(models.TestRun, run["id"])
+        db_run.status = "running"
+        db_run.phase = "scanning"
+        session.add(db_run)
+        session.commit()
+
+    started = []
+
+    async def fake_start(run_id: int) -> None:
+        started.append(run_id)
+
+    monkeypatch.setattr(scan_api.crawler_svc, "is_running", lambda run_id: False)
+    monkeypatch.setattr(
+        scan_api.scanner_svc, "is_thinking_running", lambda run_id: False
+    )
+    monkeypatch.setattr(scan_api.scanner_svc, "start_thinking_scan", fake_start)
+    monkeypatch.setattr(
+        scan_api.scanner_svc,
+        "get_thinking_scan_status",
+        lambda run_id: {"status": "running", "findings_count": 0},
+    )
+
+    response = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
+
+    assert response.status_code == 200
+    assert started == [run["id"]]
+
+
+def test_thinking_scan_start_blocked_when_crawler_task_is_running(
+    client: TestClient, monkeypatch
+):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    monkeypatch.setattr(scan_api.crawler_svc, "is_running", lambda run_id: True)
+
+    response = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Crawl is still running — wait for it to finish"
+    )
 
 
 # ── Graph / pages on empty run ────────────────────────────────────────────────
