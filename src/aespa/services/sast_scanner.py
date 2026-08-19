@@ -684,9 +684,11 @@ def _make_review_executor(
                     "validation_status": verdict,
                     "validation_reasoning": str(tool_input.get("reasoning", "")),
                     "confidence": confidence,
-                    "controls": list(tool_input.get("controls") or []),
-                    "counterevidence": list(tool_input.get("counterevidence") or []),
-                    "proof_gaps": list(tool_input.get("proof_gaps") or []),
+                    "controls": _normalize_tool_list(tool_input.get("controls")),
+                    "counterevidence": _normalize_tool_list(
+                        tool_input.get("counterevidence")
+                    ),
+                    "proof_gaps": _normalize_tool_list(tool_input.get("proof_gaps")),
                     "reportable": verdict == "confirmed"
                     and confidence >= CONFIDENCE_THRESHOLD,
                 }
@@ -702,7 +704,7 @@ def _make_review_executor(
             if not candidate.get("reportable"):
                 return f"Error: lead {candidate.get('reference') or f'#{candidate_id}'} is not reportable."
             candidate["attack_path"] = {
-                "nodes": list(tool_input.get("nodes") or []),
+                "nodes": _normalize_tool_list(tool_input.get("nodes")),
                 "impact": str(tool_input.get("impact", "")),
                 "severity_reasoning": str(tool_input.get("severity_reasoning", "")),
                 "dynamic_test": str(tool_input.get("dynamic_test", "")),
@@ -713,6 +715,23 @@ def _make_review_executor(
         return f"Unknown tool: {tool_name!r}"
 
     return tool_executor
+
+
+def _normalize_tool_list(value: object) -> list:
+    """Keep malformed string-valued tool arrays from splitting into characters."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return [value]
+        return decoded if isinstance(decoded, list) else [decoded]
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
 
 
 def _candidate_brief(candidates: list[dict], *, reportable_only: bool = False) -> str:

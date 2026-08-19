@@ -2,6 +2,37 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## [develop → main] August 19 Update — Codex and Antigravity providers, model controls, and scan reliability
+
+**Branch:** `develop → main`
+
+### OpenAI Codex and Google Antigravity providers
+
+- **Use subscription-backed Codex models** (`services/codex_provider.py`, LLM settings, packaging): Added an OpenAI Codex provider that authenticates through the local Codex app server, discovers available models, preserves agent conversations, reports subscription usage, and works in packaged macOS and Windows builds.
+- **Use Google Antigravity as an LLM provider** (`services/antigravity_provider.py`, LLM settings): Added local Antigravity authentication, model discovery, streaming tool use, conversation handling, and subscription-aware usage reporting.
+- **Pause cleanly for interactive provider setup** (`services/run_pause.py`, scan services/UI): Web, API, SAST, campaign, and A.L.I.C.E. jobs can pause while a local subscription provider requires authentication, expose the paused state in the run interface, and resume without losing the active scan.
+
+### Model discovery and reasoning controls
+
+- **Provider-aware reasoning effort** (`services/model_capabilities.py`, provider/model settings): Model discovery now records supported reasoning or thinking levels from native provider metadata, documented model families, and OpenRouter fallbacks. Profiles expose only valid effort choices and validate the selected value before saving.
+- **Improved LLM settings** (`Settings/*`, `services/settings.py`): Provider and model forms have clearer discovery and capability controls, profile names can default to `provider/model`, and deleting a profile safely returns any linked web, API, SAST, or campaign runs to the active default profile.
+- **More robust provider interoperability** (`services/llm.py`): Agent loops normalize JSON-string tool arguments and non-string tool results, reject malformed calls with a recoverable tool response, and include fixes for direct OpenAI, Codex, Copilot, Droid, OpenRouter, Azure, and Bedrock-compatible behavior.
+
+### Validation, SAST, and campaign improvements
+
+- **Validate findings from A.L.I.C.E.** (`services/alice.py`, validator/scanner prompts): A.L.I.C.E. can request adversarial validation for a finding and return the result in the active conversation. Bulk validation now retries both unvalidated and unconfirmed findings.
+- **Portable SAST results** (`services/sast_export.py`, SAST run UI/API): Completed SAST runs can be exported with their findings, leads, traces, coverage, and supporting metadata for reuse outside the original database.
+- **Reliable structured SAST evidence** (`services/sast_scanner.py`, `SastLeadDetails.jsx`): Validator controls, counterevidence, proof gaps, and attack-path nodes are normalized when providers return JSON strings, preventing list values from being split into individual characters.
+- **Stronger application correlation** (`services/campaigns.py`, correlation and route tracing): Campaign orchestration, cross-repository route matching, source references, frontend path resolution, and campaign progress handling were tightened for multi-repository application scans.
+
+### Usage, scope, and interface fixes
+
+- **Per-run cost estimates** (`services/statistics.py`, `services/llm.py`, `TokenUsageBar.jsx`): Run usage now shows cache-aware estimated token and credit costs, recalculates totals when pricing changes, and treats Codex and Antigravity usage as included with their subscriptions.
+- **Safer scope host matching** (`services/scope.py`, database migration): Existing scope hosts are backfilled with their ports, and host matching preserves explicit port boundaries instead of silently broadening targets.
+- **Run-state and interface cleanup** (`frontend/src/`): Active-job status, crawl progress, statistics, application campaigns, provider settings, and run transitions received reliability and layout fixes. Playwright and frontend dependencies were also refreshed, with rebuilt served assets included.
+
+---
+
 ## [PR #262] August 9 Update — Applications and multi-repository campaign scanning
 
 ### "Applications" targets

@@ -8,6 +8,21 @@ function jsonValue(value, fallback) {
   }
 }
 
+function jsonListValue(value) {
+  const parsed = jsonValue(value, []);
+  if (!Array.isArray(parsed) || !parsed.length || !parsed.every((item) => typeof item === "string" && item.length <= 1)) {
+    return parsed;
+  }
+
+  const reconstructed = parsed.join("");
+  try {
+    const decoded = JSON.parse(reconstructed);
+    return Array.isArray(decoded) ? decoded : [decoded];
+  } catch {
+    return reconstructed ? [reconstructed] : [];
+  }
+}
+
 function displayValue(value, fallback = "—") {
   if (value == null || value === "") return fallback;
   return String(value);
@@ -40,10 +55,10 @@ export function SastLeadDetails({ lead, showSummary = true, findingHref }) {
   if (!lead) return null;
 
   const source = jsonValue(lead.source_trace_json, {});
-  const controls = jsonValue(lead.control_trace_json, []);
+  const controls = jsonListValue(lead.control_trace_json);
   const sink = jsonValue(lead.sink_trace_json, {});
-  const counterevidence = jsonValue(lead.counterevidence_json, []);
-  const proofGaps = jsonValue(lead.proof_gaps_json, []);
+  const counterevidence = jsonListValue(lead.counterevidence_json);
+  const proofGaps = jsonListValue(lead.proof_gaps_json);
   const attackPath = jsonValue(lead.attack_path_json, {});
 
   return <div className="sast-lead-details">

@@ -211,8 +211,8 @@ def test_review_executor_records_independent_verdict_and_attack_path(
                 "verdict": "confirmed",
                 "confidence": 0.91,
                 "reasoning": "No parameterization is present.",
-                "controls": [],
-                "counterevidence": [],
+                "controls": '["Authentication middleware required"]',
+                "counterevidence": "No parameterization found",
                 "proof_gaps": [],
             },
             1,
@@ -220,6 +220,12 @@ def test_review_executor_records_independent_verdict_and_attack_path(
     )
     assert "confirmed" in result
     assert sast_scanner._candidates[41][0]["reportable"] is True
+    assert sast_scanner._candidates[41][0]["controls"] == [
+        "Authentication middleware required"
+    ]
+    assert sast_scanner._candidates[41][0]["counterevidence"] == [
+        "No parameterization found"
+    ]
 
     attack_executor = sast_scanner._make_review_executor(
         41, root, coverage, "attack_path"

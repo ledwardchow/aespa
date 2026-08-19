@@ -484,8 +484,6 @@ def _load_bucket_from_db(
                         changed = True
                     if not provider:
                         continue
-                    if counts.get("estimated_cost_available") is True:
-                        continue
                     rates = statistics_service._rates_for(s, provider, model)
                     cost = statistics_service.estimate_usage_cost(
                         provider,
@@ -509,6 +507,42 @@ def _load_bucket_from_db(
     except Exception:
         pass
     return {}
+
+
+def _reprice_bucket(bucket: dict[str, dict[str, Any]]) -> bool:
+    """Recalculate run costs from accumulated totals using the latest prices."""
+    changed = False
+    try:
+        from sqlmodel import Session as _Session
+
+        from aespa.db import get_engine
+        from aespa.services import statistics as statistics_service
+
+        with _Session(get_engine()) as session:
+            for model, counts in bucket.items():
+                if not isinstance(counts, dict):
+                    continue
+                provider = str(counts.get("provider") or "").strip()
+                if not provider or provider == "unknown":
+                    continue
+                rates = statistics_service._rates_for(session, provider, model)
+                cost = statistics_service.estimate_usage_cost(
+                    provider,
+                    input_tokens=counts.get("input", 0),
+                    output_tokens=counts.get("output", 0),
+                    cache_read_tokens=counts.get("cache_read", 0),
+                    cache_write_tokens=counts.get("cache_write", 0),
+                    ai_credits=counts.get("ai_credits", 0),
+                    factory_credits=counts.get("factory_credits", 0),
+                    rates=rates,
+                )
+                for key, value in cost.items():
+                    if counts.get(key) != value:
+                        counts[key] = value
+                        changed = True
+    except Exception:
+        log.debug("Failed to reprice accumulated run usage", exc_info=True)
+    return changed
 
 
 def _snapshot_provider_for_model(run: Any, model: str) -> str | None:
@@ -759,19 +793,15 @@ def _record_usage(
 
         usage_cost = statistics_service.estimate_usage_cost(
             usage_provider,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read_tokens,
-            cache_write_tokens=cache_write_tokens,
-            ai_credits=ai_credits,
-            factory_credits=factory_credits,
+            input_tokens=entry.get("input", 0),
+            output_tokens=entry.get("output", 0),
+            cache_read_tokens=entry.get("cache_read", 0),
+            cache_write_tokens=entry.get("cache_write", 0),
+            ai_credits=entry.get("ai_credits", 0),
+            factory_credits=entry.get("factory_credits", 0),
             rates=usage_rates,
         )
-        entry["estimated_cost_available"] = entry.get(
-            "estimated_cost_available", False
-        ) or usage_cost.pop("estimated_cost_available", False)
-        for key, value in usage_cost.items():
-            entry[key] = entry.get(key, 0) + value
+        entry.update(usage_cost)
     except Exception:
         # Cost telemetry must never make an otherwise successful LLM response fail.
         log.debug("Failed to estimate per-run LLM cost", exc_info=True)
@@ -828,6 +858,8 @@ def get_run_token_usage(run_id: int, run_kind: str = "web") -> dict:
     bucket = _run_token_usage.get(key)
     if bucket is None:
         bucket = _load_bucket_from_db(run_id, run_kind)
+    elif _reprice_bucket(bucket):
+        _persist_bucket_to_db(run_id, bucket, run_kind)
     return _usage_totals(bucket)
 
 
@@ -4960,6 +4992,32 @@ async def _call_with_tools_impl(
     raise ValueError(f"Provider {config.provider!r} does not support native tool use")
 
 
+def _normalize_agentic_tool_input(value: Any) -> tuple[dict[str, Any], str | None]:
+    """Normalize provider tool arguments to the mapping expected by executors."""
+    if value is None:
+        return {}, None
+    if isinstance(value, dict):
+        return value, None
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}, "Tool input must be a valid JSON object. Call the tool again."
+        if isinstance(parsed, dict):
+            return parsed, None
+    return {}, "Tool input must be a JSON object. Call the tool again."
+
+
+def _stringify_agentic_tool_result(value: Any) -> str:
+    """Convert executor results to canonical textual tool-result content."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 async def thinking_agentic_loop(
     config: "LLMConfig",
     *,
@@ -5408,7 +5466,9 @@ async def thinking_agentic_loop(
             for block in tool_use_blocks:
                 tool_call_count += 1
                 tool_name = block.get("name") or ""
-                tool_input = block.get("input") or {}
+                tool_input, tool_input_error = _normalize_agentic_tool_input(
+                    block.get("input")
+                )
                 tool_use_id = block.get("id") or ""
 
                 if stop_check and stop_check():
@@ -5421,6 +5481,21 @@ async def thinking_agentic_loop(
                     )
                     session_done = True
                     break
+
+                if tool_input_error:
+                    log.warning(
+                        "thinking_agentic_loop: invalid input for tool %r: %s",
+                        tool_name,
+                        tool_input_error,
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": tool_input_error,
+                        }
+                    )
+                    continue
 
                 if tool_name == "done":
                     final_summary = str(tool_input.get("summary") or "")
@@ -5498,8 +5573,8 @@ async def thinking_agentic_loop(
                         )
 
                 try:
-                    result_str = await tool_executor(
-                        tool_name, tool_input, tool_call_count
+                    result_str = _stringify_agentic_tool_result(
+                        await tool_executor(tool_name, tool_input, tool_call_count)
                     )
                 except Exception as exc:
                     log.warning(
