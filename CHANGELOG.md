@@ -2,7 +2,7 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## [develop → main] August 19 Update — new LLM providers and scan improvements
+## [PR #265] August 19 Update — new LLM providers and scan improvements
 
 **Branch:** `develop → main`
 
