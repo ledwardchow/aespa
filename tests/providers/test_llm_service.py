@@ -2071,7 +2071,8 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
     fake_boto3 = SimpleNamespace(Session=FakeSession)
     monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
     monkeypatch.setenv("AWS_PROFILE", "bedrock-dev")
-    monkeypatch.delenv("AWS_REGION", raising=False)
+    # The configured endpoint/region must win over ambient AWS settings.
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
     monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
 
     config = LLMConfig(
@@ -2097,6 +2098,21 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
         "messages": [{"role": "user", "content": [{"text": "hello"}]}],
         "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
     }
+
+
+def test_bedrock_runtime_defaults_to_sydney_when_region_is_unconfigured(monkeypatch):
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url=None,
+        model="global.anthropic.claude-sonnet-4-6",
+        max_tokens=2048,
+    )
+
+    assert llm._bedrock_region(config) == "ap-southeast-2"
 
 
 def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blank(

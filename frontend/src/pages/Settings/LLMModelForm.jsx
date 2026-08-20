@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { llmProfileToForm, llmPayload } from "../Settings";
 import { API_FORMAT_LABELS } from "./BurpRestApiSettings";
 import { api } from "../../lib/api";
 import { IconCheck } from "../../components/Icons";
+import { sortModelNames } from "../../lib/modelSorting";
 
 
 export function LLMModelForm({
@@ -43,7 +44,7 @@ export function LLMModelForm({
     }
   };
   const selectedProvider = providers.find(p => p.id === Number(form.provider_id));
-  const models = selectedProvider?.models || [];
+  const models = useMemo(() => sortModelNames(selectedProvider?.models), [selectedProvider?.models]);
   const storedCapabilities = selectedProvider?.model_capabilities || {};
   const hasStoredCapability = Object.prototype.hasOwnProperty.call(storedCapabilities, form.model);
   useEffect(() => {
@@ -69,7 +70,7 @@ export function LLMModelForm({
       if (!cancelled) setLoadingCapabilities(false);
     });
     return () => { cancelled = true; };
-  }, [selectedProvider?.id, selectedProvider?.api_format, selectedProvider?.base_url, selectedProvider?.username, form.model, hasStoredCapability]);
+  }, [selectedProvider, models, form.model, hasStoredCapability]);
   const capability = hasStoredCapability ? storedCapabilities[form.model] || {} : discoveredCapabilities[form.model] || {};
   const levels = Array.isArray(capability.supported_efforts) ? capability.supported_efforts : [];
   return <>
@@ -97,7 +98,7 @@ export function LLMModelForm({
           onChange={e => {
             const newProviderId = e.target.value;
             const provider = providers.find(p => p.id === Number(newProviderId));
-            const newModel = provider?.models?.[0] || "";
+            const newModel = sortModelNames(provider?.models)[0] || "";
             const updates = {
               provider_id: newProviderId,
               model: newModel,

@@ -3,6 +3,7 @@ import { PROVIDER_MODEL_PLACEHOLDERS, PROVIDER_BASE_URL_PLACEHOLDERS } from "./B
 import { providerPayload, providerToForm } from "../Settings";
 import { api } from "../../lib/api";
 import { IconCheck } from "../../components/Icons";
+import { BEDROCK_DEFAULT_REGIONS, BEDROCK_REGIONS, bedrockBaseUrl, isBedrockProvider } from "../../lib/bedrock";
 
 function CodexConnectionCard() {
   const [state, setState] = useState(null);
@@ -132,7 +133,7 @@ export function LLMProviderForm({
         provider_id: provider?.id || null,
         api_format: form.api_format,
         api_key: form.api_key,
-        base_url: form.base_url,
+        base_url: isBedrockProvider(form.api_format) ? bedrockBaseUrl(form.api_format, form.region) : form.base_url,
         username: form.username
       });
       if (fetched?.models?.length > 0) {
@@ -149,13 +150,19 @@ export function LLMProviderForm({
   };
 
   const onFormatChange = async api_format => {
-    upd({ api_format, model_capabilities: {} });
+    const region = isBedrockProvider(api_format) ? BEDROCK_DEFAULT_REGIONS[api_format] : "";
+    upd({
+      api_format,
+      region,
+      base_url: isBedrockProvider(api_format) ? bedrockBaseUrl(api_format, region) : form.base_url,
+      model_capabilities: {}
+    });
     if (form.models.trim()) return;
     try {
       const defaults = await api.getDefaultModels();
       const fetched = defaults[api_format] || [];
       if (fetched.length > 0) {
-        upd({ api_format, models: fetched.join("\n") });
+        upd({ api_format, region, models: fetched.join("\n") });
       }
     } catch (e) {
       setError(e.message);
@@ -204,13 +211,21 @@ export function LLMProviderForm({
           <option value="azure_foundry_anthropic">Azure AI Foundry (Anthropic API)</option>
         </select>
       </div>
-      {!(["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format)) && <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
+      {isBedrockProvider(form.api_format) && <div className="field"><label>AWS Region</label>
+        <select className="select" value={form.region || BEDROCK_DEFAULT_REGIONS[form.api_format]} onChange={e => upd({
+          region: e.target.value,
+          base_url: bedrockBaseUrl(form.api_format, e.target.value)
+        })}>
+          {!BEDROCK_REGIONS[form.api_format].some(([region]) => region === form.region) && form.region && <option value={form.region}>{form.region} (existing configuration)</option>}
+          {BEDROCK_REGIONS[form.api_format].map(([region, name]) => <option key={region} value={region}>{name} — {region}</option>)}
+        </select>
+        <div className="field-hint">AESPA builds the fixed {form.api_format === "bedrock_mantle" ? "Bedrock Mantle" : "Bedrock Runtime"} endpoint for this region.</div>
+      </div>}
+      {!(["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format)) && !isBedrockProvider(form.api_format) && <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
         <input type="url" value={form.base_url} placeholder={PROVIDER_BASE_URL_PLACEHOLDERS[form.api_format] || ""} onChange={e => upd({
           base_url: e.target.value
         })} />
-        {form.api_format === "bedrock" && <div className="field-hint">Leave blank to use the default boto3 Bedrock endpoint for AWS_REGION / AWS_DEFAULT_REGION.</div>}
         {form.api_format === "github_copilot" && <div className="field-hint">No base URL is needed. AESPA uses the official GitHub Copilot SDK.</div>}
-        {form.api_format === "bedrock_mantle" && <div className="field-hint">Best left blank — AESPA picks the endpoint per model (the <code>/openai/v1</code> path for <code>openai.gpt-5.x</code>, <code>/v1</code> for <code>gpt-oss</code>) and defaults to the us-east-2 region (or BEDROCK_MANTLE_REGION / AWS_REGION). Set only to point at another region's host, e.g. https://bedrock-mantle.us-west-2.api.aws.</div>}
       </div>}
       {form.api_format === "factory_droid" && <div className="field-hint">Uses the account signed in through Droid CLI. AESPA does not read or store Factory credentials.</div>}
       {form.api_format === "google_antigravity" && <div className="field-hint">Uses the active Antigravity CLI / Google account login. No API key or base URL is required.</div>}

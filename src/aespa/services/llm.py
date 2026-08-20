@@ -1646,11 +1646,7 @@ async def stream_chat_completion(
                 import boto3
                 from botocore.config import Config as _BotocoreConfig
 
-                region = (
-                    os.getenv("AWS_REGION")
-                    or os.getenv("AWS_DEFAULT_REGION")
-                    or _bedrock_region_from_url(config.base_url or "")
-                )
+                region = _bedrock_region(config)
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
@@ -2823,7 +2819,18 @@ def _extract_bedrock_text(data: dict[str, Any]) -> str:
 
 def _bedrock_region_from_url(base_url: str) -> str:
     match = re.search(r"bedrock-runtime[.-]([a-z0-9-]+)\.", base_url)
-    return match.group(1) if match else "us-east-1"
+    return match.group(1) if match else "ap-southeast-2"
+
+
+def _bedrock_region(config: LLMConfig) -> str:
+    """Resolve Runtime region, preferring the provider's selected endpoint."""
+    if config.base_url:
+        return _bedrock_region_from_url(config.base_url)
+    return (
+        os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or "ap-southeast-2"
+    )
 
 
 # SigV4 signing name for the bedrock-mantle endpoint.  AWS signs Mantle requests
@@ -3025,11 +3032,7 @@ async def _bedrock(
         import boto3
         from botocore.config import Config as _BotocoreConfig
 
-        region = (
-            os.getenv("AWS_REGION")
-            or os.getenv("AWS_DEFAULT_REGION")
-            or _bedrock_region_from_url(config.base_url or "")
-        )
+        region = _bedrock_region(config)
         profile = os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
         _model = config.model
@@ -4509,11 +4512,7 @@ async def _call_with_tools_impl(
                 import boto3
                 from botocore.config import Config as _BotocoreConfig
 
-                region = (
-                    os.getenv("AWS_REGION")
-                    or os.getenv("AWS_DEFAULT_REGION")
-                    or _bedrock_region_from_url(config.base_url or "")
-                )
+                region = _bedrock_region(config)
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
