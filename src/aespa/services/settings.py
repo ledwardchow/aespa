@@ -31,7 +31,6 @@ from aespa.models import (
     UpstreamProxyConfig,
 )
 from aespa.schemas import (
-    PROVIDER_DEFAULT_MODELS,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
     BurpRestApiConfigIn,
@@ -394,13 +393,15 @@ async def discover_model_options_for_format(
             if (capability := documented_model_capability("bedrock", model)) is not None
         }
     elif api_format == "bedrock_mantle":
-        discovered = list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
-        native = {
-            model: capability
-            for model in discovered
-            if (capability := documented_model_capability("bedrock_mantle", model))
-            is not None
-        }
+        from aespa.services import model_discovery
+
+        raw = await model_discovery.discover_bedrock_mantle_model_options(
+            api_key=api_key,
+            base_url=base_url,
+        )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
+    discovered = sorted(dict.fromkeys(discovered), key=str.casefold)
     for model in discovered:
         capability = documented_model_capability(api_format, model)
         existing = native.get(model)

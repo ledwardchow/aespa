@@ -3,6 +3,7 @@ import { scanProfileToForm } from "../Settings";
 import { AGENT_ROLE_LABELS } from "./LLMModelForm";
 import { api } from "../../lib/api";
 import { IconCheck } from "../../components/Icons";
+import { sortModelConfigs } from "../../lib/modelSorting";
 
 
 export function ScanProfileForm({
@@ -59,7 +60,7 @@ export function ScanProfileForm({
     }
   };
   const modelName = id => (models.find(m => m.id === Number(id)) || {}).name;
-  const modelOpts = models.map(m => <option key={m.id} value={m.id}>{m.name} ({m.model})</option>);
+  const modelOpts = sortModelConfigs(models).map(m => <option key={m.id} value={m.id}>{m.name} ({m.model})</option>);
   return <>
     {error && <div className="alert error">{error}</div>}
     <form className="card" onSubmit={onSubmit}>
