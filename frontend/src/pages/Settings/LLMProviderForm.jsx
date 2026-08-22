@@ -124,10 +124,12 @@ export function LLMProviderForm({
   };
   const [loadingModels, setLoadingModels] = useState(false);
   const [loadMessage, setLoadMessage] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   const onLoadModels = async () => {
     setLoadingModels(true);
     setLoadMessage(null);
+    setLoadFailed(false);
     try {
       const fetched = await api.discoverModelOptions({
         provider_id: provider?.id || null,
@@ -140,10 +142,12 @@ export function LLMProviderForm({
         upd({ models: fetched.models.join("\n"), model_capabilities: fetched.capabilities || {} });
         setLoadMessage(`Loaded ${fetched.models.length} model(s) and capability metadata from API.`);
       } else {
-        setLoadMessage("No models returned for this provider.");
+        setLoadFailed(true);
+        setLoadMessage("The API returned no models. Enter the model names manually.");
       }
     } catch (e) {
-      setLoadMessage(`Failed to load models: ${e.message}`);
+      setLoadFailed(true);
+      setLoadMessage(e.message);
     } finally {
       setLoadingModels(false);
     }
@@ -262,8 +266,8 @@ export function LLMProviderForm({
         <textarea rows="5" value={form.models} placeholder={PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""} onChange={e => upd({
           models: e.target.value
         })}></textarea>
-        {loadMessage && <div className="field-hint" style={{ color: "var(--accent)", marginBottom: "4px" }}>{loadMessage}</div>}
-        <div className="field-hint">Enter one model per line, or separate models with commas. Leave blank to use the models shown in the placeholder.</div>
+        {loadMessage && <div className="field-hint" style={{ color: loadFailed ? "var(--danger)" : "var(--accent)", marginBottom: "4px" }}>{loadMessage}</div>}
+        <div className="field-hint">Enter one model per line, or separate models with commas. {form.api_format === "openai_compatible" ? "The examples in the placeholder are not saved automatically." : "Leave blank to use the models shown in the placeholder."}</div>
       </div>
       {!(["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format)) && <div className="field">
         <label>{form.api_format === "github_copilot" ? "GitHub token" : "API Key"} <span className="field-optional">(optional)</span></label>
