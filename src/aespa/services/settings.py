@@ -533,14 +533,47 @@ def activate_llm_profile(session: Session, profile_id: int) -> LLMConfig:
 def delete_llm_profile(session: Session, profile_id: int) -> None:
     cfg = get_llm_profile(session, profile_id)
     was_active = cfg.is_active
+
+    referencing_profiles = []
+    for prof in session.exec(select(LLMProfile)).all():
+        role_models = _json_loads(prof.role_models_json, {})
+        if prof.default_model_id == profile_id or any(
+            str(model_id) == str(profile_id) for model_id in role_models.values()
+        ):
+            referencing_profiles.append(prof.name)
+    if referencing_profiles:
+        names = ", ".join(sorted(referencing_profiles, key=str.casefold))
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f'Cannot delete model "{cfg.name}" because it is used by '
+                f"scan profile(s): {names}. Update those profiles first."
+            ),
+        )
+
+    # Determine replacement model if one exists
+    replacement_model = session.exec(
+        select(LLMConfig)
+        .where(LLMConfig.id != profile_id)
+        .order_by(LLMConfig.is_active.desc(), LLMConfig.updated_at.desc())
+    ).first()
+    replacement_model_id = (
+        replacement_model.id if replacement_model is not None else None
+    )
+
+    # A model can be selected explicitly on past runs. Clear the reference before
+    # deleting the model so those records fall back to the active configuration.
+    for run_type in (TestRun, ApiTestRun, SastRun, AssessmentCampaign):
+        for run in session.exec(
+            select(run_type).where(run_type.llm_config_id == profile_id)
+        ).all():
+            run.llm_config_id = None
+            session.add(run)
+
     session.delete(cfg)
     session.commit()
-    if was_active:
-        replacement = session.exec(
-            select(LLMConfig).order_by(LLMConfig.updated_at.desc())
-        ).first()
-        if replacement is not None:
-            activate_llm_profile(session, replacement.id)
+    if was_active and replacement_model_id is not None:
+        activate_llm_profile(session, replacement_model_id)
 
 
 # ── Scan profiles (per-agent-role model assignment) ───────────────────────────

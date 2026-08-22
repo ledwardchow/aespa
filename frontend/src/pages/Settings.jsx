@@ -141,7 +141,9 @@ export function providerPayload(form) {
   } else {
     apiKeyPayload = null;
   }
-  const modelText = form.models.trim() || PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || "";
+  const modelText = form.models.trim() || (form.api_format === "openai_compatible"
+    ? ""
+    : PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || "");
   const baseUrl = isBedrockProvider(form.api_format)
     ? bedrockBaseUrl(form.api_format, form.region)
     : form.base_url.trim() || null;
