@@ -740,19 +740,37 @@ async def stop_campaign(
 
 
 @router.post(
+    "/{application_id}/campaigns/{campaign_id}/resume", response_model=CampaignDetail
+)
+async def resume_campaign(
+    application_id: int, campaign_id: int, session: Session = Depends(get_session)
+) -> CampaignDetail:
+    """Resume a stopped campaign without recreating completed work."""
+    try:
+        campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
+        await campaigns_svc.resume_campaign(campaign.id)
+    except campaigns_svc.CampaignNotFound as exc:
+        raise _not_found(exc) from exc
+    except campaigns_svc.InvalidCampaignState as exc:
+        raise _conflict(exc) from exc
+    session.refresh(campaign)
+    return _to_campaign_detail(session, campaign)
+
+
+@router.post(
     "/{application_id}/campaigns/{campaign_id}/retry", response_model=CampaignDetail
 )
 async def retry_campaign(
     application_id: int, campaign_id: int, session: Session = Depends(get_session)
 ) -> CampaignDetail:
-    """Resume a campaign left ``interrupted`` by a server restart.
+    """Backward-compatible route for resuming an interrupted campaign.
 
     Reuses every child run/lead the campaign already created — never
     recreates a ``SastRun``/``TestRun``/``ApiTestRun`` or duplicates a lead.
     """
     try:
         campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
-        await campaigns_svc.retry_campaign(campaign.id)
+        await campaigns_svc.resume_campaign(campaign.id)
     except campaigns_svc.CampaignNotFound as exc:
         raise _not_found(exc) from exc
     except campaigns_svc.InvalidCampaignState as exc:
@@ -1098,6 +1116,97 @@ def _component_names_by_id(session: Session, component_ids: set[int]) -> dict[in
     }
 
 
+def _cross_repo_finding_group_key(
+    finding: ScanFinding,
+    finding_lead: ScanLead | None,
+    original_lead: ScanLead | None,
+    target_member: CampaignTargetMember,
+) -> tuple[str, str, int, str, str] | None:
+    """Return a root-cause key for a campaign cross-repository finding.
+
+    A single SAST lead can be connected to many equivalent endpoints. The
+    endpoint stays in the instance list; the source vulnerability and target
+    component define the displayed root cause.
+    """
+    if (
+        finding_lead is None
+        or finding_lead.producer_run_type != "campaign"
+        or original_lead is None
+    ):
+        return None
+    attack_path = scan_leads_svc.decode_attack_path(original_lead.attack_path_json)
+    entrypoint = attack_path.get("frontend_entrypoint")
+    backend_route = attack_path.get("backend_route")
+    vulnerability = attack_path.get("vulnerability")
+    if not (
+        isinstance(entrypoint, dict)
+        and isinstance(backend_route, dict)
+        and isinstance(vulnerability, dict)
+    ):
+        return None
+    target_component_id = backend_route.get("component_id")
+    if not isinstance(target_component_id, int):
+        return None
+    vulnerability_id = vulnerability.get("lead_id") or original_lead.fingerprint
+    return (
+        "cross-repository",
+        str(vulnerability_id),
+        target_component_id,
+        finding.owasp_category,
+        target_member.target_type,
+    )
+
+
+def _finding_instance_payload(row: CampaignFindingRow) -> dict[str, object]:
+    """Keep the useful identity of a hidden duplicate in the API response."""
+    return {
+        "finding_id": row.finding_id,
+        "reference": row.reference,
+        "run_reference": row.run_reference,
+        "target_run_id": row.target_run_id,
+        "target_name": row.target_name,
+        "affected_url": row.affected_url,
+        "title": row.title,
+        "status": row.status,
+    }
+
+
+def _merge_campaign_finding_rows(
+    rows: list[tuple[CampaignFindingRow, tuple[str, str, int, str, str] | None]],
+) -> list[CampaignFindingRow]:
+    """Return one row per cross-repository root cause plus endpoint instances."""
+    grouped: dict[tuple[str, str, int, str, str], list[CampaignFindingRow]] = {}
+    for row, key in rows:
+        if key is not None:
+            grouped.setdefault(key, []).append(row)
+
+    hidden_ids: set[int] = set()
+    merged_by_primary: dict[int, str] = {}
+    for group in grouped.values():
+        group.sort(key=lambda row: (row.target_run_id, row.finding_id))
+        if len(group) < 2:
+            continue
+        primary = group[0]
+        try:
+            merged = json.loads(primary.merged_instances or "[]")
+        except (TypeError, json.JSONDecodeError):
+            merged = []
+        if not isinstance(merged, list):
+            merged = []
+        merged.extend(_finding_instance_payload(row) for row in group[1:])
+        merged_by_primary[primary.finding_id] = json.dumps(merged)
+        hidden_ids.update(row.finding_id for row in group[1:])
+
+    result: list[CampaignFindingRow] = []
+    for row, _key in rows:
+        if row.finding_id in hidden_ids:
+            continue
+        if row.finding_id in merged_by_primary:
+            row.merged_instances = merged_by_primary[row.finding_id]
+        result.append(row)
+    return result
+
+
 def _enrich_mappings(
     session: Session, campaign_id: int, mappings: list[LeadTargetMapping]
 ) -> list[LeadTargetMappingOut]:
@@ -1361,6 +1470,7 @@ def campaign_findings(
         if lead.producer_run_type == "campaign" and lead.fingerprint
     }
     original_id_by_fingerprint: dict[str, int] = {}
+    original_by_id: dict[int, ScanLead] = {}
     if campaign_copy_fingerprints:
         for original in session.exec(
             select(ScanLead)
@@ -1370,6 +1480,7 @@ def campaign_findings(
             .where(ScanLead.fingerprint.in_(campaign_copy_fingerprints))
         ).all():
             original_id_by_fingerprint[original.fingerprint] = original.id
+            original_by_id[original.id] = original
 
     provenance_by_original_lead: dict[int, list[int]] = {}
     if original_id_by_fingerprint:
@@ -1404,7 +1515,7 @@ def campaign_findings(
             return provenance_by_original_lead.get(original_id, [])
         return []
 
-    rows: list[CampaignFindingRow] = []
+    rows: list[tuple[CampaignFindingRow, tuple[str, str, int, str, str] | None]] = []
     for target_member, run_id, findings in findings_by_target:
         target = applications_svc.get_target(
             session, application_id, target_member.target_id
@@ -1436,46 +1547,63 @@ def campaign_findings(
                 for cid in component_ids
                 if cid in component_name_by_id
             ]
+            row = CampaignFindingRow(
+                finding_id=finding.id,
+                reference=campaign_reference.public_reference,
+                run_reference=finding.reference,
+                target_type=target_member.target_type,
+                target_run_id=run_id,
+                component_id=component_ids[0] if component_ids else None,
+                component_name=(
+                    ", ".join(component_names) if component_names else None
+                ),
+                component_ids=component_ids,
+                component_names=component_names,
+                target_name=target_name,
+                title=finding.title,
+                description=finding.description,
+                impact=finding.impact,
+                likelihood=finding.likelihood,
+                recommendation=finding.recommendation,
+                cvss_score=finding.cvss_score,
+                cvss_vector=finding.cvss_vector,
+                affected_url=finding.affected_url,
+                evidence=finding.evidence,
+                request_evidence=finding.request_evidence,
+                response_evidence=finding.response_evidence,
+                evidence_items=finding.evidence_items,
+                validation_note=finding.validation_note,
+                merged_instances=finding.merged_instances,
+                poc_command=finding.poc_command,
+                poc_setup=finding.poc_setup,
+                finding_source=finding.finding_source,
+                origin=finding.origin,
+                validated_by=finding.validated_by,
+                severity=finding.severity,
+                status=finding.validation_status,
+                frontend_attack_path=frontend_path,
+                backend_attack_path=backend_path
+                if isinstance(backend_path, dict)
+                else None,
+            )
+            original_lead = None
+            if (
+                finding_lead is not None
+                and finding_lead.producer_run_type == "campaign"
+            ):
+                original_id = original_id_by_fingerprint.get(finding_lead.fingerprint)
+                if original_id is not None:
+                    original_lead = original_by_id.get(original_id)
             rows.append(
-                CampaignFindingRow(
-                    finding_id=finding.id,
-                    reference=campaign_reference.public_reference,
-                    run_reference=finding.reference,
-                    target_type=target_member.target_type,
-                    target_run_id=run_id,
-                    component_id=component_ids[0] if component_ids else None,
-                    component_name=(
-                        ", ".join(component_names) if component_names else None
+                (
+                    row,
+                    _cross_repo_finding_group_key(
+                        finding,
+                        finding_lead,
+                        original_lead,
+                        target_member,
                     ),
-                    component_ids=component_ids,
-                    component_names=component_names,
-                    target_name=target_name,
-                    title=finding.title,
-                    description=finding.description,
-                    impact=finding.impact,
-                    likelihood=finding.likelihood,
-                    recommendation=finding.recommendation,
-                    cvss_score=finding.cvss_score,
-                    cvss_vector=finding.cvss_vector,
-                    affected_url=finding.affected_url,
-                    evidence=finding.evidence,
-                    request_evidence=finding.request_evidence,
-                    response_evidence=finding.response_evidence,
-                    evidence_items=finding.evidence_items,
-                    validation_note=finding.validation_note,
-                    merged_instances=finding.merged_instances,
-                    poc_command=finding.poc_command,
-                    poc_setup=finding.poc_setup,
-                    finding_source=finding.finding_source,
-                    origin=finding.origin,
-                    validated_by=finding.validated_by,
-                    severity=finding.severity,
-                    status=finding.validation_status,
-                    frontend_attack_path=frontend_path,
-                    backend_attack_path=backend_path
-                    if isinstance(backend_path, dict)
-                    else None,
                 )
             )
     session.commit()
-    return rows
+    return _merge_campaign_finding_rows(rows)

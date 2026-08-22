@@ -52,47 +52,58 @@ def test_permission_handler_only_allows_aespa_mcp_tools():
 
 def test_relay_surfaces_call_and_returns_aespa_result():
     async def exercise():
+        class MemoryReader:
+            async def readline(self):
+                return (
+                    json.dumps(
+                        {
+                            "token": "secret",
+                            "params": {
+                                "name": "echo_probe",
+                                "arguments": {"value": "ok"},
+                            },
+                        }
+                    )
+                    + "\n"
+                ).encode()
+
+        class MemoryWriter:
+            def __init__(self):
+                self.chunks = []
+                self.closed = False
+
+            def write(self, data):
+                self.chunks.append(data)
+
+            async def drain(self):
+                return None
+
+            def close(self):
+                self.closed = True
+
+            async def wait_closed(self):
+                return None
+
         events = asyncio.Queue()
         conversation = SimpleNamespace(
             token="secret",
             events=events,
             pending={},
         )
-        server = await asyncio.start_server(
-            lambda r, w: droid_provider._handle_relay(
-                r, w, conversation, {"echo_probe"}
-            ),
-            "127.0.0.1",
-            0,
+        writer = MemoryWriter()
+        relay = asyncio.create_task(
+            droid_provider._handle_relay(
+                MemoryReader(), writer, conversation, {"echo_probe"}
+            )
         )
-        port = server.sockets[0].getsockname()[1]
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        writer.write(
-            (
-                json.dumps(
-                    {
-                        "token": "secret",
-                        "params": {
-                            "name": "echo_probe",
-                            "arguments": {"value": "ok"},
-                        },
-                    }
-                )
-                + "\n"
-            ).encode()
-        )
-        await writer.drain()
 
         event_type, tool = await events.get()
         assert event_type == "tool"
         assert tool["name"] == "echo_probe"
         conversation.pending[tool["id"]].future.set_result(("ok", False))
-        response = json.loads(await reader.readline())
-
-        writer.close()
-        await writer.wait_closed()
-        server.close()
-        await server.wait_closed()
+        await relay
+        response = json.loads(b"".join(writer.chunks))
+        assert writer.closed
         return response
 
     assert asyncio.run(exercise()) == {

@@ -80,6 +80,7 @@ _FACT_TYPES = {
     "ui_action",
     "handler",
     "lead_anchor",
+    "auth_flow",
     "queue_publish",
     "queue_consume",
     "rpc_client",
@@ -190,6 +191,27 @@ def _merge_detail(existing: dict, incoming: dict) -> dict:
     if incoming.get("evidence_location"):
         locations.add(incoming["evidence_location"])
     merged["supporting_locations"] = sorted(locations)[:8]
+    for key in (
+        "handler_locations",
+        "route_locations",
+        "trigger_locations",
+        "source_locations",
+        "related_locations",
+        "acquisition_call_locations",
+        "credential_use_locations",
+    ):
+        existing_values = merged.get(key) or []
+        incoming_values = incoming.get(key) or []
+        if isinstance(existing_values, str):
+            existing_values = [existing_values]
+        if isinstance(incoming_values, str):
+            incoming_values = [incoming_values]
+        values = set(existing_values)
+        values.update(incoming_values)
+        if values:
+            merged[key] = sorted(str(value) for value in values)[:8]
+    if incoming.get("credential_kind"):
+        merged["credential_kind"] = str(incoming["credential_kind"])
     return merged
 
 
@@ -296,7 +318,13 @@ def _persist_facts(
                 "origin": "llm",
                 "confidence": raw["confidence"],
                 "reasoning": raw["reasoning"],
-                "supporting_locations": raw["supporting_locations"],
+                "evidence_location": raw["evidence_location"],
+                "supporting_locations": sorted(
+                    {
+                        raw["evidence_location"],
+                        *(raw["supporting_locations"] or []),
+                    }
+                )[:8],
                 **(raw["detail"] if isinstance(raw.get("detail"), dict) else {}),
             }
             row = by_fingerprint.get(fingerprint)
@@ -397,6 +425,8 @@ def _validate_fact(
         "trigger_locations",
         "source_locations",
         "related_locations",
+        "acquisition_call_locations",
+        "credential_use_locations",
     ):
         values = detail.get(key)
         if isinstance(values, str):
@@ -432,6 +462,11 @@ def _validate_fact(
             raise ValueError("lead_anchor facts require a lead_id") from exc
         if eligible_lead_ids is not None and lead_id not in eligible_lead_ids:
             raise ValueError("lead_anchor references an ineligible SAST lead")
+    if fact_type == "auth_flow":
+        if not detail.get("acquisition_call_locations"):
+            raise ValueError("auth_flow facts require acquisition_call_locations")
+        if not detail.get("credential_use_locations"):
+            raise ValueError("auth_flow facts require credential_use_locations")
     result = {
         "fact_type": fact_type,
         "method": method,
@@ -444,8 +479,11 @@ def _validate_fact(
         "reasoning": str(raw.get("reasoning") or "")[:1000],
         "detail": detail,
     }
-    if fact_type in {"route", "http_call", "ui_route"} and not result["path"]:
-        raise ValueError("route and http_call facts require a path")
+    if (
+        fact_type in {"route", "http_call", "ui_route", "auth_flow"}
+        and not result["path"]
+    ):
+        raise ValueError("HTTP interface and auth_flow facts require a path")
     if fact_type not in {"route", "http_call"} and not (
         result["name"] or result["path"]
     ):

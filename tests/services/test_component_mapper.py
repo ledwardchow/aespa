@@ -225,6 +225,38 @@ def test_mapper_fact_validation_rejects_unsupported_method(tmp_path):
         )
 
 
+def test_mapper_validates_evidence_backed_auth_flow(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "client.py").write_text(
+        "token = authenticate()\nheaders = bearer(token)\nrequest(headers=headers)\n"
+    )
+
+    fact = component_mapper._validate_fact(
+        root,
+        {
+            "fact_type": "auth_flow",
+            "method": "POST",
+            "path": "/session",
+            "name": "bearer token",
+            "confidence": 0.9,
+            "evidence_location": "client.py:1",
+            "supporting_locations": ["client.py:2", "client.py:3"],
+            "reasoning": "The response token is attached to later requests.",
+            "detail": {
+                "credential_kind": "bearer",
+                "acquisition_call_locations": ["client.py:1"],
+                "credential_use_locations": ["client.py:3"],
+            },
+        },
+        {"client.py": [(1, 3)]},
+    )
+
+    assert fact["fact_type"] == "auth_flow"
+    assert fact["detail"]["acquisition_call_locations"] == ["client.py:1"]
+    assert fact["detail"]["credential_use_locations"] == ["client.py:3"]
+
+
 @pytest.mark.anyio
 async def test_mapper_merges_deterministic_fact_by_semantic_fingerprint(
     isolated_db_engine, tmp_path, monkeypatch

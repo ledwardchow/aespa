@@ -25,7 +25,7 @@ const CAMPAIGN_TABS = [
 // shell only owns the campaign record and the actions that mutate its
 // lifecycle, so it never grows into a prop-bag monolith.
 export function CampaignDetail({ applicationId, campaignId, initialTab, initialFindingRef }) {
-  const { campaign, error, busy, load, start, stop, retry, resumeSource, resumeTarget, rebuildConnections, continueToLive, isActive } = useCampaign(applicationId, campaignId);
+  const { campaign, error, busy, load, start, stop, resume, resumeSource, resumeTarget, rebuildConnections, continueToLive, isActive } = useCampaign(applicationId, campaignId);
   const tab = CAMPAIGN_TABS.some(t => t.key === initialTab) ? initialTab : "runs";
 
   if (!campaign) {
@@ -34,7 +34,9 @@ export function CampaignDetail({ applicationId, campaignId, initialTab, initialF
 
   const canStart = campaign.status === "draft";
   const canStop = isActive;
-  const canRetry = campaign.status === "interrupted";
+  const hasCancelledSource = (campaign.source_members || []).some(member => member.run_status === "cancelled");
+  const canResume = ["stopped", "interrupted"].includes(campaign.status)
+    || (campaign.status === "awaiting_review" && hasCancelledSource);
   const canContinue = campaignDisplayStatus(campaign) === "awaiting_review" && !!campaign.review_submitted_at;
 
   return <>
@@ -43,7 +45,7 @@ export function CampaignDetail({ applicationId, campaignId, initialTab, initialF
       actions={<>
         {canStart && <button className="btn" disabled={busy} onClick={start}>{busy ? "Starting…" : "Start campaign"}</button>}
         {canStop && <button className="btn danger-outline" disabled={busy} onClick={stop}>{busy ? "Stopping…" : "Stop"}</button>}
-        {canRetry && <button className="btn" disabled={busy} onClick={retry}>{busy ? "Resuming…" : "Retry"}</button>}
+        {canResume && <button className="btn" disabled={busy} onClick={resume}>{busy ? "Resuming…" : "Resume campaign"}</button>}
         {canContinue && <button className="btn" disabled={busy} onClick={continueToLive}>{busy ? "Starting…" : "Continue to live testing"}</button>}
       </>}
     />
