@@ -57,6 +57,13 @@ function campaignMemberIsComplete(member) {
 export function campaignDisplayStatus(campaign) {
   if (!campaign) return undefined;
 
+  // The orchestrator's persisted stage is authoritative while it is active.
+  // Child rows can still show their previous terminal state for a moment just
+  // after Resume, which must not make an active campaign look complete.
+  if (["sast_running", "correlating", "dast_running"].includes(campaign.status)) {
+    return campaign.status;
+  }
+
   const sourceMembers = campaign.source_members || [];
   const targetMembers = campaign.target_members || [];
   if (targetMembers.some(campaignMemberIsRunning)) {

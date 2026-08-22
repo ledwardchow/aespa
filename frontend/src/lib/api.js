@@ -132,6 +132,7 @@ export const api = {
   deleteCampaign:      (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}`, { method:"DELETE" }),
   startCampaign:       (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/start`, { method:"POST" }),
   stopCampaign:        (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/stop`, { method:"POST" }),
+  resumeCampaign:      (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/resume`, { method:"POST" }),
   retryCampaign:       (id,cid)    => req(`/api/applications/${id}/campaigns/${cid}/retry`, { method:"POST" }),
   resumeCampaignSource:(id,cid,mid) => req(`/api/applications/${id}/campaigns/${cid}/sources/${mid}/resume`, { method:"POST" }),
   resumeCampaignTarget:(id,cid,mid) => req(`/api/applications/${id}/campaigns/${cid}/targets/${mid}/resume`, { method:"POST" }),

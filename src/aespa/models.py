@@ -1568,9 +1568,7 @@ class ComponentFact(SQLModel, table=True):
     component_id: Optional[int] = Field(
         default=None, foreign_key="application_component.id", index=True
     )
-    fact_type: str = Field(
-        index=True
-    )  # route | http_call | auth_boundary | queue | datastore | framework
+    fact_type: str = Field(index=True)  # route | http_call | auth_flow | auth_boundary | ...
     method: Optional[str] = Field(default=None)  # GET/POST/... when applicable
     path: Optional[str] = Field(default=None)  # /api/orders/{id}
     host: Optional[str] = Field(default=None)

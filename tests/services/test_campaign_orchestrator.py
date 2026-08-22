@@ -11,6 +11,7 @@ in ``services/campaigns.py`` is under test.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from sqlmodel import Session, select
@@ -1726,26 +1727,36 @@ async def test_stop_campaign_normalizes_running_web_target_member_to_terminal_st
 
 
 @pytest.mark.anyio
-async def test_retry_campaign_still_rejected_after_explicit_stop(
+async def test_resume_campaign_continues_after_explicit_stop(
     isolated_db_engine, monkeypatch
 ):
-    """An explicit user stop is terminal, not "interrupted" — retry_campaign
-    must keep rejecting it even now that stopped members are normalized to
-    "skipped" rather than left "running".
-    """
+    """A stopped campaign resumes the same stage and reuses its child run."""
     with Session(isolated_db_engine) as s:
         ctx = _seed_application(s)
         campaign = _create_draft_campaign(s, ctx)
         campaign_id = campaign.id
 
     started = asyncio.Event()
+    scan_calls: list[int] = []
 
     async def _fake_run_sast_scan(sast_run_id: int) -> None:
+        scan_calls.append(sast_run_id)
         started.set()
-        try:
-            await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            raise
+        if len(scan_calls) == 1:
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                with Session(isolated_db_engine) as s:
+                    run = s.get(SastRun, sast_run_id)
+                    run.status = "cancelled"
+                    s.add(run)
+                    s.commit()
+                return
+        with Session(isolated_db_engine) as s:
+            run = s.get(SastRun, sast_run_id)
+            run.status = "completed"
+            s.add(run)
+            s.commit()
 
     from aespa.services import sast_scanner as sast_scanner_svc
 
@@ -1764,11 +1775,94 @@ async def test_retry_campaign_still_rejected_after_explicit_stop(
 
     await campaigns_svc.start_campaign(campaign_id)
     await asyncio.wait_for(started.wait(), timeout=2.0)
+    with Session(isolated_db_engine) as s:
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign_id
+            )
+        ).one()
+        child_run_id = member.sast_run_id
     await campaigns_svc.stop_campaign(campaign_id)
-
-    with pytest.raises(campaigns_svc.InvalidCampaignState):
-        await campaigns_svc.retry_campaign(campaign_id)
 
     with Session(isolated_db_engine) as s:
         campaign = s.get(AssessmentCampaign, campaign_id)
-        assert campaign.status == "stopped"  # retry attempt did not mutate it
+        assert campaign.status == "stopped"
+        assert campaign.interrupted_stage == "sast_running"
+        assert "did not finish successfully" not in campaign.warnings_json
+
+    await campaigns_svc.resume_campaign(campaign_id)
+    await campaigns_svc._campaign_tasks[campaign_id]
+
+    with Session(isolated_db_engine) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign_id
+            )
+        ).one()
+        assert campaign.status == "awaiting_review"
+        assert campaign.interrupted_stage is None
+        assert member.sast_run_id == child_run_id
+    assert scan_calls == [child_run_id, child_run_id]
+
+
+@pytest.mark.anyio
+async def test_resume_repairs_cancelled_source_from_older_stopped_campaign(
+    isolated_db_engine, monkeypatch
+):
+    """Older stopped rows can carry a stale failed member and warning."""
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        campaign = _create_draft_campaign(s, ctx)
+        campaign_id = campaign.id
+        run = SastRun(name="cancelled child", status="cancelled")
+        s.add(run)
+        s.flush()
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign_id
+            )
+        ).one()
+        member.sast_run_id = run.id
+        member.status = "failed"
+        campaign.status = "awaiting_review"
+        campaign.warnings_json = json.dumps(
+            [
+                "A source-code scan did not finish successfully — matches "
+                "involving that component may be incomplete."
+            ]
+        )
+        s.add(member)
+        s.add(campaign)
+        s.commit()
+        child_run_id = run.id
+
+    calls: list[int] = []
+
+    async def _fake_run_sast_scan(sast_run_id: int) -> None:
+        calls.append(sast_run_id)
+        with Session(isolated_db_engine) as s:
+            run = s.get(SastRun, sast_run_id)
+            run.status = "completed"
+            s.add(run)
+            s.commit()
+
+    from aespa.services import sast_scanner as sast_scanner_svc
+
+    monkeypatch.setattr(sast_scanner_svc, "run_sast_scan", _fake_run_sast_scan)
+
+    await campaigns_svc.resume_campaign(campaign_id)
+    await campaigns_svc._campaign_tasks[campaign_id]
+
+    with Session(isolated_db_engine) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign_id
+            )
+        ).one()
+        assert campaign.status == "awaiting_review"
+        assert json.loads(campaign.warnings_json) == []
+        assert member.status == "completed"
+        assert member.sast_run_id == child_run_id
+    assert calls == [child_run_id]

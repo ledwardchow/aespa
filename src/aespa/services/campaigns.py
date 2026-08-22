@@ -970,6 +970,12 @@ async def _run_sast_stage(campaign_id: int) -> None:
                 warnings.append(f"A source-code scan failed to run: {exc}")
                 _update_source_member_status(member_id, "failed")
                 return
+            if campaign_id in _campaign_stop_requested:
+                # The SAST service deliberately swallows task cancellation in
+                # its awaitable wrapper. Treat that as resumable campaign work,
+                # not as a failed component with a partial-context warning.
+                _update_source_member_status(member_id, "skipped")
+                return
             with Session(get_engine()) as s:
                 run = s.get(SastRun, sast_run_id)
                 completed = run is not None and run.status == "completed"
@@ -1665,6 +1671,7 @@ async def stop_campaign(campaign_id: int) -> bool:
     _campaign_stop_requested.add(campaign_id)
 
     with Session(get_engine()) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
         source_members = s.exec(
             select(CampaignSourceMember).where(
                 CampaignSourceMember.campaign_id == campaign_id
@@ -1675,21 +1682,37 @@ async def stop_campaign(campaign_id: int) -> bool:
                 CampaignTargetMember.campaign_id == campaign_id
             )
         ).all()
-
-    for member in source_members:
-        if member.sast_run_id and sast_scanner_svc.is_sast_scan_running(
+        source_run_ids = [
             member.sast_run_id
-        ):
-            await sast_scanner_svc.stop_sast_scan_and_wait(member.sast_run_id)
-    for member in target_members:
-        if member.test_run_id and crawler_svc.is_running(member.test_run_id):
-            await crawler_svc.stop_and_wait(member.test_run_id)
-        if member.test_run_id and scanner_svc.is_thinking_running(member.test_run_id):
-            await scanner_svc.stop_thinking_and_wait(member.test_run_id)
-        if member.api_test_run_id and api_scanner_svc.is_api_scan_running(
-            member.api_test_run_id
-        ):
-            await api_scanner_svc.stop_api_scan_and_wait(member.api_test_run_id)
+            for member in source_members
+            if member.sast_run_id is not None
+        ]
+        target_run_ids = [
+            (member.test_run_id, member.api_test_run_id) for member in target_members
+        ]
+        if campaign is not None:
+            # Keep the precise continuation point while the user-visible
+            # campaign status changes to "stopped".
+            if campaign.status in _ACTIVE_STATUSES:
+                campaign.interrupted_stage = campaign.status
+            elif any(member.status == "running" for member in target_members):
+                campaign.interrupted_stage = "dast_running"
+            elif any(member.status == "running" for member in source_members):
+                campaign.interrupted_stage = "sast_running"
+            campaign.updated_at = _utcnow()
+            s.add(campaign)
+            s.commit()
+
+    for sast_run_id in source_run_ids:
+        if sast_scanner_svc.is_sast_scan_running(sast_run_id):
+            await sast_scanner_svc.stop_sast_scan_and_wait(sast_run_id)
+    for test_run_id, api_test_run_id in target_run_ids:
+        if test_run_id and crawler_svc.is_running(test_run_id):
+            await crawler_svc.stop_and_wait(test_run_id)
+        if test_run_id and scanner_svc.is_thinking_running(test_run_id):
+            await scanner_svc.stop_thinking_and_wait(test_run_id)
+        if api_test_run_id and api_scanner_svc.is_api_scan_running(api_test_run_id):
+            await api_scanner_svc.stop_api_scan_and_wait(api_test_run_id)
 
     member_tasks = [
         task
@@ -1988,8 +2011,34 @@ def reconcile_campaigns() -> list[int]:
     return reconciled
 
 
-async def retry_campaign(campaign_id: int) -> None:
-    """Resume a campaign interrupted by a restart from its recorded stage.
+def _campaign_resume_stage(session: Session, campaign: AssessmentCampaign) -> str:
+    """Return the saved stage, with a safe fallback for older stopped rows."""
+    if campaign.interrupted_stage in _ACTIVE_STATUSES:
+        return campaign.interrupted_stage
+
+    # Older stopped campaigns have no saved continuation point. Existing live
+    # child runs prove DAST had begun; completed source children mean context
+    # matching is next. The SAST fallback is safe because completed members
+    # are skipped by the stage runner.
+    targets = session.exec(
+        select(CampaignTargetMember).where(
+            CampaignTargetMember.campaign_id == campaign.id
+        )
+    ).all()
+    if any(member.test_run_id or member.api_test_run_id for member in targets):
+        return "dast_running"
+    sources = session.exec(
+        select(CampaignSourceMember).where(
+            CampaignSourceMember.campaign_id == campaign.id
+        )
+    ).all()
+    if sources and all(member.status in {"completed", "failed"} for member in sources):
+        return "correlating"
+    return "sast_running"
+
+
+async def resume_campaign(campaign_id: int) -> None:
+    """Resume a stopped or restart-interrupted campaign from its saved stage.
 
     Reuses every existing child run/lead — ``start_campaign``-created
     ``SastRun`` rows and ``_run_dast_stage``-created ``TestRun``/
@@ -2004,13 +2053,61 @@ async def retry_campaign(campaign_id: int) -> None:
         campaign = s.get(AssessmentCampaign, campaign_id)
         if campaign is None:
             raise CampaignNotFound(f"Campaign id={campaign_id} does not exist")
-        if campaign.status != "interrupted":
-            raise InvalidCampaignState(
-                f"Cannot retry a campaign with status '{campaign.status}'"
+        source_members = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign_id
             )
-        stage = campaign.interrupted_stage or "sast_running"
+        ).all()
+        cancelled_members = [
+            member
+            for member in source_members
+            if member.sast_run_id is not None
+            and (run := s.get(SastRun, member.sast_run_id)) is not None
+            and run.status == "cancelled"
+        ]
+        recovering_cancelled_source = bool(cancelled_members)
+        allowed = campaign.status in {"interrupted", "stopped"} or (
+            campaign.status == "awaiting_review" and recovering_cancelled_source
+        )
+        if not allowed:
+            raise InvalidCampaignState(
+                f"Cannot resume a campaign with status '{campaign.status}'"
+            )
+        stage = (
+            "sast_running"
+            if recovering_cancelled_source
+            else _campaign_resume_stage(s, campaign)
+        )
+        for member in cancelled_members:
+            member.status = "pending"
+            member.updated_at = _utcnow()
+            s.add(member)
+        if recovering_cancelled_source:
+            failed_source_remains = any(
+                member.sast_run_id is not None
+                and (run := s.get(SastRun, member.sast_run_id)) is not None
+                and run.status == "failed"
+                for member in source_members
+            )
+            if not failed_source_remains:
+                try:
+                    warnings = json.loads(campaign.warnings_json or "[]")
+                except (TypeError, ValueError):
+                    warnings = []
+                campaign.warnings_json = json.dumps(
+                    [
+                        warning
+                        for warning in warnings
+                        if not any(
+                            marker in str(warning)
+                            for marker in _SOURCE_FAILURE_WARNING_MARKERS
+                        )
+                    ]
+                )
+            campaign.review_submitted_at = None
         campaign.status = stage
         campaign.interrupted_stage = None
+        campaign.completed_at = None
         campaign.error_message = None
         campaign.updated_at = _utcnow()
         s.add(campaign)
@@ -2030,3 +2127,8 @@ async def retry_campaign(campaign_id: int) -> None:
                 _run_campaign(campaign_id), name=f"campaign-{campaign_id}"
             )
     _campaign_tasks[campaign_id] = task
+
+
+async def retry_campaign(campaign_id: int) -> None:
+    """Backward-compatible alias for the campaign resume action."""
+    await resume_campaign(campaign_id)

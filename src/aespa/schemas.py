@@ -1806,7 +1806,7 @@ class CampaignSummary(BaseModel):
     warnings_json: str = "[]"
     review_submitted_at: datetime | None
     error_message: str | None
-    # Set only while status == "interrupted"; the stage retry will resume.
+    # Saved continuation point for interrupted or explicitly stopped campaigns.
     interrupted_stage: str | None = None
     max_trace_edges: int | None = None
     max_trace_components: int | None = None
