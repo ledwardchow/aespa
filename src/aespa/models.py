@@ -91,7 +91,9 @@ class Site(SQLModel, table=True):
     login_url: Optional[str] = Field(default=None)
     notes: Optional[str] = Field(default=None)
     scan_guidance: Optional[str] = Field(default=None)  # Test Lead guidance
-    scope_hosts: Optional[str] = Field(default=None)  # JSON list of host:port authorities
+    scope_hosts: Optional[str] = Field(
+        default=None
+    )  # JSON list of host:port authorities
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -143,7 +145,9 @@ class ApiCollection(SQLModel, table=True):
     servers: Optional[str] = Field(
         default=None
     )  # JSON list of additional server base URLs
-    scope_hosts: Optional[str] = Field(default=None)  # JSON list of host:port authorities
+    scope_hosts: Optional[str] = Field(
+        default=None
+    )  # JSON list of host:port authorities
     auth_summary_json: Optional[str] = Field(
         default=None
     )  # security schemes from parsed specs
@@ -614,7 +618,9 @@ class SpecialistAgentConfig(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     enabled: bool = Field(default=True)
+    auto_dispatch_enabled: bool = Field(default=True)
     max_concurrent: int = Field(default=5)
+    max_queued: int = Field(default=20)
     max_steps: int = Field(default=30)
     min_priority: int = Field(default=7)
     # Per attack-class dispatch toggles
@@ -1568,7 +1574,9 @@ class ComponentFact(SQLModel, table=True):
     component_id: Optional[int] = Field(
         default=None, foreign_key="application_component.id", index=True
     )
-    fact_type: str = Field(index=True)  # route | http_call | auth_flow | auth_boundary | ...
+    fact_type: str = Field(
+        index=True
+    )  # route | http_call | auth_flow | auth_boundary | ...
     method: Optional[str] = Field(default=None)  # GET/POST/... when applicable
     path: Optional[str] = Field(default=None)  # /api/orders/{id}
     host: Optional[str] = Field(default=None)
@@ -1703,6 +1711,52 @@ class AgentLog(SQLModel, table=True):
     status: str  # active | complete | failed
     current_task: str = Field(default="")
     outcome: Optional[str] = Field(default=None)
+
+
+class SpecialistHandoff(SQLModel, table=True):
+    """One owned vulnerability lead handed from the Test Lead to a specialist."""
+
+    __tablename__ = "specialist_handoff"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_kind",
+            "run_id",
+            "fingerprint",
+            name="uq_specialist_handoff_scope",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_kind: str = Field(default="web", index=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    fingerprint: str = Field(index=True)
+    attack_class: str = Field(index=True)
+    target_url: str
+    canonical_url: str = Field(index=True)
+    parameter: Optional[str] = Field(default=None)
+    session_label: Optional[str] = Field(default=None)
+    priority: int = Field(default=7)
+    rationale: str = Field(default="")
+    dispatch_source: str = Field(default="test_lead")  # test_lead|automatic|burp
+    status: str = Field(
+        default="queued", index=True
+    )  # queued|running|completed|failed|cancelled
+    agent_id: Optional[str] = Field(default=None, index=True)
+    finding_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("scan_finding.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    outcome: Optional[str] = Field(default=None)
+    feedback_delivered: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=_utcnow)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    updated_at: datetime = Field(default_factory=_utcnow)
 
 
 # ── Phase Checkpoint & Obligation / Evidence Ledger ─────────────────────────

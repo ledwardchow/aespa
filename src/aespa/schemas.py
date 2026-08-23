@@ -980,7 +980,9 @@ class SpecialistAgentConfigBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     enabled: bool = True
+    auto_dispatch_enabled: bool = True
     max_concurrent: int = Field(default=5, ge=0, le=20)
+    max_queued: int = Field(default=20, ge=0, le=100)
     max_steps: int = Field(default=30, ge=1, le=200)
     min_priority: int = Field(default=7, ge=1, le=10)
     dispatch_idor: bool = True

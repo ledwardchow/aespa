@@ -307,7 +307,9 @@ Singleton row (id = 1). Controls when and how Specialist Agents are dispatched d
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Master switch — disable to suppress all specialist dispatch |
+| `auto_dispatch_enabled` | `true` | Automatically hand off strong upload, SSRF, SQL error, and reflected XSS signals |
 | `max_concurrent` | `5` | Maximum simultaneously-running specialists per scan |
+| `max_queued` | `20` | Maximum eligible handoffs waiting for a specialist slot |
 | `max_steps` | `30` | Step budget per specialist agent |
 | `min_priority` | `7` | Minimum recon-summary `attack_class` priority to trigger dispatch |
 | `dispatch_idor` | `true` | Dispatch specialists for IDOR leads |
@@ -804,15 +806,19 @@ Reporting agent    (post-scan LLM pre-screen pass over new findings)
 
 ### Specialist agents
 
-The Test Lead calls `agent_dispatch` when it has a strong, specific lead it wants to pursue concurrently (e.g. a suspected IDOR on a particular endpoint). The scanner dispatches `_run_specialist_agent` as a background `asyncio.Task`.
+The Test Lead calls `agent_dispatch` when a promising lead needs deeper confirmation or impact testing. The scanner can also create a handoff automatically from a small set of strong request and response signals. An issue that is already fully proven is written directly without a specialist.
+
+Each handoff is stored in `SpecialistHandoff` and owns a vulnerability class, canonical route, optional parameter, and session. While that handoff is queued or running, the Test Lead cannot probe or write the same scope. This keeps it working through other coverage gaps. Completed outcomes are attached to the next Test Lead tool result. If both agents support the same finding, the specialist evidence is merged into the existing finding.
 
 **Dispatch flow:**
 
 ```
 Test Lead calls agent_dispatch
+  └─ normalize class aliases and apply a safe default priority
   └─ _should_dispatch_specialist(attack_class, priority, config)
        • checks SpecialistAgentConfig (enabled, min_priority, per-class toggles)
-       • checks _specialist_at_capacity(run_id)  ← max_concurrent gate
+       • records a unique handoff scope
+       • queues the handoff when max_concurrent is reached
   └─ _run_specialist_agent(
          agent_id, attack_class, target_url, rationale,
          session_vault, llm_cfg, max_steps
@@ -1184,7 +1190,7 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 - **FastAPI async handlers** — all I/O is non-blocking via `asyncio`
 - **Parallel crawl workers** — multiple Playwright browser instances share a `_CrawlShared` state object (asyncio locks around the URL frontier and seen-set)
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
-- **Specialist agents** — each specialist runs as its own `asyncio.Task`; tracked in `_specialist_tasks[run_id]` so they are cancelled when the parent scan is stopped; concurrency is capped by `_specialist_running[run_id]` vs `SpecialistAgentConfig.max_concurrent`
+- **Specialist agents** — each specialist runs as its own `asyncio.Task`; tracked in `_specialist_tasks[run_id]` so it is cancelled when the parent scan is stopped. Extra handoffs wait in `_specialist_pending[run_id]` and start as slots open. The final specialist barrier waits for both active and queued work.
 - **Finding validation** — end-of-scan findings use one managed bounded batch; manual finding actions use tracked inline tasks capped by `AdversarialValidatorConfig.end_scan_max_concurrent`. Both appear as one run-level validation job and are stopped together.
 - **ALICE background tasks** — `alice_tasks.py` holds a module-level `_registry: dict[int, AliceTask]` (one entry per run). Each task runs `run_alice_turn_stream` as an `asyncio.create_task`, decoupled from the HTTP connection; all emitted events are buffered in `AliceTask.events` so clients can replay from any cursor on reconnect
 - **Scan checkpointing** — the LLM conversation history is serialised to the DB at regular intervals by `checkpoint.py`; `start_thinking_scan_resume` restores it on restart

@@ -1031,7 +1031,9 @@ def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
         )
     return SpecialistAgentConfigOut(
         enabled=cfg.enabled,
+        auto_dispatch_enabled=cfg.auto_dispatch_enabled,
         max_concurrent=cfg.max_concurrent,
+        max_queued=cfg.max_queued,
         max_steps=cfg.max_steps,
         min_priority=cfg.min_priority,
         dispatch_idor=cfg.dispatch_idor,
@@ -1044,6 +1046,7 @@ def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
         dispatch_cors=cfg.dispatch_cors,
         dispatch_crypto=cfg.dispatch_crypto,
         dispatch_config=cfg.dispatch_config,
+        dispatch_file_upload=cfg.dispatch_file_upload,
         trigger_specialist_on_burp=cfg.trigger_specialist_on_burp,
         updated_at=cfg.updated_at,
     )
@@ -1056,7 +1059,9 @@ def upsert_specialist_agent_config(
     if cfg is None:
         cfg = SpecialistAgentConfig(id=_SINGLETON_ID)
     cfg.enabled = payload.enabled
+    cfg.auto_dispatch_enabled = payload.auto_dispatch_enabled
     cfg.max_concurrent = payload.max_concurrent
+    cfg.max_queued = payload.max_queued
     cfg.max_steps = payload.max_steps
     cfg.min_priority = payload.min_priority
     cfg.dispatch_idor = payload.dispatch_idor
@@ -1069,6 +1074,7 @@ def upsert_specialist_agent_config(
     cfg.dispatch_cors = payload.dispatch_cors
     cfg.dispatch_crypto = payload.dispatch_crypto
     cfg.dispatch_config = payload.dispatch_config
+    cfg.dispatch_file_upload = payload.dispatch_file_upload
     cfg.trigger_specialist_on_burp = payload.trigger_specialist_on_burp
     cfg.updated_at = _utcnow()
     session.add(cfg)
