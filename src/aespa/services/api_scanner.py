@@ -1107,6 +1107,7 @@ def _build_api_crawl_context(
     api_run_id: int,
     *,
     sast_validate: bool = False,
+    coverage_mode: str | None = None,
 ) -> str:
     """Build the initial LLM context string from the API collection + endpoints."""
     with Session(get_engine()) as s:
@@ -1172,15 +1173,12 @@ def _build_api_crawl_context(
     # Append this run's fresh SAST-lead copies. Collection originals are never
     # mutated by a dynamic scan, so every run independently reassesses them.
     try:
-        from aespa.services.scan_leads import (
-            format_lead_index_for_validation,
-            format_leads_for_run,
-        )
+        from aespa.services.scan_leads import format_leads_for_scan_context
 
-        leads_block = (
-            format_lead_index_for_validation("api", api_run_id)
-            if sast_validate
-            else format_leads_for_run("api", api_run_id)
+        leads_block = format_leads_for_scan_context(
+            "api",
+            api_run_id,
+            coverage_mode or ("sast_validate" if sast_validate else "track"),
         )
         if leads_block:
             lines.append(leads_block)
@@ -1265,7 +1263,9 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
 
     # Build the initial LLM context from the API collection.
     crawl_context = _build_api_crawl_context(
-        api_run_id, sast_validate=coverage_mode == "sast_validate"
+        api_run_id,
+        sast_validate=coverage_mode == "sast_validate",
+        coverage_mode=coverage_mode,
     )
 
     # In enforce mode, append the coverage checklist + directive so the agent
@@ -1454,7 +1454,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     # A validation pass is incomplete when any imported lead is still open or
     # investigating.  Preserve that state so the UI can offer a safe retry.
     unresolved_sast = False
-    if coverage_mode == "sast_validate":
+    if coverage_mode in {"track", "sast_validate"}:
         from aespa.services.scan_leads import get_all_leads_for_run
 
         unresolved_sast = any(

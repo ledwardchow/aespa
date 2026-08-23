@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from sqlmodel import Session
@@ -14,9 +16,13 @@ from aespa.services.prompts.test_lead import (
 )
 from aespa.services.scan_leads import (
     format_lead_index_for_validation,
+    format_leads_for_scan_context,
     get_lead_detail_for_run,
 )
-from aespa.services.scanner import _run_thinking_context_tool
+from aespa.services.scanner import (
+    _do_agentic_thinking_loop,
+    _run_thinking_context_tool,
+)
 
 
 def _web_run(
@@ -209,6 +215,94 @@ def test_validation_index_includes_all_leads_and_dynamic_objective(
     assert "/items/24" in index
     assert "validate object 24" in index
     assert "static-analysis hypothesis" in index.lower()
+
+
+def test_quick_scan_context_includes_every_open_lead(isolated_db_engine):
+    run = _web_run(isolated_db_engine)
+    for index in range(25):
+        _imported_lead(
+            isolated_db_engine,
+            run_type="web",
+            run_id=run.id,
+            title=f"Quick lead {index}",
+        )
+
+    quick_context = format_leads_for_scan_context("web", run.id, "track")
+    full_context = format_leads_for_scan_context("web", run.id, "enforce")
+
+    assert quick_context.count("context_tool(tool=lead_detail") == 25
+    assert "Quick lead 24" in quick_context
+    assert full_context.count("[Lead ") == 20
+
+
+def test_quick_resume_refreshes_leads_and_blocks_done(isolated_db_engine, monkeypatch):
+    run = _api_run(isolated_db_engine)
+    lead = _imported_lead(
+        isolated_db_engine,
+        run_type="api",
+        run_id=run.id,
+        title="Lead added after checkpoint",
+    )
+    captured = {}
+
+    async def fake_agentic_loop(_config, **kwargs):
+        captured["system_message"] = kwargs["system_message"]
+        allowed, feedback = kwargs["done_check"]({}, 5)
+        assert allowed is False
+        assert "still open" in feedback
+
+        with Session(isolated_db_engine) as session:
+            row = session.get(ScanLead, lead.id)
+            row.status = "dismissed"
+            session.add(row)
+            session.commit()
+
+        allowed, feedback = kwargs["done_check"]({}, 6)
+        assert allowed is True
+        return "done"
+
+    monkeypatch.setattr(
+        "aespa.services.scanner.llm_svc.thinking_agentic_loop",
+        fake_agentic_loop,
+    )
+    monkeypatch.setattr(
+        "aespa.services.scanner.events_svc.emit", lambda *args, **kwargs: None
+    )
+
+    asyncio.run(
+        _do_agentic_thinking_loop(
+            run_id=run.id,
+            is_api_run=True,
+            llm_cfg=SimpleNamespace(),
+            base_url="https://api.local",
+            crawl_context="old context",
+            creds_for_llm=[],
+            session_vault={},
+            pages_snapshot=[],
+            findings_snapshot=[],
+            first_page_id=None,
+            scanner_policy=SimpleNamespace(
+                execution_monitor_enabled=False,
+                max_consecutive_text_turns=0,
+                enforce_full_coverage_obligations=False,
+            ),
+            hx=SimpleNamespace(),
+            browser_ctx=None,
+            pw_page=None,
+            history=[],
+            all_results=[],
+            resume_from={
+                "messages": [{"role": "user", "content": "checkpoint context"}],
+                "step_count": 4,
+            },
+            system_message_override="API Test Lead",
+            tools_override=[],
+            coverage_mode="track",
+        )
+    )
+
+    assert "resumed Quick run" in captured["system_message"]
+    assert "Lead added after checkpoint" in captured["system_message"]
 
 
 def test_lead_detail_returns_full_owned_data_and_rejects_foreign_leads(

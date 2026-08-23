@@ -744,7 +744,8 @@ _API_THINKING_AGENT_SYSTEM = (
     "  After 3 consecutive calls, execute a probe or write a finding.\n"
     "- write_finding: persist a confirmed finding with concrete evidence. No duplicates.\n"
     "  Set owasp_category to the OWASP API Top 10 code (e.g. API1, API3, API5).\n"
-    "- update_lead: after investigating a static-analysis lead, record the outcome\n"
+    "- update_lead: after investigating a static-analysis lead, first use lead_detail to "
+    "load its complete evidence, then record the outcome\n"
     "  (confirmed/dismissed/inconclusive) and a note about what you tested. Investigation\n"
     "  leads are UNPROVEN hypotheses from a prior SAST scan — confirm dynamically before\n"
     "  calling write_finding. Call update_lead IMMEDIATELY after resolving a lead, in the\n"
@@ -752,7 +753,9 @@ _API_THINKING_AGENT_SYSTEM = (
     "  update_lead calls at the end of the scan.\n"
     "- forge_jwt / decode_jwt: create or inspect JWTs.\n"
     "- credential_check: test a bounded list of credentials against a login endpoint.\n"
-    "- done: call ONLY when every input-taking route in the site map or spec has been probed. A finding write or specialist dispatch is NOT a done condition — resume immediately after each.\n"
+    "- done: call ONLY when every input-taking route in the site map or spec has been probed "
+    "and every imported SAST lead is resolved. A finding write or specialist dispatch is NOT "
+    "a done condition — resume immediately after each.\n"
     "- No browser tool — REST APIs do not require browser rendering.\n"
     "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
     "so the Work Program matrix fills accurately. Probe each endpoint × category pair with\n"
@@ -816,7 +819,7 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "cors, crypto, config, file_upload. Dispatch immediately — do NOT keep probing the same lead "
     "yourself after dispatching. If an issue is already fully proven by a single decisive result, write it directly and do not dispatch it.\n"
     "- update_lead: after investigating a static-analysis lead from the 'STATIC ANALYSIS "
-    "INVESTIGATION LEADS' block in your context, record the outcome "
+    "INVESTIGATION LEADS' block or 'SAST VALIDATION LEAD INDEX' in your context, record the outcome "
     "(confirmed/dismissed/inconclusive) and a note about what you tested. These leads are "
     "UNPROVEN hypotheses from a prior SAST scan. If a lead includes a static attack path, "
     "use its dynamic-test objective to choose the first focused probe, then verify or reject "
@@ -1306,8 +1309,17 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "attack_class": {
                     "type": "string",
                     "enum": [
-                        "idor", "auth_bypass", "sqli", "xss", "business_logic",
-                        "ssrf", "path_traversal", "cors", "crypto", "config", "file_upload"
+                        "idor",
+                        "auth_bypass",
+                        "sqli",
+                        "xss",
+                        "business_logic",
+                        "ssrf",
+                        "path_traversal",
+                        "cors",
+                        "crypto",
+                        "config",
+                        "file_upload",
                     ],
                     "description": (
                         "One of: idor, auth_bypass, sqli, xss, business_logic, "
