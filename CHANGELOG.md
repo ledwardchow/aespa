@@ -4,6 +4,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+- **Stronger XSS testing in Track mode**: The Test Lead now treats XSS as a primary objective, tests plausible reflected and stored paths across the discovered input and rendering contexts, and does not treat a single generic payload or SQL injection coverage as sufficient XSS testing.
 - **Safer Docker image dependencies**: The container now uses the Playwright release that matches AESPA's runtime dependency, installs available operating-system security updates during the build, and omits unused vulnerable multimedia plugins and package-management components. Cryptography has also been updated to the release containing the fixes identified by Docker Scout.
 
 ## [PR #265] August 19 Update — new LLM providers and scan improvements

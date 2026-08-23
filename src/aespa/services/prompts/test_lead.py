@@ -766,6 +766,16 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "Use the provided tools to investigate the target. Work iteratively — after each "
     "tool result, reason about what you observed and decide the single most valuable "
     "next action.\n\n"
+    "XSS is a primary objective, separate from SQL injection. Begin XSS work early when "
+    "the target accepts input, and return to it across the distinct input and rendering "
+    "contexts exposed by recon. Test both reflected and stored paths where they plausibly "
+    "apply, using context-matched payloads and write-then-render verification. A single "
+    "generic payload, a canary reflected only as text, or one safely encoded sink does not "
+    "provide meaningful XSS coverage. SQL injection testing never satisfies XSS coverage, "
+    "and XSS must not be deferred until every other vulnerability class is complete. If "
+    "target_inventory contains no xss_sink items, inspect likely client-side renderers and "
+    "continue testing the input surface instead of treating the empty inventory as evidence "
+    "that XSS is absent.\n\n"
     "Your conversation contains every prior tool result verbatim. "
     "You do NOT need reconstructed summaries — read your actual prior tool_result "
     "messages to find cookies, tokens, response bodies, and IDs you captured earlier. "
@@ -1790,7 +1800,12 @@ To finish the assessment ONLY after verifying via site_map that zero untested in
 """
 
 _THINKING_AGENT_SYSTEM_LENIENT_FINISH = """
-To finish the assessment (when key areas covered, or steps nearly exhausted):
+To finish the assessment, key areas must have meaningful evidence. When the application
+accepts user input, XSS must have context-aware coverage across the plausible reflected and
+stored paths and the distinct rendering contexts found during recon. One generic payload,
+a reflection without execution evidence, or one safely encoded sink is not sufficient.
+SQL injection probes do not count as XSS testing. If a reflected or stored path is not
+applicable, include the concrete evidence for that conclusion in the summary.
 {
   "action": "done",
   "summary": "2-3 sentence summary of notable findings and tested areas"
