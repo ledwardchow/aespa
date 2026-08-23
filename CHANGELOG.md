@@ -4,6 +4,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+- **More reliable specialist handoffs**: Strong upload, SSRF, SQL error, and reflected XSS signals can now start specialists automatically. Specialist work is queued when all slots are busy, and each handoff reserves its route and vulnerability class so the Test Lead moves on instead of repeating the same investigation. Completed specialist results are returned to the Test Lead, and matching evidence is merged into an existing finding.
 - **Stronger XSS testing in Track mode**: The Test Lead now treats XSS as a primary objective, tests plausible reflected and stored paths across the discovered input and rendering contexts, and does not treat a single generic payload or SQL injection coverage as sufficient XSS testing.
 - **Safer Docker image dependencies**: The container now uses the Playwright release that matches AESPA's runtime dependency, installs available operating-system security updates during the build, and omits unused vulnerable multimedia plugins and package-management components. Cryptography has also been updated to the release containing the fixes identified by Docker Scout.
 

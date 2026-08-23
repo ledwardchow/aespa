@@ -76,7 +76,9 @@ export function UpstreamProxySettings() {
 }
 export const DEFAULT_SPECIALIST_AGENT_FORM = {
   enabled: true,
+  auto_dispatch_enabled: true,
   max_concurrent: 5,
+  max_queued: 20,
   max_steps: 30,
   min_priority: 7,
   dispatch_idor: true,
@@ -89,5 +91,6 @@ export const DEFAULT_SPECIALIST_AGENT_FORM = {
   dispatch_cors: false,
   dispatch_crypto: true,
   dispatch_config: false,
+  dispatch_file_upload: true,
   trigger_specialist_on_burp: false
 };

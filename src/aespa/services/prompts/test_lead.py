@@ -791,7 +791,7 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "attribute or exact text to prove the payload affected the rendered DOM.\n"
     "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
     "the target. Available sub-commands: site_map, page_detail, history_search, "
-    "finding_list, lead_list, lead_detail, target_inventory, traffic_search, extract_entities, "
+    "finding_list, lead_list, lead_detail, target_inventory, traffic_search, extract_entities, specialist_status, "
     "coverage_gaps. coverage_gaps returns a compact live list of uncovered "
     "route/category cells; use it when choosing the next distinct surface or before done. "
     "After 3 consecutive calls, either execute a probe/write a finding or "
@@ -799,7 +799,7 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "scan round will change the next action.\n"
     "- write_finding: persist a confirmed finding with concrete evidence from prior results. "
     "No duplicates.\n"
-    "- agent_dispatch: delegate a confirmed high-confidence lead to a Specialist Agent that "
+    "- agent_dispatch: hand off a promising lead that still needs deeper confirmation or impact testing to a Specialist Agent that "
     "runs concurrently so you can continue covering other attack surface. Call this as soon "
     "as you have concrete evidence of a testable vector — e.g. a confirmed stored-XSS sink "
     "with a verified injection point, an IDOR primitive where you can enumerate a foreign "
@@ -814,7 +814,7 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "how many SSRF-prone parameters were found. "
     "Attack classes: idor, auth_bypass, sqli, xss, business_logic, ssrf, path_traversal, "
     "cors, crypto, config, file_upload. Dispatch immediately — do NOT keep probing the same lead "
-    "yourself after dispatching.\n"
+    "yourself after dispatching. If an issue is already fully proven by a single decisive result, write it directly and do not dispatch it.\n"
     "- update_lead: after investigating a static-analysis lead from the 'STATIC ANALYSIS "
     "INVESTIGATION LEADS' block in your context, record the outcome "
     "(confirmed/dismissed/inconclusive) and a note about what you tested. These leads are "
@@ -1305,9 +1305,13 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "properties": {
                 "attack_class": {
                     "type": "string",
+                    "enum": [
+                        "idor", "auth_bypass", "sqli", "xss", "business_logic",
+                        "ssrf", "path_traversal", "cors", "crypto", "config", "file_upload"
+                    ],
                     "description": (
                         "One of: idor, auth_bypass, sqli, xss, business_logic, "
-                        "ssrf, path_traversal, cors, crypto, config"
+                        "ssrf, path_traversal, cors, crypto, config, file_upload"
                     ),
                 },
                 "target_url": {
@@ -1335,7 +1339,7 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 },
                 "note": {"type": "string"},
             },
-            "required": ["attack_class", "target_url", "rationale"],
+            "required": ["attack_class", "target_url", "rationale", "priority"],
         },
     },
     {
@@ -1626,6 +1630,7 @@ Context tools:
 - auth_matrix: args may include search/filter and limit; returns endpoints worth anonymous/user/role checks.
 - extract_entities: args may include text, step, or page_id; returns URLs, paths, IDs, UUIDs, emails,
   redacted JWT hints, and error/debug lines.
+- specialist_status: returns queued, running, and completed specialist handoffs with outcomes.
 - Context tools have an adaptive checkpoint: after 3 consecutive context-only calls,
   execute a probe/write a finding, or include context_budget_reason summarizing what
   you learned, naming the current hypothesis, and explaining why another targeted

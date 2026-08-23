@@ -59,6 +59,17 @@ export function SpecialistAgentSettings() {
           specific vulnerability leads in parallel. Each specialist receives an independent
           LLM session and a subset of tools (HTTP, browser, context, write_finding).
         </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked={form.auto_dispatch_enabled} disabled={dis} onChange={e => upd({
+          auto_dispatch_enabled: e.target.checked
+        })} />
+          <span>Automatically dispatch strong specialist leads</span>
+        </label>
+        <div className="field-hint" style={{
+          marginBottom: "12px"
+        }}>
+          Automatically hands off clear upload, SSRF, SQL error, and reflected XSS signals. The Test Lead can still dispatch other leads.
+        </div>
 
         <div className="form-section-title">Concurrency &amp; Budget</div>
         <div className="field">
@@ -67,6 +78,13 @@ export function SpecialistAgentSettings() {
           max_concurrent: Number(e.target.value)
         })} />
           <div className="field-hint">Maximum number of specialist agents running at the same time (0 = effectively disabled). Default: 5.</div>
+        </div>
+        <div className="field">
+          <label>Maximum queued specialists</label>
+          <input type="number" min="0" max="100" value={form.max_queued} disabled={dis} onChange={e => upd({
+          max_queued: Number(e.target.value)
+        })} />
+          <div className="field-hint">Keeps eligible handoffs until a specialist slot becomes available. Default: 20.</div>
         </div>
         <div className="field">
           <label>Max steps per specialist</label>
@@ -150,6 +168,12 @@ export function SpecialistAgentSettings() {
           dispatch_config: e.target.checked
         })} />
           <span>Security Misconfiguration (A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked={form.dispatch_file_upload} disabled={dis} onChange={e => upd({
+          dispatch_file_upload: e.target.checked
+        })} />
+          <span>File Upload</span>
         </label>
 
         <div className="divider" />
