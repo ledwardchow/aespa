@@ -6841,9 +6841,9 @@ async def _do_thinking_scan(run_id: int) -> None:
             await _analyse_js_sinks(run_id, _hx_sink, scanner_policy=scanner_policy)
 
     if coverage_mode == "sast_validate":
-        from aespa.services.scan_leads import format_lead_index_for_validation
+        from aespa.services.scan_leads import format_leads_for_scan_context
 
-        lead_index = format_lead_index_for_validation("web", run_id)
+        lead_index = format_leads_for_scan_context("web", run_id, coverage_mode)
         crawl_context = (
             "SAST Validate scope: investigate only the imported leads below. "
             "The lead index is a compact work list; call lead_detail before testing "
@@ -6868,9 +6868,9 @@ async def _do_thinking_scan(run_id: int) -> None:
         # Append any SAST leads imported into this web run so the Test Lead can
         # investigate them (mirrors the API scan's collection-keyed lead injection).
         try:
-            from aespa.services.scan_leads import format_leads_for_run
+            from aespa.services.scan_leads import format_leads_for_scan_context
 
-            leads_block = format_leads_for_run("web", run_id)
+            leads_block = format_leads_for_scan_context("web", run_id, coverage_mode)
             if leads_block:
                 crawl_context = f"{crawl_context}\n\n{leads_block}"
         except Exception:
@@ -8921,7 +8921,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 _run.status = "incomplete"
                 _run.outcome = "incomplete"
                 _run.terminal_reason = "coverage_budget_exhausted"
-            elif coverage_mode == "sast_validate":
+            elif coverage_mode in {"track", "sast_validate"}:
                 from aespa.services.scan_leads import get_all_leads_for_run
 
                 unresolved = [
@@ -9163,20 +9163,25 @@ async def _do_agentic_thinking_loop(
         _blocked: set[str] = set()
         _failed: dict[str, int] = {}
 
-    if coverage_mode == "sast_validate" and resume_messages is not None:
+    if coverage_mode in {"track", "sast_validate"} and resume_messages is not None:
         from aespa.services.scan_leads import format_lead_index_for_validation
 
         current_lead_index = format_lead_index_for_validation(
             "api" if is_api_run else "web", run_id
         )
+        resume_system = system_message_override or (
+            get_sast_validate_system(is_api_run=is_api_run)
+            if coverage_mode == "sast_validate"
+            else get_thinking_agent_system(False)
+        )
+        mode_name = "SAST Validate" if coverage_mode == "sast_validate" else "Quick"
         system_message_override = (
-            (system_message_override or get_sast_validate_system(is_api_run=is_api_run))
-            + "\n\nAUTHORITATIVE RESUME STATE:\n"
+            resume_system + "\n\nAUTHORITATIVE RESUME STATE:\n"
             "The earlier conversation may contain leads that have since been "
             "confirmed, dismissed, or otherwise closed. Ignore those stale entries. "
-            "In this resumed SAST Validate run, investigate only the currently open "
-            "leads listed below; `lead_list` and `lead_detail` are restricted to "
-            "those open leads.\n\n"
+            f"In this resumed {mode_name} run, investigate every currently open "
+            "SAST lead listed below before calling done. Fetch each lead with "
+            "`lead_detail` before testing it.\n\n"
             + (current_lead_index or "There are currently no open SAST leads.")
         )
 
@@ -9250,7 +9255,7 @@ async def _do_agentic_thinking_loop(
         )
 
     def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
-        if coverage_mode == "sast_validate":
+        if coverage_mode in {"track", "sast_validate"}:
             from aespa.services.scan_leads import get_all_leads_for_run
 
             owner_type = "api" if is_api_run else "web"
@@ -9280,7 +9285,8 @@ async def _do_agentic_thinking_loop(
                 f"{counts['inconclusive']} inconclusive."
             )
             _emit_completion_log(f"Step {step}: {summary}")
-            return True, summary
+            if coverage_mode == "sast_validate":
+                return True, summary
 
         def _get_coverage_gaps() -> dict[str, Any]:
             if is_api_run:

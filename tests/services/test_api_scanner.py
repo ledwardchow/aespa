@@ -294,7 +294,8 @@ def test_api_crawl_context_uses_fresh_run_owned_sast_leads(
     context = _build_api_crawl_context(api_run.id)
 
     assert "BOLA in account lookup" in context
-    assert "STATIC ANALYSIS INVESTIGATION LEADS" in context
+    assert "SAST VALIDATION LEAD INDEX" in context
+    assert "lead_detail" in context
 
 
 @pytest.mark.parametrize("tool_name", ["target_inventory", "search_assets"])
