@@ -479,6 +479,15 @@ class LLMConfig(SQLModel, table=True):
     project_id: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")
     max_tokens: int = Field(default=70000)
+    # Total model context window, including the requested output allowance.
+    max_context_tokens: int = Field(
+        default=200000,
+        sa_column=Column(Integer, nullable=False, server_default=text("200000")),
+    )
+    context_limit_source: str = Field(
+        default="fallback",
+        sa_column=Column(String, nullable=False, server_default=text("'fallback'")),
+    )
     temperature: Optional[float] = Field(default=None)
     # Explicit reasoning/thinking level. None means provider default (legacy behavior).
     reasoning_effort: Optional[str] = Field(default=None, nullable=True)

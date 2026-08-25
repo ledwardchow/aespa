@@ -103,6 +103,48 @@ def _provider_capabilities(provider: LLMProviderConfig) -> dict[str, dict]:
     return value if isinstance(value, dict) else {}
 
 
+CONTEXT_WINDOW_FALLBACK = 128_000
+
+
+def _context_window_from_capability(value: object) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    for key in (
+        "context_window_tokens",
+        "context_length",
+        "contextWindow",
+        "context_window",
+        "max_input_tokens",
+        "inputTokenLimit",
+        "input_token_limit",
+    ):
+        candidate = value.get(key)
+        try:
+            candidate = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if candidate >= 1024:
+            return candidate
+    return None
+
+
+def detect_context_window(provider: LLMProviderConfig, model: str) -> tuple[int, str]:
+    """Resolve a model context window from exact persisted provider metadata."""
+    capability = _provider_capabilities(provider).get(model)
+    if isinstance(capability, dict) and capability.get("source") == "openrouter":
+        matched = str(capability.get("matched_model") or "").casefold()
+        requested = model.casefold()
+        if matched and matched != requested and matched.rsplit("/", 1)[-1] != requested:
+            capability = None
+    detected = _context_window_from_capability(capability)
+    if detected is not None:
+        source = str(capability.get("context_window_source") or "provider")
+        return detected, source
+    # These are deliberately conservative defaults for models whose provider
+    # endpoint does not expose a context value. The UI marks them as fallback.
+    return CONTEXT_WINDOW_FALLBACK, "fallback"
+
+
 def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
     return LLMProviderConfigOut(
         id=provider.id,
@@ -155,6 +197,8 @@ def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
         project_id=resolved.project_id,
         model=resolved.model,
         max_tokens=resolved.max_tokens,
+        max_context_tokens=resolved.max_context_tokens,
+        context_limit_source=resolved.context_limit_source,
         temperature=resolved.temperature,
         use_vision=resolved.use_vision,
         force_tool_choice=resolved.force_tool_choice,
@@ -742,6 +786,18 @@ def _apply_llm_config(
     cfg.project_id = provider.project_id
     cfg.model = payload.model
     cfg.max_tokens = payload.max_tokens
+    if payload.max_context_tokens is None:
+        cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
+            provider, payload.model
+        )
+    else:
+        cfg.max_context_tokens = payload.max_context_tokens
+        cfg.context_limit_source = "manual"
+    if cfg.max_context_tokens <= payload.max_tokens + 1024:
+        raise HTTPException(
+            status_code=422,
+            detail="The model context window must leave at least 1024 tokens for input",
+        )
     cfg.temperature = payload.temperature
     cfg.use_vision = payload.use_vision
     cfg.force_tool_choice = payload.force_tool_choice
@@ -1338,6 +1394,7 @@ def export_llm_config(
             else "",
             model=c.model,
             max_tokens=c.max_tokens,
+            max_context_tokens=c.max_context_tokens,
             temperature=c.temperature,
             reasoning_effort=c.reasoning_effort,
             use_vision=c.use_vision,
@@ -1474,6 +1531,18 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         cfg.base_url = provider.base_url
         cfg.model = item.model
         cfg.max_tokens = item.max_tokens
+        if item.max_context_tokens is None:
+            cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
+                provider, item.model
+            )
+        else:
+            cfg.max_context_tokens = item.max_context_tokens
+            cfg.context_limit_source = "manual"
+        if cfg.max_context_tokens <= item.max_tokens + 1024:
+            raise HTTPException(
+                status_code=422,
+                detail="The model context window must leave at least 1024 tokens for input",
+            )
         cfg.temperature = item.temperature
         try:
             cfg.reasoning_effort = validate_effort(

@@ -4,6 +4,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+- **Model context limits and safer long scans**: Each saved model can use its detected context window or a manual token limit. Long agent conversations compact older exchanges before they reach the limit, while end-of-scan reporting splits probe evidence into model-sized batches.
 - **Quick scans now finish imported SAST lead checks**: Web and API Quick scans load every imported SAST lead, refresh the open-lead list after a resume, and remain incomplete until each lead is confirmed, dismissed, or marked inconclusive.
 - **More reliable specialist handoffs**: Strong upload, SSRF, SQL error, and reflected XSS signals can now start specialists automatically. Specialist work is queued when all slots are busy, and each handoff reserves its route and vulnerability class so the Test Lead moves on instead of repeating the same investigation. Completed specialist results are returned to the Test Lead, and matching evidence is merged into an existing finding.
 - **Stronger XSS testing in Track mode**: The Test Lead now treats XSS as a primary objective, tests plausible reflected and stored paths across the discovered input and rendering contexts, and does not treat a single generic payload or SQL injection coverage as sufficient XSS testing.
