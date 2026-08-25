@@ -56,6 +56,54 @@ def test_agentic_context_compaction_preserves_recent_tool_pairs():
     assert compacted[-1]["role"] == "user"
 
 
+def test_agentic_context_compaction_uses_model_token_budget():
+    config = LLMConfig(
+        provider="openai_compatible",
+        model="local",
+        max_tokens=1000,
+        max_context_tokens=20_000,
+    )
+    messages = [{"role": "user", "content": "initial brief"}]
+    for index in range(80):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"call-{index}",
+                            "name": "http_request",
+                            "input": {"url": f"https://target.local/{index}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": f"call-{index}",
+                            "content": "response " + ("x" * 900),
+                        }
+                    ],
+                },
+            ]
+        )
+
+    compacted, stats = llm.compact_messages_for_config(
+        config,
+        "system prompt",
+        messages,
+        tools=[],
+    )
+
+    assert stats is not None
+    assert stats["before_tokens"] > stats["after_tokens"]
+    assert stats["after_tokens"] <= stats["context_budget_tokens"]
+    assert compacted[0]["role"] == "user"
+
+
 def test_limiter_oversized_estimate_does_not_hang():
     # A single request estimated larger than the entire per-minute budget must
     # not loop forever waiting for capacity that can never exist. Pre-fix, this

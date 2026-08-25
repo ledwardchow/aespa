@@ -227,7 +227,8 @@ Defines execution parameters linked to a provider:
 | `is_active` | `false` | Global active switch (only one profile active globally) |
 | `provider_id` | — | Foreign key linking to the `LLMProviderConfig` connection |
 | `model` | `claude-opus-4-5` | Specific model identifier to run |
-| `max_tokens` | `70000` | Max tokens per LLM call |
+| `max_tokens` | `70000` | Maximum output tokens per LLM call |
+| `max_context_tokens` | `200000` | Total model context window, including prompts, tools, conversation history, and the output allowance |
 | `temperature` | — | Unset by default (falls through to provider/model default) |
 | `use_vision` | `false` | Include Playwright screenshots in prompts |
 | `force_tool_choice` | `false` | Force tool selection via wire-format `tool_choice: required/any` |

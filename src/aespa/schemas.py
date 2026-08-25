@@ -696,10 +696,18 @@ class LLMConfigIn(BaseModel):
     provider_id: int
     model: str = Field(min_length=1)
     max_tokens: int = Field(default=70000, ge=1, le=256000)
+    # ``None`` asks the server to use the detected model context window.
+    max_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
     temperature: Optional[float] = Field(default=None)
     reasoning_effort: str | None = Field(default=None, max_length=32)
     use_vision: bool = False
     force_tool_choice: bool = False
+
+    @model_validator(mode="after")
+    def _validate_context_window(self) -> "LLMConfigIn":
+        if self.max_context_tokens is not None and self.max_context_tokens <= self.max_tokens + 1024:
+            raise ValueError("max_context_tokens must leave at least 1024 tokens for input")
+        return self
 
     @field_validator("temperature")
     @classmethod
@@ -725,6 +733,8 @@ class LLMConfigOut(BaseModel):
     project_id: str | None = None
     model: str
     max_tokens: int
+    max_context_tokens: int
+    context_limit_source: str = "configured"
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
     use_vision: bool
@@ -1149,6 +1159,7 @@ class LLMExportProfileItem(BaseModel):
     provider_name: str
     model: str
     max_tokens: int = 70000
+    max_context_tokens: int | None = None
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
     use_vision: bool = False

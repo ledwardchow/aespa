@@ -134,11 +134,13 @@ def _persist_execution_snapshot(
             "schema_version": 1,
             "captured_at": datetime.now(timezone.utc).isoformat(),
             "aespa_version": version,
-            "model": {
-                "provider": getattr(llm_cfg, "provider", None),
-                "model": getattr(llm_cfg, "model", None),
-                "max_tokens": getattr(llm_cfg, "max_tokens", None),
-                "temperature": getattr(llm_cfg, "temperature", None),
+                "model": {
+                    "provider": getattr(llm_cfg, "provider", None),
+                    "model": getattr(llm_cfg, "model", None),
+                    "max_tokens": getattr(llm_cfg, "max_tokens", None),
+                    "max_context_tokens": getattr(llm_cfg, "max_context_tokens", None),
+                    "context_limit_source": getattr(llm_cfg, "context_limit_source", None),
+                    "temperature": getattr(llm_cfg, "temperature", None),
                 "use_vision": getattr(llm_cfg, "use_vision", False),
                 "force_tool_choice": getattr(llm_cfg, "force_tool_choice", False),
             },
@@ -8636,7 +8638,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 first_page_id=first_page_id,
                 results=all_results,
             )
-        total_batches = len(llm_svc._chunk_probe_results(all_results))
+        total_batches = len(llm_svc._chunk_probe_results(all_results, config=llm_cfg, url=base_url))
         events_svc.emit(
             run_id,
             {
