@@ -113,9 +113,10 @@ def test_limiter_oversized_estimate_does_not_hang():
     assert slept is False  # clamped to max_tokens; the full bucket satisfies it at once
 
 
-def test_limiter_on_wait_fires_when_pacing():
+def test_limiter_on_wait_fires_when_pacing(monkeypatch):
     # When the bucket is empty the next acquire must pace, and on_wait must fire
     # (before the sleep) so callers can tell the user it is not stuck.
+    monkeypatch.setattr(llm, "LLM_PACING_NOTICE_THRESHOLD_S", 0.01)
     limiter = llm.AsyncTokenBucketLimiter(tpm=6000)  # 100 tokens/sec
     waits: list[float] = []
 
@@ -125,6 +126,36 @@ def test_limiter_on_wait_fires_when_pacing():
 
     asyncio.run(asyncio.wait_for(_run(), timeout=10))
     assert waits and waits[0] > 0
+
+
+def test_limiter_does_not_report_subsecond_rounding_wait():
+    limiter = llm.AsyncTokenBucketLimiter(tpm=60_000)  # 1,000 tokens/sec
+    waits: list[float] = []
+
+    async def _run():
+        await limiter.acquire(60_000)
+        return await limiter.acquire(1, on_wait=lambda wt: waits.append(wt))
+
+    reported_wait = asyncio.run(asyncio.wait_for(_run(), timeout=5))
+
+    assert reported_wait is False
+    assert waits == []
+
+
+def test_llm_pacing_events_describe_local_scheduling(monkeypatch):
+    events = []
+    monkeypatch.setattr(llm, "_emit_run_event", events.append)
+
+    llm._emit_llm_pacing_waiting("example-model", 75_558, 1.2)
+    llm._emit_llm_pacing_finished("example-model")
+
+    assert [event["phase"] for event in events] == ["llm_pacing", "llm_pacing"]
+    assert "Waiting about 2s" in events[0]["message"]
+    assert "estimated request size: 75,558 tokens" in events[0]["message"]
+    assert "rate limit" not in events[0]["message"].lower()
+    assert events[1]["message"] == (
+        "Pacing wait finished. Sending the next request to example-model."
+    )
 
 
 def test_limiter_reconcile_only_credits_what_was_reserved():

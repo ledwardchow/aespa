@@ -166,6 +166,9 @@ _run_token_seeded: set[tuple[str, int]] = set()
 # ── Rate Limiting Core ────────────────────────────────────────────────────────
 
 
+LLM_PACING_NOTICE_THRESHOLD_S = 1.0
+
+
 class AsyncTokenBucketLimiter:
     def __init__(
         self,
@@ -267,9 +270,10 @@ class AsyncTokenBucketLimiter:
                     else 0.0
                 )
                 wait_time = max(wait_tokens, wait_reqs, blocked_for)
-                slept = True
+                if wait_time >= LLM_PACING_NOTICE_THRESHOLD_S:
+                    slept = True
 
-            if on_wait and not notified:
+            if slept and on_wait and not notified:
                 notified = True
                 try:
                     on_wait(wait_time)
@@ -895,33 +899,31 @@ def _emit_run_event(event: dict) -> None:
             pass
 
 
-def _emit_rate_limit_waiting(
+def _emit_llm_pacing_waiting(
     model: str, reserved_tokens: float, wait_time: float
 ) -> None:
-    """Tell the user the scan is pacing for the rate limit (not stuck)."""
+    """Tell the user AESPA is waiting for its configured request budget."""
     _emit_run_event(
         {
             "type": "scanner_phase",
-            "phase": "rate_limit",
+            "phase": "llm_pacing",
             "status": "active",
             "message": (
-                f"LLM rate limit reached — pacing requests to stay within the "
-                f"configured limit (waiting ~{wait_time:.0f}s, reserved "
-                f"{int(reserved_tokens):,} tokens for {model})…"
+                f"Waiting about {math.ceil(wait_time)}s before the next LLM request "
+                f"to stay within the configured throughput (estimated request size: "
+                f"{int(reserved_tokens):,} tokens; model: {model})."
             ),
         }
     )
 
 
-def _emit_rate_limit_cleared(model: str, used_tokens: int) -> None:
+def _emit_llm_pacing_finished(model: str) -> None:
     _emit_run_event(
         {
             "type": "scanner_phase",
-            "phase": "rate_limit",
+            "phase": "llm_pacing",
             "status": "complete",
-            "message": (
-                f"LLM rate limit cleared — resuming (used {used_tokens:,} tokens for {model})."
-            ),
+            "message": f"Pacing wait finished. Sending the next request to {model}.",
         }
     )
 
@@ -1462,14 +1464,16 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     estimated_output = config.max_tokens or 4096
     total_estimated = estimated_input + estimated_output
 
-    # Notify the user the moment pacing starts (on_wait fires before the sleep),
-    # so a rate-limited scan never looks frozen.
+    # Notify the user when a meaningful local pacing wait starts, so the scan
+    # does not look frozen.
     slept = await limiter.acquire(
         total_estimated,
-        on_wait=lambda wt: _emit_rate_limit_waiting(
+        on_wait=lambda wt: _emit_llm_pacing_waiting(
             config.model, min(total_estimated, limiter.max_tokens), wt
         ),
     )
+    if slept:
+        _emit_llm_pacing_finished(config.model)
 
     try:
         if config.provider == "factory_droid":
@@ -1506,9 +1510,6 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         else:
             actual_total = total_estimated
             await limiter.reconcile(total_estimated, total_estimated)
-
-        if slept:
-            _emit_rate_limit_cleared(config.model, actual_total)
 
         return resp
     except Exception as exc:
@@ -2831,9 +2832,7 @@ def _bedrock_region(config: LLMConfig) -> str:
     if config.base_url:
         return _bedrock_region_from_url(config.base_url)
     return (
-        os.getenv("AWS_REGION")
-        or os.getenv("AWS_DEFAULT_REGION")
-        or "ap-southeast-2"
+        os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "ap-southeast-2"
     )
 
 
@@ -3367,8 +3366,16 @@ def _chunk_probe_results(
     if config is not None and getattr(config, "max_context_tokens", 0):
         safety = max(1024, min(8192, int(config.max_context_tokens) // 20))
         empty_prompt = build_reporting_analyse_prompt(url, [])
-        overhead = estimate_tokens(empty_prompt, model=config.model, provider=config.provider)
-        token_budget = max(1024, int(config.max_context_tokens) - int(config.max_tokens or 0) - safety - overhead)
+        overhead = estimate_tokens(
+            empty_prompt, model=config.model, provider=config.provider
+        )
+        token_budget = max(
+            1024,
+            int(config.max_context_tokens)
+            - int(config.max_tokens or 0)
+            - safety
+            - overhead,
+        )
 
     for result in results:
         formatted = _format_probe_result(result)
@@ -3378,12 +3385,22 @@ def _chunk_probe_results(
         next_size = current_size + separator_size + len(formatted)
         next_token_count = 0
         if token_budget:
-            candidate_text = build_reporting_analyse_prompt(url, [*current_batch, formatted])
-            next_token_count = estimate_tokens(candidate_text, model=config.model, provider=config.provider)
+            candidate_text = build_reporting_analyse_prompt(
+                url, [*current_batch, formatted]
+            )
+            next_token_count = estimate_tokens(
+                candidate_text, model=config.model, provider=config.provider
+            )
         if current_batch and (
             len(current_batch) >= ANALYSE_RESULTS_PER_BATCH
             or next_size > ANALYSE_RESULTS_TEXT_BUDGET
-            or (token_budget and next_token_count > int(config.max_context_tokens) - int(config.max_tokens or 0) - max(1024, min(8192, int(config.max_context_tokens) // 20)))
+            or (
+                token_budget
+                and next_token_count
+                > int(config.max_context_tokens)
+                - int(config.max_tokens or 0)
+                - max(1024, min(8192, int(config.max_context_tokens) // 20))
+            )
         ):
             batches.append(current_batch)
             current_batch = []
@@ -4009,21 +4026,28 @@ def compact_agentic_messages(
         if max_context_tokens > 0
         else 0
     )
-    safety_tokens = max(1024, min(8192, max_context_tokens // 20)) if max_context_tokens else 0
+    safety_tokens = (
+        max(1024, min(8192, max_context_tokens // 20)) if max_context_tokens else 0
+    )
     input_budget = (
         max(1024, max_context_tokens - max_output_tokens - safety_tokens)
         if max_context_tokens
         else 0
     )
     over_limit = (
-        before_tokens > input_budget if max_context_tokens else before_chars > max_context_chars
+        before_tokens > input_budget
+        if max_context_tokens
+        else before_chars > max_context_chars
     )
     if not over_limit or len(messages) < 8:
         return messages, None
 
     def _build(suffix_count: int, journal_limit: int) -> tuple[list[dict], int]:
         suffix_start = max(1, len(messages) - max(4, suffix_count))
-        while suffix_start < len(messages) and messages[suffix_start].get("role") != "assistant":
+        while (
+            suffix_start < len(messages)
+            and messages[suffix_start].get("role") != "assistant"
+        ):
             suffix_start += 1
         if suffix_start >= len(messages) - 1:
             return messages, 0
@@ -4036,9 +4060,19 @@ def compact_agentic_messages(
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") == "tool_use":
-                    tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    tool_input = (
+                        block.get("input")
+                        if isinstance(block.get("input"), dict)
+                        else {}
+                    )
                     details = [str(block.get("name") or "tool")]
-                    for key in ("method", "url", "owasp_category", "test_class", "title"):
+                    for key in (
+                        "method",
+                        "url",
+                        "owasp_category",
+                        "test_class",
+                        "title",
+                    ):
                         value = tool_input.get(key)
                         if value not in (None, ""):
                             details.append(f"{key}={str(value)[:240]}")
@@ -4082,10 +4116,16 @@ def compact_agentic_messages(
                 content = message.get("content")
                 if not isinstance(content, list):
                     continue
-                blocks = [dict(block) if isinstance(block, dict) else block for block in content]
+                blocks = [
+                    dict(block) if isinstance(block, dict) else block
+                    for block in content
+                ]
                 changed = False
                 for block in blocks:
-                    if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    if (
+                        not isinstance(block, dict)
+                        or block.get("type") != "tool_result"
+                    ):
                         continue
                     result = block.get("content")
                     if not isinstance(result, str) or len(result) < 256:
@@ -4101,7 +4141,11 @@ def compact_agentic_messages(
                     message["content"] = blocks
                 if (
                     _estimate_tools_call_tokens(
-                        system_message, compacted, tools=tools, model=model, provider=provider
+                        system_message,
+                        compacted,
+                        tools=tools,
+                        model=model,
+                        provider=provider,
                     )
                     <= input_budget
                 ):
@@ -4146,18 +4190,24 @@ def compact_messages_for_config(
         system_message=system_message,
         tools=tools,
         model=getattr(config, "model", None),
-        provider=str(getattr(getattr(config, "provider", None), "value", config.provider)),
+        provider=str(
+            getattr(getattr(config, "provider", None), "value", config.provider)
+        ),
     )
     context_limit = int(getattr(config, "max_context_tokens", 0) or 0)
     if context_limit:
         safety = max(1024, min(8192, context_limit // 20))
-        budget = max(1024, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety)
+        budget = max(
+            1024, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety
+        )
         estimated = _estimate_tools_call_tokens(
             system_message,
             compacted,
             tools=tools,
             model=getattr(config, "model", None),
-            provider=str(getattr(getattr(config, "provider", None), "value", config.provider)),
+            provider=str(
+                getattr(getattr(config, "provider", None), "value", config.provider)
+            ),
         )
         if estimated > budget:
             raise LLMContextLimitError(
@@ -4310,10 +4360,12 @@ async def _call_with_tools(
     ) + (config.max_tokens or 4096)
     slept = await limiter.acquire(
         estimated,
-        on_wait=lambda wt: _emit_rate_limit_waiting(
+        on_wait=lambda wt: _emit_llm_pacing_waiting(
             config.model, min(estimated, limiter.max_tokens), wt
         ),
     )
+    if slept:
+        _emit_llm_pacing_finished(config.model)
     try:
         result = await _call_with_tools_impl(
             config, system_message, messages, tools=tools
@@ -4321,8 +4373,6 @@ async def _call_with_tools(
         usage = _last_call_tokens_var.get()
         actual_total = (usage["input"] + usage["output"]) if usage else estimated
         await limiter.reconcile(estimated, actual_total)
-        if slept:
-            _emit_rate_limit_cleared(config.model, actual_total)
         return result
     except Exception as exc:
         if config.provider == "openai_codex" and isinstance(exc, LLMQuotaPauseError):
@@ -5341,7 +5391,9 @@ async def thinking_agentic_loop(
             messages, compaction = compact_agentic_messages(
                 messages,
                 max_context_chars=max_context_chars,
-                max_context_tokens=int(max_context_tokens or getattr(config, "max_context_tokens", 0) or 0),
+                max_context_tokens=int(
+                    max_context_tokens or getattr(config, "max_context_tokens", 0) or 0
+                ),
                 max_output_tokens=int(getattr(config, "max_tokens", 0) or 0),
                 system_message=system_message,
                 tools=tools if tools is not None else THINKING_AGENT_TOOLS,
@@ -5372,10 +5424,15 @@ async def thinking_agentic_loop(
                     except Exception:
                         pass
 
-            context_limit = int(max_context_tokens or getattr(config, "max_context_tokens", 0) or 0)
+            context_limit = int(
+                max_context_tokens or getattr(config, "max_context_tokens", 0) or 0
+            )
             if context_limit:
                 safety = max(1024, min(8192, context_limit // 20))
-                budget = max(1024, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety)
+                budget = max(
+                    1024,
+                    context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety,
+                )
                 estimated = _estimate_tools_call_tokens(
                     system_message,
                     messages,
