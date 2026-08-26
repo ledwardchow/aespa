@@ -1,11 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from aespa.services import codex_provider, statistics
+
+
+class _AsyncLines:
+    def __init__(self, *values):
+        self._values = iter(values)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._values)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
 
 
 def test_codex_child_env_uses_cli_default_home(monkeypatch):
@@ -196,7 +211,7 @@ def test_codex_preflight_stops_a_full_window_before_starting_a_turn(monkeypatch)
     assert calls == [("account/rateLimits/read", {})]
 
 
-def _run_codex_completion_events(monkeypatch, events):
+def _run_codex_completion_events(monkeypatch, events, *, tools=None):
     messages = [{"role": "user", "content": "check the findings"}]
 
     class FakeClient:
@@ -219,7 +234,7 @@ def _run_codex_completion_events(monkeypatch, events):
                 SimpleNamespace(model="auto"),
                 "system",
                 messages,
-                [],
+                tools or [],
                 lambda *args, **kwargs: None,
             )
         finally:
@@ -305,11 +320,369 @@ def test_codex_internal_wait_fails_immediately_instead_of_hanging(monkeypatch):
 def test_codex_turn_timeout_has_a_useful_error(monkeypatch):
     monkeypatch.setattr(codex_provider, "TURN_TIMEOUT_S", 0.001)
 
-    with pytest.raises(codex_provider.CodexUnavailableError) as raised:
+    with pytest.raises(codex_provider.CodexTurnTimeoutError) as raised:
         _run_codex_completion_events(monkeypatch, [])
 
     assert "produced no usable AESPA response" in str(raised.value)
     assert "stalled turn" in str(raised.value)
+
+
+def test_codex_client_failure_wakes_waiting_turn(monkeypatch):
+    with pytest.raises(codex_provider.CodexTransportError) as raised:
+        _run_codex_completion_events(
+            monkeypatch,
+            [("client/error", {"message": "Codex app-server reader stopped"})],
+        )
+
+    assert "reader stopped" in str(raised.value)
+
+
+def test_codex_tool_failure_message_rotates_broken_session(monkeypatch):
+    with pytest.raises(codex_provider.CodexToolSessionError) as raised:
+        _run_codex_completion_events(
+            monkeypatch,
+            [
+                (
+                    "item/agentMessage/completed",
+                    {
+                        "text": (
+                            "Assessment paused because AESPA’s dynamic tools stopped "
+                            "responding. Confirmed findings were preserved."
+                        )
+                    },
+                ),
+                ("turn/completed", {}),
+            ],
+            tools=[{"name": "context_tool"}],
+        )
+
+    assert "replacing the broken Codex tool session" in str(raised.value)
+
+
+def test_codex_normal_assessment_text_is_not_a_tool_session_error(monkeypatch):
+    blocks, stop_reason, _ = _run_codex_completion_events(
+        monkeypatch,
+        [
+            (
+                "turn/completed",
+                {"text": "Assessment still in progress; checking the next route."},
+            )
+        ],
+        tools=[{"name": "context_tool"}],
+    )
+
+    assert stop_reason == "end_turn"
+    assert blocks[0]["text"].startswith("Assessment still in progress")
+
+
+def test_codex_reader_failure_notifies_all_conversations():
+    client = codex_provider._JsonRpcClient("codex")
+    first = codex_provider._Conversation("thread-1", 0, client=client)
+    second = codex_provider._Conversation("thread-2", 0, client=client)
+    client._conversations = {"thread-1": first, "thread-2": second}
+
+    client._wake_conversations(codex_provider.CodexTransportError("reader stopped"))
+
+    assert first.events.get_nowait() == (
+        "client/error",
+        {"message": "reader stopped", "client": client},
+    )
+    assert second.events.get_nowait() == (
+        "client/error",
+        {"message": "reader stopped", "client": client},
+    )
+
+
+def test_codex_reader_matches_string_response_id():
+    async def run():
+        client = codex_provider._JsonRpcClient("codex")
+        client.process = SimpleNamespace(
+            stdout=_AsyncLines(b'{"jsonrpc":"2.0","id":"7","result":{"ok":true}}\n')
+        )
+        future = asyncio.get_running_loop().create_future()
+        client._pending[7] = future
+
+        await client._read_stdout()
+
+        assert future.result() == {"ok": True}
+
+    asyncio.run(run())
+
+
+def test_codex_app_server_uses_large_stream_limit(monkeypatch):
+    captured = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            stdout=_AsyncLines(),
+            stderr=_AsyncLines(),
+            returncode=None,
+        )
+
+    async def run():
+        client = codex_provider._JsonRpcClient("codex")
+
+        async def fake_request(method, params):  # noqa: ARG001
+            return {}
+
+        async def fake_notify(method, params):  # noqa: ARG001
+            return None
+
+        client.request = fake_request
+        client.notify = fake_notify
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+        )
+
+        await client.start()
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert captured["args"][:2] == ("codex", "app-server")
+    assert captured["kwargs"]["limit"] == codex_provider.CODEX_STREAM_LIMIT_BYTES
+    assert captured["kwargs"]["limit"] > 64 * 1024
+
+
+def test_codex_reader_accepts_json_line_larger_than_asyncio_default():
+    async def run():
+        client = codex_provider._JsonRpcClient("codex")
+        stdout = asyncio.StreamReader(limit=codex_provider.CODEX_STREAM_LIMIT_BYTES)
+        message = {
+            "jsonrpc": "2.0",
+            "method": "warning",
+            "params": {"message": "x" * (70 * 1024)},
+        }
+        stdout.feed_data((json.dumps(message) + "\n").encode())
+        stdout.feed_eof()
+        client.process = SimpleNamespace(stdout=stdout)
+
+        await client._read_stdout()
+
+        assert client._notifications.get_nowait() == message
+
+    asyncio.run(run())
+
+
+def test_codex_reader_keeps_string_tool_request_id():
+    async def run():
+        client = codex_provider._JsonRpcClient("codex")
+        conversation = codex_provider._Conversation("thread-1", 0, client=client)
+        client._conversations = {"thread-1": conversation}
+        client.process = SimpleNamespace(
+            stdout=_AsyncLines(
+                b'{"jsonrpc":"2.0","id":"tool-request-1","method":"item/tool/call",'
+                b'"params":{"threadId":"thread-1","callId":"call-1"}}\n'
+            )
+        )
+
+        await client._read_stdout()
+
+        assert conversation.pending_calls["call-1"][0] == "tool-request-1"
+        assert await conversation.events.get() == (
+            "tool",
+            {"threadId": "thread-1", "callId": "call-1"},
+        )
+
+    asyncio.run(run())
+
+
+def test_codex_reader_ignores_non_object_messages_and_params():
+    async def run():
+        client = codex_provider._JsonRpcClient("codex")
+        client.process = SimpleNamespace(
+            stdout=_AsyncLines(
+                b"[]\n",
+                b'{"jsonrpc":"2.0","method":"warning","params":[]}\n',
+            )
+        )
+
+        await client._read_stdout()
+
+        assert client._notifications.get_nowait() == {
+            "jsonrpc": "2.0",
+            "method": "warning",
+            "params": [],
+        }
+
+    asyncio.run(run())
+
+
+def test_codex_stalled_turn_rotates_thread_before_restarting_client(monkeypatch):
+    calls = []
+
+    async def fake_completion(*args, **kwargs):  # noqa: ARG001
+        calls.append("completion")
+        if calls.count("completion") == 1:
+            raise codex_provider.CodexTurnTimeoutError("stalled")
+        return ([{"type": "text", "text": "recovered"}], "end_turn", [])
+
+    async def fake_abandon(messages, *, delete_thread=True):  # noqa: ARG001
+        calls.append(("abandon", delete_thread))
+
+    async def fake_restart(client):  # noqa: ARG001
+        calls.append("restart")
+
+    monkeypatch.setattr(codex_provider, "_completion_with_tools_once", fake_completion)
+    monkeypatch.setattr(codex_provider, "_abandon_conversation", fake_abandon)
+    monkeypatch.setattr(codex_provider, "_restart_client", fake_restart)
+
+    result = asyncio.run(
+        codex_provider.completion_with_tools(
+            SimpleNamespace(model="auto"),
+            "system",
+            [{"role": "user", "content": "hello"}],
+            [],
+            lambda *args, **kwargs: None,
+        )
+    )
+
+    assert result[0][0]["text"] == "recovered"
+    assert calls == ["completion", ("abandon", True), "completion"]
+
+
+def test_codex_restarts_client_when_replacement_thread_also_stalls(monkeypatch):
+    calls = []
+    fake_client = object()
+    monkeypatch.setattr(codex_provider, "_client", fake_client)
+
+    async def fake_completion(*args, **kwargs):  # noqa: ARG001
+        calls.append("completion")
+        if calls.count("completion") <= 2:
+            raise codex_provider.CodexTurnTimeoutError("stalled")
+        return ([{"type": "text", "text": "recovered"}], "end_turn", [])
+
+    async def fake_abandon(messages, *, delete_thread=True):  # noqa: ARG001
+        calls.append(("abandon", delete_thread))
+
+    async def fake_restart(client, *, allow_restart=True):
+        calls.append(("restart", client))
+        return True if allow_restart else None
+
+    monkeypatch.setattr(codex_provider, "_completion_with_tools_once", fake_completion)
+    monkeypatch.setattr(codex_provider, "_abandon_conversation", fake_abandon)
+    monkeypatch.setattr(codex_provider, "_restart_client", fake_restart)
+
+    result = asyncio.run(
+        codex_provider.completion_with_tools(
+            SimpleNamespace(model="auto"),
+            "system",
+            [{"role": "user", "content": "hello"}],
+            [],
+            lambda *args, **kwargs: None,
+        )
+    )
+
+    assert result[0][0]["text"] == "recovered"
+    assert calls == [
+        "completion",
+        ("abandon", True),
+        "completion",
+        ("abandon", False),
+        ("restart", fake_client),
+        "completion",
+    ]
+
+
+def test_codex_transport_failure_stops_after_two_client_restarts(monkeypatch):
+    calls = []
+    fake_client = object()
+    monkeypatch.setattr(codex_provider, "_client", fake_client)
+
+    async def fake_completion(*args, **kwargs):  # noqa: ARG001
+        calls.append("completion")
+        raise codex_provider.CodexTransportError("reader stopped")
+
+    async def fake_abandon(messages, *, delete_thread=True):  # noqa: ARG001
+        calls.append(("abandon", delete_thread))
+
+    async def fake_restart(client, *, allow_restart=True):
+        calls.append(("restart", client, allow_restart))
+        return True if allow_restart else None
+
+    monkeypatch.setattr(codex_provider, "_completion_with_tools_once", fake_completion)
+    monkeypatch.setattr(codex_provider, "_abandon_conversation", fake_abandon)
+    monkeypatch.setattr(codex_provider, "_restart_client", fake_restart)
+
+    with pytest.raises(codex_provider.CodexTransportError):
+        asyncio.run(
+            codex_provider.completion_with_tools(
+                SimpleNamespace(model="auto"),
+                "system",
+                [{"role": "user", "content": "hello"}],
+                [],
+                lambda *args, **kwargs: None,
+            )
+        )
+
+    assert calls == [
+        "completion",
+        ("abandon", False),
+        ("restart", fake_client, True),
+        "completion",
+        ("abandon", False),
+        ("restart", fake_client, True),
+        "completion",
+        ("abandon", False),
+        ("restart", fake_client, False),
+    ]
+
+
+def test_codex_transport_recovery_targets_the_client_that_failed(monkeypatch):
+    calls = []
+    failed_client = codex_provider._JsonRpcClient("old-codex")
+    replacement_client = codex_provider._JsonRpcClient("new-codex")
+    monkeypatch.setattr(codex_provider, "_client", replacement_client)
+
+    async def fake_completion(*args, **kwargs):  # noqa: ARG001
+        calls.append("completion")
+        if calls.count("completion") == 1:
+            raise codex_provider.CodexTransportError(
+                "old reader stopped", client=failed_client
+            )
+        return ([{"type": "text", "text": "recovered"}], "end_turn", [])
+
+    async def fake_abandon(messages, *, delete_thread=True):  # noqa: ARG001
+        calls.append(("abandon", delete_thread))
+
+    async def fake_restart(client, *, allow_restart=True):
+        calls.append(("restart", client, allow_restart))
+        return False
+
+    monkeypatch.setattr(codex_provider, "_completion_with_tools_once", fake_completion)
+    monkeypatch.setattr(codex_provider, "_abandon_conversation", fake_abandon)
+    monkeypatch.setattr(codex_provider, "_restart_client", fake_restart)
+
+    result = asyncio.run(
+        codex_provider.completion_with_tools(
+            SimpleNamespace(model="auto"),
+            "system",
+            [{"role": "user", "content": "hello"}],
+            [],
+            lambda *args, **kwargs: None,
+        )
+    )
+
+    assert result[0][0]["text"] == "recovered"
+    assert calls == [
+        "completion",
+        ("abandon", False),
+        ("restart", failed_client, True),
+        "completion",
+    ]
+
+
+def test_codex_restart_does_not_close_a_newer_client(monkeypatch):
+    old_client = codex_provider._JsonRpcClient("old-codex")
+    replacement_client = codex_provider._JsonRpcClient("new-codex")
+    monkeypatch.setattr(codex_provider, "_client", replacement_client)
+
+    restarted = asyncio.run(codex_provider._restart_client(old_client))
+
+    assert restarted is False
+    assert codex_provider._client is replacement_client
 
 
 def test_codex_flushes_terminal_tool_result_before_thread_close(monkeypatch):
