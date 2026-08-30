@@ -119,6 +119,7 @@ def test_snapshot_upload_enforces_size_limit(client, tmp_path, monkeypatch):
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
     from aespa.services import applications as applications_svc
 
+    assert applications_svc.MAX_SNAPSHOT_UPLOAD_BYTES == 250 * 1024 * 1024
     monkeypatch.setattr(applications_svc, "MAX_SNAPSHOT_UPLOAD_BYTES", 4)
     monkeypatch.setattr("aespa.api.applications._MAX_SNAPSHOT_UPLOAD_BYTES", 4)
     app = _create_application(client)

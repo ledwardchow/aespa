@@ -29,12 +29,20 @@ import zipfile
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from sqlmodel import Session, select
 
 from aespa.config import get_settings
 from aespa.db import get_engine
-from aespa.models import ApiCollection, ApiDocument, ApiEndpoint, SastRun, ScanLead
+from aespa.models import (
+    ApiCollection,
+    ApiDocument,
+    ApiEndpoint,
+    PhaseCheckpoint,
+    SastRun,
+    ScanLead,
+)
 from aespa.sast_workspace import (
     SastWorkspaceLease,
     try_acquire_sast_workspace_lease,
@@ -55,6 +63,7 @@ _UTC = timezone.utc
 _sast_tasks: dict[int, asyncio.Task] = {}
 _sast_workspace_leases: dict[int, SastWorkspaceLease] = {}
 _sast_stop_requested: set[int] = set()
+_sast_pause_requested: set[int] = set()
 
 # Candidates accumulated by write_lead within a single scan task.
 # sast_run_id → list of candidate dicts (awaiting filter_lead scoring).
@@ -73,6 +82,210 @@ _MAX_COMPRESSION_RATIO = 1_000
 _MAX_INSPECT_FILE_BYTES = 10 * 1024 * 1024
 _PHASES = ("scope", "discovery", "validation", "attack_path", "report")
 _SAST_VALIDATOR_MAX_CONCURRENT = 4
+_SAST_NETWORK_RETRY_DELAYS = (1.0, 2.0, 4.0)
+
+
+class SastPauseRequested(RuntimeError):
+    """The current SAST task reached a safe user-requested pause boundary."""
+
+
+class SastNetworkPause(RuntimeError):
+    """Transient provider connectivity remained unavailable after retries."""
+
+
+def _checkpoint_key(worker_key: str) -> str:
+    return f"agent:{worker_key}"
+
+
+def _save_checkpoint(
+    sast_run_id: int,
+    phase: str,
+    key: str,
+    data: dict[str, Any],
+) -> None:
+    from aespa.services.checkpoint import save_phase_checkpoint
+
+    save_phase_checkpoint(
+        sast_run_id,
+        phase,
+        key,
+        data=data,
+        run_kind="sast",
+    )
+
+
+def _load_checkpoint(sast_run_id: int, phase: str, key: str) -> dict[str, Any]:
+    with Session(get_engine()) as s:
+        row = s.exec(
+            select(PhaseCheckpoint)
+            .where(PhaseCheckpoint.run_kind == "sast")
+            .where(PhaseCheckpoint.run_id == sast_run_id)
+            .where(PhaseCheckpoint.phase == phase)
+            .where(PhaseCheckpoint.idempotency_key == key)
+        ).first()
+    if row is None:
+        return {}
+    try:
+        value = json.loads(row.data_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _clear_checkpoints(sast_run_id: int) -> None:
+    with Session(get_engine()) as s:
+        for row in s.exec(
+            select(PhaseCheckpoint)
+            .where(PhaseCheckpoint.run_kind == "sast")
+            .where(PhaseCheckpoint.run_id == sast_run_id)
+        ).all():
+            s.delete(row)
+        s.commit()
+
+
+def _persist_candidate_state(sast_run_id: int) -> None:
+    _save_checkpoint(
+        sast_run_id,
+        "state",
+        "candidates",
+        {"candidates": _candidates.get(sast_run_id, [])},
+    )
+
+
+def _restore_candidate_state(sast_run_id: int) -> list[dict]:
+    value = _load_checkpoint(sast_run_id, "state", "candidates").get("candidates")
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _merge_persisted_coverage(
+    fresh: dict[str, dict], persisted_json: str | None
+) -> dict[str, dict]:
+    try:
+        persisted = json.loads(persisted_json or "{}").get("files", [])
+    except (TypeError, ValueError, AttributeError):
+        persisted = []
+    for item in persisted if isinstance(persisted, list) else []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        if path in fresh:
+            fresh[path]["reviewed"] = bool(item.get("reviewed"))
+            fresh[path]["read_count"] = int(item.get("read_count") or 0)
+            fresh[path]["phases"] = list(item.get("phases") or [])
+    return fresh
+
+
+def _is_transient_provider_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    try:
+        import httpx
+
+        if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+            return True
+    except Exception:  # pragma: no cover - httpx is a runtime dependency
+        pass
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    status_code = status_code or getattr(response, "status_code", None)
+    if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+        return True
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return any(
+        marker in name or marker in text
+        for marker in (
+            "connectionerror",
+            "connecterror",
+            "apiconnectionerror",
+            "timeout",
+            "temporarily unavailable",
+            "connection reset",
+            "connection refused",
+            "network is unreachable",
+            "name resolution",
+            "dns",
+        )
+    )
+
+
+async def _run_checkpointed_agent(
+    *,
+    sast_run_id: int,
+    phase: str,
+    worker_key: str,
+    config,
+    system_message: str,
+    initial_user_message: str,
+    tool_executor,
+    emit_fn,
+    stop_check,
+    tools: list[dict],
+    resume: bool,
+) -> str:
+    """Run one SAST agent with durable turn checkpoints and bounded retries."""
+    from aespa.services import llm as llm_svc
+
+    key = _checkpoint_key(worker_key)
+    saved = _load_checkpoint(sast_run_id, phase, key) if resume else {}
+    last_error: BaseException | None = None
+    for attempt in range(len(_SAST_NETWORK_RETRY_DELAYS) + 1):
+        messages = saved.get("messages")
+        step_count = int(saved.get("step_count") or 0)
+
+        async def _on_checkpoint(new_messages: list[dict], new_step_count: int) -> None:
+            nonlocal saved
+            saved = {
+                "messages": new_messages,
+                "step_count": new_step_count,
+                "worker_key": worker_key,
+            }
+            _save_checkpoint(sast_run_id, phase, key, saved)
+
+        try:
+            return await llm_svc.thinking_agentic_loop(
+                config,
+                system_message=system_message,
+                initial_user_message=initial_user_message,
+                tool_executor=tool_executor,
+                emit_fn=emit_fn,
+                stop_check=stop_check,
+                tools=tools,
+                resume_messages=messages if isinstance(messages, list) else None,
+                resume_step_count=step_count,
+                on_checkpoint=_on_checkpoint,
+            )
+        except llm_svc.LLMQuotaPauseError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not _is_transient_provider_error(exc):
+                raise
+            last_error = exc
+            if attempt >= len(_SAST_NETWORK_RETRY_DELAYS):
+                break
+            delay = _SAST_NETWORK_RETRY_DELAYS[attempt]
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "llm_response",
+                    "status": "warning",
+                    "message": (
+                        "The LLM connection was interrupted. Retrying from the "
+                        f"last saved step in {delay:g} second(s)."
+                    ),
+                    "data": {"attempt": attempt + 1, "error": str(exc)},
+                },
+            )
+            await asyncio.sleep(delay)
+    raise SastNetworkPause(
+        "The LLM provider is still unreachable. The scan was paused at its last "
+        f"saved step and can be resumed safely. Last error: {last_error}"
+    ) from last_error
 
 
 def _notify_campaign_source_started(sast_run_id: int) -> None:
@@ -99,6 +312,49 @@ def _notify_campaign_source_finished(sast_run_id: int, status: str) -> None:
             "Could not sync campaign source member for finished SAST run %s",
             sast_run_id,
         )
+
+
+def _persist_paused_run(
+    sast_run_id: int,
+    *,
+    phase: str,
+    reason: str,
+    message: str,
+    provider: str = "",
+    reset_at: datetime | None = None,
+    snapshot: dict[str, Any] | None = None,
+) -> None:
+    from aespa.services import run_pause as run_pause_svc
+
+    with Session(get_engine()) as s:
+        run = s.get(SastRun, sast_run_id)
+        if run is not None:
+            run.status = "paused"
+            run.error_message = message[:2000]
+            run.completed_at = None
+            run.updated_at = datetime.now(_UTC)
+            s.add(run)
+            s.commit()
+    run_pause_svc.save_pause(
+        "sast",
+        sast_run_id,
+        provider=provider,
+        message=message,
+        reset_at=reset_at,
+        snapshot=snapshot,
+        resume_stage=phase,
+        reason=reason,
+    )
+    _set_phase(sast_run_id, phase, "paused", message)
+    events_svc.emit(
+        sast_run_id,
+        {
+            "type": "scan_paused",
+            "reason": reason,
+            "message": message,
+            "reset_at": reset_at.isoformat() if reset_at else None,
+        },
+    )
 
 
 def _empty_phase_state() -> dict[str, dict]:
@@ -508,6 +764,7 @@ def _make_tool_executor(
     collection_id: int | None,
     coverage: dict[str, dict] | None = None,
     on_candidate_ready: Callable[[dict], None] | None = None,
+    initial_candidates: list[dict] | None = None,
 ):
     """Return an async tool_executor closure for the SAST agentic loop.
 
@@ -515,9 +772,15 @@ def _make_tool_executor(
     Candidates are stored in _candidates[sast_run_id]; filter_lead records the
     discovery agent's confidence before independent validation.
     """
-    _candidates[sast_run_id] = []
+    _candidates[sast_run_id] = list(initial_candidates or [])
     coverage = coverage if coverage is not None else _build_source_inventory(root)
-    next_candidate_id: list[int] = [0]  # mutable int in closure
+    next_candidate_id: list[int] = [
+        max(
+            (int(item.get("candidate_id", -1)) for item in _candidates[sast_run_id]),
+            default=-1,
+        )
+        + 1
+    ]
 
     async def tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         if sast_run_id in _sast_stop_requested:
@@ -530,14 +793,42 @@ def _make_tool_executor(
             return read_result
 
         if tool_name == "write_lead":
+            title = str(tool_input.get("title", ""))
+            category = str(tool_input.get("category", ""))
+            location = str(tool_input.get("location", ""))
+            fingerprint = lead_fingerprint(
+                category=category,
+                title=title,
+                location=location,
+            )
+            existing = next(
+                (
+                    item
+                    for item in _candidates[sast_run_id]
+                    if item.get("fingerprint") == fingerprint
+                    or (
+                        item.get("title") == title
+                        and item.get("category") == category
+                        and item.get("location") == location
+                    )
+                ),
+                None,
+            )
+            if existing is not None:
+                reference = existing.get("reference") or f"#{existing['candidate_id']}"
+                return (
+                    f"Lead {reference} was already recorded. Reuse it instead of "
+                    "creating a duplicate."
+                )
             cid = next_candidate_id[0]
             next_candidate_id[0] += 1
             candidate = {
                 "candidate_id": cid,
-                "title": str(tool_input.get("title", "")),
-                "category": str(tool_input.get("category", "")),
+                "fingerprint": fingerprint,
+                "title": title,
+                "category": category,
                 "severity": str(tool_input.get("severity", "medium")),
-                "location": str(tool_input.get("location", "")),
+                "location": location,
                 "description": str(tool_input.get("description", "")),
                 "evidence": str(tool_input.get("evidence", "")),
                 "suggested_endpoint": str(tool_input.get("suggested_endpoint", "")),
@@ -557,6 +848,7 @@ def _make_tool_executor(
             # lives in memory.  Persist immediately so the UI does not remain
             # empty until the later validation phase completes.
             _sync_candidates_to_db(sast_run_id, collection_id)
+            _persist_candidate_state(sast_run_id)
             events_svc.emit(
                 sast_run_id,
                 {
@@ -592,6 +884,7 @@ def _make_tool_executor(
             match["confidence"] = confidence
             match["filter_reasoning"] = reasoning
             _sync_candidates_to_db(sast_run_id, collection_id)
+            _persist_candidate_state(sast_run_id)
             kept = confidence >= CONFIDENCE_THRESHOLD
             events_svc.emit(
                 sast_run_id,
@@ -697,6 +990,7 @@ def _make_review_executor(
             # Persist and announce it now instead of waiting for the validator's
             # entire agentic loop to finish so the UI can show progressive results.
             _sync_candidate_to_db(sast_run_id, collection_id, candidate)
+            _persist_candidate_state(sast_run_id)
             _persist_coverage(sast_run_id, coverage)
             _emit_validation_result(sast_run_id, candidate)
             return f"Lead {candidate.get('reference') or f'#{candidate_id}'} validation recorded as {verdict}."
@@ -709,6 +1003,8 @@ def _make_review_executor(
                 "severity_reasoning": str(tool_input.get("severity_reasoning", "")),
                 "dynamic_test": str(tool_input.get("dynamic_test", "")),
             }
+            _sync_candidate_to_db(sast_run_id, collection_id, candidate)
+            _persist_candidate_state(sast_run_id)
             return f"Lead {candidate.get('reference') or f'#{candidate_id}'} attack path recorded."
         if tool_name == "done":
             return str(tool_input.get("summary", ""))
@@ -905,7 +1201,7 @@ def _build_initial_message(
     return "\n".join(lines)
 
 
-async def _sast_scan_task(sast_run_id: int) -> None:
+async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
     """Core async task: extract archive, run agentic loop, persist leads."""
     from aespa.services import llm as llm_svc
     from aespa.services.prompts.sast import (
@@ -919,6 +1215,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
     from aespa.services.settings import get_llm_config_for_role
 
     _sast_stop_requested.discard(sast_run_id)
+    _sast_pause_requested.discard(sast_run_id)
     tmpdir: str | None = None
     lease = _sast_workspace_leases.get(sast_run_id)
     if lease is None:
@@ -1014,6 +1311,8 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         _safe_unzip(archive_path, tmpdir)
         root = Path(tmpdir).resolve()
         coverage = _build_source_inventory(root)
+        if resume:
+            coverage = _merge_persisted_coverage(coverage, run.coverage_json)
         source_file_count = len(coverage)
         _persist_coverage(sast_run_id, coverage)
         _set_phase(
@@ -1047,9 +1346,14 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         )
 
         def _stop_check() -> bool:
-            return sast_run_id in _sast_stop_requested
+            return (
+                sast_run_id in _sast_stop_requested
+                or sast_run_id in _sast_pause_requested
+            )
 
         def _raise_if_stopped() -> None:
+            if sast_run_id in _sast_pause_requested:
+                raise SastPauseRequested("SAST scan paused by user.")
             if _stop_check():
                 raise asyncio.CancelledError
 
@@ -1064,8 +1368,11 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 if candidate is None:
                     return
                 try:
-                    await llm_svc.thinking_agentic_loop(
-                        validator_cfg_obj,
+                    await _run_checkpointed_agent(
+                        sast_run_id=sast_run_id,
+                        phase="validation",
+                        worker_key=f"validator:{candidate_id}",
+                        config=validator_cfg_obj,
                         system_message=SAST_VALIDATION_PROMPT,
                         initial_user_message=_candidate_validation_message(candidate),
                         tool_executor=_make_review_executor(
@@ -1079,11 +1386,14 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                         emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
                         stop_check=_stop_check,
                         tools=SAST_VALIDATION_TOOLS,
+                        resume=resume,
                     )
                     _raise_if_stopped()
                 except asyncio.CancelledError:
                     raise
                 except llm_svc.LLMQuotaPauseError:
+                    raise
+                except (SastPauseRequested, SastNetworkPause):
                     raise
                 except Exception as exc:
                     log.exception(
@@ -1175,39 +1485,58 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             run.collection_id,
             coverage,
             on_candidate_ready=_schedule_candidate_validation,
+            initial_candidates=(
+                _restore_candidate_state(sast_run_id) if resume else None
+            ),
         )
+
+        try:
+            saved_phases = json.loads(run.phase_state_json or "{}") if resume else {}
+        except (TypeError, ValueError):
+            saved_phases = {}
+
+        def _phase_was_complete(phase: str) -> bool:
+            entry = saved_phases.get(phase, {})
+            return isinstance(entry, dict) and entry.get("status") == "complete"
 
         current_phase = "discovery"
-        _set_phase(
-            sast_run_id,
-            "discovery",
-            "running",
-            "Tracing entry points and source-to-sink candidate paths.",
-            {"files_total": source_file_count},
-        )
+        discovery_summary = "Discovery was already complete before resume."
+        if not _phase_was_complete("discovery"):
+            _set_phase(
+                sast_run_id,
+                "discovery",
+                "running",
+                "Tracing entry points and source-to-sink candidate paths.",
+                {"files_total": source_file_count},
+            )
 
-        # ── Run the agentic exploration loop ──────────────────────────────────
-        discovery_summary = await llm_svc.thinking_agentic_loop(
-            llm_cfg_obj,
-            system_message=SAST_SYSTEM_PROMPT,
-            initial_user_message=initial_message,
-            tool_executor=tool_executor,
-            emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
-            stop_check=_stop_check,
-            tools=SAST_TOOLS,
-        )
-        _raise_if_stopped()
+            # ── Run the agentic exploration loop ──────────────────────────────
+            discovery_summary = await _run_checkpointed_agent(
+                sast_run_id=sast_run_id,
+                phase="discovery",
+                worker_key="discovery",
+                config=llm_cfg_obj,
+                system_message=SAST_SYSTEM_PROMPT,
+                initial_user_message=initial_message,
+                tool_executor=tool_executor,
+                emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
+                stop_check=_stop_check,
+                tools=SAST_TOOLS,
+                resume=resume,
+            )
+            _raise_if_stopped()
 
         candidates = _candidates.get(sast_run_id, [])
         candidate_count = len(candidates)
         _persist_coverage(sast_run_id, coverage)
-        _set_phase(
-            sast_run_id,
-            "discovery",
-            "complete",
-            f"Discovery recorded {candidate_count} candidate(s).",
-            {"files_total": source_file_count, "candidates": candidate_count},
-        )
+        if not _phase_was_complete("discovery"):
+            _set_phase(
+                sast_run_id,
+                "discovery",
+                "complete",
+                f"Discovery recorded {candidate_count} candidate(s).",
+                {"files_total": source_file_count, "candidates": candidate_count},
+            )
 
         # ── Complete independent adversarial validation ───────────────────────
         current_phase = "validation"
@@ -1215,57 +1544,49 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             raise RuntimeError(
                 "SAST source workspace disappeared before independent validation."
             )
-        for candidate in candidates:
-            if (
-                candidate.get("validation_status") == "pending"
-                and candidate.get("candidate_id") not in validation_scheduled
-            ):
-                candidate.update(
-                    {
-                        "validation_status": "inconclusive",
-                        "validation_reasoning": (
-                            "Discovery did not complete the candidate filter step."
-                        ),
-                        "proof_gaps": [
-                            *candidate.get("proof_gaps", []),
-                            "Candidate was not submitted to the independent validator.",
-                        ],
-                        "reportable": False,
-                    }
-                )
-                _sync_candidate_to_db(sast_run_id, run.collection_id, candidate)
+        if not _phase_was_complete("validation"):
+            for candidate in candidates:
+                if (
+                    candidate.get("validation_status") == "pending"
+                    and candidate.get("confidence") is not None
+                ):
+                    _schedule_candidate_validation(candidate)
 
-        if validation_tasks:
-            await asyncio.gather(*validation_tasks)
-            _raise_if_stopped()
-            validated_count = sum(c.get("reportable", False) for c in candidates)
-            validation_summary = (
-                f"Independent validation retained {validated_count} of "
-                f"{candidate_count} candidate(s)."
+            if validation_tasks:
+                await asyncio.gather(*validation_tasks)
+                _raise_if_stopped()
+                validated_count = sum(c.get("reportable", False) for c in candidates)
+                validation_summary = (
+                    f"Independent validation retained {validated_count} of "
+                    f"{candidate_count} candidate(s)."
+                )
+                if validation_failures:
+                    validation_summary += (
+                        f" {len(validation_failures)} validator task(s) failed "
+                        "and were marked inconclusive."
+                    )
+            else:
+                validated_count = sum(c.get("reportable", False) for c in candidates)
+                validation_summary = "No candidates required validation."
+
+            _sync_candidates_to_db(sast_run_id, run.collection_id)
+            _persist_candidate_state(sast_run_id)
+            _persist_coverage(sast_run_id, coverage)
+            _set_phase(
+                sast_run_id,
+                "validation",
+                "complete",
+                f"Independent validation retained {validated_count} of {candidate_count} candidate(s).",
+                {
+                    "candidates": candidate_count,
+                    "reportable": validated_count,
+                    "validator_tasks": len(validation_tasks),
+                    "validator_failures": len(validation_failures),
+                },
             )
-            if validation_failures:
-                validation_summary += (
-                    f" {len(validation_failures)} validator task(s) failed "
-                    "and were marked inconclusive."
-                )
         else:
-            validated_count = 0
-            validation_summary = "No candidates required validation."
-
-        _sync_candidates_to_db(sast_run_id, run.collection_id)
-        _persist_coverage(sast_run_id, coverage)
-        _set_phase(
-            sast_run_id,
-            "validation",
-            "complete",
-            f"Independent validation retained {validated_count} of {candidate_count} candidate(s).",
-            {
-                "candidates": candidate_count,
-                "reportable": validated_count,
-                "validator_tasks": len(validation_tasks),
-                "validator_failures": len(validation_failures),
-            },
-        )
+            validated_count = sum(c.get("reportable", False) for c in candidates)
+            validation_summary = "Independent validation was already complete before resume."
         events_svc.emit(
             sast_run_id,
             {
@@ -1281,15 +1602,26 @@ async def _sast_scan_task(sast_run_id: int) -> None:
 
         # ── Independent reachability / attack-path analysis ──────────────────
         current_phase = "attack_path"
-        _set_phase(
-            sast_run_id,
-            "attack_path",
-            "running",
-            f"Tracing reachability for {validated_count} validated candidate(s).",
-            {"candidates": validated_count},
-        )
-        attack_summary = "No validated candidates required attack-path analysis."
-        if validated_count and not _stop_check():
+        attack_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.get("reportable") and not candidate.get("attack_path")
+        ]
+        attack_summary = "Attack-path analysis was already complete before resume."
+        if not _phase_was_complete("attack_path"):
+            _set_phase(
+                sast_run_id,
+                "attack_path",
+                "running",
+                f"Tracing reachability for {len(attack_candidates)} validated candidate(s).",
+                {"candidates": len(attack_candidates)},
+            )
+            attack_summary = "No validated candidates required attack-path analysis."
+        if (
+            not _phase_was_complete("attack_path")
+            and attack_candidates
+            and not _stop_check()
+        ):
             events_svc.emit(
                 sast_run_id,
                 {
@@ -1302,39 +1634,50 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                     "_persist": True,
                 },
             )
-            attack_summary = await llm_svc.thinking_agentic_loop(
-                llm_cfg_obj,
+            attack_summary = await _run_checkpointed_agent(
+                sast_run_id=sast_run_id,
+                phase="attack_path",
+                worker_key="attack_path",
+                config=llm_cfg_obj,
                 system_message=SAST_ATTACK_PATH_PROMPT,
                 initial_user_message=(
                     "Record an attack path for every validated candidate:\n"
-                    + _candidate_brief(candidates, reportable_only=True)
+                    + _candidate_brief(attack_candidates)
                 ),
                 tool_executor=_make_review_executor(
-                    sast_run_id, root, coverage, "attack_path"
+                    sast_run_id,
+                    root,
+                    coverage,
+                    "attack_path",
+                    collection_id=run.collection_id,
                 ),
                 emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
                 stop_check=_stop_check,
                 tools=SAST_ATTACK_PATH_TOOLS,
+                resume=resume,
             )
             _raise_if_stopped()
-        for candidate in candidates:
-            if candidate.get("reportable") and not candidate.get("attack_path"):
-                candidate["attack_path"] = {
-                    "nodes": [],
-                    "impact": "",
-                    "severity_reasoning": "",
-                    "dynamic_test": candidate.get("suggested_endpoint", ""),
-                    "proof_gap": "Attack-path analyst returned no ordered path.",
-                }
+        if not _phase_was_complete("attack_path"):
+            for candidate in candidates:
+                if candidate.get("reportable") and not candidate.get("attack_path"):
+                    candidate["attack_path"] = {
+                        "nodes": [],
+                        "impact": "",
+                        "severity_reasoning": "",
+                        "dynamic_test": candidate.get("suggested_endpoint", ""),
+                        "proof_gap": "Attack-path analyst returned no ordered path.",
+                    }
         _, leads_count = _sync_candidates_to_db(sast_run_id, run.collection_id)
+        _persist_candidate_state(sast_run_id)
         _persist_coverage(sast_run_id, coverage)
-        _set_phase(
-            sast_run_id,
-            "attack_path",
-            "complete",
-            f"Attack-path analysis completed for {leads_count} reportable lead(s).",
-            {"reportable": leads_count, "dynamic_confirmation_required": True},
-        )
+        if not _phase_was_complete("attack_path"):
+            _set_phase(
+                sast_run_id,
+                "attack_path",
+                "complete",
+                f"Attack-path analysis completed for {leads_count} reportable lead(s).",
+                {"reportable": leads_count, "dynamic_confirmation_required": True},
+            )
         if validated_count:
             events_svc.emit(
                 sast_run_id,
@@ -1351,12 +1694,13 @@ async def _sast_scan_task(sast_run_id: int) -> None:
 
         # ── Report ────────────────────────────────────────────────────────────
         current_phase = "report"
-        _set_phase(
-            sast_run_id,
-            "report",
-            "running",
-            "Building the final candidate and coverage report.",
-        )
+        if not _phase_was_complete("report"):
+            _set_phase(
+                sast_run_id,
+                "report",
+                "running",
+                "Building the final candidate and coverage report.",
+            )
         report = {
             "candidates": candidate_count,
             "reportable": leads_count,
@@ -1370,19 +1714,20 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             "validation_summary": validation_summary,
             "attack_path_summary": attack_summary,
         }
-        with Session(get_engine()) as s:
-            persisted_run = s.get(SastRun, sast_run_id)
-            if persisted_run is not None:
-                persisted_run.report_json = json.dumps(report, ensure_ascii=False)
-                s.add(persisted_run)
-                s.commit()
-        _set_phase(
-            sast_run_id,
-            "report",
-            "complete",
-            f"SAST report complete: {leads_count} reportable lead(s) from {candidate_count} candidate(s).",
-            report,
-        )
+        if not _phase_was_complete("report"):
+            with Session(get_engine()) as s:
+                persisted_run = s.get(SastRun, sast_run_id)
+                if persisted_run is not None:
+                    persisted_run.report_json = json.dumps(report, ensure_ascii=False)
+                    s.add(persisted_run)
+                    s.commit()
+            _set_phase(
+                sast_run_id,
+                "report",
+                "complete",
+                f"SAST report complete: {leads_count} reportable lead(s) from {candidate_count} candidate(s).",
+                report,
+            )
         events_svc.emit(
             sast_run_id,
             {
@@ -1417,6 +1762,33 @@ async def _sast_scan_task(sast_run_id: int) -> None:
 
             persist_component_facts(sast_run_id, root)
 
+    except (SastPauseRequested, SastNetworkPause) as exc:
+        reason = "network" if isinstance(exc, SastNetworkPause) else "user"
+        log.info(
+            "SAST scan paused: sast_run_id=%s reason=%s: %s",
+            sast_run_id,
+            reason,
+            exc,
+        )
+        _persist_candidate_state(sast_run_id)
+        _persist_paused_run(
+            sast_run_id,
+            phase=current_phase,
+            reason=reason,
+            message=str(exc),
+        )
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "sast-scanner",
+                "role": "SAST Analyst",
+                "status": "paused",
+                "current_task": "Scan paused",
+                "outcome": reason,
+                "_persist": True,
+            },
+        )
     except asyncio.CancelledError:
         log.info("SAST scan cancelled: sast_run_id=%s", sast_run_id)
         total = 0
@@ -1457,35 +1829,15 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         )
     except llm_svc.LLMQuotaPauseError as exc:
         log.warning("SAST scan paused: sast_run_id=%s: %s", sast_run_id, exc)
-        from aespa.services import run_pause as run_pause_svc
-
-        if run is not None:
-            with Session(get_engine()) as s:
-                current = s.get(SastRun, sast_run_id)
-                if current is not None:
-                    current.status = "paused"
-                    current.error_message = str(exc)[:2000]
-                    current.updated_at = datetime.now(_UTC)
-                    s.add(current)
-                    s.commit()
-        run_pause_svc.save_pause(
-            "sast",
+        _persist_candidate_state(sast_run_id)
+        _persist_paused_run(
             sast_run_id,
-            provider="openai_codex",
+            phase=current_phase,
+            reason="quota",
+            provider=str(getattr(llm_cfg_obj, "provider", "")),
             message=str(exc),
             reset_at=exc.reset_at,
             snapshot=exc.snapshot,
-            resume_stage=current_phase,
-        )
-        _set_phase(sast_run_id, current_phase, "paused", str(exc))
-        events_svc.emit(
-            sast_run_id,
-            {
-                "type": "scan_paused",
-                "reason": "quota",
-                "message": str(exc),
-                "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
-            },
         )
     except Exception as exc:
         log.exception("SAST scan error: sast_run_id=%s", sast_run_id)
@@ -1535,6 +1887,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             await asyncio.gather(*validation_tasks, return_exceptions=True)
         _sast_tasks.pop(sast_run_id, None)
         _sast_stop_requested.discard(sast_run_id)
+        _sast_pause_requested.discard(sast_run_id)
         _candidates.pop(sast_run_id, None)
         if tmpdir and os.path.isdir(tmpdir):
             try:
@@ -1614,6 +1967,8 @@ async def start_sast_scan(sast_run_id: int, *, resume: bool = False) -> None:
     # authoritative 'sast' context.
     try:
         with events_svc.run_kind_scope("sast"):
+            if not resume:
+                _clear_checkpoints(sast_run_id)
             with Session(get_engine()) as s:
                 run = s.get(SastRun, sast_run_id)
                 if run is None:
@@ -1629,16 +1984,17 @@ async def start_sast_scan(sast_run_id: int, *, resume: bool = False) -> None:
                     run.report_json = None
                 run.updated_at = datetime.now(_UTC)
                 s.add(run)
-                for lead in s.exec(
-                    select(ScanLead)
-                    .where(ScanLead.producer_run_id == sast_run_id)
-                    .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-                ).all():
-                    lead.reportable = False
-                    lead.validation_status = "superseded"
-                    lead.status = "inconclusive"
-                    lead.updated_at = datetime.now(_UTC)
-                    s.add(lead)
+                if not resume:
+                    for lead in s.exec(
+                        select(ScanLead)
+                        .where(ScanLead.producer_run_id == sast_run_id)
+                        .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+                    ).all():
+                        lead.reportable = False
+                        lead.validation_status = "superseded"
+                        lead.status = "inconclusive"
+                        lead.updated_at = datetime.now(_UTC)
+                        s.add(lead)
                 s.commit()
 
             events_svc.emit(
@@ -1655,11 +2011,15 @@ async def start_sast_scan(sast_run_id: int, *, resume: bool = False) -> None:
             )
 
             task = asyncio.create_task(
-                _sast_scan_task(sast_run_id),
+                _sast_scan_task(sast_run_id, resume=resume),
                 name=f"sast-scan-{sast_run_id}",
             )
             _sast_tasks[sast_run_id] = task
             _notify_campaign_source_started(sast_run_id)
+            if resume:
+                from aespa.services import run_pause as run_pause_svc
+
+                run_pause_svc.clear_pause("sast", sast_run_id)
     except Exception:
         _sast_workspace_leases.pop(sast_run_id, None)
         lease.release()
@@ -1671,7 +2031,10 @@ async def run_sast_scan(sast_run_id: int) -> None:
 
     Safe to call when already running. Task failures are logged and swallowed.
     """
-    await start_sast_scan(sast_run_id)
+    with Session(get_engine()) as s:
+        run = s.get(SastRun, sast_run_id)
+        resume = run is not None and run.status == "paused"
+    await start_sast_scan(sast_run_id, resume=resume)
     task = _sast_tasks.get(sast_run_id)
     if task is not None:
         try:
@@ -1707,6 +2070,40 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
             )
         return True
     return False
+
+
+async def pause_sast_scan(sast_run_id: int) -> bool:
+    """Request a cooperative pause at the next completed agent step."""
+    task = _sast_tasks.get(sast_run_id)
+    if task is None or task.done():
+        return False
+    _sast_pause_requested.add(sast_run_id)
+    with events_svc.run_kind_scope("sast"):
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "sast-scanner",
+                "role": "SAST Analyst",
+                "status": "pausing",
+                "current_task": "Pausing after the current provider step",
+                "outcome": None,
+                "_persist": True,
+            },
+        )
+    return True
+
+
+async def pause_sast_scan_and_wait(
+    sast_run_id: int, timeout: float = 30.0
+) -> bool:
+    task = _sast_tasks.get(sast_run_id)
+    if task is None or task.done():
+        return False
+    paused = await pause_sast_scan(sast_run_id)
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    return paused
 
 
 async def stop_sast_scan_and_wait(sast_run_id: int, timeout: float = 5.0) -> bool:

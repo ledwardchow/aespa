@@ -1568,7 +1568,9 @@ test unless that persisted copy succeeds.
 
 ### Concurrency
 
-SAST scans use the same task-registry pattern as web and API scans: `_sast_tasks: dict[int, asyncio.Task]` and `_sast_stop_requested: set[int]`. A stop request causes the agentic loop to exit cleanly at the next step boundary.
+SAST scans use the same task-registry pattern as web and API scans. Stop cancels the run, while Pause waits for a safe agent-step boundary and keeps pending candidates intact. Discovery, each validator, and attack-path analysis save their LLM transcript and step count in `PhaseCheckpoint` rows after every completed tool exchange. Candidate state and file-review receipts are saved separately. Resume re-extracts the immutable source ZIP, restores those checkpoints, skips completed phases and validators, and continues the interrupted conversation without superseding existing leads.
+
+Temporary provider connection failures are retried with bounded backoff. If the provider remains unavailable, the run is paused with reason `network` instead of failed. A process restart also changes an orphaned `scanning` run to a resumable `paused` run after removing its disposable extraction directory. Browser or SSE disconnection does not affect the server-side scan task.
 
 ---
 

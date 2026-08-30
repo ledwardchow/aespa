@@ -80,6 +80,7 @@ export const api = {
   handoffSastLead:     (id,lid,b) => req(`/api/sast-runs/${id}/leads/${lid}/handoff`, { method:"POST", body:b }),
   deleteSastRun:       (id)       => req(`/api/sast-runs/${id}`, { method:"DELETE" }),
   startSastScan:       (id)       => req(`/api/sast-runs/${id}/scan/start`, { method:"POST" }),
+  pauseSastScan:       (id)       => req(`/api/sast-runs/${id}/scan/pause`, { method:"POST" }),
   stopSastScan:        (id)       => req(`/api/sast-runs/${id}/scan/stop`,  { method:"POST" }),
   resumeSastScan:      (id)       => req(`/api/sast-runs/${id}/scan/resume`, { method:"POST" }),
   getSastScanStatus:   (id)       => req(`/api/sast-runs/${id}/scan/status`),

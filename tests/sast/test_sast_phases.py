@@ -6,7 +6,15 @@ import zipfile
 
 from sqlmodel import Session, select
 
-from aespa.models import LLMConfig, LLMProfile, SastRun, ScanLead, Site
+from aespa.models import (
+    LLMConfig,
+    LLMProfile,
+    PhaseCheckpoint,
+    RunPause,
+    SastRun,
+    ScanLead,
+    Site,
+)
 from aespa.models import TestRun as WebTestRun
 from aespa.services import sast_scanner
 from aespa.services.scan_leads import create_lead
@@ -84,6 +92,175 @@ def test_sast_summaries_prefer_live_scanner_status(
     assert listing.status_code == 200
     listed_run = next(run for run in listing.json() if run["id"] == sast_run_id)
     assert listed_run["status"] == "scanning"
+
+
+def test_pause_endpoint_requests_cooperative_pause(
+    client, isolated_db_engine, monkeypatch
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+
+    async def fake_pause(run_id):
+        assert run_id == sast_run_id
+        return True
+
+    monkeypatch.setattr(sast_scanner, "pause_sast_scan_and_wait", fake_pause)
+    response = client.post(f"/api/sast-runs/{sast_run_id}/scan/pause")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "pause_requested": True}
+
+
+def test_checkpointed_agent_retries_from_last_saved_turn(
+    isolated_db_engine, monkeypatch
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    attempts: list[dict] = []
+
+    async def fake_loop(_config, **kwargs):
+        attempts.append(
+            {
+                "messages": kwargs.get("resume_messages"),
+                "step_count": kwargs.get("resume_step_count"),
+            }
+        )
+        if len(attempts) == 1:
+            await kwargs["on_checkpoint"](
+                [{"role": "user", "content": "start"}], 4
+            )
+            raise TimeoutError("temporary network loss")
+        return "continued"
+
+    from aespa.services import llm
+
+    monkeypatch.setattr(llm, "thinking_agentic_loop", fake_loop)
+    monkeypatch.setattr(sast_scanner, "_SAST_NETWORK_RETRY_DELAYS", (0.0,))
+
+    result = asyncio.run(
+        sast_scanner._run_checkpointed_agent(
+            sast_run_id=sast_run_id,
+            phase="discovery",
+            worker_key="discovery",
+            config=object(),
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *_args: None,
+            emit_fn=lambda _event: None,
+            stop_check=lambda: False,
+            tools=[],
+            resume=False,
+        )
+    )
+
+    assert result == "continued"
+    assert attempts == [
+        {"messages": None, "step_count": 0},
+        {"messages": [{"role": "user", "content": "start"}], "step_count": 4},
+    ]
+    with Session(isolated_db_engine) as session:
+        checkpoint = session.exec(
+            select(PhaseCheckpoint)
+            .where(PhaseCheckpoint.run_kind == "sast")
+            .where(PhaseCheckpoint.run_id == sast_run_id)
+        ).one()
+    assert checkpoint.idempotency_key == "agent:discovery"
+
+
+def test_resume_start_keeps_existing_leads_and_phase_state(
+    isolated_db_engine, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    with Session(isolated_db_engine) as session:
+        run = SastRun(
+            name="paused review",
+            status="paused",
+            phase_state_json=json.dumps(
+                {"discovery": {"status": "complete", "message": "done", "data": {}}}
+            ),
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+    create_lead(
+        producer_run_id=run_id,
+        title="Existing lead",
+        description="Keep this result",
+        confidence=0.9,
+        validation_status="confirmed",
+        reportable=True,
+    )
+
+    async def fake_task(_run_id, *, resume=False):
+        assert resume is True
+
+    monkeypatch.setattr(sast_scanner, "_sast_scan_task", fake_task)
+
+    async def start_and_wait():
+        await sast_scanner.start_sast_scan(run_id, resume=True)
+        await sast_scanner._sast_tasks[run_id]
+        sast_scanner._sast_tasks.pop(run_id, None)
+        lease = sast_scanner._sast_workspace_leases.pop(run_id, None)
+        if lease is not None:
+            lease.release()
+
+    asyncio.run(start_and_wait())
+
+    with Session(isolated_db_engine) as session:
+        saved_run = session.get(SastRun, run_id)
+        lead = session.exec(
+            select(ScanLead).where(ScanLead.producer_run_id == run_id)
+        ).one()
+    assert json.loads(saved_run.phase_state_json)["discovery"]["status"] == "complete"
+    assert lead.validation_status == "confirmed"
+    assert lead.reportable is True
+
+
+def test_provider_network_failure_pauses_sast_run(
+    isolated_db_engine, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.py", "print('ok')\n")
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="network pause",
+            status="scanning",
+            source_archive_path=str(archive),
+            source_filename="source.zip",
+            llm_config_id=config.id,
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    async def unavailable(_config, **_kwargs):
+        raise TimeoutError("network unavailable")
+
+    from aespa.services import llm
+
+    monkeypatch.setattr(llm, "thinking_agentic_loop", unavailable)
+    monkeypatch.setattr(llm, "set_run_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm, "clear_run_context", lambda: None)
+    monkeypatch.setattr(sast_scanner, "_SAST_NETWORK_RETRY_DELAYS", ())
+
+    asyncio.run(sast_scanner._sast_scan_task(run_id))
+
+    with Session(isolated_db_engine) as session:
+        saved = session.get(SastRun, run_id)
+        pause = session.exec(
+            select(RunPause)
+            .where(RunPause.run_kind == "sast")
+            .where(RunPause.run_id == run_id)
+        ).one()
+    assert saved.status == "paused"
+    assert pause.reason == "network"
+    assert "resumed safely" in pause.message
 
 
 def test_sast_model_profile_can_be_changed_after_creation(client, isolated_db_engine):
@@ -386,20 +563,19 @@ def test_discovery_candidates_are_persisted_before_validation(
         run_id = run.id
 
     executor = sast_scanner._make_tool_executor(run_id, root, None)
-    asyncio.run(
-        executor(
-            "write_lead",
-            {
-                "title": "SQL injection",
-                "category": "A03",
-                "severity": "high",
-                "location": "app.py:1",
-                "description": "Request input reaches SQL execution.",
-                "evidence": "db.execute(request.args['id'])",
-            },
-            1,
-        )
-    )
+    candidate_input = {
+        "title": "SQL injection",
+        "category": "A03",
+        "severity": "high",
+        "location": "app.py:1",
+        "description": "Request input reaches SQL execution.",
+        "evidence": "db.execute(request.args['id'])",
+    }
+    asyncio.run(executor("write_lead", candidate_input, 1))
+    replay = asyncio.run(executor("write_lead", candidate_input, 1))
+
+    assert "already recorded" in replay
+    assert len(sast_scanner._candidates[run_id]) == 1
 
     with Session(isolated_db_engine) as session:
         lead = session.exec(

@@ -5,6 +5,12 @@
 .sast-model-selector > span { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; }
 .sast-model-selector .select { width: 245px; min-width: 150px; padding-top: 6px; padding-bottom: 6px; font-size: 11px; }
 .sast-model-selector em { position: absolute; right: 9px; bottom: -13px; color: var(--muted); font-size: 9px; font-style: normal; }
+.sast-actions-menu { position: relative; flex: 0 0 auto; }
+.sast-actions-menu-trigger { width: 34px; padding: 6px 8px; font-size: 18px; line-height: 1; }
+.sast-actions-popover { position: absolute; top: calc(100% + 6px); right: 0; z-index: 70; min-width: 150px; padding: 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); box-shadow: 0 10px 28px rgba(0,0,0,.35); }
+.sast-actions-popover a, .sast-actions-popover button { display: flex; align-items: center; width: 100%; padding: 8px 10px; border: 0; border-radius: 4px; color: var(--text-2); background: transparent; cursor: pointer; font: inherit; font-size: 11px; text-align: left; white-space: nowrap; }
+.sast-actions-popover a:hover, .sast-actions-popover button:hover, .sast-actions-popover a:focus-visible, .sast-actions-popover button:focus-visible { color: var(--text); background: var(--panel-2); outline: none; }
+.sast-actions-popover button.danger { color: var(--danger); }
 .sast-run-shell { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
 .sast-phase-rail { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-bottom: 1px solid var(--border); background: var(--panel); }
 .sast-phase-rail, .sast-view-tabs { scrollbar-width: none; }

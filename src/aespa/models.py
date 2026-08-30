@@ -1236,7 +1236,7 @@ class ScanCheckpoint(SQLModel, table=True):
 
 
 class RunPause(SQLModel, table=True):
-    """A manually resumable pause, usually caused by a subscription quota."""
+    """A manually resumable user, network, restart, or quota pause."""
 
     __tablename__ = "run_pause"
     __table_args__ = (UniqueConstraint("run_kind", "run_id", name="uq_run_pause"),)
@@ -1296,7 +1296,7 @@ class SastRun(SQLModel, table=True):
     name: str
     status: str = Field(
         default="pending"
-    )  # pending|scanning|completed|failed|cancelled
+    )  # pending|scanning|paused|completed|failed|cancelled
     # What triggered this run: None=standalone, or the dynamic run that spawned it
     triggered_by_run_type: Optional[str] = Field(default=None)  # "api" | "web"
     triggered_by_run_id: Optional[int] = Field(default=None, index=True)
@@ -1777,11 +1777,11 @@ class PhaseCheckpoint(SQLModel, table=True):
     __tablename__ = "phase_checkpoint"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    run_kind: str = Field(default="web", index=True)  # web | api
+    run_kind: str = Field(default="web", index=True)  # web | api | sast
     run_id: int = Field(sa_column=_run_identity_fk())
     phase: str = Field(
         index=True
-    )  # crawl | recon | obligations | dynamic_scan | reporting | validation
+    )  # web/API phases or SAST discovery/validation/attack_path/state
     idempotency_key: str = Field(index=True)
     data_json: Optional[str] = Field(default=None)
     completed_at: datetime = Field(default_factory=_utcnow)
