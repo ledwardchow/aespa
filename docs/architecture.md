@@ -1490,8 +1490,12 @@ start_sast_scan(sast_run_id)
           a cross-process workspace lease while the directory is live. A
           startup sweep (`db._cleanup_orphaned_sast_extractions`) skips leased
           workspaces and reconciles only dirs leaked by a previous hard crash.
-       3. Build and persist a deterministic file/language inventory.
-       4. Discovery loop — trace sources to sinks and record candidate hypotheses.
+       3. Build a deterministic source atlas: classify files, identify entry
+          points, inputs, controls, and sensitive sinks, then split them into
+          bounded partitions.
+       4. Run one injection, access-control, and logic worker per partition,
+          plus bounded sink-first workers. Every source and sink item requires
+          an explicit disposition. A worker cannot finish with open items.
        5. Independent validation loop — a separate adversarial prompt/model role
           re-reads evidence, records controls/counterevidence/proof gaps, and
           returns confirmed/dismissed/inconclusive verdicts.
@@ -1499,7 +1503,11 @@ start_sast_scan(sast_run_id)
           reachability, impact, severity reasoning, and a dynamic-test objective.
        7. Upsert every candidate by stable fingerprint; only independently
           confirmed candidates above the confidence threshold are reportable.
-       8. Persist final report and file-review coverage; cleanup temp directory.
+       8. Apply the completion gate. Failed workers, open work items, a missing
+          entry-point or sink inventory, or a truncated atlas make coverage
+          partial even when no candidates were found.
+       9. Persist the final report, work program, and exact evidence receipts;
+          cleanup the temporary directory.
 ```
 
 ### File tools (all path-jailed to the extraction root)
@@ -1509,7 +1517,15 @@ start_sast_scan(sast_run_id)
 | `list_files` | Directory listing up to configurable depth |
 | `glob` | Pattern match across the file tree |
 | `read_file` | Read a file by path; optional `start_line`/`end_line`; capped at 20,000 chars |
-| `grep` | Regex or literal search across files; capped at 200 results |
+| `grep` | Regex or literal search across files; capped at 200 results. The receipt records the search scope and returned matches. Files in the search scope do not count as directly opened. |
+| `get_work_program` | Return the current worker's assigned source or sink items |
+| `record_disposition` | Close one assigned item with a result, reason, trace, controls, and evidence |
+
+The normalized work program is stored in `SastSourceFile`, `SastSurfaceItem`,
+`SastPartition`, `SastWorker`, `SastWorkItem`, and `SastEvidenceReceipt`. This
+state is authoritative for completion and resume. `coverage_json` remains as a
+file-level compatibility view, where `reviewed` now means the file was opened
+with `read_file`.
 
 ### Lead lifecycle
 

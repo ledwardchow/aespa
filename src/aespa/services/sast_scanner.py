@@ -40,7 +40,9 @@ from aespa.models import (
     ApiDocument,
     ApiEndpoint,
     PhaseCheckpoint,
+    SastEvidenceReceipt,
     SastRun,
+    SastWorker,
     ScanLead,
 )
 from aespa.sast_workspace import (
@@ -48,6 +50,7 @@ from aespa.sast_workspace import (
     try_acquire_sast_workspace_lease,
 )
 from aespa.services import events as events_svc
+from aespa.services import sast_workprogram as workprogram_svc
 from aespa.services.scan_leads import (
     CONFIDENCE_THRESHOLD,
     create_lead,
@@ -224,6 +227,8 @@ async def _run_checkpointed_agent(
     stop_check,
     tools: list[dict],
     resume: bool,
+    done_check=None,
+    termination_check=None,
 ) -> str:
     """Run one SAST agent with durable turn checkpoints and bounded retries."""
     from aespa.services import llm as llm_svc
@@ -256,6 +261,8 @@ async def _run_checkpointed_agent(
                 resume_messages=messages if isinstance(messages, list) else None,
                 resume_step_count=step_count,
                 on_checkpoint=_on_checkpoint,
+                done_check=done_check,
+                termination_check=termination_check,
             )
         except llm_svc.LLMQuotaPauseError:
             raise
@@ -697,6 +704,7 @@ def _run_read_tool(
     phase: str,
     tool_name: str,
     tool_input: dict,
+    worker_id: int | None = None,
 ) -> str | None:
     """Execute one shared read-only file tool and record review receipts."""
     if tool_name == "list_files":
@@ -719,6 +727,28 @@ def _run_read_tool(
         )
         if not result.startswith("Error:"):
             _mark_reviewed(coverage, [path], phase)
+            returned_lines = [
+                line for line in result.splitlines() if line != "[... truncated ...]"
+            ]
+            receipt_start = int(tool_input.get("start_line") or 1)
+            receipt_end = (
+                receipt_start + len(returned_lines) - 1
+                if returned_lines
+                else receipt_start
+            )
+            workprogram_svc.record_evidence_receipt(
+                SastEvidenceReceipt(
+                    sast_run_id=sast_run_id,
+                    worker_id=worker_id,
+                    phase=phase,
+                    tool_name=tool_name,
+                    path=path,
+                    start_line=receipt_start,
+                    end_line=receipt_end,
+                    characters_returned=len(result),
+                    truncated="truncated" in result.casefold(),
+                )
+            )
     elif tool_name == "grep":
         pattern = str(tool_input.get("pattern", ""))
         path = str(tool_input.get("path", ""))
@@ -740,7 +770,32 @@ def _run_read_tool(
             ]
         except (OSError, ValueError):
             inspected_paths = []
-        _mark_reviewed(coverage, inspected_paths, phase)
+        matched_paths = sorted(
+            {
+                line.split(":", 1)[0]
+                for line in result.splitlines()
+                if re.match(r"^.+:\d+:", line)
+            }
+        )
+        workprogram_svc.record_evidence_receipt(
+            SastEvidenceReceipt(
+                sast_run_id=sast_run_id,
+                worker_id=worker_id,
+                phase=phase,
+                tool_name=tool_name,
+                path=path,
+                search_pattern=pattern,
+                include_pattern=include_pattern,
+                files_in_scope=len(inspected_paths),
+                files_with_matches=len(matched_paths),
+                matches_returned=sum(
+                    bool(re.match(r"^.+:\d+:", line)) for line in result.splitlines()
+                ),
+                characters_returned=len(result),
+                truncated="truncated" in result.casefold(),
+                details_json=json.dumps({"matched_paths": matched_paths}),
+            )
+        )
     else:
         return None
     events_svc.emit(
@@ -765,6 +820,7 @@ def _make_tool_executor(
     coverage: dict[str, dict] | None = None,
     on_candidate_ready: Callable[[dict], None] | None = None,
     initial_candidates: list[dict] | None = None,
+    assigned_worker_id: int | None = None,
 ):
     """Return an async tool_executor closure for the SAST agentic loop.
 
@@ -772,27 +828,82 @@ def _make_tool_executor(
     Candidates are stored in _candidates[sast_run_id]; filter_lead records the
     discovery agent's confidence before independent validation.
     """
-    _candidates[sast_run_id] = list(initial_candidates or [])
+    if initial_candidates is not None or sast_run_id not in _candidates:
+        _candidates[sast_run_id] = list(initial_candidates or [])
     coverage = coverage if coverage is not None else _build_source_inventory(root)
-    next_candidate_id: list[int] = [
-        max(
-            (int(item.get("candidate_id", -1)) for item in _candidates[sast_run_id]),
-            default=-1,
-        )
-        + 1
-    ]
+    assigned_items = (
+        {
+            int(item["work_item_id"])
+            for item in workprogram_svc.worker_payload(assigned_worker_id).get(
+                "work_items", []
+            )
+        }
+        if assigned_worker_id is not None
+        else set()
+    )
 
     async def tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         if sast_run_id in _sast_stop_requested:
             return "Scan stopped by user."
 
         read_result = _run_read_tool(
-            sast_run_id, root, coverage, "discovery", tool_name, tool_input
+            sast_run_id,
+            root,
+            coverage,
+            "discovery",
+            tool_name,
+            tool_input,
+            assigned_worker_id,
         )
         if read_result is not None:
             return read_result
 
+        if tool_name == "get_work_program":
+            if assigned_worker_id is None:
+                return "Error: this agent has no assigned work program."
+            return json.dumps(
+                workprogram_svc.worker_payload(assigned_worker_id),
+                ensure_ascii=False,
+            )
+
+        if tool_name == "record_disposition":
+            work_item_id = int(tool_input.get("work_item_id", -1))
+            if work_item_id not in assigned_items:
+                return (
+                    f"Error: work item {work_item_id} is not assigned to this worker."
+                )
+            ok, message = workprogram_svc.record_disposition(
+                work_item_id,
+                status=str(tool_input.get("status", "")),
+                reasoning=str(tool_input.get("reasoning", "")),
+                trace=_normalize_tool_list(tool_input.get("trace")),
+                controls=_normalize_tool_list(tool_input.get("controls")),
+                evidence=_normalize_tool_list(tool_input.get("evidence")),
+            )
+            return message if ok else f"Error: {message}"
+
         if tool_name == "write_lead":
+            work_item_id = int(tool_input.get("work_item_id", -1))
+            if assigned_worker_id is not None and work_item_id not in assigned_items:
+                return (
+                    "Error: write_lead requires a work_item_id assigned to this worker."
+                )
+            if assigned_worker_id is not None:
+                disposition_ok, disposition_message = (
+                    workprogram_svc.record_disposition(
+                        work_item_id,
+                        status="candidate",
+                        reasoning=str(
+                            tool_input.get("description", "Candidate recorded.")
+                        ),
+                        trace=[tool_input.get("source_trace") or {}],
+                        controls=_normalize_tool_list(tool_input.get("controls")),
+                        evidence=[str(tool_input.get("evidence", ""))],
+                        candidate_from_lead=True,
+                    )
+                )
+                if not disposition_ok:
+                    return f"Error: {disposition_message}"
             title = str(tool_input.get("title", ""))
             category = str(tool_input.get("category", ""))
             location = str(tool_input.get("location", ""))
@@ -815,15 +926,26 @@ def _make_tool_executor(
                 None,
             )
             if existing is not None:
+                if work_item_id >= 0 and existing.get("lead_id"):
+                    workprogram_svc.attach_lead(work_item_id, int(existing["lead_id"]))
                 reference = existing.get("reference") or f"#{existing['candidate_id']}"
                 return (
                     f"Lead {reference} was already recorded. Reuse it instead of "
                     "creating a duplicate."
                 )
-            cid = next_candidate_id[0]
-            next_candidate_id[0] += 1
+            cid = (
+                max(
+                    (
+                        int(item.get("candidate_id", -1))
+                        for item in _candidates[sast_run_id]
+                    ),
+                    default=-1,
+                )
+                + 1
+            )
             candidate = {
                 "candidate_id": cid,
+                "source_work_item_id": work_item_id if work_item_id >= 0 else None,
                 "fingerprint": fingerprint,
                 "title": title,
                 "category": category,
@@ -1150,6 +1272,16 @@ def _sync_candidate_to_db(
         reportable=bool(candidate.get("reportable")),
     )
     candidate["reference"] = lead.reference
+    candidate["lead_id"] = lead.id
+    source_work_item_id = candidate.get("source_work_item_id")
+    if lead.id is not None and source_work_item_id:
+        with Session(get_engine()) as session:
+            persisted_lead = session.get(ScanLead, lead.id)
+            if persisted_lead is not None:
+                persisted_lead.source_work_item_id = int(source_work_item_id)
+                session.add(persisted_lead)
+                session.commit()
+        workprogram_svc.attach_lead(int(source_work_item_id), lead.id)
 
 
 # ── SAST scan task ─────────────────────────────────────────────────────────────
@@ -1207,10 +1339,10 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
     from aespa.services.prompts.sast import (
         SAST_ATTACK_PATH_PROMPT,
         SAST_ATTACK_PATH_TOOLS,
-        SAST_SYSTEM_PROMPT,
         SAST_TOOLS,
         SAST_VALIDATION_PROMPT,
         SAST_VALIDATION_TOOLS,
+        sast_worker_prompt,
     )
     from aespa.services.settings import get_llm_config_for_role
 
@@ -1314,13 +1446,25 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         if resume:
             coverage = _merge_persisted_coverage(coverage, run.coverage_json)
         source_file_count = len(coverage)
+        work_program_built = (
+            not resume or workprogram_svc.count_rows(sast_run_id, SastWorker) == 0
+        )
+        if work_program_built:
+            atlas_summary = workprogram_svc.build_source_atlas(sast_run_id, root)
+        else:
+            atlas_summary = workprogram_svc.work_program_summary(sast_run_id)
         _persist_coverage(sast_run_id, coverage)
         _set_phase(
             sast_run_id,
             "scope",
             "complete",
             f"Source scope ready: {source_file_count} regular file(s) inventoried.",
-            {"files_total": source_file_count},
+            {
+                "files_total": source_file_count,
+                "production_files": atlas_summary["files"]["production"],
+                "surface": atlas_summary["surface"],
+                "work_items": atlas_summary["work_items"]["total"],
+            },
         )
 
         initial_message = _build_initial_message(coll, endpoints, archive_name)
@@ -1478,16 +1622,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 )
             )
 
-        # ── Build tool executor ────────────────────────────────────────────────
-        tool_executor = _make_tool_executor(
-            sast_run_id,
-            root,
-            run.collection_id,
-            coverage,
-            on_candidate_ready=_schedule_candidate_validation,
-            initial_candidates=(
-                _restore_candidate_state(sast_run_id) if resume else None
-            ),
+        _candidates[sast_run_id] = (
+            _restore_candidate_state(sast_run_id) if resume else []
         )
 
         try:
@@ -1497,7 +1633,11 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
 
         def _phase_was_complete(phase: str) -> bool:
             entry = saved_phases.get(phase, {})
-            return isinstance(entry, dict) and entry.get("status") == "complete"
+            return (
+                isinstance(entry, dict)
+                and entry.get("status") == "complete"
+                and not (phase == "discovery" and work_program_built)
+            )
 
         current_phase = "discovery"
         discovery_summary = "Discovery was already complete before resume."
@@ -1510,32 +1650,114 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 {"files_total": source_file_count},
             )
 
-            # ── Run the agentic exploration loop ──────────────────────────────
-            discovery_summary = await _run_checkpointed_agent(
-                sast_run_id=sast_run_id,
-                phase="discovery",
-                worker_key="discovery",
-                config=llm_cfg_obj,
-                system_message=SAST_SYSTEM_PROMPT,
-                initial_user_message=initial_message,
-                tool_executor=tool_executor,
-                emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
-                stop_check=_stop_check,
-                tools=SAST_TOOLS,
-                resume=resume,
+            worker_semaphore = asyncio.Semaphore(4)
+
+            async def _run_discovery_worker(worker: SastWorker) -> str:
+                if worker.id is None:
+                    return "Worker has no persisted id."
+                if resume and worker.status == "complete":
+                    return worker.summary or f"{worker.worker_key} already complete."
+                async with worker_semaphore:
+                    workprogram_svc.set_worker_status(worker.id, "running")
+                    payload = workprogram_svc.worker_payload(worker.id)
+
+                    def _worker_done(_tool_input: dict, _calls: int):
+                        unresolved = workprogram_svc.unresolved_for_worker(worker.id)
+                        if unresolved:
+                            return (
+                                False,
+                                "Resolve these assigned work items before done: "
+                                + ", ".join(str(item) for item in unresolved[:50]),
+                            )
+                        return True, ""
+
+                    try:
+                        summary = await _run_checkpointed_agent(
+                            sast_run_id=sast_run_id,
+                            phase="discovery",
+                            worker_key=worker.worker_key,
+                            config=llm_cfg_obj,
+                            system_message=sast_worker_prompt(worker.class_group),
+                            initial_user_message=(
+                                initial_message
+                                + "\n\nAssigned work program:\n"
+                                + json.dumps(payload, ensure_ascii=False)
+                            ),
+                            tool_executor=_make_tool_executor(
+                                sast_run_id,
+                                root,
+                                run.collection_id,
+                                coverage,
+                                on_candidate_ready=_schedule_candidate_validation,
+                                assigned_worker_id=worker.id,
+                            ),
+                            emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
+                            stop_check=_stop_check,
+                            tools=SAST_TOOLS,
+                            resume=resume,
+                            done_check=_worker_done,
+                        )
+                    except (
+                        asyncio.CancelledError,
+                        llm_svc.LLMQuotaPauseError,
+                        SastPauseRequested,
+                        SastNetworkPause,
+                    ):
+                        raise
+                    except Exception as exc:
+                        workprogram_svc.set_worker_status(
+                            worker.id, "failed", error=str(exc)
+                        )
+                        log.exception(
+                            "SAST discovery worker failed: run=%s worker=%s",
+                            sast_run_id,
+                            worker.worker_key,
+                        )
+                        return f"{worker.worker_key} failed: {exc}"
+                    unresolved = workprogram_svc.unresolved_for_worker(worker.id)
+                    workprogram_svc.set_worker_status(
+                        worker.id,
+                        "complete" if not unresolved else "blocked",
+                        summary=summary,
+                        error=(
+                            f"{len(unresolved)} assigned item(s) unresolved."
+                            if unresolved
+                            else ""
+                        ),
+                    )
+                    return summary
+
+            worker_summaries = await asyncio.gather(
+                *(
+                    _run_discovery_worker(worker)
+                    for worker in workprogram_svc.worker_rows(sast_run_id)
+                )
             )
+            discovery_summary = "\n".join(worker_summaries)
             _raise_if_stopped()
 
         candidates = _candidates.get(sast_run_id, [])
         candidate_count = len(candidates)
         _persist_coverage(sast_run_id, coverage)
+        completion_status, completion_reasons, work_program_summary = (
+            workprogram_svc.completion_decision(sast_run_id)
+        )
         if not _phase_was_complete("discovery"):
             _set_phase(
                 sast_run_id,
                 "discovery",
                 "complete",
-                f"Discovery recorded {candidate_count} candidate(s).",
-                {"files_total": source_file_count, "candidates": candidate_count},
+                (
+                    f"Discovery recorded {candidate_count} candidate(s) with "
+                    f"{completion_status} work-program coverage."
+                ),
+                {
+                    "files_total": source_file_count,
+                    "candidates": candidate_count,
+                    "completion_status": completion_status,
+                    "completion_reasons": completion_reasons,
+                    "work_program": work_program_summary,
+                },
             )
 
         # ── Complete independent adversarial validation ───────────────────────
@@ -1586,7 +1808,9 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             )
         else:
             validated_count = sum(c.get("reportable", False) for c in candidates)
-            validation_summary = "Independent validation was already complete before resume."
+            validation_summary = (
+                "Independent validation was already complete before resume."
+            )
         events_svc.emit(
             sast_run_id,
             {
@@ -1713,6 +1937,9 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             "discovery_summary": discovery_summary,
             "validation_summary": validation_summary,
             "attack_path_summary": attack_summary,
+            "completion_status": completion_status,
+            "completion_reasons": completion_reasons,
+            "work_program": work_program_summary,
         }
         if not _phase_was_complete("report"):
             with Session(get_engine()) as s:
@@ -1725,7 +1952,10 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 sast_run_id,
                 "report",
                 "complete",
-                f"SAST report complete: {leads_count} reportable lead(s) from {candidate_count} candidate(s).",
+                (
+                    f"SAST report complete with {completion_status} coverage: "
+                    f"{leads_count} reportable lead(s) from {candidate_count} candidate(s)."
+                ),
                 report,
             )
         events_svc.emit(
@@ -1736,7 +1966,9 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "role": "SAST Analyst",
                 "status": "complete",
                 "current_task": "Analysis complete",
-                "outcome": f"{leads_count} lead(s) recorded",
+                "outcome": (
+                    f"{leads_count} lead(s) recorded, {completion_status} coverage"
+                ),
                 "_persist": True,
             },
         )
@@ -1745,6 +1977,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             r = s.get(SastRun, sast_run_id)
             if r is not None and r.status == "scanning":
                 r.status = "completed"
+                r.completion_status = completion_status
                 r.leads_count = leads_count
                 r.completed_at = datetime.now(_UTC)
                 r.updated_at = datetime.now(_UTC)
@@ -1979,6 +2212,7 @@ async def start_sast_scan(sast_run_id: int, *, resume: bool = False) -> None:
                 run.error_message = None
                 if not resume:
                     run.leads_count = 0
+                    run.completion_status = "pending"
                     run.phase_state_json = json.dumps(_empty_phase_state())
                     run.coverage_json = None
                     run.report_json = None
@@ -2094,9 +2328,7 @@ async def pause_sast_scan(sast_run_id: int) -> bool:
     return True
 
 
-async def pause_sast_scan_and_wait(
-    sast_run_id: int, timeout: float = 30.0
-) -> bool:
+async def pause_sast_scan_and_wait(sast_run_id: int, timeout: float = 30.0) -> bool:
     task = _sast_tasks.get(sast_run_id)
     if task is None or task.done():
         return False

@@ -1310,12 +1310,220 @@ class SastRun(SQLModel, table=True):
     phase_state_json: Optional[str] = Field(default=None)
     coverage_json: Optional[str] = Field(default=None)
     report_json: Optional[str] = Field(default=None)
+    # Coverage assurance is separate from the task lifecycle so existing callers
+    # can continue treating ``status=completed`` as a terminal worker state while
+    # the SAST report distinguishes a full review from a partial one.
+    completion_status: str = Field(default="pending", index=True)
     error_message: Optional[str] = Field(default=None)
     token_usage_json: Optional[str] = Field(default=None)
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastSourceFile(SQLModel, table=True):
+    """One deterministic source-tree inventory row for a SAST run."""
+
+    __tablename__ = "sast_source_file"
+    __table_args__ = (
+        UniqueConstraint("sast_run_id", "path", name="uq_sast_source_file_path"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    path: str = Field(index=True)
+    language: str = Field(default="Other", index=True)
+    size: int = Field(default=0)
+    sha256: str = Field(default="", index=True)
+    classification: str = Field(default="production", index=True)
+    production_relevant: bool = Field(default=True, index=True)
+    classification_reason: str = Field(default="")
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastSurfaceItem(SQLModel, table=True):
+    """An entry point, input, sink, control, store, or call edge."""
+
+    __tablename__ = "sast_surface_item"
+    __table_args__ = (
+        UniqueConstraint(
+            "sast_run_id", "fingerprint", name="uq_sast_surface_item_fingerprint"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    source_file_id: Optional[int] = Field(
+        default=None, foreign_key="sast_source_file.id", index=True
+    )
+    kind: str = Field(index=True)  # entrypoint | input | sink | control | store
+    category: str = Field(default="", index=True)
+    name: str = Field(default="")
+    path: str = Field(default="", index=True)
+    line: Optional[int] = Field(default=None)
+    symbol: str = Field(default="")
+    trust_level: str = Field(default="unknown", index=True)
+    production_reachable: bool = Field(default=True, index=True)
+    details_json: str = Field(default="{}")
+    provenance: str = Field(default="deterministic", index=True)
+    fingerprint: str = Field(index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastPartition(SQLModel, table=True):
+    """A bounded, independently reviewable slice of the source work program."""
+
+    __tablename__ = "sast_partition"
+    __table_args__ = (
+        UniqueConstraint("sast_run_id", "partition_key", name="uq_sast_partition"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    partition_key: str = Field(index=True)
+    name: str = Field(default="")
+    status: str = Field(default="pending", index=True)
+    production_reachable: bool = Field(default=True, index=True)
+    file_paths_json: str = Field(default="[]")
+    shared_paths_json: str = Field(default="[]")
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastWorker(SQLModel, table=True):
+    """Durable status for one partition and vulnerability-class worker."""
+
+    __tablename__ = "sast_worker"
+    __table_args__ = (
+        UniqueConstraint(
+            "sast_run_id",
+            "worker_key",
+            name="uq_sast_worker_key",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    partition_id: Optional[int] = Field(
+        default=None, foreign_key="sast_partition.id", index=True
+    )
+    worker_key: str = Field(index=True)
+    class_group: str = Field(index=True)
+    status: str = Field(default="pending", index=True)
+    summary: str = Field(default="")
+    error_message: str = Field(default="")
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastWorkItem(SQLModel, table=True):
+    """One auditable source/sink obligation with an explicit disposition."""
+
+    __tablename__ = "sast_work_item"
+    __table_args__ = (
+        UniqueConstraint(
+            "sast_run_id",
+            "work_key",
+            name="uq_sast_work_item_key",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    partition_id: Optional[int] = Field(
+        default=None, foreign_key="sast_partition.id", index=True
+    )
+    surface_item_id: Optional[int] = Field(
+        default=None, foreign_key="sast_surface_item.id", index=True
+    )
+    worker_id: Optional[int] = Field(
+        default=None, foreign_key="sast_worker.id", index=True
+    )
+    work_key: str = Field(index=True)
+    work_type: str = Field(default="input", index=True)  # input | sink
+    class_group: str = Field(index=True)
+    status: str = Field(default="pending", index=True)
+    disposition: str = Field(default="")
+    reasoning: str = Field(default="")
+    trace_json: str = Field(default="[]")
+    controls_json: str = Field(default="[]")
+    evidence_json: str = Field(default="[]")
+    lead_id: Optional[int] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastEvidenceReceipt(SQLModel, table=True):
+    """Exact file/search evidence shown to one SAST agent."""
+
+    __tablename__ = "sast_evidence_receipt"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    worker_id: Optional[int] = Field(
+        default=None, foreign_key="sast_worker.id", index=True
+    )
+    phase: str = Field(default="discovery", index=True)
+    tool_name: str = Field(index=True)
+    path: str = Field(default="", index=True)
+    start_line: Optional[int] = Field(default=None)
+    end_line: Optional[int] = Field(default=None)
+    search_pattern: str = Field(default="")
+    include_pattern: str = Field(default="")
+    files_in_scope: int = Field(default=0)
+    files_with_matches: int = Field(default=0)
+    matches_returned: int = Field(default=0)
+    characters_returned: int = Field(default=0)
+    truncated: bool = Field(default=False)
+    details_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_utcnow)
 
 
 class ScanLead(SQLModel, table=True):
@@ -1329,6 +1537,7 @@ class ScanLead(SQLModel, table=True):
         default="sast", index=True
     )  # "sast" (future: "recon")
     producer_run_id: int = Field(index=True)  # SastRun.id that created it
+    source_work_item_id: Optional[int] = Field(default=None, index=True)
     source: str = Field(default="sast", index=True)
     category: str = Field(default="")  # OWASP A0x / API0x (best-effort)
     severity: str = Field(default="medium")  # high | medium | low

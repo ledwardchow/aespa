@@ -26,7 +26,13 @@ from aespa.models import (
     ApiDocument,
     ComponentFact,
     LLMProfile,
+    SastEvidenceReceipt,
+    SastPartition,
     SastRun,
+    SastSourceFile,
+    SastSurfaceItem,
+    SastWorker,
+    SastWorkItem,
     ScanLead,
     ScanLog,
 )
@@ -125,6 +131,23 @@ def export_sast_run(session: Session, run_id: int) -> dict[str, Any]:
         .where(ComponentFact.sast_run_id == run_id)
         .order_by(ComponentFact.id)
     ).all()
+    work_program_models = (
+        SastSourceFile,
+        SastSurfaceItem,
+        SastPartition,
+        SastWorker,
+        SastWorkItem,
+        SastEvidenceReceipt,
+    )
+    work_program = {
+        model.__tablename__: [
+            _row(row)
+            for row in session.exec(
+                select(model).where(model.sast_run_id == run_id).order_by(model.id)
+            ).all()
+        ]
+        for model in work_program_models
+    }
 
     run_data = _row(run)
     # Absolute paths are installation-specific and can disclose local layout.
@@ -140,6 +163,7 @@ def export_sast_run(session: Session, run_id: int) -> dict[str, Any]:
         "scan_logs": [_row(log) for log in scan_logs],
         "agent_logs": [_row(log) for log in agent_logs],
         "component_facts": [_row(fact) for fact in component_facts],
+        "work_program": work_program,
     }
 
 
@@ -239,11 +263,94 @@ def import_sast_run(session: Session, bundle: Any) -> SastRun:
     session.flush()
     new_run_id: int = run.id  # type: ignore[assignment]
 
+    work_program = bundle.get("work_program")
+    if work_program is not None and not isinstance(work_program, dict):
+        raise SastExportError("work_program must be an object")
+    work_program = work_program or {}
+    id_maps: dict[str, dict[int, int]] = {
+        "source": {},
+        "surface": {},
+        "partition": {},
+        "worker": {},
+        "work_item": {},
+        "receipt": {},
+        "lead": {},
+    }
+    pending_work_leads: dict[int, int] = {}
+
+    def _import_rows(key: str, model, map_name: str, transform) -> None:
+        rows = work_program.get(key, [])
+        if not isinstance(rows, list):
+            raise SastExportError(f"work_program.{key} must be an array")
+        for item in rows:
+            if not isinstance(item, dict):
+                raise SastExportError(f"work_program.{key} entries must be objects")
+            data = dict(item)
+            old_id = int(data.pop("id"))
+            data["sast_run_id"] = new_run_id
+            transform(data, old_id)
+            row = model(**data)
+            session.add(row)
+            session.flush()
+            id_maps[map_name][old_id] = int(row.id)
+
+    _import_rows(
+        "sast_source_file",
+        SastSourceFile,
+        "source",
+        lambda data, _old_id: _parse_datetimes(data, "created_at"),
+    )
+
+    def _surface_transform(data: dict, _old_id: int) -> None:
+        source_id = data.get("source_file_id")
+        data["source_file_id"] = id_maps["source"].get(source_id)
+        _parse_datetimes(data, "created_at")
+
+    _import_rows("sast_surface_item", SastSurfaceItem, "surface", _surface_transform)
+    _import_rows(
+        "sast_partition",
+        SastPartition,
+        "partition",
+        lambda data, _old_id: _parse_datetimes(
+            data, "started_at", "completed_at", "created_at", "updated_at"
+        ),
+    )
+
+    def _worker_transform(data: dict, _old_id: int) -> None:
+        partition_id = data.get("partition_id")
+        data["partition_id"] = id_maps["partition"].get(partition_id)
+        _parse_datetimes(data, "started_at", "completed_at", "created_at", "updated_at")
+
+    _import_rows("sast_worker", SastWorker, "worker", _worker_transform)
+
+    def _work_item_transform(data: dict, old_id: int) -> None:
+        data["partition_id"] = id_maps["partition"].get(data.get("partition_id"))
+        data["surface_item_id"] = id_maps["surface"].get(data.get("surface_item_id"))
+        data["worker_id"] = id_maps["worker"].get(data.get("worker_id"))
+        old_lead_id = data.get("lead_id")
+        if old_lead_id is not None:
+            pending_work_leads[old_id] = int(old_lead_id)
+        data["lead_id"] = None
+        _parse_datetimes(data, "created_at", "updated_at")
+
+    _import_rows("sast_work_item", SastWorkItem, "work_item", _work_item_transform)
+
+    def _receipt_transform(data: dict, _old_id: int) -> None:
+        data["worker_id"] = id_maps["worker"].get(data.get("worker_id"))
+        _parse_datetimes(data, "created_at")
+
+    _import_rows(
+        "sast_evidence_receipt",
+        SastEvidenceReceipt,
+        "receipt",
+        _receipt_transform,
+    )
+
     for item in bundle.get("scan_leads", []):
         if not isinstance(item, dict):
             raise SastExportError("scan_leads entries must be objects")
         lead_data = dict(item)
-        lead_data.pop("id", None)
+        old_lead_id = lead_data.pop("id", None)
         lead_data["producer_run_type"] = "sast"
         lead_data["producer_run_id"] = new_run_id
         lead_data["collection_id"] = None
@@ -254,10 +361,25 @@ def import_sast_run(session: Session, bundle: Any) -> SastRun:
         # A linked finding belongs to a dynamic run, not to the SAST run. It
         # cannot be restored safely without exporting that other run as well.
         lead_data["linked_finding_id"] = None
+        lead_data["source_work_item_id"] = id_maps["work_item"].get(
+            lead_data.get("source_work_item_id")
+        )
         _parse_datetimes(lead_data, "created_at", "updated_at")
         lead = ScanLead(**lead_data)
         session.add(lead)
         session.flush()
+        if old_lead_id is not None:
+            id_maps["lead"][int(old_lead_id)] = int(lead.id)
+
+    for old_work_id, old_lead_id in pending_work_leads.items():
+        new_work_id = id_maps["work_item"].get(old_work_id)
+        new_lead_id = id_maps["lead"].get(old_lead_id)
+        if new_work_id is None or new_lead_id is None:
+            continue
+        work_item = session.get(SastWorkItem, new_work_id)
+        if work_item is not None:
+            work_item.lead_id = new_lead_id
+            session.add(work_item)
 
     for item in bundle.get("scan_logs", []):
         if not isinstance(item, dict):

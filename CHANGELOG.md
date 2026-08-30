@@ -4,6 +4,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+- **Auditable SAST coverage**: SAST scans now build a framework-neutral inventory of entry points, inputs, and sensitive operations, then review it in bounded source-area and vulnerability-class workers. Every assigned item needs an explicit result before its worker can finish. Directory searches no longer count every searched file as reviewed, and scans report partial coverage when work is still open, a worker failed, or the source inventory could not identify key surfaces. The SAST screen shows work-item progress, direct file reads, search matches, and the reason for a partial result.
 - **Resumable SAST scans**: SAST scans now survive temporary provider outages and process restarts by saving progress after each agent step. Users can pause and resume without discarding completed discovery, validation, coverage, or attack-path work. Application campaigns wait for paused source scans instead of treating them as failed.
 - **Larger SAST archives**: Standalone SAST scans and application component snapshots now accept ZIP uploads up to 250 MiB.
 - **Clearer LLM pacing messages**: Short scheduling delays no longer appear in the activity log. Longer waits are identified as local request pacing instead of provider rate-limit errors, and the completion message appears when AESPA sends the request rather than after the model responds.

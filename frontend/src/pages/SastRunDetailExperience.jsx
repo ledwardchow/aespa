@@ -275,27 +275,31 @@ function LeadEvidence({ lead, targets, onQueue, queueBusy }) {
   </aside>;
 }
 
-function CoverageView({ coverage, phases, statuses, onPhaseSelect }) {
+function CoverageView({ coverage, workProgram, assurance }) {
   const summary = coverage?.summary || {};
   const files = coverage?.files || [];
-  const total = summary.files_total || 0;
-  const reviewed = summary.files_reviewed || 0;
-  const percent = total ? Math.round(reviewed / total * 100) : 0;
+  const total = workProgram?.files?.total ?? summary.files_total ?? 0;
+  const directlyOpened = workProgram?.files?.directly_opened ?? summary.files_reviewed ?? 0;
+  const percent = total ? Math.round(directlyOpened / total * 100) : 0;
+  const workItems = workProgram?.work_items || {};
+  const workers = workProgram?.workers || {};
+  const failedWorkers = (workers.failed || 0) + (workers.blocked || 0);
+  const unfinishedWorkers = Math.max((workers.total || 0) - (workers.complete || 0) - failedWorkers, 0);
   const languages = Object.entries(summary.languages || {}).sort((a, b) => b[1].total - a[1].total);
   return <div className="sast-coverage-layout">
-    <section className="sast-panel sast-coverage-phases">
-      <div className="sast-panel-header"><div><div className="sast-panel-title">Phase evidence</div><div className="sast-panel-sub">Authoritative persisted phase state</div></div><span className="sast-state sast-state-open">{Object.values(statuses).filter(status => status === "complete").length} / {PHASES.length} complete</span></div>
-      <div className="sast-phase-evidence-list">{PHASES.map(phase => <button key={phase.key} onClick={() => onPhaseSelect(phase.key)}>{statuses[phase.key] === "running" ? <span className="agent-dot agent-dot--active sast-evidence-running-dot" aria-label="running" /> : <span className={`sast-evidence-status status-${statuses[phase.key]}`}>{phaseIcon(statuses[phase.key]) || "·"}</span>}<span><strong>{phase.label}</strong><small>{phases?.[phase.key]?.message || phase.short}</small></span><em>{statuses[phase.key]}</em></button>)}</div>
+    <section className="sast-panel sast-coverage-assurance">
+      <div className="sast-panel-header"><div><div className="sast-panel-title">Coverage assurance</div><div className="sast-panel-sub">{assurance?.reasons?.length ? assurance.reasons.join(" ") : "Every generated source and sink obligation was closed."}</div></div><span className={`sast-state sast-state-${assurance?.status === "full" ? "confirmed" : "inconclusive"}`}>{assurance?.status || "pending"}</span></div>
+      <div className="sast-summary-grid sast-assurance-metrics"><div><span>Security checks completed</span><strong>{workItems.resolved || 0}/{workItems.total || 0}</strong><small>{workItems.unresolved || 0} checks still need a result</small></div><div><span>Analysis batches completed</span><strong>{workers.complete || 0}/{workers.total || 0}</strong><small>{unfinishedWorkers} unfinished{failedWorkers ? ` · ${failedWorkers} failed or blocked` : ""}</small></div><div><span>Direct file reads</span><strong>{directlyOpened}/{total}</strong><small>grep scope excluded</small></div><div><span>Search matches</span><strong>{workProgram?.files?.with_search_matches || 0}</strong><small>files returned by grep</small></div></div>
     </section>
     <section className="sast-panel">
-      <div className="sast-panel-header"><div><div className="sast-panel-title">File review coverage</div><div className="sast-panel-sub">Deterministic inventory plus actual read and search receipts</div></div><span className="sast-state sast-state-confirmed">{reviewed} / {total} reviewed</span></div>
+      <div className="sast-panel-header"><div><div className="sast-panel-title">Direct file reads</div><div className="sast-panel-sub">A search across a directory does not count as opening every file</div></div><span className="sast-state sast-state-confirmed">{directlyOpened} / {total} opened</span></div>
       <div className="sast-coverage-grid">
         <div className="sast-coverage-row"><div className="sast-coverage-name">All files</div><div className="sast-coverage-bar"><span style={{ width: `${percent}%` }} /></div><div className="sast-coverage-count">{percent}%</div></div>
         {languages.map(([language, counts]) => { const languagePercent = counts.total ? Math.round(counts.reviewed / counts.total * 100) : 0; return <div className="sast-coverage-row" key={language}><div className="sast-coverage-name">{language}</div><div className="sast-coverage-bar"><span style={{ width: `${languagePercent}%` }} /></div><div className="sast-coverage-count">{counts.reviewed}/{counts.total}</div></div>; })}
       </div>
     </section>
     <section className="sast-panel sast-file-receipts">
-      <div className="sast-panel-header"><div><div className="sast-panel-title">Review receipts</div><div className="sast-panel-sub">{files.length} inventoried files</div></div></div>
+      <div className="sast-panel-header"><div><div className="sast-panel-title">Direct read receipts</div><div className="sast-panel-sub">{files.length} inventoried files</div></div></div>
       <div className="sast-file-list">{files.slice(0, 250).map(file => <div key={file.path}><span className={`sast-evidence-status status-${file.reviewed ? "complete" : "pending"}`}>{file.reviewed ? "✓" : "·"}</span><code title={file.path}>{file.path}</code><small>{file.language} · {file.read_count} read{file.read_count === 1 ? "" : "s"}</small></div>)}</div>
     </section>
   </div>;
@@ -313,7 +317,7 @@ function ActivityView({ logs, agentLog, scanRunning, tokenUsage, tokenExpanded, 
 
 export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const [run, setRun] = useState(null);
-  const [analysis, setAnalysis] = useState({ phases: {}, coverage: { files: [], summary: {} }, report: {} });
+  const [analysis, setAnalysis] = useState({ phases: {}, coverage: { files: [], summary: {} }, work_program: {}, assurance: {}, report: {} });
   const [logs, setLogs] = useState([]);
   const [agentLog, setAgentLog] = useState([]);
   const [leads, setLeads] = useState([]);
@@ -354,6 +358,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const selectedLead = useMemo(() => leads.find(lead => lead.id === selectedLeadId) || leads[0] || null, [leads, selectedLeadId]);
   const reportableCount = leads.filter(lead => lead.reportable).length;
   const proofGapCount = leads.reduce((count, lead) => count + jsonValue(lead.proof_gaps_json, []).length, 0);
+  const workItemSummary = analysis.work_program?.work_items || {};
   const goTab = nextTab => { setTab(nextTab); nav(`#/sast-runs/${runId}/${nextTab}`); };
   const onStart = async () => { setStartBusy(true); setError(null); try { await api.startSastScan(runId); setActivePhase(null); setScanRunning(true); await loadData(); } catch (err) { setError(err.message); } finally { setStartBusy(false); } };
   const onPause = async () => { setStartBusy(true); setError(null); try { await api.pauseSastScan(runId); await loadData(); } catch (err) { setError(err.message); } finally { setStartBusy(false); } };
@@ -375,9 +380,9 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       <div className="sast-run-content">
         {error && <div className="alert error">{error}</div>}{notice && <div className="alert info sast-inline-notice">{notice}</div>}
         <div className="sast-phase-banner"><div><strong>{PHASES.find(item => item.key === displayedPhase)?.label}</strong><span>{phaseEntry.message || "This phase has not started."}</span></div><span className="sast-phase-banner-status">{statuses[displayedPhase]}</span></div>
-        <div className="sast-summary-grid"><div><span>Files reviewed</span><strong>{analysis.coverage?.summary?.files_reviewed || 0}/{analysis.coverage?.summary?.files_total || 0}</strong><small>deterministic receipts</small></div><div><span>Candidates</span><strong>{leads.length}</strong><small>persisted hypotheses</small></div><div><span>Reportable</span><strong>{reportableCount}</strong><small>independently confirmed</small></div><div><span>Proof gaps</span><strong>{proofGapCount}</strong><small>unresolved evidence</small></div></div>
+        <div className="sast-summary-grid"><div><span>Security checks</span><strong>{workItemSummary.resolved || 0}/{workItemSummary.total || 0}</strong><small>{workItemSummary.unresolved || 0} remaining</small></div><div><span>Candidates</span><strong>{leads.length}</strong><small>persisted hypotheses</small></div><div><span>Reportable</span><strong>{reportableCount}</strong><small>independently confirmed</small></div><div><span>Proof gaps</span><strong>{proofGapCount}</strong><small>unresolved evidence</small></div></div>
         {tab === "candidates" && <CandidatesView leads={leads} selectedLead={selectedLead} onSelect={setSelectedLeadId} targets={targets} onQueue={onQueue} queueBusy={queueBusy} reportableCount={reportableCount} onExport={onExportReport} />}
-        {tab === "coverage" && <CoverageView coverage={analysis.coverage} phases={analysis.phases} statuses={statuses} onPhaseSelect={setActivePhase} />}
+        {tab === "coverage" && <CoverageView coverage={analysis.coverage} workProgram={analysis.work_program} assurance={analysis.assurance} />}
         {tab === "activity" && <ActivityView logs={logs} agentLog={agentLog} scanRunning={scanRunning} tokenUsage={tokenUsage} tokenExpanded={tokenExpanded} setTokenExpanded={setTokenExpanded} runId={runId} />}
         <div ref={bottomRef} />
       </div>
