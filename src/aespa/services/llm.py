@@ -79,6 +79,10 @@ class LLMQuotaPauseError(RuntimeError):
         self.snapshot = snapshot or {}
 
 
+class LLMContextLimitError(RuntimeError):
+    """The fixed prompt and tool overhead cannot fit the configured window."""
+
+
 _REFUSAL_MARKERS = (
     "cyber_policy",
     "content was flagged for possible cybersecurity risk",
@@ -160,6 +164,9 @@ _run_token_seeded: set[tuple[str, int]] = set()
 
 
 # ── Rate Limiting Core ────────────────────────────────────────────────────────
+
+
+LLM_PACING_NOTICE_THRESHOLD_S = 1.0
 
 
 class AsyncTokenBucketLimiter:
@@ -263,9 +270,10 @@ class AsyncTokenBucketLimiter:
                     else 0.0
                 )
                 wait_time = max(wait_tokens, wait_reqs, blocked_for)
-                slept = True
+                if wait_time >= LLM_PACING_NOTICE_THRESHOLD_S:
+                    slept = True
 
-            if on_wait and not notified:
+            if slept and on_wait and not notified:
                 notified = True
                 try:
                     on_wait(wait_time)
@@ -891,33 +899,31 @@ def _emit_run_event(event: dict) -> None:
             pass
 
 
-def _emit_rate_limit_waiting(
+def _emit_llm_pacing_waiting(
     model: str, reserved_tokens: float, wait_time: float
 ) -> None:
-    """Tell the user the scan is pacing for the rate limit (not stuck)."""
+    """Tell the user AESPA is waiting for its configured request budget."""
     _emit_run_event(
         {
             "type": "scanner_phase",
-            "phase": "rate_limit",
+            "phase": "llm_pacing",
             "status": "active",
             "message": (
-                f"LLM rate limit reached — pacing requests to stay within the "
-                f"configured limit (waiting ~{wait_time:.0f}s, reserved "
-                f"{int(reserved_tokens):,} tokens for {model})…"
+                f"Waiting about {math.ceil(wait_time)}s before the next LLM request "
+                f"to stay within the configured throughput (estimated request size: "
+                f"{int(reserved_tokens):,} tokens; model: {model})."
             ),
         }
     )
 
 
-def _emit_rate_limit_cleared(model: str, used_tokens: int) -> None:
+def _emit_llm_pacing_finished(model: str) -> None:
     _emit_run_event(
         {
             "type": "scanner_phase",
-            "phase": "rate_limit",
+            "phase": "llm_pacing",
             "status": "complete",
-            "message": (
-                f"LLM rate limit cleared — resuming (used {used_tokens:,} tokens for {model})."
-            ),
+            "message": f"Pacing wait finished. Sending the next request to {model}.",
         }
     )
 
@@ -1458,14 +1464,16 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     estimated_output = config.max_tokens or 4096
     total_estimated = estimated_input + estimated_output
 
-    # Notify the user the moment pacing starts (on_wait fires before the sleep),
-    # so a rate-limited scan never looks frozen.
+    # Notify the user when a meaningful local pacing wait starts, so the scan
+    # does not look frozen.
     slept = await limiter.acquire(
         total_estimated,
-        on_wait=lambda wt: _emit_rate_limit_waiting(
+        on_wait=lambda wt: _emit_llm_pacing_waiting(
             config.model, min(total_estimated, limiter.max_tokens), wt
         ),
     )
+    if slept:
+        _emit_llm_pacing_finished(config.model)
 
     try:
         if config.provider == "factory_droid":
@@ -1502,9 +1510,6 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         else:
             actual_total = total_estimated
             await limiter.reconcile(total_estimated, total_estimated)
-
-        if slept:
-            _emit_rate_limit_cleared(config.model, actual_total)
 
         return resp
     except Exception as exc:
@@ -1646,11 +1651,7 @@ async def stream_chat_completion(
                 import boto3
                 from botocore.config import Config as _BotocoreConfig
 
-                region = (
-                    os.getenv("AWS_REGION")
-                    or os.getenv("AWS_DEFAULT_REGION")
-                    or _bedrock_region_from_url(config.base_url or "")
-                )
+                region = _bedrock_region(config)
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
@@ -2823,7 +2824,16 @@ def _extract_bedrock_text(data: dict[str, Any]) -> str:
 
 def _bedrock_region_from_url(base_url: str) -> str:
     match = re.search(r"bedrock-runtime[.-]([a-z0-9-]+)\.", base_url)
-    return match.group(1) if match else "us-east-1"
+    return match.group(1) if match else "ap-southeast-2"
+
+
+def _bedrock_region(config: LLMConfig) -> str:
+    """Resolve Runtime region, preferring the provider's selected endpoint."""
+    if config.base_url:
+        return _bedrock_region_from_url(config.base_url)
+    return (
+        os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "ap-southeast-2"
+    )
 
 
 # SigV4 signing name for the bedrock-mantle endpoint.  AWS signs Mantle requests
@@ -3025,11 +3035,7 @@ async def _bedrock(
         import boto3
         from botocore.config import Config as _BotocoreConfig
 
-        region = (
-            os.getenv("AWS_REGION")
-            or os.getenv("AWS_DEFAULT_REGION")
-            or _bedrock_region_from_url(config.base_url or "")
-        )
+        region = _bedrock_region(config)
         profile = os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
         _model = config.model
@@ -3286,7 +3292,7 @@ async def analyse_probes(
     if not results:
         return []
 
-    batches = _chunk_probe_results(results)
+    batches = _chunk_probe_results(results, config=config, url=url)
 
     async def _analyse(turn_num: int, batch: list[str]) -> list[dict]:
         batch_findings = await _analyse_probe_batch(config, url, batch)
@@ -3328,18 +3334,73 @@ def _format_probe_result(result: dict) -> str:
     )
 
 
-def _chunk_probe_results(results: list[dict]) -> list[list[str]]:
+def _fit_text_to_tokens(text: str, budget: int, model: str | None = None) -> str:
+    if budget <= 0 or estimate_tokens(text, model=model) <= budget:
+        return text
+    marker = "\n[… evidence excerpt trimmed; use the durable evidence record for the full response …]\n"
+    available = max(128, budget - estimate_tokens(marker, model=model))
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        candidate = text[: mid // 2] + marker + text[-(mid - mid // 2) :]
+        if estimate_tokens(candidate, model=model) <= available:
+            lo = mid
+        else:
+            hi = mid - 1
+    if lo <= 0:
+        return marker
+    return text[: lo // 2] + marker + text[-(lo - lo // 2) :]
+
+
+def _chunk_probe_results(
+    results: list[dict],
+    *,
+    config: LLMConfig | None = None,
+    url: str = "",
+) -> list[list[str]]:
     batches: list[list[str]] = []
     current_batch: list[str] = []
     current_size = 0
 
+    token_budget = 0
+    if config is not None and getattr(config, "max_context_tokens", 0):
+        safety = max(1024, min(8192, int(config.max_context_tokens) // 20))
+        empty_prompt = build_reporting_analyse_prompt(url, [])
+        overhead = estimate_tokens(
+            empty_prompt, model=config.model, provider=config.provider
+        )
+        token_budget = max(
+            1024,
+            int(config.max_context_tokens)
+            - int(config.max_tokens or 0)
+            - safety
+            - overhead,
+        )
+
     for result in results:
         formatted = _format_probe_result(result)
+        if token_budget:
+            formatted = _fit_text_to_tokens(formatted, token_budget, model=config.model)
         separator_size = 2 if current_batch else 0
         next_size = current_size + separator_size + len(formatted)
+        next_token_count = 0
+        if token_budget:
+            candidate_text = build_reporting_analyse_prompt(
+                url, [*current_batch, formatted]
+            )
+            next_token_count = estimate_tokens(
+                candidate_text, model=config.model, provider=config.provider
+            )
         if current_batch and (
             len(current_batch) >= ANALYSE_RESULTS_PER_BATCH
             or next_size > ANALYSE_RESULTS_TEXT_BUDGET
+            or (
+                token_budget
+                and next_token_count
+                > int(config.max_context_tokens)
+                - int(config.max_tokens or 0)
+                - max(1024, min(8192, int(config.max_context_tokens) // 20))
+            )
         ):
             batches.append(current_batch)
             current_batch = []
@@ -3938,7 +3999,13 @@ CONTEXT_TOOL_RESULT_CHAR_LIMIT = 12_000
 def compact_agentic_messages(
     messages: list[dict],
     *,
-    max_context_chars: int,
+    max_context_chars: int = 0,
+    max_context_tokens: int = 0,
+    max_output_tokens: int = 0,
+    system_message: str = "",
+    tools: list[dict] | None = None,
+    model: str | None = None,
+    provider: str = "openai",
     recent_messages: int = 32,
 ) -> tuple[list[dict], dict[str, int] | None]:
     """Compact completed tool exchanges while preserving protocol-valid pairs.
@@ -3948,60 +4015,206 @@ def compact_agentic_messages(
     and full response bodies are deliberately excluded from the journal.
     """
     before_chars = len(json.dumps(messages, default=str))
-    if max_context_chars <= 0 or before_chars <= max_context_chars or len(messages) < 8:
+    before_tokens = (
+        _estimate_tools_call_tokens(
+            system_message,
+            messages,
+            tools=tools,
+            model=model,
+            provider=provider,
+        )
+        if max_context_tokens > 0
+        else 0
+    )
+    safety_tokens = (
+        max(1024, min(8192, max_context_tokens // 20)) if max_context_tokens else 0
+    )
+    input_budget = (
+        max(1024, max_context_tokens - max_output_tokens - safety_tokens)
+        if max_context_tokens
+        else 0
+    )
+    over_limit = (
+        before_tokens > input_budget
+        if max_context_tokens
+        else before_chars > max_context_chars
+    )
+    if not over_limit or len(messages) < 8:
         return messages, None
 
-    suffix_start = max(1, len(messages) - max(8, recent_messages))
-    while (
-        suffix_start < len(messages)
-        and messages[suffix_start].get("role") != "assistant"
-    ):
-        suffix_start += 1
-    if suffix_start >= len(messages) - 1:
+    def _build(suffix_count: int, journal_limit: int) -> tuple[list[dict], int]:
+        suffix_start = max(1, len(messages) - max(4, suffix_count))
+        while (
+            suffix_start < len(messages)
+            and messages[suffix_start].get("role") != "assistant"
+        ):
+            suffix_start += 1
+        if suffix_start >= len(messages) - 1:
+            return messages, 0
+        removed = messages[1:suffix_start]
+        journal_lines: list[str] = []
+        for message in removed:
+            content = message.get("content")
+            blocks = content if isinstance(content, list) else []
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    tool_input = (
+                        block.get("input")
+                        if isinstance(block.get("input"), dict)
+                        else {}
+                    )
+                    details = [str(block.get("name") or "tool")]
+                    for key in (
+                        "method",
+                        "url",
+                        "owasp_category",
+                        "test_class",
+                        "title",
+                    ):
+                        value = tool_input.get(key)
+                        if value not in (None, ""):
+                            details.append(f"{key}={str(value)[:240]}")
+                    journal_lines.append("- " + " ".join(details))
+                elif block.get("type") == "tool_result":
+                    result = str(block.get("content") or "").replace("\n", " ").strip()
+                    if result:
+                        journal_lines.append(f"  result: {result[:360]}")
+        journal = (
+            f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
+            "Use context tools for full durable evidence.]\n"
+            + "\n".join(journal_lines[-journal_limit:])
+        )[:16_000]
+        first = dict(messages[0])
+        first_content = first.get("content")
+        if isinstance(first_content, list):
+            first["content"] = list(first_content) + [{"type": "text", "text": journal}]
+        else:
+            first["content"] = f"{first_content or ''}\n\n{journal}"
+        return [first, *messages[suffix_start:]], len(removed)
+
+    compacted, removed_count = _build(recent_messages, 80)
+    truncated_tool_results = 0
+    if max_context_tokens:
+        for suffix_count, journal_limit in ((16, 60), (8, 40), (4, 20)):
+            estimated = _estimate_tools_call_tokens(
+                system_message, compacted, tools=tools, model=model, provider=provider
+            )
+            if estimated <= input_budget:
+                break
+            compacted, removed_count = _build(suffix_count, journal_limit)
+        if (
+            _estimate_tools_call_tokens(
+                system_message, compacted, tools=tools, model=model, provider=provider
+            )
+            > input_budget
+        ):
+            compacted = [dict(message) for message in compacted]
+            for index in range(1, len(compacted)):
+                message = compacted[index]
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                blocks = [
+                    dict(block) if isinstance(block, dict) else block
+                    for block in content
+                ]
+                changed = False
+                for block in blocks:
+                    if (
+                        not isinstance(block, dict)
+                        or block.get("type") != "tool_result"
+                    ):
+                        continue
+                    result = block.get("content")
+                    if not isinstance(result, str) or len(result) < 256:
+                        continue
+                    block["content"] = _fit_text_to_tokens(
+                        result,
+                        max(128, input_budget // 8),
+                        model=model,
+                    )
+                    changed = True
+                    truncated_tool_results += 1
+                if changed:
+                    message["content"] = blocks
+                if (
+                    _estimate_tools_call_tokens(
+                        system_message,
+                        compacted,
+                        tools=tools,
+                        model=model,
+                        provider=provider,
+                    )
+                    <= input_budget
+                ):
+                    break
+    if removed_count == 0:
         return messages, None
-
-    removed = messages[1:suffix_start]
-    journal_lines: list[str] = []
-    for message in removed:
-        content = message.get("content")
-        blocks = content if isinstance(content, list) else []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_use":
-                tool_input = (
-                    block.get("input") if isinstance(block.get("input"), dict) else {}
-                )
-                details = [str(block.get("name") or "tool")]
-                for key in ("method", "url", "owasp_category", "test_class", "title"):
-                    value = tool_input.get(key)
-                    if value not in (None, ""):
-                        details.append(f"{key}={str(value)[:240]}")
-                journal_lines.append("- " + " ".join(details))
-            elif block.get("type") == "tool_result":
-                result = str(block.get("content") or "").replace("\n", " ").strip()
-                if result:
-                    journal_lines.append(f"  result: {result[:360]}")
-
-    journal = (
-        f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
-        "Use context tools for full durable evidence.]\n"
-        + "\n".join(journal_lines[-80:])
-    )[:16_000]
-    first = dict(messages[0])
-    first_content = first.get("content")
-    if isinstance(first_content, list):
-        first["content"] = list(first_content) + [{"type": "text", "text": journal}]
-    else:
-        first["content"] = f"{first_content or ''}\n\n{journal}"
-    compacted = [first, *messages[suffix_start:]]
     after_chars = len(json.dumps(compacted, default=str))
+    after_tokens = (
+        _estimate_tools_call_tokens(
+            system_message,
+            compacted,
+            tools=tools,
+            model=model,
+            provider=provider,
+        )
+        if max_context_tokens
+        else 0
+    )
     return compacted, {
         "before_chars": before_chars,
         "after_chars": after_chars,
-        "removed_messages": len(removed),
+        "before_tokens": before_tokens,
+        "after_tokens": after_tokens,
+        "context_budget_tokens": input_budget,
+        "removed_messages": removed_count,
+        "truncated_tool_results": truncated_tool_results,
         "remaining_messages": len(compacted),
     }
+
+
+def compact_messages_for_config(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> tuple[list[dict], dict[str, int] | None]:
+    """Apply the configured model context budget to a live transcript."""
+    compacted, stats = compact_agentic_messages(
+        messages,
+        max_context_tokens=int(getattr(config, "max_context_tokens", 0) or 0),
+        max_output_tokens=int(getattr(config, "max_tokens", 0) or 0),
+        system_message=system_message,
+        tools=tools,
+        model=getattr(config, "model", None),
+        provider=str(
+            getattr(getattr(config, "provider", None), "value", config.provider)
+        ),
+    )
+    context_limit = int(getattr(config, "max_context_tokens", 0) or 0)
+    if context_limit:
+        safety = max(1024, min(8192, context_limit // 20))
+        budget = max(
+            1024, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety
+        )
+        estimated = _estimate_tools_call_tokens(
+            system_message,
+            compacted,
+            tools=tools,
+            model=getattr(config, "model", None),
+            provider=str(
+                getattr(getattr(config, "provider", None), "value", config.provider)
+            ),
+        )
+        if estimated > budget:
+            raise LLMContextLimitError(
+                f"The configured context window cannot fit the fixed prompt and current turn "
+                f"({estimated:,} input tokens estimated; {budget:,} available)."
+            )
+    return compacted, stats
 
 
 # All providers that support native tool use and therefore run the continuous
@@ -4147,10 +4360,12 @@ async def _call_with_tools(
     ) + (config.max_tokens or 4096)
     slept = await limiter.acquire(
         estimated,
-        on_wait=lambda wt: _emit_rate_limit_waiting(
+        on_wait=lambda wt: _emit_llm_pacing_waiting(
             config.model, min(estimated, limiter.max_tokens), wt
         ),
     )
+    if slept:
+        _emit_llm_pacing_finished(config.model)
     try:
         result = await _call_with_tools_impl(
             config, system_message, messages, tools=tools
@@ -4158,8 +4373,6 @@ async def _call_with_tools(
         usage = _last_call_tokens_var.get()
         actual_total = (usage["input"] + usage["output"]) if usage else estimated
         await limiter.reconcile(estimated, actual_total)
-        if slept:
-            _emit_rate_limit_cleared(config.model, actual_total)
         return result
     except Exception as exc:
         if config.provider == "openai_codex" and isinstance(exc, LLMQuotaPauseError):
@@ -4509,11 +4722,7 @@ async def _call_with_tools_impl(
                 import boto3
                 from botocore.config import Config as _BotocoreConfig
 
-                region = (
-                    os.getenv("AWS_REGION")
-                    or os.getenv("AWS_DEFAULT_REGION")
-                    or _bedrock_region_from_url(config.base_url or "")
-                )
+                region = _bedrock_region(config)
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
@@ -5038,6 +5247,7 @@ async def thinking_agentic_loop(
     execution_monitor_enabled: bool = True,
     max_consecutive_text_turns: int = 3,
     max_context_chars: int = 0,
+    max_context_tokens: int | None = None,
     on_context_compaction=None,
     text_only_repair_message: str | None = None,
 ) -> str:
@@ -5181,6 +5391,14 @@ async def thinking_agentic_loop(
             messages, compaction = compact_agentic_messages(
                 messages,
                 max_context_chars=max_context_chars,
+                max_context_tokens=int(
+                    max_context_tokens or getattr(config, "max_context_tokens", 0) or 0
+                ),
+                max_output_tokens=int(getattr(config, "max_tokens", 0) or 0),
+                system_message=system_message,
+                tools=tools if tools is not None else THINKING_AGENT_TOOLS,
+                model=config.model,
+                provider=str(getattr(config.provider, "value", config.provider)),
             )
             if compaction:
                 if on_context_compaction:
@@ -5205,6 +5423,28 @@ async def thinking_agentic_loop(
                         )
                     except Exception:
                         pass
+
+            context_limit = int(
+                max_context_tokens or getattr(config, "max_context_tokens", 0) or 0
+            )
+            if context_limit:
+                safety = max(1024, min(8192, context_limit // 20))
+                budget = max(
+                    1024,
+                    context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety,
+                )
+                estimated = _estimate_tools_call_tokens(
+                    system_message,
+                    messages,
+                    tools=tools if tools is not None else THINKING_AGENT_TOOLS,
+                    model=config.model,
+                    provider=str(getattr(config.provider, "value", config.provider)),
+                )
+                if estimated > budget:
+                    raise LLMContextLimitError(
+                        f"The configured context window cannot fit the fixed prompt and current turn "
+                        f"({estimated:,} input tokens estimated; {budget:,} available)."
+                    )
 
             if emit_fn:
                 try:
@@ -5363,14 +5603,14 @@ async def thinking_agentic_loop(
                     response_status = "complete"
                     response_message = f"Step {tool_call_count + 1}: LLM → {action_label} (stop: {stop_reason})"
                 else:
-                    response_status = "warning"
+                    response_status = "retrying"
                     response_kind = (
                         "empty response" if no_usable_content else "text-only response"
                     )
                     response_message = (
                         f"Step {tool_call_count + 1}: LLM returned {response_kind} "
                         f"without a tool call (native stop: {stop_reason}); "
-                        f"retry {no_tool_attempt}/3"
+                        f"retrying {no_tool_attempt}/3"
                     )
                 try:
                     emit_fn(

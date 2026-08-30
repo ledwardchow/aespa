@@ -80,9 +80,32 @@ def _native_capability(raw: Any) -> dict[str, Any] | None:
                 "default_reasoning_effort",
                 "defaultReasoningEffort",
                 "reasoning",
+                "context_length",
+                "context_window",
+                "contextWindow",
+                "max_input_tokens",
+                "inputTokenLimit",
             )
             if hasattr(raw, key)
         }
+    context_window = None
+    for key in (
+        "context_window_tokens",
+        "context_length",
+        "contextWindow",
+        "context_window",
+        "max_input_tokens",
+        "inputTokenLimit",
+        "input_token_limit",
+    ):
+        candidate = raw.get(key)
+        try:
+            candidate = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if candidate >= 1024:
+            context_window = candidate
+            break
     supported_key = next(
         (
             key
@@ -101,15 +124,27 @@ def _native_capability(raw: Any) -> dict[str, Any] | None:
             params = raw.get("supported_parameters") or []
             if "reasoning" in params or "reasoning_effort" in params:
                 # OpenRouter sometimes exposes support without enumerating levels.
-                return {
+                result = {
                     "supported_efforts": None,
                     "source": "native",
                     "confidence": "provider",
                 }
+                if context_window is not None:
+                    result["context_window_tokens"] = context_window
+                return result
             # OpenRouter includes supported_parameters for every model. If the
             # reasoning parameter is absent, this is authoritative unsupported.
-            return {
+            result = {
                 "supported_efforts": [],
+                "source": "native",
+                "confidence": "provider",
+            }
+            if context_window is not None:
+                result["context_window_tokens"] = context_window
+            return result
+        if context_window is not None:
+            return {
+                "context_window_tokens": context_window,
                 "source": "native",
                 "confidence": "provider",
             }
@@ -134,6 +169,8 @@ def _native_capability(raw: Any) -> dict[str, Any] | None:
             or default.get("value")
         )
     result: dict[str, Any] = {"source": "native", "confidence": "provider"}
+    if context_window is not None:
+        result["context_window_tokens"] = context_window
     if isinstance(raw.get("strategy"), str):
         result["strategy"] = raw["strategy"]
     result["supported_efforts"] = efforts

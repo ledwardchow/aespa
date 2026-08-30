@@ -44,6 +44,63 @@ def test_provider_specific_cache_normalization_contract():
     assert statistics.local_month(datetime(2026, 8, 1, tzinfo=timezone.utc))
 
 
+def test_codex_daybreak_uses_official_gpt_5_6_sol_prices(isolated_db_engine):
+    rates = statistics.record_usage(
+        "openai_codex",
+        "gpt-daybreak-blue-latest",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        cache_read_tokens=1_000_000,
+        cache_write_tokens=1_000_000,
+        month="2026-08",
+    )
+
+    assert rates["input_price_usd_per_million"] == 4
+    assert rates["output_price_usd_per_million"] == 20
+    assert rates["cache_read_price_usd_per_million"] == 0.4
+    assert rates["cache_write_price_usd_per_million"] == 5
+    assert rates["price_source"].endswith("/gpt-5.6-sol")
+    assert rates["price_confidence"] == "alias"
+
+
+def test_codex_known_models_use_their_official_openai_prices(isolated_db_engine):
+    rates = statistics.record_usage(
+        "openai_codex",
+        "gpt-5.6-terra",
+        input_tokens=1,
+        month="2026-08",
+    )
+
+    assert rates["input_price_usd_per_million"] == 2
+    assert rates["output_price_usd_per_million"] == 12
+    assert rates["cache_read_price_usd_per_million"] == 0.2
+    assert rates["cache_write_price_usd_per_million"] == 2.5
+    assert rates["price_confidence"] == "exact"
+
+
+def test_codex_run_counter_uses_official_api_equivalent_cost(isolated_db_engine):
+    run_id = 991000
+    key = ("web", run_id)
+    llm.set_run_context(run_id, emit_fn=None)
+    try:
+        llm._record_usage(
+            "gpt-daybreak-blue-latest",
+            input_tokens=3_000_000,
+            output_tokens=1_000_000,
+            cache_read_tokens=1_000_000,
+            cache_write_tokens=1_000_000,
+            provider="openai_codex",
+        )
+        usage = llm.get_run_token_usage(run_id)
+    finally:
+        llm.clear_run_context()
+        llm._run_token_usage.pop(key, None)
+        llm._run_token_seeded.discard(key)
+
+    assert usage["estimated_cost_available"] is True
+    assert usage["estimated_total_cost_usd"] == 29.4
+
+
 def test_openrouter_compatible_profile_is_labelled_openrouter():
     config = LLMConfig(
         provider="openai",

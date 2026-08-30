@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlmodel import Session, select
 
 from aespa.db import get_session
@@ -52,6 +52,18 @@ from aespa.services.model_capabilities import documented_model_capability
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+def _model_discovery_error(api_format: str) -> HTTPException:
+    if api_format == "openai_compatible":
+        return HTTPException(
+            status_code=502,
+            detail=(
+                "Could not load models from the OpenAI-compatible API. "
+                "Check the base URL and API key, or enter the model names manually."
+            ),
+        )
+    return HTTPException(status_code=502, detail="Could not load models from the API.")
 
 
 @router.get("/llm/codex/status", response_model=CodexIntegrationConfigOut)
@@ -335,8 +347,13 @@ async def discover_llm_models(
         log.warning(
             "Explicit model discovery for format '%s' failed: %s", api_format, exc
         )
+        if api_format == "openai_compatible":
+            raise _model_discovery_error(api_format) from exc
 
-    return list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
+    fallback = list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
+    if api_format == "openai_compatible" and not fallback:
+        raise _model_discovery_error(api_format)
+    return fallback
 
 
 @router.post("/llm/discover-model-options", response_model=LLMModelDiscoveryOut)
@@ -384,6 +401,8 @@ async def discover_llm_model_options(
         log.warning(
             "Structured model discovery for format '%s' failed: %s", api_format, exc
         )
+        if api_format == "openai_compatible":
+            raise _model_discovery_error(api_format) from exc
         models = payload.models or list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
         capabilities = {
             model: capability

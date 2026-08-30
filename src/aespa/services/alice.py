@@ -1926,6 +1926,12 @@ async def run_alice_turn_stream(
         while step_count < ALICE_MAX_STEPS:
             step_count += 1
 
+            messages, compaction = llm_svc.compact_messages_for_config(
+                llm_cfg, system_message, messages, tools=alice_tools
+            )
+            if compaction:
+                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[Older context compacted to stay within the model limit.]\\n'})}\n\n"
+
             yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Calling LLM...\n'})}\n\n"
             try:
                 yield f"data: {json.dumps({'type': 'step_llm_call', 'step': step_count, 'messages': _build_step_messages(messages)})}\n\n"
@@ -3070,6 +3076,12 @@ async def run_api_alice_turn_stream(
     try:
         while step_count < ALICE_MAX_STEPS:
             step_count += 1
+
+            messages, compaction = llm_svc.compact_messages_for_config(
+                llm_cfg, system_message, messages, tools=alice_tools
+            )
+            if compaction:
+                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[Older context compacted to stay within the model limit.]\\n'})}\n\n"
 
             yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Calling LLM...\n'})}\n\n"
             try:

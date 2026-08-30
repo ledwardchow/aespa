@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 from aespa.models import CampaignSourceMember, ComponentFact
 from aespa.services.component_facts import (
     extract_component_facts,
+    interface_fact_fingerprint,
     persist_component_facts,
 )
 
@@ -43,6 +44,45 @@ def test_extracts_auth_boundary_and_datastore_markers(tmp_path):
     fact_types = {f["fact_type"] for f in facts}
     assert "auth_boundary" in fact_types
     assert "datastore" in fact_types
+
+
+def test_extracts_path_aware_spring_security_rules(tmp_path):
+    (tmp_path / "SecurityConfig.java").write_text(
+        'http.securityMatcher("/api/customer/**")\n'
+        '.requestMatchers(HttpMethod.POST, "/api/customer/auth").permitAll()\n'
+        ".anyRequest().authenticated();\n"
+    )
+    facts = extract_component_facts(tmp_path)
+    auth_facts = [fact for fact in facts if fact["fact_type"] == "auth_boundary"]
+
+    public = next(fact for fact in auth_facts if fact["name"] == "permitAll")
+    assert public["detail"] == {
+        "scope": "path",
+        "public_paths": ["/api/customer/auth"],
+        "public_methods": ["POST"],
+    }
+    global_rule = next(
+        fact for fact in auth_facts if fact["detail"].get("scope") == "global"
+    )
+    assert global_rule["detail"]["protected_paths"] == ["/api/customer/**"]
+
+
+def test_interface_fingerprint_ignores_mapper_labels_and_host_explanations():
+    first = interface_fact_fingerprint(
+        fact_type="http_call",
+        method="GET",
+        path="/api/customer/profile/",
+        host="http://192.168.3.104 (default)",
+        name="Customer profile API",
+    )
+    second = interface_fact_fingerprint(
+        fact_type="http_call",
+        method="get",
+        path="/api/customer/profile",
+        host="http://192.168.3.104",
+        name="Profile endpoint",
+    )
+    assert first == second
 
 
 def test_extracts_framework_marker_from_package_json(tmp_path):
@@ -128,3 +168,38 @@ def test_persist_component_facts_is_idempotent_per_run(isolated_db_engine, tmp_p
             select(ComponentFact).where(ComponentFact.sast_run_id == 321)
         ).all()
     assert len(facts) == 1  # rerun replaces, does not duplicate
+
+
+def test_persist_component_facts_reuses_legacy_semantic_llm_fact(
+    isolated_db_engine, tmp_path
+):
+    (tmp_path / "app.py").write_text("@app.route('/orders')\ndef v():\n    pass\n")
+    with Session(isolated_db_engine) as s:
+        s.add(
+            ComponentFact(
+                sast_run_id=654,
+                fact_type="route",
+                method="GET",
+                path="/orders",
+                name=None,
+                detail_json='{"origin":"llm"}',
+                evidence_location="app.py:1",
+                fingerprint="legacy-label-dependent-fingerprint",
+            )
+        )
+        s.commit()
+
+    persist_component_facts(654, tmp_path)
+    with Session(isolated_db_engine) as s:
+        facts = s.exec(
+            select(ComponentFact).where(ComponentFact.sast_run_id == 654)
+        ).all()
+    assert len(facts) == 1
+    assert facts[0].detail_json == '{"origin":"llm"}'
+    assert facts[0].fingerprint == interface_fact_fingerprint(
+        fact_type="route",
+        method="GET",
+        path="/orders",
+        host=None,
+        name=None,
+    )

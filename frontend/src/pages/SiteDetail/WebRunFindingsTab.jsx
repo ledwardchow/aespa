@@ -10,24 +10,18 @@ export function WebRunFindingsTab(props) {
     <>
       <div className="findings-panel">
           <div className="findings-status-bar">
-            {thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle" && <span className={"scan-status-badge scan-status-" + (thinkingStopRequested ? "stopping" : thinkingStatus.status)}>
-                {thinkingStopRequested ? "Stopping Dynamic Scan…" : thinkingStatus.run_outcome === "incomplete" ? "Validation incomplete — resume available" : thinkingStatus.status === "running" ? "Dynamic Scan running…" : thinkingStatus.status === "analysing" || thinkingStatus.status === "analyzing" ? "Dynamic Scan analysing…" : thinkingStatus.status === "stopping" ? "Dynamic Scan stopping…" : thinkingStatus.status === "complete" ? "Dynamic Scan complete" : thinkingStatus.status === "stopped" ? "Dynamic Scan stopped" : thinkingStatus.status === "failed" ? "Dynamic Scan failed" : "Dynamic Scan"}
-              </span>}
-            <div style={{
-            flex: 1
-          }}></div>
-            {validateStatus?.status === "running" ? <span className="val-status-badge val-running">Validating… {validateStatus.confirmed + validateStatus.false_positives + (validateStatus.unconfirmed || 0)}/{validateStatus.total}</span> : validateStatus?.status === "stopped" ? <span className="val-status-badge val-fp">Validation stopped</span> : validateStatus?.status === "complete" ? <span className="val-status-badge val-complete">{validateStatus.confirmed} confirmed · {validateStatus.unconfirmed || 0} unconfirmed · {validateStatus.false_positives} low confidence</span> : null}
-            {validateStatus?.status === "running" && <button className="btn danger-outline sm" style={{
-            marginLeft: 8
-          }} onClick={onStopValidation}>Stop validation</button>}
-            {dedupeBusy && <span className="val-status-badge val-running dedupe-status">
+            <div className="findings-status-summary">
+              {thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle" && <span className={"scan-status-badge scan-status-" + (thinkingStopRequested ? "stopping" : thinkingStatus.status)}>
+                  {thinkingStopRequested ? "Stopping Dynamic Scan…" : thinkingStatus.run_outcome === "incomplete" ? "Validation incomplete — resume available" : thinkingStatus.status === "running" ? "Dynamic Scan running…" : thinkingStatus.status === "analysing" || thinkingStatus.status === "analyzing" ? "Dynamic Scan analysing…" : thinkingStatus.status === "stopping" ? "Dynamic Scan stopping…" : thinkingStatus.status === "complete" ? "Dynamic Scan complete" : thinkingStatus.status === "stopped" ? "Dynamic Scan stopped" : thinkingStatus.status === "failed" ? "Dynamic Scan failed" : "Dynamic Scan"}
+                </span>}
+              {validateStatus?.status === "running" ? <span className="val-status-badge val-running">Validating… {validateStatus.confirmed + validateStatus.false_positives + (validateStatus.unconfirmed || 0)}/{validateStatus.total}</span> : validateStatus?.status === "stopped" ? <span className="val-status-badge val-fp">Validation stopped</span> : validateStatus?.status === "complete" ? <span className="val-status-badge val-complete">{validateStatus.confirmed} confirmed · {validateStatus.unconfirmed || 0} unconfirmed · {validateStatus.false_positives} low confidence</span> : null}
+              {validateStatus?.status === "running" && <button className="btn danger-outline sm" onClick={onStopValidation}>Stop validation</button>}
+              {dedupeBusy && <span className="val-status-badge val-running dedupe-status">
                 <span className="inline-spinner"></span>
                 A.L.I.C.E. is reviewing issues…
               </span>}
-            <div className="row" style={{
-            gap: 8,
-            marginLeft: 8
-          }}>
+            </div>
+            <div className="findings-actions">
               {findings.length > 0 && <button className="btn sm" onClick={onExportFindingsMarkdown}>
                   Export Issues
                 </button>}

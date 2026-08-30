@@ -1,3 +1,5 @@
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect
 from sqlalchemy.pool import StaticPool
@@ -46,6 +48,30 @@ def test_discover_llm_models_endpoint(client: TestClient, monkeypatch):
     )
     assert r.status_code == 200
     assert r.json() == ["custom-openrouter-model-1", "custom-openrouter-model-2"]
+
+
+def test_openai_compatible_discovery_failure_has_clear_error(
+    client: TestClient, monkeypatch
+):
+    async def fail_discovery(**_kwargs):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_model_options_for_format", fail_discovery
+    )
+    response = client.post(
+        "/api/settings/llm/discover-model-options",
+        json={
+            "api_format": "openai_compatible",
+            "base_url": "http://localhost:1234/v1",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == (
+        "Could not load models from the OpenAI-compatible API. "
+        "Check the base URL and API key, or enter the model names manually."
+    )
 
 
 def test_burp_rest_api_config_round_trip(client: TestClient):
@@ -580,6 +606,23 @@ def test_cannot_delete_provider_used_by_profile(client: TestClient):
     assert r.status_code == 409
 
 
+def test_cannot_delete_model_used_by_scan_profile(client: TestClient):
+    provider = _make_provider(client).json()
+    model = _make_profile(client, provider["id"], name="Shared model").json()
+    client.post(
+        "/api/settings/llm/profiles",
+        json={"name": "Full scan", "default_model_id": model["id"]},
+    )
+
+    response = client.delete(f"/api/settings/llm/model-configs/{model['id']}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        'Cannot delete model "Shared model" because it is used by '
+        "scan profile(s): Full scan. Update those profiles first."
+    )
+
+
 def test_delete_scan_profile_clears_run_reference(client: TestClient):
     provider = _make_provider(client).json()
     model = _make_profile(client, provider["id"]).json()
@@ -845,3 +888,105 @@ def test_export_import_write_only_keys(client: TestClient):
     updated_p = next(item for item in list_r.json() if item["id"] == p["id"])
     assert updated_p["has_api_key"] is True
     assert updated_p["api_key"] is None
+
+
+def test_delete_model_used_by_scan_profile_returns_conflict(fk_engine):
+    from aespa.models import (
+        ApiCollection,
+        ApiTestRun,
+        Application,
+        AssessmentCampaign,
+        LLMConfig,
+        LLMProfile,
+        LLMProviderConfig,
+        SastRun,
+        Site,
+        TestRun,
+    )
+    from aespa.services import settings as settings_svc
+
+    with Session(fk_engine) as session:
+        provider = LLMProviderConfig(
+            name="OpenAI",
+            api_format="openai",
+            models_json='["gpt-4o", "gpt-4o-mini"]',
+        )
+        session.add(provider)
+        session.flush()
+
+        model1 = LLMConfig(
+            name="Model 1",
+            provider_id=provider.id,
+            provider="openai",
+            model="gpt-4o",
+            is_active=True,
+        )
+        model2 = LLMConfig(
+            name="Model 2",
+            provider_id=provider.id,
+            provider="openai",
+            model="gpt-4o-mini",
+            is_active=False,
+        )
+        session.add(model1)
+        session.add(model2)
+        session.flush()
+
+        profile = LLMProfile(
+            name="Custom Profile",
+            is_active=True,
+            default_model_id=model1.id,
+            role_models_json=f'{{"crawler": {model1.id}, "specialist": {model2.id}}}',
+        )
+        session.add(profile)
+
+        site = Site(name="Test Site", base_url="http://test.local")
+        session.add(site)
+        session.flush()
+        test_run = TestRun(site_id=site.id, name="Run 1", llm_config_id=model1.id)
+        session.add(test_run)
+
+        collection = ApiCollection(name="Test API", base_url="http://api.test")
+        session.add(collection)
+        session.flush()
+        api_run = ApiTestRun(
+            collection_id=collection.id, name="API Run", llm_config_id=model1.id
+        )
+        session.add(api_run)
+
+        sast_run = SastRun(name="SAST Run", llm_config_id=model1.id)
+        session.add(sast_run)
+
+        app = Application(name="Test App")
+        session.add(app)
+        session.flush()
+        campaign = AssessmentCampaign(
+            application_id=app.id, name="Campaign", llm_config_id=model1.id
+        )
+        session.add(campaign)
+        session.commit()
+
+        with pytest.raises(HTTPException) as exc_info:
+            settings_svc.delete_llm_profile(session, model1.id)
+
+        error = exc_info.value
+        assert error.status_code == 409
+        assert "Custom Profile" in error.detail
+        assert session.get(LLMConfig, model1.id) is not None
+
+        session.delete(profile)
+        session.commit()
+        settings_svc.delete_llm_profile(session, model1.id)
+
+        assert session.get(LLMConfig, model1.id) is None
+        session.refresh(model2)
+        assert model2.is_active is True
+
+        session.refresh(test_run)
+        assert test_run.llm_config_id is None
+        session.refresh(api_run)
+        assert api_run.llm_config_id is None
+        session.refresh(sast_run)
+        assert sast_run.llm_config_id is None
+        session.refresh(campaign)
+        assert campaign.llm_config_id is None

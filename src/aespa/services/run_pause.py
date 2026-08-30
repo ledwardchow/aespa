@@ -1,4 +1,4 @@
-"""Persistence helpers for quota-paused runs."""
+"""Persistence helpers for manually resumable runs."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ def save_pause(
     reset_at: datetime | None = None,
     snapshot: dict[str, Any] | None = None,
     resume_stage: str | None = None,
+    reason: str = "quota",
 ) -> RunPause:
     with Session(get_engine()) as session:
         row = session.exec(
@@ -35,7 +36,7 @@ def save_pause(
         if row is None:
             row = RunPause(run_kind=run_kind, run_id=run_id)
         row.provider = provider
-        row.reason = "quota"
+        row.reason = reason
         row.message = message
         row.reset_at = reset_at
         row.snapshot_json = json.dumps(snapshot or {}, default=str)

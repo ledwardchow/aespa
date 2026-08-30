@@ -31,7 +31,6 @@ from aespa.models import (
     UpstreamProxyConfig,
 )
 from aespa.schemas import (
-    PROVIDER_DEFAULT_MODELS,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
     BurpRestApiConfigIn,
@@ -104,6 +103,48 @@ def _provider_capabilities(provider: LLMProviderConfig) -> dict[str, dict]:
     return value if isinstance(value, dict) else {}
 
 
+CONTEXT_WINDOW_FALLBACK = 128_000
+
+
+def _context_window_from_capability(value: object) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    for key in (
+        "context_window_tokens",
+        "context_length",
+        "contextWindow",
+        "context_window",
+        "max_input_tokens",
+        "inputTokenLimit",
+        "input_token_limit",
+    ):
+        candidate = value.get(key)
+        try:
+            candidate = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if candidate >= 1024:
+            return candidate
+    return None
+
+
+def detect_context_window(provider: LLMProviderConfig, model: str) -> tuple[int, str]:
+    """Resolve a model context window from exact persisted provider metadata."""
+    capability = _provider_capabilities(provider).get(model)
+    if isinstance(capability, dict) and capability.get("source") == "openrouter":
+        matched = str(capability.get("matched_model") or "").casefold()
+        requested = model.casefold()
+        if matched and matched != requested and matched.rsplit("/", 1)[-1] != requested:
+            capability = None
+    detected = _context_window_from_capability(capability)
+    if detected is not None:
+        source = str(capability.get("context_window_source") or "provider")
+        return detected, source
+    # These are deliberately conservative defaults for models whose provider
+    # endpoint does not expose a context value. The UI marks them as fallback.
+    return CONTEXT_WINDOW_FALLBACK, "fallback"
+
+
 def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
     return LLMProviderConfigOut(
         id=provider.id,
@@ -156,6 +197,8 @@ def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
         project_id=resolved.project_id,
         model=resolved.model,
         max_tokens=resolved.max_tokens,
+        max_context_tokens=resolved.max_context_tokens,
+        context_limit_source=resolved.context_limit_source,
         temperature=resolved.temperature,
         use_vision=resolved.use_vision,
         force_tool_choice=resolved.force_tool_choice,
@@ -394,13 +437,15 @@ async def discover_model_options_for_format(
             if (capability := documented_model_capability("bedrock", model)) is not None
         }
     elif api_format == "bedrock_mantle":
-        discovered = list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
-        native = {
-            model: capability
-            for model in discovered
-            if (capability := documented_model_capability("bedrock_mantle", model))
-            is not None
-        }
+        from aespa.services import model_discovery
+
+        raw = await model_discovery.discover_bedrock_mantle_model_options(
+            api_key=api_key,
+            base_url=base_url,
+        )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
+    discovered = sorted(dict.fromkeys(discovered), key=str.casefold)
     for model in discovered:
         capability = documented_model_capability(api_format, model)
         existing = native.get(model)
@@ -532,14 +577,47 @@ def activate_llm_profile(session: Session, profile_id: int) -> LLMConfig:
 def delete_llm_profile(session: Session, profile_id: int) -> None:
     cfg = get_llm_profile(session, profile_id)
     was_active = cfg.is_active
+
+    referencing_profiles = []
+    for prof in session.exec(select(LLMProfile)).all():
+        role_models = _json_loads(prof.role_models_json, {})
+        if prof.default_model_id == profile_id or any(
+            str(model_id) == str(profile_id) for model_id in role_models.values()
+        ):
+            referencing_profiles.append(prof.name)
+    if referencing_profiles:
+        names = ", ".join(sorted(referencing_profiles, key=str.casefold))
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f'Cannot delete model "{cfg.name}" because it is used by '
+                f"scan profile(s): {names}. Update those profiles first."
+            ),
+        )
+
+    # Determine replacement model if one exists
+    replacement_model = session.exec(
+        select(LLMConfig)
+        .where(LLMConfig.id != profile_id)
+        .order_by(LLMConfig.is_active.desc(), LLMConfig.updated_at.desc())
+    ).first()
+    replacement_model_id = (
+        replacement_model.id if replacement_model is not None else None
+    )
+
+    # A model can be selected explicitly on past runs. Clear the reference before
+    # deleting the model so those records fall back to the active configuration.
+    for run_type in (TestRun, ApiTestRun, SastRun, AssessmentCampaign):
+        for run in session.exec(
+            select(run_type).where(run_type.llm_config_id == profile_id)
+        ).all():
+            run.llm_config_id = None
+            session.add(run)
+
     session.delete(cfg)
     session.commit()
-    if was_active:
-        replacement = session.exec(
-            select(LLMConfig).order_by(LLMConfig.updated_at.desc())
-        ).first()
-        if replacement is not None:
-            activate_llm_profile(session, replacement.id)
+    if was_active and replacement_model_id is not None:
+        activate_llm_profile(session, replacement_model_id)
 
 
 # ── Scan profiles (per-agent-role model assignment) ───────────────────────────
@@ -708,6 +786,18 @@ def _apply_llm_config(
     cfg.project_id = provider.project_id
     cfg.model = payload.model
     cfg.max_tokens = payload.max_tokens
+    if payload.max_context_tokens is None:
+        cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
+            provider, payload.model
+        )
+    else:
+        cfg.max_context_tokens = payload.max_context_tokens
+        cfg.context_limit_source = "manual"
+    if cfg.max_context_tokens <= payload.max_tokens + 1024:
+        raise HTTPException(
+            status_code=422,
+            detail="The model context window must leave at least 1024 tokens for input",
+        )
     cfg.temperature = payload.temperature
     cfg.use_vision = payload.use_vision
     cfg.force_tool_choice = payload.force_tool_choice
@@ -997,7 +1087,9 @@ def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
         )
     return SpecialistAgentConfigOut(
         enabled=cfg.enabled,
+        auto_dispatch_enabled=cfg.auto_dispatch_enabled,
         max_concurrent=cfg.max_concurrent,
+        max_queued=cfg.max_queued,
         max_steps=cfg.max_steps,
         min_priority=cfg.min_priority,
         dispatch_idor=cfg.dispatch_idor,
@@ -1010,6 +1102,7 @@ def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
         dispatch_cors=cfg.dispatch_cors,
         dispatch_crypto=cfg.dispatch_crypto,
         dispatch_config=cfg.dispatch_config,
+        dispatch_file_upload=cfg.dispatch_file_upload,
         trigger_specialist_on_burp=cfg.trigger_specialist_on_burp,
         updated_at=cfg.updated_at,
     )
@@ -1022,7 +1115,9 @@ def upsert_specialist_agent_config(
     if cfg is None:
         cfg = SpecialistAgentConfig(id=_SINGLETON_ID)
     cfg.enabled = payload.enabled
+    cfg.auto_dispatch_enabled = payload.auto_dispatch_enabled
     cfg.max_concurrent = payload.max_concurrent
+    cfg.max_queued = payload.max_queued
     cfg.max_steps = payload.max_steps
     cfg.min_priority = payload.min_priority
     cfg.dispatch_idor = payload.dispatch_idor
@@ -1035,6 +1130,7 @@ def upsert_specialist_agent_config(
     cfg.dispatch_cors = payload.dispatch_cors
     cfg.dispatch_crypto = payload.dispatch_crypto
     cfg.dispatch_config = payload.dispatch_config
+    cfg.dispatch_file_upload = payload.dispatch_file_upload
     cfg.trigger_specialist_on_burp = payload.trigger_specialist_on_burp
     cfg.updated_at = _utcnow()
     session.add(cfg)
@@ -1298,6 +1394,7 @@ def export_llm_config(
             else "",
             model=c.model,
             max_tokens=c.max_tokens,
+            max_context_tokens=c.max_context_tokens,
             temperature=c.temperature,
             reasoning_effort=c.reasoning_effort,
             use_vision=c.use_vision,
@@ -1434,6 +1531,18 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         cfg.base_url = provider.base_url
         cfg.model = item.model
         cfg.max_tokens = item.max_tokens
+        if item.max_context_tokens is None:
+            cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
+                provider, item.model
+            )
+        else:
+            cfg.max_context_tokens = item.max_context_tokens
+            cfg.context_limit_source = "manual"
+        if cfg.max_context_tokens <= item.max_tokens + 1024:
+            raise HTTPException(
+                status_code=422,
+                detail="The model context window must leave at least 1024 tokens for input",
+            )
         cfg.temperature = item.temperature
         try:
             cfg.reasoning_effort = validate_effort(

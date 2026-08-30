@@ -123,6 +123,10 @@ export function WebRunActivityTab(props) {
                 label: "⚠ LLM",
                 cls: "phase-warning"
               },
+              llm_pacing: {
+                label: "LLM pacing",
+                cls: "phase-llm-wait"
+              },
               credential_warning: {
                 label: "⚠ Auth",
                 cls: "phase-warning"

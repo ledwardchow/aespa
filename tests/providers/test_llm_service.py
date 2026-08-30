@@ -56,6 +56,54 @@ def test_agentic_context_compaction_preserves_recent_tool_pairs():
     assert compacted[-1]["role"] == "user"
 
 
+def test_agentic_context_compaction_uses_model_token_budget():
+    config = LLMConfig(
+        provider="openai_compatible",
+        model="local",
+        max_tokens=1000,
+        max_context_tokens=20_000,
+    )
+    messages = [{"role": "user", "content": "initial brief"}]
+    for index in range(80):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"call-{index}",
+                            "name": "http_request",
+                            "input": {"url": f"https://target.local/{index}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": f"call-{index}",
+                            "content": "response " + ("x" * 900),
+                        }
+                    ],
+                },
+            ]
+        )
+
+    compacted, stats = llm.compact_messages_for_config(
+        config,
+        "system prompt",
+        messages,
+        tools=[],
+    )
+
+    assert stats is not None
+    assert stats["before_tokens"] > stats["after_tokens"]
+    assert stats["after_tokens"] <= stats["context_budget_tokens"]
+    assert compacted[0]["role"] == "user"
+
+
 def test_limiter_oversized_estimate_does_not_hang():
     # A single request estimated larger than the entire per-minute budget must
     # not loop forever waiting for capacity that can never exist. Pre-fix, this
@@ -65,9 +113,10 @@ def test_limiter_oversized_estimate_does_not_hang():
     assert slept is False  # clamped to max_tokens; the full bucket satisfies it at once
 
 
-def test_limiter_on_wait_fires_when_pacing():
+def test_limiter_on_wait_fires_when_pacing(monkeypatch):
     # When the bucket is empty the next acquire must pace, and on_wait must fire
     # (before the sleep) so callers can tell the user it is not stuck.
+    monkeypatch.setattr(llm, "LLM_PACING_NOTICE_THRESHOLD_S", 0.01)
     limiter = llm.AsyncTokenBucketLimiter(tpm=6000)  # 100 tokens/sec
     waits: list[float] = []
 
@@ -77,6 +126,36 @@ def test_limiter_on_wait_fires_when_pacing():
 
     asyncio.run(asyncio.wait_for(_run(), timeout=10))
     assert waits and waits[0] > 0
+
+
+def test_limiter_does_not_report_subsecond_rounding_wait():
+    limiter = llm.AsyncTokenBucketLimiter(tpm=60_000)  # 1,000 tokens/sec
+    waits: list[float] = []
+
+    async def _run():
+        await limiter.acquire(60_000)
+        return await limiter.acquire(1, on_wait=lambda wt: waits.append(wt))
+
+    reported_wait = asyncio.run(asyncio.wait_for(_run(), timeout=5))
+
+    assert reported_wait is False
+    assert waits == []
+
+
+def test_llm_pacing_events_describe_local_scheduling(monkeypatch):
+    events = []
+    monkeypatch.setattr(llm, "_emit_run_event", events.append)
+
+    llm._emit_llm_pacing_waiting("example-model", 75_558, 1.2)
+    llm._emit_llm_pacing_finished("example-model")
+
+    assert [event["phase"] for event in events] == ["llm_pacing", "llm_pacing"]
+    assert "Waiting about 2s" in events[0]["message"]
+    assert "estimated request size: 75,558 tokens" in events[0]["message"]
+    assert "rate limit" not in events[0]["message"].lower()
+    assert events[1]["message"] == (
+        "Pacing wait finished. Sending the next request to example-model."
+    )
 
 
 def test_limiter_reconcile_only_credits_what_was_reserved():
@@ -643,15 +722,15 @@ def test_agentic_loop_logs_native_stop_and_terminal_no_tool_failure(monkeypatch)
     )
 
     assert summary == ""
-    warnings = [
+    retries = [
         event
         for event in emitted
-        if event.get("phase") == "llm_response" and event.get("status") == "warning"
+        if event.get("phase") == "llm_response" and event.get("status") == "retrying"
     ]
-    assert len(warnings) == 3
-    assert warnings[0]["data"]["native_stop_reason"] == "guardrail_intervened"
-    assert warnings[0]["data"]["no_tool_retry"] == 1
-    assert warnings[0]["data"]["provider_diagnostics"][0]["transport"] == {
+    assert len(retries) == 3
+    assert retries[0]["data"]["native_stop_reason"] == "guardrail_intervened"
+    assert retries[0]["data"]["no_tool_retry"] == 1
+    assert retries[0]["data"]["provider_diagnostics"][0]["transport"] == {
         "request_id": "request-123",
         "http_status": 200,
     }
@@ -2071,7 +2150,8 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
     fake_boto3 = SimpleNamespace(Session=FakeSession)
     monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
     monkeypatch.setenv("AWS_PROFILE", "bedrock-dev")
-    monkeypatch.delenv("AWS_REGION", raising=False)
+    # The configured endpoint/region must win over ambient AWS settings.
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
     monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
 
     config = LLMConfig(
@@ -2097,6 +2177,21 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
         "messages": [{"role": "user", "content": [{"text": "hello"}]}],
         "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
     }
+
+
+def test_bedrock_runtime_defaults_to_sydney_when_region_is_unconfigured(monkeypatch):
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url=None,
+        model="global.anthropic.claude-sonnet-4-6",
+        max_tokens=2048,
+    )
+
+    assert llm._bedrock_region(config) == "ap-southeast-2"
 
 
 def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blank(

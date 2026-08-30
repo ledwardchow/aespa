@@ -24,7 +24,58 @@ DEFAULT_CREDIT_PRICES: dict[str, tuple[float, str]] = {
     "factory_droid": (7.0, "Factory credits per 1,000,000 credits"),
 }
 
-SUBSCRIPTION_PROVIDERS = {"openai_codex", "google_antigravity"}
+SUBSCRIPTION_PROVIDERS = {"google_antigravity"}
+
+OPENAI_MODEL_DOCS_URL = "https://developers.openai.com/api/docs/models"
+_CODEX_PRICE_ALIASES = {
+    "daybreak-blue-latest": "gpt-5.6-sol",
+    "gpt-daybreak-blue-latest": "gpt-5.6-sol",
+    "gpt-5.6": "gpt-5.6-sol",
+    "gpt-5.6-sol": "gpt-5.6-sol",
+    "gpt-5.6-terra": "gpt-5.6-terra",
+    "gpt-5.6-luna": "gpt-5.6-luna",
+    "gpt-5.5": "gpt-5.5",
+    "gpt-5.4": "gpt-5.4",
+    "gpt-5.4-mini": "gpt-5.4-mini",
+}
+_OFFICIAL_OPENAI_PRICES = {
+    "gpt-5.6-sol": {
+        "input_price_usd_per_million": 4.0,
+        "output_price_usd_per_million": 20.0,
+        "cache_read_price_usd_per_million": 0.4,
+        "cache_write_price_usd_per_million": 5.0,
+    },
+    "gpt-5.6-terra": {
+        "input_price_usd_per_million": 2.0,
+        "output_price_usd_per_million": 12.0,
+        "cache_read_price_usd_per_million": 0.2,
+        "cache_write_price_usd_per_million": 2.5,
+    },
+    "gpt-5.6-luna": {
+        "input_price_usd_per_million": 0.2,
+        "output_price_usd_per_million": 1.2,
+        "cache_read_price_usd_per_million": 0.02,
+        "cache_write_price_usd_per_million": 0.25,
+    },
+    "gpt-5.5": {
+        "input_price_usd_per_million": 5.0,
+        "output_price_usd_per_million": 30.0,
+        "cache_read_price_usd_per_million": 0.5,
+        "cache_write_price_usd_per_million": None,
+    },
+    "gpt-5.4": {
+        "input_price_usd_per_million": 2.5,
+        "output_price_usd_per_million": 15.0,
+        "cache_read_price_usd_per_million": 0.25,
+        "cache_write_price_usd_per_million": None,
+    },
+    "gpt-5.4-mini": {
+        "input_price_usd_per_million": 0.75,
+        "output_price_usd_per_million": 4.5,
+        "cache_read_price_usd_per_million": 0.075,
+        "cache_write_price_usd_per_million": None,
+    },
+}
 
 _INCLUSIVE_INPUT_PROVIDERS = {
     "openai",
@@ -169,6 +220,24 @@ def _feed(session: Session) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _official_codex_rates(model: str) -> dict[str, Any] | None:
+    requested_model = str(model or "").strip().lower()
+    priced_model = _CODEX_PRICE_ALIASES.get(requested_model)
+    prices = _OFFICIAL_OPENAI_PRICES.get(priced_model or "")
+    if not prices:
+        return None
+    return {
+        **prices,
+        "credit_price_usd_per_million": None,
+        "credit_unit": None,
+        "price_source": f"{OPENAI_MODEL_DOCS_URL}/{priced_model}",
+        "price_confidence": "exact"
+        if requested_model == priced_model
+        else "alias",
+        "manual_override": False,
+    }
+
+
 def _rates_for(session: Session, provider: str, model: str) -> dict[str, Any]:
     if provider in SUBSCRIPTION_PROVIDERS:
         return {
@@ -211,6 +280,8 @@ def _rates_for(session: Session, provider: str, model: str) -> dict[str, Any]:
         )
         rates["credit_unit"] = rates["credit_unit"] or credit_unit
         return rates
+    if provider == "openai_codex":
+        return _official_codex_rates(model) or {}
     resolved = resolve_price(provider, model, _feed(session)) or {}
     credit_price, credit_unit = _native_credit_defaults(provider)
     resolved.setdefault("credit_price_usd_per_million", credit_price)
@@ -511,7 +582,11 @@ def refresh_prices(session: Session) -> dict[str, Any]:
     for row in current_rows:
         if row.manual_override:
             continue
-        rates = resolve_price(row.provider, row.model, payload) or {}
+        rates = (
+            _official_codex_rates(row.model)
+            if row.provider == "openai_codex"
+            else resolve_price(row.provider, row.model, payload)
+        ) or {}
         credit_price, credit_unit = _native_credit_defaults(row.provider)
         for key, value in rates.items():
             setattr(row, key, value)
@@ -525,7 +600,11 @@ def refresh_prices(session: Session) -> dict[str, Any]:
     for catalog in list(session.exec(select(LLMPriceCatalog))):
         if catalog.manual_override:
             continue
-        rates = resolve_price(catalog.provider, catalog.model, payload) or {}
+        rates = (
+            _official_codex_rates(catalog.model)
+            if catalog.provider == "openai_codex"
+            else resolve_price(catalog.provider, catalog.model, payload)
+        ) or {}
         for key, value in rates.items():
             setattr(catalog, key, value)
         catalog.updated_at = now

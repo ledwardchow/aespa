@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from sqlmodel import Session, select
@@ -35,8 +36,53 @@ from aespa.models import (
     Site,
     TestRun,
 )
+from aespa.schemas import CampaignFindingRow
 
 _UTC = timezone.utc
+
+
+def test_campaign_finding_rows_merge_cross_repo_instances():
+    from aespa.api.applications import _merge_campaign_finding_rows
+
+    first = CampaignFindingRow(
+        finding_id=10,
+        reference="CF-10",
+        run_reference="F-10",
+        target_type="api_collection",
+        target_run_id=101,
+        component_id=None,
+        component_name=None,
+        target_name="orders-api",
+        title="Cross-repository authorization issue",
+        affected_url="https://api.test/orders/1",
+        severity="high",
+        status="confirmed",
+    )
+    second = CampaignFindingRow(
+        finding_id=11,
+        reference="CF-11",
+        run_reference="F-11",
+        target_type="api_collection",
+        target_run_id=102,
+        component_id=None,
+        component_name=None,
+        target_name="orders-api",
+        title="Cross-repository authorization issue",
+        affected_url="https://api.test/orders/2",
+        severity="high",
+        status="confirmed",
+    )
+
+    rows = _merge_campaign_finding_rows(
+        [
+            (first, ("cross-repository", "source-1", 2, "A01", "api_collection")),
+            (second, ("cross-repository", "source-1", 2, "A01", "api_collection")),
+        ]
+    )
+
+    assert len(rows) == 1
+    assert rows[0].finding_id == 10
+    assert [item["finding_id"] for item in json.loads(rows[0].merged_instances)] == [11]
 
 
 def _seed_two_component_application(session: Session) -> dict:

@@ -60,7 +60,7 @@ export function SastRunForm() {
         {error && <div className="alert error">{error}</div>}
 
         <div className="field">
-          <label>Source Archive <span className="field-required">*</span></label>
+          <label>Source Archive <span className="field-required">*</span> <span className="subtle">(max 250 MB)</span></label>
           <input
             ref={fileInputRef}
             type="file"

@@ -50,6 +50,7 @@ from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import recon_summary as recon_summary_svc
 from aespa.services import scanner_sessions as session_svc
+from aespa.services import specialist_handoffs as handoff_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.execution_monitor import (
     InterventionState,
@@ -133,11 +134,13 @@ def _persist_execution_snapshot(
             "schema_version": 1,
             "captured_at": datetime.now(timezone.utc).isoformat(),
             "aespa_version": version,
-            "model": {
-                "provider": getattr(llm_cfg, "provider", None),
-                "model": getattr(llm_cfg, "model", None),
-                "max_tokens": getattr(llm_cfg, "max_tokens", None),
-                "temperature": getattr(llm_cfg, "temperature", None),
+                "model": {
+                    "provider": getattr(llm_cfg, "provider", None),
+                    "model": getattr(llm_cfg, "model", None),
+                    "max_tokens": getattr(llm_cfg, "max_tokens", None),
+                    "max_context_tokens": getattr(llm_cfg, "max_context_tokens", None),
+                    "context_limit_source": getattr(llm_cfg, "context_limit_source", None),
+                    "temperature": getattr(llm_cfg, "temperature", None),
                 "use_vision": getattr(llm_cfg, "use_vision", False),
                 "force_tool_choice": getattr(llm_cfg, "force_tool_choice", False),
             },
@@ -2390,6 +2393,16 @@ def _run_thinking_context_tool(
             },
         }
 
+    if tool_name == "specialist_status":
+        if run_id is None:
+            return {"tool": "specialist_status", "error": "run_id unavailable"}
+        return {
+            "tool": "specialist_status",
+            "handoffs": handoff_svc.list_handoffs(
+                run_id, run_kind="api" if api_run_id is not None else "web"
+            ),
+        }
+
     if tool_name == "site_map":
         route_type = str(args.get("type") or "").lower()
         flags = args.get("flags") if isinstance(args.get("flags"), list) else []
@@ -2793,6 +2806,7 @@ def _run_thinking_context_tool(
             "site_map",
             "page_detail",
             "run_status",
+            "specialist_status",
             "history_search",
             "finding_list",
             "target_inventory",
@@ -4082,6 +4096,28 @@ def _dynamic_finding_exists(
     owasp_category: str,
     is_api_run: bool = False,
 ) -> bool:
+    return (
+        _find_dynamic_duplicate(
+            session,
+            run_id=run_id,
+            title=title,
+            affected_url=affected_url,
+            owasp_category=owasp_category,
+            is_api_run=is_api_run,
+        )
+        is not None
+    )
+
+
+def _find_dynamic_duplicate(
+    session: Session,
+    *,
+    run_id: int,
+    title: str,
+    affected_url: str,
+    owasp_category: str,
+    is_api_run: bool = False,
+) -> ScanFinding | None:
     existing = session.exec(
         select(ScanFinding)
         .where(_finding_run_filter(run_id, is_api_run))
@@ -4089,13 +4125,17 @@ def _dynamic_finding_exists(
     ).all()
     normalized_title = title.strip().lower()
     normalized_owasp = owasp_category.strip().lower()
-    return any(
-        f.title.strip().lower() == normalized_title
-        or (
-            f.owasp_category.strip().lower() == normalized_owasp
-            and f.title.strip().lower() == normalized_title
-        )
-        for f in existing
+    return next(
+        (
+            finding
+            for finding in existing
+            if finding.title.strip().lower() == normalized_title
+            or (
+                finding.owasp_category.strip().lower() == normalized_owasp
+                and finding.title.strip().lower() == normalized_title
+            )
+        ),
+        None,
     )
 
 
@@ -4703,6 +4743,7 @@ _specialist_running: dict[int, int] = {}
 _specialist_seq: dict[int, int] = {}
 # Tracks live specialist asyncio tasks so they can be cancelled on stop.
 _specialist_tasks: dict[int, list[asyncio.Task]] = {}
+_specialist_pending: dict[int, list[dict[str, Any]]] = {}
 # Per-run callback fired after every persisted finding (covers all agents, not just the main loop).
 _finding_hooks: dict[int, Any] = {}
 
@@ -4734,9 +4775,32 @@ def _should_dispatch_specialist(
     return True
 
 
+def _specialist_dispatch_rejection(
+    attack_class: str, priority: int, config
+) -> str | None:
+    if config is None:
+        return "specialist settings are unavailable"
+    if not config.enabled:
+        return "specialist dispatch is disabled"
+    if config.max_concurrent == 0:
+        return "maximum concurrent specialists is zero"
+    field = _SPECIALIST_DISPATCH_CLASSES.get(attack_class)
+    if field is None:
+        return f"unsupported attack class {attack_class!r}"
+    if not getattr(config, field, False):
+        return f"specialists for {attack_class} are disabled"
+    minimum = 5 if attack_class == "ssrf" else config.min_priority
+    if priority < minimum:
+        return f"priority {priority} is below the required minimum {minimum}"
+    return None
+
+
 def _specialist_at_capacity(run_id: int, config) -> bool:
     """Return True if the run has reached max_concurrent specialists."""
-    running = _specialist_running.get(run_id, 0)
+    running = max(
+        _specialist_running.get(run_id, 0),
+        sum(1 for task in _specialist_tasks.get(run_id, []) if not task.done()),
+    )
     return running >= (config.max_concurrent if config else 5)
 
 
@@ -4784,6 +4848,7 @@ async def _run_specialist_agent(
     is_api_run: bool = False,
     target_page_id: int | None = None,
     target_session_label: str | None = None,
+    handoff_id: int | None = None,
 ) -> None:
     """Run a focused specialist agent for a specific vulnerability lead."""
     # The specialist role may be assigned a different Model than the Test Lead
@@ -4940,7 +5005,11 @@ async def _run_specialist_agent(
                 "response_evidence": str(tool_input.get("response_evidence") or ""),
             }
             # Force finding_source to specialist_agent
-            raw = {**tool_input, "finding_source": "specialist_agent"}
+            raw = {
+                **tool_input,
+                "finding_source": "specialist_agent",
+                "_handoff_id": handoff_id,
+            }
             async with _make_scanner_client(
                 cookies=cookies,
                 headers={"User-Agent": _UA, **extra_headers},
@@ -4962,6 +5031,8 @@ async def _run_specialist_agent(
                 )
             if saved is not None:
                 findings_written[0] += 1
+                if handoff_id is not None:
+                    handoff_svc.update_handoff(handoff_id, finding_id=saved.id)
                 _emit_scan_update(run_id)
                 from aespa.services import validator as _validator_svc
 
@@ -5231,6 +5302,8 @@ async def _run_specialist_agent(
     # ── Run the agentic loop ───────────────────────────────────────────────────
     try:
         _specialist_running[run_id] = _specialist_running.get(run_id, 0) + 1
+        if handoff_id is not None:
+            handoff_svc.update_handoff(handoff_id, status="running")
         events_svc.emit(
             run_id,
             {
@@ -5264,6 +5337,18 @@ async def _run_specialist_agent(
             if findings_written[0] > 0
             else "No additional issues found"
         )
+        if handoff_id is not None:
+            persisted_handoff = handoff_svc.get_handoff(handoff_id)
+            if persisted_handoff is not None and persisted_handoff.finding_id:
+                outcome = persisted_handoff.outcome or (
+                    f"Linked to finding #{persisted_handoff.finding_id}"
+                )
+        if handoff_id is not None:
+            handoff_svc.update_handoff(
+                handoff_id,
+                status="completed",
+                outcome=outcome,
+            )
         events_svc.emit(
             run_id,
             {
@@ -5291,10 +5376,20 @@ async def _run_specialist_agent(
                 "_persist": True,
             },
         )
+        if handoff_id is not None:
+            handoff_svc.update_handoff(
+                handoff_id, status="cancelled", outcome="Specialist stopped."
+            )
         raise
     except llm_svc.LLMQuotaPauseError:
         # A subscription allowance exhaustion must reach the outer scan task so
         # it can pause the whole run and preserve a resumable checkpoint.
+        if handoff_id is not None:
+            handoff_svc.update_handoff(
+                handoff_id,
+                status="failed",
+                outcome="Specialist paused because the LLM allowance was exhausted.",
+            )
         raise
     except Exception as exc:
         log.warning("Specialist agent %s error: %s", agent_id, exc)
@@ -5310,8 +5405,51 @@ async def _run_specialist_agent(
                 "_persist": True,
             },
         )
+        if handoff_id is not None:
+            handoff_svc.update_handoff(
+                handoff_id, status="failed", outcome=f"Specialist failed: {exc}"
+            )
     finally:
         _specialist_running[run_id] = max(0, _specialist_running.get(run_id, 0) - 1)
+
+
+def _launch_specialist_task(context: dict[str, Any]) -> None:
+    run_id = int(context["run_id"])
+    try:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(
+            _run_specialist_agent(**context),
+            name=f"specialist-{run_id}-{context['agent_id']}",
+        )
+        _specialist_tasks.setdefault(run_id, []).append(task)
+
+        def _completed(completed: asyncio.Task, rid: int = run_id) -> None:
+            if completed in _specialist_tasks.get(rid, []):
+                _specialist_tasks[rid].remove(completed)
+            _drain_specialist_queue(rid)
+
+        task.add_done_callback(_completed)
+    except RuntimeError:
+        if context.get("handoff_id") is not None:
+            handoff_svc.update_handoff(
+                int(context["handoff_id"]),
+                status="failed",
+                outcome="No event loop was available to start the specialist.",
+            )
+
+
+def _drain_specialist_queue(run_id: int) -> None:
+    pending = _specialist_pending.get(run_id) or []
+    while pending:
+        context = pending[0]
+        config = context.pop("_specialist_config")
+        if _specialist_at_capacity(run_id, config):
+            context["_specialist_config"] = config
+            break
+        pending.pop(0)
+        _launch_specialist_task(context)
+    if not pending:
+        _specialist_pending.pop(run_id, None)
 
 
 def _schedule_specialist_agent(
@@ -5324,13 +5462,22 @@ def _schedule_specialist_agent(
     specialist_config,  # SpecialistAgentConfigOut
     site_id: int = 0,
     is_api_run: bool = False,
-) -> str | None:
+) -> dict[str, Any]:
     """Gate-check and schedule a specialist agent as a background asyncio task.
 
-    Returns the agent_id if dispatched, or None if dropped.
+    Returns a structured dispatched, queued, duplicate, or rejected decision.
     """
-    attack_class = str(dispatch.get("attack_class") or "").strip()
-    priority = int(dispatch.get("priority") or 0)
+    raw_attack_class = str(dispatch.get("attack_class") or "").strip()
+    attack_class = handoff_svc.normalize_attack_class(raw_attack_class)
+    default_priority = (
+        5
+        if attack_class == "ssrf"
+        else int(getattr(specialist_config, "min_priority", 7) or 7)
+    )
+    try:
+        priority = int(dispatch.get("priority") or default_priority)
+    except (TypeError, ValueError):
+        priority = default_priority
     target_url = str(dispatch.get("target_url") or base_url)
     rationale = str(dispatch.get("rationale") or "")
     try:
@@ -5343,53 +5490,81 @@ def _schedule_specialist_agent(
         target_page_id = None
     target_session_label = str(dispatch.get("use_session") or "").strip() or None
 
-    if not _should_dispatch_specialist(attack_class, priority, specialist_config):
-        return None
-    if _specialist_at_capacity(run_id, specialist_config):
-        log.info(
-            "Specialist dispatch for %s dropped: at capacity (%d/%d)",
-            attack_class,
-            _specialist_running.get(run_id, 0),
-            specialist_config.max_concurrent,
-        )
-        return None
+    rejection = _specialist_dispatch_rejection(
+        attack_class or raw_attack_class, priority, specialist_config
+    )
+    if rejection:
+        return {"status": "rejected", "reason": rejection, "agent_id": None}
+
+    pending = _specialist_pending.setdefault(run_id, [])
+    at_capacity = _specialist_at_capacity(run_id, specialist_config)
+    if at_capacity and len(pending) >= int(
+        getattr(specialist_config, "max_queued", 20) or 0
+    ):
+        return {
+            "status": "rejected",
+            "reason": "specialist queue is full",
+            "agent_id": None,
+        }
 
     agent_id = _next_specialist_agent_id(run_id, attack_class)
     max_steps = specialist_config.max_steps if specialist_config else 30
+    parameter = handoff_svc.infer_parameter(
+        target_url, dispatch.get("body"), dispatch.get("parameter")
+    )
+    handoff, created = handoff_svc.create_or_get_handoff(
+        run_id=run_id,
+        run_kind="api" if is_api_run else "web",
+        attack_class=attack_class,
+        target_url=target_url,
+        parameter=parameter,
+        session_label=target_session_label,
+        priority=priority,
+        rationale=rationale,
+        dispatch_source=str(dispatch.get("dispatch_source") or "test_lead"),
+        agent_id=agent_id,
+    )
+    if not created:
+        return {
+            "status": "duplicate",
+            "reason": f"scope already {handoff.status} as {handoff.agent_id}",
+            "agent_id": handoff.agent_id,
+            "handoff_id": handoff.id,
+        }
 
-    try:
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(
-            _run_specialist_agent(
-                run_id=run_id,
-                agent_id=agent_id,
-                attack_class=attack_class,
-                target_url=target_url,
-                rationale=rationale,
-                session_vault=session_vault,
-                llm_cfg=llm_cfg,
-                base_url=base_url,
-                scanner_policy=scanner_policy,
-                max_steps=max_steps,
-                site_id=site_id,
-                is_api_run=is_api_run,
-                target_page_id=target_page_id,
-                target_session_label=target_session_label,
-            ),
-            name=f"specialist-{run_id}-{agent_id}",
-        )
-        _specialist_tasks.setdefault(run_id, []).append(task)
-        task.add_done_callback(
-            lambda t, rid=run_id: (
-                _specialist_tasks.get(rid, []).remove(t)
-                if t in _specialist_tasks.get(rid, [])
-                else None
-            )
-        )
-    except RuntimeError:
-        return None
-
-    return agent_id
+    context = {
+        "run_id": run_id,
+        "agent_id": agent_id,
+        "attack_class": attack_class,
+        "target_url": target_url,
+        "rationale": rationale,
+        "session_vault": session_vault,
+        "llm_cfg": llm_cfg,
+        "base_url": base_url,
+        "scanner_policy": scanner_policy,
+        "max_steps": max_steps,
+        "site_id": site_id,
+        "is_api_run": is_api_run,
+        "target_page_id": target_page_id,
+        "target_session_label": target_session_label,
+        "handoff_id": handoff.id,
+    }
+    if at_capacity:
+        context["_specialist_config"] = specialist_config
+        pending.append(context)
+        return {
+            "status": "queued",
+            "reason": "specialist capacity is full; queued for the next slot",
+            "agent_id": agent_id,
+            "handoff_id": handoff.id,
+        }
+    _launch_specialist_task(context)
+    return {
+        "status": "dispatched",
+        "reason": "specialist started",
+        "agent_id": agent_id,
+        "handoff_id": handoff.id,
+    }
 
 
 def dispatch_specialist_agent(
@@ -5437,7 +5612,7 @@ def dispatch_specialist_agent(
     if use_session:
         dispatch["use_session"] = use_session
 
-    return _schedule_specialist_agent(
+    decision = _schedule_specialist_agent(
         run_id=run_id,
         dispatch=dispatch,
         session_vault=session_vault,
@@ -5446,6 +5621,11 @@ def dispatch_specialist_agent(
         scanner_policy=scanner_policy,
         specialist_config=specialist_config,
         site_id=site_id,
+    )
+    return (
+        decision.get("agent_id")
+        if decision.get("status") in {"dispatched", "queued"}
+        else None
     )
 
 
@@ -5509,14 +5689,52 @@ async def _persist_dynamic_finding(
                 first_page_id=first_page_id,
             )
 
-            if _dynamic_finding_exists(
+            duplicate = _find_dynamic_duplicate(
                 s,
                 run_id=run_id,
                 title=str(raw.get("title") or "Untitled finding"),
                 affected_url=affected,
                 owasp_category=str(raw.get("owasp_category") or "A00"),
                 is_api_run=is_api_run,
-            ):
+            )
+            if duplicate is not None:
+                handoff_id = raw.get("_handoff_id")
+                source = str(raw.get("finding_source") or writeup_source or "")
+                if source == "specialist_agent" or str(writeup_source or "").startswith(
+                    "specialist:"
+                ):
+                    additions = []
+                    for label, field in (
+                        ("Evidence", "evidence"),
+                        ("Request", "request_evidence"),
+                        ("Response", "response_evidence"),
+                    ):
+                        value = str(raw.get(field) or "").strip()
+                        current = str(getattr(duplicate, field) or "")
+                        if value and value not in current:
+                            setattr(
+                                duplicate,
+                                field,
+                                (
+                                    current
+                                    + f"\n\nSpecialist {label.lower()}:\n"
+                                    + value
+                                )[-EVIDENCE_TEXT_LIMIT:],
+                            )
+                            additions.append(label.lower())
+                    if additions and duplicate.finding_source == "dynamic_scan":
+                        duplicate.finding_source = "test_lead+specialist_agent"
+                    s.add(duplicate)
+                    s.commit()
+                    if handoff_id is not None:
+                        handoff_svc.update_handoff(
+                            int(handoff_id),
+                            finding_id=duplicate.id,
+                            outcome=(
+                                f"Corroborated existing finding #{duplicate.id}; "
+                                f"merged {', '.join(additions) or 'matching evidence'}."
+                            ),
+                        )
                 return None
 
             finding = _finding_from_llm(
@@ -5819,30 +6037,49 @@ async def stop_thinking_and_wait(run_id: int, timeout: float = 5.0) -> bool:
 
 async def await_specialist_barrier(run_id: int, timeout: float = 60.0) -> int:
     """Bounded specialist barrier: await in-flight specialists before finalization."""
-    tasks = [t for t in list(_specialist_tasks.get(run_id, [])) if not t.done()]
-    if not tasks:
-        return 0
-    log.info(
-        "await_specialist_barrier: run_id=%s awaiting %d specialist tasks...",
-        run_id,
-        len(tasks),
-    )
+    deadline = asyncio.get_running_loop().time() + timeout
+    completed = 0
     try:
-        done, pending = await asyncio.wait(tasks, timeout=timeout)
-        if pending:
-            log.warning(
-                "await_specialist_barrier: run_id=%s %d tasks timed out after %ss",
+        while True:
+            _drain_specialist_queue(run_id)
+            tasks = [
+                task
+                for task in list(_specialist_tasks.get(run_id, []))
+                if not task.done()
+            ]
+            queued = len(_specialist_pending.get(run_id, []))
+            if not tasks and not queued:
+                return completed
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                log.warning(
+                    "await_specialist_barrier: run_id=%s timed out with %d active and %d queued specialist(s)",
+                    run_id,
+                    len(tasks),
+                    queued,
+                )
+                for task in tasks:
+                    task.cancel()
+                return completed
+            if not tasks:
+                await asyncio.sleep(0)
+                continue
+            log.info(
+                "await_specialist_barrier: run_id=%s awaiting %d active and %d queued specialist(s)...",
                 run_id,
-                len(pending),
-                timeout,
+                len(tasks),
+                queued,
             )
-            for t in pending:
-                if not t.done():
-                    t.cancel()
-        return len(done)
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            completed += len(done)
+            await asyncio.sleep(0)
     except Exception as exc:
         log.warning("await_specialist_barrier failed for run_id=%s: %s", run_id, exc)
-        return 0
+        return completed
     events_svc.emit(
         run_id,
         {
@@ -6059,6 +6296,7 @@ async def _queue_reporting_validation(run_id: int, finding_ids: list[int]) -> No
 
 
 async def _thinking_scan_task(run_id: int) -> None:
+    handoff_svc.recover_interrupted_handoffs(run_id, run_kind="web")
     _thinking_scan_status[run_id] = "running"
     _emit_thinking_status(run_id)
     events_svc.emit(
@@ -6194,6 +6432,8 @@ async def _thinking_scan_task(run_id: int) -> None:
                 _s.add(_run)
                 _s.commit()
     finally:
+        _specialist_pending.pop(run_id, None)
+        handoff_svc.recover_interrupted_handoffs(run_id, run_kind="web")
         _thinking_stop_requested.discard(run_id)
         _specialist_running.pop(run_id, None)
         _specialist_seq.pop(run_id, None)
@@ -6603,9 +6843,9 @@ async def _do_thinking_scan(run_id: int) -> None:
             await _analyse_js_sinks(run_id, _hx_sink, scanner_policy=scanner_policy)
 
     if coverage_mode == "sast_validate":
-        from aespa.services.scan_leads import format_lead_index_for_validation
+        from aespa.services.scan_leads import format_leads_for_scan_context
 
-        lead_index = format_lead_index_for_validation("web", run_id)
+        lead_index = format_leads_for_scan_context("web", run_id, coverage_mode)
         crawl_context = (
             "SAST Validate scope: investigate only the imported leads below. "
             "The lead index is a compact work list; call lead_detail before testing "
@@ -6630,9 +6870,9 @@ async def _do_thinking_scan(run_id: int) -> None:
         # Append any SAST leads imported into this web run so the Test Lead can
         # investigate them (mirrors the API scan's collection-keyed lead injection).
         try:
-            from aespa.services.scan_leads import format_leads_for_run
+            from aespa.services.scan_leads import format_leads_for_scan_context
 
-            leads_block = format_leads_for_run("web", run_id)
+            leads_block = format_leads_for_scan_context("web", run_id, coverage_mode)
             if leads_block:
                 crawl_context = f"{crawl_context}\n\n{leads_block}"
         except Exception:
@@ -8398,7 +8638,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 first_page_id=first_page_id,
                 results=all_results,
             )
-        total_batches = len(llm_svc._chunk_probe_results(all_results))
+        total_batches = len(llm_svc._chunk_probe_results(all_results, config=llm_cfg, url=base_url))
         events_svc.emit(
             run_id,
             {
@@ -8683,7 +8923,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 _run.status = "incomplete"
                 _run.outcome = "incomplete"
                 _run.terminal_reason = "coverage_budget_exhausted"
-            elif coverage_mode == "sast_validate":
+            elif coverage_mode in {"track", "sast_validate"}:
                 from aespa.services.scan_leads import get_all_leads_for_run
 
                 unresolved = [
@@ -8925,20 +9165,25 @@ async def _do_agentic_thinking_loop(
         _blocked: set[str] = set()
         _failed: dict[str, int] = {}
 
-    if coverage_mode == "sast_validate" and resume_messages is not None:
+    if coverage_mode in {"track", "sast_validate"} and resume_messages is not None:
         from aespa.services.scan_leads import format_lead_index_for_validation
 
         current_lead_index = format_lead_index_for_validation(
             "api" if is_api_run else "web", run_id
         )
+        resume_system = system_message_override or (
+            get_sast_validate_system(is_api_run=is_api_run)
+            if coverage_mode == "sast_validate"
+            else get_thinking_agent_system(False)
+        )
+        mode_name = "SAST Validate" if coverage_mode == "sast_validate" else "Quick"
         system_message_override = (
-            (system_message_override or get_sast_validate_system(is_api_run=is_api_run))
-            + "\n\nAUTHORITATIVE RESUME STATE:\n"
+            resume_system + "\n\nAUTHORITATIVE RESUME STATE:\n"
             "The earlier conversation may contain leads that have since been "
             "confirmed, dismissed, or otherwise closed. Ignore those stale entries. "
-            "In this resumed SAST Validate run, investigate only the currently open "
-            "leads listed below; `lead_list` and `lead_detail` are restricted to "
-            "those open leads.\n\n"
+            f"In this resumed {mode_name} run, investigate every currently open "
+            "SAST lead listed below before calling done. Fetch each lead with "
+            "`lead_detail` before testing it.\n\n"
             + (current_lead_index or "There are currently no open SAST leads.")
         )
 
@@ -9012,7 +9257,7 @@ async def _do_agentic_thinking_loop(
         )
 
     def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
-        if coverage_mode == "sast_validate":
+        if coverage_mode in {"track", "sast_validate"}:
             from aespa.services.scan_leads import get_all_leads_for_run
 
             owner_type = "api" if is_api_run else "web"
@@ -9042,7 +9287,8 @@ async def _do_agentic_thinking_loop(
                 f"{counts['inconclusive']} inconclusive."
             )
             _emit_completion_log(f"Step {step}: {summary}")
-            return True, summary
+            if coverage_mode == "sast_validate":
+                return True, summary
 
         def _get_coverage_gaps() -> dict[str, Any]:
             if is_api_run:
@@ -9369,6 +9615,24 @@ async def _do_agentic_thinking_loop(
         # ── write_finding ─────────────────────────────────────────────────────
         if tool_name == "write_finding":
             affected = str(tool_input.get("affected_url") or base_url)
+            finding_attack_class = handoff_svc.infer_attack_class(tool_input)
+            owned = handoff_svc.find_active_conflict(
+                run_id,
+                run_kind="api" if is_api_run else "web",
+                attack_class=finding_attack_class,
+                target_url=affected,
+                parameter=handoff_svc.infer_parameter(
+                    affected, None, tool_input.get("parameter")
+                ),
+                session_label=str(tool_input.get("use_session") or "") or None,
+            )
+            if owned is not None:
+                return (
+                    f"Finding write blocked: {owned.agent_id} owns the active "
+                    f"{owned.attack_class} investigation on {owned.target_url}. "
+                    "Move to a different route or vulnerability class. The specialist "
+                    "result will be added to a later tool result."
+                )
             _fw_title = str(tool_input.get("title") or "Untitled finding")
             events_svc.emit(
                 run_id,
@@ -9590,6 +9854,23 @@ async def _do_agentic_thinking_loop(
                     br_url = str(br_target_page.get("url") or br_url)
             br_owasp = str(tool_input.get("owasp_category") or "").strip().upper()
             br_test_class = str(tool_input.get("test_class") or "").strip()
+            browser_attack_class = handoff_svc.infer_attack_class(tool_input)
+            owned = handoff_svc.find_active_conflict(
+                run_id,
+                run_kind="web",
+                attack_class=browser_attack_class,
+                target_url=br_url,
+                parameter=handoff_svc.infer_parameter(
+                    br_url, None, tool_input.get("parameter")
+                ),
+                session_label=str(tool_input.get("use_session") or "") or None,
+            )
+            if owned is not None:
+                return (
+                    f"Browser probe blocked: {owned.agent_id} owns the active "
+                    f"{owned.attack_class} investigation on {owned.target_url}. "
+                    "Choose another coverage gap."
+                )
             _scope_err = _active_scope_check(br_url)
             if _scope_err:
                 return f"[SCOPE BLOCK] {_scope_err}"
@@ -10595,7 +10876,7 @@ async def _do_agentic_thinking_loop(
 
         # ── agent_dispatch ────────────────────────────────────────────────────
         if tool_name == "agent_dispatch":
-            dispatched_id = _schedule_specialist_agent(
+            decision = _schedule_specialist_agent(
                 run_id=run_id,
                 dispatch=tool_input,
                 session_vault=session_vault,
@@ -10606,7 +10887,8 @@ async def _do_agentic_thinking_loop(
                 site_id=site_id,
                 is_api_run=is_api_run,
             )
-            if dispatched_id:
+            dispatched_id = decision.get("agent_id")
+            if decision.get("status") in {"dispatched", "queued", "duplicate"}:
                 completion_policy.record_progress(f"specialist:{dispatched_id}")
                 events_svc.emit(
                     run_id,
@@ -10614,8 +10896,10 @@ async def _do_agentic_thinking_loop(
                         "type": "agent_status",
                         "agent_id": dispatched_id,
                         "role": "Specialist",
-                        "status": "queued",
-                        "current_task": f"Queued: {tool_input.get('attack_class')} on {tool_input.get('target_url')}",
+                        "status": (
+                            "queued" if decision.get("status") == "queued" else "active"
+                        ),
+                        "current_task": f"{decision.get('status', 'dispatched').title()}: {tool_input.get('attack_class')} on {tool_input.get('target_url')}",
                         "outcome": None,
                         "_persist": True,
                     },
@@ -10627,7 +10911,7 @@ async def _do_agentic_thinking_loop(
                         "phase": "thinking_step",
                         "status": "complete",
                         "message": (
-                            f"Step {step}: dispatched specialist {dispatched_id} "
+                            f"Step {step}: {decision.get('status')} specialist {dispatched_id} "
                             f"({tool_input.get('attack_class')} → "
                             f"{tool_input.get('target_url')})"
                         ),
@@ -10648,18 +10932,15 @@ async def _do_agentic_thinking_loop(
                     }
                 )
                 return (
-                    f"Specialist agent dispatched: {dispatched_id}\n"
+                    f"Specialist handoff {decision.get('status')}: {dispatched_id}\n"
                     f"Class: {tool_input.get('attack_class')}\n"
                     f"Target: {tool_input.get('target_url')}\n"
-                    f"Rationale: {tool_input.get('rationale')}"
+                    f"Rationale: {tool_input.get('rationale')}\n"
+                    "This scope now belongs to the specialist. Do not probe or write "
+                    "the same route and vulnerability class."
                 )
             else:
-                drop_reason = (
-                    "capacity reached"
-                    if specialist_config
-                    and _specialist_at_capacity(run_id, specialist_config)
-                    else "class disabled or priority too low"
-                )
+                drop_reason = str(decision.get("reason") or "unknown rejection")
                 events_svc.emit(
                     run_id,
                     {
@@ -10722,6 +11003,25 @@ async def _do_agentic_thinking_loop(
                 for key in ("hypothesis", "payload_purpose", "note", "body")
             ),
         )
+        http_attack_class = handoff_svc.infer_attack_class(
+            {**tool_input, "test_class": _hr_test_class}
+        )
+        owned = handoff_svc.find_active_conflict(
+            run_id,
+            run_kind="api" if is_api_run else "web",
+            attack_class=http_attack_class,
+            target_url=hr_url,
+            parameter=handoff_svc.infer_parameter(
+                hr_url, hr_body, tool_input.get("parameter")
+            ),
+            session_label=hr_use_session,
+        )
+        if owned is not None:
+            return (
+                f"HTTP probe blocked: {owned.agent_id} owns the active "
+                f"{owned.attack_class} investigation on {owned.target_url}. "
+                "Choose another route or vulnerability class."
+            )
         _hr_probe_signature = completion_policy.probe_signature(
             method=hr_method,
             url=hr_url,
@@ -10784,6 +11084,8 @@ async def _do_agentic_thinking_loop(
         hr_duration_ms: Optional[int] = None
         hr_redirect_blocked: tuple[str, str] | None = None
         hr_sent_cookies: dict[str, str] = {}
+        hr_response_session_cookies: dict[str, str] = {}
+        captured_session_label = ""
         _obligation_note = ""
         _js_paths: list[str] = []
         try:
@@ -10837,20 +11139,39 @@ async def _do_agentic_thinking_loop(
                         scope_check=scope_check_fn,
                         **hr_req_kwargs,
                     )
+                # Capture cookies before _client_session_cookies restores the
+                # shared jar. This includes cookies set on intermediate login
+                # redirects as well as the final response.
+                hr_response_session_cookies = dict(hx.cookies)
             hr_duration_ms = int((time.perf_counter() - hr_started) * 1000)
             hr_raw = hr_r.text[:BODY_READ_LIMIT]
             hr_token = _extract_bearer_token_from_body(hr_raw)
-            if hr_token and hr_r.status_code < 400:
-                hr_lbl = _session_label(
-                    str(tool_input.get("store_as") or "http_token"), session_vault
+            requested_store_as = str(tool_input.get("store_as") or "").strip()
+            response_cookies = {
+                **hr_response_session_cookies,
+                **dict(hr_r.cookies),
+            }
+            if hr_r.status_code < 400 and (
+                hr_token or (requested_store_as and response_cookies)
+            ):
+                # An explicit label is stable and refreshable. Generated labels
+                # remain unique for ordinary token discovery outside login flows.
+                hr_lbl = (
+                    _session_label(requested_store_as, {})
+                    if requested_store_as
+                    else _session_label("http_token", session_vault)
+                )
+                captured_session_label = hr_lbl
+                captured_headers = (
+                    {"Authorization": f"Bearer {hr_token}"} if hr_token else {}
                 )
                 session_vault[hr_lbl] = {
                     "label": hr_lbl,
-                    "kind": "bearer",
+                    "kind": _session_kind(response_cookies, captured_headers),
                     "username": None,
                     "source": f"{hr_method} {hr_url}",
-                    "extra_headers": {"Authorization": f"Bearer {hr_token}"},
-                    "cookies": {},
+                    "extra_headers": captured_headers,
+                    "cookies": response_cookies,
                 }
                 _record_session(
                     run_id,
@@ -11053,6 +11374,80 @@ async def _do_agentic_thinking_loop(
                         )
                 except Exception as _pp_exc:
                     log.debug("post_probe_fn error: %s", _pp_exc)
+        _auto_dispatch_note = ""
+        if (
+            coverage_mode != "sast_validate"
+            and specialist_config is not None
+            and getattr(specialist_config, "auto_dispatch_enabled", True)
+        ):
+            candidate = handoff_svc.automatic_candidate(
+                tool_input,
+                response_status=hr_resp_status,
+                response_headers=hr_resp_headers,
+                response_body=hr_resp_body,
+            )
+            if candidate is not None:
+                decision = _schedule_specialist_agent(
+                    run_id=run_id,
+                    dispatch={
+                        **candidate,
+                        "target_url": hr_url,
+                        "page_id": hr_page_id,
+                        "use_session": hr_use_session,
+                        "dispatch_source": "automatic",
+                    },
+                    session_vault=session_vault,
+                    llm_cfg=llm_cfg,
+                    base_url=base_url,
+                    scanner_policy=scanner_policy,
+                    specialist_config=specialist_config,
+                    site_id=site_id,
+                    is_api_run=is_api_run,
+                )
+                if decision.get("status") in {"dispatched", "queued"}:
+                    completion_policy.record_progress(
+                        f"specialist:{decision.get('agent_id')}"
+                    )
+                    _auto_dispatch_note = (
+                        "[AUTOMATIC SPECIALIST HANDOFF] "
+                        f"{decision.get('agent_id')} {decision.get('status')} for "
+                        f"{candidate['attack_class']} on {hr_url}. This scope now "
+                        "belongs to the specialist; continue with another route or class.\n\n"
+                    )
+                    events_svc.emit(
+                        run_id,
+                        {
+                            "type": "agent_status",
+                            "agent_id": decision.get("agent_id"),
+                            "role": "Specialist",
+                            "status": (
+                                "queued"
+                                if decision.get("status") == "queued"
+                                else "active"
+                            ),
+                            "current_task": (
+                                f"Automatic {candidate['attack_class']} handoff on {hr_url}"
+                            ),
+                            "outcome": None,
+                            "_persist": True,
+                        },
+                    )
+                    events_svc.emit(
+                        run_id,
+                        {
+                            "type": "scanner_phase",
+                            "phase": "specialist_auto_dispatch",
+                            "status": "complete",
+                            "message": _auto_dispatch_note.strip(),
+                            "data": {
+                                "agent_id": decision.get("agent_id"),
+                                "attack_class": candidate["attack_class"],
+                                "url": hr_url,
+                                "dispatch_status": decision.get("status"),
+                            },
+                            "_persist": True,
+                        },
+                    )
         # A 403 is authorization evidence, not proof that authentication failed.
         _hr_session_evicted = False
         if (
@@ -11145,10 +11540,18 @@ async def _do_agentic_thinking_loop(
         )
         return (
             _obligation_note
+            + _auto_dispatch_note
             + _canary_alert
             + _eviction_note
             + _redirect_note
             + _waf_guidance_reminder(hr_resp_status)
+            + (
+                f"[SESSION STORED] Authentication material was saved as "
+                f"'{captured_session_label}'. Use "
+                f"use_session='{captured_session_label}' on protected requests.\n\n"
+                if captured_session_label
+                else ""
+            )
             + f"Method: {hr_method}\nURL: {hr_url}\nStatus: {hr_resp_status}\n"
             + (f"Duration: {hr_duration_ms}ms\n" if hr_duration_ms else "")
             + (
@@ -11329,7 +11732,17 @@ async def _do_agentic_thinking_loop(
                     "_persist": True,
                 },
             )
-        return completion_policy.observe_tool_result(result, executed=True)
+        annotated = completion_policy.observe_tool_result(result, executed=True)
+        feedback = handoff_svc.consume_feedback(
+            run_id, run_kind="api" if is_api_run else "web"
+        )
+        if feedback:
+            annotated += (
+                "\n\n[SPECIALIST RESULTS]\n- "
+                + "\n- ".join(feedback)
+                + "\nTreat completed specialist scopes as closed. Do not repeat their probes."
+            )
+        return annotated
 
     exec_mon_enabled = bool(
         scanner_policy and getattr(scanner_policy, "execution_monitor_enabled", False)

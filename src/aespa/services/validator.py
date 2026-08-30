@@ -1308,6 +1308,7 @@ async def _persist_verdict(
 
 
 def _reset_validating_findings(run_id: int, note: str) -> None:
+    finding_ids: list[int] = []
     with Session(get_engine()) as s:
         findings = s.exec(
             select(ScanFinding)
@@ -1315,17 +1316,19 @@ def _reset_validating_findings(run_id: int, note: str) -> None:
             .where(ScanFinding.validation_status == "validating")
         ).all()
         for finding in findings:
+            if finding.id is not None:
+                finding_ids.append(finding.id)
             finding.validation_status = "unvalidated"
             finding.validation_note = note
             s.add(finding)
         s.commit()
 
-    for finding in findings:
+    for finding_id in finding_ids:
         events_svc.emit(
             run_id,
             {
                 "type": "finding_validation_update",
-                "finding_id": finding.id,
+                "finding_id": finding_id,
                 "validation_status": "unvalidated",
                 "validation_note": note,
             },

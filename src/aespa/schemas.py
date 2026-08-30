@@ -390,6 +390,7 @@ class SastRunSummary(BaseModel):
     llm_config_id: int | None
     llm_profile_id: int | None = None
     leads_count: int
+    completion_status: str = "pending"
     phase_state_json: str | None = None
     coverage_json: str | None = None
     report_json: str | None = None
@@ -414,6 +415,7 @@ class ScanLeadOut(BaseModel):
     collection_id: int | None
     producer_run_type: str
     producer_run_id: int
+    source_work_item_id: int | None = None
     source: str
     category: str
     severity: str
@@ -696,10 +698,23 @@ class LLMConfigIn(BaseModel):
     provider_id: int
     model: str = Field(min_length=1)
     max_tokens: int = Field(default=70000, ge=1, le=256000)
+    # ``None`` asks the server to use the detected model context window.
+    max_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
     temperature: Optional[float] = Field(default=None)
     reasoning_effort: str | None = Field(default=None, max_length=32)
     use_vision: bool = False
     force_tool_choice: bool = False
+
+    @model_validator(mode="after")
+    def _validate_context_window(self) -> "LLMConfigIn":
+        if (
+            self.max_context_tokens is not None
+            and self.max_context_tokens <= self.max_tokens + 1024
+        ):
+            raise ValueError(
+                "max_context_tokens must leave at least 1024 tokens for input"
+            )
+        return self
 
     @field_validator("temperature")
     @classmethod
@@ -725,6 +740,8 @@ class LLMConfigOut(BaseModel):
     project_id: str | None = None
     model: str
     max_tokens: int
+    max_context_tokens: int
+    context_limit_source: str = "configured"
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
     use_vision: bool
@@ -980,7 +997,9 @@ class SpecialistAgentConfigBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     enabled: bool = True
+    auto_dispatch_enabled: bool = True
     max_concurrent: int = Field(default=5, ge=0, le=20)
+    max_queued: int = Field(default=20, ge=0, le=100)
     max_steps: int = Field(default=30, ge=1, le=200)
     min_priority: int = Field(default=7, ge=1, le=10)
     dispatch_idor: bool = True
@@ -1147,6 +1166,7 @@ class LLMExportProfileItem(BaseModel):
     provider_name: str
     model: str
     max_tokens: int = 70000
+    max_context_tokens: int | None = None
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
     use_vision: bool = False
@@ -1806,7 +1826,7 @@ class CampaignSummary(BaseModel):
     warnings_json: str = "[]"
     review_submitted_at: datetime | None
     error_message: str | None
-    # Set only while status == "interrupted"; the stage retry will resume.
+    # Saved continuation point for interrupted or explicitly stopped campaigns.
     interrupted_stage: str | None = None
     max_trace_edges: int | None = None
     max_trace_components: int | None = None
