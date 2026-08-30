@@ -744,7 +744,8 @@ _API_THINKING_AGENT_SYSTEM = (
     "  After 3 consecutive calls, execute a probe or write a finding.\n"
     "- write_finding: persist a confirmed finding with concrete evidence. No duplicates.\n"
     "  Set owasp_category to the OWASP API Top 10 code (e.g. API1, API3, API5).\n"
-    "- update_lead: after investigating a static-analysis lead, record the outcome\n"
+    "- update_lead: after investigating a static-analysis lead, first use lead_detail to "
+    "load its complete evidence, then record the outcome\n"
     "  (confirmed/dismissed/inconclusive) and a note about what you tested. Investigation\n"
     "  leads are UNPROVEN hypotheses from a prior SAST scan — confirm dynamically before\n"
     "  calling write_finding. Call update_lead IMMEDIATELY after resolving a lead, in the\n"
@@ -752,7 +753,9 @@ _API_THINKING_AGENT_SYSTEM = (
     "  update_lead calls at the end of the scan.\n"
     "- forge_jwt / decode_jwt: create or inspect JWTs.\n"
     "- credential_check: test a bounded list of credentials against a login endpoint.\n"
-    "- done: call ONLY when every input-taking route in the site map or spec has been probed. A finding write or specialist dispatch is NOT a done condition — resume immediately after each.\n"
+    "- done: call ONLY when every input-taking route in the site map or spec has been probed "
+    "and every imported SAST lead is resolved. A finding write or specialist dispatch is NOT "
+    "a done condition — resume immediately after each.\n"
     "- No browser tool — REST APIs do not require browser rendering.\n"
     "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
     "so the Work Program matrix fills accurately. Probe each endpoint × category pair with\n"
@@ -766,6 +769,16 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "Use the provided tools to investigate the target. Work iteratively — after each "
     "tool result, reason about what you observed and decide the single most valuable "
     "next action.\n\n"
+    "XSS is a primary objective, separate from SQL injection. Begin XSS work early when "
+    "the target accepts input, and return to it across the distinct input and rendering "
+    "contexts exposed by recon. Test both reflected and stored paths where they plausibly "
+    "apply, using context-matched payloads and write-then-render verification. A single "
+    "generic payload, a canary reflected only as text, or one safely encoded sink does not "
+    "provide meaningful XSS coverage. SQL injection testing never satisfies XSS coverage, "
+    "and XSS must not be deferred until every other vulnerability class is complete. If "
+    "target_inventory contains no xss_sink items, inspect likely client-side renderers and "
+    "continue testing the input surface instead of treating the empty inventory as evidence "
+    "that XSS is absent.\n\n"
     "Your conversation contains every prior tool result verbatim. "
     "You do NOT need reconstructed summaries — read your actual prior tool_result "
     "messages to find cookies, tokens, response bodies, and IDs you captured earlier. "
@@ -781,7 +794,7 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "attribute or exact text to prove the payload affected the rendered DOM.\n"
     "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
     "the target. Available sub-commands: site_map, page_detail, history_search, "
-    "finding_list, lead_list, lead_detail, target_inventory, traffic_search, extract_entities, "
+    "finding_list, lead_list, lead_detail, target_inventory, traffic_search, extract_entities, specialist_status, "
     "coverage_gaps. coverage_gaps returns a compact live list of uncovered "
     "route/category cells; use it when choosing the next distinct surface or before done. "
     "After 3 consecutive calls, either execute a probe/write a finding or "
@@ -789,7 +802,7 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "scan round will change the next action.\n"
     "- write_finding: persist a confirmed finding with concrete evidence from prior results. "
     "No duplicates.\n"
-    "- agent_dispatch: delegate a confirmed high-confidence lead to a Specialist Agent that "
+    "- agent_dispatch: hand off a promising lead that still needs deeper confirmation or impact testing to a Specialist Agent that "
     "runs concurrently so you can continue covering other attack surface. Call this as soon "
     "as you have concrete evidence of a testable vector — e.g. a confirmed stored-XSS sink "
     "with a verified injection point, an IDOR primitive where you can enumerate a foreign "
@@ -804,9 +817,9 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "how many SSRF-prone parameters were found. "
     "Attack classes: idor, auth_bypass, sqli, xss, business_logic, ssrf, path_traversal, "
     "cors, crypto, config, file_upload. Dispatch immediately — do NOT keep probing the same lead "
-    "yourself after dispatching.\n"
+    "yourself after dispatching. If an issue is already fully proven by a single decisive result, write it directly and do not dispatch it.\n"
     "- update_lead: after investigating a static-analysis lead from the 'STATIC ANALYSIS "
-    "INVESTIGATION LEADS' block in your context, record the outcome "
+    "INVESTIGATION LEADS' block or 'SAST VALIDATION LEAD INDEX' in your context, record the outcome "
     "(confirmed/dismissed/inconclusive) and a note about what you tested. These leads are "
     "UNPROVEN hypotheses from a prior SAST scan. If a lead includes a static attack path, "
     "use its dynamic-test objective to choose the first focused probe, then verify or reject "
@@ -872,6 +885,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "Reusable session label. Omit to use the primary authenticated "
                         "session. Set exactly 'anonymous' for a request with no session "
                         "cookies or credential headers."
+                    ),
+                },
+                "store_as": {
+                    "type": "string",
+                    "description": (
+                        "For a successful authentication request, save any bearer "
+                        "token or response cookie under this reusable session label. "
+                        "Use that exact label on later requests with use_session."
                     ),
                 },
                 "owasp_category": {
@@ -1295,9 +1316,22 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "properties": {
                 "attack_class": {
                     "type": "string",
+                    "enum": [
+                        "idor",
+                        "auth_bypass",
+                        "sqli",
+                        "xss",
+                        "business_logic",
+                        "ssrf",
+                        "path_traversal",
+                        "cors",
+                        "crypto",
+                        "config",
+                        "file_upload",
+                    ],
                     "description": (
                         "One of: idor, auth_bypass, sqli, xss, business_logic, "
-                        "ssrf, path_traversal, cors, crypto, config"
+                        "ssrf, path_traversal, cors, crypto, config, file_upload"
                     ),
                 },
                 "target_url": {
@@ -1325,7 +1359,7 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 },
                 "note": {"type": "string"},
             },
-            "required": ["attack_class", "target_url", "rationale"],
+            "required": ["attack_class", "target_url", "rationale", "priority"],
         },
     },
     {
@@ -1431,8 +1465,10 @@ and ordered attack path. Treat every path hop as an unproven hypothesis and veri
 with focused live evidence, following the attack path's dynamic-test objective.
 
 Use the configured API credentials and seeded HTTP session labels to authenticate and
-reach protected functionality described by the attack path. Do not perform credential
-attacks, spraying, account registration, or JWT forging.
+reach protected functionality described by the attack path. Login credentials are not
+authenticated sessions. Submit a login request anonymously with store_as set to a stable
+label, then use that exact label on protected requests. Do not perform credential attacks,
+spraying, account registration, or JWT forging.
 
 Work through leads one at a time. A confirmed lead requires concrete live evidence and
 write_finding, followed immediately by update_lead with finding_reference. Dismiss or mark
@@ -1616,6 +1652,7 @@ Context tools:
 - auth_matrix: args may include search/filter and limit; returns endpoints worth anonymous/user/role checks.
 - extract_entities: args may include text, step, or page_id; returns URLs, paths, IDs, UUIDs, emails,
   redacted JWT hints, and error/debug lines.
+- specialist_status: returns queued, running, and completed specialist handoffs with outcomes.
 - Context tools have an adaptive checkpoint: after 3 consecutive context-only calls,
   execute a probe/write a finding, or include context_budget_reason summarizing what
   you learned, naming the current hypothesis, and explaining why another targeted
@@ -1790,7 +1827,12 @@ To finish the assessment ONLY after verifying via site_map that zero untested in
 """
 
 _THINKING_AGENT_SYSTEM_LENIENT_FINISH = """
-To finish the assessment (when key areas covered, or steps nearly exhausted):
+To finish the assessment, key areas must have meaningful evidence. When the application
+accepts user input, XSS must have context-aware coverage across the plausible reflected and
+stored paths and the distinct rendering contexts found during recon. One generic payload,
+a reflection without execution evidence, or one safely encoded sink is not sufficient.
+SQL injection probes do not count as XSS testing. If a reflected or stored path is not
+applicable, include the concrete evidence for that conclusion in the summary.
 {
   "action": "done",
   "summary": "2-3 sentence summary of notable findings and tested areas"

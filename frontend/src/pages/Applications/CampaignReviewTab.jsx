@@ -17,6 +17,58 @@ function componentNamesFor(mapping) {
   return [mapping.lead_producer_run_type === "campaign" ? "Cross-repository" : "Unknown component"];
 }
 
+function crossRepositoryRootKey(mapping) {
+  if (mapping.lead_producer_run_type !== "campaign") return null;
+  const path = safeParseJson(mapping.lead_attack_path_json, {});
+  const vulnerability = path.vulnerability;
+  const backendRoute = path.backend_route;
+  if (!vulnerability?.lead_id || !Number.isInteger(backendRoute?.component_id)) return null;
+  const backendCase = Array.isArray(path.instances)
+    ? path.instances.some(instance => instance?.case === "backend")
+    : /^Cross-repository:\s*Backend lead/i.test(mapping.lead_title || "");
+  return [
+    "cross-repository",
+    mapping.lead_category || "",
+    vulnerability.lead_id,
+    backendRoute.component_id,
+    backendCase ? "backend" : "source",
+  ].join(":");
+}
+
+function reviewLeadGroupKey(mapping) {
+  return crossRepositoryRootKey(mapping) || `lead:${mapping.lead_origin_lead_id || mapping.lead_id}`;
+}
+
+function endpointInstancesFor(mappings) {
+  const instances = new Map();
+  for (const mapping of mappings) {
+    const path = safeParseJson(mapping.lead_attack_path_json, {});
+    const pathInstances = Array.isArray(path.instances) ? path.instances : [{
+      case: "legacy",
+      source_location: path.frontend_entrypoint?.location,
+      source_method: path.frontend_entrypoint?.method,
+      source_path: path.frontend_entrypoint?.path,
+      target_location: path.backend_route?.location,
+      target_method: path.backend_route?.method,
+      target_path: path.backend_route?.path,
+    }];
+    for (const instance of pathInstances) {
+      if (!instance?.source_location && !instance?.target_location) continue;
+      const key = [
+        instance.case,
+        instance.source_location,
+        instance.source_method,
+        instance.source_path,
+        instance.target_location,
+        instance.target_method,
+        instance.target_path,
+      ].join("|");
+      instances.set(key, instance);
+    }
+  }
+  return [...instances.values()];
+}
+
 // ── CampaignReviewTab ────────────────────────────────────────────────────────
 // The main human decision point: proposed lead→target routings, grouped by
 // source lead, with per-mapping approve/reject, filters, and a guarded bulk
@@ -50,7 +102,7 @@ export function CampaignReviewTab({ applicationId, campaignId, campaign, canCont
   const grouped = useMemo(() => {
     const byLead = new Map();
     for (const m of filtered) {
-      const key = m.lead_origin_lead_id || m.lead_id;
+      const key = reviewLeadGroupKey(m);
       if (!byLead.has(key)) byLead.set(key, []);
       byLead.get(key).push(m);
     }
@@ -237,6 +289,7 @@ function LeadGroup({ mappings, targets, decisions, selected, onSetDecision, onTo
   const [expanded, setExpanded] = useState(false);
   const first = mappings[0];
   const componentNames = componentNamesFor(first);
+  const endpointInstances = endpointInstancesFor(mappings);
   const leadObj = {
     id: first.lead_id,
     reference: first.lead_reference,
@@ -284,6 +337,9 @@ function LeadGroup({ mappings, targets, decisions, selected, onSetDecision, onTo
         <span className="subtle" style={{ fontSize: 12 }}>
           {componentNames.join(", ")}{first.lead_location ? ` · ${first.lead_location}` : ""}
         </span>
+        {endpointInstances.length > 1 && <span className="subtle" style={{ fontSize: 12 }}>
+          · {endpointInstances.length} endpoint instances
+        </span>}
       </div>
       <button className="btn secondary sm" onClick={() => setExpanded(prev => !prev)}>
         {expanded ? "Collapse trace" : "View full trace"}
@@ -292,6 +348,16 @@ function LeadGroup({ mappings, targets, decisions, selected, onSetDecision, onTo
     
     {expanded && <div style={{ marginTop: 10, borderTop: "1px solid var(--border-2)", paddingTop: 10 }}>
       <SastLeadDetails lead={leadObj} showSummary={false} />
+      {endpointInstances.length > 1 && <div className="subtle" style={{ marginTop: 10 }}>
+        <strong>Matched endpoints</strong>
+        <ul style={{ margin: "6px 0 0 18px" }}>
+          {endpointInstances.map((instance, index) => <li key={`${instance.source_location || "source"}-${instance.source_path || ""}-${instance.target_location || index}-${instance.target_path || ""}`}>
+            {instance.source_method || ""} {instance.source_path || instance.source_location || "source"}
+            {instance.target_path && <> → {instance.target_method || ""} {instance.target_path}</>}
+            {instance.access === "authenticated" && <> (authenticated via {instance.authentication?.acquisition?.method || ""} {instance.authentication?.acquisition?.path || "credential flow"})</>}
+          </li>)}
+        </ul>
+      </div>}
     </div>}
 
     <table className="app-review-mappings-table" style={{ marginTop: 12 }}>

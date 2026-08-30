@@ -39,9 +39,14 @@ from aespa.services.correlation import (
 )
 
 
-def _seed_two_component_campaign(engine) -> dict:
-    """checkout-ui calls POST /orders; orders-api exposes POST /orders with no
-    recorded auth boundary. Both SAST runs are marked completed already."""
+def _seed_two_component_campaign(engine, *, public_route: bool = True) -> dict:
+    """checkout-ui calls POST /orders; orders-api exposes POST /orders.
+
+    The default fixture records an explicit public-route rule so tests that
+    exercise cross-repository generation do not rely on missing evidence being
+    interpreted as public. Set ``public_route=False`` for auth-negative cases.
+    Both SAST runs are marked completed already.
+    """
     with Session(engine) as s:
         app = Application(name="Acme")
         s.add(app)
@@ -133,6 +138,26 @@ def _seed_two_component_campaign(engine) -> dict:
         )
         s.add(call_fact)
         s.add(route_fact)
+        if public_route:
+            s.add(
+                ComponentFact(
+                    sast_run_id=api_sast_run_id,
+                    component_id=api.id,
+                    fact_type="auth_boundary",
+                    method="POST",
+                    path="/orders",
+                    name="permitAll",
+                    detail_json=json.dumps(
+                        {
+                            "scope": "path",
+                            "public_paths": ["/orders"],
+                            "public_methods": ["POST"],
+                        }
+                    ),
+                    evidence_location="src/security.py:8",
+                    fingerprint="public-orders-fp",
+                )
+            )
         s.flush()
 
         source_lead = ScanLead(
@@ -521,7 +546,7 @@ def test_correlate_campaign_generates_cross_repo_lead_with_provenance(
 def test_correlate_campaign_skips_cross_repo_lead_when_route_has_auth_boundary(
     isolated_db_engine,
 ):
-    ctx = _seed_two_component_campaign(isolated_db_engine)
+    ctx = _seed_two_component_campaign(isolated_db_engine, public_route=False)
     with Session(isolated_db_engine) as s:
         s.add(
             ComponentFact(
@@ -541,6 +566,160 @@ def test_correlate_campaign_skips_cross_repo_lead_when_route_has_auth_boundary(
             select(ScanLead).where(ScanLead.producer_run_type == "campaign")
         ).all()
     assert cross_leads == []
+
+
+def test_correlate_campaign_does_not_treat_missing_auth_evidence_as_public(
+    isolated_db_engine,
+):
+    ctx = _seed_two_component_campaign(isolated_db_engine, public_route=False)
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as s:
+        cross_leads = s.exec(
+            select(ScanLead).where(ScanLead.producer_run_type == "campaign")
+        ).all()
+    assert cross_leads == []
+
+
+def test_correlate_campaign_follows_evidence_backed_authentication_chain(
+    isolated_db_engine,
+):
+    """A public credential flow can make a protected cross-repo route reachable."""
+    ctx = _seed_two_component_campaign(isolated_db_engine, public_route=False)
+    with Session(isolated_db_engine) as s:
+        s.add(
+            ComponentFact(
+                sast_run_id=9001,
+                component_id=ctx["ui_component_id"],
+                fact_type="http_call",
+                method="POST",
+                path="/session",
+                host="api.acme.test",
+                evidence_location="src/session.js:20",
+                fingerprint="session-call-fp",
+            )
+        )
+        s.add(
+            ComponentFact(
+                sast_run_id=9002,
+                component_id=ctx["api_component_id"],
+                fact_type="route",
+                method="POST",
+                path="/session",
+                evidence_location="src/session_routes.py:5",
+                fingerprint="session-route-fp",
+            )
+        )
+        s.add(
+            ComponentFact(
+                sast_run_id=9001,
+                component_id=ctx["ui_component_id"],
+                fact_type="auth_flow",
+                method="POST",
+                path="/session",
+                name="bearer token",
+                evidence_location="src/session.js:21",
+                detail_json=json.dumps(
+                    {
+                        "origin": "llm",
+                        "confidence": 0.9,
+                        "credential_kind": "bearer",
+                        "acquisition_call_locations": ["src/session.js:20"],
+                        "credential_use_locations": ["src/checkout.js:42"],
+                    }
+                ),
+                fingerprint="auth-flow-fp",
+            )
+        )
+        s.add(
+            ComponentFact(
+                sast_run_id=9002,
+                component_id=ctx["api_component_id"],
+                fact_type="auth_boundary",
+                method="POST",
+                path="/session",
+                detail_json=json.dumps(
+                    {
+                        "scope": "path",
+                        "public_paths": ["/session"],
+                        "public_methods": ["POST"],
+                    }
+                ),
+                evidence_location="src/security.py:8",
+                fingerprint="public-session-fp",
+            )
+        )
+        s.add(
+            ComponentFact(
+                sast_run_id=9002,
+                component_id=ctx["api_component_id"],
+                fact_type="auth_boundary",
+                detail_json=json.dumps(
+                    {"scope": "global", "protected_paths": ["/orders"]}
+                ),
+                evidence_location="src/security.py:9",
+                fingerprint="protected-orders-fp",
+            )
+        )
+        target_lead = ScanLead(
+            producer_run_id=9002,
+            producer_run_type="sast",
+            title="Authorization control failure in order service",
+            category="A01",
+            severity="high",
+            confidence=0.9,
+            location="src/order_policy.py:50",
+            suggested_endpoint="POST /orders",
+            evidence="The order policy trusts an attacker-controlled account.",
+            reportable=True,
+            validation_status="confirmed",
+        )
+        s.add(target_lead)
+        s.flush()
+        s.add(
+            ComponentFact(
+                sast_run_id=9002,
+                component_id=ctx["api_component_id"],
+                fact_type="lead_anchor",
+                method="POST",
+                path="/orders",
+                name=target_lead.title,
+                detail_json=json.dumps(
+                    {
+                        "origin": "llm",
+                        "lead_id": target_lead.id,
+                        "route_locations": ["src/routes.py:10"],
+                    }
+                ),
+                evidence_location="src/order_policy.py:50",
+                fingerprint="order-policy-anchor-fp",
+            )
+        )
+        s.commit()
+
+    result = correlate_campaign(ctx["campaign_id"], llm_match=lambda _items: [])
+    assert result["cross_component_leads"] == 2
+    with Session(isolated_db_engine) as s:
+        leads = s.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_type == "campaign")
+            .where(ScanLead.producer_run_id == ctx["campaign_id"])
+        ).all()
+        assert len(leads) == 2
+        for lead in leads:
+            attack_path = json.loads(lead.attack_path_json)
+            instance = next(
+                item
+                for item in attack_path["instances"]
+                if item["target_path"] == "/orders"
+            )
+            assert instance["access"] == "authenticated"
+            assert instance["authentication"]["credential_kind"] == "bearer"
+            assert instance["authentication"]["acquisition"]["path"] == "/session"
+        backend = next(
+            lead for lead in leads if "Authorization control failure" in lead.title
+        )
+        assert backend.location == "src/order_policy.py:50"
 
 
 def test_correlate_campaign_does_not_fabricate_lead_without_connection(
@@ -1144,3 +1323,84 @@ def test_generate_cross_repo_lead_for_backend_route_vulnerability(isolated_db_en
         primary_prov = next((p for p in provenance if p.role == "primary"), None)
         assert primary_prov is not None
         assert primary_prov.component_id == ctx["ui_component_id"]
+
+
+def test_cross_repo_backend_lead_groups_endpoint_instances(isolated_db_engine):
+    """One backend root lead should cover every matched endpoint instance."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    with Session(isolated_db_engine) as s:
+        s.add(
+            ComponentFact(
+                sast_run_id=9001,
+                component_id=ctx["ui_component_id"],
+                fact_type="http_call",
+                method="POST",
+                path="/orders/second",
+                host="api.acme.test",
+                evidence_location="src/checkout.js:42",
+                fingerprint="second-call-fp",
+            )
+        )
+        s.add(
+            ComponentFact(
+                sast_run_id=9002,
+                component_id=ctx["api_component_id"],
+                fact_type="route",
+                method="POST",
+                path="/orders/second",
+                evidence_location="src/routes.py:10",
+                fingerprint="second-route-fp",
+            )
+        )
+        s.add(
+            ComponentFact(
+                sast_run_id=9002,
+                component_id=ctx["api_component_id"],
+                fact_type="auth_boundary",
+                method="POST",
+                path="/orders/second",
+                detail_json=json.dumps(
+                    {
+                        "scope": "path",
+                        "public_paths": ["/orders/second"],
+                        "public_methods": ["POST"],
+                    }
+                ),
+                evidence_location="src/security.py:9",
+                fingerprint="public-second-order-fp",
+            )
+        )
+        s.add(
+            ScanLead(
+                producer_run_id=9002,
+                producer_run_type="sast",
+                title="Arbitrary order price acceptance",
+                category="A01",
+                severity="high",
+                confidence=0.88,
+                location="src/routes.py:10",
+                evidence="Order total is accepted directly from payload.",
+                reportable=True,
+                validation_status="confirmed",
+            )
+        )
+        s.commit()
+
+    result = correlate_campaign(ctx["campaign_id"])
+    assert result["cross_component_leads"] == 2
+    with Session(isolated_db_engine) as s:
+        leads = s.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_type == "campaign")
+            .where(ScanLead.producer_run_id == ctx["campaign_id"])
+        ).all()
+        backend_leads = [
+            lead for lead in leads if "Arbitrary order price acceptance" in lead.title
+        ]
+        assert len(backend_leads) == 1
+        path = json.loads(backend_leads[0].attack_path_json)
+        assert len(path["instances"]) == 2
+        assert {instance["target_path"] for instance in path["instances"]} == {
+            "/orders",
+            "/orders/second",
+        }

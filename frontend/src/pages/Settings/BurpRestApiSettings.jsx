@@ -207,6 +207,7 @@ export const DEFAULT_PROVIDER_FORM = {
   name: "",
   api_format: "anthropic",
   base_url: "",
+  region: "",
   username: "",
   project_id: "",
   models: "",
@@ -220,8 +221,10 @@ export const DEFAULT_LLM_FORM = {
   provider_id: "",
   model: "",
   max_tokens: 70000,
+  max_context_tokens: 128000,
+  max_context_auto: true,
   temperature: 0.2,
-  use_temperature: true,
+  use_temperature: false,
   use_vision: false,
   force_tool_choice: false,
   reasoning_effort: ""
@@ -255,7 +258,7 @@ export const PROVIDER_DEFAULT_BASE_URLS = {
   // no sensible default — must be set
   openrouter: "https://openrouter.ai/api/v1",
   google: "https://generativelanguage.googleapis.com",
-  bedrock: "AWS SDK default (us-east-1)",
+  bedrock: "AWS SDK default (ap-southeast-2)",
   bedrock_mantle: "https://bedrock-mantle.us-east-2.api.aws/v1",
   azure_openai: null,
   // must be set

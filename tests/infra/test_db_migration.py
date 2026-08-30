@@ -1,6 +1,6 @@
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa import db
 
@@ -72,6 +72,53 @@ def test_reset_orphaned_running_runs_uses_crawl_message_and_updates_legacy_text(
         )
         assert rows[1][-1] == "Last crawl interrupted prior to completion"
     finally:
+        engine.dispose()
+
+
+def test_reset_orphaned_runs_backfills_sast_restart_message_into_phase_log():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+        from aespa.models import SastRun, ScanLog
+
+        SQLModel.metadata.create_all(engine)
+        with Session(engine) as session:
+            run = SastRun(
+                name="Interrupted scan",
+                status="failed",
+                error_message="Interrupted by a server restart; mark as failed.",
+            )
+            session.add(run)
+            live_run = SastRun(name="Live scan", status="scanning")
+            session.add(live_run)
+            session.commit()
+            session.refresh(run)
+            session.refresh(live_run)
+            run_id = run.id
+            live_run_id = live_run.id
+
+        db._reset_orphaned_running_runs(engine)
+        db._reset_orphaned_running_runs(engine)
+
+        with Session(engine) as session:
+            logs = session.exec(
+                select(ScanLog)
+                .where(ScanLog.test_run_id == run_id)
+                .where(ScanLog.run_kind == "sast")
+                .where(ScanLog.phase == "restart_recovery")
+            ).all()
+            live_status = session.get(SastRun, live_run_id).status
+
+        assert len(logs) == 1
+        assert logs[0].status == "failed"
+        assert logs[0].message == "Interrupted by a server restart; mark as failed."
+        assert live_status == "scanning"
+    finally:
+        SQLModel.metadata.drop_all(engine)
         engine.dispose()
 
 
@@ -754,7 +801,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "test_run" in tables
         assert was_pre_alembic is False
         # The migration chain now includes replay/session provenance fields.
-        assert version == "d4e5f6a7b8c9"
+        assert version == "a8f2c6d9e4b1"
     finally:
         engine.dispose()
 
@@ -904,7 +951,7 @@ def test_replay_provenance_repair_migration_handles_existing_c4_database():
         assert "replay_credential_id" in columns["crawled_page"]
         assert {"page_id", "session_label"} <= columns["traffic_entry"]
         assert "page_id" in columns["target_intel_item"]
-        assert version == "d4e5f6a7b8c9"
+        assert version == "a8f2c6d9e4b1"
     finally:
         engine.dispose()
 
@@ -1055,7 +1102,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "d4e5f6a7b8c9"
+        assert version == "a8f2c6d9e4b1"
     finally:
         engine.dispose()
 
@@ -1092,7 +1139,7 @@ def test_current_db_with_applications_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "d4e5f6a7b8c9"
+        assert version == "a8f2c6d9e4b1"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -1136,7 +1183,7 @@ def test_explicit_target_component_migration_adds_nullable_column():
             ).scalar_one()
 
         assert "component_id" in columns
-        assert version == "d4e5f6a7b8c9"
+        assert version == "a8f2c6d9e4b1"
     finally:
         engine.dispose()
 
@@ -1162,14 +1209,9 @@ def test_scope_host_port_migration_backfills_configured_effective_ports():
                 )
             )
             conn.execute(
-                text(
-                    "CREATE TABLE alembic_version "
-                    "(version_num VARCHAR(32) NOT NULL)"
-                )
+                text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
             )
-            conn.execute(
-                text("INSERT INTO alembic_version VALUES ('c7d8e9f0a1b2')")
-            )
+            conn.execute(text("INSERT INTO alembic_version VALUES ('c7d8e9f0a1b2')"))
             conn.execute(
                 text(
                     "INSERT INTO site VALUES "
@@ -1209,6 +1251,6 @@ def test_scope_host_port_migration_backfills_configured_effective_ports():
             '"secure.example.com:443"]'
         )
         assert api_scope == '["api.example.com:8080"]'
-        assert version == "d4e5f6a7b8c9"
+        assert version == "a8f2c6d9e4b1"
     finally:
         engine.dispose()

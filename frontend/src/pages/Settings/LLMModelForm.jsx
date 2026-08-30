@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { llmProfileToForm, llmPayload } from "../Settings";
 import { API_FORMAT_LABELS } from "./BurpRestApiSettings";
 import { api } from "../../lib/api";
 import { IconCheck } from "../../components/Icons";
+import { sortModelNames } from "../../lib/modelSorting";
 
 
 export function LLMModelForm({
@@ -43,7 +44,7 @@ export function LLMModelForm({
     }
   };
   const selectedProvider = providers.find(p => p.id === Number(form.provider_id));
-  const models = selectedProvider?.models || [];
+  const models = useMemo(() => sortModelNames(selectedProvider?.models), [selectedProvider?.models]);
   const storedCapabilities = selectedProvider?.model_capabilities || {};
   const hasStoredCapability = Object.prototype.hasOwnProperty.call(storedCapabilities, form.model);
   useEffect(() => {
@@ -69,9 +70,15 @@ export function LLMModelForm({
       if (!cancelled) setLoadingCapabilities(false);
     });
     return () => { cancelled = true; };
-  }, [selectedProvider?.id, selectedProvider?.api_format, selectedProvider?.base_url, selectedProvider?.username, form.model, hasStoredCapability]);
+  }, [selectedProvider, models, form.model, hasStoredCapability]);
   const capability = hasStoredCapability ? storedCapabilities[form.model] || {} : discoveredCapabilities[form.model] || {};
   const levels = Array.isArray(capability.supported_efforts) ? capability.supported_efforts : [];
+  const detectedContext = Number(capability.context_window_tokens || capability.context_length || 0);
+  useEffect(() => {
+    if (form.max_context_auto && detectedContext >= 1024) {
+      upd({ max_context_tokens: detectedContext });
+    }
+  }, [detectedContext, form.max_context_auto]);
   return <>
     {error && <div className="alert error">{error}</div>}
     <form className="card" onSubmit={onSubmit}>
@@ -97,7 +104,7 @@ export function LLMModelForm({
           onChange={e => {
             const newProviderId = e.target.value;
             const provider = providers.find(p => p.id === Number(newProviderId));
-            const newModel = provider?.models?.[0] || "";
+            const newModel = sortModelNames(provider?.models)[0] || "";
             const updates = {
               provider_id: newProviderId,
               model: newModel,
@@ -152,6 +159,17 @@ export function LLMModelForm({
           <input type="number" required min="1" max="256000" value={form.max_tokens} onChange={e => upd({
             max_tokens: e.target.value
           })} /></div>
+        <div className="field"><label>Maximum context tokens</label>
+          <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+            <input type="checkbox" checked={form.max_context_auto} onChange={e => upd({ max_context_auto: e.target.checked })} />
+            <span>Auto{detectedContext >= 1024 ? ` (${detectedContext.toLocaleString()} detected)` : ""}</span>
+          </label>
+          <input type="number" required={!form.max_context_auto} disabled={form.max_context_auto} min="1024" max="2000000" value={form.max_context_tokens} onChange={e => upd({
+            max_context_tokens: e.target.value,
+            max_context_auto: false
+          })} />
+          <div className="field-hint">Includes the prompt, tools, conversation, and maximum output.</div>
+        </div>
         <div className="field">
           <label style={{
             display: "flex",

@@ -26,6 +26,7 @@ from aespa.db import set_engine
 from aespa.models import (
     ApiCollection,
     ApiCredential,
+    ApiEndpoint,
     ApiTestRun,
     SastRun,
     ScanFinding,
@@ -269,6 +270,93 @@ def test_seed_sessions_no_creds_only_anonymous(db_engine, collection, api_run):
     assert sessions[0].label == "anonymous"
 
 
+def test_seed_sessions_does_not_treat_login_credentials_as_sessions(
+    db_engine, db_session, collection, api_run
+):
+    """A username/password pair needs a successful login before it is a session."""
+    from aespa.services.api_scanner import seed_sessions_from_credentials
+    from aespa.services.scanner_sessions import list_run_sessions
+
+    credential = ApiCredential(
+        collection_id=collection.id,
+        scheme="login",
+        name="email",
+        value="user@example.com:correct-password",
+        label="user@example.com",
+        auth_endpoint="/api/auth",
+    )
+    db_session.add(credential)
+    db_session.commit()
+    db_session.refresh(credential)
+
+    # Simulate the empty row produced by an older AESPA version so retries are
+    # covered as well as newly created runs.
+    from aespa.services.scanner_sessions import upsert_session
+
+    upsert_session(
+        api_run.id,
+        label="user_example_com",
+        kind="mixed",
+        credential_id=credential.id,
+        source="api_scanner",
+        cookies={},
+        extra_headers={},
+        run_kind="api",
+    )
+
+    assert seed_sessions_from_credentials(api_run.id) == 1
+    sessions = list_run_sessions(api_run.id, run_kind="api")
+    assert [session.label for session in sessions] == ["anonymous"]
+    all_sessions = list_run_sessions(api_run.id, active_only=False, run_kind="api")
+    legacy = next(session for session in all_sessions if session.credential_id)
+    assert legacy.is_active is False
+    assert legacy.lifecycle_state == "superseded"
+
+
+def test_sast_validation_detects_authentication_blocked_protected_routes(
+    db_engine, db_session, collection, api_run
+):
+    from aespa.services.api_scanner import _sast_validation_authentication_blocked
+
+    db_session.add(
+        ApiEndpoint(
+            collection_id=collection.id,
+            method="GET",
+            path="/api/private/{id}",
+            auth_required=True,
+        )
+    )
+    db_session.add(
+        TrafficEntry(
+            api_test_run_id=api_run.id,
+            source="scanner",
+            method="GET",
+            url="http://api.local/api/private/7",
+            request_headers="{}",
+            status=401,
+            response_headers="{}",
+        )
+    )
+    db_session.commit()
+
+    assert _sast_validation_authentication_blocked(api_run.id) is True
+
+    db_session.add(
+        TrafficEntry(
+            api_test_run_id=api_run.id,
+            source="scanner",
+            method="GET",
+            url="http://api.local/api/private/8",
+            request_headers='{"Authorization":"[REDACTED]"}',
+            status=200,
+            response_headers="{}",
+        )
+    )
+    db_session.commit()
+
+    assert _sast_validation_authentication_blocked(api_run.id) is False
+
+
 def test_api_crawl_context_uses_fresh_run_owned_sast_leads(
     db_engine, db_session, collection, api_run
 ):
@@ -294,7 +382,8 @@ def test_api_crawl_context_uses_fresh_run_owned_sast_leads(
     context = _build_api_crawl_context(api_run.id)
 
     assert "BOLA in account lookup" in context
-    assert "STATIC ANALYSIS INVESTIGATION LEADS" in context
+    assert "SAST VALIDATION LEAD INDEX" in context
+    assert "lead_detail" in context
 
 
 @pytest.mark.parametrize("tool_name", ["target_inventory", "search_assets"])

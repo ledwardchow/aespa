@@ -2,6 +2,15 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## [PR #266] August 30 update - SAST, API scan and UI improvements
+
+- **More reliable and auditable SAST scans**: SAST now inventories entry points, inputs, and sensitive operations, assigns them to bounded workers, and records explicit results and detailed activity. Scans save progress after each agent step, can resume after pauses, provider outages, or process restarts, and clearly report partial coverage or authentication blockers. Existing campaigns wait for paused source scans, and SAST ZIP uploads can now be up to 250 MiB.
+- **Stronger Codex and long-scan recovery**: AESPA corrects recoverable Codex tool-call responses, replaces broken sessions, and restarts the local client when needed. Process and protocol failures now surface promptly, including with newer Codex CLI releases, large contexts, and concurrent scans. Model context limits can be detected or set manually, with conversation compaction and batched reporting to keep long scans within those limits. Activity messages now distinguish local request pacing from provider errors.
+- **Reusable API login sessions**: API scans now distinguish saved credentials from authenticated sessions. Successful logins can save returned tokens or cookies under a reusable label and replace expired sessions.
+- **Better dynamic scan coverage**: Quick web and API scans must resolve every imported SAST lead. Strong upload, SSRF, SQL error, and reflected XSS signals can automatically queue specialist work without repeating the same investigation, and matching evidence is merged into existing findings. XSS testing now covers plausible reflected and stored paths across discovered inputs and rendering contexts.
+- **Safer Docker image dependencies**: The container now matches the installed Playwright version, applies available operating-system security updates, removes unused vulnerable components, and includes the patched Cryptography release identified by Docker Scout.
+- **UI fixes**: UI elements now position better on smaller screens.
+
 ## [PR #265] August 19 Update — new LLM providers and scan improvements
 
 **Branch:** `develop → main`

@@ -57,6 +57,18 @@ def test_native_empty_capability_blocks_openrouter_fallback():
     assert result["vendor/plain-model"]["supported_efforts"] == []
 
 
+def test_native_context_window_is_preserved_without_reasoning_metadata():
+    result = asyncio.run(
+        enrich_model_options(
+            "openai",
+            ["gpt-context-model"],
+            {"gpt-context-model": {"context_length": 131072}},
+            catalog_fetcher=lambda: asyncio.sleep(0, result=[]),
+        )
+    )
+    assert result["gpt-context-model"]["context_window_tokens"] == 131072
+
+
 def test_unknown_capability_is_safe_default_only():
     result = asyncio.run(
         enrich_model_options(

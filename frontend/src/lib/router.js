@@ -28,6 +28,7 @@ export function useRoute() {
   if ((m = routeHash.match(/^#\/apis\/(\d+)\/edit$/)))        return { name: "api-edit",    id: +m[1] };
   if ((m = routeHash.match(/^#\/apis\/(\d+)\/files$/)))       return { name: "api-files",   id: +m[1] };
   if ((m = routeHash.match(/^#\/apis\/(\d+)\/runs\/new$/)))   return { name: "api-run-new", id: +m[1] };
+  if ((m = routeHash.match(/^#\/apis\/(\d+)\/(runs|endpoints|credentials)$/))) return { name: "api-detail", id: +m[1], tab: m[2] };
   if ((m = routeHash.match(/^#\/apis\/(\d+)$/)))              return { name: "api-detail",  id: +m[1] };
   if (routeHash === "#/apis")                                 return { name: "api-list" };
   if ((m = routeHash.match(/^#\/api-runs\/(\d+)\/([a-z]+)$/))) return { name: "api-run-detail", id: +m[1], tab: m[2], findingRef };

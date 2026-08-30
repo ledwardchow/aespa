@@ -26,6 +26,11 @@ from aespa.models import LLMConfig
 log = logging.getLogger("aespa.llm.codex")
 
 TURN_TIMEOUT_S = 600.0
+CONVERSATION_CLOSE_TIMEOUT_S = 3.0
+MAX_REQUIRED_TOOL_REPAIRS = 2
+# asyncio defaults subprocess streams to 64 KiB. Codex sends one JSON object per
+# line, and long scan contexts or tool payloads can make a valid line much larger.
+CODEX_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
 _INTERNAL_ACTION_ITEM_TYPES = {
     "collabAgentToolCall",
     "commandExecution",
@@ -56,6 +61,26 @@ _ENV_ALLOWLIST = (
 
 class CodexUnavailableError(RuntimeError):
     """Codex is not installed, signed in, or compatible with AESPA."""
+
+
+class CodexTurnTimeoutError(CodexUnavailableError):
+    """A Codex turn stopped emitting events while the app-server stayed alive."""
+
+    def __init__(self, message: str, *, client: _JsonRpcClient | None = None) -> None:
+        super().__init__(message)
+        self.client = client
+
+
+class CodexToolSessionError(CodexTurnTimeoutError):
+    """Codex completed a turn by reporting that AESPA tools were unavailable."""
+
+
+class CodexTransportError(CodexUnavailableError):
+    """The Codex app-server process or its event reader stopped."""
+
+    def __init__(self, message: str, *, client: _JsonRpcClient | None = None) -> None:
+        super().__init__(message)
+        self.client = client
 
 
 class CodexQuotaError(RuntimeError):
@@ -349,7 +374,10 @@ async def detect_installation(path: str | None = None) -> dict[str, Any]:
 class _Conversation:
     thread_id: str
     last_message_count: int
-    pending_calls: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
+    client: _JsonRpcClient | None = None
+    pending_calls: dict[str, tuple[int | str, dict[str, Any]]] = field(
+        default_factory=dict
+    )
     events: asyncio.Queue[tuple[str, dict[str, Any]]] = field(
         default_factory=asyncio.Queue
     )
@@ -371,6 +399,12 @@ class _JsonRpcClient:
         self._stderr_tail: deque[str] = deque(maxlen=30)
         self.initialized = False
 
+    def _wake_conversations(self, error: CodexTransportError) -> None:
+        """Wake turns waiting on an event from a client that has stopped."""
+        params = {"message": str(error), "client": error.client or self}
+        for conversation in tuple(self._conversations.values()):
+            conversation.events.put_nowait(("client/error", params))
+
     async def start(self) -> None:
         if self.process and self.process.returncode is None:
             return
@@ -385,6 +419,7 @@ class _JsonRpcClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=CODEX_STREAM_LIMIT_BYTES,
         )
         self._reader_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._read_stderr())
@@ -405,14 +440,25 @@ class _JsonRpcClient:
 
     async def _read_stdout(self) -> None:
         assert self.process and self.process.stdout
+        reader_error: Exception | None = None
         try:
             async for raw in self.process.stdout:
                 try:
                     message = json.loads(raw.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
+                if not isinstance(message, dict):
+                    log.debug(
+                        "Ignoring non-object message from Codex app-server: %r",
+                        message,
+                    )
+                    continue
                 if "id" in message and ("result" in message or "error" in message):
-                    future = self._pending.pop(int(message["id"]), None)
+                    request_id = message["id"]
+                    future = self._pending.pop(request_id, None)
+                    if future is None and isinstance(request_id, str):
+                        with contextlib.suppress(ValueError):
+                            future = self._pending.pop(int(request_id), None)
                     if future and not future.done():
                         if "error" in message:
                             future.set_exception(
@@ -421,7 +467,8 @@ class _JsonRpcClient:
                         else:
                             future.set_result(message.get("result"))
                     continue
-                params = message.get("params") or {}
+                raw_params = message.get("params")
+                params = raw_params if isinstance(raw_params, dict) else {}
                 thread_id = str(params.get("threadId") or "")
                 if message.get("method") == "item/tool/call" and thread_id:
                     conversation = self._conversations.get(thread_id)
@@ -433,13 +480,13 @@ class _JsonRpcClient:
                         )
                         if "id" in message:
                             conversation.pending_calls[call_id] = (
-                                int(message["id"]),
+                                message["id"],
                                 params,
                             )
                         await conversation.events.put(("tool", params))
                     elif "id" in message:
                         await self._send_response(
-                            int(message["id"]),
+                            message["id"],
                             {
                                 "success": False,
                                 "contentItems": [
@@ -459,12 +506,19 @@ class _JsonRpcClient:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.debug("Codex app-server stdout reader stopped: %s", exc)
+            reader_error = exc
+            log.warning("Codex app-server stdout reader stopped", exc_info=True)
         finally:
-            error = CodexUnavailableError(
-                "Codex app-server stopped unexpectedly"
-                + (f": {list(self._stderr_tail)[-1]}" if self._stderr_tail else "")
+            detail = ""
+            if reader_error is not None:
+                detail = f": {type(reader_error).__name__}: {reader_error}"
+            elif self._stderr_tail:
+                detail = f": {list(self._stderr_tail)[-1]}"
+            error = CodexTransportError(
+                "Codex app-server stopped unexpectedly" + detail,
+                client=self,
             )
+            self._wake_conversations(error)
             for future in list(self._pending.values()):
                 if not future.done():
                     future.set_exception(error)
@@ -483,12 +537,12 @@ class _JsonRpcClient:
 
     async def _send(self, message: dict[str, Any]) -> None:
         if not self.process or not self.process.stdin:
-            raise CodexUnavailableError("Codex app-server is not running")
+            raise CodexTransportError("Codex app-server is not running", client=self)
         async with self._write_lock:
             self.process.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
             await self.process.stdin.drain()
 
-    async def _send_response(self, request_id: int, result: Any) -> None:
+    async def _send_response(self, request_id: int | str, result: Any) -> None:
         await self._send({"jsonrpc": "2.0", "id": request_id, "result": result})
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
@@ -505,7 +559,10 @@ class _JsonRpcClient:
                 "params": params or {},
             }
         )
-        return await asyncio.wait_for(future, timeout=TURN_TIMEOUT_S)
+        try:
+            return await asyncio.wait_for(future, timeout=TURN_TIMEOUT_S)
+        finally:
+            self._pending.pop(request_id, None)
 
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         await self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
@@ -638,6 +695,72 @@ def _internal_action_name(params: dict[str, Any]) -> str | None:
     return str(item.get("tool") or item_type)
 
 
+def _reports_dynamic_tool_failure(
+    text: str, tools: list[dict[str, Any]] | None = None
+) -> bool:
+    """Recognize terminal Codex messages that say its AESPA tools are broken."""
+    normalized = re.sub(r"\s+", " ", text.lower().replace("’", "'")).strip()
+    unavailable = (
+        r"(?:stopped responding|are not responding|became unavailable|"
+        r"are unavailable|stopped working|are not working)"
+    )
+    if bool(
+        re.search(
+            rf"\b(?:aespa(?:'s)?\s+)?dynamic tools? (?:have )?{unavailable}\b",
+            normalized,
+        )
+        or re.search(
+            rf"\baespa(?:'s)? tools? (?:have )?{unavailable}\b",
+            normalized,
+        )
+        or re.search(
+            rf"\btool calls? (?:have )?{unavailable}\b",
+            normalized,
+        )
+    ):
+        return True
+
+    # Codex can name an AESPA tool instead of calling the set "dynamic tools",
+    # for example: "the required credential_check tool is unavailable". Keep
+    # this tied to an advertised tool name so an unavailable target dependency
+    # such as a payment gateway does not rotate a healthy Codex session.
+    tool_names = {
+        str(tool.get("name") or "").strip().lower()
+        for tool in tools or []
+        if str(tool.get("name") or "").strip()
+    }
+    mentions_named_tool = any(
+        re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalized)
+        for name in tool_names
+    )
+    if not mentions_named_tool or "tool" not in normalized:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:is|are|was|were|seems?|remains?)\s+"
+            r"(?:not\s+(?:directly\s+)?available|unavailable|not\s+accessible)\b",
+            normalized,
+        )
+        or re.search(
+            r"\b(?:cannot|can't|do not|does not)\s+"
+            r"(?:directly\s+)?(?:access|call|use)\b",
+            normalized,
+        )
+    )
+
+
+def _required_tool_repair_prompt(tools: list[dict[str, Any]]) -> str:
+    names = [str(tool.get("name") or "").strip() for tool in tools]
+    names = [name for name in names if name]
+    available = ", ".join(names)
+    return (
+        "Your previous response ended without calling an AESPA dynamic tool, so "
+        "no scan action was executed. Call exactly one AESPA dynamic tool now and "
+        "do not respond with prose alone. Available tools: "
+        f"{available}."
+    )
+
+
 def _conversation_prompt(system_message: str, messages: list[dict[str, Any]]) -> str:
     transcript = [system_message]
     for message in messages:
@@ -720,8 +843,9 @@ async def _start_thread(
     tools: list[dict[str, Any]],
 ) -> _Conversation:
     tool_rule = (
-        "Call only the dynamic tools supplied by AESPA. Every tool-assisted "
-        "step must use one of those dynamic tools."
+        "Call only the dynamic tools supplied by AESPA. Every response must "
+        "call exactly one of those dynamic tools. Never end a response with "
+        "prose alone; call the supplied completion tool when the work is done."
         if tools
         else "Do not call any tool."
     )
@@ -752,7 +876,11 @@ async def _start_thread(
     thread_id = str((result or {}).get("thread", result or {}).get("id") or "")
     if not thread_id:
         raise CodexUnavailableError("Codex did not return a thread id")
-    conversation = _Conversation(thread_id=thread_id, last_message_count=len(messages))
+    conversation = _Conversation(
+        thread_id=thread_id,
+        last_message_count=len(messages),
+        client=client,
+    )
     client._conversations[thread_id] = conversation
     return conversation
 
@@ -793,7 +921,7 @@ async def _send_turn(
         "input": [{"type": "text", "text": prompt}],
         "model": config.model,
     }
-    if config.reasoning_effort:
+    if getattr(config, "reasoning_effort", None):
         params["effort"] = config.reasoning_effort
     await client.request(
         "turn/start",
@@ -842,10 +970,13 @@ async def flush_pending_tool_results(messages: list[dict]) -> int:
     can deadlock if the owning loop stops first.
     """
     conversation = _conversations.get(id(messages))
-    if conversation is None or _client is None:
+    if conversation is None:
+        return 0
+    client = conversation.client or _client
+    if client is None:
         return 0
     resolved = await _send_pending_tool_results(
-        _client,
+        client,
         conversation,
         messages,
         conversation.last_message_count,
@@ -884,6 +1015,11 @@ async def _completion_with_tools_once(
         )
     key = id(messages)
     conversation = _conversations.get(key)
+    if conversation is not None and conversation.client not in {None, client}:
+        # The shared app-server was recycled while this agent was between tool
+        # calls. Its old thread cannot be continued on the replacement client.
+        await _abandon_conversation(messages, delete_thread=False)
+        conversation = None
     if conversation is None:
         conversation = await _start_thread(
             client, config, system_message, messages, tools
@@ -930,16 +1066,25 @@ async def _completion_with_tools_once(
                 _content_text(user_messages[-1].get("content")),
             )
 
+    required_tool_repairs = 0
     while True:
         try:
             event_type, params = await asyncio.wait_for(
                 conversation.events.get(), timeout=TURN_TIMEOUT_S
             )
         except TimeoutError as exc:
-            raise CodexUnavailableError(
+            raise CodexTurnTimeoutError(
                 f"Codex produced no usable AESPA response for {TURN_TIMEOUT_S:.0f} "
-                "seconds. AESPA stopped the stalled turn."
+                "seconds. AESPA stopped the stalled turn.",
+                client=conversation.client,
             ) from exc
+        if event_type == "client/error":
+            raise CodexTransportError(
+                str(params.get("message") or "Codex app-server stopped unexpectedly"),
+                client=params.get("client")
+                if isinstance(params.get("client"), _JsonRpcClient)
+                else conversation.client,
+            )
         if event_type in {"item/started", "item/completed"}:
             internal_action = _internal_action_name(params)
             if internal_action:
@@ -1001,6 +1146,28 @@ async def _completion_with_tools_once(
             _merge_completed_text(conversation, _event_text(params))
             output = _take_conversation_text(conversation)
             if output:
+                if tools and _reports_dynamic_tool_failure(output, tools):
+                    raise CodexToolSessionError(
+                        "Codex reported that AESPA's dynamic tools stopped responding. "
+                        "AESPA is replacing the broken Codex tool session. "
+                        f"Codex response: {output[:500]}",
+                        client=conversation.client,
+                    )
+            if tools and required_tool_repairs < MAX_REQUIRED_TOOL_REPAIRS:
+                required_tool_repairs += 1
+                log.info(
+                    "Codex ended without an AESPA tool call; repairing turn (%d/%d)",
+                    required_tool_repairs,
+                    MAX_REQUIRED_TOOL_REPAIRS,
+                )
+                await _send_turn(
+                    client,
+                    conversation,
+                    config,
+                    _required_tool_repair_prompt(tools),
+                )
+                continue
+            if output:
                 block = {
                     "type": "text",
                     "id": None,
@@ -1009,6 +1176,8 @@ async def _completion_with_tools_once(
                     "text": output,
                 }
                 return [block], "end_turn", [block]
+            if tools:
+                return [], "end_turn", []
             continue
         if event_type in {"item/agentMessage/delta", "agentMessage/delta"}:
             delta_text = str(params.get("delta") or params.get("text") or "")
@@ -1058,9 +1227,13 @@ async def completion_with_tools(
     usage_callback: Callable[..., None],
     proxy_url: str | None = None,
 ) -> tuple[list[dict], str, list[dict]]:
-    """Run a turn, retrying short-lived upstream Codex rate limits safely."""
-    max_retries = 3
-    for attempt in range(max_retries + 1):
+    """Run a turn with bounded rate-limit and stalled-client recovery."""
+    max_rate_limit_retries = 3
+    rate_limit_attempt = 0
+    thread_retry_used = False
+    client_restart_count = 0
+    max_client_restarts = 2
+    while True:
         try:
             return await _completion_with_tools_once(
                 config,
@@ -1073,7 +1246,7 @@ async def completion_with_tools(
         except CodexRateLimitError as exc:
             if exc.snapshot.get("preflight") or exc.snapshot.get("window_full"):
                 raise
-            if attempt >= max_retries:
+            if rate_limit_attempt >= max_rate_limit_retries:
                 raise CodexRateLimitError(
                     "Codex upstream rate limit persisted after AESPA retries. "
                     "AESPA's local TPM setting cannot reset this window; resume after the Codex rate-limit window resets.",
@@ -1081,15 +1254,58 @@ async def completion_with_tools(
                     reset_at=exc.reset_at,
                     snapshot=exc.snapshot,
                 ) from exc
-            delay = max(0.25, exc.retry_after_s or 0.5) * (2**attempt)
+            delay = max(0.25, exc.retry_after_s or 0.5) * (2**rate_limit_attempt)
+            rate_limit_attempt += 1
             await close_conversation(messages)
             log.info(
                 "Codex upstream rate limit; retrying AESPA turn in %.2fs (attempt %d/%d)",
                 delay,
-                attempt + 1,
-                max_retries,
+                rate_limit_attempt,
+                max_rate_limit_retries,
             )
             await asyncio.sleep(min(delay, 5.0))
+        except CodexTurnTimeoutError as exc:
+            if not thread_retry_used:
+                thread_retry_used = True
+                await _abandon_conversation(messages)
+                log.warning("Codex turn stalled; retrying once in a fresh Codex thread")
+                continue
+            failed_client = exc.client or _client
+            await _abandon_conversation(messages, delete_thread=False)
+            restarted = await _restart_client(
+                failed_client,
+                allow_restart=client_restart_count < max_client_restarts,
+            )
+            if restarted is None:
+                raise
+            if restarted:
+                client_restart_count += 1
+                log.warning(
+                    "Replacement Codex thread also stalled; restarted the Codex app-server and retrying once"
+                )
+            else:
+                log.info(
+                    "Codex stall came from an older client; retrying on its existing replacement"
+                )
+            continue
+        except CodexTransportError as exc:
+            failed_client = exc.client or _client
+            await _abandon_conversation(messages, delete_thread=False)
+            restarted = await _restart_client(
+                failed_client,
+                allow_restart=client_restart_count < max_client_restarts,
+            )
+            if restarted is None:
+                raise
+            if restarted:
+                client_restart_count += 1
+                log.warning(
+                    "Codex app-server transport stopped; restarted it and retrying"
+                )
+            else:
+                log.info(
+                    "Codex transport error came from an older client; retrying on its existing replacement"
+                )
 
 
 async def plain_completion(
@@ -1121,9 +1337,13 @@ async def plain_completion(
 async def close_conversation(messages: list[dict]) -> None:
     key = id(messages)
     conversation = _conversations.get(key)
-    if conversation is None or _client is None:
+    if conversation is None:
         _conversations.pop(key, None)
         _usage_callbacks.pop(key, None)
+        return
+    client = conversation.client or _client
+    if client is None:
+        _detach_conversation(messages)
         return
     # Deliver any results appended immediately before cancellation, a budget
     # stop, or another early exit. Then explicitly fail callbacks whose tool
@@ -1132,7 +1352,7 @@ async def close_conversation(messages: list[dict]) -> None:
         await flush_pending_tool_results(messages)
     for call_id, (request_id, _params) in list(conversation.pending_calls.items()):
         with contextlib.suppress(Exception):
-            await _client._send_response(
+            await client._send_response(
                 request_id,
                 {
                     "success": False,
@@ -1145,20 +1365,74 @@ async def close_conversation(messages: list[dict]) -> None:
                 },
             )
         conversation.pending_calls.pop(call_id, None)
-    _conversations.pop(key, None)
-    _usage_callbacks.pop(key, None)
-    _client._conversations.pop(conversation.thread_id, None)
+    _detach_conversation(messages, client)
     with contextlib.suppress(Exception):
-        await _client.request("thread/delete", {"threadId": conversation.thread_id})
+        await asyncio.wait_for(
+            client.request("thread/delete", {"threadId": conversation.thread_id}),
+            timeout=CONVERSATION_CLOSE_TIMEOUT_S,
+        )
+
+
+def _detach_conversation(
+    messages: list[dict], client: _JsonRpcClient | None = None
+) -> _Conversation | None:
+    """Remove a conversation from AESPA without waiting on its app-server."""
+    key = id(messages)
+    conversation = _conversations.pop(key, None)
+    _usage_callbacks.pop(key, None)
+    owner = client or (conversation.client if conversation else None)
+    if conversation is not None and owner is not None:
+        owner._conversations.pop(conversation.thread_id, None)
+    return conversation
+
+
+async def _abandon_conversation(
+    messages: list[dict], *, delete_thread: bool = True
+) -> None:
+    """Drop a stalled thread so the next attempt starts from message history."""
+    conversation = _detach_conversation(messages)
+    if conversation is None or conversation.client is None or not delete_thread:
+        return
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(
+            conversation.client.request(
+                "thread/delete", {"threadId": conversation.thread_id}
+            ),
+            timeout=CONVERSATION_CLOSE_TIMEOUT_S,
+        )
+
+
+async def _restart_client(
+    failed_client: _JsonRpcClient | None, *, allow_restart: bool = True
+) -> bool | None:
+    """Recycle the failed client without closing a newer replacement.
+
+    ``True`` means this call restarted the current client, ``False`` means
+    another task had already replaced it, and ``None`` means the caller's
+    restart budget was exhausted while the failed client was still current.
+    """
+    global _client
+    if failed_client is None:
+        return False
+    async with _client_lock:
+        if _client is not failed_client:
+            return False
+        if not allow_restart:
+            return None
+        _client = None
+        await failed_client.close()
+        return True
 
 
 async def close_clients() -> None:
     global _client
-    _conversations.clear()
-    _usage_callbacks.clear()
-    if _client is not None:
-        await _client.close()
-    _client = None
+    async with _client_lock:
+        client = _client
+        _client = None
+        _conversations.clear()
+        _usage_callbacks.clear()
+        if client is not None:
+            await client.close()
 
 
 async def login_start() -> dict[str, Any]:

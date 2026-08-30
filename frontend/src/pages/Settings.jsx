@@ -4,6 +4,8 @@ import { PROVIDER_DEFAULT_BASE_URLS, PROVIDER_MODEL_PLACEHOLDERS, DEFAULT_PROVID
 import { AGENT_ROLE_LABELS } from "./Settings/LLMModelForm";
 import { DEFAULT_BURP_REST_API_FORM } from "./Settings/SpecialistAgentSettings";
 import { api } from "../lib/api";
+import { bedrockBaseUrl, bedrockRegionFromBaseUrl, isBedrockProvider } from "../lib/bedrock";
+import { sortModelNames } from "../lib/modelSorting";
 
 import { ScannerPolicyFields } from "./Settings/ScannerPolicyFields";
 import { ScannerPolicySettings } from "./Settings/ScannerPolicySettings";
@@ -25,7 +27,9 @@ import { DebugFindingsTable } from "./Settings/DebugFindingsTable";
 export function specialistAgentToForm(cfg) {
   return cfg ? {
     enabled: cfg.enabled ?? true,
+    auto_dispatch_enabled: cfg.auto_dispatch_enabled ?? true,
     max_concurrent: cfg.max_concurrent ?? 5,
+    max_queued: cfg.max_queued ?? 20,
     max_steps: cfg.max_steps ?? 30,
     min_priority: cfg.min_priority ?? 7,
     dispatch_idor: cfg.dispatch_idor ?? true,
@@ -38,6 +42,7 @@ export function specialistAgentToForm(cfg) {
     dispatch_cors: cfg.dispatch_cors ?? false,
     dispatch_crypto: cfg.dispatch_crypto ?? true,
     dispatch_config: cfg.dispatch_config ?? false,
+    dispatch_file_upload: cfg.dispatch_file_upload ?? true,
     trigger_specialist_on_burp: cfg.trigger_specialist_on_burp ?? false
   } : {
     ...DEFAULT_SPECIALIST_AGENT_FORM
@@ -46,7 +51,9 @@ export function specialistAgentToForm(cfg) {
 export function specialistAgentPayload(form) {
   return {
     enabled: !!form.enabled,
+    auto_dispatch_enabled: !!form.auto_dispatch_enabled,
     max_concurrent: Number(form.max_concurrent),
+    max_queued: Number(form.max_queued),
     max_steps: Number(form.max_steps),
     min_priority: Number(form.min_priority),
     dispatch_idor: !!form.dispatch_idor,
@@ -59,6 +66,7 @@ export function specialistAgentPayload(form) {
     dispatch_cors: !!form.dispatch_cors,
     dispatch_crypto: !!form.dispatch_crypto,
     dispatch_config: !!form.dispatch_config,
+    dispatch_file_upload: !!form.dispatch_file_upload,
     trigger_specialist_on_burp: !!form.trigger_specialist_on_burp
   };
 }
@@ -111,6 +119,7 @@ export function providerToForm(provider) {
     name: provider.name || "",
     api_format: provider.api_format || "anthropic",
     base_url: provider.base_url || "",
+    region: isBedrockProvider(provider.api_format) ? bedrockRegionFromBaseUrl(provider.api_format, provider.base_url) : "",
     username: provider.username || "",
     project_id: provider.project_id || "",
     models: (provider.models || []).join("\n"),
@@ -138,11 +147,16 @@ export function providerPayload(form) {
   } else {
     apiKeyPayload = null;
   }
-  const modelText = form.models.trim() || PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || "";
+  const modelText = form.models.trim() || (form.api_format === "openai_compatible"
+    ? ""
+    : PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || "");
+  const baseUrl = isBedrockProvider(form.api_format)
+    ? bedrockBaseUrl(form.api_format, form.region)
+    : form.base_url.trim() || null;
   return {
     name: form.name.trim(),
     api_format: form.api_format,
-    base_url: usesCliCredentials ? null : form.base_url.trim() || null,
+    base_url: usesCliCredentials ? null : baseUrl,
     username: form.api_format === "github_copilot" ? form.username.trim() || null : null,
     project_id: form.api_format === "bedrock_mantle" ? form.project_id.trim() || null : null,
     models: modelText.split(/\r?\n|,/).map(m => m.trim()).filter(Boolean),
@@ -163,6 +177,8 @@ export function llmProfileToForm(cfg, providers = []) {
       provider_id: providerId,
       model: cfg.model,
       max_tokens: cfg.max_tokens,
+      max_context_tokens: cfg.max_context_tokens || 128000,
+      max_context_auto: cfg.context_limit_source !== "manual",
       temperature: hasTemp ? cfg.temperature : 0.2,
       use_temperature: hasTemp,
       use_vision: cfg.use_vision ?? false,
@@ -170,7 +186,7 @@ export function llmProfileToForm(cfg, providers = []) {
       reasoning_effort: cfg.reasoning_effort || ""
     };
   }
-  const defaultModel = provider?.models?.[0] || "";
+  const defaultModel = sortModelNames(provider?.models)[0] || "";
   const defaultName = provider?.name && defaultModel ? `${provider.name}/${defaultModel}` : defaultModel;
   return {
     ...DEFAULT_LLM_FORM,
@@ -185,6 +201,7 @@ export function llmPayload(form) {
     provider_id: Number(form.provider_id),
     model: form.model.trim(),
     max_tokens: Number(form.max_tokens),
+    max_context_tokens: form.max_context_auto ? null : Number(form.max_context_tokens),
     temperature: form.use_temperature ? Number(form.temperature) : null,
     use_vision: form.use_vision,
     force_tool_choice: form.force_tool_choice,

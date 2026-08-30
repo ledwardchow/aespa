@@ -124,6 +124,13 @@ class ConnectionProposal:
     evidence: dict
 
 
+@dataclass(frozen=True)
+class RouteAccess:
+    kind: str
+    confidence: float
+    authentication: dict | None = None
+
+
 LlmMatchFn = Callable[[list[dict]], list[dict]]
 
 
@@ -150,6 +157,306 @@ def _paths_match(a: str | None, b: str | None) -> bool:
     if not a or not b:
         return False
     return _normalize_path(a) == _normalize_path(b)
+
+
+def _path_pattern_matches(pattern: str | None, path: str | None) -> bool:
+    """Match a small set of common route-prefix patterns."""
+    if not pattern or not path:
+        return False
+    normalized_pattern = _normalize_path(pattern)
+    normalized_path = _normalize_path(path)
+    if normalized_pattern in {"", "*", "/**"}:
+        return True
+    if normalized_pattern.endswith("/**"):
+        prefix = normalized_pattern[:-3].rstrip("/") or "/"
+        return normalized_path == prefix or normalized_path.startswith(prefix + "/")
+    if normalized_pattern.endswith("/*"):
+        prefix = normalized_pattern[:-2].rstrip("/") or "/"
+        return normalized_path == prefix or normalized_path.startswith(prefix + "/")
+    return normalized_pattern == normalized_path
+
+
+def _auth_boundary_state(session: Session, route: ComponentFact) -> str:
+    """Return ``public``, ``protected``, or ``unknown`` for one route.
+
+    Older facts only contain a file location. Those remain useful as local
+    protection evidence, but absence of a same-file marker is deliberately not
+    treated as proof that a route is public.
+    """
+    facts = session.exec(
+        select(ComponentFact)
+        .where(ComponentFact.sast_run_id == route.sast_run_id)
+        .where(ComponentFact.fact_type == "auth_boundary")
+    ).all()
+    route_method = (route.method or "").upper()
+    has_protected_match = False
+
+    for fact in facts:
+        detail = _fact_detail(fact)
+        public_paths = detail.get("public_paths")
+        if isinstance(public_paths, str):
+            public_paths = [public_paths]
+        public_methods = detail.get("public_methods")
+        if isinstance(public_methods, str):
+            public_methods = [public_methods]
+        if isinstance(public_paths, list) and any(
+            _path_pattern_matches(str(pattern), route.path)
+            and (
+                not public_methods
+                or route_method in {str(method).upper() for method in public_methods}
+            )
+            for pattern in public_paths
+        ):
+            return "public"
+
+        protected_paths = detail.get("protected_paths")
+        if isinstance(protected_paths, str):
+            protected_paths = [protected_paths]
+        if detail.get("scope") == "global" and isinstance(protected_paths, list):
+            if any(
+                _path_pattern_matches(str(pattern), route.path)
+                for pattern in protected_paths
+            ):
+                has_protected_match = True
+        elif detail.get("scope") in {None, "local"} and _same_evidence_file(
+            fact, route
+        ):
+            has_protected_match = True
+
+    return "protected" if has_protected_match else "unknown"
+
+
+def _fact_identity(fact: ComponentFact) -> tuple[str, str, str]:
+    """Return a semantic method/path/host identity for a fact."""
+    host = _host_of(fact.host) or (fact.host or "").strip().lower()
+    return (
+        (fact.method or "").upper(),
+        _normalize_path(fact.path),
+        host,
+    )
+
+
+def _connection_identity(
+    source_component_id: int,
+    target_component_id: int,
+    source: ComponentFact,
+    target: ComponentFact,
+) -> tuple[int, int, tuple[str, str, str], tuple[str, str, str]]:
+    """Identify one semantic cross-component endpoint pair."""
+    return (
+        source_component_id,
+        target_component_id,
+        _fact_identity(source),
+        _fact_identity(target),
+    )
+
+
+def _cross_repo_lead_fingerprint(
+    *,
+    category: str,
+    origin_fingerprint: str,
+    source_component_id: int,
+    target_component_id: int,
+    backend_case: bool = False,
+) -> str:
+    """Identify one cross-repo root cause across all matched endpoints."""
+    semantic_location = "|".join(
+        (
+            origin_fingerprint,
+            str(source_component_id),
+            str(target_component_id),
+            "backend" if backend_case else "source",
+        )
+    )
+    return lead_fingerprint(
+        category=category,
+        title="cross-repository",
+        location=semantic_location,
+    )
+
+
+def _cross_repo_attack_path(
+    *,
+    existing: dict,
+    source_fact: ComponentFact,
+    target_fact: ComponentFact,
+    connection: ComponentConnection,
+    source_component_name: str,
+    target_component_name: str,
+    vulnerability: ScanLead,
+    backend_case: bool,
+    access: RouteAccess,
+) -> dict:
+    """Keep one root path while retaining every matched endpoint instance."""
+    path = deepcopy(existing) if isinstance(existing, dict) else {}
+    path.setdefault(
+        "frontend_entrypoint",
+        {
+            "component_id": connection.source_component_id,
+            "component_name": source_component_name,
+            "location": source_fact.evidence_location,
+            "method": source_fact.method,
+            "path": source_fact.path,
+            "host": source_fact.host,
+        },
+    )
+    path.setdefault(
+        "backend_route",
+        {
+            "component_id": connection.target_component_id,
+            "component_name": target_component_name,
+            "location": target_fact.evidence_location,
+            "method": target_fact.method,
+            "path": target_fact.path,
+        },
+    )
+    path.setdefault(
+        "vulnerability",
+        {
+            "lead_id": vulnerability.id,
+            "category": vulnerability.category,
+            "severity": vulnerability.severity,
+            "title": vulnerability.title,
+            "description": vulnerability.description,
+            "evidence": vulnerability.evidence,
+        },
+    )
+    instances = path.get("instances")
+    if not isinstance(instances, list):
+        instances = []
+    instance = {
+        "case": "backend" if backend_case else "source",
+        "source_component_id": connection.source_component_id,
+        "source_fact_id": source_fact.id,
+        "source_location": source_fact.evidence_location,
+        "source_method": source_fact.method,
+        "source_path": source_fact.path,
+        "source_host": source_fact.host,
+        "target_component_id": connection.target_component_id,
+        "target_fact_id": target_fact.id,
+        "target_location": target_fact.evidence_location,
+        "target_method": target_fact.method,
+        "target_path": target_fact.path,
+        "access": access.kind,
+        "confidence": access.confidence,
+    }
+    if access.authentication is not None:
+        instance["authentication"] = deepcopy(access.authentication)
+    instance_key = (
+        instance["case"],
+        instance["source_location"],
+        instance["source_method"],
+        instance["source_path"],
+        instance["target_location"],
+        instance["target_method"],
+        instance["target_path"],
+    )
+    existing_index = next(
+        (
+            index
+            for index, item in enumerate(instances)
+            if isinstance(item, dict)
+            and (
+                item.get("case"),
+                item.get("source_location"),
+                item.get("source_method"),
+                item.get("source_path"),
+                item.get("target_location"),
+                item.get("target_method"),
+                item.get("target_path"),
+            )
+            == instance_key
+        ),
+        None,
+    )
+    if existing_index is None:
+        instances.append(instance)
+    else:
+        instances[existing_index] = {**instances[existing_index], **instance}
+    path["instances"] = instances[:64]
+    return path
+
+
+def _load_cross_repo_attack_path(
+    session: Session,
+    *,
+    campaign_id: int,
+    fingerprint: str,
+    base: dict,
+    source_fact: ComponentFact,
+    target_fact: ComponentFact,
+    connection: ComponentConnection,
+    source_component_name: str,
+    target_component_name: str,
+    vulnerability: ScanLead,
+    backend_case: bool,
+    access: RouteAccess,
+) -> dict:
+    """Load an existing root path before adding another endpoint instance."""
+    existing = session.exec(
+        select(ScanLead)
+        .where(ScanLead.producer_run_id == campaign_id)
+        .where(ScanLead.producer_run_type == "campaign")
+        .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+        .where(ScanLead.fingerprint == fingerprint)
+    ).first()
+    current: dict = {}
+    if existing is not None:
+        try:
+            decoded = json.loads(existing.attack_path_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            decoded = {}
+        if isinstance(decoded, dict):
+            current = decoded
+    if not current:
+        current = deepcopy(base)
+    return _cross_repo_attack_path(
+        existing=current,
+        source_fact=source_fact,
+        target_fact=target_fact,
+        connection=connection,
+        source_component_name=source_component_name,
+        target_component_name=target_component_name,
+        vulnerability=vulnerability,
+        backend_case=backend_case,
+        access=access,
+    )
+
+
+def _cross_repo_suggested_endpoint(attack_path: dict) -> str:
+    """Return one representative endpoint for target matching and display."""
+    instances = attack_path.get("instances")
+    if isinstance(instances, list):
+        for instance in instances:
+            if not isinstance(instance, dict):
+                continue
+            method = instance.get("target_method") or ""
+            path = instance.get("target_path") or ""
+            if method or path:
+                return f"{method} {path}".strip()
+    route = attack_path.get("backend_route")
+    if isinstance(route, dict):
+        return f"{route.get('method') or ''} {route.get('path') or ''}".strip()
+    return ""
+
+
+def _attack_path_has_authenticated_access(attack_path: dict) -> bool:
+    instances = attack_path.get("instances")
+    return isinstance(instances, list) and any(
+        isinstance(instance, dict) and instance.get("access") == "authenticated"
+        for instance in instances
+    )
+
+
+def _route_access_evidence(access: RouteAccess) -> str:
+    if access.authentication is None:
+        return "Target route is explicitly public"
+    acquisition = access.authentication.get("acquisition") or {}
+    return (
+        "Target route is reachable with a credential acquired through "
+        f"{acquisition.get('method') or ''} {acquisition.get('path') or ''} "
+        f"({acquisition.get('source_location') or 'unknown source'})"
+    ).strip()
 
 
 def _fact_evidence(fact: ComponentFact) -> dict:
@@ -182,6 +489,8 @@ def _detail_locations(fact: ComponentFact) -> set[str]:
         "route_locations",
         "source_locations",
         "related_locations",
+        "acquisition_call_locations",
+        "credential_use_locations",
     ):
         values = detail.get(key)
         if isinstance(values, str):
@@ -202,6 +511,118 @@ def _detail_connects(source: ComponentFact, target: ComponentFact) -> bool:
     )
 
 
+def _detail_location_set(fact: ComponentFact, key: str) -> set[str]:
+    values = _fact_detail(fact).get(key)
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        return set()
+    return {str(value) for value in values if value}
+
+
+def _authenticated_route_access(
+    session: Session,
+    connection: ComponentConnection,
+    source_fact: ComponentFact,
+    target_fact: ComponentFact,
+    connections: list[ComponentConnection],
+) -> RouteAccess | None:
+    """Prove that a protected cross-repo call can obtain and use credentials."""
+    flows = session.exec(
+        select(ComponentFact)
+        .where(ComponentFact.sast_run_id == source_fact.sast_run_id)
+        .where(ComponentFact.fact_type == "auth_flow")
+    ).all()
+    best: RouteAccess | None = None
+    for flow in flows:
+        if source_fact.evidence_location not in _detail_location_set(
+            flow, "credential_use_locations"
+        ):
+            continue
+        acquisition_locations = _detail_location_set(flow, "acquisition_call_locations")
+        if not acquisition_locations:
+            continue
+        detail = _fact_detail(flow)
+        try:
+            flow_confidence = float(
+                detail.get("confidence") or detail.get("llm_confidence") or 0.75
+            )
+        except (TypeError, ValueError):
+            flow_confidence = 0.75
+        flow_confidence = max(0.0, min(flow_confidence, 1.0))
+
+        for acquisition in connections:
+            if getattr(acquisition, "edge_kind", "calls") != "calls":
+                continue
+            if (
+                acquisition.source_component_id != connection.source_component_id
+                or acquisition.target_component_id != connection.target_component_id
+            ):
+                continue
+            acquisition_call = session.get(ComponentFact, acquisition.source_fact_id)
+            acquisition_route = session.get(ComponentFact, acquisition.target_fact_id)
+            if acquisition_call is None or acquisition_route is None:
+                continue
+            if acquisition_call.evidence_location not in acquisition_locations:
+                continue
+            if flow.method and (
+                not acquisition_call.method
+                or flow.method.upper() != acquisition_call.method.upper()
+            ):
+                continue
+            if flow.path and not _paths_match(flow.path, acquisition_call.path):
+                continue
+            if _auth_boundary_state(session, acquisition_route) != "public":
+                continue
+
+            confidence = min(
+                connection.confidence,
+                acquisition.confidence,
+                flow_confidence,
+            )
+            candidate = RouteAccess(
+                kind="authenticated",
+                confidence=confidence,
+                authentication={
+                    "flow_fact_id": flow.id,
+                    "flow_location": flow.evidence_location,
+                    "credential_kind": detail.get("credential_kind"),
+                    "acquisition": {
+                        "source_fact_id": acquisition_call.id,
+                        "source_location": acquisition_call.evidence_location,
+                        "method": acquisition_call.method,
+                        "path": acquisition_call.path,
+                        "target_fact_id": acquisition_route.id,
+                        "target_location": acquisition_route.evidence_location,
+                    },
+                },
+            )
+            if best is None or candidate.confidence > best.confidence:
+                best = candidate
+    return best
+
+
+def _route_access(
+    session: Session,
+    connection: ComponentConnection,
+    source_fact: ComponentFact,
+    target_fact: ComponentFact,
+    connections: list[ComponentConnection],
+) -> RouteAccess | None:
+    state = _auth_boundary_state(session, target_fact)
+    if state == "public":
+        return RouteAccess(kind="public", confidence=connection.confidence)
+    if state == "protected":
+        return _authenticated_route_access(
+            session,
+            connection,
+            source_fact,
+            target_fact,
+            connections,
+        )
+    return None
+
+
 def _same_evidence_file(left: ComponentFact, right: ComponentFact) -> bool:
     return (
         left.evidence_location.split(":", 1)[0]
@@ -212,9 +633,11 @@ def _same_evidence_file(left: ComponentFact, right: ComponentFact) -> bool:
 def _host_of(value: str | None) -> str | None:
     if not value:
         return None
-    if "://" in value:
-        return (urlparse(value).hostname or "").lower() or None
-    return None
+    first_token = value.strip().split()[0] if value.strip() else ""
+    if not first_token:
+        return None
+    parsed = urlparse(first_token if "://" in first_token else f"//{first_token}")
+    return (parsed.hostname or "").lower() or None
 
 
 def _extract_method_path(text: str) -> tuple[str | None, str | None]:
@@ -300,12 +723,37 @@ def _build_component_connections(
             .where(ScanLead.reportable == True)  # noqa: E712
         ).all()
         for original in originals:
-            if any(
-                fact.fact_type == "lead_anchor"
-                and _fact_detail(fact).get("lead_id") == original.id
+            anchor_method, anchor_path = _extract_method_path(
+                original.suggested_endpoint or ""
+            )
+            existing_anchors = [
+                fact
                 for fact in facts
-            ):
-                continue
+                if fact.fact_type == "lead_anchor"
+                and _fact_detail(fact).get("lead_id") == original.id
+            ]
+            if existing_anchors:
+                for existing_anchor in existing_anchors:
+                    changed = False
+                    if not existing_anchor.method and anchor_method:
+                        existing_anchor.method = anchor_method
+                        changed = True
+                    if not existing_anchor.path and anchor_path:
+                        existing_anchor.path = anchor_path
+                        changed = True
+                    if changed:
+                        session.add(existing_anchor)
+                if not anchor_path or any(
+                    existing_anchor.path
+                    and _paths_match(existing_anchor.path, anchor_path)
+                    and (
+                        not anchor_method
+                        or not existing_anchor.method
+                        or existing_anchor.method.upper() == anchor_method.upper()
+                    )
+                    for existing_anchor in existing_anchors
+                ):
+                    continue
             fingerprint = f"lead-anchor:{original.id}:{original.fingerprint}"
             anchor = next(
                 (fact for fact in facts if fact.fingerprint == fingerprint),
@@ -316,6 +764,8 @@ def _build_component_connections(
                     sast_run_id=member.sast_run_id,
                     component_id=member.component_id,
                     fact_type="lead_anchor",
+                    method=anchor_method,
+                    path=anchor_path,
                     name=original.title,
                     detail_json=json.dumps(
                         {
@@ -345,6 +795,9 @@ def _build_component_connections(
     session.flush()
 
     connections: list[ComponentConnection] = []
+    seen_cross_call_identities: set[
+        tuple[int, int, tuple[str, str, str], tuple[str, str, str]]
+    ] = set()
     component_ids = list(facts_by_component.keys())
     # Build the intra-repository portion of the graph first. These edges make
     # a source-code HTTP call reachable from a browser route/action instead of
@@ -441,15 +894,32 @@ def _build_component_connections(
                 for fact in facts
                 if fact.fact_type in {"route", "handler", "http_call"}
                 and fact.id != anchor.id
-                and fact.evidence_location.split(":", 1)[0] == anchor_file
+                and (
+                    fact.evidence_location.split(":", 1)[0] == anchor_file
+                    or (
+                        fact.fact_type == "route"
+                        and anchor.path
+                        and _paths_match(fact.path, anchor.path)
+                        and (
+                            not anchor.method
+                            or not fact.method
+                            or anchor.method.upper() == fact.method.upper()
+                        )
+                    )
+                )
             ):
+                same_file = source.evidence_location.split(":", 1)[0] == anchor_file
                 edge = _make_connection(
                     campaign_id=campaign_id,
                     source=source,
                     target=anchor,
                     match_kind="deterministic",
                     confidence=0.60,
-                    rationale="API route/handler and SAST vulnerability lead reside in the same source file",
+                    rationale=(
+                        "API route/handler and SAST vulnerability lead reside in the same source file"
+                        if same_file
+                        else "SAST lead endpoint matches the API route"
+                    ),
                     evidence={
                         "source": _fact_evidence(source),
                         "lead_anchor": _fact_evidence(anchor),
@@ -535,6 +1005,15 @@ def _build_component_connections(
                         best = (score, rationale, evidence, route)
                 if best is not None:
                     score, rationale, evidence, route = best
+                    identity = _connection_identity(
+                        source_component_id,
+                        target_component_id,
+                        call,
+                        route,
+                    )
+                    if identity in seen_cross_call_identities:
+                        continue
+                    seen_cross_call_identities.add(identity)
                     connection = _make_connection(
                         campaign_id=campaign_id,
                         source=call,
@@ -581,6 +1060,15 @@ def _build_component_connections(
                     route = next((item for item in routes if item.id == route_id), None)
                     if call is None or route is None:
                         continue
+                    identity = _connection_identity(
+                        source_component_id,
+                        target_component_id,
+                        call,
+                        route,
+                    )
+                    if identity in seen_cross_call_identities:
+                        continue
+                    seen_cross_call_identities.add(identity)
                     connection = _make_connection(
                         campaign_id=campaign_id,
                         source=call,
@@ -796,6 +1284,42 @@ def _same_file(location_a: str, location_b: str) -> bool:
     return (location_a or "").split(":")[0] == (location_b or "").split(":")[0]
 
 
+def _target_leads_for_route(
+    session: Session,
+    target_fact: ComponentFact,
+    connections: list[ComponentConnection],
+) -> list[ScanLead]:
+    """Resolve backend leads through route→lead-anchor graph evidence."""
+    anchor_ids = {
+        connection.target_fact_id
+        for connection in connections
+        if getattr(connection, "edge_kind", "") == "reaches"
+        and connection.source_fact_id == target_fact.id
+    }
+    lead_ids: set[int] = set()
+    for anchor_id in anchor_ids:
+        anchor = session.get(ComponentFact, anchor_id)
+        if anchor is None or anchor.fact_type != "lead_anchor":
+            continue
+        try:
+            lead_ids.add(int(_fact_detail(anchor).get("lead_id")))
+        except (TypeError, ValueError):
+            continue
+
+    return [
+        lead
+        for lead in session.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_id == target_fact.sast_run_id)
+            .where(ScanLead.producer_run_type == "sast")
+            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+            .where(ScanLead.reportable == True)  # noqa: E712
+        ).all()
+        if lead.id in lead_ids
+        or _same_file(lead.location, target_fact.evidence_location)
+    ]
+
+
 def _upsert_lead_provenance(
     session: Session,
     *,
@@ -828,11 +1352,12 @@ def _generate_cross_component_leads(
     """Create campaign-owned leads when two components' evidence combines into
     a new hypothesis:
     1. A reportable SAST lead at the outbound-call site (Repo A) reaching an
-       unauthenticated route (Repo B).
-    2. A reportable SAST lead at the target route site (Repo B) accessible via
-       an outbound call site (Repo A).
+       explicitly public route or an evidence-backed authenticated route
+       (Repo B).
+    2. A reportable SAST lead reached by the target route graph (Repo B), where
+       the route is public or the caller has a proven credential flow.
     """
-    created: list[ScanLead] = []
+    created_by_id: dict[int, ScanLead] = {}
     for connection in connections:
         if getattr(connection, "edge_kind", "calls") != "calls":
             continue
@@ -853,6 +1378,15 @@ def _generate_cross_component_leads(
         target_comp_name = (
             target_comp.name if target_comp else f"#{connection.target_component_id}"
         )
+        access = _route_access(
+            session,
+            connection,
+            source_fact,
+            target_fact,
+            connections,
+        )
+        if access is None:
+            continue
 
         # ── Case 1: SAST lead on the calling component (source_fact) ─────────
         source_leads = [
@@ -868,21 +1402,17 @@ def _generate_cross_component_leads(
         ]
 
         for source_lead in source_leads:
-            target_auth_facts = session.exec(
-                select(ComponentFact)
-                .where(ComponentFact.sast_run_id == target_fact.sast_run_id)
-                .where(ComponentFact.fact_type == "auth_boundary")
-            ).all()
-            if not any(
-                _same_file(fact.evidence_location, target_fact.evidence_location)
-                for fact in target_auth_facts
-            ):
-                fingerprint = lead_fingerprint(
-                    category=source_lead.category,
-                    title=f"cross-repo:{source_lead.title}",
-                    location=f"{source_fact.evidence_location}->{target_fact.evidence_location}",
-                )
-                attack_path = {
+            fingerprint = _cross_repo_lead_fingerprint(
+                category=source_lead.category,
+                origin_fingerprint=source_lead.fingerprint,
+                source_component_id=connection.source_component_id,
+                target_component_id=connection.target_component_id,
+            )
+            attack_path = _load_cross_repo_attack_path(
+                session,
+                campaign_id=campaign_id,
+                fingerprint=fingerprint,
+                base={
                     "frontend_entrypoint": {
                         "component_id": connection.source_component_id,
                         "component_name": source_comp_name,
@@ -906,128 +1436,151 @@ def _generate_cross_component_leads(
                         "description": source_lead.description,
                         "evidence": source_lead.evidence,
                     },
-                }
-                lead = upsert_lead(
-                    session,
-                    producer_run_id=campaign_id,
-                    producer_run_type="campaign",
-                    title=(
-                        f"Cross-repository: {source_lead.title} reaches an "
-                        f"unauthenticated {target_fact.method or ''} {target_fact.path or target_fact.name or ''}".strip()
-                    ),
-                    description=(
-                        f"{source_lead.description}\n\nThis call site is connected "
-                        "(deterministic route/method match) to a route in another "
-                        "repository that has no recorded authentication boundary."
-                    ),
-                    category=source_lead.category,
-                    severity=source_lead.severity,
-                    confidence=min(source_lead.confidence, connection.confidence),
-                    location=f"{source_fact.evidence_location} -> {target_fact.evidence_location}",
-                    evidence=(
-                        f"Outbound call: {source_fact.method} {source_fact.path} "
-                        f"({source_fact.evidence_location})\n"
-                        f"Matched route: {target_fact.method} {target_fact.path} "
-                        f"({target_fact.evidence_location})\n{source_lead.evidence}"
-                    ),
-                    source="campaign",
-                    fingerprint=fingerprint,
-                    suggested_endpoint=f"{target_fact.method or ''} {target_fact.path or ''}".strip(),
-                    attack_path=attack_path,
-                    validation_status="pending",
-                    reportable=True,
-                )
-                created.append(lead)
-
-                for component_id, role, fact_id in (
-                    (connection.source_component_id, "primary", source_fact.id),
-                    (connection.target_component_id, "contributing", target_fact.id),
-                ):
-                    _upsert_lead_provenance(
-                        session,
-                        lead_id=lead.id,
-                        component_id=component_id,
-                        role=role,
-                        fact_id=fact_id,
-                    )
-
-        # ── Case 2: SAST lead on the receiving target route (target_fact) ────
-        target_leads = [
-            target_lead
-            for target_lead in session.exec(
-                select(ScanLead)
-                .where(ScanLead.producer_run_id == target_fact.sast_run_id)
-                .where(ScanLead.producer_run_type == "sast")
-                .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-                .where(ScanLead.reportable == True)  # noqa: E712
-            ).all()
-            if _same_file(target_lead.location, target_fact.evidence_location)
-        ]
-
-        for target_lead in target_leads:
-            fingerprint = lead_fingerprint(
-                category=target_lead.category,
-                title=f"cross-repo:backend:{target_lead.title}",
-                location=f"{source_fact.evidence_location}->{target_fact.evidence_location}",
+                },
+                source_fact=source_fact,
+                target_fact=target_fact,
+                connection=connection,
+                source_component_name=source_comp_name,
+                target_component_name=target_comp_name,
+                vulnerability=source_lead,
+                backend_case=False,
+                access=access,
             )
-            attack_path = {
-                "frontend_entrypoint": {
-                    "component_id": connection.source_component_id,
-                    "component_name": source_comp_name,
-                    "location": source_fact.evidence_location,
-                    "method": source_fact.method,
-                    "path": source_fact.path,
-                    "host": source_fact.host,
-                },
-                "backend_route": {
-                    "component_id": connection.target_component_id,
-                    "component_name": target_comp_name,
-                    "location": target_fact.evidence_location,
-                    "method": target_fact.method,
-                    "path": target_fact.path,
-                },
-                "vulnerability": {
-                    "lead_id": target_lead.id,
-                    "category": target_lead.category,
-                    "severity": target_lead.severity,
-                    "title": target_lead.title,
-                    "description": target_lead.description,
-                    "evidence": target_lead.evidence,
-                },
-            }
+            authenticated_access = _attack_path_has_authenticated_access(attack_path)
             lead = upsert_lead(
                 session,
                 producer_run_id=campaign_id,
                 producer_run_type="campaign",
                 title=(
-                    f"Cross-repository: Backend lead '{target_lead.title}' accessible via "
-                    f"{source_comp_name} ({source_fact.evidence_location})"
+                    f"Cross-repository: {source_lead.title} can reach "
+                    f"{'authenticated routes' if authenticated_access else 'an explicitly public route'} "
+                    f"in {target_comp_name}"
                 ),
                 description=(
-                    f"Backend vulnerability '{target_lead.title}' in {target_comp_name} ({target_fact.evidence_location}) "
-                    f"is accessible via frontend entrypoint {source_fact.evidence_location} in {source_comp_name}.\n\n"
-                    f"Attack Path:\n"
-                    f"- Entrypoint: {source_fact.evidence_location} ({source_fact.method or ''} {source_fact.path or ''})\n"
-                    f"- Target Route: {target_fact.evidence_location} ({target_fact.method or ''} {target_fact.path or ''})\n"
-                    f"- Vulnerability Description: {target_lead.description}"
+                    f"{source_lead.description}\n\nThis call site is connected "
+                    "(deterministic route/method match) to another repository. "
+                    + (
+                        "The caller has an evidence-backed credential acquisition "
+                        "and reuse path for protected routes. "
+                        if authenticated_access
+                        else "The matched route is explicitly public. "
+                    )
+                    + "Matched endpoint instances are retained in the attack path."
                 ),
-                category=target_lead.category,
-                severity=target_lead.severity,
-                confidence=min(target_lead.confidence, connection.confidence),
-                location=f"{source_fact.evidence_location} -> {target_fact.evidence_location}",
+                category=source_lead.category,
+                severity=source_lead.severity,
+                confidence=min(source_lead.confidence, access.confidence),
+                location=source_lead.location,
                 evidence=(
-                    f"Frontend entrypoint: {source_fact.evidence_location} ({source_fact.method or ''} {source_fact.path or ''})\n"
-                    f"Backend route: {target_fact.evidence_location} ({target_fact.method or ''} {target_fact.path or ''})\n"
-                    f"Backend SAST lead: {target_lead.evidence}"
+                    f"Source SAST lead: {source_lead.location}\n"
+                    f"Matched endpoint: {target_fact.method} {target_fact.path} "
+                    f"({target_fact.evidence_location})\n"
+                    f"{_route_access_evidence(access)}\n{source_lead.evidence}"
                 ),
                 source="campaign",
                 fingerprint=fingerprint,
-                suggested_endpoint=f"{target_fact.method or ''} {target_fact.path or ''}".strip(),
+                suggested_endpoint=_cross_repo_suggested_endpoint(attack_path),
                 attack_path=attack_path,
                 validation_status="pending",
                 reportable=True,
             )
-            created.append(lead)
+            if lead.id is not None:
+                created_by_id[lead.id] = lead
+
+            for component_id, role, fact_id in (
+                (connection.source_component_id, "primary", source_fact.id),
+                (connection.target_component_id, "contributing", target_fact.id),
+            ):
+                _upsert_lead_provenance(
+                    session,
+                    lead_id=lead.id,
+                    component_id=component_id,
+                    role=role,
+                    fact_id=fact_id,
+                )
+
+        # ── Case 2: SAST lead on the receiving target route (target_fact) ────
+        target_leads = _target_leads_for_route(session, target_fact, connections)
+
+        for target_lead in target_leads:
+            fingerprint = _cross_repo_lead_fingerprint(
+                category=target_lead.category,
+                origin_fingerprint=target_lead.fingerprint,
+                source_component_id=connection.source_component_id,
+                target_component_id=connection.target_component_id,
+                backend_case=True,
+            )
+            attack_path = _load_cross_repo_attack_path(
+                session,
+                campaign_id=campaign_id,
+                fingerprint=fingerprint,
+                base={
+                    "frontend_entrypoint": {
+                        "component_id": connection.source_component_id,
+                        "component_name": source_comp_name,
+                        "location": source_fact.evidence_location,
+                        "method": source_fact.method,
+                        "path": source_fact.path,
+                        "host": source_fact.host,
+                    },
+                    "backend_route": {
+                        "component_id": connection.target_component_id,
+                        "component_name": target_comp_name,
+                        "location": target_fact.evidence_location,
+                        "method": target_fact.method,
+                        "path": target_fact.path,
+                    },
+                    "vulnerability": {
+                        "lead_id": target_lead.id,
+                        "category": target_lead.category,
+                        "severity": target_lead.severity,
+                        "title": target_lead.title,
+                        "description": target_lead.description,
+                        "evidence": target_lead.evidence,
+                    },
+                },
+                source_fact=source_fact,
+                target_fact=target_fact,
+                connection=connection,
+                source_component_name=source_comp_name,
+                target_component_name=target_comp_name,
+                vulnerability=target_lead,
+                backend_case=True,
+                access=access,
+            )
+            lead = upsert_lead(
+                session,
+                producer_run_id=campaign_id,
+                producer_run_type="campaign",
+                title=(
+                    f"Cross-repository: Backend lead '{target_lead.title}' reachable "
+                    f"from {source_comp_name}"
+                ),
+                description=(
+                    f"Backend vulnerability '{target_lead.title}' in {target_comp_name} "
+                    f"is reachable through {source_comp_name}. Matched endpoint "
+                    "instances are retained in the attack path.\n\n"
+                    f"Vulnerability Description: {target_lead.description}"
+                ),
+                category=target_lead.category,
+                severity=target_lead.severity,
+                confidence=min(target_lead.confidence, access.confidence),
+                location=target_lead.location,
+                evidence=(
+                    f"Frontend entrypoint: {source_fact.evidence_location} ({source_fact.method or ''} {source_fact.path or ''})\n"
+                    f"Backend route: {target_fact.evidence_location} ({target_fact.method or ''} {target_fact.path or ''})\n"
+                    f"{_route_access_evidence(access)}\n"
+                    f"Backend SAST lead: {target_lead.evidence}"
+                ),
+                source="campaign",
+                fingerprint=fingerprint,
+                suggested_endpoint=_cross_repo_suggested_endpoint(attack_path),
+                attack_path=attack_path,
+                validation_status="pending",
+                reportable=True,
+            )
+            if lead.id is not None:
+                created_by_id[lead.id] = lead
 
             for component_id, role, fact_id in (
                 (connection.source_component_id, "primary", source_fact.id),
@@ -1042,7 +1595,7 @@ def _generate_cross_component_leads(
                 )
 
     session.flush()
-    return created
+    return list(created_by_id.values())
 
 
 def _generate_frontend_path_leads(

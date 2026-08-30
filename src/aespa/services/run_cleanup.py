@@ -46,6 +46,7 @@ from aespa.models import (
     PhaseCheckpoint,
     ProbeExecution,
     RunIdentity,
+    RunPause,
     SastRun,
     ScanCheckpoint,
     ScanFinding,
@@ -197,6 +198,12 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)
     ).all():
         session.delete(checkpoint)
+    for pause in session.exec(
+        select(RunPause)
+        .where(RunPause.run_kind == "sast")
+        .where(RunPause.run_id == run_id)
+    ).all():
+        session.delete(pause)
     for checkpoint in session.exec(
         select(PhaseCheckpoint)
         .where(PhaseCheckpoint.run_kind == "web")
@@ -346,6 +353,12 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         .where(AgentLog.run_kind == "sast")
     ).all():
         session.delete(log)
+    for checkpoint in session.exec(
+        select(PhaseCheckpoint)
+        .where(PhaseCheckpoint.run_kind == "sast")
+        .where(PhaseCheckpoint.run_id == run_id)
+    ).all():
+        session.delete(checkpoint)
     for fact in session.exec(
         select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
     ).all():
