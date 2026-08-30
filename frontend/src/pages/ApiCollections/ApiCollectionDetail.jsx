@@ -5,9 +5,22 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { EmptyState } from "../../components/EmptyState";
 import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
 
+const API_COLLECTION_TABS = [{
+  key: "runs",
+  label: "Test Runs"
+}, {
+  key: "endpoints",
+  label: "Endpoints"
+}, {
+  key: "credentials",
+  label: "Credentials"
+}];
+
 export function ApiCollectionDetail({
-  collectionId
+  collectionId,
+  initialTab
 }) {
+  const activeTab = API_COLLECTION_TABS.some(tab => tab.key === initialTab) ? initialTab : "runs";
   const [collection, setCollection] = useState(null);
   const [endpoints, setEndpoints] = useState(null);
   const [readiness, setReadiness] = useState(null);
@@ -165,9 +178,20 @@ export function ApiCollectionDetail({
         {collection && <button className="btn secondary" onClick={() => nav(`#/apis/${collectionId}/edit`)}>Edit collection</button>}
         {collection && <button className="btn danger-outline" onClick={onDelete}>Delete</button>}
       </>} />
+    <div className="tab-bar" role="tablist" aria-label="API collection views">
+      {API_COLLECTION_TABS.map(tab => <button
+        key={tab.key}
+        type="button"
+        role="tab"
+        aria-selected={activeTab === tab.key}
+        className={"tab-btn" + (activeTab === tab.key ? " active" : "")}
+        onClick={() => nav(`#/apis/${collectionId}/${tab.key}`)}
+      >{tab.label}</button>)}
+    </div>
     <div className="content scroll-content stack">
       {error && <div className="alert error">{error}</div>}
       {collection && <>
+        {activeTab === "endpoints" && <>
         <div className="card">
           <div className="form-section-title">Overview</div>
           <div className="field" style={{
@@ -264,7 +288,9 @@ export function ApiCollectionDetail({
               </div>
             </div>}
         </div>
+        </>}
 
+        {activeTab === "credentials" && <>
         <div className="card">
           <div className="form-section-title">
             <span>Credentials {credentials !== null ? <span className="badge neutral" style={{
@@ -319,7 +345,9 @@ export function ApiCollectionDetail({
               Secret values are stored but never shown. <strong>login</strong>-scheme entries are username/password test accounts used to obtain tokens during a scan.
             </div></>}
         </div>
+        </>}
 
+        {activeTab === "endpoints" && <>
         <div className="card">
           <div className="form-section-title" style={{
             display: "flex",
@@ -414,7 +442,9 @@ export function ApiCollectionDetail({
               </table>
             </div>}
         </div>
+        </>}
 
+        {activeTab === "runs" && <>
         <div className="card">
           <div className="form-section-title" style={{
             display: "flex",
@@ -458,7 +488,9 @@ export function ApiCollectionDetail({
               </tbody>
             </table>
           </div>}
-        </div></>}
+        </div>
+        </>}
+      </>}
     </div>
   </>;
 }

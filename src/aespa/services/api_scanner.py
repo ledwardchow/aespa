@@ -34,6 +34,8 @@ from aespa.models import (
     ApiEndpointTest,
     ApiTestRun,
     ScanFinding,
+    ScannerSession,
+    TrafficEntry,
 )
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
@@ -828,6 +830,13 @@ def seed_sessions_from_credentials(api_run_id: int) -> int:
         cookies: dict[str, str] = {}
 
         scheme = (cred.scheme or "bearer").lower()
+        # A username/password pair is an instruction for obtaining a session,
+        # not session material itself. Seeding it with empty headers and
+        # cookies makes the Test Lead believe it is already authenticated and
+        # guarantees a 401 when the label is used on a protected endpoint.
+        if scheme == "login":
+            _deactivate_legacy_empty_login_session(api_run_id, cred.id)
+            continue
         if scheme in ("bearer", "apikey", "header"):
             extra_headers[cred.name or "Authorization"] = (
                 f"Bearer {cred.value}"
@@ -868,6 +877,81 @@ def seed_sessions_from_credentials(api_run_id: int) -> int:
         seeded += 1
 
     return seeded
+
+
+def _deactivate_legacy_empty_login_session(
+    api_run_id: int, credential_id: int | None
+) -> None:
+    """Hide empty login sessions created by older scanner versions on retry."""
+    if credential_id is None:
+        return
+    with Session(get_engine()) as session:
+        rows = list(
+            session.exec(
+                select(ScannerSession)
+                .where(ScannerSession.test_run_id == api_run_id)
+                .where(ScannerSession.run_kind == "api")
+                .where(ScannerSession.credential_id == credential_id)
+                .where(ScannerSession.source == "api_scanner")
+            ).all()
+        )
+        changed = False
+        for row in rows:
+            try:
+                cookies = json.loads(row.cookies_json or "{}")
+                headers = json.loads(row.extra_headers_json or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if cookies or headers:
+                continue
+            row.is_active = False
+            row.lifecycle_state = "superseded"
+            row.updated_at = datetime.now(_UTC)
+            session.add(row)
+            changed = True
+        if changed:
+            session.commit()
+
+
+def _sast_validation_authentication_blocked(api_run_id: int) -> bool:
+    """Return whether protected SAST probes failed only for authentication.
+
+    Login endpoints can return 2xx while every request to the protected attack
+    path still returns 401. That is an incomplete validation pass, not a
+    successful pass with an ordinary inconclusive verdict.
+    """
+    with Session(get_engine()) as session:
+        run = session.get(ApiTestRun, api_run_id)
+        if run is None:
+            return False
+        collection = session.get(ApiCollection, run.collection_id)
+        endpoints = list(
+            session.exec(
+                select(ApiEndpoint)
+                .where(ApiEndpoint.collection_id == run.collection_id)
+                .where(ApiEndpoint.auth_required == True)  # noqa: E712
+            ).all()
+        )
+        traffic = list(
+            session.exec(
+                select(TrafficEntry).where(TrafficEntry.api_test_run_id == api_run_id)
+            ).all()
+        )
+
+    if not endpoints:
+        return False
+    base_url = collection.base_url if collection is not None else ""
+    saw_auth_failure = False
+    saw_authenticated_success = False
+    for entry in traffic:
+        endpoint = _match_endpoint_for_url(entry.url, endpoints, base_url)
+        if endpoint is None or endpoint.method.upper() != entry.method.upper():
+            continue
+        if entry.status in {401, 419, 440}:
+            saw_auth_failure = True
+        elif entry.status is not None and 200 <= entry.status < 400:
+            saw_authenticated_success = True
+    return saw_auth_failure and not saw_authenticated_success
 
 
 # ── Context tool override ─────────────────────────────────────────────────────
@@ -1461,17 +1545,29 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             (lead.status or "open") not in {"confirmed", "dismissed", "inconclusive"}
             for lead in get_all_leads_for_run("api", api_run_id)
         )
+    authentication_blocked = bool(
+        coverage_mode == "sast_validate"
+        and _sast_validation_authentication_blocked(api_run_id)
+    )
+    incomplete = unresolved_sast or authentication_blocked
 
     # Mark run completed (or explicitly incomplete).
     with Session(get_engine()) as s:
         r = s.get(ApiTestRun, api_run_id)
         if r is not None and r.status in ("scanning", "running"):
-            r.status = "incomplete" if unresolved_sast else "completed"
+            r.status = "incomplete" if incomplete else "completed"
             r.phase = "finished"
-            r.outcome = "incomplete" if unresolved_sast else "complete"
-            r.terminal_reason = (
-                "unresolved_sast_leads" if unresolved_sast else "coverage_complete"
-            )
+            r.outcome = "incomplete" if incomplete else "complete"
+            if authentication_blocked:
+                r.terminal_reason = "authentication_unavailable"
+                r.error_message = (
+                    "Protected API requests were rejected because no reusable "
+                    "authenticated session was available."
+                )
+            elif unresolved_sast:
+                r.terminal_reason = "unresolved_sast_leads"
+            else:
+                r.terminal_reason = "coverage_complete"
             r.completed_at = datetime.now(_UTC)
             r.updated_at = datetime.now(_UTC)
             s.add(r)
@@ -1482,8 +1578,12 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         {
             "type": "scanner_phase",
             "phase": "scan_stopped",
-            "status": "complete",
-            "message": f"API scan complete. {finding_count} finding(s) recorded.",
+            "status": "warning" if incomplete else "complete",
+            "message": (
+                "API scan incomplete because authenticated access was unavailable."
+                if authentication_blocked
+                else f"API scan complete. {finding_count} finding(s) recorded."
+            ),
         },
     )
     events_svc.emit(

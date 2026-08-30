@@ -196,7 +196,7 @@ function App() {
           {route.name === "api-list" && <ApiCollectionsList />}
           {route.name === "api-new" && <ApiCollectionForm key="api-new" />}
           {route.name === "api-edit" && <ApiCollectionForm key={route.id} collectionId={route.id} />}
-          {route.name === "api-detail" && <ApiCollectionDetail key={route.id} collectionId={route.id} />}
+          {route.name === "api-detail" && <ApiCollectionDetail key={route.id} collectionId={route.id} initialTab={route.tab} />}
           {route.name === "api-files" && <ApiFilesManager key={route.id} collectionId={route.id} />}
           {route.name === "api-run-new" && <ApiTestRunForm key={route.id} collectionId={route.id} />}
           {route.name === "api-run-detail" && <ApiTestRunDetail key={route.id} runId={route.id} initialTab={route.tab} initialFindingRef={route.findingRef} />}

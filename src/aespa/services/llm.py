@@ -5603,14 +5603,14 @@ async def thinking_agentic_loop(
                     response_status = "complete"
                     response_message = f"Step {tool_call_count + 1}: LLM → {action_label} (stop: {stop_reason})"
                 else:
-                    response_status = "warning"
+                    response_status = "retrying"
                     response_kind = (
                         "empty response" if no_usable_content else "text-only response"
                     )
                     response_message = (
                         f"Step {tool_call_count + 1}: LLM returned {response_kind} "
                         f"without a tool call (native stop: {stop_reason}); "
-                        f"retry {no_tool_attempt}/3"
+                        f"retrying {no_tool_attempt}/3"
                     )
                 try:
                     emit_fn(

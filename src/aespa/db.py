@@ -251,10 +251,10 @@ def _reset_orphaned_validating_findings(engine: Engine) -> None:
 def _reset_orphaned_running_runs(engine: Engine) -> None:
     """Fail out crawl/scan runs left stuck in a "running" state.
 
-    ``TestRun.status``, ``ApiTestRun.status`` and ``SastRun.status`` are only
+    ``TestRun.status`` and ``ApiTestRun.status`` are only
     ever driven to a running value by an in-memory asyncio task (crawler,
     thinking-scan, api-scanner, sast-scanner). A fresh process has none of
-    those tasks yet, so any run still showing "running"/"scanning" at startup
+    those tasks yet, so any run still showing "running" at startup
     is an orphan from a previous process that was killed or crashed mid-run —
     never a run that is genuinely resuming. Left alone, the UI polls the
     stale status forever and looks like the crawl/scan restarted itself on
@@ -305,13 +305,60 @@ def _reset_orphaned_running_runs(engine: Engine) -> None:
                     ),
                     {"note": scan_note},
                 )
-            if "sast_run" in tables:
+            if "scan_log" in tables and "test_run" in tables:
                 conn.execute(
                     _text(
-                        "UPDATE sast_run "
-                        "SET status='failed', "
-                        "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
-                        "WHERE status='scanning'"
+                        "INSERT INTO scan_log "
+                        "(test_run_id, run_kind, created_at, phase, status, message) "
+                        "SELECT id, 'web', COALESCE(completed_at, CURRENT_TIMESTAMP), "
+                        "       'restart_recovery', 'failed', error_message "
+                        "FROM test_run AS interrupted "
+                        "WHERE error_message=:note "
+                        "  AND NOT EXISTS ("
+                        "    SELECT 1 FROM scan_log AS logged "
+                        "    WHERE logged.test_run_id=interrupted.id "
+                        "      AND logged.run_kind='web' "
+                        "      AND logged.phase='restart_recovery'"
+                        "  )"
+                    ),
+                    {"note": crawl_note},
+                )
+            if "scan_log" in tables and "api_test_run" in tables:
+                conn.execute(
+                    _text(
+                        "INSERT INTO scan_log "
+                        "(test_run_id, run_kind, created_at, phase, status, message) "
+                        "SELECT id, 'api', COALESCE(completed_at, CURRENT_TIMESTAMP), "
+                        "       'restart_recovery', 'failed', error_message "
+                        "FROM api_test_run AS interrupted "
+                        "WHERE error_message=:note "
+                        "  AND NOT EXISTS ("
+                        "    SELECT 1 FROM scan_log AS logged "
+                        "    WHERE logged.test_run_id=interrupted.id "
+                        "      AND logged.run_kind='api' "
+                        "      AND logged.phase='restart_recovery'"
+                        "  )"
+                    ),
+                    {"note": scan_note},
+                )
+            if "scan_log" in tables and "sast_run" in tables:
+                # Backfill the old failure marker so historical SAST runs show
+                # why they stopped. New SAST interruptions are handled below by
+                # the workspace-lease-aware cleanup, which pauses resumably.
+                conn.execute(
+                    _text(
+                        "INSERT INTO scan_log "
+                        "(test_run_id, run_kind, created_at, phase, status, message) "
+                        "SELECT id, 'sast', COALESCE(completed_at, CURRENT_TIMESTAMP), "
+                        "       'restart_recovery', 'failed', error_message "
+                        "FROM sast_run AS interrupted "
+                        "WHERE error_message=:note "
+                        "  AND NOT EXISTS ("
+                        "    SELECT 1 FROM scan_log AS logged "
+                        "    WHERE logged.test_run_id=interrupted.id "
+                        "      AND logged.run_kind='sast' "
+                        "      AND logged.phase='restart_recovery'"
+                        "  )"
                     ),
                     {"note": scan_note},
                 )
@@ -354,8 +401,8 @@ def _cleanup_orphaned_sast_extractions() -> None:
       * no matching ``SastRun``                              → delete the dir
       * run in a terminal state (completed/failed/cancelled) → delete the dir
       * run is ``scanning``                                  → mark the run
-        ``failed`` (with a note that the process was interrupted), then delete
-        the dir
+        ``paused`` with a resumable interruption note and phase-log entry,
+        then delete the dir
       * run is ``pending``                                   → leave alone
         (the user may still start it)
       * subdir name is not an integer                        → leave alone
@@ -373,7 +420,7 @@ def _cleanup_orphaned_sast_extractions() -> None:
     from sqlmodel import Session
 
     from aespa.config import get_settings
-    from aespa.models import RunPause, SastRun
+    from aespa.models import RunPause, SastRun, ScanLog
     from aespa.sast_workspace import try_acquire_sast_workspace_lease
 
     _UTC = timezone.utc
@@ -410,6 +457,15 @@ def _cleanup_orphaned_sast_extractions() -> None:
             pause.resume_stage = None
             pause.paused_at = datetime.now(_UTC)
             session.add(pause)
+            session.add(
+                ScanLog(
+                    test_run_id=run.id,
+                    run_kind="sast",
+                    phase="restart_recovery",
+                    status="paused",
+                    message=run.error_message,
+                )
+            )
             session.commit()
 
         entries = extract_root.iterdir() if extract_root.is_dir() else []

@@ -1,6 +1,7 @@
 /* ── SAST run phase experience ───────────────────────────────────────────── */
-.sast-header-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.sast-header-name { min-width: 0; overflow-wrap: anywhere; }
+.sast-run-topbar .topbar-title { overflow: hidden; }
+.sast-header-title { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; overflow: hidden; }
+.sast-header-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sast-model-selector { position: relative; display: flex; align-items: center; gap: 6px; min-width: 0; }
 .sast-model-selector > span { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; }
 .sast-model-selector .select { width: 245px; min-width: 150px; padding-top: 6px; padding-bottom: 6px; font-size: 11px; }
@@ -12,7 +13,7 @@
 .sast-actions-popover a:hover, .sast-actions-popover button:hover, .sast-actions-popover a:focus-visible, .sast-actions-popover button:focus-visible { color: var(--text); background: var(--panel-2); outline: none; }
 .sast-actions-popover button.danger { color: var(--danger); }
 .sast-run-shell { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
-.sast-phase-rail { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-bottom: 1px solid var(--border); background: var(--panel); }
+.sast-phase-rail { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); flex: 0 0 auto; border-bottom: 1px solid var(--border); background: var(--panel); }
 .sast-phase-rail, .sast-view-tabs { scrollbar-width: none; }
 .sast-phase-rail::-webkit-scrollbar, .sast-view-tabs::-webkit-scrollbar { display: none; }
 .sast-phase-step { position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 8px; min-width: 0; padding: 12px 13px 11px; border: 0; border-right: 1px solid var(--border); color: var(--muted); background: transparent; text-align: left; cursor: pointer; }
@@ -26,7 +27,7 @@
 .sast-phase-step.status-failed .sast-phase-marker, .sast-phase-step.status-cancelled .sast-phase-marker { color: #fca5a5; background: rgba(239,68,68,.16); }
 .sast-phase-label { min-width: 0; overflow: hidden; color: var(--text); font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .sast-phase-meta { min-width: 0; overflow: hidden; margin-top: 3px; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.sast-view-tabs { display: flex; gap: 20px; padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.sast-view-tabs { display: flex; flex: 0 0 auto; gap: 20px; padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .sast-view-tabs button { padding: 10px 0 9px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: none; cursor: pointer; font-size: 12px; font-weight: 600; }
 .sast-view-tabs button:hover { color: var(--text); }
 .sast-view-tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
@@ -42,7 +43,8 @@
 .sast-summary-grid span { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .35px; text-transform: uppercase; }
 .sast-summary-grid strong { overflow: hidden; margin-top: 4px; color: var(--text); font-size: 18px; line-height: 1.1; text-overflow: ellipsis; white-space: nowrap; }
 .sast-summary-grid small { overflow: hidden; margin-top: 3px; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.sast-candidates-layout { display: grid; grid-template-columns: minmax(0, var(--sast-ledger-width, 54%)) 8px minmax(0, 1fr); align-items: stretch; flex: 1 1 auto; min-height: 0; }
+.sast-run-summary-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.sast-candidates-layout { display: grid; grid-template-columns: minmax(0, var(--sast-ledger-width, 54%)) 8px minmax(0, 1fr); align-items: stretch; flex: 1 1 auto; min-height: 360px; }
 .sast-candidate-ledger { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .sast-layout-resizer { align-self: stretch; display: flex; align-items: center; justify-content: center; min-height: 120px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); background: var(--panel); cursor: col-resize; touch-action: none; }
 .sast-layout-resizer:hover, .sast-layout-resizer:focus-visible { background: var(--hover); outline: none; }
@@ -118,10 +120,8 @@
 .sast-handoff-box select { width: 100%; min-width: 0; }
 .sast-handoff-box .btn { align-self: flex-start; }
 .sast-coverage-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(245px, .75fr); gap: 10px; align-items: start; }
-.sast-coverage-assurance { grid-column: 1 / -1; }
-.sast-coverage-assurance .sast-panel-header > div { min-width: 0; }
-.sast-coverage-assurance .sast-panel-sub { line-height: 1.4; overflow-wrap: anywhere; }
-.sast-assurance-metrics { gap: 8px; padding: 10px 12px 12px; margin-bottom: 0; }
+.sast-assurance-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 2px; margin: -2px 0 12px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.sast-assurance-note strong { color: var(--text-2); }
 .sast-coverage-grid { display: flex; flex-direction: column; gap: 11px; padding: 14px 12px 12px; }
 .sast-coverage-row { display: grid; grid-template-columns: 94px minmax(80px, 1fr) 80px; align-items: center; gap: 10px; font-size: 11px; }
 .sast-coverage-name { color: var(--text-2); }
@@ -148,5 +148,5 @@
 .sast-activity-entry time { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; }
 .sast-activity-phase { overflow: hidden; color: var(--accent-hover); font-size: 10px; font-weight: 700; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 .sast-activity-message { min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
-@media (max-width: 900px) { .sast-phase-rail { grid-template-columns: repeat(5, minmax(112px, 1fr)); overflow-x: auto; } .sast-phase-step { min-width: 112px; } .sast-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sast-candidates-layout, .sast-coverage-layout { grid-template-columns: 1fr; gap: 10px; } .sast-layout-resizer { display: none; } }
-@media (max-width: 560px) { .sast-model-selector { width: 100%; } .sast-model-selector .select { flex: 1; width: auto; } .sast-run-content { padding: 10px; overflow-x: hidden; } .sast-view-tabs { gap: 14px; overflow-x: auto; } .sast-view-tabs button { flex: 0 0 auto; white-space: nowrap; } .sast-phase-banner { align-items: flex-start; flex-direction: column; } .sast-summary-grid { grid-template-columns: 1fr 1fr; gap: 6px; } .sast-summary-grid > div { padding: 8px; } .sast-assurance-metrics { padding: 8px; } .sast-activity-toolbar { align-items: flex-start; flex-wrap: wrap; } .sast-activity-tabs { width: 100%; } .sast-activity-entry { grid-template-columns: 58px minmax(0, 1fr); gap: 4px 8px; } .sast-activity-phase { grid-column: 2; } .sast-activity-message { grid-column: 2; } .sast-candidate-table { min-width: 520px; } .sast-coverage-row { grid-template-columns: 76px minmax(60px, 1fr) 54px; gap: 7px; } .sast-lead-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 900px) { .sast-phase-rail { grid-template-columns: repeat(5, minmax(112px, 1fr)); overflow-x: auto; } .sast-phase-step { min-width: 112px; } .sast-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sast-run-summary-grid { grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); } .sast-candidates-layout, .sast-coverage-layout { grid-template-columns: 1fr; gap: 10px; } .sast-layout-resizer { display: none; } }
+@media (max-width: 560px) { .sast-model-selector { width: 100%; } .sast-model-selector .select { flex: 1; width: auto; } .sast-run-content { padding: 10px; overflow-x: hidden; } .sast-view-tabs { gap: 14px; overflow-x: auto; } .sast-view-tabs button { flex: 0 0 auto; white-space: nowrap; } .sast-phase-banner { align-items: flex-start; flex-direction: column; } .sast-summary-grid { grid-template-columns: 1fr 1fr; gap: 6px; } .sast-run-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sast-summary-grid > div { padding: 8px; } .sast-assurance-note { align-items: flex-start; flex-direction: column; } .sast-activity-toolbar { align-items: flex-start; flex-wrap: wrap; } .sast-activity-tabs { width: 100%; } .sast-activity-entry { grid-template-columns: 58px minmax(0, 1fr); gap: 4px 8px; } .sast-activity-phase { grid-column: 2; } .sast-activity-message { grid-column: 2; } .sast-candidate-table { min-width: 520px; } .sast-coverage-row { grid-template-columns: 76px minmax(60px, 1fr) 54px; gap: 7px; } .sast-lead-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

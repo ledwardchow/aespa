@@ -29,7 +29,9 @@ from aespa.models import (
     AgentLog,
     ApiCollection,
     ApiTestRun,
+    PhaseCheckpoint,
     SastRun,
+    SastWorker,
     ScanFinding,
     ScanLead,
     ScanLog,
@@ -76,6 +78,125 @@ def _to_summary(run: SastRun) -> SastRunSummary:
     if sast_scanner.is_sast_scan_running(run.id):
         return summary.model_copy(update={"status": "scanning"})
     return summary
+
+
+def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
+    """Return persisted agent events plus lifecycle history for older workers."""
+    rows = session.exec(
+        select(AgentLog)
+        .where(AgentLog.test_run_id == run_id)
+        .where(AgentLog.run_kind == "sast")
+        .order_by(AgentLog.id)
+    ).all()
+    entries = [
+        {
+            "id": r.id,
+            "agent_id": r.agent_id,
+            "role": r.role,
+            "status": r.status,
+            "current_task": r.current_task,
+            "outcome": r.outcome,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]
+    recorded_statuses: dict[str, set[str]] = {}
+    for entry in entries:
+        recorded_statuses.setdefault(entry["agent_id"], set()).add(entry["status"])
+
+    workers = session.exec(
+        select(SastWorker)
+        .where(SastWorker.sast_run_id == run_id)
+        .order_by(SastWorker.id)
+    ).all()
+    for worker in workers:
+        agent_id = f"sast-worker-{worker.id}"
+        statuses = recorded_statuses.get(agent_id, set())
+        role = f"SAST {worker.class_group.replace('_', ' ').title()} Worker"
+        lifecycle_times = [
+            value
+            for value in (worker.created_at, worker.started_at, worker.completed_at)
+            if value is not None
+        ]
+        spawned_at = min(lifecycle_times) if lifecycle_times else worker.created_at
+        if "spawned" not in statuses:
+            entries.append(
+                {
+                    "id": f"{agent_id}-spawned",
+                    "agent_id": agent_id,
+                    "role": role,
+                    "status": "spawned",
+                    "current_task": f"Queued analysis worker {worker.worker_key}",
+                    "outcome": None,
+                    "created_at": spawned_at,
+                }
+            )
+        if worker.started_at and "active" not in statuses:
+            entries.append(
+                {
+                    "id": f"{agent_id}-active",
+                    "agent_id": agent_id,
+                    "role": role,
+                    "status": "active",
+                    "current_task": f"Started analysis worker {worker.worker_key}",
+                    "outcome": None,
+                    "created_at": min(
+                        value
+                        for value in (worker.started_at, worker.completed_at)
+                        if value is not None
+                    ),
+                }
+            )
+        if worker.completed_at and worker.status not in statuses:
+            outcome = worker.error_message or worker.summary or None
+            entries.append(
+                {
+                    "id": f"{agent_id}-{worker.status}",
+                    "agent_id": agent_id,
+                    "role": role,
+                    "status": worker.status,
+                    "current_task": f"Analysis finished for {worker.worker_key}",
+                    "outcome": outcome[:500] if outcome else None,
+                    "created_at": worker.completed_at,
+                }
+            )
+
+    validator_checkpoints = session.exec(
+        select(PhaseCheckpoint)
+        .where(PhaseCheckpoint.run_kind == "sast")
+        .where(PhaseCheckpoint.run_id == run_id)
+        .where(PhaseCheckpoint.phase == "validation")
+        .order_by(PhaseCheckpoint.id)
+    ).all()
+    for checkpoint in validator_checkpoints:
+        worker_key = checkpoint.idempotency_key.removeprefix("agent:")
+        if not worker_key.startswith("validator:"):
+            continue
+        candidate_id = worker_key.partition(":")[2]
+        agent_id = f"sast-validator-{candidate_id}"
+        if "complete" in recorded_statuses.get(agent_id, set()):
+            continue
+        entries.append(
+            {
+                "id": f"{agent_id}-checkpoint",
+                "agent_id": agent_id,
+                "role": "SAST Candidate Validator",
+                "status": "complete",
+                "current_task": f"Validated candidate {candidate_id}",
+                "outcome": "Recovered from the saved validator checkpoint",
+                "created_at": checkpoint.completed_at,
+            }
+        )
+
+    status_order = {"spawned": 0, "active": 1}
+    entries.sort(
+        key=lambda entry: (
+            entry["created_at"].isoformat() if entry["created_at"] else "",
+            status_order.get(entry["status"], 2),
+            str(entry["id"]),
+        )
+    )
+    return entries
 
 
 # ── Standalone SAST run (upload archive + create, no collection) ──────────────
@@ -419,7 +540,7 @@ def get_scan_log(
         select(ScanLog)
         .where(ScanLog.test_run_id == run_id)
         .where(ScanLog.run_kind == "sast")
-        .order_by(ScanLog.id)
+        .order_by(ScanLog.created_at, ScanLog.id)
     ).all()
     return [
         {
@@ -439,21 +560,11 @@ def get_agent_log(
     session: Session = Depends(get_session),
 ) -> list:
     _get_run_or_404(session, run_id)
-    rows = session.exec(
-        select(AgentLog)
-        .where(AgentLog.test_run_id == run_id)
-        .where(AgentLog.run_kind == "sast")
-        .order_by(AgentLog.id)
-    ).all()
+    rows = _sast_agent_activity(session, run_id)
     return [
         {
-            "id": r.id,
-            "agent_id": r.agent_id,
-            "role": r.role,
-            "status": r.status,
-            "current_task": r.current_task,
-            "outcome": r.outcome,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
+            **r,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         }
         for r in rows
     ]
@@ -465,12 +576,7 @@ def export_agent_log(
     session: Session = Depends(get_session),
 ) -> HTTPResponse:
     run = _get_run_or_404(session, run_id)
-    rows = session.exec(
-        select(AgentLog)
-        .where(AgentLog.test_run_id == run_id)
-        .where(AgentLog.run_kind == "sast")
-        .order_by(AgentLog.id)
-    ).all()
+    rows = _sast_agent_activity(session, run_id)
     exported_at = datetime.now(_UTC).strftime("%Y-%m-%d %H:%M UTC")
     lines: list[str] = [
         f"# Agent Log — SAST Run #{run_id}",
@@ -483,16 +589,17 @@ def export_agent_log(
         "",
     ]
     for r in rows:
-        ts = r.created_at.strftime("%H:%M:%S") if r.created_at else ""
+        created_at = r["created_at"]
+        ts = created_at.strftime("%H:%M:%S") if created_at else ""
         lines.append(
-            f"### `{ts}` [{(r.status or '').upper()}] {r.role} (`{r.agent_id}`)"
+            f"### `{ts}` [{(r['status'] or '').upper()}] {r['role']} (`{r['agent_id']}`)"
         )
         lines.append("")
-        if r.current_task:
-            lines.append(f"**Task:** {r.current_task}")
+        if r["current_task"]:
+            lines.append(f"**Task:** {r['current_task']}")
             lines.append("")
-        if r.outcome:
-            lines.append(f"**Outcome:** {r.outcome}")
+        if r["outcome"]:
+            lines.append(f"**Outcome:** {r['outcome']}")
             lines.append("")
         lines.append("---")
         lines.append("")

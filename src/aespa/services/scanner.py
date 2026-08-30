@@ -11084,6 +11084,8 @@ async def _do_agentic_thinking_loop(
         hr_duration_ms: Optional[int] = None
         hr_redirect_blocked: tuple[str, str] | None = None
         hr_sent_cookies: dict[str, str] = {}
+        hr_response_session_cookies: dict[str, str] = {}
+        captured_session_label = ""
         _obligation_note = ""
         _js_paths: list[str] = []
         try:
@@ -11137,20 +11139,39 @@ async def _do_agentic_thinking_loop(
                         scope_check=scope_check_fn,
                         **hr_req_kwargs,
                     )
+                # Capture cookies before _client_session_cookies restores the
+                # shared jar. This includes cookies set on intermediate login
+                # redirects as well as the final response.
+                hr_response_session_cookies = dict(hx.cookies)
             hr_duration_ms = int((time.perf_counter() - hr_started) * 1000)
             hr_raw = hr_r.text[:BODY_READ_LIMIT]
             hr_token = _extract_bearer_token_from_body(hr_raw)
-            if hr_token and hr_r.status_code < 400:
-                hr_lbl = _session_label(
-                    str(tool_input.get("store_as") or "http_token"), session_vault
+            requested_store_as = str(tool_input.get("store_as") or "").strip()
+            response_cookies = {
+                **hr_response_session_cookies,
+                **dict(hr_r.cookies),
+            }
+            if hr_r.status_code < 400 and (
+                hr_token or (requested_store_as and response_cookies)
+            ):
+                # An explicit label is stable and refreshable. Generated labels
+                # remain unique for ordinary token discovery outside login flows.
+                hr_lbl = (
+                    _session_label(requested_store_as, {})
+                    if requested_store_as
+                    else _session_label("http_token", session_vault)
+                )
+                captured_session_label = hr_lbl
+                captured_headers = (
+                    {"Authorization": f"Bearer {hr_token}"} if hr_token else {}
                 )
                 session_vault[hr_lbl] = {
                     "label": hr_lbl,
-                    "kind": "bearer",
+                    "kind": _session_kind(response_cookies, captured_headers),
                     "username": None,
                     "source": f"{hr_method} {hr_url}",
-                    "extra_headers": {"Authorization": f"Bearer {hr_token}"},
-                    "cookies": {},
+                    "extra_headers": captured_headers,
+                    "cookies": response_cookies,
                 }
                 _record_session(
                     run_id,
@@ -11524,6 +11545,13 @@ async def _do_agentic_thinking_loop(
             + _eviction_note
             + _redirect_note
             + _waf_guidance_reminder(hr_resp_status)
+            + (
+                f"[SESSION STORED] Authentication material was saved as "
+                f"'{captured_session_label}'. Use "
+                f"use_session='{captured_session_label}' on protected requests.\n\n"
+                if captured_session_label
+                else ""
+            )
             + f"Method: {hr_method}\nURL: {hr_url}\nStatus: {hr_resp_status}\n"
             + (f"Duration: {hr_duration_ms}ms\n" if hr_duration_ms else "")
             + (

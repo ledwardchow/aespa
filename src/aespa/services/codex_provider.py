@@ -27,6 +27,7 @@ log = logging.getLogger("aespa.llm.codex")
 
 TURN_TIMEOUT_S = 600.0
 CONVERSATION_CLOSE_TIMEOUT_S = 3.0
+MAX_REQUIRED_TOOL_REPAIRS = 2
 # asyncio defaults subprocess streams to 64 KiB. Codex sends one JSON object per
 # line, and long scan contexts or tool payloads can make a valid line much larger.
 CODEX_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
@@ -694,14 +695,16 @@ def _internal_action_name(params: dict[str, Any]) -> str | None:
     return str(item.get("tool") or item_type)
 
 
-def _reports_dynamic_tool_failure(text: str) -> bool:
+def _reports_dynamic_tool_failure(
+    text: str, tools: list[dict[str, Any]] | None = None
+) -> bool:
     """Recognize terminal Codex messages that say its AESPA tools are broken."""
     normalized = re.sub(r"\s+", " ", text.lower().replace("’", "'")).strip()
     unavailable = (
         r"(?:stopped responding|are not responding|became unavailable|"
         r"are unavailable|stopped working|are not working)"
     )
-    return bool(
+    if bool(
         re.search(
             rf"\b(?:aespa(?:'s)?\s+)?dynamic tools? (?:have )?{unavailable}\b",
             normalized,
@@ -714,6 +717,47 @@ def _reports_dynamic_tool_failure(text: str) -> bool:
             rf"\btool calls? (?:have )?{unavailable}\b",
             normalized,
         )
+    ):
+        return True
+
+    # Codex can name an AESPA tool instead of calling the set "dynamic tools",
+    # for example: "the required credential_check tool is unavailable". Keep
+    # this tied to an advertised tool name so an unavailable target dependency
+    # such as a payment gateway does not rotate a healthy Codex session.
+    tool_names = {
+        str(tool.get("name") or "").strip().lower()
+        for tool in tools or []
+        if str(tool.get("name") or "").strip()
+    }
+    mentions_named_tool = any(
+        re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalized)
+        for name in tool_names
+    )
+    if not mentions_named_tool or "tool" not in normalized:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:is|are|was|were|seems?|remains?)\s+"
+            r"(?:not\s+(?:directly\s+)?available|unavailable|not\s+accessible)\b",
+            normalized,
+        )
+        or re.search(
+            r"\b(?:cannot|can't|do not|does not)\s+"
+            r"(?:directly\s+)?(?:access|call|use)\b",
+            normalized,
+        )
+    )
+
+
+def _required_tool_repair_prompt(tools: list[dict[str, Any]]) -> str:
+    names = [str(tool.get("name") or "").strip() for tool in tools]
+    names = [name for name in names if name]
+    available = ", ".join(names)
+    return (
+        "Your previous response ended without calling an AESPA dynamic tool, so "
+        "no scan action was executed. Call exactly one AESPA dynamic tool now and "
+        "do not respond with prose alone. Available tools: "
+        f"{available}."
     )
 
 
@@ -799,8 +843,9 @@ async def _start_thread(
     tools: list[dict[str, Any]],
 ) -> _Conversation:
     tool_rule = (
-        "Call only the dynamic tools supplied by AESPA. Every tool-assisted "
-        "step must use one of those dynamic tools."
+        "Call only the dynamic tools supplied by AESPA. Every response must "
+        "call exactly one of those dynamic tools. Never end a response with "
+        "prose alone; call the supplied completion tool when the work is done."
         if tools
         else "Do not call any tool."
     )
@@ -876,7 +921,7 @@ async def _send_turn(
         "input": [{"type": "text", "text": prompt}],
         "model": config.model,
     }
-    if config.reasoning_effort:
+    if getattr(config, "reasoning_effort", None):
         params["effort"] = config.reasoning_effort
     await client.request(
         "turn/start",
@@ -1021,6 +1066,7 @@ async def _completion_with_tools_once(
                 _content_text(user_messages[-1].get("content")),
             )
 
+    required_tool_repairs = 0
     while True:
         try:
             event_type, params = await asyncio.wait_for(
@@ -1100,13 +1146,28 @@ async def _completion_with_tools_once(
             _merge_completed_text(conversation, _event_text(params))
             output = _take_conversation_text(conversation)
             if output:
-                if tools and _reports_dynamic_tool_failure(output):
+                if tools and _reports_dynamic_tool_failure(output, tools):
                     raise CodexToolSessionError(
                         "Codex reported that AESPA's dynamic tools stopped responding. "
                         "AESPA is replacing the broken Codex tool session. "
                         f"Codex response: {output[:500]}",
                         client=conversation.client,
                     )
+            if tools and required_tool_repairs < MAX_REQUIRED_TOOL_REPAIRS:
+                required_tool_repairs += 1
+                log.info(
+                    "Codex ended without an AESPA tool call; repairing turn (%d/%d)",
+                    required_tool_repairs,
+                    MAX_REQUIRED_TOOL_REPAIRS,
+                )
+                await _send_turn(
+                    client,
+                    conversation,
+                    config,
+                    _required_tool_repair_prompt(tools),
+                )
+                continue
+            if output:
                 block = {
                     "type": "text",
                     "id": None,
@@ -1115,6 +1176,8 @@ async def _completion_with_tools_once(
                     "text": output,
                 }
                 return [block], "end_turn", [block]
+            if tools:
+                return [], "end_turn", []
             continue
         if event_type in {"item/agentMessage/delta", "agentMessage/delta"}:
             delta_text = str(params.get("delta") or params.get("text") or "")
