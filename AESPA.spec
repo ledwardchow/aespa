@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('src/aespa/web', 'aespa/web'), ('alembic.ini', '.'), ('alembic', 'alembic'), ('THIRD_PARTY_LICENSES.txt', '.'), ('LICENSE', '.')]
+datas = [('src/aespa/web', 'aespa/web'), ('alembic.ini', '.'), ('alembic', 'alembic'), ('THIRD_PARTY_LICENSES.txt', '.'), ('LICENSE.txt', '.')]
 binaries = []
 hiddenimports = []
 hiddenimports += collect_submodules('aespa')
