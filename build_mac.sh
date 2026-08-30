@@ -51,7 +51,7 @@ echo "==> Building app bundle with PyInstaller"
     --add-data "alembic.ini:." \
     --add-data "alembic:alembic" \
     --add-data "THIRD_PARTY_LICENSES.txt:." \
-    --add-data "LICENSE:." \
+    --add-data "LICENSE.txt:." \
     --collect-all playwright \
     --collect-all alembic \
     --collect-all uvicorn \
