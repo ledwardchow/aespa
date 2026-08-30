@@ -5,6 +5,11 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -28,24 +33,9 @@ jobs:
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           fi
 
-  release:
+  windows:
     needs: check
     if: needs.check.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # PAT (not GITHUB_TOKEN) so the new tag cascades into docker-publish.yml.
-      - name: Create tag + release
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
-        run: |
-          gh release create "v${{ needs.check.outputs.version }}" \
-            --title "v${{ needs.check.outputs.version }}" \
-            --notes "Automated build." \
-            --target "$GITHUB_SHA"
-
-  windows:
-    needs: [check, release]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,13 +47,16 @@ jobs:
       - name: Zip
         run: Compress-Archive -Path dist\AESPA -DestinationPath "AESPA-windows-v${{ needs.check.outputs.version }}.zip"
 
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
-        run: gh release upload "v${{ needs.check.outputs.version }}" "AESPA-windows-v${{ needs.check.outputs.version }}.zip"
+      - name: Store release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aespa-release-windows
+          path: AESPA-windows-v${{ needs.check.outputs.version }}.zip
+          if-no-files-found: error
 
   macos:
-    needs: [check, release]
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +91,60 @@ jobs:
           ./build_mac.sh
           ./make_dmg.sh
 
-      - name: Upload to release
+      - name: Store release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aespa-release-macos
+          path: dist/AESPA-macos-v${{ needs.check.outputs.version }}.dmg
+          if-no-files-found: error
+
+  release:
+    needs: [check, windows, macos]
+    if: needs.check.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: aespa-release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Read latest changelog entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          actual_pr="$(
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+              --jq '[.[] | select(.base.ref == "main")][0].number // empty'
+          )"
+          changelog_pr="$(
+            sed -n 's/^## \[PR #\([0-9][0-9]*\)\].*/\1/p' CHANGELOG.md | head -n 1
+          )"
+
+          if [[ -n "$actual_pr" && "$changelog_pr" == "$actual_pr" ]]; then
+            awk '
+              /^## / {
+                if (found) exit
+                found = 1
+              }
+              found { print }
+            ' CHANGELOG.md > release-notes.md
+          else
+            printf '%s\n' 'Release notes pending.' > release-notes.md
+          fi
+
+          test -s release-notes.md
+
+      # PAT (not GITHUB_TOKEN) so the new tag cascades into docker-publish.yml.
+      - name: Create tag and release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
-        run: gh release upload "v${{ needs.check.outputs.version }}" "dist/AESPA-macos-v${{ needs.check.outputs.version }}.dmg"
+        run: |
+          gh release create "v${{ needs.check.outputs.version }}" \
+            release-assets/* \
+            --title "v${{ needs.check.outputs.version }}" \
+            --notes-file release-notes.md \
+            --target "$GITHUB_SHA"

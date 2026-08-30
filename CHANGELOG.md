@@ -2,7 +2,9 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## [PR #266] August 30 update - SAST, API scan and UI improvements
+## [PR #267] August 30 update - SAST, API scan and UI improvements
+
+This is a hotfix of PR #266, this additional PR fixes release scripts.
 
 - **More reliable and auditable SAST scans**: SAST now inventories entry points, inputs, and sensitive operations, assigns them to bounded workers, and records explicit results and detailed activity. Scans save progress after each agent step, can resume after pauses, provider outages, or process restarts, and clearly report partial coverage or authentication blockers. Existing campaigns wait for paused source scans, and SAST ZIP uploads can now be up to 250 MiB.
 - **Stronger Codex and long-scan recovery**: AESPA corrects recoverable Codex tool-call responses, replaces broken sessions, and restarts the local client when needed. Process and protocol failures now surface promptly, including with newer Codex CLI releases, large contexts, and concurrent scans. Model context limits can be detected or set manually, with conversation compaction and batched reporting to keep long scans within those limits. Activity messages now distinguish local request pacing from provider errors.
