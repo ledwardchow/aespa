@@ -887,6 +887,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "cookies or credential headers."
                     ),
                 },
+                "store_as": {
+                    "type": "string",
+                    "description": (
+                        "For a successful authentication request, save any bearer "
+                        "token or response cookie under this reusable session label. "
+                        "Use that exact label on later requests with use_session."
+                    ),
+                },
                 "owasp_category": {
                     "type": "string",
                     "description": (
@@ -1457,8 +1465,10 @@ and ordered attack path. Treat every path hop as an unproven hypothesis and veri
 with focused live evidence, following the attack path's dynamic-test objective.
 
 Use the configured API credentials and seeded HTTP session labels to authenticate and
-reach protected functionality described by the attack path. Do not perform credential
-attacks, spraying, account registration, or JWT forging.
+reach protected functionality described by the attack path. Login credentials are not
+authenticated sessions. Submit a login request anonymously with store_as set to a stable
+label, then use that exact label on protected requests. Do not perform credential attacks,
+spraying, account registration, or JWT forging.
 
 Work through leads one at a time. A confirmed lead requires concrete live evidence and
 write_finding, followed immediately by update_lead with finding_reference. Dismiss or mark

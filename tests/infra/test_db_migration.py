@@ -1,6 +1,6 @@
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa import db
 
@@ -72,6 +72,53 @@ def test_reset_orphaned_running_runs_uses_crawl_message_and_updates_legacy_text(
         )
         assert rows[1][-1] == "Last crawl interrupted prior to completion"
     finally:
+        engine.dispose()
+
+
+def test_reset_orphaned_runs_backfills_sast_restart_message_into_phase_log():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+        from aespa.models import SastRun, ScanLog
+
+        SQLModel.metadata.create_all(engine)
+        with Session(engine) as session:
+            run = SastRun(
+                name="Interrupted scan",
+                status="failed",
+                error_message="Interrupted by a server restart; mark as failed.",
+            )
+            session.add(run)
+            live_run = SastRun(name="Live scan", status="scanning")
+            session.add(live_run)
+            session.commit()
+            session.refresh(run)
+            session.refresh(live_run)
+            run_id = run.id
+            live_run_id = live_run.id
+
+        db._reset_orphaned_running_runs(engine)
+        db._reset_orphaned_running_runs(engine)
+
+        with Session(engine) as session:
+            logs = session.exec(
+                select(ScanLog)
+                .where(ScanLog.test_run_id == run_id)
+                .where(ScanLog.run_kind == "sast")
+                .where(ScanLog.phase == "restart_recovery")
+            ).all()
+            live_status = session.get(SastRun, live_run_id).status
+
+        assert len(logs) == 1
+        assert logs[0].status == "failed"
+        assert logs[0].message == "Interrupted by a server restart; mark as failed."
+        assert live_status == "scanning"
+    finally:
+        SQLModel.metadata.drop_all(engine)
         engine.dispose()
 
 

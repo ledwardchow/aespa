@@ -15,7 +15,7 @@ export function WebRunTabBar({
   activityLive,
   children
 }) {
-  return <div className="tab-bar">
+  return <div className="tab-bar web-run-tab-bar">
     {WEB_RUN_TABS.map(tab => {
       const count = counts[tab.key] || 0;
       return <button

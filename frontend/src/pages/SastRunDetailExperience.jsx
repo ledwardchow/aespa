@@ -275,22 +275,14 @@ function LeadEvidence({ lead, targets, onQueue, queueBusy }) {
   </aside>;
 }
 
-function CoverageView({ coverage, workProgram, assurance }) {
+function CoverageView({ coverage, workProgram }) {
   const summary = coverage?.summary || {};
   const files = coverage?.files || [];
   const total = workProgram?.files?.total ?? summary.files_total ?? 0;
   const directlyOpened = workProgram?.files?.directly_opened ?? summary.files_reviewed ?? 0;
   const percent = total ? Math.round(directlyOpened / total * 100) : 0;
-  const workItems = workProgram?.work_items || {};
-  const workers = workProgram?.workers || {};
-  const failedWorkers = (workers.failed || 0) + (workers.blocked || 0);
-  const unfinishedWorkers = Math.max((workers.total || 0) - (workers.complete || 0) - failedWorkers, 0);
   const languages = Object.entries(summary.languages || {}).sort((a, b) => b[1].total - a[1].total);
   return <div className="sast-coverage-layout">
-    <section className="sast-panel sast-coverage-assurance">
-      <div className="sast-panel-header"><div><div className="sast-panel-title">Coverage assurance</div><div className="sast-panel-sub">{assurance?.reasons?.length ? assurance.reasons.join(" ") : "Every generated source and sink obligation was closed."}</div></div><span className={`sast-state sast-state-${assurance?.status === "full" ? "confirmed" : "inconclusive"}`}>{assurance?.status || "pending"}</span></div>
-      <div className="sast-summary-grid sast-assurance-metrics"><div><span>Security checks completed</span><strong>{workItems.resolved || 0}/{workItems.total || 0}</strong><small>{workItems.unresolved || 0} checks still need a result</small></div><div><span>Analysis batches completed</span><strong>{workers.complete || 0}/{workers.total || 0}</strong><small>{unfinishedWorkers} unfinished{failedWorkers ? ` · ${failedWorkers} failed or blocked` : ""}</small></div><div><span>Direct file reads</span><strong>{directlyOpened}/{total}</strong><small>grep scope excluded</small></div><div><span>Search matches</span><strong>{workProgram?.files?.with_search_matches || 0}</strong><small>files returned by grep</small></div></div>
-    </section>
     <section className="sast-panel">
       <div className="sast-panel-header"><div><div className="sast-panel-title">Direct file reads</div><div className="sast-panel-sub">A search across a directory does not count as opening every file</div></div><span className="sast-state sast-state-confirmed">{directlyOpened} / {total} opened</span></div>
       <div className="sast-coverage-grid">
@@ -349,7 +341,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => { api.listLLMProfiles().then(items => setProfiles(items || [])).catch(err => setError(err.message)); }, []);
   useEffect(() => { const timer = setInterval(loadData, scanRunning ? 3000 : 8000); return () => clearInterval(timer); }, [loadData, scanRunning]);
-  useEffect(() => { const es = new EventSource(`/api/sast-runs/${runId}/events`); es.onmessage = event => { try { const payload = JSON.parse(event.data); if (payload.type === "token_usage_update") setTokenUsage(payload.totals); if (payload.type === "scanner_phase") loadData(); } catch {} }; return () => es.close(); }, [runId, loadData]);
+  useEffect(() => { const es = new EventSource(`/api/sast-runs/${runId}/events`); es.onmessage = event => { try { const payload = JSON.parse(event.data); if (payload.type === "token_usage_update") setTokenUsage(payload.totals); if (payload.type === "scanner_phase" || payload.type === "agent_status") loadData(); } catch {} }; return () => es.close(); }, [runId, loadData]);
   useEffect(() => { if (tab === "activity" && scanRunning) bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [logs.length, tab, scanRunning]);
 
   const statuses = useMemo(() => Object.fromEntries(PHASES.map(phase => [phase.key, analysis.phases?.[phase.key]?.status || "pending"])), [analysis.phases]);
@@ -359,6 +351,10 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const reportableCount = leads.filter(lead => lead.reportable).length;
   const proofGapCount = leads.reduce((count, lead) => count + jsonValue(lead.proof_gaps_json, []).length, 0);
   const workItemSummary = analysis.work_program?.work_items || {};
+  const workerSummary = analysis.work_program?.workers || {};
+  const fileSummary = analysis.work_program?.files || {};
+  const failedWorkers = (workerSummary.failed || 0) + (workerSummary.blocked || 0);
+  const unfinishedWorkers = Math.max((workerSummary.total || 0) - (workerSummary.complete || 0) - failedWorkers, 0);
   const goTab = nextTab => { setTab(nextTab); nav(`#/sast-runs/${runId}/${nextTab}`); };
   const onStart = async () => { setStartBusy(true); setError(null); try { await api.startSastScan(runId); setActivePhase(null); setScanRunning(true); await loadData(); } catch (err) { setError(err.message); } finally { setStartBusy(false); } };
   const onPause = async () => { setStartBusy(true); setError(null); try { await api.pauseSastScan(runId); await loadData(); } catch (err) { setError(err.message); } finally { setStartBusy(false); } };
@@ -373,16 +369,17 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   if (!run) return <div className="content scroll-content">{error ? <div className="alert error">{error}</div> : <div className="subtle">Loading…</div>}</div>;
   const phaseEntry = analysis.phases?.[displayedPhase] || {};
   return <>
-    <PageHeader title={<span className="sast-header-title"><Crumb href="#/sast-runs">SAST</Crumb><Sep /><span className="sast-header-name">{run.name}</span><StatusBadge status={scanRunning ? "scanning" : run.status} /></span>} actions={<><SastModelSelector run={run} profiles={profiles} disabled={scanRunning} saving={profileBusy} onChange={onProfileChange} />{canStart && <button className="btn" disabled={startBusy} onClick={onStart}>{startBusy ? "Starting…" : "Start SAST Scan"}</button>}{run.status === "paused" && <button className="btn" disabled={startBusy} onClick={onResume}>{startBusy ? "Resuming…" : "Resume SAST Scan"}</button>}{scanRunning && <button className="btn secondary" disabled={startBusy} onClick={onPause}>{startBusy ? "Pausing…" : "Pause"}</button>}{scanRunning && <button className="btn danger-outline" onClick={onStop}>Stop</button>}<SastRunActionsMenu runId={runId} onDelete={onDelete} /></>} />
+    <PageHeader className="sast-run-topbar" title={<span className="sast-header-title"><Crumb href="#/sast-runs">SAST</Crumb><Sep /><span className="sast-header-name">{run.name}</span><StatusBadge status={scanRunning ? "scanning" : run.status} /></span>} actions={<><SastModelSelector run={run} profiles={profiles} disabled={scanRunning} saving={profileBusy} onChange={onProfileChange} />{canStart && <button className="btn" disabled={startBusy} onClick={onStart}>{startBusy ? "Starting…" : "Start SAST Scan"}</button>}{run.status === "paused" && <button className="btn" disabled={startBusy} onClick={onResume}>{startBusy ? "Resuming…" : "Resume SAST Scan"}</button>}{scanRunning && <button className="btn secondary" disabled={startBusy} onClick={onPause}>{startBusy ? "Pausing…" : "Pause"}</button>}{scanRunning && <button className="btn danger-outline" onClick={onStop}>Stop</button>}<SastRunActionsMenu runId={runId} onDelete={onDelete} /></>} />
     <div className="sast-run-shell">
       <div className="sast-phase-rail" role="tablist" aria-label="SAST scan phases">{PHASES.map((phase, index) => <button key={phase.key} className={`sast-phase-step ${displayedPhase === phase.key ? "active" : ""} status-${statuses[phase.key]}`} onClick={() => { setActivePhase(phase.key); goTab(phase.view); }} role="tab" aria-selected={displayedPhase === phase.key}>{statuses[phase.key] === "running" ? <span className="agent-dot agent-dot--active sast-phase-running-dot" aria-label="running" /> : <span className="sast-phase-marker">{phaseIcon(statuses[phase.key]) || index + 1}</span>}<span className="sast-phase-label">{phase.label}</span><span className="sast-phase-meta">{statuses[phase.key] === "pending" ? phase.short : statuses[phase.key]}</span></button>)}</div>
       <div className="sast-view-tabs" role="tablist" aria-label="SAST run views">{[{ key: "coverage", label: "Coverage" }, { key: "candidates", label: `Candidates ${leads.length}` }, { key: "activity", label: "Activity" }].map(item => <button key={item.key} className={tab === item.key ? "active" : ""} onClick={() => goTab(item.key)} role="tab" aria-selected={tab === item.key}>{item.label}</button>)}</div>
       <div className="sast-run-content">
         {error && <div className="alert error">{error}</div>}{notice && <div className="alert info sast-inline-notice">{notice}</div>}
         <div className="sast-phase-banner"><div><strong>{PHASES.find(item => item.key === displayedPhase)?.label}</strong><span>{phaseEntry.message || "This phase has not started."}</span></div><span className="sast-phase-banner-status">{statuses[displayedPhase]}</span></div>
-        <div className="sast-summary-grid"><div><span>Security checks</span><strong>{workItemSummary.resolved || 0}/{workItemSummary.total || 0}</strong><small>{workItemSummary.unresolved || 0} remaining</small></div><div><span>Candidates</span><strong>{leads.length}</strong><small>persisted hypotheses</small></div><div><span>Reportable</span><strong>{reportableCount}</strong><small>independently confirmed</small></div><div><span>Proof gaps</span><strong>{proofGapCount}</strong><small>unresolved evidence</small></div></div>
+        <div className="sast-summary-grid sast-run-summary-grid"><div><span>Security checks</span><strong>{workItemSummary.resolved || 0}/{workItemSummary.total || 0}</strong><small>{workItemSummary.unresolved || 0} remaining</small></div><div><span>Analysis batches</span><strong>{workerSummary.complete || 0}/{workerSummary.total || 0}</strong><small>{unfinishedWorkers} unfinished{failedWorkers ? ` · ${failedWorkers} failed` : ""}</small></div><div><span>Direct file reads</span><strong>{fileSummary.directly_opened || 0}/{fileSummary.total || 0}</strong><small>grep excluded</small></div><div><span>Search matches</span><strong>{fileSummary.with_search_matches || 0}</strong><small>files returned</small></div><div><span>Candidates</span><strong>{leads.length}</strong><small>persisted hypotheses</small></div><div><span>Reportable</span><strong>{reportableCount}</strong><small>independently confirmed</small></div><div><span>Proof gaps</span><strong>{proofGapCount}</strong><small>unresolved evidence</small></div></div>
         {tab === "candidates" && <CandidatesView leads={leads} selectedLead={selectedLead} onSelect={setSelectedLeadId} targets={targets} onQueue={onQueue} queueBusy={queueBusy} reportableCount={reportableCount} onExport={onExportReport} />}
-        {tab === "coverage" && <CoverageView coverage={analysis.coverage} workProgram={analysis.work_program} assurance={analysis.assurance} />}
+        {tab === "coverage" && <div className="sast-assurance-note"><span><strong>Coverage assurance:</strong> {analysis.assurance?.reasons?.length ? analysis.assurance.reasons.join(" ") : "Every generated source and sink obligation was closed."}</span><span className={`sast-state sast-state-${analysis.assurance?.status === "full" ? "confirmed" : "inconclusive"}`}>{analysis.assurance?.status || "pending"}</span></div>}
+        {tab === "coverage" && <CoverageView coverage={analysis.coverage} workProgram={analysis.work_program} />}
         {tab === "activity" && <ActivityView logs={logs} agentLog={agentLog} scanRunning={scanRunning} tokenUsage={tokenUsage} tokenExpanded={tokenExpanded} setTokenExpanded={setTokenExpanded} runId={runId} />}
         <div ref={bottomRef} />
       </div>

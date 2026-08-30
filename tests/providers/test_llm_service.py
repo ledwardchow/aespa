@@ -722,15 +722,15 @@ def test_agentic_loop_logs_native_stop_and_terminal_no_tool_failure(monkeypatch)
     )
 
     assert summary == ""
-    warnings = [
+    retries = [
         event
         for event in emitted
-        if event.get("phase") == "llm_response" and event.get("status") == "warning"
+        if event.get("phase") == "llm_response" and event.get("status") == "retrying"
     ]
-    assert len(warnings) == 3
-    assert warnings[0]["data"]["native_stop_reason"] == "guardrail_intervened"
-    assert warnings[0]["data"]["no_tool_retry"] == 1
-    assert warnings[0]["data"]["provider_diagnostics"][0]["transport"] == {
+    assert len(retries) == 3
+    assert retries[0]["data"]["native_stop_reason"] == "guardrail_intervened"
+    assert retries[0]["data"]["no_tool_retry"] == 1
+    assert retries[0]["data"]["provider_diagnostics"][0]["transport"] == {
         "request_id": "request-123",
         "http_status": 200,
     }

@@ -36,6 +36,9 @@ export const IconChevronLeft = () => <svg width="14" height="14" viewBox="0 0 14
 export const IconChevronRight = () => <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
   <path d="M5 2l5 5-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
 </svg>;
+export const IconChevronDown = () => <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+  <path d="m2.5 4.25 3.5 3.5 3.5-3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+</svg>;
 export const IconBug = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
   <circle cx="8" cy="9" r="4" stroke="currentColor" stroke-width="1.4" />
   <path d="M6 5.5C6 4.4 6.9 3.5 8 3.5s2 .9 2 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />

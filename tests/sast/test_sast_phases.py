@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import zipfile
+from datetime import datetime, timezone
 
 from sqlmodel import Session, select
 
@@ -12,6 +13,7 @@ from aespa.models import (
     PhaseCheckpoint,
     RunPause,
     SastRun,
+    SastWorker,
     ScanLead,
     Site,
 )
@@ -66,6 +68,51 @@ def test_analysis_endpoint_returns_persisted_semantic_state(client, isolated_db_
         "files_total": 2,
         "files_reviewed": 1,
     }
+
+
+def test_agent_log_replays_persisted_worker_and_validator_activity(
+    client, isolated_db_engine
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    now = datetime.now(timezone.utc)
+    with Session(isolated_db_engine) as session:
+        worker = SastWorker(
+            sast_run_id=sast_run_id,
+            worker_key="sink-audit:1",
+            class_group="sink",
+            status="blocked",
+            error_message="2 assigned item(s) unresolved.",
+            started_at=now,
+            completed_at=now,
+        )
+        checkpoint = PhaseCheckpoint(
+            run_kind="sast",
+            run_id=sast_run_id,
+            phase="validation",
+            idempotency_key="agent:validator:17",
+            completed_at=now,
+        )
+        session.add(worker)
+        session.add(checkpoint)
+        session.commit()
+        session.refresh(worker)
+
+    response = client.get(f"/api/sast-runs/{sast_run_id}/agent-log")
+
+    assert response.status_code == 200
+    entries = response.json()
+    worker_entries = [
+        entry for entry in entries if entry["agent_id"] == f"sast-worker-{worker.id}"
+    ]
+    assert [entry["status"] for entry in worker_entries] == [
+        "spawned",
+        "active",
+        "blocked",
+    ]
+    assert any(
+        entry["agent_id"] == "sast-validator-17" and entry["status"] == "complete"
+        for entry in entries
+    )
 
 
 def test_sast_summaries_prefer_live_scanner_status(

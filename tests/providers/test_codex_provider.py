@@ -216,8 +216,11 @@ def _run_codex_completion_events(monkeypatch, events, *, tools=None):
 
     class FakeClient:
         async def request(self, method, params):  # noqa: ARG002
-            assert method == "account/rateLimits/read"
-            return {"rateLimits": {"primary": {"usedPercent": 0}}}
+            if method == "account/rateLimits/read":
+                return {"rateLimits": {"primary": {"usedPercent": 0}}}
+            if method == "turn/start":
+                return {"turn": {"id": "repair-turn"}}
+            raise AssertionError(f"unexpected method: {method}")
 
     async def fake_get_client():
         return FakeClient()
@@ -359,20 +362,91 @@ def test_codex_tool_failure_message_rotates_broken_session(monkeypatch):
     assert "replacing the broken Codex tool session" in str(raised.value)
 
 
-def test_codex_normal_assessment_text_is_not_a_tool_session_error(monkeypatch):
+def test_codex_named_tool_unavailable_rotates_broken_session(monkeypatch):
+    with pytest.raises(codex_provider.CodexToolSessionError):
+        _run_codex_completion_events(
+            monkeypatch,
+            [
+                (
+                    "turn/completed",
+                    {
+                        "text": (
+                            "Unable to begin: AESPA's required context_tool and "
+                            "http_request tools are not directly available in this session."
+                        )
+                    },
+                )
+            ],
+            tools=[{"name": "context_tool"}, {"name": "http_request"}],
+        )
+
+
+def test_codex_environmental_unavailable_text_repairs_without_rotating(monkeypatch):
+    blocks, stop_reason, _ = _run_codex_completion_events(
+        monkeypatch,
+        [
+            (
+                "turn/completed",
+                {
+                    "text": (
+                        "The controlled payment gateway is unavailable, so I will "
+                        "continue with the next route."
+                    )
+                },
+            ),
+            (
+                "tool",
+                {
+                    "callId": "call-2",
+                    "tool": "context_tool",
+                    "arguments": {"tool": "lead_detail", "lead_id": "HHOA-030"},
+                },
+            ),
+        ],
+        tools=[{"name": "context_tool"}],
+    )
+
+    assert stop_reason == "tool_use"
+    assert blocks[-1]["name"] == "context_tool"
+
+
+def test_codex_repairs_text_only_turn_before_returning_to_scanner(monkeypatch):
     blocks, stop_reason, _ = _run_codex_completion_events(
         monkeypatch,
         [
             (
                 "turn/completed",
                 {"text": "Assessment still in progress; checking the next route."},
-            )
+            ),
+            (
+                "tool",
+                {
+                    "callId": "call-3",
+                    "tool": "context_tool",
+                    "arguments": {"tool": "run_status"},
+                },
+            ),
+        ],
+        tools=[{"name": "context_tool"}],
+    )
+
+    assert stop_reason == "tool_use"
+    assert blocks[-1]["name"] == "context_tool"
+
+
+def test_codex_returns_text_after_required_tool_repairs_are_exhausted(monkeypatch):
+    blocks, stop_reason, _ = _run_codex_completion_events(
+        monkeypatch,
+        [
+            ("turn/completed", {"text": "First prose-only response."}),
+            ("turn/completed", {"text": "Second prose-only response."}),
+            ("turn/completed", {"text": "Third prose-only response."}),
         ],
         tools=[{"name": "context_tool"}],
     )
 
     assert stop_reason == "end_turn"
-    assert blocks[0]["text"].startswith("Assessment still in progress")
+    assert blocks[0]["text"] == "Third prose-only response."
 
 
 def test_codex_reader_failure_notifies_all_conversations():
@@ -776,12 +850,18 @@ def test_codex_close_fails_unresolved_dynamic_callbacks(monkeypatch):
     assert "thread-1" not in fake_client._conversations
 
 
-def test_codex_subscription_usage_has_no_dollar_estimate():
+def test_codex_usage_uses_api_equivalent_dollar_estimate():
     result = statistics.estimate_usage_cost(
-        "openai_codex", input_tokens=1000, output_tokens=1000
+        "openai_codex",
+        input_tokens=1000,
+        output_tokens=1000,
+        rates={
+            "input_price_usd_per_million": 4,
+            "output_price_usd_per_million": 20,
+        },
     )
-    assert result["estimated_cost_available"] is False
-    assert result["estimated_total_cost_usd"] == 0
+    assert result["estimated_cost_available"] is True
+    assert result["estimated_total_cost_usd"] == 0.024
 
 
 def test_codex_login_uses_device_code_flow(monkeypatch):

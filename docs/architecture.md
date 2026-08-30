@@ -231,7 +231,7 @@ Defines execution parameters linked to a provider:
 | `max_context_tokens` | `200000` | Total model context window, including prompts, tools, conversation history, and the output allowance |
 | `temperature` | — | Unset by default (falls through to provider/model default) |
 | `use_vision` | `false` | Include Playwright screenshots in prompts |
-| `force_tool_choice` | `false` | Force tool selection via wire-format `tool_choice: required/any` |
+| `force_tool_choice` | `false` | Force tool selection through the provider wire format where supported. Codex app-server does not expose a per-turn tool-choice field, so AESPA repairs prose-only Codex scan turns inside its adapter. |
 
 #### 3. Multi-Role Model Profile (`LLMProfile` model)
 
@@ -921,6 +921,8 @@ Factory Droid uses the installed CLI's encrypted login state; AESPA never reads 
 
 Codex uses the same subscription-provider lifecycle through `services/codex_provider.py`, but AESPA starts the user's separately installed `codex app-server` and communicates over JSONL JSON-RPC. The child uses the normal Codex CLI home, including an explicitly configured `CODEX_HOME`, so it automatically uses the CLI's default ChatGPT login when one exists. It still runs in an empty working directory and receives only the environment values needed for CLI authentication, networking, and certificates. Codex dynamic tools are experimental and are required for scans; an incompatible CLI produces an upgrade error. Model discovery, account status, allowance windows, and manual login/logout are exposed through Settings. Codex token and prompt-cache counters are recorded, but subscription usage is never converted into a dollar estimate.
 
+Codex app-server advertises dynamic tools at thread start but does not provide a per-turn `tool_choice` field. AESPA therefore enforces the scan contract in the adapter. A prose-only completion receives a bounded correction asking for exactly one AESPA tool. Messages that say an advertised AESPA tool is unavailable replace the Codex thread, while unavailable target infrastructure remains ordinary scan evidence. Only recovery exhaustion reaches the shared agent loop as a no-tool response.
+
 Droid tool calls pass through a minimal authenticated loopback MCP relay. The relay advertises only the current AESPA tool schemas and suspends each call while AESPA performs its existing validation, scope checks, execution, checkpointing, and result truncation. Supplying the canonical `tool_result` resumes the same Droid session. A checkpoint restored into a new process starts a fresh session seeded from the canonical message history. Factory-reported input, output, cache-read, cache-write, and Droid credit counters feed normal AESPA telemetry. AESPA records per-turn deltas from Droid's cumulative session counters, so persistent sessions preserve prompt-cache reporting without double-counting tokens or credits.
 
 Structured outputs such as probe lists, finding objects, and page analysis are requested as JSON or produced through tool calls. AESPA does not parse free-form model text with regular expressions.
@@ -1433,7 +1435,8 @@ The entry point `start_api_scan(api_run_id)` launches `_api_scan_task` as a back
 _api_scan_task(api_run_id)
   └─ _do_api_thinking_scan(api_run_id)
        1. Load ApiTestRun, LLM config, scanner policy, collection
-       2. seed_sessions_from_credentials — load ApiCredentials into scanner session vault
+       2. seed_sessions_from_credentials — load credentials that already contain usable
+          session material, such as bearer tokens, API keys, cookies, and Basic auth
        3. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs (Track/Enforce only)
        4. _build_api_crawl_context — build LLM opening context from collection metadata + explicitly imported SAST leads
        5. _do_agentic_thinking_loop (shared with web scanner)
@@ -1447,12 +1450,19 @@ _api_scan_task(api_run_id)
             • _make_post_probe_fn updates the coverage matrix cell for each probe (endpoint, category)
             • _make_post_finding_fn stamps api_test_run_id and OWASP category on each finding
        7. (enforce mode only) _enforce_coverage_loop — drive uncovered cells to terminal state
+```
 
 In SAST Validate, the API prompt and tool list are restricted to context lookup,
 HTTP requests, finding/lead updates, and completion. Coverage probe hooks and
 final untouched-cell resolution are disabled. `lead_detail` is available in all
 API scan modes and enforces ownership by `(run_kind, run_id, lead_id)`.
-```
+
+Username/password API credentials are login instructions, so they are not added to
+the session vault until a login succeeds. The Test Lead sends the login request with
+`store_as`, and AESPA saves a returned bearer token or response cookie under that
+stable label. Later requests select it with `use_session`. If protected requests are
+rejected because no reusable authenticated session was established, SAST Validate
+finishes as incomplete with `authentication_unavailable`.
 
 ### Scope enforcement
 
@@ -1587,6 +1597,8 @@ test unless that persisted copy succeeds.
 SAST scans use the same task-registry pattern as web and API scans. Stop cancels the run, while Pause waits for a safe agent-step boundary and keeps pending candidates intact. Discovery, each validator, and attack-path analysis save their LLM transcript and step count in `PhaseCheckpoint` rows after every completed tool exchange. Candidate state and file-review receipts are saved separately. Resume re-extracts the immutable source ZIP, restores those checkpoints, skips completed phases and validators, and continues the interrupted conversation without superseding existing leads.
 
 Temporary provider connection failures are retried with bounded backoff. If the provider remains unavailable, the run is paused with reason `network` instead of failed. A process restart also changes an orphaned `scanning` run to a resumable `paused` run after removing its disposable extraction directory. Browser or SSE disconnection does not affect the server-side scan task.
+
+The cross-process workspace lease is checked before startup recovery changes a SAST run, so starting a second AESPA process does not mark a live scan as interrupted. A genuine interruption writes a `restart_recovery` entry to the phase log. Agent Activity persists queue, start, and terminal events for each discovery worker and candidate validator. Runs created before these events were added rebuild the available discovery-worker history from `SastWorker` rows and completed validator activity from phase checkpoints.
 
 ---
 

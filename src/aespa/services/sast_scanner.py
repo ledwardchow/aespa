@@ -295,6 +295,30 @@ async def _run_checkpointed_agent(
     ) from last_error
 
 
+def _emit_agent_activity(
+    sast_run_id: int,
+    *,
+    agent_id: str,
+    role: str,
+    status: str,
+    current_task: str,
+    outcome: str | None = None,
+) -> None:
+    """Persist and stream one SAST child-agent lifecycle event."""
+    events_svc.emit(
+        sast_run_id,
+        {
+            "type": "agent_status",
+            "agent_id": agent_id,
+            "role": role,
+            "status": status,
+            "current_task": current_task,
+            "outcome": outcome,
+            "_persist": True,
+        },
+    )
+
+
 def _notify_campaign_source_started(sast_run_id: int) -> None:
     """Keep a campaign child in sync when the SAST page starts its scan."""
     try:
@@ -1507,10 +1531,26 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         validation_started = False
 
         async def _validate_candidate(candidate_id: int) -> None:
+            agent_id = f"sast-validator-{candidate_id}"
+            role = "SAST Candidate Validator"
             async with validation_semaphore:
                 candidate = _candidate_for_id(sast_run_id, candidate_id)
                 if candidate is None:
+                    _emit_agent_activity(
+                        sast_run_id,
+                        agent_id=agent_id,
+                        role=role,
+                        status="skipped",
+                        current_task=f"Candidate {candidate_id} is no longer available",
+                    )
                     return
+                _emit_agent_activity(
+                    sast_run_id,
+                    agent_id=agent_id,
+                    role=role,
+                    status="active",
+                    current_task=f"Validating candidate {candidate_id}: {candidate.get('title') or 'Untitled candidate'}",
+                )
                 try:
                     await _run_checkpointed_agent(
                         sast_run_id=sast_run_id,
@@ -1534,10 +1574,32 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     )
                     _raise_if_stopped()
                 except asyncio.CancelledError:
+                    _emit_agent_activity(
+                        sast_run_id,
+                        agent_id=agent_id,
+                        role=role,
+                        status="cancelled",
+                        current_task=f"Validation stopped for candidate {candidate_id}",
+                    )
                     raise
                 except llm_svc.LLMQuotaPauseError:
+                    _emit_agent_activity(
+                        sast_run_id,
+                        agent_id=agent_id,
+                        role=role,
+                        status="paused",
+                        current_task=f"Validation paused for candidate {candidate_id}",
+                        outcome="LLM quota unavailable",
+                    )
                     raise
                 except (SastPauseRequested, SastNetworkPause):
+                    _emit_agent_activity(
+                        sast_run_id,
+                        agent_id=agent_id,
+                        role=role,
+                        status="paused",
+                        current_task=f"Validation paused for candidate {candidate_id}",
+                    )
                     raise
                 except Exception as exc:
                     log.exception(
@@ -1567,6 +1629,14 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                                 sast_run_id, candidate, error=str(exc)
                             )
                             validation_failures.append(candidate_id)
+                    _emit_agent_activity(
+                        sast_run_id,
+                        agent_id=agent_id,
+                        role=role,
+                        status="failed",
+                        current_task=f"Validation failed for candidate {candidate_id}",
+                        outcome=str(exc),
+                    )
                     return
 
                 candidate = _candidate_for_id(sast_run_id, candidate_id)
@@ -1587,6 +1657,14 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     _sync_candidate_to_db(sast_run_id, run.collection_id, candidate)
                     _persist_coverage(sast_run_id, coverage)
                     _emit_validation_result(sast_run_id, candidate)
+                _emit_agent_activity(
+                    sast_run_id,
+                    agent_id=agent_id,
+                    role=role,
+                    status="complete",
+                    current_task=f"Validated candidate {candidate_id}",
+                    outcome=str(candidate.get("validation_status") or "inconclusive"),
+                )
 
         def _schedule_candidate_validation(candidate: dict) -> None:
             nonlocal validation_started
@@ -1594,6 +1672,13 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             if candidate_id in validation_scheduled:
                 return
             validation_scheduled.add(candidate_id)
+            _emit_agent_activity(
+                sast_run_id,
+                agent_id=f"sast-validator-{candidate_id}",
+                role="SAST Candidate Validator",
+                status="spawned",
+                current_task=f"Queued validation for candidate {candidate_id}: {candidate.get('title') or 'Untitled candidate'}",
+            )
             if not validation_started:
                 validation_started = True
                 _set_phase(
@@ -1657,9 +1742,29 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     return "Worker has no persisted id."
                 if resume and worker.status == "complete":
                     return worker.summary or f"{worker.worker_key} already complete."
+                agent_id = f"sast-worker-{worker.id}"
+                role = f"SAST {worker.class_group.replace('_', ' ').title()} Worker"
+                _emit_agent_activity(
+                    sast_run_id,
+                    agent_id=agent_id,
+                    role=role,
+                    status="spawned",
+                    current_task=f"Queued analysis worker {worker.worker_key}",
+                )
                 async with worker_semaphore:
                     workprogram_svc.set_worker_status(worker.id, "running")
                     payload = workprogram_svc.worker_payload(worker.id)
+                    assigned_count = len(payload.get("work_items") or [])
+                    _emit_agent_activity(
+                        sast_run_id,
+                        agent_id=agent_id,
+                        role=role,
+                        status="active",
+                        current_task=(
+                            f"{worker.worker_key}: reviewing {assigned_count} assigned "
+                            f"item{'s' if assigned_count != 1 else ''}"
+                        ),
+                    )
 
                     def _worker_done(_tool_input: dict, _calls: int):
                         unresolved = workprogram_svc.unresolved_for_worker(worker.id)
@@ -1698,11 +1803,26 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                             done_check=_worker_done,
                         )
                     except (
-                        asyncio.CancelledError,
                         llm_svc.LLMQuotaPauseError,
                         SastPauseRequested,
                         SastNetworkPause,
                     ):
+                        _emit_agent_activity(
+                            sast_run_id,
+                            agent_id=agent_id,
+                            role=role,
+                            status="paused",
+                            current_task=f"Analysis paused for {worker.worker_key}",
+                        )
+                        raise
+                    except asyncio.CancelledError:
+                        _emit_agent_activity(
+                            sast_run_id,
+                            agent_id=agent_id,
+                            role=role,
+                            status="cancelled",
+                            current_task=f"Analysis stopped for {worker.worker_key}",
+                        )
                         raise
                     except Exception as exc:
                         workprogram_svc.set_worker_status(
@@ -1713,16 +1833,37 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                             sast_run_id,
                             worker.worker_key,
                         )
+                        _emit_agent_activity(
+                            sast_run_id,
+                            agent_id=agent_id,
+                            role=role,
+                            status="failed",
+                            current_task=f"Analysis failed for {worker.worker_key}",
+                            outcome=str(exc),
+                        )
                         return f"{worker.worker_key} failed: {exc}"
                     unresolved = workprogram_svc.unresolved_for_worker(worker.id)
+                    final_status = "complete" if not unresolved else "blocked"
                     workprogram_svc.set_worker_status(
                         worker.id,
-                        "complete" if not unresolved else "blocked",
+                        final_status,
                         summary=summary,
                         error=(
                             f"{len(unresolved)} assigned item(s) unresolved."
                             if unresolved
                             else ""
+                        ),
+                    )
+                    _emit_agent_activity(
+                        sast_run_id,
+                        agent_id=agent_id,
+                        role=role,
+                        status=final_status,
+                        current_task=f"Analysis finished for {worker.worker_key}",
+                        outcome=(
+                            f"{len(unresolved)} assigned item(s) unresolved"
+                            if unresolved
+                            else summary
                         ),
                     )
                     return summary

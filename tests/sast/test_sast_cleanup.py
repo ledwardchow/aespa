@@ -34,7 +34,7 @@ from aespa.db import (
     init_db,
     set_engine,
 )
-from aespa.models import RunPause, SastRun
+from aespa.models import RunPause, SastRun, ScanLog
 from aespa.sast_workspace import try_acquire_sast_workspace_lease
 
 _UTC = timezone.utc
@@ -137,10 +137,18 @@ def test_sweep_marks_scanning_run_paused_and_removes_dir(engine, tmp_path, monke
             .where(RunPause.run_kind == "sast")
             .where(RunPause.run_id == run_id)
         ).one()
+        restart_log = s.exec(
+            select(ScanLog)
+            .where(ScanLog.test_run_id == run_id)
+            .where(ScanLog.run_kind == "sast")
+            .where(ScanLog.phase == "restart_recovery")
+        ).one()
     assert run.status == "paused"
     assert "interrupted" in (run.error_message or "").lower()
     assert run.completed_at is None
     assert pause.reason == "interrupted"
+    assert restart_log.status == "paused"
+    assert "interrupted" in restart_log.message.lower()
 
 
 def test_sweep_pauses_scanning_run_without_workspace(engine, tmp_path, monkeypatch):
@@ -245,4 +253,4 @@ def test_sweep_wired_into_init_db(engine, tmp_path, monkeypatch):
     assert not d.exists()
     with Session(engine) as s:
         run = s.get(SastRun, run_id)
-    assert run.status == "failed"
+    assert run.status == "paused"
