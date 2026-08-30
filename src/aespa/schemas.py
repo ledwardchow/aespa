@@ -390,6 +390,7 @@ class SastRunSummary(BaseModel):
     llm_config_id: int | None
     llm_profile_id: int | None = None
     leads_count: int
+    completion_status: str = "pending"
     phase_state_json: str | None = None
     coverage_json: str | None = None
     report_json: str | None = None
@@ -414,6 +415,7 @@ class ScanLeadOut(BaseModel):
     collection_id: int | None
     producer_run_type: str
     producer_run_id: int
+    source_work_item_id: int | None = None
     source: str
     category: str
     severity: str
@@ -705,8 +707,13 @@ class LLMConfigIn(BaseModel):
 
     @model_validator(mode="after")
     def _validate_context_window(self) -> "LLMConfigIn":
-        if self.max_context_tokens is not None and self.max_context_tokens <= self.max_tokens + 1024:
-            raise ValueError("max_context_tokens must leave at least 1024 tokens for input")
+        if (
+            self.max_context_tokens is not None
+            and self.max_context_tokens <= self.max_tokens + 1024
+        ):
+            raise ValueError(
+                "max_context_tokens must leave at least 1024 tokens for input"
+            )
         return self
 
     @field_validator("temperature")

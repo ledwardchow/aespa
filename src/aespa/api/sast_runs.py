@@ -264,6 +264,9 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
     """Return authoritative phase, coverage, and report state for the UI."""
     run = _get_run_or_404(session, run_id)
     from aespa.services.sast_scanner import _empty_phase_state
+    from aespa.services.sast_workprogram import completion_decision
+
+    completion_status, completion_reasons, work_program = completion_decision(run_id)
 
     return {
         "phases": _json_object(run.phase_state_json, _empty_phase_state()),
@@ -272,6 +275,11 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
             {"files": [], "summary": {"files_total": 0, "files_reviewed": 0}},
         ),
         "report": _json_object(run.report_json, {}),
+        "work_program": work_program,
+        "assurance": {
+            "status": completion_status,
+            "reasons": completion_reasons,
+        },
     }
 
 

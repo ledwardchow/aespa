@@ -124,9 +124,7 @@ def test_checkpointed_agent_retries_from_last_saved_turn(
             }
         )
         if len(attempts) == 1:
-            await kwargs["on_checkpoint"](
-                [{"role": "user", "content": "start"}], 4
-            )
+            await kwargs["on_checkpoint"]([{"role": "user", "content": "start"}], 4)
             raise TimeoutError("temporary network loss")
         return "continued"
 
@@ -671,31 +669,46 @@ def test_full_sast_task_executes_three_real_phase_loops(
             )
         else:
             calls.append("discovery")
+            payload = json.loads(await execute("get_work_program", {}, 0))
+            work_items = payload["work_items"]
             await execute(
                 "read_file", {"path": "app.py", "start_line": 1, "end_line": 3}, 1
             )
-            await execute(
-                "write_lead",
-                {
-                    "title": "SQL injection in item",
-                    "category": "A03",
-                    "severity": "high",
-                    "location": "app.py:3",
-                    "description": "Request id reaches db.execute.",
-                    "evidence": "db.execute(value)",
-                    "suggested_endpoint": "GET /item?id=",
-                    "source_trace": {"file": "app.py", "line": 2},
-                    "controls": [],
-                    "sink_trace": {"file": "app.py", "line": 3},
-                    "proof_gaps": [],
-                },
-                1,
-            )
-            await execute(
-                "filter_lead",
-                {"lead_id": 0, "confidence": 0.88, "reasoning": "Concrete path"},
-                2,
-            )
+            if "assigned focus is injection" in prompt:
+                await execute(
+                    "write_lead",
+                    {
+                        "work_item_id": work_items[0]["work_item_id"],
+                        "title": "SQL injection in item",
+                        "category": "A03",
+                        "severity": "high",
+                        "location": "app.py:3",
+                        "description": "Request id reaches db.execute.",
+                        "evidence": "db.execute(value)",
+                        "suggested_endpoint": "GET /item?id=",
+                        "source_trace": {"file": "app.py", "line": 2},
+                        "controls": [],
+                        "sink_trace": {"file": "app.py", "line": 3},
+                        "proof_gaps": [],
+                    },
+                    1,
+                )
+                await execute(
+                    "filter_lead",
+                    {"lead_id": 0, "confidence": 0.88, "reasoning": "Concrete path"},
+                    2,
+                )
+                work_items = work_items[1:]
+            for item in work_items:
+                await execute(
+                    "record_disposition",
+                    {
+                        "work_item_id": item["work_item_id"],
+                        "status": "no_match",
+                        "reasoning": "No issue in this assigned class.",
+                    },
+                    3,
+                )
         return f"{calls[-1]} complete"
 
     from aespa.services import llm
@@ -706,7 +719,9 @@ def test_full_sast_task_executes_three_real_phase_loops(
 
     asyncio.run(sast_scanner._sast_scan_task(run_id))
 
-    assert calls == ["discovery", "validation", "attack_path"]
+    assert calls.count("discovery") == 4
+    assert calls.count("validation") == 1
+    assert calls[-1] == "attack_path"
     with Session(isolated_db_engine) as session:
         saved_run = session.get(SastRun, run_id)
         saved_lead = session.exec(
@@ -792,10 +807,28 @@ def test_sast_validation_starts_before_discovery_finishes(
                 )
         else:
             calls.append("discovery")
+            payload = json.loads(await execute("get_work_program", {}, 0))
+            work_items = payload["work_items"]
+            await execute(
+                "read_file", {"path": "app.py", "start_line": 1, "end_line": 3}, 1
+            )
+            if "assigned focus is injection" not in prompt:
+                for item in work_items:
+                    await execute(
+                        "record_disposition",
+                        {
+                            "work_item_id": item["work_item_id"],
+                            "status": "no_match",
+                            "reasoning": "No issue in this assigned class.",
+                        },
+                        1,
+                    )
+                return "phase complete"
             for candidate_id in (0, 1):
                 await execute(
                     "write_lead",
                     {
+                        "work_item_id": work_items[0]["work_item_id"],
                         "title": f"SQL injection in item {candidate_id}",
                         "category": "A03",
                         "severity": "high",
@@ -847,3 +880,61 @@ def test_sast_validation_starts_before_discovery_finishes(
         "confirmed",
         "confirmed",
     ]
+
+
+def test_grep_scope_does_not_count_as_direct_file_review(tmp_path, isolated_db_engine):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "route.py").write_text(
+        "@app.get('/items')\ndef items(request):\n    return db.execute(request.args['q'])\n"
+    )
+    (source_root / "other.py").write_text("def helper():\n    return 1\n")
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="receipt-test", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    coverage = sast_scanner._build_source_inventory(source_root)
+    from aespa.services import sast_workprogram
+
+    sast_workprogram.build_source_atlas(run_id, source_root)
+    result = sast_scanner._run_read_tool(
+        run_id,
+        source_root,
+        coverage,
+        "discovery",
+        "grep",
+        {"pattern": "db\\.execute", "path": ""},
+    )
+
+    assert "route.py" in result
+    assert not any(item["reviewed"] for item in coverage.values())
+    summary = sast_workprogram.work_program_summary(run_id)
+    assert summary["files"]["directly_opened"] == 0
+    assert summary["files"]["with_search_matches"] == 1
+    assert summary["evidence"]["search_calls"] == 1
+    worker = sast_workprogram.worker_rows(run_id)[0]
+    work_item_id = sast_workprogram.worker_payload(worker.id)["work_items"][0][
+        "work_item_id"
+    ]
+    ok, message = sast_workprogram.record_disposition(
+        work_item_id, status="no_match", reasoning="No matching flow."
+    )
+    assert ok is False
+    assert "read_file" in message
+
+    sast_scanner._run_read_tool(
+        run_id,
+        source_root,
+        coverage,
+        "discovery",
+        "read_file",
+        {"path": "route.py", "start_line": 1, "end_line": 3},
+        worker.id,
+    )
+    ok, _ = sast_workprogram.record_disposition(
+        work_item_id, status="no_match", reasoning="No matching flow."
+    )
+    assert ok is True
