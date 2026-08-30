@@ -82,6 +82,43 @@ function SastModelSelector({ run, profiles, disabled, saving, onChange }) {
   </label>;
 }
 
+function SastRunActionsMenu({ runId, onDelete }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsideClick = event => {
+      if (!menuRef.current?.contains(event.target)) setOpen(false);
+    };
+    const closeOnEscape = event => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return <div className="sast-actions-menu" ref={menuRef}>
+    <button
+      className="btn ghost sast-actions-menu-trigger"
+      type="button"
+      aria-label="More run actions"
+      aria-haspopup="menu"
+      aria-expanded={open}
+      title="More run actions"
+      onClick={() => setOpen(current => !current)}
+    >⋯</button>
+    {open && <div className="sast-actions-popover" role="menu">
+      <a href={`/api/sast-runs/${runId}/export`} download role="menuitem" onClick={() => setOpen(false)}>Export run</a>
+      <button type="button" className="danger" role="menuitem" onClick={() => { setOpen(false); onDelete(); }}>Delete run</button>
+    </div>}
+  </div>;
+}
+
 function CandidateTable({ leads, selectedId, onSelect }) {
   const [widths, setWidths] = useState(() => readStoredValue(
     CANDIDATE_COLUMN_WIDTHS_KEY,
@@ -319,6 +356,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const proofGapCount = leads.reduce((count, lead) => count + jsonValue(lead.proof_gaps_json, []).length, 0);
   const goTab = nextTab => { setTab(nextTab); nav(`#/sast-runs/${runId}/${nextTab}`); };
   const onStart = async () => { setStartBusy(true); setError(null); try { await api.startSastScan(runId); setActivePhase(null); setScanRunning(true); await loadData(); } catch (err) { setError(err.message); } finally { setStartBusy(false); } };
+  const onPause = async () => { setStartBusy(true); setError(null); try { await api.pauseSastScan(runId); await loadData(); } catch (err) { setError(err.message); } finally { setStartBusy(false); } };
   const onStop = async () => { try { await api.stopSastScan(runId); await loadData(); } catch (err) { setError(err.message); } };
   const onResume = async () => { setStartBusy(true); setError(null); try { await api.resumeSastScan(runId); setScanRunning(true); await loadData(); } catch (err) { setError(err.message); } finally { setStartBusy(false); } };
   const onDelete = async () => { if (!confirm("Delete this SAST run and all its leads?")) return; try { const collId = run?.collection_id; await api.deleteSastRun(runId); nav(collId ? `#/apis/${collId}/files` : "#/sast-runs"); } catch (err) { setError(err.message); } };
@@ -330,7 +368,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   if (!run) return <div className="content scroll-content">{error ? <div className="alert error">{error}</div> : <div className="subtle">Loading…</div>}</div>;
   const phaseEntry = analysis.phases?.[displayedPhase] || {};
   return <>
-    <PageHeader title={<span className="sast-header-title"><Crumb href="#/sast-runs">SAST</Crumb><Sep /><span className="sast-header-name">{run.name}</span><StatusBadge status={scanRunning ? "scanning" : run.status} /></span>} actions={<><SastModelSelector run={run} profiles={profiles} disabled={scanRunning} saving={profileBusy} onChange={onProfileChange} /><a className="btn ghost" href={`/api/sast-runs/${runId}/export`} download>Export run ↓</a>{canStart && <button className="btn" disabled={startBusy} onClick={onStart}>{startBusy ? "Starting…" : "Start SAST Scan"}</button>}{run.status === "paused" && <button className="btn" disabled={startBusy} onClick={onResume}>{startBusy ? "Resuming…" : "Resume SAST Scan"}</button>}{scanRunning && <button className="btn danger-outline" onClick={onStop}>Stop</button>}<button className="btn danger-outline" onClick={onDelete}>Delete</button></>} />
+    <PageHeader title={<span className="sast-header-title"><Crumb href="#/sast-runs">SAST</Crumb><Sep /><span className="sast-header-name">{run.name}</span><StatusBadge status={scanRunning ? "scanning" : run.status} /></span>} actions={<><SastModelSelector run={run} profiles={profiles} disabled={scanRunning} saving={profileBusy} onChange={onProfileChange} />{canStart && <button className="btn" disabled={startBusy} onClick={onStart}>{startBusy ? "Starting…" : "Start SAST Scan"}</button>}{run.status === "paused" && <button className="btn" disabled={startBusy} onClick={onResume}>{startBusy ? "Resuming…" : "Resume SAST Scan"}</button>}{scanRunning && <button className="btn secondary" disabled={startBusy} onClick={onPause}>{startBusy ? "Pausing…" : "Pause"}</button>}{scanRunning && <button className="btn danger-outline" onClick={onStop}>Stop</button>}<SastRunActionsMenu runId={runId} onDelete={onDelete} /></>} />
     <div className="sast-run-shell">
       <div className="sast-phase-rail" role="tablist" aria-label="SAST scan phases">{PHASES.map((phase, index) => <button key={phase.key} className={`sast-phase-step ${displayedPhase === phase.key ? "active" : ""} status-${statuses[phase.key]}`} onClick={() => { setActivePhase(phase.key); goTab(phase.view); }} role="tab" aria-selected={displayedPhase === phase.key}>{statuses[phase.key] === "running" ? <span className="agent-dot agent-dot--active sast-phase-running-dot" aria-label="running" /> : <span className="sast-phase-marker">{phaseIcon(statuses[phase.key]) || index + 1}</span>}<span className="sast-phase-label">{phase.label}</span><span className="sast-phase-meta">{statuses[phase.key] === "pending" ? phase.short : statuses[phase.key]}</span></button>)}</div>
       <div className="sast-view-tabs" role="tablist" aria-label="SAST run views">{[{ key: "coverage", label: "Coverage" }, { key: "candidates", label: `Candidates ${leads.length}` }, { key: "activity", label: "Activity" }].map(item => <button key={item.key} className={tab === item.key ? "active" : ""} onClick={() => goTab(item.key)} role="tab" aria-selected={tab === item.key}>{item.label}</button>)}</div>

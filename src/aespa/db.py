@@ -7,7 +7,7 @@ from pathlib import Path
 from alembic.config import Config
 from sqlalchemy import event, inspect
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, create_engine
+from sqlmodel import Session, create_engine, select
 
 from aespa.config import Settings, get_settings
 from alembic import command
@@ -373,7 +373,7 @@ def _cleanup_orphaned_sast_extractions() -> None:
     from sqlmodel import Session
 
     from aespa.config import get_settings
-    from aespa.models import SastRun
+    from aespa.models import RunPause, SastRun
     from aespa.sast_workspace import try_acquire_sast_workspace_lease
 
     _UTC = timezone.utc
@@ -381,17 +381,46 @@ def _cleanup_orphaned_sast_extractions() -> None:
 
     try:
         extract_root = Path(get_settings().data_dir) / "sast_extract"
-        if not extract_root.is_dir():
-            return
         engine = get_engine()
         terminal = {"completed", "failed", "cancelled"}
-        for entry in extract_root.iterdir():
+        seen_run_ids: set[int] = set()
+
+        def _mark_interrupted_paused(session: Session, run: SastRun) -> None:
+            run.status = "paused"
+            run.error_message = (
+                "Process was interrupted while the SAST scan was running; "
+                "the temporary source workspace was cleaned up on startup. "
+                "Resume the scan to continue from its last saved step."
+            )
+            run.completed_at = None
+            run.updated_at = datetime.now(_UTC)
+            session.add(run)
+            pause = session.exec(
+                select(RunPause)
+                .where(RunPause.run_kind == "sast")
+                .where(RunPause.run_id == run.id)
+            ).first()
+            if pause is None:
+                pause = RunPause(run_kind="sast", run_id=run.id)
+            pause.provider = ""
+            pause.reason = "interrupted"
+            pause.message = run.error_message
+            pause.reset_at = None
+            pause.snapshot_json = "{}"
+            pause.resume_stage = None
+            pause.paused_at = datetime.now(_UTC)
+            session.add(pause)
+            session.commit()
+
+        entries = extract_root.iterdir() if extract_root.is_dir() else []
+        for entry in entries:
             if not entry.is_dir():
                 continue
             try:
                 run_id = int(entry.name)
             except ValueError:
                 continue  # non-numeric subdir (e.g. lost+found) — leave alone
+            seen_run_ids.add(run_id)
             lease = try_acquire_sast_workspace_lease(
                 Path(get_settings().data_dir), run_id
             )
@@ -417,19 +446,10 @@ def _cleanup_orphaned_sast_extractions() -> None:
                         )
                         continue
                     if run.status == "scanning":
-                        run.status = "failed"
-                        run.error_message = (
-                            "Process was interrupted while the SAST scan was running; "
-                            "extracted source tree has been cleaned up on startup. "
-                            "Re-start the scan to retry."
-                        )
-                        run.completed_at = run.completed_at or datetime.now(_UTC)
-                        run.updated_at = datetime.now(_UTC)
-                        s.add(run)
-                        s.commit()
+                        _mark_interrupted_paused(s, run)
                         shutil.rmtree(entry, ignore_errors=True)
                         log.warning(
-                            "sast_extract sweep: marked run id=%s 'failed' and removed %s "
+                            "sast_extract sweep: marked run id=%s 'paused' and removed %s "
                             "(process was interrupted mid-scan)",
                             run_id,
                             entry,
@@ -437,6 +457,36 @@ def _cleanup_orphaned_sast_extractions() -> None:
                         continue
                     # status == 'pending' — user may still start the scan, leave the
                     # dir alone (and it should not exist yet anyway).
+            finally:
+                lease.release()
+
+        # A crash can occur after the DB status changes but before extraction
+        # creates its directory. Reconcile those rows too. The workspace lease
+        # keeps this safe if another AESPA process still owns the run.
+        with Session(engine) as s:
+            orphan_ids = [
+                run.id
+                for run in s.exec(
+                    select(SastRun).where(SastRun.status == "scanning")
+                ).all()
+                if run.id is not None and run.id not in seen_run_ids
+            ]
+        for run_id in orphan_ids:
+            lease = try_acquire_sast_workspace_lease(
+                Path(get_settings().data_dir), run_id
+            )
+            if lease is None:
+                continue
+            try:
+                with Session(engine) as s:
+                    run = s.get(SastRun, run_id)
+                    if run is not None and run.status == "scanning":
+                        _mark_interrupted_paused(s, run)
+                        log.warning(
+                            "sast_extract sweep: marked run id=%s 'paused' "
+                            "without an extraction directory",
+                            run_id,
+                        )
             finally:
                 lease.release()
     except Exception:

@@ -445,6 +445,7 @@ def test_standalone_sast_upload_streams_and_enforces_limit(env, tmp_path, monkey
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
     from aespa.api import sast_runs as sast_api
 
+    assert sast_api._MAX_UPLOAD_BYTES == 250 * 1024 * 1024
     monkeypatch.setattr(sast_api, "_MAX_UPLOAD_BYTES", 4)
     resp = client.post(
         "/api/sast-runs",

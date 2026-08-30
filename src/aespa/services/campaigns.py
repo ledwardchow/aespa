@@ -80,6 +80,10 @@ class InvalidCampaignState(CampaignServiceError):
     pass
 
 
+class CampaignSourcePaused(CampaignServiceError):
+    pass
+
+
 class InvalidReviewDecision(CampaignServiceError):
     """Raised for a malformed review submission: an unknown/foreign mapping
     id, or an empty submission while proposals are still pending."""
@@ -653,6 +657,33 @@ def _interrupt_campaign(campaign_id: int, *, error: str) -> None:
     )
 
 
+def _interrupt_sast_campaign(campaign_id: int, *, error: str) -> None:
+    """Keep a campaign resumable while one of its source scans is paused."""
+    with Session(get_engine()) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        if campaign is None:
+            return
+        campaign.status = "interrupted"
+        campaign.interrupted_stage = "sast_running"
+        campaign.completed_at = None
+        campaign.error_message = error
+        campaign.updated_at = _utcnow()
+        s.add(campaign)
+        s.commit()
+    events_svc.emit(
+        campaign_id,
+        {
+            "type": "agent_status",
+            "agent_id": "campaign",
+            "role": "Campaign Orchestrator",
+            "status": "interrupted",
+            "current_task": "A source scan is paused",
+            "outcome": error,
+            "_persist": True,
+        },
+    )
+
+
 def _update_source_member_status(member_id: int, status: str) -> None:
     with Session(get_engine()) as s:
         member = s.get(CampaignSourceMember, member_id)
@@ -919,7 +950,9 @@ async def _run_campaign(campaign_id: int) -> None:
         log.exception("Campaign %s failed during SAST/correlation", campaign_id)
         from aespa.services.component_mapper import CorrelationTransientError
 
-        if isinstance(exc, CorrelationTransientError):
+        if isinstance(exc, CampaignSourcePaused):
+            _interrupt_sast_campaign(campaign_id, error=str(exc))
+        elif isinstance(exc, CorrelationTransientError):
             _interrupt_campaign(campaign_id, error=str(exc))
         else:
             _finish_campaign(campaign_id, "failed", error=str(exc))
@@ -978,7 +1011,11 @@ async def _run_sast_stage(campaign_id: int) -> None:
                 return
             with Session(get_engine()) as s:
                 run = s.get(SastRun, sast_run_id)
-                completed = run is not None and run.status == "completed"
+                run_status = run.status if run is not None else "failed"
+                completed = run_status == "completed"
+            if run_status == "paused":
+                _update_source_member_status(member_id, "pending")
+                return
             _update_source_member_status(
                 member_id, "completed" if completed else "failed"
             )
@@ -992,6 +1029,15 @@ async def _run_sast_stage(campaign_id: int) -> None:
         *(_run_one(member_id, run_id) for member_id, run_id in member_refs)
     )
     _append_campaign_warnings(campaign_id, warnings)
+    with Session(get_engine()) as s:
+        paused = any(
+            (run := s.get(SastRun, run_id)) is not None and run.status == "paused"
+            for _, run_id in member_refs
+        )
+    if paused:
+        raise CampaignSourcePaused(
+            "A source scan was paused and can be resumed without rerunning completed components."
+        )
 
 
 async def _resume_source_member_task(
@@ -1011,6 +1057,8 @@ async def _resume_source_member_task(
                 return
             if campaign_id in _campaign_stop_requested:
                 member.status = "skipped"
+            elif run is not None and run.status == "paused":
+                member.status = "pending"
             else:
                 member.status = (
                     "completed"
@@ -1021,6 +1069,13 @@ async def _resume_source_member_task(
             s.add(member)
             s.commit()
             completed = member.status == "completed"
+            paused = run is not None and run.status == "paused"
+        if paused:
+            _interrupt_sast_campaign(
+                campaign_id,
+                error="The resumed source scan paused again and can continue from its saved step.",
+            )
+            return
         if not completed:
             _append_campaign_warnings(
                 campaign_id,

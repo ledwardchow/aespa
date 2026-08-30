@@ -44,8 +44,8 @@ from aespa.services.references import ensure_finding_reference, ensure_lead_refe
 
 _UTC = timezone.utc
 
-# 25 MiB cap, matching the API-document upload limit.
-_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+# Keep standalone uploads aligned with SAST export/import archives.
+_MAX_UPLOAD_BYTES = 250 * 1024 * 1024
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 router = APIRouter(tags=["sast-runs"])
@@ -315,12 +315,27 @@ async def stop_sast_scan(
     return {"ok": True, "stopped": stopped}
 
 
+@router.post("/api/sast-runs/{run_id}/scan/pause")
+async def pause_sast_scan(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Pause an active SAST scan after its current provider step."""
+    _get_run_or_404(session, run_id)
+    from aespa.services import sast_scanner
+
+    paused = await sast_scanner.pause_sast_scan_and_wait(run_id)
+    if not paused:
+        raise HTTPException(status_code=409, detail="SAST scan is not running")
+    return {"ok": True, "pause_requested": True}
+
+
 @router.post("/api/sast-runs/{run_id}/scan/resume")
 async def resume_sast_scan(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> dict:
-    """Manually resume a quota-paused SAST scan without clearing its state."""
+    """Resume a user, network, quota, or restart-paused SAST scan."""
     from aespa.services import sast_scanner
 
     _get_run_or_404(session, run_id)

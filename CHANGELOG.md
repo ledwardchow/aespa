@@ -4,6 +4,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+- **Resumable SAST scans**: SAST scans now survive temporary provider outages and process restarts by saving progress after each agent step. Users can pause and resume without discarding completed discovery, validation, coverage, or attack-path work. Application campaigns wait for paused source scans instead of treating them as failed.
+- **Larger SAST archives**: Standalone SAST scans and application component snapshots now accept ZIP uploads up to 250 MiB.
 - **Clearer LLM pacing messages**: Short scheduling delays no longer appear in the activity log. Longer waits are identified as local request pacing instead of provider rate-limit errors, and the completion message appears when AESPA sends the request rather than after the model responds.
 - **Codex scans recover from stalled turns**: AESPA retries a stalled or broken tool session in a fresh conversation and restarts the local Codex client if the replacement also fails. If the Codex process stops or its protocol reader fails, affected scans are notified immediately with a useful error instead of waiting for the ten-minute timeout. The reader accepts request identifiers used by newer Codex CLI releases and large messages produced by long scan contexts. Concurrent scans share recovery safely without repeatedly restarting each other's replacement client.
 - **Model context limits and safer long scans**: Each saved model can use its detected context window or a manual token limit. Long agent conversations compact older exchanges before they reach the limit, while end-of-scan reporting splits probe evidence into model-sized batches.
