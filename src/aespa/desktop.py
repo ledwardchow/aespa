@@ -8,9 +8,7 @@ progress — keep running. Only "Quit" from the menubar stops the process.
 
 from __future__ import annotations
 
-import socket
 import threading
-import time
 
 import objc
 from AppKit import (
@@ -64,6 +62,7 @@ from aespa.browser import (
     download_chromium_if_missing,
 )
 from aespa.config import DEFAULT_WEB_DIR, _pkg_version
+from aespa.desktop_server import start_local_server
 
 _LATEST_RELEASE_API = "https://api.github.com/repos/ledwardchow/aespa/releases/latest"
 
@@ -74,53 +73,6 @@ _WINDOW_STYLE = (
     | NSWindowStyleMaskMiniaturizable
 )
 _VIEW_SIZABLE = 2 | 16  # NSViewWidthSizable | NSViewHeightSizable
-
-
-def _free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
-_server_error: Exception | None = None
-
-
-def _serve(port: int) -> None:
-    global _server_error
-    try:
-        import uvicorn
-
-        from aespa.main import app
-
-        uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
-        ).run()
-    except Exception as exc:
-        _server_error = exc
-        raise
-
-
-def _wait_port(port: int, timeout: float = 20.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _server_error is not None:
-            raise RuntimeError(
-                f"Backend server failed to start: {_server_error}"
-            ) from _server_error
-        try:
-            with socket.create_connection(("127.0.0.1", port), 0.25):
-                return
-        except OSError:
-            time.sleep(0.1)
-    if _server_error is not None:
-        raise RuntimeError(
-            f"Backend server failed to start: {_server_error}"
-        ) from _server_error
-    raise TimeoutError(
-        f"Backend server failed to bind to port {port} within {timeout}s"
-    )
 
 
 def _check_for_update() -> str | None:
@@ -503,10 +455,8 @@ def main() -> None:
     configure_browsers_path()
     # The Controller kicks off the first-run Chromium download once its menubar
     # is up, so the "Downloading browser…" indicator can reflect it.
-    port = _free_port()
-    threading.Thread(target=_serve, args=(port,), daemon=True).start()
     try:
-        _wait_port(port)
+        port = start_local_server()
     except Exception as exc:
         import sys
 
