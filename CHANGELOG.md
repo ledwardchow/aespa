@@ -2,6 +2,11 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## Unreleased
+
+- **Interactive terminal console**: Running AESPA from a terminal now opens a fixed console interface with separate views for HTTP requests, Python errors, LLM traffic, and agent activity. Number keys switch views, Page Up and Page Down browse buffered output without moving a selected historical page, and the page counter, scrollback percentage, and scrollbar show the current position. The layout automatically follows terminal resizing.
+- **Easier LLM request inspection**: LLM calls are grouped by call number and collapsed to a one-line header by default. Use the arrow keys to select a call and Enter to show or hide its request and response. Each payload identifies the operation that produced it, request type, direction, provider, model, run, and matching call number.
+
 ## [PR #267] August 30 update - SAST, API scan and UI improvements
 
 This is a hotfix of PR #266, this additional PR fixes release scripts.
@@ -10,8 +15,11 @@ This is a hotfix of PR #266, this additional PR fixes release scripts.
 - **Stronger Codex and long-scan recovery**: AESPA corrects recoverable Codex tool-call responses, replaces broken sessions, and restarts the local client when needed. Process and protocol failures now surface promptly, including with newer Codex CLI releases, large contexts, and concurrent scans. Model context limits can be detected or set manually, with conversation compaction and batched reporting to keep long scans within those limits. Activity messages now distinguish local request pacing from provider errors.
 - **Reusable API login sessions**: API scans now distinguish saved credentials from authenticated sessions. Successful logins can save returned tokens or cookies under a reusable label and replace expired sessions.
 - **Better dynamic scan coverage**: Quick web and API scans must resolve every imported SAST lead. Strong upload, SSRF, SQL error, and reflected XSS signals can automatically queue specialist work without repeating the same investigation, and matching evidence is merged into existing findings. XSS testing now covers plausible reflected and stored paths across discovered inputs and rendering contexts.
+- **More reliable application campaigns**: Cross-repository findings are grouped and merged across equivalent endpoints so the same root cause is easier to follow. Campaign stopping and resuming, endpoint matching, authentication-path details, and source-to-target correlation have also been improved.
+- **Simpler and safer LLM configuration**: AWS Bedrock connections now have a region selector, automatic regional endpoints, and model discovery for Bedrock Mantle. Model lists are sorted, OpenAI-compatible discovery failures provide a clear error, and AESPA prevents deleting a model while a scan profile still uses it.
+- **Validation and usage reporting fixes**: Stopping an active finding validation no longer returns a server error. Codex usage estimates now use official token prices and recognize model aliases.
 - **Safer Docker image dependencies**: The container now matches the installed Playwright version, applies available operating-system security updates, removes unused vulnerable components, and includes the patched Cryptography release identified by Docker Scout.
-- **UI fixes**: UI elements now position better on smaller screens.
+- **Clearer scan controls and UI fixes**: Web scan controls now present crawl, pentest, resume, and export actions more clearly. UI elements also position better on smaller screens.
 
 ## [PR #265] August 19 Update — new LLM providers and scan improvements
 

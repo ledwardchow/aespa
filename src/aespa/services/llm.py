@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import itertools
 import json
 import logging
 import math
 import os
 import re
+import sys
 import tempfile
 import time
 from contextvars import ContextVar
@@ -56,6 +58,7 @@ from aespa.services.prompts.validator import (
 )
 
 log = logging.getLogger("aespa.llm")
+traffic_log = logging.getLogger("aespa.llm.traffic")
 
 REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
 
@@ -126,6 +129,8 @@ _base_url_var: ContextVar[str | None] = ContextVar("_base_url", default=None)
 _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
+_operation_var: ContextVar[str | None] = ContextVar("llm_operation", default=None)
+_traffic_call_ids = itertools.count(1)
 
 
 def _usage_provider(config: LLMConfig) -> str:
@@ -1426,7 +1431,9 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         return raw_cleaned, [], dict(_EMPTY_CATS)
 
 
-async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+async def _call_impl(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
     _last_call_tokens_var.set(None)
@@ -1519,6 +1526,101 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         raise
 
 
+def _traffic_context(config: LLMConfig) -> str:
+    run_id = _run_id_var.get()
+    run = f"{_run_kind_var.get()} run {run_id}" if run_id is not None else "no run"
+    return f"{config.provider}/{config.model} - {run}"
+
+
+def _infer_llm_operation() -> str:
+    """Return a stable module/function label for the code requesting the call."""
+    try:
+        frame = sys._getframe(2)
+    except ValueError:
+        return "unknown"
+    while frame and frame.f_code.co_name in {
+        "plain_completion",
+        "stream_chat_completion",
+        "_call_with_tools",
+    }:
+        frame = frame.f_back
+    if frame is None:
+        return "unknown"
+    module = str(frame.f_globals.get("__name__") or "unknown").rsplit(".", 1)[-1]
+    function = frame.f_code.co_name
+    return f"{module}.{function}"
+
+
+def _log_llm_traffic(
+    direction: str,
+    config: LLMConfig,
+    payload: Any,
+    *,
+    kind: str,
+    operation: str,
+    call_id: int,
+) -> None:
+    if not traffic_log.isEnabledFor(logging.INFO):
+        return
+    if isinstance(payload, str):
+        rendered = payload
+    else:
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    label = (
+        f"operation={operation} | type={kind} | call={call_id} | "
+        f"direction={direction} | {_traffic_context(config)}"
+    )
+    traffic_log.info(
+        "============ BEGIN LLM %s ============\n%s\n"
+        "============ END LLM %s ============",
+        label,
+        rendered,
+        label,
+        extra={
+            "aespa_llm_call_id": call_id,
+            "aespa_llm_operation": operation,
+            "aespa_llm_kind": kind,
+            "aespa_llm_direction": direction,
+            "aespa_llm_context": _traffic_context(config),
+            "aespa_llm_payload": rendered,
+        },
+    )
+
+
+async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    operation = _operation_var.get() or _infer_llm_operation()
+    call_id = next(_traffic_call_ids)
+    _log_llm_traffic(
+        "REQUEST",
+        config,
+        prompt,
+        kind="completion",
+        operation=operation,
+        call_id=call_id,
+    )
+    try:
+        response = await _call_impl(config, prompt, screenshot_b64)
+    except Exception as exc:
+        _log_llm_traffic(
+            "FAILED",
+            config,
+            str(exc),
+            kind="completion",
+            operation=operation,
+            call_id=call_id,
+        )
+        raise
+    _log_llm_traffic(
+        "RESPONSE",
+        config,
+        response,
+        kind="completion",
+        operation=operation,
+        call_id=call_id,
+    )
+    return response
+
+
 async def plain_completion(
     config: LLMConfig, prompt: str, *, system_prompt: str | None = None
 ) -> str:
@@ -1528,6 +1630,51 @@ async def plain_completion(
 
 
 async def stream_chat_completion(
+    config: LLMConfig,
+    system_message: str,
+    messages: list[dict],
+) -> AsyncGenerator[str, None]:
+    operation = _operation_var.get() or _infer_llm_operation()
+    call_id = next(_traffic_call_ids)
+    request = {"system": system_message, "messages": messages}
+    _log_llm_traffic(
+        "REQUEST",
+        config,
+        request,
+        kind="stream",
+        operation=operation,
+        call_id=call_id,
+    )
+    chunks: list[str] = []
+    try:
+        async for chunk in _stream_chat_completion_impl(
+            config, system_message, messages
+        ):
+            chunks.append(chunk)
+            yield chunk
+    except Exception as exc:
+        _log_llm_traffic(
+            "FAILED",
+            config,
+            str(exc),
+            kind="stream",
+            operation=operation,
+            call_id=call_id,
+        )
+        raise
+    finally:
+        if chunks:
+            _log_llm_traffic(
+                "RESPONSE",
+                config,
+                "".join(chunks),
+                kind="stream",
+                operation=operation,
+                call_id=call_id,
+            )
+
+
+async def _stream_chat_completion_impl(
     config: LLMConfig,
     system_message: str,
     messages: list[dict],
@@ -4329,7 +4476,7 @@ def _estimate_tools_call_tokens(
     return estimated + 8 + (4 * len(messages)) + (8 if tools else 0)
 
 
-async def _call_with_tools(
+async def _call_with_tools_rate_limited(
     config: "LLMConfig",
     system_message: str,
     messages: list[dict],
@@ -4379,6 +4526,54 @@ async def _call_with_tools(
             await limiter.block_for(_codex_cooldown_seconds(exc))
         await limiter.reconcile(estimated, 0)
         raise
+
+
+async def _call_with_tools(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> "tuple[list[dict], str, Any]":
+    operation = _operation_var.get() or _infer_llm_operation()
+    call_id = next(_traffic_call_ids)
+    active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    request = {
+        "system": system_message,
+        "messages": messages,
+        "tools": [tool.get("name", "") for tool in active_tools],
+    }
+    _log_llm_traffic(
+        "REQUEST",
+        config,
+        request,
+        kind="tools",
+        operation=operation,
+        call_id=call_id,
+    )
+    try:
+        result = await _call_with_tools_rate_limited(
+            config, system_message, messages, tools=tools
+        )
+    except Exception as exc:
+        _log_llm_traffic(
+            "FAILED",
+            config,
+            str(exc),
+            kind="tools",
+            operation=operation,
+            call_id=call_id,
+        )
+        raise
+    blocks, stop_reason, raw_content = result
+    _log_llm_traffic(
+        "RESPONSE",
+        config,
+        {"stop_reason": stop_reason, "content": blocks},
+        kind="tools",
+        operation=operation,
+        call_id=call_id,
+    )
+    return blocks, stop_reason, raw_content
 
 
 async def _call_with_tools_impl(
@@ -5360,6 +5555,7 @@ async def thinking_agentic_loop(
         except Exception:
             pass
 
+    operation_token = _operation_var.set(_infer_llm_operation())
     try:
         while True:
             if stop_check and stop_check():
@@ -5907,6 +6103,7 @@ async def thinking_agentic_loop(
                 await on_checkpoint(messages, tool_call_count)
             except Exception:
                 pass
+        _operation_var.reset(operation_token)
 
     return final_summary
 

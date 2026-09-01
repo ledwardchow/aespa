@@ -73,6 +73,9 @@ def _get_alembic_config(engine: Engine) -> Config:
     cfg = Config(str(ini_path))
     cfg.set_main_option("script_location", str(repo_root / "alembic"))
     cfg.attributes["connection"] = engine
+    # The application owns process-wide logging. Alembic's default fileConfig
+    # call would replace the interactive console handler during startup.
+    cfg.attributes["configure_logging"] = False
     return cfg
 
 
