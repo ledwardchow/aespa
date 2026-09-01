@@ -62,6 +62,7 @@ router = APIRouter(tags=["test_runs"])
 
 _CRAWL_ARCHIVE_FORMAT = "aespa-crawl-export"
 _CRAWL_ARCHIVE_VERSION = 1
+_CRAWL_OWNED_PHASES = {"created", "crawling", "reconciling", "finalizing"}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1405,13 +1406,17 @@ def stop_test_run(
     run_id: int, session: Session = Depends(get_session)
 ) -> TestRunSummary:
     run = _get_run_or_404(session, run_id)
-    if run.status != TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Test run is not currently running")
+    if not crawler_svc.is_running(run_id):
+        raise HTTPException(status_code=409, detail="Crawl is not currently running")
     crawler_svc.request_stop(run_id)
-    run.status = TestRunStatus.stopped
-    session.add(run)
-    session.commit()
-    session.refresh(run)
+    # The Dynamic Scan can run at the same time as the crawler and owns the
+    # shared run status once its phase starts. Stopping the crawler must not
+    # overwrite an active or completed scan result.
+    if run.phase in _CRAWL_OWNED_PHASES:
+        run.status = TestRunStatus.stopped
+        session.add(run)
+        session.commit()
+        session.refresh(run)
     return _run_summary(run, session)
 
 

@@ -222,14 +222,34 @@ async def _crawl_task(run_id: int) -> None:
         await _do_crawl(run_id)
     except asyncio.CancelledError:
         log.info("Crawl task cancelled (stop requested) for run_id=%s", run_id)
+        crawl_owned_run_state = False
         with Session(get_engine()) as s:
             run = s.get(TestRun, run_id)
-            if run and run.status == TestRunStatus.running:
+            if run and run.phase in {
+                "created",
+                "crawling",
+                "reconciling",
+                "finalizing",
+            }:
                 run.status = TestRunStatus.stopped
                 run.completed_at = _utcnow()
                 s.add(run)
                 s.commit()
-        events_svc.emit(run_id, {"type": "run_update", "status": "stopped"})
+                crawl_owned_run_state = True
+        if crawl_owned_run_state:
+            events_svc.emit(run_id, {"type": "run_update", "status": "stopped"})
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "crawler",
+                "role": "Crawler",
+                "status": "complete",
+                "current_task": "Crawl stopped",
+                "outcome": "Stopped by user",
+                "_persist": True,
+            },
+        )
         raise
     except Exception as exc:
         from aespa.services import llm as llm_svc

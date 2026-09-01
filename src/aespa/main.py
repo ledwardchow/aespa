@@ -243,16 +243,25 @@ def main() -> None:
     import uvicorn
 
     from aespa.browser import ensure_chromium
+    from aespa.console import InteractiveConsole, interactive_console_available
 
     _build_frontend_if_stale()
     ensure_chromium()
     settings = get_settings()
-    uvicorn.run(
-        "aespa.main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=False,
-    )
+    console = InteractiveConsole() if interactive_console_available() else None
+    if console:
+        console.start()
+    try:
+        uvicorn.run(
+            "aespa.main:app",
+            host=settings.host,
+            port=settings.port,
+            reload=False,
+            log_config=None if console else uvicorn.config.LOGGING_CONFIG,
+        )
+    finally:
+        if console:
+            console.stop()
 
 
 if __name__ == "__main__":

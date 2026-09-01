@@ -1100,6 +1100,38 @@ def test_stop_pending_run_rejected(client: TestClient):
     run = _make_run(client, site["id"]).json()
     r = client.post(f"/api/test-runs/{run['id']}/stop")
     assert r.status_code == 409
+    assert r.json()["detail"] == "Crawl is not currently running"
+
+
+def test_stop_uses_crawler_task_state_and_preserves_scan_result(
+    client: TestClient, isolated_db_engine, monkeypatch
+):
+    from aespa.services import crawler as crawler_svc
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    with Session(isolated_db_engine) as session:
+        db_run = session.get(models.TestRun, run["id"])
+        db_run.status = models.TestRunStatus.complete
+        db_run.phase = "finished"
+        db_run.outcome = "complete"
+        session.add(db_run)
+        session.commit()
+
+    stopped_runs = []
+    monkeypatch.setattr(crawler_svc, "is_running", lambda run_id: True)
+    monkeypatch.setattr(
+        crawler_svc,
+        "request_stop",
+        lambda run_id: stopped_runs.append(run_id),
+    )
+
+    response = client.post(f"/api/test-runs/{run['id']}/stop")
+
+    assert response.status_code == 200
+    assert stopped_runs == [run["id"]]
+    assert response.json()["status"] == "complete"
+    assert response.json()["phase"] == "finished"
 
 
 def test_stop_validation_endpoint_accepts_post(client: TestClient, monkeypatch):

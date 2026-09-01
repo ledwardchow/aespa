@@ -2,7 +2,9 @@ import asyncio
 import json
 
 import pytest
+from sqlmodel import Session
 
+from aespa.models import Site, TestRun, TestRunStatus
 from aespa.services import crawler
 
 
@@ -12,6 +14,61 @@ def test_page_function_label_removes_credential_possessive():
     )
     assert (
         crawler._page_function_label("Admin User Management") == "Admin User Management"
+    )
+
+
+def test_cancelled_crawl_preserves_finished_scan_state(
+    isolated_db_engine, monkeypatch
+):
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        run = TestRun(
+            site_id=site.id,
+            name="Concurrent crawl",
+            status=TestRunStatus.complete,
+            phase="finished",
+            outcome="complete",
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    async def cancelled_crawl(_run_id):
+        raise asyncio.CancelledError
+
+    emitted = []
+    monkeypatch.setattr(crawler, "_do_crawl", cancelled_crawl)
+    monkeypatch.setattr(
+        crawler.events_svc,
+        "emit",
+        lambda emitted_run_id, event: emitted.append((emitted_run_id, event)),
+    )
+
+    async def run_cancelled_task():
+        with pytest.raises(asyncio.CancelledError):
+            await crawler._crawl_task(run_id)
+
+    asyncio.run(run_cancelled_task())
+
+    with Session(isolated_db_engine) as session:
+        saved_run = session.get(TestRun, run_id)
+        assert saved_run.status == TestRunStatus.complete
+        assert saved_run.phase == "finished"
+        assert saved_run.outcome == "complete"
+
+    assert not any(
+        event.get("type") == "run_update" and event.get("status") == "stopped"
+        for _, event in emitted
+    )
+    assert any(
+        event.get("type") == "agent_status"
+        and event.get("agent_id") == "crawler"
+        and event.get("current_task") == "Crawl stopped"
+        for _, event in emitted
     )
 
 

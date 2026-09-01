@@ -115,6 +115,22 @@ uv run aespa
 
 The UI is available at `http://127.0.0.1:8000` by default.
 
+The terminal has four live log views. Press `1` for HTTP requests, `2` for
+Python errors, `3` for LLM requests and responses, or `4` for agent activity.
+The LLM view shows full prompt content and may include credentials or target data supplied to a scan.
+Each payload is enclosed by a delimiter that identifies the calling operation,
+request type, direction, and matching call number.
+LLM calls are collapsed to one row in the terminal by default. In the LLM view,
+use Up and Down to select a call and Enter to expand or collapse its request and
+response payloads.
+The number keys switch views immediately, without pressing Enter. Logs stay
+inside a fixed terminal window. Use Page Up and Page Down to move through older
+and newer pages. The right-side scrollbar and header percentage show how far
+back the current page is from live output. Page numbers increase toward the
+newest content. Paging into older output keeps that page fixed while new log
+records arrive; returning to the newest page resumes live updates.
+The viewport reflows automatically when the terminal is resized.
+
 ### Frontend build (only for UI development)
 
 The compiled frontend bundle is committed under `src/aespa/web/` to make runs/deployment easier. 
