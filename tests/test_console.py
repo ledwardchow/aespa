@@ -11,6 +11,7 @@ from aespa.console import (
     ERRORS,
     HTTP,
     LLM,
+    TESTING,
     InteractiveConsole,
     InteractiveConsoleHandler,
 )
@@ -37,6 +38,30 @@ def _llm_record(
     return record
 
 
+def _testing_record(
+    traffic_id: int,
+    method: str,
+    url: str,
+    status: int | None,
+) -> logging.LogRecord:
+    record = _record("aespa.testing.traffic", logging.INFO, "structured test traffic")
+    record.aespa_testing_traffic_id = traffic_id
+    record.aespa_testing_run_kind = "web"
+    record.aespa_testing_run_id = 7
+    record.aespa_testing_source = "httpx"
+    record.aespa_testing_method = method
+    record.aespa_testing_url = url
+    record.aespa_testing_status = status
+    record.aespa_testing_duration_ms = 42
+    record.aespa_testing_username = "alice"
+    record.aespa_testing_session_label = "alice-session"
+    record.aespa_testing_request_headers = {"content-type": "application/json"}
+    record.aespa_testing_request_body = '{"payload":"test"}'
+    record.aespa_testing_response_headers = {"content-type": "application/json"}
+    record.aespa_testing_response_body = '{"ok":true}'
+    return record
+
+
 def test_console_routes_records_to_separate_views() -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output)
@@ -54,12 +79,14 @@ def test_console_routes_records_to_separate_views() -> None:
     handler.emit(
         _record("aespa.agent.activity", logging.INFO, "web run 7 ACTIVE Scanner")
     )
+    handler.emit(_record("aespa.testing.traffic", logging.INFO, "GET /target"))
     handler.emit(_record("aespa.service", logging.WARNING, "ignored warning"))
 
     assert "GET /api/health" in handler.buffers[HTTP][0]
     assert "scan failed" in handler.buffers[ERRORS][0]
     assert "prompt" in handler.buffers[LLM][0]
     assert "Scanner" in handler.buffers[AGENT][0]
+    assert "GET /target" in handler.buffers[TESTING][0]
     assert all("ignored warning" not in item for item in handler.buffers.values())
 
 
@@ -77,7 +104,7 @@ def test_switch_clears_screen_and_replays_selected_buffer() -> None:
     assert "visible error" in rendered
 
 
-def test_agent_is_initial_view_and_number_keys_switch_agent_and_http() -> None:
+def test_agent_is_initial_view_and_number_keys_switch_all_views() -> None:
     output = io.StringIO()
     console = InteractiveConsole(input_stream=io.StringIO(), output_stream=output)
 
@@ -93,11 +120,17 @@ def test_agent_is_initial_view_and_number_keys_switch_agent_and_http() -> None:
     console._process_posix_keys(b"1")
     assert console.handler.mode == AGENT
 
+    console._process_posix_keys(b"5")
+    assert console.handler.mode == TESTING
+    assert "[5 Testing Traffic]" in output.getvalue()
+
 
 def test_legend_is_drawn_on_last_terminal_row(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output)
-    monkeypatch.setattr("aespa.console.shutil.get_terminal_size", lambda fallback: (80, 12))
+    monkeypatch.setattr(
+        "aespa.console.shutil.get_terminal_size", lambda fallback: (80, 12)
+    )
 
     handler.start_screen()
     handler.emit(
@@ -109,13 +142,15 @@ def test_legend_is_drawn_on_last_terminal_row(monkeypatch) -> None:
         )
     )
 
-    assert "\x1b[12;1H\x1b[2K[1-4] Views" in output.getvalue()
+    assert "\x1b[12;1H\x1b[2K[1-5] Views" in output.getvalue()
 
 
 def test_page_up_and_page_down_navigate_fixed_viewport(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output)
-    monkeypatch.setattr("aespa.console.shutil.get_terminal_size", lambda fallback: (80, 8))
+    monkeypatch.setattr(
+        "aespa.console.shutil.get_terminal_size", lambda fallback: (80, 8)
+    )
     for index in range(12):
         handler.emit(
             _record(
@@ -148,7 +183,9 @@ def test_page_up_and_page_down_navigate_fixed_viewport(monkeypatch) -> None:
 def test_scrolled_page_stays_anchored_when_new_records_arrive(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output)
-    monkeypatch.setattr("aespa.console.shutil.get_terminal_size", lambda fallback: (80, 8))
+    monkeypatch.setattr(
+        "aespa.console.shutil.get_terminal_size", lambda fallback: (80, 8)
+    )
     for index in range(12):
         handler.emit(
             _record(
@@ -182,7 +219,9 @@ def test_scrolled_page_stays_anchored_when_new_records_arrive(monkeypatch) -> No
 
 
 def test_posix_page_key_sequences_are_handled(monkeypatch) -> None:
-    console = InteractiveConsole(input_stream=io.StringIO(), output_stream=io.StringIO())
+    console = InteractiveConsole(
+        input_stream=io.StringIO(), output_stream=io.StringIO()
+    )
     calls: list[str] = []
     monkeypatch.setattr(console.handler, "page_up", lambda: calls.append("up"))
     monkeypatch.setattr(console.handler, "page_down", lambda: calls.append("down"))
@@ -216,7 +255,7 @@ def test_terminal_resize_reflows_and_redraws_viewport(monkeypatch) -> None:
             '%s - "%s %s HTTP/%s" %d',
             ("client", "GET", "/a/long/path/that/will/reflow", "1.1", 200),
         )
-        )
+    )
     handler.switch(HTTP)
     handler.start_screen()
     frames_before = output.getvalue().count("\x1b[2J\x1b[H")
@@ -227,16 +266,22 @@ def test_terminal_resize_reflows_and_redraws_viewport(monkeypatch) -> None:
 
     rendered = output.getvalue()
     assert rendered.count("\x1b[2J\x1b[H") == frames_before + 1
-    assert "\x1b[9;1H\x1b[2K[1-4] Views" in rendered
+    assert "\x1b[9;1H\x1b[2K[1-5] Views" in rendered
     assert "\x1b[3;50H" in rendered
 
 
 def test_llm_calls_are_collapsed_navigable_and_expandable(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output)
-    monkeypatch.setattr("aespa.console.shutil.get_terminal_size", lambda fallback: (120, 16))
-    handler.emit(_llm_record(10, "REQUEST", "first request", operation="api_docs.parse"))
-    handler.emit(_llm_record(10, "RESPONSE", "first response", operation="api_docs.parse"))
+    monkeypatch.setattr(
+        "aespa.console.shutil.get_terminal_size", lambda fallback: (120, 16)
+    )
+    handler.emit(
+        _llm_record(10, "REQUEST", "first request", operation="api_docs.parse")
+    )
+    handler.emit(
+        _llm_record(10, "RESPONSE", "first response", operation="api_docs.parse")
+    )
     handler.emit(_llm_record(11, "REQUEST", "second request"))
     handler.start_screen()
     handler.switch(LLM)
@@ -263,6 +308,39 @@ def test_llm_calls_are_collapsed_navigable_and_expandable(monkeypatch) -> None:
     assert "first request" not in contracted
 
 
+def test_testing_traffic_is_collapsed_navigable_and_expandable(monkeypatch) -> None:
+    output = io.StringIO()
+    handler = InteractiveConsoleHandler(output)
+    monkeypatch.setattr(
+        "aespa.console.shutil.get_terminal_size", lambda fallback: (140, 20)
+    )
+    handler.emit(_testing_record(21, "POST", "https://target.test/login", 401))
+    handler.emit(_testing_record(22, "GET", "https://target.test/admin", 200))
+    handler.start_screen()
+    handler.switch(TESTING)
+
+    collapsed = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "#21 POST https://target.test/login [401 42ms]" in collapsed
+    assert "#22 GET https://target.test/admin [200 42ms]" in collapsed
+    assert '"payload":"test"' not in collapsed
+    assert "Request 2/2" in collapsed
+
+    handler.select_previous_llm()
+    assert handler.testing_selected == 0
+    handler.toggle_selected_llm()
+    expanded = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "Request 1/2" in expanded
+    assert "web run 7 · httpx · session alice-session · user alice" in expanded
+    assert "--- REQUEST ---" in expanded
+    assert '"payload":"test"' in expanded
+    assert "--- RESPONSE ---" in expanded
+    assert '"ok":true' in expanded
+
+    handler.toggle_selected_llm()
+    contracted = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert '"payload":"test"' not in contracted
+
+
 def test_error_view_includes_traceback() -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output)
@@ -282,7 +360,9 @@ def test_console_removes_handlers_that_bypass_view_filter() -> None:
     old_level = root.level
     bypass = logging.StreamHandler(io.StringIO())
     root.addHandler(bypass)
-    console = InteractiveConsole(input_stream=io.StringIO(), output_stream=io.StringIO())
+    console = InteractiveConsole(
+        input_stream=io.StringIO(), output_stream=io.StringIO()
+    )
     try:
         console._configure_logging()
         assert root.handlers == [console.handler]
@@ -292,7 +372,9 @@ def test_console_removes_handlers_that_bypass_view_filter() -> None:
         root.setLevel(old_level)
 
 
-def test_llm_traffic_delimiters_identify_operation_and_pair(caplog, monkeypatch) -> None:
+def test_llm_traffic_delimiters_identify_operation_and_pair(
+    caplog, monkeypatch
+) -> None:
     from aespa.services import llm
 
     async def fake_call_impl(config, prompt, screenshot):  # noqa: ARG001

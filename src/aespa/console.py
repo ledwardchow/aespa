@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import select
@@ -21,9 +22,10 @@ HTTP = "http"
 ERRORS = "errors"
 LLM = "llm"
 AGENT = "agent"
+TESTING = "testing"
 
-_MODES = (AGENT, ERRORS, LLM, HTTP)
-_MODE_KEYS = {"1": AGENT, "2": ERRORS, "3": LLM, "4": HTTP}
+_MODES = (AGENT, ERRORS, LLM, HTTP, TESTING)
+_MODE_KEYS = {"1": AGENT, "2": ERRORS, "3": LLM, "4": HTTP, "5": TESTING}
 _PAGE_UP = b"\x1b[5~"
 _PAGE_DOWN = b"\x1b[6~"
 _ARROW_UP = b"\x1b[A"
@@ -35,6 +37,8 @@ def _record_view(record: logging.LogRecord) -> str | None:
         return AGENT
     if record.name == "aespa.llm.traffic":
         return LLM
+    if record.name == "aespa.testing.traffic":
+        return TESTING
     if record.levelno >= logging.ERROR:
         return ERRORS
     if record.name == "uvicorn.access":
@@ -58,6 +62,9 @@ class InteractiveConsoleHandler(logging.Handler):
         self.llm_calls: list[dict] = []
         self.llm_selected = -1
         self.llm_expanded: set[int] = set()
+        self.testing_calls: list[dict] = []
+        self.testing_selected = -1
+        self.testing_expanded: set[int] = set()
         self._max_records = max_records
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -68,6 +75,8 @@ class InteractiveConsoleHandler(logging.Handler):
             with self._output_lock:
                 if view == LLM and hasattr(record, "aespa_llm_call_id"):
                     self._store_llm_record(record)
+                elif view == TESTING and hasattr(record, "aespa_testing_traffic_id"):
+                    self._store_testing_record(record)
                 else:
                     self.buffers[view].append(self._format_record(record, view))
                 if self.mode == view and self._screen_active:
@@ -90,15 +99,16 @@ class InteractiveConsoleHandler(logging.Handler):
 
     def toggle_selected_llm(self) -> None:
         with self._output_lock:
-            if self.mode != LLM or not self.llm_calls:
+            calls, selected, expanded = self._structured_state()
+            if not calls or selected < 0:
                 return
-            call_id = int(self.llm_calls[self.llm_selected]["call_id"])
-            if call_id in self.llm_expanded:
-                self.llm_expanded.remove(call_id)
+            item_id = self._structured_item_id(calls[selected])
+            if item_id in expanded:
+                expanded.remove(item_id)
             else:
-                self.llm_expanded.add(call_id)
-            self.follow_live[LLM] = False
-            self._show_selected_llm_page()
+                expanded.add(item_id)
+            self.follow_live[self.mode] = False
+            self._show_selected_structured_page()
             self._redraw_locked()
 
     def page_up(self) -> None:
@@ -174,12 +184,14 @@ class InteractiveConsoleHandler(logging.Handler):
         end = min(len(body_lines), (page + 1) * body_height)
         start = page * body_height
         visible = body_lines[start:end]
+        structured_calls, structured_selected, _ = self._structured_state()
         title = _title(
             self.mode,
             page + 1,
             page_count,
-            selected=self.llm_selected + 1 if self.mode == LLM and self.llm_calls else 0,
-            item_count=len(self.llm_calls) if self.mode == LLM else 0,
+            selected=structured_selected + 1 if structured_calls else 0,
+            item_count=len(structured_calls),
+            width=width,
         )
         scrollbar = _scrollbar(body_height, page, page_count)
         screen = f"\x1b[2J\x1b[H{title[:width]}\x1b[2;1H{'─' * width}"
@@ -204,6 +216,8 @@ class InteractiveConsoleHandler(logging.Handler):
     def _body_lines(self, width: int) -> list[str]:
         if self.mode == LLM and self.llm_calls:
             return self._llm_body_lines(width)[0]
+        if self.mode == TESTING and self.testing_calls:
+            return self._testing_body_lines(width)[0]
         body_lines: list[str] = []
         for record in self.buffers[self.mode]:
             for line in record.replace("\r", "").replace("\x1b", "\\x1b").split("\n"):
@@ -244,6 +258,47 @@ class InteractiveConsoleHandler(logging.Handler):
             lines.append("")
         return lines, header_positions
 
+    def _testing_body_lines(self, width: int) -> tuple[list[str], list[int]]:
+        lines: list[str] = []
+        header_positions: list[int] = []
+        for index, call in enumerate(self.testing_calls):
+            header_positions.append(len(lines))
+            traffic_id = int(call["traffic_id"])
+            expanded = traffic_id in self.testing_expanded
+            marker = "▶" if index == self.testing_selected else " "
+            disclosure = "▾" if expanded else "▸"
+            status = call["status"] if call["status"] is not None else "FAILED"
+            duration = (
+                f" {call['duration_ms']}ms" if call["duration_ms"] is not None else ""
+            )
+            header = (
+                f"{marker} {disclosure} #{traffic_id} {call['method']} {call['url']} "
+                f"[{status}{duration}]"
+            )
+            lines.extend(_wrap_console_line(header, width))
+            if not expanded:
+                continue
+            context = f"{call['run_kind']} run {call['run_id']} · {call['source']}"
+            if call.get("session_label"):
+                context += f" · session {call['session_label']}"
+            if call.get("username"):
+                context += f" · user {call['username']}"
+            lines.extend(_wrap_console_line(f"    {context}", width))
+            for direction, headers_key, body_key in (
+                ("REQUEST", "request_headers", "request_body"),
+                ("RESPONSE", "response_headers", "response_body"),
+            ):
+                lines.extend(_wrap_console_line(f"    --- {direction} ---", width))
+                headers = json.dumps(call[headers_key], indent=2, sort_keys=True)
+                for payload_line in headers.split("\n"):
+                    lines.extend(_wrap_console_line(f"    {payload_line}", width))
+                body = call.get(body_key)
+                if body:
+                    for payload_line in str(body).split("\n"):
+                        lines.extend(_wrap_console_line(f"    {payload_line}", width))
+            lines.append("")
+        return lines, header_positions
+
     def _store_llm_record(self, record: logging.LogRecord) -> None:
         call_id = int(record.aespa_llm_call_id)
         call = next(
@@ -268,23 +323,69 @@ class InteractiveConsoleHandler(logging.Handler):
         if self.follow_live[LLM] or self.llm_selected < 0:
             self.llm_selected = len(self.llm_calls) - 1
 
+    def _store_testing_record(self, record: logging.LogRecord) -> None:
+        call = {
+            "traffic_id": int(record.aespa_testing_traffic_id),
+            "run_kind": str(record.aespa_testing_run_kind),
+            "run_id": int(record.aespa_testing_run_id),
+            "source": str(record.aespa_testing_source),
+            "method": str(record.aespa_testing_method),
+            "url": str(record.aespa_testing_url),
+            "status": record.aespa_testing_status,
+            "duration_ms": record.aespa_testing_duration_ms,
+            "username": record.aespa_testing_username,
+            "session_label": record.aespa_testing_session_label,
+            "request_headers": record.aespa_testing_request_headers,
+            "request_body": record.aespa_testing_request_body,
+            "response_headers": record.aespa_testing_response_headers,
+            "response_body": record.aespa_testing_response_body,
+        }
+        self.testing_calls.append(call)
+        if len(self.testing_calls) > self._max_records:
+            removed = self.testing_calls.pop(0)
+            self.testing_expanded.discard(int(removed["traffic_id"]))
+            self.testing_selected = max(-1, self.testing_selected - 1)
+        if self.follow_live[TESTING] or self.testing_selected < 0:
+            self.testing_selected = len(self.testing_calls) - 1
+
     def _move_llm_selection(self, delta: int) -> None:
         with self._output_lock:
-            if self.mode != LLM or not self.llm_calls:
+            calls, selected, _ = self._structured_state()
+            if not calls:
                 return
-            self.llm_selected = min(
-                max(self.llm_selected + delta, 0), len(self.llm_calls) - 1
-            )
-            self.follow_live[LLM] = False
-            self._show_selected_llm_page()
+            selected = min(max(selected + delta, 0), len(calls) - 1)
+            if self.mode == LLM:
+                self.llm_selected = selected
+            else:
+                self.testing_selected = selected
+            self.follow_live[self.mode] = False
+            self._show_selected_structured_page()
             self._redraw_locked()
 
-    def _show_selected_llm_page(self) -> None:
+    def _structured_state(self) -> tuple[list[dict], int, set[int]]:
+        if self.mode == LLM:
+            return self.llm_calls, self.llm_selected, self.llm_expanded
+        if self.mode == TESTING:
+            return self.testing_calls, self.testing_selected, self.testing_expanded
+        return [], -1, set()
+
+    @staticmethod
+    def _structured_item_id(item: dict) -> int:
+        return int(item.get("call_id", item.get("traffic_id")))
+
+    def _show_selected_structured_page(self) -> None:
         width, height = self._terminal_size()
         body_height = height - 3
-        _, positions = self._llm_body_lines(width - 2)
-        if positions and self.llm_selected >= 0:
-            self.page_indices[LLM] = positions[self.llm_selected] // body_height
+        if self.mode == LLM:
+            _, positions = self._llm_body_lines(width - 2)
+            selected = self.llm_selected
+        elif self.mode == TESTING:
+            _, positions = self._testing_body_lines(width - 2)
+            selected = self.testing_selected
+        else:
+            return
+        if positions and selected >= 0:
+            self.page_indices[self.mode] = positions[selected] // body_height
 
     def _page_count(self, body_height: int, content_width: int) -> int:
         line_count = len(self._body_lines(content_width))
@@ -295,8 +396,7 @@ class InteractiveConsoleHandler(logging.Handler):
         if view == HTTP and isinstance(record.args, tuple) and len(record.args) >= 5:
             client, method, path, http_version, status = record.args[:5]
             return (
-                f"{timestamp}  {status}  {method} {path}  "
-                f"HTTP/{http_version}  {client}"
+                f"{timestamp}  {status}  {method} {path}  HTTP/{http_version}  {client}"
             )
 
         message = record.getMessage()
@@ -317,20 +417,36 @@ def _title(
     *,
     selected: int = 0,
     item_count: int = 0,
+    width: int = 120,
 ) -> str:
-    tabs = [
-        f"[{key} {label}]" if selected == mode else f" {key} {label} "
-        for key, selected, label in (
-            ("1", AGENT, "Agent"),
-            ("2", ERRORS, "Err"),
-            ("3", LLM, "LLM"),
-            ("4", HTTP, "HTTP"),
-        )
-    ]
+    tab_specs = (
+        ("1", AGENT, "Agent", "A"),
+        ("2", ERRORS, "Err", "E"),
+        ("3", LLM, "LLM", "L"),
+        ("4", HTTP, "HTTP", "H"),
+        ("5", TESTING, "Testing Traffic", "T"),
+    )
+    if width < 100:
+        tabs = [
+            f"[{key} {label}]" if selected_mode == mode else f"{key}{short_label}"
+            for key, selected_mode, label, short_label in tab_specs
+        ]
+        tab_separator = " "
+    else:
+        tabs = [
+            f"[{key} {label}]" if selected_mode == mode else f" {key} {label} "
+            for key, selected_mode, label, _ in tab_specs
+        ]
+        tab_separator = "  "
     scrollback = _scrollback_percent(page - 1, page_count)
-    selection = f"  |  Call {selected}/{item_count}" if mode == LLM and item_count else ""
+    item_label = "Call" if mode == LLM else "Request"
+    selection = (
+        f"  |  {item_label} {selected}/{item_count}"
+        if mode in (LLM, TESTING) and item_count
+        else ""
+    )
     return (
-        f"AESPA  {'  '.join(tabs)}  |  Page {page}/{page_count}"
+        f"AESPA  {tab_separator.join(tabs)}  |  Page {page}/{page_count}"
         f"{selection}  |  Scrollback {scrollback}%"
     )
 
@@ -375,7 +491,7 @@ def _scrollbar(body_height: int, page: int, page_count: int) -> list[str]:
 
 
 def _legend() -> str:
-    return "[1-4] Views  [↑/↓] Select  [Enter] Expand  [PgUp/PgDn] Page  [Ctrl+C] Stop"
+    return "[1-5] Views  [↑/↓] Select  [Enter] Expand  [PgUp/PgDn] Page  [Ctrl+C] Stop"
 
 
 class InteractiveConsole:
@@ -423,6 +539,7 @@ class InteractiveConsole:
         logging.getLogger("uvicorn.access").setLevel(logging.INFO)
         logging.getLogger("aespa.llm.traffic").setLevel(logging.INFO)
         logging.getLogger("aespa.agent.activity").setLevel(logging.INFO)
+        logging.getLogger("aespa.testing.traffic").setLevel(logging.INFO)
 
     def _enable_immediate_keys(self) -> None:
         if os.name == "nt":
@@ -473,7 +590,11 @@ class InteractiveConsole:
         }
         while self._key_buffer:
             matched = next(
-                (sequence for sequence in sequences if self._key_buffer.startswith(sequence)),
+                (
+                    sequence
+                    for sequence in sequences
+                    if self._key_buffer.startswith(sequence)
+                ),
                 None,
             )
             if matched is not None:
