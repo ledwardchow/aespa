@@ -5,16 +5,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import select
 import shutil
+import socket
 import sys
 import textwrap
 import threading
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import TextIO
 
 
@@ -23,9 +27,17 @@ ERRORS = "errors"
 LLM = "llm"
 AGENT = "agent"
 TESTING = "testing"
+SETTINGS = "settings"
 
-_MODES = (AGENT, ERRORS, LLM, HTTP, TESTING)
-_MODE_KEYS = {"1": AGENT, "2": ERRORS, "3": LLM, "4": HTTP, "5": TESTING}
+_MODES = (AGENT, ERRORS, LLM, HTTP, TESTING, SETTINGS)
+_MODE_KEYS = {
+    "1": AGENT,
+    "2": ERRORS,
+    "3": LLM,
+    "4": HTTP,
+    "5": TESTING,
+    "6": SETTINGS,
+}
 _PAGE_UP = b"\x1b[5~"
 _PAGE_DOWN = b"\x1b[6~"
 _ARROW_UP = b"\x1b[A"
@@ -49,7 +61,16 @@ def _record_view(record: logging.LogRecord) -> str | None:
 class InteractiveConsoleHandler(logging.Handler):
     """Route log records into switchable, buffered terminal views."""
 
-    def __init__(self, stream: TextIO, *, max_records: int = 200) -> None:
+    def __init__(
+        self,
+        stream: TextIO,
+        *,
+        max_records: int = 200,
+        port: int = 8000,
+        host: str = "127.0.0.1",
+        env_path: Path | None = None,
+        on_port_change: Callable[[int], None] | None = None,
+    ) -> None:
         super().__init__(level=logging.DEBUG)
         self.stream = stream
         self.mode = AGENT
@@ -66,6 +87,15 @@ class InteractiveConsoleHandler(logging.Handler):
         self.testing_selected = -1
         self.testing_expanded: set[int] = set()
         self._max_records = max_records
+        self.runtime_port = port
+        self.configured_port = port
+        self.host = host
+        self.env_path = env_path or Path(".env")
+        self.on_port_change = on_port_change
+        self.settings_editing = False
+        self.settings_replace_on_digit = False
+        self.settings_value = str(port)
+        self.settings_status = ""
 
     def emit(self, record: logging.LogRecord) -> None:
         view = _record_view(record)
@@ -90,6 +120,85 @@ class InteractiveConsoleHandler(logging.Handler):
         with self._output_lock:
             self.mode = mode
             self._redraw_locked()
+
+    def set_runtime_port(self, port: int) -> None:
+        """Update the Settings view after the listener has restarted."""
+        with self._output_lock:
+            self.runtime_port = port
+            self.configured_port = port
+            self.settings_value = str(port)
+            self.settings_status = f"AESPA is now listening on port {port}."
+            if self._screen_active and self.mode == SETTINGS:
+                self._redraw_locked()
+
+    def handle_settings_key(self, key: str) -> bool:
+        """Handle one key when the Settings view is active."""
+        if self.mode != SETTINGS:
+            return False
+        with self._output_lock:
+            if not self.settings_editing:
+                if key in ("\r", "\n"):
+                    self.settings_editing = True
+                    self.settings_replace_on_digit = True
+                    self.settings_value = str(self.configured_port)
+                    self.settings_status = "Type a port number, then press Enter to apply."
+                    self._redraw_locked()
+                    return True
+                return False
+
+            if key.isdigit():
+                if self.settings_replace_on_digit:
+                    self.settings_value = ""
+                    self.settings_replace_on_digit = False
+                if len(self.settings_value) < 5:
+                    self.settings_value += key
+                self._redraw_locked()
+                return True
+            if key in ("\b", "\x7f"):
+                self.settings_replace_on_digit = False
+                self.settings_value = self.settings_value[:-1]
+                self._redraw_locked()
+                return True
+            if key == "\x1b":
+                self.settings_editing = False
+                self.settings_replace_on_digit = False
+                self.settings_value = str(self.configured_port)
+                self.settings_status = "Change cancelled."
+                self._redraw_locked()
+                return True
+            if key in ("\r", "\n"):
+                self._save_port()
+                self._redraw_locked()
+                return True
+            return True
+
+    def _save_port(self) -> None:
+        try:
+            port = int(self.settings_value)
+        except ValueError:
+            self.settings_status = "Enter a port between 1 and 65535."
+            return
+        if not 1 <= port <= 65535:
+            self.settings_status = "Enter a port between 1 and 65535."
+            return
+        if port == self.runtime_port:
+            self.settings_editing = False
+            self.configured_port = port
+            self.settings_status = f"AESPA is already listening on port {port}."
+            return
+        if not _port_available(self.host, port):
+            self.settings_status = f"Port {port} is already in use. Choose another port."
+            return
+        try:
+            _write_port_setting(self.env_path, port)
+        except OSError as exc:
+            self.settings_status = f"Could not save the port: {exc}"
+            return
+        self.settings_editing = False
+        self.configured_port = port
+        self.settings_status = f"Saved port {port}. Restarting the AESPA listener…"
+        if self.on_port_change is not None:
+            self.on_port_change(port)
 
     def select_previous_llm(self) -> None:
         self._move_llm_selection(-1)
@@ -202,7 +311,10 @@ class InteractiveConsoleHandler(logging.Handler):
                 f"\x1b[{row};1H{line[:content_width]}"
                 f"\x1b[{row};{width}H{scrollbar[index]}"
             )
-        screen += f"\x1b[{height};1H\x1b[2K{_legend()[:width]}"
+        screen += (
+            f"\x1b[{height};1H\x1b[2K"
+            f"{_legend(self.mode, self.settings_editing)[:width]}"
+        )
         self.stream.write(screen)
         self.stream.flush()
 
@@ -214,6 +326,8 @@ class InteractiveConsoleHandler(logging.Handler):
         return max(20, int(size[0])), max(5, int(size[1]))
 
     def _body_lines(self, width: int) -> list[str]:
+        if self.mode == SETTINGS:
+            return self._settings_body_lines(width)
         if self.mode == LLM and self.llm_calls:
             return self._llm_body_lines(width)[0]
         if self.mode == TESTING and self.testing_calls:
@@ -229,6 +343,33 @@ class InteractiveConsoleHandler(logging.Handler):
                 )
                 body_lines.extend(wrapped or [""])
         return body_lines
+
+    def _settings_body_lines(self, width: int) -> list[str]:
+        value = self.settings_value if self.settings_editing else str(self.configured_port)
+        cursor = "▌" if self.settings_editing else ""
+        lines = [
+            "Server settings",
+            "",
+            f"  Listening address   http://{self.host}:{self.runtime_port}",
+            f"  Port                {value}{cursor}",
+            "",
+            "Press Enter to edit the port. AESPA restarts its listener after saving.",
+            f"The setting is saved in {self.env_path} for future launches.",
+        ]
+        if os.environ.get("AESPA_PORT"):
+            lines.extend(
+                [
+                    "",
+                    "Note: the AESPA_PORT environment variable may override the saved value",
+                    "on the next launch.",
+                ]
+            )
+        if self.settings_status:
+            lines.extend(["", self.settings_status])
+        wrapped: list[str] = []
+        for line in lines:
+            wrapped.extend(_wrap_console_line(line, width))
+        return wrapped
 
     def _llm_body_lines(self, width: int) -> tuple[list[str], list[int]]:
         lines: list[str] = []
@@ -425,6 +566,7 @@ def _title(
         ("3", LLM, "LLM", "L"),
         ("4", HTTP, "HTTP", "H"),
         ("5", TESTING, "Testing Traffic", "T"),
+        ("6", SETTINGS, "Settings", "S"),
     )
     if width < 100:
         tabs = [
@@ -490,8 +632,42 @@ def _scrollbar(body_height: int, page: int, page_count: int) -> list[str]:
     ]
 
 
-def _legend() -> str:
-    return "[1-5] Views  [↑/↓] Select  [Enter] Expand  [PgUp/PgDn] Page  [Ctrl+C] Stop"
+def _legend(mode: str = AGENT, editing: bool = False) -> str:
+    if mode == SETTINGS:
+        if editing:
+            return "[0-9] Port  [Backspace] Delete  [Enter] Save  [Esc] Cancel"
+        return "[1-6] Views  [Enter] Change port  [Ctrl+C] Stop"
+    return "[1-6] Views  [↑/↓] Select  [Enter] Expand  [PgUp/PgDn] Page  [Ctrl+C] Stop"
+
+
+def _port_available(host: str, port: int) -> bool:
+    """Return whether a TCP port can be bound before stopping the live server."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        try:
+            listener.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def _write_port_setting(path: Path, port: int) -> None:
+    """Persist AESPA_PORT while preserving unrelated .env settings."""
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    replacement = f"AESPA_PORT={port}"
+    pattern = re.compile(r"^\s*(?:export\s+)?AESPA_PORT\s*=.*$", re.MULTILINE)
+    if pattern.search(existing):
+        updated = pattern.sub(replacement, existing)
+    else:
+        separator = "" if not existing or existing.endswith(("\n", "\r")) else "\n"
+        updated = f"{existing}{separator}{replacement}\n"
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        temporary.write_text(updated, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class InteractiveConsole:
@@ -502,9 +678,19 @@ class InteractiveConsole:
         *,
         input_stream: TextIO = sys.stdin,
         output_stream: TextIO = sys.stdout,
+        port: int = 8000,
+        host: str = "127.0.0.1",
+        env_path: Path | None = None,
+        on_port_change: Callable[[int], None] | None = None,
     ) -> None:
         self.input_stream = input_stream
-        self.handler = InteractiveConsoleHandler(output_stream)
+        self.handler = InteractiveConsoleHandler(
+            output_stream,
+            port=port,
+            host=host,
+            env_path=env_path,
+            on_port_change=on_port_change,
+        )
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._terminal_state = None
@@ -589,6 +775,11 @@ class InteractiveConsole:
             _ARROW_DOWN: self.handler.select_next_llm,
         }
         while self._key_buffer:
+            if self.handler.mode == SETTINGS and self.handler.settings_editing:
+                key = self._key_buffer[:1].decode(errors="ignore")
+                self._key_buffer = self._key_buffer[1:]
+                self.handler.handle_settings_key(key)
+                continue
             matched = next(
                 (
                     sequence
@@ -605,6 +796,8 @@ class InteractiveConsole:
                 return
             key = self._key_buffer[:1].decode(errors="ignore")
             self._key_buffer = self._key_buffer[1:]
+            if self.handler.handle_settings_key(key):
+                continue
             if key in _MODE_KEYS:
                 self.handler.switch(_MODE_KEYS[key])
             elif key in ("\r", "\n"):
@@ -627,6 +820,8 @@ class InteractiveConsole:
                         self.handler.select_previous_llm()
                     elif special == "P":
                         self.handler.select_next_llm()
+                elif self.handler.handle_settings_key(key):
+                    continue
                 elif key in _MODE_KEYS:
                     self.handler.switch(_MODE_KEYS[key])
                 elif key == "\r":

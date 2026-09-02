@@ -248,18 +248,49 @@ def main() -> None:
     _build_frontend_if_stale()
     ensure_chromium()
     settings = get_settings()
-    console = InteractiveConsole() if interactive_console_available() else None
+    restart: dict[str, object | None] = {"port": None, "server": None}
+
+    def change_port(port: int) -> None:
+        restart["port"] = port
+        server = restart["server"]
+        if server is not None:
+            server.should_exit = True
+
+    console = (
+        InteractiveConsole(
+            port=settings.port,
+            host=settings.host,
+            env_path=Path.cwd() / ".env",
+            on_port_change=change_port,
+        )
+        if interactive_console_available()
+        else None
+    )
     if console:
         console.start()
     try:
-        uvicorn.run(
-            "aespa.main:app",
-            host=settings.host,
-            port=settings.port,
-            reload=False,
-            log_config=None if console else uvicorn.config.LOGGING_CONFIG,
-        )
+        port = settings.port
+        while True:
+            server = uvicorn.Server(
+                uvicorn.Config(
+                    "aespa.main:app",
+                    host=settings.host,
+                    port=port,
+                    reload=False,
+                    log_config=None if console else uvicorn.config.LOGGING_CONFIG,
+                )
+            )
+            restart["server"] = server
+            if console:
+                console.handler.set_runtime_port(port)
+            server.run()
+            next_port = restart["port"]
+            if next_port is None:
+                break
+            port = int(next_port)
+            restart["port"] = None
     finally:
+        restart["server"] = None
         if console:
             console.stop()
 

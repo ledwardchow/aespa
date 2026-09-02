@@ -11,9 +11,11 @@ from aespa.console import (
     ERRORS,
     HTTP,
     LLM,
+    SETTINGS,
     TESTING,
     InteractiveConsole,
     InteractiveConsoleHandler,
+    _write_port_setting,
 )
 
 
@@ -124,6 +126,10 @@ def test_agent_is_initial_view_and_number_keys_switch_all_views() -> None:
     assert console.handler.mode == TESTING
     assert "[5 Testing Traffic]" in output.getvalue()
 
+    console._process_posix_keys(b"6")
+    assert console.handler.mode == SETTINGS
+    assert "[6 Settings]" in output.getvalue()
+
 
 def test_legend_is_drawn_on_last_terminal_row(monkeypatch) -> None:
     output = io.StringIO()
@@ -142,7 +148,7 @@ def test_legend_is_drawn_on_last_terminal_row(monkeypatch) -> None:
         )
     )
 
-    assert "\x1b[12;1H\x1b[2K[1-5] Views" in output.getvalue()
+    assert "\x1b[12;1H\x1b[2K[1-6] Views" in output.getvalue()
 
 
 def test_page_up_and_page_down_navigate_fixed_viewport(monkeypatch) -> None:
@@ -266,7 +272,7 @@ def test_terminal_resize_reflows_and_redraws_viewport(monkeypatch) -> None:
 
     rendered = output.getvalue()
     assert rendered.count("\x1b[2J\x1b[H") == frames_before + 1
-    assert "\x1b[9;1H\x1b[2K[1-5] Views" in rendered
+    assert "\x1b[9;1H\x1b[2K[1-6] Views" in rendered
     assert "\x1b[3;50H" in rendered
 
 
@@ -352,6 +358,67 @@ def test_error_view_includes_traceback() -> None:
         handler.emit(record)
 
     assert "RuntimeError: broken" in handler.buffers[ERRORS][0]
+
+
+def test_settings_view_edits_persists_and_requests_port_restart(
+    tmp_path, monkeypatch
+) -> None:
+    output = io.StringIO()
+    env_path = tmp_path / ".env"
+    env_path.write_text("AESPA_HOST=127.0.0.1\nKEEP_ME=yes\n", encoding="utf-8")
+    requested: list[int] = []
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=output,
+        port=8000,
+        env_path=env_path,
+        on_port_change=requested.append,
+    )
+    monkeypatch.setattr("aespa.console._port_available", lambda host, port: True)
+
+    console.handler.start_screen()
+    console._process_posix_keys(b"6\r8123\r")
+
+    assert console.handler.mode == SETTINGS
+    assert console.handler.configured_port == 8123
+    assert requested == [8123]
+    assert env_path.read_text(encoding="utf-8") == (
+        "AESPA_HOST=127.0.0.1\nKEEP_ME=yes\nAESPA_PORT=8123\n"
+    )
+    frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "Saved port 8123" in frame
+    assert "[Enter] Change port" in frame
+
+
+def test_settings_rejects_invalid_or_occupied_ports(tmp_path, monkeypatch) -> None:
+    output = io.StringIO()
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=output,
+        env_path=tmp_path / ".env",
+    )
+    console.handler.start_screen()
+    console._process_posix_keys(b"6\r70000\r")
+    assert "between 1 and 65535" in output.getvalue()
+
+    monkeypatch.setattr("aespa.console._port_available", lambda host, port: False)
+    console._process_posix_keys(b"\x1b\r9000\r")
+    assert "Port 9000 is already in use" in output.getvalue()
+    assert not (tmp_path / ".env").exists()
+
+
+def test_write_port_setting_replaces_existing_value(tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "OTHER=value\nexport AESPA_PORT = 8000\nAESPA_PORT=8200\n",
+        encoding="utf-8",
+    )
+
+    _write_port_setting(env_path, 8100)
+
+    assert env_path.read_text(encoding="utf-8") == (
+        "OTHER=value\nAESPA_PORT=8100\nAESPA_PORT=8100\n"
+    )
 
 
 def test_console_removes_handlers_that_bypass_view_filter() -> None:
