@@ -239,15 +239,42 @@ def _build_frontend_if_stale() -> None:
     subprocess.run(["npm", "run", "build"], cwd=frontend, check=True)
 
 
+def _ensure_port_available(host: str, port: int) -> None:
+    """Exit with an actionable message when the configured listener is occupied."""
+    import errno
+    import socket
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        # create_server mirrors a real listener and enables safe address reuse
+        # on POSIX, avoiding false positives from recently closed connections.
+        with socket.create_server((host, port), family=family):
+            pass
+    except OSError as exc:
+        address_in_use = exc.errno in {errno.EADDRINUSE, 10048} or (
+            getattr(exc, "winerror", None) == 10048
+        )
+        if address_in_use:
+            raise SystemExit(
+                f"[aespa] Cannot start: {host}:{port} is already in use. "
+                "Stop the process using that port, or choose another port by "
+                f"setting AESPA_PORT={port + 1} in .env."
+            ) from exc
+        raise SystemExit(
+            f"[aespa] Cannot listen on {host}:{port}: {exc}"
+        ) from exc
+
+
 def main() -> None:
     import uvicorn
 
     from aespa.browser import ensure_chromium
     from aespa.console import InteractiveConsole, interactive_console_available
 
+    settings = get_settings()
+    _ensure_port_available(settings.host, settings.port)
     _build_frontend_if_stale()
     ensure_chromium()
-    settings = get_settings()
     restart: dict[str, object | None] = {"port": None, "server": None}
 
     def change_port(port: int) -> None:
@@ -271,6 +298,7 @@ def main() -> None:
     try:
         port = settings.port
         while True:
+            _ensure_port_available(settings.host, port)
             server = uvicorn.Server(
                 uvicorn.Config(
                     "aespa.main:app",

@@ -2353,6 +2353,46 @@ def test_authenticate_smart_completes_login_and_substitutes_credentials(monkeypa
         assert "s3cr3t-pw" not in blob
 
 
+def test_authenticate_smart_emits_llm_failures_as_error_events(monkeypatch):
+    page = _SmartLoginPage()
+    cred = _SmartCred()
+    emitted: list[tuple] = []
+
+    async def _fake_decide(config, **kwargs):  # noqa: ARG001
+        return {
+            "action": "give_up",
+            "reason": "LLM request failed: model allowance exhausted",
+            "_llm_error": True,
+            "_llm_error_type": "quota",
+            "_llm_reset_at": "2026-09-02T15:33:08+00:00",
+        }
+
+    monkeypatch.setattr(crawler.llm_svc, "decide_login_action", _fake_decide)
+    monkeypatch.setattr(
+        crawler,
+        "_crawl_log",
+        lambda *args, **kwargs: emitted.append((args, kwargs)),
+    )
+
+    class _LLMCfg:
+        model = "gpt-5.3-codex-spark"
+        use_vision = False
+
+    asyncio.run(
+        crawler._authenticate_smart(
+            page, "https://target.local/login", cred, 1, _LLMCfg()
+        )
+    )
+
+    error_event = next(entry for entry in emitted if entry[0][2] == "error")
+    assert "model allowance exhausted" in error_event[0][3]
+    assert error_event[1]["data"] == {
+        "error_type": "quota",
+        "model": "gpt-5.3-codex-spark",
+        "reset_at": "2026-09-02T15:33:08+00:00",
+    }
+
+
 def test_custom_login_field_substitution_stays_local():
     class _CustomCred:
         username = "ABC123456"
