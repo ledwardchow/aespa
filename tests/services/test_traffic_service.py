@@ -486,3 +486,46 @@ def test_maybe_record_waf_records_in_scope_traffic(monkeypatch):
         assert run_db.waf_provider == "Cloudflare"
         assert run_db.waf_confidence == "high"
         assert run_db.waf_evidence == "server: cloudflare"
+
+
+def test_write_emits_structured_testing_traffic_for_console(monkeypatch, caplog):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        run = RunModel(site_id=1, name="Run #52")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    caplog.set_level("INFO", logger="aespa.testing.traffic")
+    traffic._write(
+        run_id=run_id,
+        source="httpx",
+        method="POST",
+        url="https://target.local/login",
+        request_headers={"content-type": "application/json"},
+        request_body='{"user":"alice"}',
+        status=401,
+        response_headers={"content-type": "application/json"},
+        response_body='{"error":"denied"}',
+        duration_ms=42,
+        username="alice",
+        session_label="configured_alice",
+    )
+
+    record = next(
+        item for item in caplog.records if item.name == "aespa.testing.traffic"
+    )
+    assert record.aespa_testing_run_kind == "web"
+    assert record.aespa_testing_run_id == run_id
+    assert record.aespa_testing_method == "POST"
+    assert record.aespa_testing_status == 401
+    assert record.aespa_testing_request_body == '{"user":"alice"}'
+    assert record.aespa_testing_response_body == '{"error":"denied"}'

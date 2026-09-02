@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -19,6 +20,11 @@ from aespa.db import get_engine
 
 BODY_LIMIT = 8192  # 8 KB per body stored
 SKIP_RESOURCE_TYPES = {"image", "font", "media"}  # noisy, rarely useful
+
+# Enabled by the interactive terminal console. Keeping this logger above INFO by
+# default prevents scanner payloads from spilling into ordinary server logs.
+testing_traffic_log = logging.getLogger("aespa.testing.traffic")
+testing_traffic_log.setLevel(logging.WARNING)
 
 # In-memory cache of WAF detections, keyed by (run_kind, run_id), so the
 # agentic scan loop can check "is this run behind a WAF?" on every tool call
@@ -173,7 +179,34 @@ def _write(
             interaction_id=interaction_id,
         )
         s.add(entry)
+        s.flush()
+        traffic_id = int(entry.id)
         s.commit()
+
+    testing_traffic_log.info(
+        "%s run %s  %s %s  %s",
+        "api" if api_run_id is not None else "web",
+        api_run_id if api_run_id is not None else run_id,
+        method,
+        url,
+        status if status is not None else "FAILED",
+        extra={
+            "aespa_testing_traffic_id": traffic_id,
+            "aespa_testing_run_kind": "api" if api_run_id is not None else "web",
+            "aespa_testing_run_id": (api_run_id if api_run_id is not None else run_id),
+            "aespa_testing_source": source,
+            "aespa_testing_method": method,
+            "aespa_testing_url": url,
+            "aespa_testing_status": status,
+            "aespa_testing_duration_ms": duration_ms,
+            "aespa_testing_username": username,
+            "aespa_testing_session_label": session_label,
+            "aespa_testing_request_headers": request_headers,
+            "aespa_testing_request_body": (request_body or "")[:BODY_LIMIT] or None,
+            "aespa_testing_response_headers": response_headers,
+            "aespa_testing_response_body": (response_body or "")[:BODY_LIMIT] or None,
+        },
+    )
 
     _maybe_record_waf(run_id, api_run_id, url, response_headers, response_body)
 
