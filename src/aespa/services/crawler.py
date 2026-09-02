@@ -8106,12 +8106,33 @@ async def _authenticate_smart(
 
         name = action.get("action")
         reason = action.get("reason") or ""
-        log.info("  _authenticate_smart: step %d → %s (%s)", step + 1, name, reason)
+        llm_error = bool(action.get("_llm_error"))
+        if llm_error:
+            log.error(
+                "  _authenticate_smart: LLM %s error at step %d: %s",
+                action.get("_llm_error_type") or "request",
+                step + 1,
+                reason,
+            )
+        else:
+            log.info(
+                "  _authenticate_smart: step %d → %s (%s)",
+                step + 1,
+                name,
+                reason,
+            )
         _crawl_log(
             run_id,
             "auth",
-            "info",
+            "error" if llm_error else "info",
             f"AI login step {step + 1}: {name}" + (f" — {reason}" if reason else ""),
+            data={
+                "error_type": action.get("_llm_error_type"),
+                "model": getattr(llm_cfg, "model", None),
+                "reset_at": action.get("_llm_reset_at"),
+            }
+            if llm_error
+            else None,
         )
 
         if name == "done":

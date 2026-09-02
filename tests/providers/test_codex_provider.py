@@ -43,6 +43,25 @@ def test_codex_child_env_does_not_inject_a_private_home(monkeypatch):
     assert "CODEX_HOME" not in env
 
 
+def test_codex_child_env_keeps_windows_runtime_variables(monkeypatch):
+    expected = {
+        "SYSTEMROOT": r"C:\Windows",
+        "WINDIR": r"C:\Windows",
+        "COMSPEC": r"C:\Windows\System32\cmd.exe",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "TEMP": r"C:\Temp",
+        "TMP": r"C:\Temp",
+        "HOMEDRIVE": "C:",
+        "HOMEPATH": r"\Users\example",
+    }
+    for key, value in expected.items():
+        monkeypatch.setenv(key, value)
+
+    env = codex_provider._child_env()
+
+    assert {key: env[key] for key in expected} == expected
+
+
 def test_codex_tool_schema_uses_dynamic_tool_wire_shape():
     schema = codex_provider._tool_schema(
         {
@@ -184,6 +203,43 @@ def test_codex_rate_limit_snapshot_detects_numeric_full_window():
     )
 
 
+def test_codex_rate_limit_scope_uses_regular_bucket_for_non_spark_model():
+    snapshot = {
+        "rateLimits": {"primary": {"usedPercent": 8}},
+        "rateLimitsByLimitId": {
+            "codex": {"primary": {"usedPercent": 8}},
+            "codex_bengalfox": {
+                "limitName": "GPT-5.3-Codex-Spark",
+                "primary": {"usedPercent": 100},
+            },
+        },
+    }
+
+    applicable = codex_provider._rate_limit_scope_for_model(snapshot, "gpt-5.6-sol")
+
+    assert applicable == {"primary": {"usedPercent": 8}}
+    assert not codex_provider._rate_limit_is_exhausted(applicable)
+
+
+def test_codex_rate_limit_scope_uses_spark_specific_bucket():
+    snapshot = {
+        "rateLimitsByLimitId": {
+            "codex": {"primary": {"usedPercent": 8}},
+            "codex_bengalfox": {
+                "limitName": "GPT-5.3-Codex-Spark",
+                "primary": {"usedPercent": 100},
+            },
+        }
+    }
+
+    applicable = codex_provider._rate_limit_scope_for_model(
+        snapshot, "gpt-5.3-codex-spark"
+    )
+
+    assert applicable["primary"]["usedPercent"] == 100
+    assert codex_provider._rate_limit_is_exhausted(applicable)
+
+
 def test_codex_preflight_stops_a_full_window_before_starting_a_turn(monkeypatch):
     calls = []
 
@@ -297,6 +353,66 @@ def test_codex_turn_completion_joins_streamed_message_deltas(monkeypatch):
 
     assert stop_reason == "end_turn"
     assert blocks[0]["text"] == "Validation is running."
+
+
+def test_codex_retryable_stream_error_waits_for_reconnected_turn(monkeypatch):
+    blocks, stop_reason, _ = _run_codex_completion_events(
+        monkeypatch,
+        [
+            (
+                "error",
+                {
+                    "error": {
+                        "message": "Reconnecting... 2/5",
+                        "codexErrorInfo": {
+                            "responseStreamDisconnected": {"httpStatusCode": None}
+                        },
+                    },
+                    "willRetry": True,
+                },
+            ),
+            ("item/agentMessage/delta", {"delta": "Recovered"}),
+            ("turn/completed", {}),
+        ],
+    )
+
+    assert stop_reason == "end_turn"
+    assert blocks[0]["text"] == "Recovered"
+
+
+def test_codex_terminal_stream_error_still_fails(monkeypatch):
+    with pytest.raises(codex_provider.CodexUnavailableError) as raised:
+        _run_codex_completion_events(
+            monkeypatch,
+            [
+                (
+                    "error",
+                    {
+                        "error": {"message": "Reconnect attempts exhausted"},
+                        "willRetry": False,
+                    },
+                )
+            ],
+        )
+
+    assert "Reconnect attempts exhausted" in str(raised.value)
+
+
+def test_codex_retryable_stream_errors_are_bounded(monkeypatch):
+    retryable = (
+        "error",
+        {
+            "error": {"message": "Reconnecting... waiting for network"},
+            "willRetry": True,
+        },
+    )
+    with pytest.raises(codex_provider.CodexTransportError) as raised:
+        _run_codex_completion_events(
+            monkeypatch,
+            [retryable] * (codex_provider.MAX_RETRYABLE_TURN_ERRORS + 1),
+        )
+
+    assert "remained disconnected" in str(raised.value)
 
 
 def test_codex_internal_wait_fails_immediately_instead_of_hanging(monkeypatch):

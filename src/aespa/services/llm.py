@@ -1371,9 +1371,30 @@ async def decide_login_action(
     )
     try:
         raw = await _call(config, prompt, screenshot_b64 if config.use_vision else None)
+    except LLMQuotaPauseError as exc:
+        return {
+            "action": "give_up",
+            "reason": f"LLM request failed: {exc}",
+            "_llm_error": True,
+            "_llm_error_type": "quota",
+            "_llm_reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
+        }
+    except Exception as exc:
+        return {
+            "action": "give_up",
+            "reason": f"LLM request failed: {exc}",
+            "_llm_error": True,
+            "_llm_error_type": "request",
+        }
+    try:
         action = _extract_action_json(raw)
     except Exception as exc:
-        return {"action": "give_up", "reason": f"LLM action parse failed: {exc}"}
+        return {
+            "action": "give_up",
+            "reason": f"LLM action parse failed: {exc}",
+            "_llm_error": True,
+            "_llm_error_type": "response_parse",
+        }
 
     name = str(action.get("action") or "").strip().lower()
     if name not in _LOGIN_ACTIONS:

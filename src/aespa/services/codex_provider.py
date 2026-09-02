@@ -28,6 +28,7 @@ log = logging.getLogger("aespa.llm.codex")
 TURN_TIMEOUT_S = 600.0
 CONVERSATION_CLOSE_TIMEOUT_S = 3.0
 MAX_REQUIRED_TOOL_REPAIRS = 2
+MAX_RETRYABLE_TURN_ERRORS = 5
 # asyncio defaults subprocess streams to 64 KiB. Codex sends one JSON object per
 # line, and long scan contexts or tool payloads can make a valid line much larger.
 CODEX_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
@@ -45,9 +46,17 @@ _ENV_ALLOWLIST = (
     "PATH",
     "HOME",
     "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
     "APPDATA",
     "LOCALAPPDATA",
     "CODEX_HOME",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
     "LANG",
     "LC_ALL",
     "SSL_CERT_FILE",
@@ -205,6 +214,20 @@ def _is_rate_limit_error(value: Any) -> bool:
     )
 
 
+def _will_retry_error(value: Any) -> bool:
+    """Return whether a Codex error notification promises a later retry."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).lower().replace("_", "") == "willretry":
+                return child is True or (
+                    isinstance(child, str) and child.strip().lower() == "true"
+                )
+        return any(_will_retry_error(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_will_retry_error(child) for child in value)
+    return False
+
+
 def _rate_limit_error_has_full_window(value: Any) -> bool:
     """Recognize Codex's human-readable ``Limit … Used …`` error details."""
     text = json.dumps(value, default=str)
@@ -317,6 +340,36 @@ def _rate_limit_is_exhausted(value: Any) -> bool:
 
     walk(value)
     return exhausted
+
+
+def _rate_limit_scope_for_model(value: Any, model: str) -> Any:
+    """Select the allowance bucket that applies to ``model``.
+
+    Codex reports the regular allowance and model-specific allowances together.
+    A full Spark bucket must not block a turn using the regular Codex bucket (or
+    vice versa).
+    """
+    if not isinstance(value, dict):
+        return value
+    limits_by_id = value.get("rateLimitsByLimitId")
+    if not isinstance(limits_by_id, dict) or not limits_by_id:
+        return value
+
+    normalized_model = model.strip().casefold()
+    wants_spark = "spark" in normalized_model
+    if wants_spark:
+        for limit_id, snapshot in limits_by_id.items():
+            searchable = f"{limit_id} {json.dumps(snapshot, default=str)}".casefold()
+            if "spark" in searchable or "bengalfox" in searchable:
+                return snapshot
+    else:
+        for limit_id, snapshot in limits_by_id.items():
+            if str(limit_id).strip().casefold() == "codex":
+                return snapshot
+
+    # Preserve the conservative legacy behavior if Codex changes its bucket
+    # identifiers and AESPA cannot confidently match this model.
+    return value
 
 
 def _workspace() -> Path:
@@ -1006,12 +1059,17 @@ async def _completion_with_tools_once(
         rate_limits = await client.request("account/rateLimits/read", {})
     except Exception:
         rate_limits = None
-    if rate_limits is not None and _rate_limit_is_exhausted(rate_limits):
+    applicable_rate_limits = _rate_limit_scope_for_model(rate_limits, config.model)
+    if rate_limits is not None and _rate_limit_is_exhausted(applicable_rate_limits):
         raise CodexRateLimitError(
             "Codex reports that its current rate-limit window is full. "
             "AESPA paused before sending this turn; resume after the window resets.",
-            reset_at=_extract_reset_at(rate_limits),
-            snapshot={"preflight": True, "rate_limits": rate_limits},
+            reset_at=_extract_reset_at(applicable_rate_limits),
+            snapshot={
+                "preflight": True,
+                "rate_limits": rate_limits,
+                "applicable_rate_limits": applicable_rate_limits,
+            },
         )
     key = id(messages)
     conversation = _conversations.get(key)
@@ -1067,6 +1125,7 @@ async def _completion_with_tools_once(
             )
 
     required_tool_repairs = 0
+    retryable_error_count = 0
     while True:
         try:
             event_type, params = await asyncio.wait_for(
@@ -1078,6 +1137,8 @@ async def _completion_with_tools_once(
                 "seconds. AESPA stopped the stalled turn.",
                 client=conversation.client,
             ) from exc
+        if event_type not in {"turn/failed", "error"}:
+            retryable_error_count = 0
         if event_type == "client/error":
             raise CodexTransportError(
                 str(params.get("message") or "Codex app-server stopped unexpectedly"),
@@ -1198,6 +1259,9 @@ async def _completion_with_tools_once(
                 rate_limits: dict[str, Any] = {}
                 with contextlib.suppress(Exception):
                     rate_limits = await read_rate_limits()
+                applicable_rate_limits = _rate_limit_scope_for_model(
+                    rate_limits, config.model
+                )
                 message = (
                     "Codex upstream TPM window is full. AESPA paused this turn; "
                     "resume after the rate-limit window resets."
@@ -1208,7 +1272,7 @@ async def _completion_with_tools_once(
                 raise CodexRateLimitError(
                     message,
                     retry_after_s=retry_after_s,
-                    reset_at=_extract_reset_at(rate_limits)
+                    reset_at=_extract_reset_at(applicable_rate_limits)
                     or _extract_reset_at(params),
                     snapshot={
                         "error": params,
@@ -1216,6 +1280,20 @@ async def _completion_with_tools_once(
                         "window_full": window_full,
                     },
                 )
+            if _will_retry_error(params):
+                retryable_error_count += 1
+                if retryable_error_count > MAX_RETRYABLE_TURN_ERRORS:
+                    raise CodexTransportError(
+                        "Codex remained disconnected after its advertised retry attempts.",
+                        client=conversation.client,
+                    )
+                log.warning(
+                    "Codex reported a retryable turn error (%d/%d); waiting for its reconnect attempt: %s",
+                    retryable_error_count,
+                    MAX_RETRYABLE_TURN_ERRORS,
+                    details[:1000],
+                )
+                continue
             raise CodexUnavailableError(details)
 
 
