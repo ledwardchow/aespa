@@ -104,6 +104,149 @@ function CodexConnectionCard() {
   </div>;
 }
 
+function CopilotConnectionCard({ value, onSelect }) {
+  const [accounts, setAccounts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [message, setMessage] = useState(null);
+  const [loginChallenge, setLoginChallenge] = useState(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api.listCopilotAccounts();
+      const next = Array.isArray(result?.accounts) ? result.accounts : [];
+      setAccounts(next);
+      return next;
+    } catch (e) {
+      setError(e.message);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!loginChallenge?.login_id) return undefined;
+    let stopped = false;
+    let timer;
+    const poll = async () => {
+      try {
+        const result = await api.getCopilotLogin(loginChallenge.login_id);
+        if (stopped) return;
+        if (result.status === "complete") {
+          const next = await refresh();
+          if (stopped) return;
+          const selected = result.login || next.find(account => account.is_default)?.login;
+          if (selected) onSelect(selected);
+          setLoginChallenge(null);
+          setBusy(false);
+          setMessage(selected ? `Signed in as ${selected}.` : "GitHub Copilot sign-in completed.");
+          return;
+        }
+        if (result.status === "failed" || result.status === "cancelled") {
+          setLoginChallenge(null);
+          setBusy(false);
+          if (result.status === "failed") setError(result.error || "GitHub Copilot sign-in failed.");
+          return;
+        }
+        timer = window.setTimeout(poll, 1500);
+      } catch (e) {
+        if (!stopped) {
+          setLoginChallenge(null);
+          setBusy(false);
+          setError(e.message);
+        }
+      }
+    };
+    poll();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [loginChallenge?.login_id, onSelect, refresh]);
+
+  const login = async () => {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api.startCopilotLogin();
+      if (!result.verification_url || !result.user_code || !result.login_id) {
+        throw new Error("Copilot CLI did not return a device-code login.");
+      }
+      setLoginChallenge(result);
+    } catch (e) {
+      setBusy(false);
+      setError(e.message);
+    }
+  };
+
+  const copyCode = async () => {
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard access is unavailable.");
+      await navigator.clipboard.writeText(loginChallenge.user_code);
+      setMessage("One-time code copied.");
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const cancelLogin = async () => {
+    if (!loginChallenge?.login_id) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.cancelCopilotLogin(loginChallenge.login_id);
+      setLoginChallenge(null);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const defaultAccount = accounts.find(account => account.is_default);
+  const selectedMissing = value && !accounts.some(
+    account => account.login.toLowerCase() === value.toLowerCase()
+  );
+
+  return <div className="form-section" style={{ marginTop: 12 }}>
+    <div className="form-section-title">Copilot connection</div>
+    <div className="field-hint">Accounts are authenticated and stored by Copilot CLI. AESPA only saves the selected GitHub username.</div>
+    <div className="field">
+      <label htmlFor="copilot-account-selector">Copilot account</label>
+      <select id="copilot-account-selector" className="select" value={value} disabled={loading || busy} onChange={e => onSelect(e.target.value)}>
+        <option value="">Copilot CLI default{defaultAccount ? ` — ${defaultAccount.login}` : ""}</option>
+        {selectedMissing && <option value={value}>{value} (not currently available)</option>}
+        {accounts.map(account => <option key={account.login} value={account.login}>
+          {account.login}{account.is_default ? " (default)" : ""}
+        </option>)}
+      </select>
+    </div>
+    <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+      <button type="button" className="btn secondary sm" disabled={busy} onClick={login}>Sign in another account</button>
+      <button type="button" className="btn ghost sm" disabled={busy || loading} onClick={refresh}>Refresh accounts</button>
+    </div>
+    {loginChallenge && <div className="form-section" style={{ marginTop: 12 }}>
+      <div className="form-section-title">Finish signing in</div>
+      <div className="field-hint">Open GitHub, enter this one-time code, and authorize GitHub Copilot CLI. AESPA will detect completion automatically.</div>
+      <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <code style={{ fontSize: 18, letterSpacing: 1 }}>{loginChallenge.user_code}</code>
+        <button type="button" className="btn ghost sm" onClick={copyCode}>Copy code</button>
+        <a className="btn secondary sm" href={loginChallenge.verification_url} target="_blank" rel="noreferrer">Open GitHub</a>
+        <button type="button" className="btn ghost sm" onClick={cancelLogin}>Cancel</button>
+      </div>
+    </div>}
+    {!loading && accounts.length === 0 && !loginChallenge && <div className="field-hint" style={{ marginTop: 8 }}>No saved Copilot CLI accounts were found. Sign in to add one.</div>}
+    {message && <div className="save-confirm" style={{ marginTop: 8 }}><IconCheck /> {message}</div>}
+    {error && <div className="alert error" style={{ marginTop: 8 }}>{error}</div>}
+  </div>;
+}
+
 
 export function LLMProviderForm({
   mode,
@@ -115,13 +258,16 @@ export function LLMProviderForm({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
-  const upd = p => {
+  const upd = useCallback(p => {
     setSaved(false);
     setForm(f => ({
       ...f,
       ...p
     }));
-  };
+  }, []);
+  const selectCopilotUsername = useCallback(username => {
+    upd({ username });
+  }, [upd]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [loadMessage, setLoadMessage] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -243,13 +389,7 @@ export function LLMProviderForm({
         })} />
         <div className="field-hint">Sent as the OpenAI-Project header to attribute usage/cost to a Bedrock Mantle project. Use the project id (proj_…) from the Bedrock console, not its name. Leave blank for the account default project.</div>
       </div>}
-      {form.api_format === "github_copilot" && <div className="field">
-        <label>Copilot username <span className="field-optional">(optional)</span></label>
-        <input type="text" autoComplete="off" value={form.username} placeholder="Use Copilot CLI's selected default account" onChange={e => upd({
-          username: e.target.value
-        })} />
-        <div className="field-hint">Enter a login from Copilot CLI's <code>/user</code> list. Leave blank to use its selected default account.</div>
-      </div>}
+      {form.api_format === "github_copilot" && <CopilotConnectionCard value={form.username} onSelect={selectCopilotUsername} />}
       <div className="field">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
           <label style={{ margin: 0 }}>Model names</label>

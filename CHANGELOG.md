@@ -4,6 +4,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+- **GitHub Copilot account sign-in and selection**: Copilot providers can now start the GitHub device-code sign-in flow from AESPA and select any locally authenticated Copilot CLI account. Credentials remain in Copilot CLI's credential store and are never sent to the browser.
+- **Visible console listening address**: The Agents view now opens with a ready message showing the exact host and port where AESPA is listening.
 - **More reliable Codex connectivity and reconnects**: Codex subprocesses now retain the standard Windows environment required for reliable DNS and HTTPS access. Temporary response-stream interruptions also wait for the reconnect attempt advertised by Codex instead of immediately failing the LLM call. Model-specific allowances are checked independently, so an exhausted Spark allowance no longer blocks other Codex models that still have capacity. Crawler login failures from unavailable models, exhausted allowances, and malformed responses now appear as error events with the affected model and reset time when available.
 - **Clearer startup port errors**: Running AESPA from a terminal now reports when its configured address is already in use and explains how to select another port.
 - **Console port settings**: The interactive terminal console now includes a sixth Settings view. It shows the active listening address, lets users choose a new available port, restarts the listener immediately, and saves the choice for future launches.

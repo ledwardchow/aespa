@@ -305,6 +305,152 @@ def test_named_copilot_account_must_exist(monkeypatch, tmp_path):
         raise AssertionError("Missing Copilot account should fail")
 
 
+def test_list_accounts_returns_only_logins_and_default_state(monkeypatch, tmp_path):
+    copilot_home = tmp_path / "copilot-home"
+    copilot_home.mkdir()
+    with sqlite3.connect(copilot_home / "data.db") as connection:
+        connection.execute(
+            "CREATE TABLE accounts (login TEXT, access_token TEXT, kind TEXT, "
+            "is_default INTEGER)"
+        )
+        connection.executemany(
+            "INSERT INTO accounts VALUES (?, ?, ?, ?)",
+            [
+                ("work-user", "secret-work-token", "github", 0),
+                ("Personal-User", "secret-personal-token", "github", 1),
+                ("ignored", "other-secret", "other", 0),
+            ],
+        )
+    monkeypatch.setenv("COPILOT_HOME", str(copilot_home))
+
+    assert copilot_provider.list_accounts() == [
+        {"login": "Personal-User", "is_default": True},
+        {"login": "work-user", "is_default": False},
+    ]
+
+
+def test_device_login_returns_challenge_and_uses_copilot_credential_store(
+    monkeypatch, tmp_path
+):
+    copilot_home = tmp_path / "copilot-home"
+    copilot_home.mkdir()
+    with sqlite3.connect(copilot_home / "data.db") as connection:
+        connection.execute(
+            "CREATE TABLE accounts (login TEXT, access_token TEXT, kind TEXT, "
+            "is_default INTEGER)"
+        )
+        connection.execute(
+            "INSERT INTO accounts VALUES (?, ?, 'github', 1)",
+            ("signed-in-user", "stored-token"),
+        )
+
+    class FakeStdout:
+        def __init__(self):
+            self.lines = [
+                b"To authenticate, visit https://github.com/login/device and enter code ABCD-1234.\n"
+            ]
+
+        async def readline(self):
+            return self.lines.pop(0) if self.lines else b""
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = FakeStdout()
+            self.returncode = None
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    captured = {}
+
+    async def fake_subprocess(*command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setenv("COPILOT_HOME", str(copilot_home))
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "must-not-bypass-device-login")
+    monkeypatch.setattr(
+        copilot_provider, "_copilot_login_command", lambda: ["copilot", "login"]
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    copilot_provider._login_flows.clear()
+
+    async def exercise():
+        challenge = await copilot_provider.login_start()
+        flow = copilot_provider._login_flows[challenge["login_id"]]
+        assert flow.task is not None
+        await flow.task
+        return challenge, copilot_provider.login_status(challenge["login_id"])
+
+    challenge, status = asyncio.run(exercise())
+
+    assert challenge["verification_url"] == "https://github.com/login/device"
+    assert challenge["user_code"] == "ABCD-1234"
+    assert status["status"] == "complete"
+    assert status["login"] == "signed-in-user"
+    assert captured["command"] == ("copilot", "login")
+    assert captured["kwargs"]["env"]["COPILOT_HOME"] == str(copilot_home)
+    assert "COPILOT_GITHUB_TOKEN" not in captured["kwargs"]["env"]
+    copilot_provider._login_flows.clear()
+
+
+def test_device_login_can_be_cancelled(monkeypatch):
+    class FakeStdout:
+        def __init__(self):
+            self.first = True
+            self.closed = asyncio.Event()
+
+        async def readline(self):
+            if self.first:
+                self.first = False
+                return b"Enter code WXYZ-9876 at https://github.com/login/device\n"
+            await self.closed.wait()
+            return b""
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = FakeStdout()
+            self.returncode = None
+
+        async def wait(self):
+            await self.stdout.closed.wait()
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+            self.stdout.closed.set()
+
+        def kill(self):
+            self.returncode = -9
+            self.stdout.closed.set()
+
+    async def fake_subprocess(*_command, **_kwargs):
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        copilot_provider, "_copilot_login_command", lambda: ["copilot", "login"]
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    copilot_provider._login_flows.clear()
+
+    async def exercise():
+        challenge = await copilot_provider.login_start()
+        return await copilot_provider.login_cancel(challenge["login_id"])
+
+    result = asyncio.run(exercise())
+
+    assert result["status"] == "cancelled"
+    copilot_provider._login_flows.clear()
+
+
 def test_completion_with_tools_returns_captured_tool_call(monkeypatch):
     client = _FakeClient(call_tool=True)
 
