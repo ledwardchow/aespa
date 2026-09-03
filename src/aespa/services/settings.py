@@ -866,6 +866,7 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
         enforce_full_coverage_obligations=getattr(
             cfg, "enforce_full_coverage_obligations", False
         ),
+        standard_coverage_percent=getattr(cfg, "standard_coverage_percent", 60),
         scan_mode=cfg.scan_mode,
         max_probes_per_page=cfg.max_probes_per_page,
         thinking_max_steps=cfg.thinking_max_steps,
@@ -902,6 +903,7 @@ def upsert_scanner_policy(
     cfg.disable_deterministic_checks = payload.disable_deterministic_checks
     cfg.max_consecutive_text_turns = payload.max_consecutive_text_turns
     cfg.enforce_full_coverage_obligations = payload.enforce_full_coverage_obligations
+    cfg.standard_coverage_percent = payload.standard_coverage_percent
     cfg.scan_mode = payload.scan_mode
     cfg.max_probes_per_page = payload.max_probes_per_page
     cfg.thinking_max_steps = payload.thinking_max_steps

@@ -302,7 +302,7 @@ class ApiCredentialCreate(BaseModel):
 
 # ── API Test Run schemas ──────────────────────────────────────────────────────
 
-CoverageModeLiteral = Literal["track", "enforce", "sast_validate"]
+CoverageModeLiteral = Literal["track", "standard", "enforce", "sast_validate"]
 
 
 class ApiTestRunCreate(BaseModel):
@@ -793,6 +793,7 @@ class ScannerPolicyBase(BaseModel):
     disable_deterministic_checks: bool = False
     max_consecutive_text_turns: int = Field(default=0, ge=0, le=50)
     enforce_full_coverage_obligations: bool = False
+    standard_coverage_percent: int = Field(default=60, ge=1, le=100)
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)

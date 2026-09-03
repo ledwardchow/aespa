@@ -102,6 +102,8 @@ export const formatPhase = phase => PHASE_LABELS[phase] || (phase ? phase.replac
 
 const TERMINAL_REASON_LABELS = {
   coverage_complete: "all planned tests completed",
+  coverage_target_reached: "configured coverage target reached",
+  coverage_target_not_reached: "step budget ended before the coverage target",
   coverage_budget_exhausted: "step budget exhausted before full coverage",
   user_stop: "stopped by user",
   provider_error: "LLM provider refused/errored",

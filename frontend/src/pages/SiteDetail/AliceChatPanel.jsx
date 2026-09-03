@@ -6,6 +6,7 @@ import {
   renderAliceTraceBox,
   renderMarkdown
 } from "../../lib/aliceRender";
+import { useAutoFollowScroll } from "../../hooks/useAutoFollowScroll";
 
 /** Open the standalone A.L.I.C.E. view for a web test run. */
 export function openAlicePopout(runId) {
@@ -47,6 +48,12 @@ export function AliceChatPanel({
   onPopOut,
   popout = false
 }) {
+  const { historyRef, handleScroll } = useAutoFollowScroll(
+    activeAliceTabId,
+    aliceMessages,
+    isActiveThinking
+  );
+
   const handlePopOut = () => {
     const openedWindow = openAlicePopout(runId);
     if (openedWindow && onPopOut) onPopOut();
@@ -70,9 +77,12 @@ export function AliceChatPanel({
         <IconExternalLink />
       </button>}
     </div>
-    <div className="alice-chat-history" style={{ height: popout ? undefined : `${aliceChatHeight}px` }} ref={el => {
-      if (el) el.scrollTop = el.scrollHeight;
-    }}>
+    <div
+      className="alice-chat-history"
+      style={{ height: popout ? undefined : `${aliceChatHeight}px` }}
+      ref={historyRef}
+      onScroll={handleScroll}
+    >
       {aliceMessages.map((msg, _msgIdx) => {
         // Thinking messages render as an ordered run of trace boxes and chat bubbles.
         if (msg.type === "thinking") {

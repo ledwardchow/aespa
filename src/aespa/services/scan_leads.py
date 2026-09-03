@@ -969,11 +969,11 @@ def format_leads_for_scan_context(
 ) -> str:
     """Return the lead context appropriate for a dynamic scan mode.
 
-    Quick scans must resolve every imported lead, so they receive the complete
-    compact index and fetch full lead details as they work. Full scans retain
-    the detailed, capped context used by the general coverage workflow.
+    Quick and Standard scans must resolve every imported lead, so they receive
+    the complete compact index and fetch full lead details as they work. Full
+    scans retain the detailed, capped context used by the general coverage workflow.
     """
-    if coverage_mode in {"track", "sast_validate"}:
+    if coverage_mode in {"track", "standard", "sast_validate"}:
         return format_lead_index_for_validation(target_run_type, target_run_id)
     return format_leads_for_run(target_run_type, target_run_id)
 

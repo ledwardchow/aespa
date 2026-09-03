@@ -95,6 +95,16 @@ def test_create_run_coverage_mode(client):
     assert r.json()["coverage_mode"] == "enforce"
 
 
+def test_create_run_standard_coverage_mode(client):
+    cid = _make_collection(client)
+    r = client.post(
+        f"/api/api-collections/{cid}/test-runs",
+        json={"name": "Standard run", "coverage_mode": "standard"},
+    )
+    assert r.status_code == 201
+    assert r.json()["coverage_mode"] == "standard"
+
+
 def test_validate_api_scanner_sessions_route(client, monkeypatch):
     from aespa.services import scanner_sessions
 

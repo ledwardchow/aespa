@@ -87,6 +87,28 @@ from aespa.services.settings import (
 log = logging.getLogger("aespa.scanner")
 
 
+def _exercised_coverage_progress(
+    totals: dict[str, int] | None, target_percent: int
+) -> dict[str, int | float | bool]:
+    """Measure cells touched by a real probe, excluding justified skips."""
+    counts = totals or {}
+    skipped = int(counts.get("skipped", 0) or 0)
+    total = max(0, sum(int(value or 0) for value in counts.values()) - skipped)
+    exercised = sum(
+        int(counts.get(status, 0) or 0)
+        for status in ("in_progress", "covered", "finding")
+    )
+    percent = round((exercised * 100 / total), 1) if total else 100.0
+    return {
+        "exercised": exercised,
+        "total": total,
+        "skipped": skipped,
+        "percent": percent,
+        "target_percent": target_percent,
+        "target_met": total == 0 or exercised * 100 >= target_percent * total,
+    }
+
+
 def _persist_execution_snapshot(
     run_id: int,
     *,
@@ -129,6 +151,7 @@ def _persist_execution_snapshot(
             "disable_deterministic_checks",
             "max_consecutive_text_turns",
             "enforce_full_coverage_obligations",
+            "standard_coverage_percent",
         )
         snapshot = {
             "schema_version": 1,
@@ -8884,6 +8907,22 @@ async def _do_thinking_scan(run_id: int) -> None:
             await _run_post_scan_llm_review(run_id, llm_cfg, _pre_scan_max_id)
         except Exception as _rev_exc:
             log.warning("Post-scan review failed (non-fatal): %s", _rev_exc)
+    standard_progress = None
+    standard_target_unmet = False
+    if not stopped and coverage_mode == "standard":
+        try:
+            from aespa.services.web_workprogram import get_web_coverage_matrix
+
+            standard_progress = _exercised_coverage_progress(
+                get_web_coverage_matrix(run_id).get("column_totals", {}),
+                int(getattr(scanner_policy, "standard_coverage_percent", 60)),
+            )
+            standard_target_unmet = not bool(standard_progress["target_met"])
+        except Exception as _standard_exc:
+            log.warning(
+                "Could not verify the Standard coverage target: %s", _standard_exc
+            )
+            standard_target_unmet = True
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
     _emit_thinking_status(run_id)
     log.info(
@@ -8909,6 +8948,25 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "_persist": True,
             },
         )
+    elif standard_target_unmet:
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "incomplete",
+                "current_task": "Standard coverage target not reached",
+                "outcome": (
+                    f"Exercised {standard_progress['exercised']}/"
+                    f"{standard_progress['total']} applicable coverage cells "
+                    f"({standard_progress['percent']}%)"
+                    if standard_progress
+                    else "Coverage progress could not be verified"
+                ),
+                "_persist": True,
+            },
+        )
     else:
         _emit_scan_complete(run_id, _finding_count)
     with Session(get_engine()) as _s:
@@ -8923,7 +8981,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 _run.status = "incomplete"
                 _run.outcome = "incomplete"
                 _run.terminal_reason = "coverage_budget_exhausted"
-            elif coverage_mode in {"track", "sast_validate"}:
+            elif coverage_mode in {"track", "standard", "sast_validate"}:
                 from aespa.services.scan_leads import get_all_leads_for_run
 
                 unresolved = [
@@ -8932,11 +8990,19 @@ async def _do_thinking_scan(run_id: int) -> None:
                     if (lead.status or "open")
                     not in {"confirmed", "dismissed", "inconclusive"}
                 ]
-                _run.status = "incomplete" if unresolved else "complete"
-                _run.outcome = "incomplete" if unresolved else "complete"
-                _run.terminal_reason = (
-                    "unresolved_sast_leads" if unresolved else "coverage_complete"
+                incomplete = bool(unresolved) or bool(
+                    coverage_mode == "standard" and standard_target_unmet
                 )
+                _run.status = "incomplete" if incomplete else "complete"
+                _run.outcome = "incomplete" if incomplete else "complete"
+                if unresolved:
+                    _run.terminal_reason = "unresolved_sast_leads"
+                elif coverage_mode == "standard" and standard_target_unmet:
+                    _run.terminal_reason = "coverage_target_not_reached"
+                elif coverage_mode == "standard":
+                    _run.terminal_reason = "coverage_target_reached"
+                else:
+                    _run.terminal_reason = "coverage_complete"
             else:
                 _run.status = "complete"
                 _run.outcome = "complete"
@@ -9165,7 +9231,7 @@ async def _do_agentic_thinking_loop(
         _blocked: set[str] = set()
         _failed: dict[str, int] = {}
 
-    if coverage_mode in {"track", "sast_validate"} and resume_messages is not None:
+    if coverage_mode in {"track", "standard", "sast_validate"} and resume_messages is not None:
         from aespa.services.scan_leads import format_lead_index_for_validation
 
         current_lead_index = format_lead_index_for_validation(
@@ -9176,7 +9242,13 @@ async def _do_agentic_thinking_loop(
             if coverage_mode == "sast_validate"
             else get_thinking_agent_system(False)
         )
-        mode_name = "SAST Validate" if coverage_mode == "sast_validate" else "Quick"
+        mode_name = (
+            "SAST Validate"
+            if coverage_mode == "sast_validate"
+            else "Standard"
+            if coverage_mode == "standard"
+            else "Quick"
+        )
         system_message_override = (
             resume_system + "\n\nAUTHORITATIVE RESUME STATE:\n"
             "The earlier conversation may contain leads that have since been "
@@ -9257,7 +9329,7 @@ async def _do_agentic_thinking_loop(
         )
 
     def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
-        if coverage_mode in {"track", "sast_validate"}:
+        if coverage_mode in {"track", "standard", "sast_validate"}:
             from aespa.services.scan_leads import get_all_leads_for_run
 
             owner_type = "api" if is_api_run else "web"
@@ -9289,6 +9361,55 @@ async def _do_agentic_thinking_loop(
             _emit_completion_log(f"Step {step}: {summary}")
             if coverage_mode == "sast_validate":
                 return True, summary
+
+        if coverage_mode == "standard":
+            target = int(getattr(scanner_policy, "standard_coverage_percent", 60))
+            if is_api_run:
+                from aespa.services.api_scanner import get_coverage_matrix
+
+                matrix = get_coverage_matrix(run_id)
+                totals = matrix.get("totals", {})
+                next_actions = []
+                for endpoint in matrix.get("endpoints", []):
+                    for category, cell in endpoint.get("cells", {}).items():
+                        if cell.get("status") in {"not_started"}:
+                            next_actions.append(
+                                f"{endpoint.get('method')} {endpoint.get('path')} ({category})"
+                            )
+                        if len(next_actions) >= 6:
+                            break
+                    if len(next_actions) >= 6:
+                        break
+            else:
+                from aespa.services.web_workprogram import (
+                    get_web_coverage_gaps,
+                    get_web_coverage_matrix,
+                )
+
+                matrix = get_web_coverage_matrix(run_id)
+                totals = matrix.get("column_totals", {})
+                gaps = get_web_coverage_gaps(run_id, limit=6)
+                next_actions = [
+                    f"{item.get('method')} {item.get('url')} "
+                    f"({item.get('owasp_category')})"
+                    for item in gaps.get("next_actions", [])
+                ]
+            progress = _exercised_coverage_progress(totals, target)
+            if not progress["target_met"]:
+                message = (
+                    "Standard mode has exercised "
+                    f"{progress['exercised']}/{progress['total']} applicable coverage "
+                    f"cells ({progress['percent']}%), below the {target}% target. "
+                    "Test more coverage cells before calling done."
+                )
+                if next_actions:
+                    message += " Suggested next cells: " + "; ".join(next_actions) + "."
+                _emit_completion_log(f"Step {step}: {message}", status="warning")
+                return False, message
+            _emit_completion_log(
+                f"Step {step}: Standard coverage target met at "
+                f"{progress['percent']}% ({progress['exercised']}/{progress['total']} cells)."
+            )
 
         def _get_coverage_gaps() -> dict[str, Any]:
             if is_api_run:
@@ -9364,6 +9485,14 @@ async def _do_agentic_thinking_loop(
         if guidance
         else ""
     )
+    standard_coverage_text = ""
+    if coverage_mode == "standard":
+        target = int(getattr(scanner_policy, "standard_coverage_percent", 60))
+        standard_coverage_text = (
+            f"Standard scan requirement: exercise at least {target}% of applicable "
+            "coverage cells before calling done. A cell is exercised when you send "
+            "a probe for that endpoint or page and OWASP category, or record a finding."
+        )
 
     initial_message = "\n\n".join(
         filter(
@@ -9374,6 +9503,7 @@ async def _do_agentic_thinking_loop(
                 creds_text,
                 sessions_text,
                 guidance_text,
+                standard_coverage_text,
                 "Begin the assessment.",
             ],
         )
