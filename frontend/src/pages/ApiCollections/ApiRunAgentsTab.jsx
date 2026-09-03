@@ -4,6 +4,7 @@ import { api } from "../../lib/api";
 import { FindingReferenceLink } from "../../components/FindingReferenceLink";
 import { renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox, normalizeAliceText } from "../../lib/aliceRender";
 import { IconSend } from "../../components/Icons";
+import { useAutoFollowScroll } from "../../hooks/useAutoFollowScroll";
 
 
 export function ApiRunAgentsTab({
@@ -428,6 +429,11 @@ export function ApiRunAgentsTab({
   };
   const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
   const aliceMessages = activeAliceTab?.messages || [];
+  const { historyRef: aliceHistoryRef, handleScroll: handleAliceHistoryScroll } = useAutoFollowScroll(
+    activeAliceTabId,
+    aliceMessages,
+    aliceRunning
+  );
   const roster = buildRoster();
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -460,9 +466,7 @@ export function ApiRunAgentsTab({
                   </div>
                   <div className="alice-chat-history" style={{
               height: `${aliceChatHeight}px`
-            }} ref={el => {
-              if (el) el.scrollTop = el.scrollHeight;
-            }}>
+            }} ref={aliceHistoryRef} onScroll={handleAliceHistoryScroll}>
                     {aliceMessages.length === 0 && <div style={{
                 padding: "24px",
                 textAlign: "center",

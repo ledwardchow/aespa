@@ -716,6 +716,12 @@ def _upgrade_pre_alembic_schema(engine: Engine) -> None:
     _ensure_column(
         engine,
         "scanner_policy",
+        "standard_coverage_percent",
+        "INTEGER NOT NULL DEFAULT 60",
+    )
+    _ensure_column(
+        engine,
+        "scanner_policy",
         "strict_locator_enforcement",
         "BOOLEAN NOT NULL DEFAULT 1",
     )

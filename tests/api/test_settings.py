@@ -723,6 +723,7 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert data["disable_deterministic_checks"] is False
     assert data["max_consecutive_text_turns"] == 0
     assert data["enforce_full_coverage_obligations"] is False
+    assert data["standard_coverage_percent"] == 60
     assert data["scan_mode"] == "aggressive"
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
@@ -742,6 +743,7 @@ def test_upsert_scanner_policy(client: TestClient):
             "disable_deterministic_checks": True,
             "max_consecutive_text_turns": 0,
             "enforce_full_coverage_obligations": False,
+            "standard_coverage_percent": 72,
             "max_probes_per_page": 25,
             "thinking_max_steps": 180,
             "request_timeout_s": 12.5,
@@ -757,6 +759,7 @@ def test_upsert_scanner_policy(client: TestClient):
     assert data["disable_deterministic_checks"] is True
     assert data["max_consecutive_text_turns"] == 0
     assert data["enforce_full_coverage_obligations"] is False
+    assert data["standard_coverage_percent"] == 72
     assert data["scan_mode"] == "aggressive"
     assert data["max_probes_per_page"] == 25
     assert data["thinking_max_steps"] == 180
@@ -770,6 +773,13 @@ def test_upsert_scanner_policy(client: TestClient):
 def test_upsert_scanner_policy_invalid_limit(client: TestClient):
     payload = client.get("/api/settings/scanner-policy").json()
     payload["max_probes_per_page"] = 9999
+    r = client.put("/api/settings/scanner-policy", json=payload)
+    assert r.status_code == 422
+
+
+def test_upsert_scanner_policy_rejects_invalid_standard_target(client: TestClient):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload["standard_coverage_percent"] = 101
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 422
 

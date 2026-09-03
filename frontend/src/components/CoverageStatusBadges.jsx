@@ -1,5 +1,5 @@
 export function CoverageStatusBadges({ mode = "track", percent, covered, total, live, enforce }) {
-  const modeLabel = mode === "enforce" ? "Full" : "Quick";
+  const modeLabel = mode === "enforce" ? "Full" : mode === "standard" ? "Standard" : mode === "sast_validate" ? "SAST Validate" : "Quick";
   return <>
     <span className={'badge ' + (mode === 'enforce' ? 'warning' : 'neutral')}>{modeLabel} mode</span>
     <span className="badge neutral">{percent}% coverage ({covered}/{total} cells)</span>

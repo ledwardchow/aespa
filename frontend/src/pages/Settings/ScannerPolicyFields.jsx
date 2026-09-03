@@ -26,6 +26,13 @@ export function ScannerPolicyFields({
       <span>Enforce full coverage obligations</span>
     </label>
     <div className="subtle" style={{ marginBottom: "10px" }}>Include strict task-graph completion rules in system prompt before allowing the agent to end the scan.</div>
+    <div className="field" style={{ marginTop: "8px" }}>
+      <label>Standard mode coverage target (%)</label>
+      <input type="number" disabled={disabled} min="1" max="100" value={form.standard_coverage_percent} onChange={e => upd({
+        standard_coverage_percent: e.target.value
+      })} />
+      <div className="field-hint">Standard mode will not accept completion until the Test Lead has exercised this percentage of applicable coverage cells. Default: 60%.</div>
+    </div>
     <label className="toggle-row">
       <input type="checkbox" disabled={disabled} checked={form.strict_locator_enforcement} onChange={e => upd({
         strict_locator_enforcement: e.target.checked

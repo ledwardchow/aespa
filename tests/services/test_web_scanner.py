@@ -53,6 +53,7 @@ def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypa
             disable_deterministic_checks=True,
             max_consecutive_text_turns=3,
             enforce_full_coverage_obligations=True,
+            standard_coverage_percent=70,
         ),
         pages_snapshot=[{"url": "https://target.local/", "req_auth": False}],
         coverage_mode="enforce",
@@ -65,8 +66,41 @@ def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypa
     assert snapshot["model"]["model"] == "minimax/m3"
     assert snapshot["coverage_mode"] == "enforce"
     assert snapshot["policy"]["disable_deterministic_checks"] is True
+    assert snapshot["policy"]["standard_coverage_percent"] == 70
     assert len(snapshot["crawl_sha256"]) == 64
     assert "must-not-be-persisted" not in snapshot_raw
+
+
+def test_exercised_coverage_progress_counts_live_and_completed_probes():
+    progress = scanner._exercised_coverage_progress(
+        {
+            "not_started": 3,
+            "in_progress": 2,
+            "covered": 2,
+            "finding": 1,
+            "skipped": 2,
+        },
+        60,
+    )
+
+    assert progress == {
+        "exercised": 5,
+        "total": 8,
+        "skipped": 2,
+        "percent": 62.5,
+        "target_percent": 60,
+        "target_met": True,
+    }
+
+
+def test_exercised_coverage_progress_rejects_below_target():
+    progress = scanner._exercised_coverage_progress(
+        {"not_started": 5, "in_progress": 2, "covered": 1},
+        60,
+    )
+
+    assert progress["percent"] == 37.5
+    assert progress["target_met"] is False
 
 
 def test_select_browser_auth_token_accepts_namespaced_token_key():

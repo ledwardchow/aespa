@@ -478,7 +478,7 @@ export function ApiCollectionDetail({
                     fontWeight: 600
                   }}>{r.name}</a></td>
                   <td><StatusBadge status={r.status} /></td>
-                  <td>{r.coverage_mode === "enforce" ? "Full" : r.coverage_mode === "sast_validate" ? "SAST Validate" : "Quick"}</td>
+                  <td>{r.coverage_mode === "enforce" ? "Full" : r.coverage_mode === "standard" ? "Standard" : r.coverage_mode === "sast_validate" ? "SAST Validate" : "Quick"}</td>
                   <td style={{
                   fontSize: 12,
                   color: "var(--muted)"

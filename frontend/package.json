@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/pages/SiteDetail/runState.test.js src/lib/bedrock.test.js src/lib/modelSorting.test.js",
+    "test": "node --test src/pages/SiteDetail/runState.test.js src/lib/bedrock.test.js src/lib/modelSorting.test.js src/hooks/useAutoFollowScroll.test.js",
     "lint": "oxlint --deny-warnings src && eslint --max-warnings 0 src",
     "check": "npm run lint && npm run build",
     "preview": "vite preview"

@@ -4,6 +4,9 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+- **ALICE chat history keeps its place**: Incoming and streaming messages no longer move the chat to the bottom after you scroll up. The chat resumes following new messages after you return to the bottom.
+- **Configurable Standard scan mode**: Standard scans now keep testing until the Test Lead has exercised the configured percentage of applicable OWASP coverage cells. The target is set in the Test Lead agent settings and defaults to 60%.
+- **Crawls continue past unclickable overlays**: Dialog and login control clicks now have short attempt limits and a total time budget. Stale, obscured, or repeatedly re-rendered controls no longer keep a crawl stuck on one page.
 - **GitHub Copilot account sign-in and selection**: Copilot providers can now start the GitHub device-code sign-in flow from AESPA and select any locally authenticated Copilot CLI account. Credentials remain in Copilot CLI's credential store and are never sent to the browser.
 - **Visible console listening address**: The Agents view now opens with a ready message showing the exact host and port where AESPA is listening.
 - **More reliable Codex connectivity and reconnects**: Codex subprocesses now retain the standard Windows environment required for reliable DNS and HTTPS access. Temporary response-stream interruptions also wait for the reconnect attempt advertised by Codex instead of immediately failing the LLM call. Model-specific allowances are checked independently, so an exhausted Spark allowance no longer blocks other Codex models that still have capacity. Crawler login failures from unavailable models, exhausted allowances, and malformed responses now appear as error events with the affected model and reset time when available.

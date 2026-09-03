@@ -112,6 +112,69 @@ def test_visible_locator_skips_hidden_first_match():
     assert asyncio.run(crawler._visible_locator(_Page(), "input")) is visible
 
 
+def test_click_first_visible_times_out_stale_match_and_tries_next_selector():
+    class _HangingLocator(_FakeLocator):
+        async def click(self):
+            await asyncio.Event().wait()
+
+    class _ClickableLocator(_FakeLocator):
+        async def click(self):
+            self.clicked = True
+
+    hanging = _HangingLocator(count=1, visible=True)
+    clickable = _ClickableLocator(count=1, visible=True)
+
+    class _Page:
+        def locator(self, selector):
+            locator = hanging if selector == "stale" else clickable
+            return _IndexedLocatorRoot([locator])
+
+    clicked = asyncio.run(
+        asyncio.wait_for(
+            crawler._click_first_visible(
+                _Page(),
+                ["stale", "usable"],
+                click_timeout_ms=10,
+                total_timeout_ms=100,
+            ),
+            timeout=0.2,
+        )
+    )
+
+    assert clicked is True
+    assert clickable.clicked is True
+
+
+def test_dismiss_blocking_modal_has_total_time_budget():
+    class _HangingClose(_FakeLocator):
+        async def click(self):
+            await asyncio.Event().wait()
+
+    hanging_close = _HangingClose(count=1, visible=True)
+
+    class _Container(_FakeLocator):
+        def locator(self, selector):  # noqa: ARG002
+            return _IndexedLocatorRoot([hanging_close])
+
+    container = _Container(count=1, visible=True)
+
+    class _Page:
+        def locator(self, selector):  # noqa: ARG002
+            return _IndexedLocatorRoot([container])
+
+        async def wait_for_timeout(self, timeout):  # noqa: ARG002
+            return None
+
+    dismissed = asyncio.run(
+        asyncio.wait_for(
+            crawler._dismiss_blocking_modal(_Page(), total_timeout_ms=20),
+            timeout=0.2,
+        )
+    )
+
+    assert dismissed is False
+
+
 class _FakePage:
     def __init__(self, url, text, password_count=0, password_visible=False):
         self.url = url
