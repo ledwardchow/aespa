@@ -15,10 +15,12 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +40,20 @@ class _ClientEntry:
     client: Any
     base_directory: Path
     owns_base_directory: bool
+
+
+@dataclass
+class _LoginFlow:
+    login_id: str
+    process: asyncio.subprocess.Process
+    status: str = "starting"
+    verification_url: str | None = None
+    user_code: str | None = None
+    login: str | None = None
+    error: str | None = None
+    started_monotonic: float = field(default_factory=time.monotonic)
+    challenge_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    task: asyncio.Task[None] | None = None
 
 
 @dataclass
@@ -69,6 +85,14 @@ class _ConversationState:
 _clients: dict[str, _ClientEntry] = {}
 _clients_lock = asyncio.Lock()
 _conversations: dict[int, _ConversationState] = {}
+_login_flows: dict[str, _LoginFlow] = {}
+_login_lock = asyncio.Lock()
+
+_DEVICE_URL_RE = re.compile(r"https://[^\s\x1b]+/login/device", re.IGNORECASE)
+_DEVICE_CODE_RE = re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{4}\b", re.IGNORECASE)
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_LOGIN_CHALLENGE_TIMEOUT_S = 20.0
+_LOGIN_FLOW_RETENTION_S = 15 * 60
 
 _COPILOT_ENV_ALLOWLIST = (
     "PATH",
@@ -92,6 +116,224 @@ def _copilot_home() -> Path:
     """Return the Copilot CLI home containing its selected account."""
     configured = (os.environ.get("COPILOT_HOME") or "").strip()
     return Path(configured).expanduser() if configured else Path.home() / ".copilot"
+
+
+def list_accounts() -> list[dict[str, Any]]:
+    """List locally authenticated Copilot accounts without exposing credentials."""
+    database = _copilot_home() / "data.db"
+    if not database.is_file():
+        return []
+    try:
+        connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT login, is_default FROM accounts "
+                "WHERE kind = 'github' AND login IS NOT NULL "
+                "ORDER BY is_default DESC, login COLLATE NOCASE"
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise RuntimeError("Unable to read Copilot CLI account data.") from exc
+
+    accounts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for login, is_default in rows:
+        value = str(login or "").strip()
+        key = value.casefold()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        accounts.append({"login": value, "is_default": bool(is_default)})
+    return accounts
+
+
+def _copilot_login_command() -> list[str]:
+    """Resolve the CLI bundled with the SDK for its supported login command."""
+    configured = (os.environ.get("COPILOT_CLI_PATH") or "").strip()
+    cli_path: str | None = configured or None
+    if cli_path is None:
+        try:
+            from copilot.client import _get_or_download_cli
+        except ImportError as exc:  # pragma: no cover - dependency is required
+            raise RuntimeError(
+                "GitHub Copilot login requires the github-copilot-sdk package."
+            ) from exc
+        cli_path = _get_or_download_cli()
+    if not cli_path:
+        raise RuntimeError("GitHub Copilot CLI could not be found.")
+    resolved = Path(cli_path).expanduser()
+    if not resolved.is_file():
+        raise RuntimeError(f"GitHub Copilot CLI was not found at {resolved}.")
+    if resolved.suffix.casefold() == ".js":
+        node = shutil.which("node")
+        if not node:
+            raise RuntimeError("Node.js is required to run this GitHub Copilot CLI.")
+        return [node, str(resolved), "login", "--device-code"]
+    return [str(resolved), "login", "--device-code"]
+
+
+def _copilot_login_env() -> dict[str, str]:
+    """Build a minimal login environment that cannot bypass OAuth with a host token."""
+    allowed = (*_COPILOT_ENV_ALLOWLIST, "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+    child_env = {name: os.environ[name] for name in allowed if name in os.environ}
+    for name in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        child_env.pop(name, None)
+    child_env["COPILOT_HOME"] = str(_copilot_home())
+    return child_env
+
+
+def _login_payload(flow: _LoginFlow) -> dict[str, Any]:
+    return {
+        "login_id": flow.login_id,
+        "status": flow.status,
+        "verification_url": flow.verification_url,
+        "user_code": flow.user_code,
+        "login": flow.login,
+        "error": flow.error,
+    }
+
+
+def _prune_login_flows() -> None:
+    cutoff = time.monotonic() - _LOGIN_FLOW_RETENTION_S
+    for login_id, flow in list(_login_flows.items()):
+        if (
+            flow.status not in {"starting", "waiting"}
+            and flow.started_monotonic < cutoff
+        ):
+            _login_flows.pop(login_id, None)
+
+
+async def _read_login_process(flow: _LoginFlow) -> None:
+    process = flow.process
+    assert process.stdout is not None
+    try:
+        while True:
+            raw_line = await process.stdout.readline()
+            if not raw_line:
+                break
+            line = _ANSI_RE.sub("", raw_line.decode(errors="replace"))
+            if flow.verification_url is None:
+                match = _DEVICE_URL_RE.search(line)
+                if match:
+                    flow.verification_url = match.group(0).rstrip(".,)")
+            if flow.user_code is None:
+                match = _DEVICE_CODE_RE.search(line)
+                if match:
+                    flow.user_code = match.group(0).upper()
+            if flow.verification_url and flow.user_code and flow.status == "starting":
+                flow.status = "waiting"
+                flow.challenge_ready.set()
+
+        return_code = await process.wait()
+        if flow.status == "cancelled":
+            return
+        if return_code == 0:
+            accounts = list_accounts()
+            default_account = next(
+                (account for account in accounts if account["is_default"]), None
+            )
+            flow.login = default_account["login"] if default_account else None
+            flow.status = "complete"
+        else:
+            flow.status = "failed"
+            flow.error = (
+                "GitHub Copilot login did not complete. Try again or run "
+                "'copilot login --device-code' in a terminal."
+            )
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.terminate()
+        flow.status = "cancelled"
+        raise
+    except Exception:
+        log.exception("GitHub Copilot device login failed")
+        flow.status = "failed"
+        flow.error = "GitHub Copilot login failed unexpectedly."
+    finally:
+        flow.challenge_ready.set()
+
+
+async def login_start() -> dict[str, Any]:
+    """Start Copilot CLI's device-code flow and return its browser challenge."""
+    async with _login_lock:
+        _prune_login_flows()
+        active = next(
+            (
+                flow
+                for flow in _login_flows.values()
+                if flow.status in {"starting", "waiting"}
+            ),
+            None,
+        )
+        if active is not None:
+            flow = active
+        else:
+            command = _copilot_login_command()
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    env=_copilot_login_env(),
+                    cwd=tempfile.gettempdir(),
+                )
+            except OSError as exc:
+                raise RuntimeError("Unable to start GitHub Copilot login.") from exc
+            flow = _LoginFlow(login_id=str(uuid.uuid4()), process=process)
+            _login_flows[flow.login_id] = flow
+            flow.task = asyncio.create_task(_read_login_process(flow))
+
+    try:
+        await asyncio.wait_for(
+            flow.challenge_ready.wait(), timeout=_LOGIN_CHALLENGE_TIMEOUT_S
+        )
+    except TimeoutError as exc:
+        await login_cancel(flow.login_id)
+        raise RuntimeError(
+            "GitHub Copilot CLI did not provide a device code in time."
+        ) from exc
+    if not flow.verification_url or not flow.user_code:
+        raise RuntimeError(
+            flow.error or "GitHub Copilot CLI did not provide a device code."
+        )
+    return _login_payload(flow)
+
+
+def login_status(login_id: str) -> dict[str, Any]:
+    """Return one device login's public state."""
+    _prune_login_flows()
+    flow = _login_flows.get(login_id)
+    if flow is None:
+        raise KeyError(login_id)
+    return _login_payload(flow)
+
+
+async def login_cancel(login_id: str) -> dict[str, Any]:
+    """Cancel a pending Copilot device login."""
+    flow = _login_flows.get(login_id)
+    if flow is None:
+        raise KeyError(login_id)
+    if flow.status not in {"starting", "waiting"}:
+        return _login_payload(flow)
+    flow.status = "cancelled"
+    if flow.process.returncode is None:
+        flow.process.terminate()
+    if flow.task is not None:
+        try:
+            await asyncio.wait_for(asyncio.shield(flow.task), timeout=5.0)
+        except TimeoutError:
+            if flow.process.returncode is None:
+                flow.process.kill()
+            await flow.task
+    return _login_payload(flow)
+
+
+async def _cancel_login_flows() -> None:
+    for flow in list(_login_flows.values()):
+        if flow.status in {"starting", "waiting"}:
+            await login_cancel(flow.login_id)
 
 
 def _client_key(config: LLMConfig, proxy_url: str | None) -> str:
@@ -209,6 +451,7 @@ async def _get_client(config: LLMConfig, proxy_url: str | None) -> Any:
 
 async def close_clients() -> None:
     """Stop all shared Copilot CLI processes during application shutdown."""
+    await _cancel_login_flows()
     for key in list(_conversations):
         await _close_conversation_key(key)
     async with _clients_lock:

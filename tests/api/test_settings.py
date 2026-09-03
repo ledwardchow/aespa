@@ -35,6 +35,53 @@ def test_get_default_models(client: TestClient):
     assert isinstance(data["bedrock"], list)
 
 
+def test_copilot_account_and_login_endpoints(client: TestClient, monkeypatch):
+    accounts = [{"login": "octocat", "is_default": True}]
+    challenge = {
+        "login_id": "login-1",
+        "status": "waiting",
+        "verification_url": "https://github.com/login/device",
+        "user_code": "ABCD-1234",
+        "login": None,
+        "error": None,
+    }
+
+    monkeypatch.setattr(
+        "aespa.services.copilot_provider.list_accounts", lambda: accounts
+    )
+
+    async def fake_start():
+        return challenge
+
+    def fake_status(login_id):
+        assert login_id == "login-1"
+        return {**challenge, "status": "complete", "login": "octocat"}
+
+    async def fake_cancel(login_id):
+        assert login_id == "login-1"
+        return {**challenge, "status": "cancelled"}
+
+    monkeypatch.setattr("aespa.services.copilot_provider.login_start", fake_start)
+    monkeypatch.setattr("aespa.services.copilot_provider.login_status", fake_status)
+    monkeypatch.setattr("aespa.services.copilot_provider.login_cancel", fake_cancel)
+
+    response = client.get("/api/settings/llm/copilot/accounts")
+    assert response.status_code == 200
+    assert response.json() == {"accounts": accounts}
+
+    response = client.post("/api/settings/llm/copilot/login")
+    assert response.status_code == 200
+    assert response.json() == challenge
+
+    response = client.get("/api/settings/llm/copilot/login/login-1")
+    assert response.status_code == 200
+    assert response.json()["login"] == "octocat"
+
+    response = client.post("/api/settings/llm/copilot/login/login-1/cancel")
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+
 def test_discover_llm_models_endpoint(client: TestClient, monkeypatch):
     async def fake_discover(api_format, api_key=None, base_url=None, username=None):
         return ["custom-openrouter-model-1", "custom-openrouter-model-2"]

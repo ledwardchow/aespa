@@ -113,6 +113,7 @@ def test_agent_is_initial_view_and_number_keys_switch_all_views() -> None:
     assert console.handler.mode == AGENT
     console.handler.start_screen()
     assert "[1 Agent]" in output.getvalue()
+    assert "Ready - listening on http://127.0.0.1:8000" in output.getvalue()
     assert output.getvalue().index("[1 Agent]") < output.getvalue().index(" 4 HTTP ")
 
     console._process_posix_keys(b"4")
@@ -129,6 +130,16 @@ def test_agent_is_initial_view_and_number_keys_switch_all_views() -> None:
     console._process_posix_keys(b"6")
     assert console.handler.mode == SETTINGS
     assert "[6 Settings]" in output.getvalue()
+
+
+def test_console_ready_line_uses_configured_ipv6_host_and_port() -> None:
+    output = io.StringIO()
+    handler = InteractiveConsoleHandler(output, host="::1", port=8123)
+
+    handler.start_screen()
+    handler.start_screen()
+
+    assert list(handler.buffers[AGENT]) == ["Ready - listening on http://[::1]:8123"]
 
 
 def test_legend_is_drawn_on_last_terminal_row(monkeypatch) -> None:

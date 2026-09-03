@@ -131,6 +131,50 @@ async def logout_codex() -> dict:
     return await codex_provider.logout()
 
 
+@router.get("/llm/copilot/accounts")
+def list_copilot_accounts() -> dict[str, list[dict]]:
+    from aespa.services import copilot_provider
+
+    try:
+        return {"accounts": copilot_provider.list_accounts()}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/llm/copilot/login")
+async def start_copilot_login() -> dict:
+    from aespa.services import copilot_provider
+
+    try:
+        return await copilot_provider.login_start()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/llm/copilot/login/{login_id}")
+async def copilot_login_status(login_id: str) -> dict:
+    from aespa.services import copilot_provider
+
+    try:
+        return copilot_provider.login_status(login_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="Copilot login was not found"
+        ) from exc
+
+
+@router.post("/llm/copilot/login/{login_id}/cancel")
+async def cancel_copilot_login(login_id: str) -> dict:
+    from aespa.services import copilot_provider
+
+    try:
+        return await copilot_provider.login_cancel(login_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="Copilot login was not found"
+        ) from exc
+
+
 @router.get("/llm", response_model=LLMConfigOut | None)
 def get_llm_config(session: Session = Depends(get_session)) -> LLMConfigOut | None:
     cfg = settings_service.get_llm_config(session)

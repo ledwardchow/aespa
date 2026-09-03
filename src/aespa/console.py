@@ -96,6 +96,7 @@ class InteractiveConsoleHandler(logging.Handler):
         self.settings_replace_on_digit = False
         self.settings_value = str(port)
         self.settings_status = ""
+        self._ready_announced = False
 
     def emit(self, record: logging.LogRecord) -> None:
         view = _record_view(record)
@@ -141,7 +142,9 @@ class InteractiveConsoleHandler(logging.Handler):
                     self.settings_editing = True
                     self.settings_replace_on_digit = True
                     self.settings_value = str(self.configured_port)
-                    self.settings_status = "Type a port number, then press Enter to apply."
+                    self.settings_status = (
+                        "Type a port number, then press Enter to apply."
+                    )
                     self._redraw_locked()
                     return True
                 return False
@@ -187,7 +190,9 @@ class InteractiveConsoleHandler(logging.Handler):
             self.settings_status = f"AESPA is already listening on port {port}."
             return
         if not _port_available(self.host, port):
-            self.settings_status = f"Port {port} is already in use. Choose another port."
+            self.settings_status = (
+                f"Port {port} is already in use. Choose another port."
+            )
             return
         try:
             _write_port_setting(self.env_path, port)
@@ -255,6 +260,11 @@ class InteractiveConsoleHandler(logging.Handler):
 
     def start_screen(self) -> None:
         with self._output_lock:
+            if not self._ready_announced:
+                self.buffers[AGENT].append(
+                    f"Ready - listening on {_listening_url(self.host, self.runtime_port)}"
+                )
+                self._ready_announced = True
             self._screen_active = True
             self.stream.write("\x1b[?1049h")
             self._redraw_locked()
@@ -345,7 +355,9 @@ class InteractiveConsoleHandler(logging.Handler):
         return body_lines
 
     def _settings_body_lines(self, width: int) -> list[str]:
-        value = self.settings_value if self.settings_editing else str(self.configured_port)
+        value = (
+            self.settings_value if self.settings_editing else str(self.configured_port)
+        )
         cursor = "▌" if self.settings_editing else ""
         lines = [
             "Server settings",
@@ -638,6 +650,11 @@ def _legend(mode: str = AGENT, editing: bool = False) -> str:
             return "[0-9] Port  [Backspace] Delete  [Enter] Save  [Esc] Cancel"
         return "[1-6] Views  [Enter] Change port  [Ctrl+C] Stop"
     return "[1-6] Views  [↑/↓] Select  [Enter] Expand  [PgUp/PgDn] Page  [Ctrl+C] Stop"
+
+
+def _listening_url(host: str, port: int) -> str:
+    display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"http://{display_host}:{port}"
 
 
 def _port_available(host: str, port: int) -> bool:
