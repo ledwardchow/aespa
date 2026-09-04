@@ -604,6 +604,32 @@ def get_api_traffic_count(
     return {"count": traffic_svc.count_traffic(0, api_run_id=run_id)}
 
 
+@router.get("/{run_id}/code-executions")
+def list_api_code_executions(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _get_run_or_404(session, run_id)
+    from aespa.services import code_execution
+
+    return code_execution.list_executions("api", run_id)
+
+
+@router.get("/{run_id}/code-executions/{execution_id}")
+def get_api_code_execution(
+    run_id: int,
+    execution_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import code_execution
+
+    execution = code_execution.get_execution("api", run_id, execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Code execution not found")
+    return execution
+
+
 # ── Coverage matrix ────────────────────────────────────────────────────────────
 
 

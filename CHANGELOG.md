@@ -4,6 +4,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+- **Reliable Python sandbox startup**: Executor workspaces now receive the sandbox user's explicit UID/GID and private permissions. AESPA verifies the complete offline container profile before reporting the runtime ready and surfaces the Docker runner exit code when the harness cannot return a result.
+- **Consistent Python Sandbox settings layout**: The Python Sandbox configuration now uses the same bounded content width as the other Agent Settings pages.
+- **Multi-architecture Python sandbox publishing**: A release script can now publish the optional Python executor to Docker Hub as one tag supporting both Intel/AMD64 and Apple Silicon/ARM64 systems, including provenance and SBOM attestations.
+- **Sandboxed Python for advanced agent workflows**: A.L.I.C.E., specialist agents, and Test Leads can now run bounded Python programs in a network-isolated Docker sandbox for custom payload generation, parsing, and multi-step tests. The default runtime is the published multi-architecture `ledwardchow/aespa-python-executor:0.1` image. All target requests are routed through AESPA's scope and scan-policy checks and appear in the Traffic Log with their Python execution, agent, batch, and coverage provenance. The feature is disabled by default and can be configured under Agent Settings → Python Sandbox.
 - **ALICE chat history keeps its place**: Incoming and streaming messages no longer move the chat to the bottom after you scroll up. The chat resumes following new messages after you return to the bottom.
 - **Configurable Standard scan mode**: Standard scans now keep testing until the Test Lead has exercised the configured percentage of applicable OWASP coverage cells. The target is set in the Test Lead agent settings and defaults to 60%.
 - **Crawls continue past unclickable overlays**: Dialog and login control clicks now have short attempt limits and a total time budget. Stale, obscured, or repeatedly re-rendered controls no longer keep a crawl stuck on one page.

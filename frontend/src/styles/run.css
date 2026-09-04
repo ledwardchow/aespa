@@ -236,6 +236,8 @@
 .src-badge { font-size:10px; font-weight:700; padding:1px 6px; border-radius:4px; text-transform:uppercase; letter-spacing:0.3px; }
 .src-httpx      { background:rgba(99,102,241,0.15); color:#818cf8; }
 .src-playwright { background:rgba(16,185,129,0.15); color:#34d399; }
+.src-python     { background:rgba(168,85,247,0.16); color:#c084fc; }
+.traffic-provenance { flex:0 0 auto; padding:6px 10px; border-top:1px solid var(--border); background:rgba(168,85,247,0.08); color:#c4b5fd; font:11px/1.4 monospace; }
 /* Detail section: both the overall height and the request/response split can be dragged. */
 .traffic-detail-wrap { display:flex; flex-direction:column; flex:1 1 0; min-height:0; }
 .traffic-detail-resizer { position:relative; z-index:3; flex:0 0 9px; display:flex; align-items:center; justify-content:center; border-top:2px solid var(--border); background:var(--panel); cursor:row-resize; touch-action:none; }

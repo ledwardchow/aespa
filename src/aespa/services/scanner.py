@@ -5106,6 +5106,41 @@ async def _run_specialist_agent(
                 )
             return f'Duplicate skipped: "{tool_input.get("title")}" already exists. Move to a different test vector.'
 
+        if tool_name == "execute_python":
+            from aespa.services.code_execution import execute_agent_python
+
+            if is_api_run:
+                from aespa.services.api_scanner import (
+                    _api_check_scope,
+                    _make_post_probe_fn,
+                )
+
+                def execution_scope(url: str) -> str | None:
+                    return _api_check_scope(url, run_id)
+
+                execution_post_probe = _make_post_probe_fn(run_id)
+            else:
+                from aespa.services.web_workprogram import _make_web_post_probe_fn
+
+                def execution_scope(url: str) -> str | None:
+                    return check_scope(url, site_id, run_id)
+
+                execution_post_probe = _make_web_post_probe_fn(run_id)
+            return await execute_agent_python(
+                run_kind="api" if is_api_run else "web",
+                run_id=run_id,
+                agent_id=agent_id,
+                agent_role="specialist",
+                agent_step=step,
+                purpose=str(tool_input.get("purpose") or "Custom security test"),
+                code=str(tool_input.get("code") or ""),
+                session_vault=session_vault,
+                scanner_policy=scanner_policy,
+                scope_check_fn=execution_scope,
+                post_probe_fn=execution_post_probe,
+                requested_timeout_s=tool_input.get("timeout_s"),
+            )
+
         if tool_name == "http_request":
             _url = str(tool_input.get("url") or target_url)
             _scope_err = check_scope(_url, site_id, run_id)
@@ -6024,6 +6059,9 @@ def is_thinking_running(run_id: int) -> bool:
 
 def request_thinking_stop(run_id: int) -> None:
     _thinking_stop_requested.add(run_id)
+    from aespa.services.code_execution import cancel_run_executions
+
+    cancel_run_executions("web", run_id)
     # Cancel the main scan task immediately so it doesn't wait out a full LLM
     # round-trip or Playwright navigation before seeing the stop flag.
     task = _thinking_tasks.get(run_id)
@@ -9616,6 +9654,25 @@ async def _do_agentic_thinking_loop(
 
         # Non-context tools reset the consecutive counter
         _consecutive_ctx_tools[0] = 0
+
+        # ── execute_python ───────────────────────────────────────────────────
+        if tool_name == "execute_python":
+            from aespa.services.code_execution import execute_agent_python
+
+            return await execute_agent_python(
+                run_kind="api" if is_api_run else "web",
+                run_id=run_id,
+                agent_id="scanner",
+                agent_role="test_lead",
+                agent_step=step,
+                purpose=str(tool_input.get("purpose") or "Custom security test"),
+                code=str(tool_input.get("code") or ""),
+                session_vault=session_vault,
+                scanner_policy=scanner_policy,
+                scope_check_fn=_active_scope_check,
+                post_probe_fn=post_probe_fn,
+                requested_timeout_s=tool_input.get("timeout_s"),
+            )
 
         # ── skip_coverage ─────────────────────────────────────────────────────
         if tool_name == "skip_coverage":

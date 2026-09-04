@@ -15,6 +15,9 @@ from aespa.schemas import (
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
+    CodeExecutionConfigIn,
+    CodeExecutionConfigOut,
+    CodeExecutionRuntimeStatus,
     CodexIntegrationConfigIn,
     CodexIntegrationConfigOut,
     ComponentMapperConfigIn,
@@ -486,6 +489,31 @@ def upsert_scanner_policy(
     session: Session = Depends(get_session),
 ) -> ScannerPolicyOut:
     return settings_service.upsert_scanner_policy(session, payload)
+
+
+@router.get("/code-execution", response_model=CodeExecutionConfigOut)
+def get_code_execution_config(
+    session: Session = Depends(get_session),
+) -> CodeExecutionConfigOut:
+    return settings_service.get_code_execution_config(session)
+
+
+@router.put("/code-execution", response_model=CodeExecutionConfigOut)
+def upsert_code_execution_config(
+    payload: CodeExecutionConfigIn,
+    session: Session = Depends(get_session),
+) -> CodeExecutionConfigOut:
+    return settings_service.upsert_code_execution_config(session, payload)
+
+
+@router.get("/code-execution/status", response_model=CodeExecutionRuntimeStatus)
+async def code_execution_status(
+    session: Session = Depends(get_session),
+) -> CodeExecutionRuntimeStatus:
+    from aespa.services.code_execution import runtime_status
+
+    cfg = settings_service.get_code_execution_config(session)
+    return CodeExecutionRuntimeStatus(**(await runtime_status(cfg)))
 
 
 @router.get("/crawler-config", response_model=CrawlerConfigOut)

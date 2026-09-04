@@ -106,6 +106,9 @@ async def start(
 
 async def stop(run_id: int, run_type: str = "site") -> bool:
     """Cancel the running task for this run.  Returns True if one was active."""
+    from aespa.services.code_execution import cancel_run_executions
+
+    cancel_run_executions("api" if run_type == "api" else "web", run_id)
     task = _registry.get((run_type, run_id))
     if task is None or task.done:
         return False

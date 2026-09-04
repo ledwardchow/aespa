@@ -35,6 +35,41 @@ def test_get_default_models(client: TestClient):
     assert isinstance(data["bedrock"], list)
 
 
+def test_code_execution_config_round_trip(client: TestClient, monkeypatch):
+    initial = client.get("/api/settings/code-execution")
+    assert initial.status_code == 200
+    assert initial.json()["enabled"] is False
+    assert initial.json()["image_ref"] == "ledwardchow/aespa-python-executor:0.1"
+    assert initial.json()["allowed_roles"] == [
+        "alice",
+        "specialist",
+        "test_lead",
+    ]
+
+    payload = {**initial.json(), "enabled": True, "allowed_roles": ["alice"]}
+    payload.pop("updated_at")
+    updated = client.put("/api/settings/code-execution", json=payload)
+    assert updated.status_code == 200
+    assert updated.json()["enabled"] is True
+    assert updated.json()["allowed_roles"] == ["alice"]
+
+    async def fake_status(config):
+        return {
+            "enabled": config.enabled,
+            "available": True,
+            "backend": config.backend,
+            "image_ref": config.image_ref,
+            "docker_installed": True,
+            "image_present": True,
+            "message": "Sandbox runtime is ready.",
+        }
+
+    monkeypatch.setattr("aespa.services.code_execution.runtime_status", fake_status)
+    status = client.get("/api/settings/code-execution/status")
+    assert status.status_code == 200
+    assert status.json()["available"] is True
+
+
 def test_copilot_account_and_login_endpoints(client: TestClient, monkeypatch):
     accounts = [{"login": "octocat", "is_default": True}]
     challenge = {

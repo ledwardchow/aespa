@@ -115,6 +115,32 @@ uv run aespa
 
 The UI is available at `http://127.0.0.1:8000` by default.
 
+### Optional agent Python sandbox
+
+AESPA can let A.L.I.C.E. and specialist agents run short Python programs for custom payload generation, parsing, and bounded request workflows. This capability is disabled by default and requires a local Docker daemon plus the dedicated executor image:
+
+```bash
+docker pull ledwardchow/aespa-python-executor:0.1
+
+# Or build the same image reference locally
+docker build -t ledwardchow/aespa-python-executor:0.1 runtime/python-executor
+```
+
+To publish one Docker Hub executor tag for both Intel/AMD64 and Apple
+Silicon/ARM64 hosts, authenticate and pass your Docker Hub username:
+
+```bash
+docker login docker.io
+./scripts/publish_python_executor.sh YOUR_DOCKER_HUB_USERNAME
+```
+
+The script creates or reuses an `aespa-multiarch` buildx builder, publishes
+`linux/amd64` and `linux/arm64` variants as
+`docker.io/YOUR_DOCKER_HUB_USERNAME/aespa-python-executor:0.1`, and verifies
+the published manifest. Set `AESPA_BUILDX_BUILDER` to use a different builder.
+
+Enable and tune it under **Agent Settings → Python Sandbox**. Generated code has no direct network access; it can reach the test target only through AESPA's broker API. The broker applies the run's scope and request policy, and every transmitted request is recorded in the Traffic Log with its execution provenance. Do not mount the Docker socket into the main AESPA container when enabling this feature.
+
 The terminal has four live log views. Press `1` for HTTP requests, `2` for
 Python errors, `3` for LLM requests and responses, or `4` for agent activity.
 The LLM view shows full prompt content and may include credentials or target data supplied to a scan.

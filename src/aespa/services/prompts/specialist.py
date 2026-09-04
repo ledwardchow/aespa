@@ -287,6 +287,7 @@ SPECIALIST_SYSTEM_PROMPT = (
 _CRYPTO_EXTRA = {"forge_jwt", "decode_jwt"}
 _BASE_SPECIALIST_TOOL_NAMES = {
     "http_request",
+    "execute_python",
     "browser",
     "context_tool",
     "write_finding",

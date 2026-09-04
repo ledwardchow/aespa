@@ -489,6 +489,12 @@ def test_sast_validate_prompt_and_tools_are_focused():
     assert "browser" not in {
         tool["name"] for tool in get_sast_validate_tools(is_api_run=True)
     }
+    assert "execute_python" in {
+        tool["name"] for tool in get_sast_validate_tools(is_api_run=False)
+    }
+    assert "execute_python" in {
+        tool["name"] for tool in get_sast_validate_tools(is_api_run=True)
+    }
     assert "agent_dispatch" not in {
         tool["name"] for tool in get_sast_validate_tools(is_api_run=False)
     }

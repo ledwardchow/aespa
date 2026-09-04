@@ -877,6 +877,48 @@ class RunScannerPolicyOut(ScannerPolicyBase):
     updated_at: datetime | None = None
 
 
+class CodeExecutionConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    enabled: bool = False
+    backend: Literal["docker"] = "docker"
+    image_ref: str = Field(
+        default="ledwardchow/aespa-python-executor:0.1", min_length=1, max_length=300
+    )
+    allowed_roles: list[Literal["alice", "specialist", "test_lead"]] = Field(
+        default_factory=lambda: ["alice", "specialist", "test_lead"]
+    )
+    timeout_s: int = Field(default=30, ge=1, le=60)
+    memory_mb: int = Field(default=256, ge=64, le=1024)
+    cpu_cores: float = Field(default=0.5, ge=0.25, le=2.0)
+    pids_limit: int = Field(default=32, ge=8, le=64)
+    workspace_mb: int = Field(default=16, ge=4, le=64)
+    output_limit_bytes: int = Field(default=65536, ge=8192, le=262144)
+    artifact_limit_bytes: int = Field(default=10485760, ge=0, le=50 * 1024 * 1024)
+    max_requests_per_execution: int = Field(default=20, ge=0, le=100)
+    max_concurrent_requests: int = Field(default=5, ge=1, le=10)
+    max_concurrent_executions: int = Field(default=2, ge=1, le=8)
+    retain_redacted_source: bool = True
+
+
+class CodeExecutionConfigIn(CodeExecutionConfigBase):
+    pass
+
+
+class CodeExecutionConfigOut(CodeExecutionConfigBase):
+    updated_at: datetime
+
+
+class CodeExecutionRuntimeStatus(BaseModel):
+    enabled: bool
+    available: bool
+    backend: str
+    image_ref: str
+    docker_installed: bool = False
+    image_present: bool = False
+    message: str
+
+
 class CrawlerConfigBase(BaseModel):
     js_endpoint_discovery_enabled: bool = False
     skip_dangerous_actions: bool = True

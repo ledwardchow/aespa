@@ -170,6 +170,62 @@ async def test_logging_async_client_success(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_python_traffic_keeps_execution_and_body_provenance(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+    mock_resp = httpx.Response(
+        status_code=201,
+        headers={"Content-Type": "application/octet-stream"},
+        content=b"\x00\xffresult",
+        request=httpx.Request("POST", "https://target.local/test"),
+    )
+    monkeypatch.setattr(httpx.AsyncClient, "send", AsyncMock(return_value=mock_resp))
+
+    async with LoggingAsyncClient(
+        run_id=42,
+        source="python",
+        provenance={
+            "code_execution_id": 7,
+            "batch_id": "batch-1",
+            "batch_index": 2,
+            "agent_id": "specialist-1",
+            "agent_step": 4,
+            "owasp_category": "A03",
+            "test_class": "sqli",
+        },
+    ) as client:
+        request = httpx.Request(
+            "POST",
+            "https://target.local/test",
+            content=b"\x00\x01payload",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        await client.send(request)
+
+    with Session(engine) as session:
+        entry = session.exec(select(TrafficEntry)).one()
+        assert entry.source == "python"
+        assert entry.code_execution_id == 7
+        assert entry.batch_id == "batch-1"
+        assert entry.batch_index == 2
+        assert entry.agent_id == "specialist-1"
+        assert entry.agent_step == 4
+        assert entry.owasp_category == "A03"
+        assert entry.test_class == "sqli"
+        assert entry.request_body_encoding == "base64"
+        assert entry.request_body_size == 9
+        assert entry.request_body_sha256
+        assert entry.response_body_encoding == "base64"
+        assert entry.response_body_size == 8
+        assert entry.response_body_sha256
+
+
+@pytest.mark.anyio
 async def test_logging_async_client_failure(monkeypatch):
     engine = create_engine(
         "sqlite:///:memory:",

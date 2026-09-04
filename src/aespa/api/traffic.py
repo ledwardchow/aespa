@@ -7,6 +7,7 @@ from sqlmodel import Session
 
 from aespa.db import get_session
 from aespa.models import TestRun
+from aespa.services import code_execution as code_execution_svc
 from aespa.services import traffic as traffic_svc
 
 router = APIRouter(tags=["traffic"])
@@ -31,6 +32,30 @@ def get_traffic_count(
     if session.get(TestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="Test run not found")
     return {"count": traffic_svc.count_traffic(run_id)}
+
+
+@router.get("/api/test-runs/{run_id}/code-executions")
+def list_code_executions(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    if session.get(TestRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="Test run not found")
+    return code_execution_svc.list_executions("web", run_id)
+
+
+@router.get("/api/test-runs/{run_id}/code-executions/{execution_id}")
+def get_code_execution(
+    run_id: int,
+    execution_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    if session.get(TestRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="Test run not found")
+    execution = code_execution_svc.get_execution("web", run_id, execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Code execution not found")
+    return execution
 
 
 @router.delete("/api/test-runs/{run_id}/traffic", status_code=204)
