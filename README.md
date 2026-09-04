@@ -102,9 +102,6 @@ Clone or download a zip of this repository. Within a terminal with the working d
 ```bash
 # Install dependencies
 uv sync
-
-# Install Playwright's Chromium browser (one-time)
-uv run playwright install chromium
 ```
 
 ### Run
@@ -114,6 +111,8 @@ uv run aespa
 ```
 
 The UI is available at `http://127.0.0.1:8000` by default.
+AESPA checks for Playwright's Chromium browser during startup and installs it
+automatically when it is missing.
 
 ### Optional agent Python sandbox
 
@@ -156,6 +155,11 @@ back the current page is from live output. Page numbers increase toward the
 newest content. Paging into older output keeps that page fixed while new log
 records arrive; returning to the newest page resumes live updates.
 The viewport reflows automatically when the terminal is resized.
+
+The Settings view includes Database Operations. Use Up and Down to select it
+and press Enter. Backups default to a timestamped SQLite file in your home
+folder. Clear scans keeps targets, LLM connections, and settings. Reset removes
+all database records. Clear and Reset require the confirmation shown on screen.
 
 ### Frontend build (only for UI development)
 

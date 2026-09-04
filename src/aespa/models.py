@@ -1373,6 +1373,33 @@ class AliceChatSession(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class AliceGoal(SQLModel, table=True):
+    """Durable objective followed by one ALICE chat tab."""
+
+    __tablename__ = "alice_goal"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_kind", "test_run_id", "session_key", name="uq_alice_goal_owner"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
+    run_kind: str = Field(default="web", index=True)  # web | api
+    session_key: str = Field(index=True)
+    objective: str
+    status: str = Field(default="active", index=True)
+    checkpoint_json: str = Field(default="{}")
+    completion_json: str = Field(default="{}")
+    blocker: str = Field(default="")
+    pause_reason: str = Field(default="")
+    cycle_count: int = Field(default=0)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+    paused_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+
+
 # ── SAST Run ──────────────────────────────────────────────────────────────────
 
 

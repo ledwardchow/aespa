@@ -7,6 +7,7 @@ import sys
 from types import SimpleNamespace
 
 from aespa.console import (
+    _ANSI_SGR,
     AGENT,
     ERRORS,
     HTTP,
@@ -15,6 +16,8 @@ from aespa.console import (
     TESTING,
     InteractiveConsole,
     InteractiveConsoleHandler,
+    _aespa_logo_lines,
+    _python_executor_image_present,
     _write_port_setting,
 )
 
@@ -132,14 +135,95 @@ def test_agent_is_initial_view_and_number_keys_switch_all_views() -> None:
     assert "[6 Settings]" in output.getvalue()
 
 
-def test_console_ready_line_uses_configured_ipv6_host_and_port() -> None:
+def test_agent_logo_is_colored_and_clears_on_first_agent_message(monkeypatch) -> None:
+    output = io.StringIO()
+    handler = InteractiveConsoleHandler(output, terminal_size=(100, 35))
+    monkeypatch.setattr("aespa.console._python_executor_image_present", lambda: True)
+
+    handler.start_screen()
+
+    initial_frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "+ooooooooooooooooooooooooo+" in _ANSI_SGR.sub("", initial_frame)
+    assert "\x1b[38;5;196m" in initial_frame
+    assert "\x1b[38;5;203m" in initial_frame
+    assert "Ready - listening" in initial_frame
+
+    handler.emit(_record("aespa.agent.activity", logging.INFO, "Scanner started"))
+
+    agent_frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "+ooooooooooooooooooooooooo+" not in _ANSI_SGR.sub("", agent_frame)
+    assert "Scanner started" in agent_frame
+
+
+def test_agent_logo_has_a_compact_narrow_terminal_variant(monkeypatch) -> None:
+    output = io.StringIO()
+    handler = InteractiveConsoleHandler(output, terminal_size=(40, 24))
+    monkeypatch.setattr("aespa.console._python_executor_image_present", lambda: True)
+
+    handler.start_screen()
+
+    frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "A E S P A" in frame
+    assert ".ossssssssssssso." in _ANSI_SGR.sub("", frame)
+
+    plain_lines = [_ANSI_SGR.sub("", line) for line in _aespa_logo_lines(38)]
+    centers = []
+    for line in plain_lines:
+        first = len(line) - len(line.lstrip())
+        last = len(line.rstrip()) - 1
+        centers.append((first + last) / 2)
+    assert max(centers) - min(centers) <= 1
+
+
+def test_console_ready_line_uses_configured_ipv6_host_and_port(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output, host="::1", port=8123)
+    monkeypatch.setattr("aespa.console._python_executor_image_present", lambda: True)
 
     handler.start_screen()
     handler.start_screen()
 
     assert list(handler.buffers[AGENT]) == ["Ready - listening on http://[::1]:8123"]
+
+
+def test_console_warns_below_ready_line_when_python_executor_is_missing(
+    monkeypatch,
+) -> None:
+    output = io.StringIO()
+    handler = InteractiveConsoleHandler(output)
+    monkeypatch.setattr("aespa.console._python_executor_image_present", lambda: False)
+
+    handler.start_screen()
+    handler.start_screen()
+
+    assert list(handler.buffers[AGENT]) == [
+        "Ready - listening on http://127.0.0.1:8000",
+        (
+            "Python executor image is not installed - run docker pull "
+            "ledwardchow/aespa-python-executor:0.1"
+        ),
+    ]
+
+
+def test_python_executor_check_inspects_the_published_image(monkeypatch) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr("aespa.console.shutil.which", lambda command: "/bin/docker")
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr("aespa.console.subprocess.run", fake_run)
+
+    assert _python_executor_image_present() is False
+    assert commands == [
+        [
+            "docker",
+            "image",
+            "inspect",
+            "ledwardchow/aespa-python-executor:0.1",
+        ]
+    ]
 
 
 def test_legend_is_drawn_on_last_terminal_row(monkeypatch) -> None:
@@ -388,7 +472,7 @@ def test_settings_view_edits_persists_and_requests_port_restart(
     monkeypatch.setattr("aespa.console._port_available", lambda host, port: True)
 
     console.handler.start_screen()
-    console._process_posix_keys(b"6\r8123\r")
+    console._process_posix_keys(b"6\r\r8123\r")
 
     assert console.handler.mode == SETTINGS
     assert console.handler.configured_port == 8123
@@ -398,7 +482,27 @@ def test_settings_view_edits_persists_and_requests_port_restart(
     )
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
     assert "Saved port 8123" in frame
+    assert "Listening address" in frame
     assert "[Enter] Change port" in frame
+
+
+def test_settings_menu_hides_server_details_until_opened() -> None:
+    output = io.StringIO()
+    console = InteractiveConsole(input_stream=io.StringIO(), output_stream=output)
+
+    console.handler.start_screen()
+    console._process_posix_keys(b"6")
+
+    frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "Server Settings" in frame
+    assert "Database Operations" in frame
+    assert "Listening address" not in frame
+    assert "Port                " not in frame
+
+    console._process_posix_keys(b"\r")
+    frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "Listening address" in frame
+    assert "Port                8000" in frame
 
 
 def test_settings_rejects_invalid_or_occupied_ports(tmp_path, monkeypatch) -> None:
@@ -409,13 +513,71 @@ def test_settings_rejects_invalid_or_occupied_ports(tmp_path, monkeypatch) -> No
         env_path=tmp_path / ".env",
     )
     console.handler.start_screen()
-    console._process_posix_keys(b"6\r70000\r")
+    console._process_posix_keys(b"6\r\r70000\r")
     assert "between 1 and 65535" in output.getvalue()
 
     monkeypatch.setattr("aespa.console._port_available", lambda host, port: False)
     console._process_posix_keys(b"\x1b\r9000\r")
     assert "Port 9000 is already in use" in output.getvalue()
     assert not (tmp_path / ".env").exists()
+
+
+def test_database_settings_backup_uses_default_home_path(tmp_path, monkeypatch) -> None:
+    output = io.StringIO()
+    console = InteractiveConsole(input_stream=io.StringIO(), output_stream=output)
+    destination = tmp_path / "aespa-backup.db"
+    saved_paths = []
+    monkeypatch.setattr(
+        "aespa.console._default_database_backup_path", lambda: destination
+    )
+    monkeypatch.setattr(
+        "aespa.services.database_operations.backup_database",
+        lambda path: saved_paths.append(path) or path,
+    )
+
+    console.handler.start_screen()
+    console._process_posix_keys(b"6\x1b[B\r\r\r")
+
+    assert saved_paths == [destination]
+    assert console.handler.settings_section == "database"
+    assert "Database backup saved" in output.getvalue()
+
+
+def test_database_settings_clear_requires_exact_confirmation(monkeypatch) -> None:
+    output = io.StringIO()
+    console = InteractiveConsole(input_stream=io.StringIO(), output_stream=output)
+    calls = []
+    monkeypatch.setattr(
+        "aespa.services.database_operations.clear_scans",
+        lambda: calls.append("clear") or 4,
+    )
+
+    console.handler.start_screen()
+    console._process_posix_keys(b"6\x1b[B\r\x1b[B\rclear\r")
+
+    assert calls == []
+    assert 'Type "CLEAR" exactly' in output.getvalue()
+
+    console._process_posix_keys(b"CLEAR\r")
+
+    assert calls == ["clear"]
+    assert "Cleared 4 scan runs." in output.getvalue()
+
+
+def test_database_settings_reset_requires_reset_confirmation(monkeypatch) -> None:
+    output = io.StringIO()
+    console = InteractiveConsole(input_stream=io.StringIO(), output_stream=output)
+    calls = []
+    monkeypatch.setattr(
+        "aespa.services.database_operations.reset_database",
+        lambda: calls.append("reset"),
+    )
+
+    console.handler.start_screen()
+    console._process_posix_keys(b"6\x1b[B\r\x1b[B\x1b[B\rRESET\r")
+
+    assert calls == ["reset"]
+    assert "Database reset complete." in output.getvalue()
 
 
 def test_write_port_setting_replaces_existing_value(tmp_path) -> None:

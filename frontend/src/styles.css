@@ -1243,6 +1243,21 @@ legend {
 .alice-chat-container:focus-within {
   border-color: rgba(192, 132, 252, 0.5);
 }
+.alice-goal-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid rgba(192, 132, 252, 0.28);
+  background: rgba(192, 132, 252, 0.08);
+}
+.alice-goal-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.alice-goal-status { color: #c084fc; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.alice-goal-objective { overflow: hidden; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.alice-goal-detail { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.alice-goal-actions { display: flex; gap: 5px; }
+.alice-goal-actions button { border: 1px solid var(--border-2); border-radius: 5px; background: var(--panel); color: var(--muted); padding: 4px 7px; cursor: pointer; font-size: 11px; }
+.alice-goal-actions button:hover { border-color: #c084fc; color: var(--text); }
 
 .alice-chat-history {
   flex: none;

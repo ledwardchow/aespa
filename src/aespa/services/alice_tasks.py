@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Optional
 
@@ -30,6 +31,9 @@ class AliceTask:
     think_msg_id: str
     reply_msg_id: str
     run_type: str = "site"  # "site" | "api"
+    goal_id: int | None = None
+    goal: dict[str, Any] | None = None
+    steering: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
     # All SSE events produced so far (for replay on reconnect).
     events: list[dict] = field(default_factory=list)
     # Number of events dropped off the front of ``events`` by buffer trimming.
@@ -57,9 +61,16 @@ def get(run_id: int, run_type: str = "site") -> Optional[AliceTask]:
 
 
 def status(run_id: int, run_type: str = "site") -> dict[str, Any]:
+    from aespa.services import alice_goals
+
+    run_kind = "api" if run_type == "api" else "web"
     t = _registry.get((run_type, run_id))
     if t is None:
-        return {"running": False, "done": False}
+        return {
+            "running": False,
+            "done": False,
+            "goal": alice_goals.goal_out(alice_goals.get_goal(run_kind, run_id)),
+        }
     return {
         "running": not t.done,
         "done": t.done,
@@ -67,6 +78,7 @@ def status(run_id: int, run_type: str = "site") -> dict[str, Any]:
         "think_msg_id": t.think_msg_id,
         "reply_msg_id": t.reply_msg_id,
         "event_count": len(t.events),
+        "goal": alice_goals.goal_out(alice_goals.get_goal(run_kind, run_id)),
     }
 
 
@@ -81,6 +93,61 @@ async def start(
     run_type: str = "site",
 ) -> AliceTask:
     """Start a new ALICE background task, cancelling any existing one first."""
+    from aespa.services import alice_goals
+
+    run_kind = "api" if run_type == "api" else "web"
+    existing = _registry.get((run_type, run_id))
+    command = re.fullmatch(r"/goal(?:\s+(.*))?", message.strip(), re.I | re.S)
+    goal: dict[str, Any] | None = None
+    control_message: str | None = None
+
+    if command:
+        argument = str(command.group(1) or "").strip()
+        action = argument.casefold()
+        current = alice_goals.get_goal(run_kind, run_id, tab_id)
+        if not argument:
+            if current is None:
+                control_message = "No goal is set for this chat. Use /goal <objective> to start one."
+            else:
+                current_out = alice_goals.goal_out(current) or {}
+                checkpoint = current_out.get("checkpoint") or {}
+                control_message = (
+                    f"Goal: {current.objective}\n\nStatus: {current.status}."
+                    + (f"\n\nCheckpoint: {json.dumps(checkpoint)}" if checkpoint else "")
+                )
+        elif action == "pause":
+            if current is None:
+                control_message = "No goal is set for this chat."
+            else:
+                await stop(run_id, run_type=run_type)
+                current = alice_goals.update_goal(
+                    current.id, status="paused", pause_reason="Paused by user."
+                )
+                control_message = "Goal paused."
+        elif action == "clear":
+            if current is None:
+                control_message = "No goal is set for this chat."
+            else:
+                await stop(run_id, run_type=run_type)
+                current = alice_goals.update_goal(current.id, status="cleared")
+                control_message = "Goal cleared."
+        elif action == "resume":
+            if current is None or current.status not in {"paused", "waiting_input"}:
+                control_message = "There is no paused goal to resume in this chat."
+            else:
+                current = alice_goals.update_goal(
+                    current.id, status="active", pause_reason="", increment_cycle=True
+                )
+                goal = alice_goals.goal_out(current)
+                message = current.objective
+        else:
+            if existing and existing.asyncio_task and not existing.asyncio_task.done():
+                await stop(run_id, run_type=run_type)
+            current = alice_goals.create_goal(run_kind, run_id, tab_id, argument)
+            current = alice_goals.update_goal(current.id, increment_cycle=True)
+            goal = alice_goals.goal_out(current)
+            message = argument
+
     existing = _registry.get((run_type, run_id))
     if existing and existing.asyncio_task and not existing.asyncio_task.done():
         existing.asyncio_task.cancel()
@@ -95,12 +162,20 @@ async def start(
         think_msg_id=think_msg_id,
         reply_msg_id=reply_msg_id,
         run_type=run_type,
+        goal_id=(goal or {}).get("id"),
+        goal=goal,
     )
     _registry[(run_type, run_id)] = task
-    task.asyncio_task = asyncio.create_task(
-        _run(task, message, history),
-        name=f"alice-run-{run_type}-{run_id}",
-    )
+    if control_message is not None:
+        task.asyncio_task = asyncio.create_task(
+            _run_control(task, control_message),
+            name=f"alice-goal-control-{run_type}-{run_id}",
+        )
+    else:
+        task.asyncio_task = asyncio.create_task(
+            _run(task, message, history),
+            name=f"alice-run-{run_type}-{run_id}",
+        )
     return task
 
 
@@ -112,6 +187,12 @@ async def stop(run_id: int, run_type: str = "site") -> bool:
     task = _registry.get((run_type, run_id))
     if task is None or task.done:
         return False
+    if task.goal_id is not None:
+        from aespa.services import alice_goals
+
+        alice_goals.update_goal(
+            task.goal_id, status="paused", pause_reason="Paused by user."
+        )
     if task.asyncio_task and not task.asyncio_task.done():
         task.asyncio_task.cancel()
         try:
@@ -120,6 +201,26 @@ async def stop(run_id: int, run_type: str = "site") -> bool:
             pass
         return True
     return False
+
+
+async def steer_goal(run_id: int, message: str, run_type: str = "site") -> bool:
+    """Queue user guidance for the next safe boundary in an active goal."""
+    task = _registry.get((run_type, run_id))
+    if task is None or task.done or task.goal_id is None or not message.strip():
+        return False
+    from aespa.services import alice_goals
+
+    run_kind = "api" if run_type == "api" else "web"
+    current = alice_goals.get_goal(run_kind, run_id, task.tab_id)
+    if current is None or current.status != "active":
+        return False
+    task.goal = alice_goals.goal_out(current)
+    await task.steering.put(message.strip())
+    _append(
+        task,
+        {"type": "goal_steered", "message": message.strip(), "goal": task.goal},
+    )
+    return True
 
 
 async def stream_events(
@@ -160,6 +261,15 @@ async def stream_events(
 
 
 # ── Internal ──────────────────────────────────────────────────────────────────
+
+
+async def _run_control(task: AliceTask, message: str) -> None:
+    _append(task, {"type": "message_chunk", "delta": message})
+    _append(task, {"type": "done", "thought": "", "message": message})
+    task.done = True
+    for q in list(task.waiters):
+        q.put_nowait(None)
+    task.waiters.clear()
 
 
 def _append(task: AliceTask, event: dict) -> None:
@@ -214,13 +324,39 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
     run_kind = "api" if task.run_type == "api" else "web"
 
     try:
+        if task.goal is not None:
+            _append(task, {"type": "goal_started", "goal": task.goal})
         with events_svc.run_kind_scope(run_kind):
-            async for sse_line in stream_fn(task.run_id, message, history):
+            async for sse_line in stream_fn(
+                task.run_id,
+                message,
+                history,
+                goal=task.goal,
+                steering_queue=task.steering,
+            ):
                 if sse_line.startswith("data: "):
                     try:
                         _append(task, json.loads(sse_line[6:].strip()))
                     except Exception:
                         pass
+
+            if task.goal_id is not None:
+                from aespa.services import alice_goals
+
+                current = alice_goals.get_goal(run_kind, task.run_id, task.tab_id)
+                if current is not None and current.status == "active":
+                    current = alice_goals.update_goal(
+                        task.goal_id,
+                        status="paused",
+                        pause_reason="ALICE stopped before the goal completion gate passed.",
+                    )
+                    _append(
+                        task,
+                        {
+                            "type": "goal_paused",
+                            "goal": alice_goals.goal_out(current),
+                        },
+                    )
 
             # Calibrate all findings for this run when Alice finishes
             is_api = task.run_type == "api"
@@ -231,6 +367,16 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
             except Exception as ce:
                 log.warning("calibrate_all_findings_for_run failed: %s", ce)
     except asyncio.CancelledError:
+        if task.goal_id is not None:
+            from aespa.services import alice_goals
+
+            current = alice_goals.update_goal(
+                task.goal_id, status="paused", pause_reason="Paused by user."
+            )
+            _append(
+                task,
+                {"type": "goal_paused", "goal": alice_goals.goal_out(current)},
+            )
         _append(
             task,
             {
@@ -250,6 +396,16 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
                 "message": f"Agent encountered an error: {exc}",
             },
         )
+        if task.goal_id is not None:
+            from aespa.services import alice_goals
+
+            current = alice_goals.update_goal(
+                task.goal_id, status="paused", pause_reason=str(exc)
+            )
+            _append(
+                task,
+                {"type": "goal_paused", "goal": alice_goals.goal_out(current)},
+            )
     finally:
         task.done = True
         for q in list(task.waiters):

@@ -9,6 +9,7 @@ import re
 import select
 import shutil
 import socket
+import subprocess
 import sys
 import textwrap
 import threading
@@ -42,6 +43,56 @@ _PAGE_UP = b"\x1b[5~"
 _PAGE_DOWN = b"\x1b[6~"
 _ARROW_UP = b"\x1b[A"
 _ARROW_DOWN = b"\x1b[B"
+_PYTHON_EXECUTOR_IMAGE = "ledwardchow/aespa-python-executor:0.1"
+_ANSI_RED = "\x1b[38;5;196m"
+_ANSI_ORANGE = "\x1b[38;5;202m"
+_ANSI_CORAL = "\x1b[38;5;203m"
+_ANSI_DIM_RED = "\x1b[38;5;88m"
+_ANSI_RESET = "\x1b[0m"
+_ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+_AESPA_LOGO = (
+    "                     +ooooooooooooooooooooooooo+",
+    "                    +sssssssssssssssssssssssssss+",
+    "                   +sssooooooooooooooooooooooosss+",
+    "                  +sss+         .ooo.         +sss+",
+    "                 +sss+          .oso.          +sss+",
+    "                +sss+    +o+    .oso.           +sss+",
+    "               +sss+     osooooooosooooooooo+    +sss+",
+    "              +sss+     +so+    +oso+     oso     +sss+",
+    "             +sss+     .so     +ssoss+.   +os+     +sss+",
+    "            +sss+     .oo.   .oss+.+sso+    oo.     +sss+",
+    "           +sss+     .oo.   .osooso .oss+.  .oo.     +sss+",
+    "          +sss+     .oo.   +osoosss. .+sso.  .oo.     +sss+",
+    "         +sss+      os.  .+ssoosoos+   +oss+  .oo      +sss+",
+    "        +sss+      +s+  .oss+oso.+so.   .+sso. +s+......+sss+",
+    "  .+++++oss++++++++s+++++so+oso. .os+    .+os++++ssssssssssso+++++.",
+    "  +sssssssssssssssssssssssssso.   +so.  +ossssssssssssssssssssssss+",
+    "  .+++++++sso++++++++++++oso+.    .os+ +ssso++++++++++++oss+++++++.",
+    "       .+sso+o+        +oso+       +soossooso+        +o+oss+.",
+    "      .osso.oso       +oso+        .ssss+ +oso+       oso.osso.",
+    "     .osso.+so+      +oso+          oso+   +oso+      +os+.osso.",
+    "    +ossooosooooooooooso+           .+.     +osoooooooooosooosso+",
+    "    ossssssssssssssssso+                     +ossssssssssssssssso",
+    "                              A E S P A",
+)
+
+_AESPA_LOGO_COMPACT = (
+    "           .+++++++++++++.",
+    "          .ossssssssssssso.",
+    "          +so+++++++++++os+",
+    "         +so..+. +s+ .+..os+",
+    "        +ss. +sooosooos+ .ss+",
+    "       +ss+ +s++ss+ss++s+ +ss+",
+    "      .ss+ +s+osos+.oso+s+ +ss.",
+    "     .os+ +s+ss+soo..+ss+s+.+so.",
+    " .+++os+++s+so+s++s+  .os+ssssss+++.",
+    " +sssssssssssss+ .oo..+ssssssssssss+",
+    " .+++os++++++os+  +s++so++++++so+++.",
+    "  .+ss++++++ss+.  .oos+ss++++++ss+.",
+    "  +ssssssssso+     +s+ +osssssssss+",
+    "              A E S P A",
+)
 
 
 def _record_view(record: logging.LogRecord) -> str | None:
@@ -100,7 +151,13 @@ class InteractiveConsoleHandler(logging.Handler):
         self.settings_replace_on_digit = False
         self.settings_value = str(port)
         self.settings_status = ""
+        self.settings_section = "root"
+        self.settings_selected = 0
+        self.database_selected = 0
+        self.database_action: str | None = None
+        self.database_input = ""
         self._ready_announced = False
+        self._agent_message_seen = False
 
     def emit(self, record: logging.LogRecord) -> None:
         view = _record_view(record)
@@ -108,6 +165,8 @@ class InteractiveConsoleHandler(logging.Handler):
             return
         try:
             with self._output_lock:
+                if view == AGENT:
+                    self._agent_message_seen = True
                 if view == LLM and hasattr(record, "aespa_llm_call_id"):
                     self._store_llm_record(record)
                 elif view == TESTING and hasattr(record, "aespa_testing_traffic_id"):
@@ -141,7 +200,23 @@ class InteractiveConsoleHandler(logging.Handler):
         if self.mode != SETTINGS:
             return False
         with self._output_lock:
+            if self.settings_section == "database":
+                return self._handle_database_key(key)
+            if self.settings_section == "root":
+                if key not in ("\r", "\n"):
+                    return False
+                self.settings_section = (
+                    "server" if self.settings_selected == 0 else "database"
+                )
+                self.settings_status = ""
+                self._redraw_locked()
+                return True
             if not self.settings_editing:
+                if key == "\x1b":
+                    self.settings_section = "root"
+                    self.settings_status = ""
+                    self._redraw_locked()
+                    return True
                 if key in ("\r", "\n"):
                     if not self.allow_port_change:
                         self.settings_status = (
@@ -185,6 +260,85 @@ class InteractiveConsoleHandler(logging.Handler):
                 return True
             return True
 
+    def _handle_database_key(self, key: str) -> bool:
+        if self.database_action is None:
+            if key == "\x1b":
+                self.settings_section = "root"
+                self.settings_status = ""
+                self._redraw_locked()
+                return True
+            if key not in ("\r", "\n"):
+                return False
+            action = ("backup", "clear", "reset")[self.database_selected]
+            self.database_action = action
+            self.settings_editing = True
+            self.settings_status = ""
+            self.database_input = (
+                str(_default_database_backup_path()) if action == "backup" else ""
+            )
+            self._redraw_locked()
+            return True
+
+        if key == "\x1b":
+            self.database_action = None
+            self.database_input = ""
+            self.settings_editing = False
+            self.settings_status = "Action cancelled."
+            self._redraw_locked()
+            return True
+        if key in ("\b", "\x7f"):
+            self.database_input = self.database_input[:-1]
+            self._redraw_locked()
+            return True
+        if key in ("\r", "\n"):
+            self._run_database_action()
+            return True
+        if key.isprintable():
+            self.database_input += key
+            self._redraw_locked()
+        return True
+
+    def _run_database_action(self) -> None:
+        from aespa.services import database_operations
+
+        action = self.database_action
+        confirmation = self.database_input
+        if action == "clear" and confirmation != "CLEAR":
+            self.settings_status = 'Confirmation did not match. Type "CLEAR" exactly.'
+            self.database_input = ""
+            self._redraw_locked()
+            return
+        if action == "reset" and confirmation != "RESET":
+            self.settings_status = 'Confirmation did not match. Type "RESET" exactly.'
+            self.database_input = ""
+            self._redraw_locked()
+            return
+
+        self.settings_status = {
+            "backup": "Creating database backup...",
+            "clear": "Clearing scans...",
+            "reset": "Resetting database...",
+        }[action]
+        self._redraw_locked()
+        try:
+            if action == "backup":
+                destination = database_operations.backup_database(Path(confirmation))
+                self.settings_status = f"Database backup saved to {destination}"
+            elif action == "clear":
+                count = database_operations.clear_scans()
+                suffix = "run" if count == 1 else "runs"
+                self.settings_status = f"Cleared {count} scan {suffix}."
+            else:
+                database_operations.reset_database()
+                self.settings_status = "Database reset complete."
+        except Exception as exc:
+            self.settings_status = f"Database operation failed: {exc}"
+        finally:
+            self.database_action = None
+            self.database_input = ""
+            self.settings_editing = False
+            self._redraw_locked()
+
     def _save_port(self) -> None:
         try:
             port = int(self.settings_value)
@@ -216,10 +370,24 @@ class InteractiveConsoleHandler(logging.Handler):
             self.on_port_change(port)
 
     def select_previous_llm(self) -> None:
+        if self.mode == SETTINGS and not self.settings_editing:
+            self._move_settings_selection(-1)
+            return
         self._move_llm_selection(-1)
 
     def select_next_llm(self) -> None:
+        if self.mode == SETTINGS and not self.settings_editing:
+            self._move_settings_selection(1)
+            return
         self._move_llm_selection(1)
+
+    def _move_settings_selection(self, delta: int) -> None:
+        with self._output_lock:
+            if self.settings_section == "database":
+                self.database_selected = min(max(self.database_selected + delta, 0), 2)
+            elif self.settings_section == "root":
+                self.settings_selected = min(max(self.settings_selected + delta, 0), 1)
+            self._redraw_locked()
 
     def toggle_selected_llm(self) -> None:
         with self._output_lock:
@@ -274,6 +442,11 @@ class InteractiveConsoleHandler(logging.Handler):
                 self.buffers[AGENT].append(
                     f"Ready - listening on {_listening_url(self.host, self.runtime_port)}"
                 )
+                if not _python_executor_image_present():
+                    self.buffers[AGENT].append(
+                        "Python executor image is not installed - run "
+                        f"docker pull {_PYTHON_EXECUTOR_IMAGE}"
+                    )
                 self._ready_announced = True
             self._screen_active = True
             self.stream.write("\x1b[?1049h")
@@ -328,12 +501,12 @@ class InteractiveConsoleHandler(logging.Handler):
             row = index + 3
             line = visible[index] if index < len(visible) else ""
             screen += (
-                f"\x1b[{row};1H{line[:content_width]}"
+                f"\x1b[{row};1H{_truncate_terminal_line(line, content_width)}"
                 f"\x1b[{row};{width}H{scrollbar[index]}"
             )
         screen += (
             f"\x1b[{height};1H\x1b[2K"
-            f"{_legend(self.mode, self.settings_editing)[:width]}"
+            f"{_legend(self.mode, self.settings_editing, self.settings_section)[:width]}"
         )
         self.stream.write(screen)
         self.stream.flush()
@@ -355,6 +528,9 @@ class InteractiveConsoleHandler(logging.Handler):
         if self.mode == TESTING and self.testing_calls:
             return self._testing_body_lines(width)[0]
         body_lines: list[str] = []
+        if self.mode == AGENT and not self._agent_message_seen:
+            body_lines.extend(_aespa_logo_lines(width))
+            body_lines.append("")
         for record in self.buffers[self.mode]:
             for line in record.replace("\r", "").replace("\x1b", "\\x1b").split("\n"):
                 wrapped = textwrap.wrap(
@@ -367,6 +543,16 @@ class InteractiveConsoleHandler(logging.Handler):
         return body_lines
 
     def _settings_body_lines(self, width: int) -> list[str]:
+        if self.settings_section == "database":
+            return self._database_settings_body_lines(width)
+        if self.settings_section == "server":
+            return self._server_settings_body_lines(width)
+        return [
+            f"{'▶' if self.settings_selected == 0 else ' '} Server Settings",
+            f"{'▶' if self.settings_selected == 1 else ' '} Database Operations",
+        ]
+
+    def _server_settings_body_lines(self, width: int) -> list[str]:
         value = (
             self.settings_value if self.settings_editing else str(self.configured_port)
         )
@@ -377,7 +563,7 @@ class InteractiveConsoleHandler(logging.Handler):
             else "The desktop app selects an available local port automatically."
         )
         lines = [
-            "Server settings",
+            "Server Settings",
             "",
             f"  Listening address   http://{self.host}:{self.runtime_port}",
             f"  Port                {value}{cursor}",
@@ -385,7 +571,9 @@ class InteractiveConsoleHandler(logging.Handler):
             guidance,
         ]
         if self.allow_port_change:
-            lines.append(f"The setting is saved in {self.env_path} for future launches.")
+            lines.append(
+                f"The setting is saved in {self.env_path} for future launches."
+            )
         if os.environ.get("AESPA_PORT"):
             lines.extend(
                 [
@@ -394,6 +582,48 @@ class InteractiveConsoleHandler(logging.Handler):
                     "on the next launch.",
                 ]
             )
+        if self.settings_status:
+            lines.extend(["", self.settings_status])
+        wrapped: list[str] = []
+        for line in lines:
+            wrapped.extend(_wrap_console_line(line, width))
+        return wrapped
+
+    def _database_settings_body_lines(self, width: int) -> list[str]:
+        lines = [
+            "Database Operations",
+            "",
+            f"{'▶' if self.database_selected == 0 else ' '} Backup database",
+            "      Save a complete copy of the SQLite database.",
+            "",
+            f"{'▶' if self.database_selected == 1 else ' '} Clear scans",
+            "      Remove all web, API, SAST, and campaign runs. Keep targets,",
+            "      LLM connections, and settings.",
+            "",
+            f"{'▶' if self.database_selected == 2 else ' '} Reset database",
+            "      Delete all data, including targets, LLM connections, and settings.",
+        ]
+        if self.database_action == "backup":
+            lines.extend(
+                [
+                    "",
+                    "Backup file path:",
+                    f"  {self.database_input}▌",
+                    "Press Enter to save the backup or Esc to cancel.",
+                ]
+            )
+        elif self.database_action in ("clear", "reset"):
+            required = self.database_action.upper()
+            lines.extend(
+                [
+                    "",
+                    f'Type "{required}" to confirm:',
+                    f"  {self.database_input}▌",
+                    "Press Esc to cancel.",
+                ]
+            )
+        else:
+            lines.extend(["", "Press Esc to return to Settings."])
         if self.settings_status:
             lines.extend(["", self.settings_status])
         wrapped: list[str] = []
@@ -662,17 +892,98 @@ def _scrollbar(body_height: int, page: int, page_count: int) -> list[str]:
     ]
 
 
-def _legend(mode: str = AGENT, editing: bool = False) -> str:
+def _legend(
+    mode: str = AGENT, editing: bool = False, settings_section: str = "root"
+) -> str:
     if mode == SETTINGS:
+        if settings_section == "database":
+            if editing:
+                return "[Enter] Confirm  [Backspace] Delete  [Esc] Cancel"
+            return "[↑/↓] Select  [Enter] Open  [Esc] Back"
+        if settings_section == "root":
+            return "[1-6] Views  [↑/↓] Select  [Enter] Open  [Ctrl+C] Stop"
         if editing:
             return "[0-9] Port  [Backspace] Delete  [Enter] Save  [Esc] Cancel"
-        return "[1-6] Views  [Enter] Change port  [Ctrl+C] Stop"
+        return "[Enter] Change port  [Esc] Back  [Ctrl+C] Stop"
     return "[1-6] Views  [↑/↓] Select  [Enter] Expand  [PgUp/PgDn] Page  [Ctrl+C] Stop"
 
 
 def _listening_url(host: str, port: int) -> str:
     display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
     return f"http://{display_host}:{port}"
+
+
+def _aespa_logo_lines(width: int) -> list[str]:
+    """Return a centered ANSI-color logo for the empty Agent screen."""
+    if width < 46:
+        art = _AESPA_LOGO_COMPACT
+    else:
+        art = _AESPA_LOGO
+
+    art_width = max(len(line) for line in art)
+    padding = " " * max(0, (width - art_width) // 2)
+    lines: list[str] = []
+    for line in art:
+        if not line:
+            lines.append("")
+            continue
+        lines.append(padding + _color_ascii_logo_line(line))
+    return lines
+
+
+def _color_ascii_logo_line(line: str) -> str:
+    """Color density characters separately to retain the shaded ASCII effect."""
+    density_colors = {
+        ".": _ANSI_DIM_RED,
+        "+": _ANSI_ORANGE,
+        "o": _ANSI_RED,
+        "s": _ANSI_CORAL,
+    }
+    if line.strip() == "A E S P A":
+        return f"{_ANSI_CORAL}{line}{_ANSI_RESET}"
+
+    rendered: list[str] = []
+    active_color = ""
+    for character in line:
+        color = density_colors.get(character, _ANSI_RED if character != " " else "")
+        if color != active_color:
+            if active_color:
+                rendered.append(_ANSI_RESET)
+            if color:
+                rendered.append(color)
+            active_color = color
+        rendered.append(character)
+    if active_color:
+        rendered.append(_ANSI_RESET)
+    return "".join(rendered)
+
+
+def _truncate_terminal_line(value: str, width: int) -> str:
+    """Crop a line by visible characters without cutting ANSI color sequences."""
+    result: list[str] = []
+    visible = 0
+    position = 0
+    for match in _ANSI_SGR.finditer(value):
+        text = value[position : match.start()]
+        remaining = width - visible
+        if remaining <= 0:
+            break
+        result.append(text[:remaining])
+        visible += min(len(text), remaining)
+        if visible < width or match.start() == position:
+            result.append(match.group())
+        position = match.end()
+    if visible < width:
+        result.append(value[position : position + width - visible])
+    rendered = "".join(result)
+    if "\x1b[" in rendered and not rendered.endswith(_ANSI_RESET):
+        rendered += _ANSI_RESET
+    return rendered
+
+
+def _default_database_backup_path() -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Path.home() / f"aespa-backup-{timestamp}.db"
 
 
 def _port_available(host: str, port: int) -> bool:
@@ -683,6 +994,24 @@ def _port_available(host: str, port: int) -> bool:
         except OSError:
             return False
     return True
+
+
+def _python_executor_image_present() -> bool:
+    """Return whether the optional Python executor image is available locally."""
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", _PYTHON_EXECUTOR_IMAGE],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _write_port_setting(path: Path, port: int) -> None:

@@ -152,7 +152,11 @@ export function useAliceChat(runId, { onActivate } = {}) {
   useEffect(() => {
     let cancelled = false;
     api.getAliceStatus(runId).then(st => {
-      if (cancelled || !st.running) return;
+      if (cancelled) return;
+      if (st.goal?.tab_id) {
+        setAliceChats(prev => prev.map(tab => tab.id === st.goal.tab_id ? { ...tab, goal: st.goal } : tab));
+      }
+      if (!st.running) return;
       const {
         tab_id,
         think_msg_id,
@@ -234,6 +238,9 @@ export function useAliceChat(runId, { onActivate } = {}) {
           thinkMsgId,
           replyMsgId
         } = session;
+        if (event.goal?.tab_id) {
+          setAliceChats(prev => prev.map(tab => tab.id === event.goal.tab_id ? { ...tab, goal: event.goal } : tab));
+        }
         // Use session's running totals (not m.text + delta) so every render
         // sees the complete accumulated text — identical to the catch-up sync
         // on navigation-back, which ensures blocks parse and render graphically
@@ -409,6 +416,10 @@ export function useAliceChat(runId, { onActivate } = {}) {
     api.stopAliceRun(runId).catch(() => {});
     setAliceThinkingTabId(null);
     setAliceGlobalRunning(false);
+    setAliceChats(prev => prev.map(tab => tab.id === activeAliceTabId && tab.goal ? {
+      ...tab,
+      goal: { ...tab.goal, status: "paused", pause_reason: "Paused by user." }
+    } : tab));
   };
 
   // Core ALICE turn submission. `handleAliceSend` drives this from the chat input,
@@ -419,9 +430,29 @@ export function useAliceChat(runId, { onActivate } = {}) {
     onComplete = null
   } = {}) => {
     const userText = (rawText || "").trim();
-    if (!userText || aliceIsThinking) return;
+    if (!userText) return;
+    if (aliceIsThinking) {
+      const activeGoal = aliceChats.find(tab => tab.id === activeAliceTabId)?.goal;
+      if (activeGoal?.status !== "active") return;
+      const steerMessage = {
+        id: `steer-${Date.now()}`,
+        sender: "user",
+        type: "message",
+        text: userText,
+        ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })
+      };
+      setAliceChats(prev => prev.map(tab => tab.id === activeAliceTabId ? { ...tab, messages: [...tab.messages, steerMessage] } : tab));
+      if (fromInput) setAliceInputText("");
+      api.steerAliceGoal(runId, { message: userText }).catch(() => {});
+      return;
+    }
     if (fromInput) setAliceInputText("");
     const currentTabId = activeAliceTabId;
+    if (/^\/goal\s+resume$/i.test(userText)) {
+      setAliceChats(prev => prev.map(tab => tab.id === currentTabId && tab.goal ? { ...tab, goal: { ...tab.goal, status: "active", pause_reason: "" } } : tab));
+    } else if (/^\/goal\s+clear$/i.test(userText)) {
+      setAliceChats(prev => prev.map(tab => tab.id === currentTabId ? { ...tab, goal: null } : tab));
+    }
 
     // Make sure the A.L.I.C.E. panel is expanded so the user can watch it work.
     if (onActivate) onActivate();

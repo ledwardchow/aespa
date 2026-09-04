@@ -27,6 +27,7 @@ from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
 from aespa.config import Settings, get_settings
 from aespa.db import get_session, init_db
+from aespa.services import alice_goals as alice_goals_svc
 from aespa.services import antigravity_provider as antigravity_provider_svc
 from aespa.services import campaigns as campaigns_svc
 from aespa.services import codex_provider as codex_provider_svc
@@ -39,6 +40,7 @@ from aespa.services.settings import get_cloudflare_access_config
 @asynccontextmanager
 async def _lifespan(app: FastAPI):  # noqa: ARG001
     init_db()
+    alice_goals_svc.reconcile_interrupted_goals()
     await validator_svc.resume_interrupted_validations()
     campaigns_svc.reconcile_campaigns()
     try:

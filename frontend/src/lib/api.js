@@ -38,6 +38,7 @@ export const api = {
   getApiAliceStatus:   (id)       => req(`/api/api-test-runs/${id}/alice/status`),
   startApiAliceRun:    (id,b)     => req(`/api/api-test-runs/${id}/alice/run`,      { method:"POST", body:b }),
   stopApiAliceRun:     (id)       => req(`/api/api-test-runs/${id}/alice/run`,      { method:"DELETE" }),
+  steerApiAliceGoal:   (id,b)     => req(`/api/api-test-runs/${id}/alice/goal/steer`, { method:"POST", body:b }),
   getApiAgentLog:      (id)       => req(`/api/api-test-runs/${id}/agent-log`),
   getApiAgentLogPage:  (id, { limit = 200, beforeId } = {}) => {
     const query = new URLSearchParams({ limit: String(Math.min(limit + 1, 1001)) });
@@ -272,6 +273,7 @@ export const api = {
   getAliceStatus:    (id)          => req(`/api/test-runs/${id}/alice/status`),
   startAliceRun:     (id, b)       => req(`/api/test-runs/${id}/alice/run`,      { method:"POST", body:b }),
   stopAliceRun:      (id)          => req(`/api/test-runs/${id}/alice/run`,      { method:"DELETE" }),
+  steerAliceGoal:    (id,b)        => req(`/api/test-runs/${id}/alice/goal/steer`, { method:"POST", body:b }),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   updateFinding:         (id,fid,b) => req(`/api/test-runs/${id}/findings/${fid}`, { method:"PATCH", body:b }),

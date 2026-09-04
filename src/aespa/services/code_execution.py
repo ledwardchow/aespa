@@ -31,6 +31,11 @@ SANDBOX_GID = 65532
 _active: dict[tuple[str, int, int], asyncio.subprocess.Process] = {}
 
 
+def has_active_executions() -> bool:
+    """Return whether a Python sandbox process is still running."""
+    return any(process.returncode is None for process in _active.values())
+
+
 class _ExecutionLimiter:
     """One process-wide limiter whose ceiling is captured by each execution."""
 

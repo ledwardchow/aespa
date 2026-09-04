@@ -5,6 +5,7 @@ import { FindingReferenceLink } from "../../components/FindingReferenceLink";
 import { renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox, normalizeAliceText } from "../../lib/aliceRender";
 import { IconSend } from "../../components/Icons";
 import { useAutoFollowScroll } from "../../hooks/useAutoFollowScroll";
+import { AliceGoalBar } from "../../components/AliceGoalBar";
 
 
 export function ApiRunAgentsTab({
@@ -176,6 +177,9 @@ export function ApiRunAgentsTab({
     es.onmessage = ev => {
       try {
         const event = JSON.parse(ev.data);
+        if (event.goal?.tab_id) {
+          setAliceChats(prev => prev.map(tab => tab.id === event.goal.tab_id ? { ...tab, goal: event.goal } : tab));
+        }
         if ((event.type === "thinking_chunk" || event.type === "message_chunk") && event.delta && event.tab_id && event.msg_id) {
           textAcc[event.msg_id] = normalizeAliceText((textAcc[event.msg_id] || "") + event.delta);
           const text = textAcc[event.msg_id];
@@ -279,6 +283,9 @@ export function ApiRunAgentsTab({
       setAgents(_buildAgentsFromLog(rows));
     }).catch(() => {});
     api.getApiAliceStatus(runId).then(st => {
+      if (st?.goal?.tab_id) {
+        setAliceChats(prev => prev.map(tab => tab.id === st.goal.tab_id ? { ...tab, goal: st.goal } : tab));
+      }
       if (st?.running) {
         setAliceRunning(true);
         connectAliceStream(0);
@@ -287,11 +294,29 @@ export function ApiRunAgentsTab({
   }, [runId, connectAliceStream]);
 
   // ── ALICE send / stop ─────────────────────────────────────────────────────
-  const handleAliceSend = async () => {
-    if (!aliceInputText.trim() || aliceRunning) return;
-    const userText = aliceInputText;
+  const submitAliceDirective = async rawText => {
+    const userText = (typeof rawText === "string" ? rawText : aliceInputText).trim();
+    if (!userText) return;
+    if (aliceRunning) {
+      const tabId = activeAliceTabIdRef.current;
+      const activeGoal = sessionsRef.current.find(tab => tab.id === tabId)?.goal;
+      if (activeGoal?.status !== "active") return;
+      const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+      setAliceChats(prev => prev.map(tab => tab.id === tabId ? {
+        ...tab,
+        messages: [...tab.messages, { id: `steer-${Date.now()}`, sender: "user", type: "message", text: userText, ts }]
+      } : tab));
+      setAliceInputText("");
+      api.steerApiAliceGoal(runId, { message: userText }).catch(() => {});
+      return;
+    }
     setAliceInputText("");
     const tabId = activeAliceTabIdRef.current;
+    if (/^\/goal\s+resume$/i.test(userText)) {
+      setAliceChats(prev => prev.map(tab => tab.id === tabId && tab.goal ? { ...tab, goal: { ...tab.goal, status: "active", pause_reason: "" } } : tab));
+    } else if (/^\/goal\s+clear$/i.test(userText)) {
+      setAliceChats(prev => prev.map(tab => tab.id === tabId ? { ...tab, goal: null } : tab));
+    }
     const thinkId = `think-${Date.now()}`;
     const replyId = `reply-${Date.now() + 1}`;
     const ts = new Date().toLocaleTimeString("en-US", {
@@ -345,6 +370,7 @@ export function ApiRunAgentsTab({
       setAliceRunning(false);
     }
   };
+  const handleAliceSend = () => submitAliceDirective(aliceInputText);
   const handleAliceStop = () => {
     api.stopApiAliceRun(runId).catch(() => {});
     if (streamRef.current) {
@@ -352,6 +378,11 @@ export function ApiRunAgentsTab({
       streamRef.current = null;
     }
     setAliceRunning(false);
+    const tabId = activeAliceTabIdRef.current;
+    setAliceChats(prev => prev.map(tab => tab.id === tabId && tab.goal ? {
+      ...tab,
+      goal: { ...tab.goal, status: "paused", pause_reason: "Paused by user." }
+    } : tab));
   };
 
   // ── ALICE tab management ──────────────────────────────────────────────────
@@ -428,6 +459,7 @@ export function ApiRunAgentsTab({
     }];
   };
   const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
+  const activeAliceGoal = activeAliceTab?.goal;
   const aliceMessages = activeAliceTab?.messages || [];
   const { historyRef: aliceHistoryRef, handleScroll: handleAliceHistoryScroll } = useAutoFollowScroll(
     activeAliceTabId,
@@ -515,14 +547,25 @@ export function ApiRunAgentsTab({
                       </div>}
                   </div>
                   <div className="alice-chat-resizer" onMouseDown={startAliceResize}></div>
+                  <AliceGoalBar
+                    goal={activeAliceGoal}
+                    running={aliceRunning}
+                    onPause={handleAliceStop}
+                    onResume={() => submitAliceDirective("/goal resume")}
+                    onEdit={() => {
+                      const objective = window.prompt("Update the goal objective", activeAliceGoal?.objective || "");
+                      if (objective?.trim()) submitAliceDirective(`/goal ${objective.trim()}`);
+                    }}
+                    onClear={() => submitAliceDirective("/goal clear")}
+                  />
                   <div className="alice-chat-input-bar">
-                    <input className="alice-chat-input" placeholder="Direct A.L.I.C.E. on what to test…" value={aliceInputText} disabled={aliceRunning} onInput={e => setAliceInputText(e.target.value)} onKeyDown={e => {
+                    <input className="alice-chat-input" placeholder={aliceRunning && activeAliceGoal?.status === "active" ? "Add guidance to the active goal…" : "Direct A.L.I.C.E., or use /goal <objective>…"} value={aliceInputText} disabled={aliceRunning && activeAliceGoal?.status !== "active"} onInput={e => setAliceInputText(e.target.value)} onKeyDown={e => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   handleAliceSend();
                 }
               }} />
-                    {aliceRunning ? <button className="alice-chat-stop-btn" onClick={handleAliceStop} title="Stop">
+                    {aliceRunning && activeAliceGoal?.status !== "active" ? <button className="alice-chat-stop-btn" onClick={handleAliceStop} title="Stop">
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                             <rect x="4" y="4" width="16" height="16" rx="1" ry="1"></rect>
                           </svg>

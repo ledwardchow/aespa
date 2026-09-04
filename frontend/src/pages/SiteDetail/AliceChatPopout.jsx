@@ -93,6 +93,7 @@ export function AliceChatPopout({ runId }) {
       aliceIsThinking={alice.aliceIsThinking}
       handleAliceSend={alice.handleAliceSend}
       handleAliceStop={alice.handleAliceStop}
+      submitAliceDirective={alice.submitAliceDirective}
       popout
     />
   </main>;
