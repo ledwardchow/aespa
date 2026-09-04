@@ -4,8 +4,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import select
 
 from aespa.models import (
     AgentLog,
@@ -470,16 +469,8 @@ def test_delete_credential_wrong_site(client):
 
 # --- Merged from test_sites_export_import.py ---
 @pytest.fixture
-def session():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as s:
-        yield s
-    engine.dispose()
+def session(db_session):
+    return db_session
 
 
 def test_roundtrip_includes_run_children(session):

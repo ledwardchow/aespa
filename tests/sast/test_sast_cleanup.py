@@ -23,16 +23,13 @@ from datetime import datetime, timezone  # noqa: F401  (datetime used in fixture
 from pathlib import Path
 
 import pytest
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
-from aespa import db as db_mod
 from aespa.config import get_settings
 from aespa.db import (
     _cleanup_orphaned_sast_extractions,
     get_engine,
     init_db,
-    set_engine,
 )
 from aespa.models import RunPause, SastRun, ScanLog
 from aespa.sast_workspace import try_acquire_sast_workspace_lease
@@ -41,23 +38,8 @@ _UTC = timezone.utc
 
 
 @pytest.fixture(name="engine")
-def engine_fixture():
-    """A fresh in-memory SQLite engine wired into the db module + a tmp
-    data_dir for the on-disk extraction root."""
-    prev_engine = db_mod._engine
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)
-    yield engine
-    set_engine(prev_engine)
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
+def engine_fixture(db_engine):
+    return db_engine
 
 
 def _write_run(status: str, **kwargs) -> int:

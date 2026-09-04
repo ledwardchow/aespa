@@ -13,9 +13,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from sqlmodel import Session, select
+from sqlmodel import select
 
-from aespa.db import get_engine
 from aespa.models import (
     CrawledPage,
     ScanObligation,
@@ -30,12 +29,6 @@ from aespa.services.web_workprogram import (
     record_probe_execution,
     seed_scan_obligations,
 )
-
-
-@pytest.fixture
-def db_session():
-    with Session(get_engine()) as session:
-        yield session
 
 
 def test_scenario_01_terminal_reason_state_model(db_session):

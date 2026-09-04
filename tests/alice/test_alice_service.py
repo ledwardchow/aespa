@@ -8,43 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
-from aespa.db import get_session, set_engine
+from aespa.db import get_session
 from aespa.main import create_app
 from aespa.models import CrawledPage, LLMConfig, Site
 from aespa.models import TestRun as RunModel
 from aespa.services import alice_tasks as at
 from aespa.services.alice import run_alice_turn, run_alice_turn_stream
-
-
-@pytest.fixture(name="db_engine")
-def db_engine_fixture():
-    """Create an in-memory database engine for testing, and set it globally."""
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    from aespa.db import _engine as original_engine
-
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)
-
-    yield engine
-
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    set_engine(original_engine)
-
-
-@pytest.fixture(name="db_session")
-def db_session_fixture(db_engine):
-    """Provide a database Session for populating test data."""
-    with Session(db_engine) as session:
-        yield session
 
 
 @pytest.fixture(name="test_data")

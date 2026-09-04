@@ -559,15 +559,21 @@ def test_review_executor_persists_each_verdict_before_next_candidate(
     sast_scanner._candidates.pop(42, None)
 
 
-def test_file_inventory_records_actual_read_receipts(tmp_path):
+def test_file_inventory_records_actual_read_receipts(tmp_path, isolated_db_engine):
     root = tmp_path / "source"
     root.mkdir()
     (root / "app.py").write_text("print('hello')\n")
     (root / "notes.txt").write_text("documentation\n")
     coverage = sast_scanner._build_source_inventory(root)
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="inventory receipts")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
 
     result = sast_scanner._run_read_tool(
-        52, root, coverage, "discovery", "read_file", {"path": "app.py"}
+        run_id, root, coverage, "discovery", "read_file", {"path": "app.py"}
     )
 
     assert "hello" in result

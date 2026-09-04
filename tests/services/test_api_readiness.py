@@ -6,11 +6,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
-
-from aespa.db import get_session
-from aespa.main import create_app
+from sqlmodel import SQLModel
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -22,28 +18,8 @@ def data_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def client(data_dir):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-
-    def _override_session():
-        with Session(engine) as session:
-            yield session
-
-    app = create_app()
-    app.dependency_overrides[get_session] = _override_session
-
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c
-
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
+def client(isolated_client, data_dir):
+    return isolated_client
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

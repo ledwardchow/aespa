@@ -37,7 +37,7 @@ def test_adversarial_validator_config_defaults(client: TestClient):
 # ── API round-trip ─────────────────────────────────────────────────────────────
 
 
-def test_upsert_adversarial_validator_config(client: TestClient):
+def test_adversarial_validator_config_update_round_trip(client: TestClient):
     payload = {
         "enabled": False,
         "max_steps": 10,
@@ -56,27 +56,10 @@ def test_upsert_adversarial_validator_config(client: TestClient):
     assert data["auto_validate_inline"] is False
     assert data["require_concrete_disproof"] is False
 
+    stored = client.get("/api/settings/adversarial-validator-config").json()
+    assert {key: stored[key] for key in payload} == payload
 
-def test_upsert_then_get_round_trip(client: TestClient):
-    payload = {
-        "enabled": True,
-        "max_steps": 35,
-        "min_severity": "critical",
-        "end_scan_max_concurrent": 6,
-        "auto_validate_inline": True,
-        "require_concrete_disproof": True,
-    }
-    client.put("/api/settings/adversarial-validator-config", json=payload)
-    resp = client.get("/api/settings/adversarial-validator-config")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["max_steps"] == 35
-    assert data["min_severity"] == "critical"
-    assert data["end_scan_max_concurrent"] == 6
-
-
-def test_upsert_is_idempotent(client: TestClient):
-    payload = {
+    replacement = {
         "enabled": True,
         "max_steps": 5,
         "min_severity": "medium",
@@ -84,11 +67,11 @@ def test_upsert_is_idempotent(client: TestClient):
         "auto_validate_inline": False,
         "require_concrete_disproof": True,
     }
-    r1 = client.put("/api/settings/adversarial-validator-config", json=payload)
-    r2 = client.put("/api/settings/adversarial-validator-config", json=payload)
-    assert r1.status_code == 200
-    assert r2.status_code == 200
-    assert r2.json()["max_steps"] == 5
+    second = client.put(
+        "/api/settings/adversarial-validator-config", json=replacement
+    )
+    assert second.status_code == 200
+    assert client.get("/api/settings/adversarial-validator-config").json()["max_steps"] == 5
 
 
 # ── Validation ────────────────────────────────────────────────────────────────

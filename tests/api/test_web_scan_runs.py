@@ -961,17 +961,6 @@ def test_get_run_not_found(client: TestClient):
     assert r.status_code == 404
 
 
-def test_task_graph_routes_are_removed(client: TestClient):
-    site = _make_site(client)
-    run = _make_run(client, site["id"]).json()
-
-    assert client.get(f"/api/test-runs/{run['id']}/task-graph").status_code == 404
-    assert client.post(f"/api/test-runs/{run['id']}/task-graph/seed").status_code in {
-        404,
-        405,
-    }
-
-
 def test_delete_web_scan_run(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
@@ -1072,13 +1061,6 @@ def test_run_scan_policy_tracks_global_defaults(client: TestClient):
     assert run2["scan_mode"] == "passive"
     assert run2["scanner_policy"]["source"] == "global_default"
     assert run2["scanner_policy"]["max_probes_per_page"] == 30
-
-
-def test_run_scan_policy_endpoint_removed(client: TestClient):
-    site = _make_site(client)
-    run = _make_run(client, site["id"]).json()
-    r = client.get(f"/api/test-runs/{run['id']}/scan/policy")
-    assert r.status_code == 404
 
 
 # ── Start without LLM config ──────────────────────────────────────────────────

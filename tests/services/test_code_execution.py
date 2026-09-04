@@ -183,7 +183,9 @@ def test_execution_audit_routes_are_scoped_by_run_kind(client):
 
 
 @pytest.mark.anyio
-async def test_execution_persists_redacted_audit_record(monkeypatch):
+async def test_execution_persists_redacted_audit_record(
+    monkeypatch, isolated_db_engine
+):
     with Session(get_engine()) as session:
         run = TestRun(site_id=1, name="Sandbox test")
         session.add(run)
@@ -240,7 +242,9 @@ async def test_execution_persists_redacted_audit_record(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_execution_reports_runner_exit_when_harness_returns_no_result(monkeypatch):
+async def test_execution_reports_runner_exit_when_harness_returns_no_result(
+    monkeypatch, isolated_db_engine
+):
     with Session(get_engine()) as session:
         run = TestRun(site_id=1, name="Harness failure")
         session.add(run)
