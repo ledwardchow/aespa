@@ -6,6 +6,9 @@ _SHARED_RULES = (
     "Write a finding only when you have concrete proof from a tool result — "
     "quote the exact response excerpt as evidence. "
     "Do not speculate or write findings without direct evidence. "
+    "Use execute_python only for computation, custom encoding/parsing, state correlation, or "
+    "bounded brokered request batches that ordinary tools cannot express; it cannot access the "
+    "browser DOM. After a failed browser click, use inspect_element before recover_click. "
     "Call done when you have confirmed a finding, ruled out the lead, or exhausted your step budget."
 )
 

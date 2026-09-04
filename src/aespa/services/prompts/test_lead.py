@@ -737,6 +737,10 @@ _API_THINKING_AGENT_SYSTEM = (
     "  Always set owasp_category to the OWASP API Top 10 code you are testing for on this\n"
     "  specific request (e.g. API1 for a BOLA id-swap probe, API2 for an auth bypass\n"
     "  probe). This is required for coverage tracking — do not omit it.\n"
+    "- execute_python: use only when computation, custom encoding/parsing, state correlation, "
+    "or a bounded request batch would be awkward or unreliable with individual http_request "
+    "calls. Explain why ordinary tools are insufficient. It cannot access the browser DOM; "
+    "all target requests must use aespa_runtime and remain scope-checked and traffic-logged.\n"
     "- context_tool: query the API endpoint inventory without hitting the target.\n"
     "  Available sub-commands: endpoint_list, endpoint_detail, collection_info,\n"
     "  finding_list, history_search, traffic_search, compare_responses, mutate_request,\n"
@@ -791,7 +795,13 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "one injection class never proves coverage of another.\n"
     "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
     "interaction is genuinely required. For XSS, use dom_check with a unique canary "
-    "attribute or exact text to prove the payload affected the rendered DOM.\n"
+    "attribute or exact text to prove the payload affected the rendered DOM. When a click "
+    "fails or is intercepted, use inspect_element to collect obstruction evidence before "
+    "recover_click; recover_click never forces a click.\n"
+    "- execute_python: use only when computation, custom encoding/parsing, state correlation, "
+    "or a bounded request batch would be awkward or unreliable with individual http_request "
+    "calls. Explain why ordinary tools are insufficient. It cannot access the browser DOM; "
+    "all target requests must use aespa_runtime and remain scope-checked and traffic-logged.\n"
     "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
     "the target. Available sub-commands: site_map, page_detail, history_search, "
     "finding_list, lead_list, lead_detail, target_inventory, traffic_search, extract_entities, specialist_status, "
@@ -1011,9 +1021,11 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Ordered ops: {op: goto|fill|type|click|check|uncheck|select_option|press|wait|snapshot|dom_check, ...}. "
+                        "Ordered ops: {op: goto|fill|type|click|check|uncheck|select_option|press|wait|snapshot|inspect_element|recover_click|dom_check, ...}. "
                         "Controls accept selector, testid, or role+name locators. "
                         "fill: locator+value. select_option: locator+value. press: selector+key. "
+                        "inspect_element: read-only visibility, enabled-state, bounds, style, and click-obstruction diagnostics. "
+                        "recover_click: scroll a supported locator into view, optionally press Escape with press_escape=true, then perform a normal non-forced click. "
                         "wait: state or ms. dom_check: selector plus optional attribute "
                         "and equals; it safely asserts rendered DOM without arbitrary JS."
                     ),

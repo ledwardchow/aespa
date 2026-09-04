@@ -11873,6 +11873,15 @@ async def _do_agentic_thinking_loop(
                     "recon_summary": recon_summary or {},
                     "known_pages": pages_snapshot[:30],
                     "known_findings": findings_snapshot[-10:],
+                    "proposed_action": {
+                        "step": step,
+                        "tool": tool_name,
+                        "input": tool_input,
+                        "browser_page_url": (
+                            exec_mon.last_intervention_details.get("current_page_url")
+                            or None
+                        ),
+                    },
                     "recent_progress_keys": sorted(completion_policy.progress_keys)[
                         -50:
                     ],
@@ -13350,6 +13359,7 @@ async def _run_thinking_browser_action(
     last_status: Optional[int] = None
     last_headers: dict = {}
     action_log: list[str] = []
+    browser_diagnostics: list[dict[str, Any]] = []
     started = time.perf_counter()
 
     # ── Local traffic capture ─────────────────────────────────────────────────
@@ -13447,6 +13457,64 @@ async def _run_thinking_browser_action(
             ).first
         return None
 
+    async def _inspect_element(locator, target: str) -> dict[str, Any]:
+        """Collect bounded, read-only evidence about a browser interaction target."""
+        count = await locator.count()
+        diagnostic: dict[str, Any] = {"target": target, "count": count}
+        if not count:
+            browser_diagnostics.append(diagnostic)
+            return diagnostic
+        try:
+            diagnostic["visible"] = await locator.is_visible(timeout=2_000)
+        except Exception:
+            diagnostic["visible"] = None
+        try:
+            diagnostic["enabled"] = await locator.is_enabled(timeout=2_000)
+        except Exception:
+            diagnostic["enabled"] = None
+        try:
+            diagnostic["box"] = await locator.bounding_box(timeout=2_000)
+        except Exception:
+            diagnostic["box"] = None
+        try:
+            dom = await locator.evaluate(
+                """el => {
+                    const style = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    const hit = rect.width && rect.height
+                        ? document.elementFromPoint(
+                            rect.left + rect.width / 2,
+                            rect.top + rect.height / 2
+                          )
+                        : null;
+                    return {
+                        tag: el.tagName.toLowerCase(),
+                        id: el.id || null,
+                        classes: Array.from(el.classList || []).slice(0, 8),
+                        role: el.getAttribute('role'),
+                        ariaDisabled: el.getAttribute('aria-disabled'),
+                        disabled: Boolean(el.disabled),
+                        display: style.display,
+                        visibility: style.visibility,
+                        pointerEvents: style.pointerEvents,
+                        opacity: style.opacity,
+                        hitTarget: hit ? {
+                            tag: hit.tagName.toLowerCase(),
+                            id: hit.id || null,
+                            classes: Array.from(hit.classList || []).slice(0, 8),
+                            text: (hit.innerText || hit.textContent || '').trim().slice(0, 160)
+                        } : null,
+                        targetReceivesPointer: Boolean(hit && (hit === el || el.contains(hit)))
+                    };
+                }"""
+            )
+            if isinstance(dom, dict):
+                diagnostic.update(dom)
+        except Exception as exc:
+            diagnostic["inspection_error"] = str(exc)[:300]
+        browser_diagnostics.append(diagnostic)
+        return diagnostic
+
     try:
         for raw_step in steps[:20]:
             if not isinstance(raw_step, dict):
@@ -13534,6 +13602,55 @@ async def _run_thinking_browser_action(
                         await pw_page.wait_for_load_state(state, timeout=timeout_ms)
                 elif op == "snapshot":
                     action_log.append("snapshot")
+                elif op == "inspect_element":
+                    locator = _step_locator(raw_step)
+                    target = (
+                        raw_step.get("selector")
+                        or raw_step.get("testid")
+                        or f"{raw_step.get('role')}:{raw_step.get('name')}"
+                    )
+                    if locator is None:
+                        action_log.append(
+                            "inspect_element failed: missing locator (requires selector, "
+                            "testid, or role+name)"
+                        )
+                        continue
+                    diagnostic = await _inspect_element(locator, str(target))
+                    if not diagnostic.get("count"):
+                        action_log.append(f"inspect_element FAIL {target}: not found")
+                    else:
+                        blocker = diagnostic.get("hitTarget")
+                        blocked = diagnostic.get("targetReceivesPointer") is False
+                        action_log.append(
+                            f"inspect_element {target}: visible={diagnostic.get('visible')} "
+                            f"enabled={diagnostic.get('enabled')} blocked={blocked} "
+                            f"hit={_compact_log_value(blocker, 240)}"
+                        )
+                elif op == "recover_click":
+                    locator = _step_locator(raw_step)
+                    target = (
+                        raw_step.get("selector")
+                        or raw_step.get("testid")
+                        or f"{raw_step.get('role')}:{raw_step.get('name')}"
+                    )
+                    if locator is None:
+                        action_log.append(
+                            "recover_click failed: missing locator (requires selector, "
+                            "testid, or role+name)"
+                        )
+                        continue
+                    before = await _inspect_element(locator, str(target))
+                    if not before.get("count"):
+                        action_log.append(f"recover_click failed: {target} not found")
+                        continue
+                    await locator.scroll_into_view_if_needed(timeout=3_000)
+                    if raw_step.get("press_escape"):
+                        await pw_page.keyboard.press("Escape")
+                    await locator.click(timeout=5_000)
+                    action_log.append(
+                        f"recover_click {target}: normal click succeeded"
+                        + (" after Escape" if raw_step.get("press_escape") else "")
+                    )
                 elif op == "dom_check":
                     selector = str(raw_step.get("selector") or "").strip()
                     if not selector:
@@ -13636,6 +13753,12 @@ async def _run_thinking_browser_action(
         + f"Title: {title}\n"
         + "Action log:\n"
         + "\n".join(f"- {line}" for line in action_log)
+        + (
+            "\n\nElement diagnostics:\n"
+            + json.dumps(browser_diagnostics, indent=2)[:5000]
+            if browser_diagnostics
+            else ""
+        )
         + "\n\n"
         + f"Visible text excerpt:\n{visible_text[:3000]}\n\n"
         + f"HTML excerpt:\n{html[:3000]}"
@@ -13647,6 +13770,12 @@ async def _run_thinking_browser_action(
         f"Last response status: {last_status}\n\n"
         f"Action log:\n"
         + "\n".join(f"- {line}" for line in action_log)
+        + (
+            "\n\nElement diagnostics:\n"
+            + json.dumps(browser_diagnostics, indent=2)[:5000]
+            if browser_diagnostics
+            else ""
+        )
         + "\n\n"
         + (_traffic_section if _traffic_section else "")
         + f"Visible text excerpt:\n{visible_text[:3000]}"
@@ -13654,7 +13783,10 @@ async def _run_thinking_browser_action(
     duration_ms = int((time.perf_counter() - started) * 1000)
     outcome = "Browser action completed."
     if any(
-        " failed:" in line or line.startswith("dom_check FAIL") for line in action_log
+        " failed:" in line
+        or line.startswith("dom_check FAIL")
+        or line.startswith("inspect_element FAIL")
+        for line in action_log
     ):
         outcome = "Browser action completed with failed steps or DOM checks."
     return {
@@ -13666,6 +13798,7 @@ async def _run_thinking_browser_action(
         "captured_traffic": _captured,
         "duration_ms": duration_ms,
         "action_log": action_log,
+        "browser_diagnostics": browser_diagnostics,
         "action_outcome": outcome,
         "evidence": _combined_evidence(request_evidence, response_evidence),
         "request_evidence": request_evidence,

@@ -11,11 +11,11 @@ from typing import Any
 from sqlmodel import Session
 
 from aespa.db import get_engine
-from aespa.models import ApiTestRun, TestRun
+from aespa.models import ApiTestRun, CodeExecutionConfig, TestRun
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services.execution_monitor import StrategyVector
-from aespa.services.prompts.mentor import MENTOR_SYSTEM_PROMPT
+from aespa.services.prompts.mentor import MENTOR_DEBUG_SYSTEM_PROMPT
 from aespa.services.settings import get_llm_config_for_role
 
 log = logging.getLogger("aespa.mentor")
@@ -26,18 +26,34 @@ class MentorAdvice:
     diagnosis: str
     suggested_vectors: list[StrategyVector] = field(default_factory=list)
     tactical_advice: str = ""
+    failure_class: str = "unknown"
+    recovery_kind: str = "pivot"
     raw_response: str = ""
 
     def format_xml_block(self) -> str:
+        def vector_line(vector: StrategyVector) -> str:
+            constraints = []
+            for label, values in (
+                ("tools", vector.tool_names),
+                ("routes", vector.route_patterns),
+                ("categories", vector.owasp_categories),
+                ("classes", vector.test_classes),
+                ("parameters", vector.parameter_names),
+            ):
+                if values:
+                    constraints.append(f"{label}={','.join(values)}")
+            suffix = f" ({'; '.join(constraints)})" if constraints else ""
+            return f"- {vector.id}: {vector.title}{suffix}"
+
         vectors = (
-            "\n".join(
-                f"- {vector.id}: {vector.title}" for vector in self.suggested_vectors
-            )
+            "\n".join(vector_line(vector) for vector in self.suggested_vectors)
             or "- No enforceable vector was produced; choose a clearly different untried action."
         )
         return (
             "<mentor_analysis>\n"
+            f"FAILURE CLASS: {self.failure_class}\n"
             f"DIAGNOSIS:\n{self.diagnosis}\n\n"
+            f"RECOVERY KIND: {self.recovery_kind}\n\n"
             f"STRATEGY SHIFT CONTRACT — Required Pivot Vectors:\n{vectors}\n\n"
             f"TACTICAL ADVICE:\n{self.tactical_advice}\n"
             "</mentor_analysis>"
@@ -62,7 +78,98 @@ def _json_object(text: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def parse_mentor_response(text: str) -> MentorAdvice:
+_SENSITIVE_KEYS = (
+    "authorization",
+    "cookie",
+    "password",
+    "secret",
+    "token",
+    "api-key",
+    "apikey",
+)
+_FAILURE_CLASSES = {
+    "browser_obstruction",
+    "stale_element",
+    "selector_mismatch",
+    "authentication",
+    "unchanged_response",
+    "tool_limit",
+    "target_blocker",
+    "unknown",
+}
+_RECOVERY_KINDS = {
+    "inspect_browser",
+    "recover_browser",
+    "reauthenticate",
+    "switch_http",
+    "execute_python",
+    "pivot",
+}
+
+
+def _redact_and_bound(value: Any, *, key: str = "", depth: int = 0) -> Any:
+    """Retain failure evidence without copying credentials or unbounded bodies."""
+    if any(marker in key.casefold() for marker in _SENSITIVE_KEYS):
+        return "[redacted]"
+    if depth >= 5:
+        return "[truncated]"
+    if isinstance(value, dict):
+        return {
+            str(item_key)[:120]: _redact_and_bound(
+                item_value, key=str(item_key), depth=depth + 1
+            )
+            for item_key, item_value in list(value.items())[:50]
+        }
+    if isinstance(value, list):
+        return [
+            _redact_and_bound(item, key=key, depth=depth + 1)
+            for item in value[:30]
+        ]
+    if isinstance(value, str):
+        text = re.sub(
+            r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+            "[redacted-jwt]",
+            value,
+        )
+        text = re.sub(
+            r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+", r"\1[redacted]", text
+        )
+        return text[:4000]
+    return value
+
+
+def _recent_incident_history(history_snippet: list[dict]) -> list[dict[str, Any]]:
+    recent = []
+    for item in history_snippet[-8:]:
+        recent.append(
+            {
+                "step": item.get("step"),
+                "tool": item.get("tool") or item.get("method"),
+                "url": item.get("url") or item.get("target"),
+                "status": item.get("response_status") or item.get("status"),
+                "note": item.get("note") or item.get("desc"),
+                "request": _redact_and_bound(
+                    {
+                        "headers": item.get("request_headers") or {},
+                        "body": item.get("request_body"),
+                    }
+                ),
+                "result": _redact_and_bound(
+                    {
+                        "headers": item.get("response_headers") or {},
+                        "body": item.get("response_body") or item.get("result"),
+                    }
+                ),
+                "owasp_category": item.get("owasp_category"),
+                "test_class": item.get("test_class"),
+            }
+        )
+    return recent
+
+
+def parse_mentor_response(
+    text: str, *, available_tools: set[str] | None = None
+) -> MentorAdvice:
     """Parse and validate the Mentor's structured response without guessing vectors."""
     payload = _json_object(text)
     if payload is None:
@@ -79,6 +186,13 @@ def parse_mentor_response(text: str) -> MentorAdvice:
             if not isinstance(raw, dict):
                 continue
             vector = StrategyVector.from_dict(raw, index)
+            if available_tools is not None:
+                requested_tools = list(vector.tool_names)
+                vector.tool_names = [
+                    name for name in vector.tool_names if name in available_tools
+                ]
+                if requested_tools and not vector.tool_names:
+                    continue
             if any(
                 (
                     vector.tool_names,
@@ -90,6 +204,11 @@ def parse_mentor_response(text: str) -> MentorAdvice:
             ):
                 vectors.append(vector)
 
+    failure_class = str(payload.get("failure_class") or "unknown").strip()
+    recovery_kind = str(payload.get("recovery_kind") or "pivot").strip()
+    if available_tools is not None and recovery_kind == "execute_python":
+        if "execute_python" not in available_tools:
+            recovery_kind = "pivot"
     return MentorAdvice(
         diagnosis=str(
             payload.get("diagnosis") or "Execution progress stalled."
@@ -98,6 +217,12 @@ def parse_mentor_response(text: str) -> MentorAdvice:
         tactical_advice=str(
             payload.get("tactical_advice") or "Pivot to an untried surface."
         ).strip(),
+        failure_class=(
+            failure_class if failure_class in _FAILURE_CLASSES else "unknown"
+        ),
+        recovery_kind=(
+            recovery_kind if recovery_kind in _RECOVERY_KINDS else "pivot"
+        ),
         raw_response=text,
     )
 
@@ -149,6 +274,7 @@ async def run_mentor_adviser(
         with Session(get_engine()) as session:
             run = session.get(ApiTestRun if is_api_run else TestRun, run_id)
             llm_cfg = get_llm_config_for_role(session, run, "mentor") if run else None
+            code_config = session.get(CodeExecutionConfig, 1)
         if llm_cfg is None:
             terminal_status = "warning"
             log.warning(
@@ -156,31 +282,41 @@ async def run_mentor_adviser(
             )
             return advice
 
-        recent_history = []
-        for item in history_snippet[-8:]:
-            recent_history.append(
-                {
-                    "step": item.get("step"),
-                    "tool": item.get("tool") or item.get("method"),
-                    "url": item.get("url") or item.get("target"),
-                    "status": item.get("response_status") or item.get("status"),
-                    "note": item.get("note") or item.get("desc"),
-                    "owasp_category": item.get("owasp_category"),
-                    "test_class": item.get("test_class"),
-                }
-            )
+        available_tools = {
+            "context_tool",
+            "http_request",
+            "write_finding",
+            "update_lead",
+        }
+        if not is_api_run:
+            available_tools.update({"browser", "reauthenticate"})
+        try:
+            python_roles = set(json.loads(code_config.allowed_roles_json or "[]"))
+        except (AttributeError, TypeError, json.JSONDecodeError):
+            python_roles = set()
+        python_configured = bool(
+            code_config and code_config.enabled and "test_lead" in python_roles
+        )
+        if python_configured:
+            available_tools.add("execute_python")
         incident = {
             "target_url": target_url,
             "trigger_reason": trigger_reason,
-            "recent_history": recent_history,
-            "scan_context": loop_context or {},
+            "recent_history": _recent_incident_history(history_snippet),
+            "scan_context": _redact_and_bound(loop_context or {}),
+            "available_tools": sorted(available_tools),
+            "python_sandbox": {
+                "configured": python_configured,
+                "browser_or_dom_access": False,
+                "network_access": "AESPA broker only",
+            },
         }
         raw_text = await llm_svc.plain_completion(
             llm_cfg,
             json.dumps(incident, sort_keys=True, default=str),
-            system_prompt=MENTOR_SYSTEM_PROMPT,
+            system_prompt=MENTOR_DEBUG_SYSTEM_PROMPT,
         )
-        advice = parse_mentor_response(raw_text)
+        advice = parse_mentor_response(raw_text, available_tools=available_tools)
         if not advice.suggested_vectors:
             terminal_status = "warning"
     except Exception as exc:
@@ -222,6 +358,8 @@ async def run_mentor_adviser(
                 "data": {
                     "emitter": "Mentor Agent",
                     "trigger_reason": trigger_reason,
+                    "failure_class": advice.failure_class,
+                    "recovery_kind": advice.recovery_kind,
                     "diagnosis": advice.diagnosis,
                     "suggested_vectors": [
                         asdict(vector) for vector in advice.suggested_vectors
