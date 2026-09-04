@@ -7,6 +7,8 @@ persists them to the DB, and exposes a polling endpoint for the frontend.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import time
@@ -20,6 +22,37 @@ from aespa.db import get_engine
 
 BODY_LIMIT = 8192  # 8 KB per body stored
 SKIP_RESOURCE_TYPES = {"image", "font", "media"}  # noisy, rarely useful
+
+
+def _body_preview(
+    data: bytes | None, content_type: str = ""
+) -> tuple[Optional[str], Optional[str], int, Optional[str]]:
+    """Return a bounded display preview plus byte-level provenance."""
+    if not data:
+        return None, None, 0, None
+    digest = hashlib.sha256(data).hexdigest()
+    textual = any(
+        marker in content_type.lower()
+        for marker in (
+            "text",
+            "json",
+            "xml",
+            "html",
+            "javascript",
+            "x-www-form-urlencoded",
+        )
+    )
+    if not textual and not content_type:
+        try:
+            decoded = data.decode("utf-8")
+            textual = all(char.isprintable() or char in "\r\n\t" for char in decoded)
+        except UnicodeDecodeError:
+            textual = False
+    if textual:
+        return data.decode(errors="replace")[:BODY_LIMIT], "text", len(data), digest
+    encoded = base64.b64encode(data[:BODY_LIMIT]).decode()
+    return encoded, "base64", len(data), digest
+
 
 # Enabled by the interactive terminal console. Keeping this logger above INFO by
 # default prevents scanner payloads from spilling into ordinary server logs.
@@ -156,7 +189,21 @@ def _write(
     page_id: Optional[int] = None,
     session_label: Optional[str] = None,
     interaction_id: Optional[str] = None,
-) -> None:
+    code_execution_id: Optional[int] = None,
+    batch_id: Optional[str] = None,
+    batch_index: Optional[int] = None,
+    agent_id: Optional[str] = None,
+    agent_step: Optional[int] = None,
+    owasp_category: Optional[str] = None,
+    test_class: Optional[str] = None,
+    obligation_id: Optional[int] = None,
+    request_body_encoding: Optional[str] = None,
+    request_body_size: Optional[int] = None,
+    request_body_sha256: Optional[str] = None,
+    response_body_encoding: Optional[str] = None,
+    response_body_size: Optional[int] = None,
+    response_body_sha256: Optional[str] = None,
+) -> int:
     from aespa.models import TrafficEntry
 
     with Session(get_engine()) as s:
@@ -177,6 +224,20 @@ def _write(
             page_id=page_id,
             session_label=session_label,
             interaction_id=interaction_id,
+            code_execution_id=code_execution_id,
+            batch_id=batch_id,
+            batch_index=batch_index,
+            agent_id=agent_id,
+            agent_step=agent_step,
+            owasp_category=owasp_category,
+            test_class=test_class,
+            obligation_id=obligation_id,
+            request_body_encoding=request_body_encoding,
+            request_body_size=request_body_size,
+            request_body_sha256=request_body_sha256,
+            response_body_encoding=response_body_encoding,
+            response_body_size=response_body_size,
+            response_body_sha256=response_body_sha256,
         )
         s.add(entry)
         s.flush()
@@ -209,6 +270,7 @@ def _write(
     )
 
     _maybe_record_waf(run_id, api_run_id, url, response_headers, response_body)
+    return traffic_id
 
 
 def _maybe_record_waf(
@@ -348,6 +410,20 @@ def get_traffic(
                 "username": e.username,
                 "page_id": e.page_id,
                 "session_label": e.session_label,
+                "code_execution_id": e.code_execution_id,
+                "batch_id": e.batch_id,
+                "batch_index": e.batch_index,
+                "agent_id": e.agent_id,
+                "agent_step": e.agent_step,
+                "owasp_category": e.owasp_category,
+                "test_class": e.test_class,
+                "obligation_id": e.obligation_id,
+                "request_body_encoding": e.request_body_encoding,
+                "request_body_size": e.request_body_size,
+                "request_body_sha256": e.request_body_sha256,
+                "response_body_encoding": e.response_body_encoding,
+                "response_body_size": e.response_body_size,
+                "response_body_sha256": e.response_body_sha256,
             }
             for e in entries
         ]
@@ -386,6 +462,8 @@ class LoggingAsyncClient(httpx.AsyncClient):
         api_run_id: Optional[int] = None,
         page_id: Optional[int] = None,
         session_label: Optional[str] = None,
+        source: str = "httpx",
+        provenance: Optional[dict] = None,
         **kwargs,
     ):
         self.run_id = run_id
@@ -393,6 +471,9 @@ class LoggingAsyncClient(httpx.AsyncClient):
         self.username = username
         self.page_id = page_id
         self.session_label = session_label
+        self.source = source
+        self.provenance = dict(provenance or {})
+        self.last_traffic_id: Optional[int] = None
         kwargs.pop("event_hooks", None)
         super().__init__(*args, **kwargs)
 
@@ -409,25 +490,27 @@ class LoggingAsyncClient(httpx.AsyncClient):
             response = await super().send(request, *args, **kwargs)
             duration_ms = int((time.monotonic() - t0) * 1000)
 
+            response_bytes: bytes | None = None
             try:
                 await response.aread()
+                response_bytes = response.content
                 ct = response.headers.get("content-type", "")
-                if any(t in ct for t in ("text", "json", "xml", "html", "javascript")):
-                    resp_body: Optional[str] = response.text[:BODY_LIMIT]
-                else:
-                    resp_body = f"[binary, {len(response.content)} bytes]"
+                resp_body, resp_encoding, resp_size, resp_sha256 = _body_preview(
+                    response_bytes, ct
+                )
             except Exception as e:
                 resp_body = f"[Error reading response body: {e}]"
+                resp_encoding, resp_size, resp_sha256 = "text", 0, None
 
             raw_body = request.content
-            req_body: Optional[str] = (
-                raw_body.decode(errors="replace")[:BODY_LIMIT] if raw_body else None
+            req_body, req_encoding, req_size, req_sha256 = _body_preview(
+                raw_body or None, request.headers.get("content-type", "")
             )
 
-            await asyncio.to_thread(
+            self.last_traffic_id = await asyncio.to_thread(
                 _write,
                 effective_run_id,
-                "httpx",
+                self.source,
                 request.method,
                 str(request.url),
                 dict(request.headers),
@@ -440,6 +523,21 @@ class LoggingAsyncClient(httpx.AsyncClient):
                 self.api_run_id,
                 self.page_id,
                 self.session_label,
+                None,
+                self.provenance.get("code_execution_id"),
+                self.provenance.get("batch_id"),
+                self.provenance.get("batch_index"),
+                self.provenance.get("agent_id"),
+                self.provenance.get("agent_step"),
+                self.provenance.get("owasp_category"),
+                self.provenance.get("test_class"),
+                self.provenance.get("obligation_id"),
+                req_encoding,
+                req_size,
+                req_sha256,
+                resp_encoding,
+                resp_size,
+                resp_sha256,
             )
             # Fire any registered coverage-tracking callback for API runs.
             if self.api_run_id is not None:
@@ -452,14 +550,14 @@ class LoggingAsyncClient(httpx.AsyncClient):
         except Exception as exc:
             duration_ms = int((time.monotonic() - t0) * 1000)
             raw_body = request.content
-            req_body: Optional[str] = (
-                raw_body.decode(errors="replace")[:BODY_LIMIT] if raw_body else None
+            req_body, req_encoding, req_size, req_sha256 = _body_preview(
+                raw_body or None, request.headers.get("content-type", "")
             )
 
-            await asyncio.to_thread(
+            self.last_traffic_id = await asyncio.to_thread(
                 _write,
                 effective_run_id,
-                "httpx",
+                self.source,
                 request.method,
                 str(request.url),
                 dict(request.headers),
@@ -472,6 +570,21 @@ class LoggingAsyncClient(httpx.AsyncClient):
                 self.api_run_id,
                 self.page_id,
                 self.session_label,
+                None,
+                self.provenance.get("code_execution_id"),
+                self.provenance.get("batch_id"),
+                self.provenance.get("batch_index"),
+                self.provenance.get("agent_id"),
+                self.provenance.get("agent_step"),
+                self.provenance.get("owasp_category"),
+                self.provenance.get("test_class"),
+                self.provenance.get("obligation_id"),
+                req_encoding,
+                req_size,
+                req_sha256,
+                "text",
+                None,
+                None,
             )
             raise exc
 

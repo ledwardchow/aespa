@@ -549,6 +549,30 @@ class ScannerPolicy(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class CodeExecutionConfig(SQLModel, table=True):
+    """Singleton settings for sandboxed agent-authored Python execution."""
+
+    __tablename__ = "code_execution_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    enabled: bool = Field(default=False)
+    backend: str = Field(default="docker")
+    image_ref: str = Field(default="ledwardchow/aespa-python-executor:0.1")
+    allowed_roles_json: str = Field(default='["alice","specialist","test_lead"]')
+    timeout_s: int = Field(default=30)
+    memory_mb: int = Field(default=256)
+    cpu_cores: float = Field(default=0.5)
+    pids_limit: int = Field(default=32)
+    workspace_mb: int = Field(default=16)
+    output_limit_bytes: int = Field(default=65536)
+    artifact_limit_bytes: int = Field(default=10485760)
+    max_requests_per_execution: int = Field(default=20)
+    max_concurrent_requests: int = Field(default=5)
+    max_concurrent_executions: int = Field(default=2)
+    retain_redacted_source: bool = Field(default=True)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class CrawlerConfig(SQLModel, table=True):
     """Singleton row (id always = 1) for crawler behavior settings."""
 
@@ -958,6 +982,83 @@ class TrafficEntry(SQLModel, table=True):
     session_label: Optional[str] = Field(default=None, index=True)
     # Opaque id for one replayed browser action. Page-load traffic has no id.
     interaction_id: Optional[str] = Field(default=None, index=True)
+    code_execution_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("code_execution.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    batch_id: Optional[str] = Field(default=None, index=True)
+    batch_index: Optional[int] = Field(default=None)
+    agent_id: Optional[str] = Field(default=None, index=True)
+    agent_step: Optional[int] = Field(default=None)
+    owasp_category: Optional[str] = Field(default=None, index=True)
+    test_class: Optional[str] = Field(default=None, index=True)
+    obligation_id: Optional[int] = Field(default=None, index=True)
+    request_body_encoding: Optional[str] = Field(default=None)
+    request_body_size: Optional[int] = Field(default=None)
+    request_body_sha256: Optional[str] = Field(default=None)
+    response_body_encoding: Optional[str] = Field(default=None)
+    response_body_size: Optional[int] = Field(default=None)
+    response_body_sha256: Optional[str] = Field(default=None)
+
+
+class CodeExecution(SQLModel, table=True):
+    """One auditable invocation of agent-authored code in an external sandbox."""
+
+    __tablename__ = "code_execution"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_kind: str = Field(default="web", index=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    agent_id: str = Field(index=True)
+    agent_role: str
+    agent_step: Optional[int] = Field(default=None)
+    purpose: str
+    code_redacted: Optional[str] = Field(default=None)
+    code_sha256: str
+    status: str = Field(default="queued", index=True)
+    runtime_backend: str = Field(default="docker")
+    runtime_version: Optional[str] = Field(default=None)
+    image_ref: Optional[str] = Field(default=None)
+    protocol_version: str = Field(default="1")
+    limits_json: str = Field(default="{}")
+    request_count: int = Field(default=0)
+    denied_request_count: int = Field(default=0)
+    stdout_preview: Optional[str] = Field(default=None)
+    stderr_preview: Optional[str] = Field(default=None)
+    result_json: Optional[str] = Field(default=None)
+    exit_code: Optional[int] = Field(default=None)
+    error_message: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+
+
+class CodeArtifact(SQLModel, table=True):
+    """A bounded input or output artifact associated with a code execution."""
+
+    __tablename__ = "code_artifact"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    execution_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("code_execution.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    direction: str = Field(default="output")
+    logical_name: str
+    content_type: Optional[str] = Field(default=None)
+    size_bytes: int
+    sha256: str
+    stored_path: str
+    created_at: datetime = Field(default_factory=_utcnow)
 
 
 class ScannerSession(SQLModel, table=True):

@@ -1807,6 +1807,9 @@ async def start_sast_validation_resume(api_run_id: int) -> None:
 
 async def stop_api_scan(api_run_id: int) -> bool:
     """Stop an in-progress API scan."""
+    from aespa.services.code_execution import cancel_run_executions
+
+    cancel_run_executions("api", api_run_id)
     task = _scan_tasks.get(api_run_id)
     if task is not None:
         _stop_requested.add(api_run_id)

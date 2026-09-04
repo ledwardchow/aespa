@@ -119,7 +119,11 @@ export function TrafficDetail({ entry, onClose }) {
   };
   const detailHeight = layout.detailHeight == null ? undefined : { flex: `0 0 ${layout.detailHeight}%` };
   const requestWidth = layout.requestWidth;
+  const executionLabel = entry.code_execution_id
+    ? `Python execution #${entry.code_execution_id}${entry.batch_id ? ` · batch ${entry.batch_id}${entry.batch_index != null ? ` [${entry.batch_index}]` : ""}` : ""}${entry.agent_id ? ` · ${entry.agent_id}${entry.agent_step != null ? ` step ${entry.agent_step}` : ""}` : ""}`
+    : null;
   return <div className="traffic-detail-wrap" ref={detailWrapRef} style={detailHeight}>
+    {executionLabel && <div className="traffic-provenance">{executionLabel}{entry.owasp_category ? ` · ${entry.owasp_category}` : ""}{entry.test_class ? ` · ${entry.test_class}` : ""}</div>}
     <div className="traffic-detail-resizer" role="separator" aria-label="Resize request and response display height" aria-orientation="horizontal" aria-valuemin={MIN_DETAIL_HEIGHT} aria-valuemax={MAX_DETAIL_HEIGHT} aria-valuenow={Math.round(layout.detailHeight ?? 50)} tabIndex="0" onPointerDown={event => startResize(event, "y")} onKeyDown={event => handleKeyDown(event, "y")}><span className="traffic-resizer-grip" aria-hidden="true" /></div>
     <div className="traffic-detail" ref={detailRef} style={{ gridTemplateColumns: `minmax(0, ${requestWidth}fr) 8px minmax(0, ${100 - requestWidth}fr)` }}>
       <div className="traffic-pane"><div className="traffic-pane-label">REQUEST — {entry.method} {entry.url}</div><pre className="traffic-raw">{rawRequest(entry)}</pre></div>

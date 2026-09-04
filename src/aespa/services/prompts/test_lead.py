@@ -946,6 +946,39 @@ THINKING_AGENT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "execute_python",
+        "description": (
+            "Run a short Python 3 script in AESPA's isolated sandbox for custom "
+            "payload generation, response parsing, stateful workflows, or bounded "
+            "request batches. The sandbox has no direct network access. Import "
+            "aespa_runtime and use aespa_runtime.request(...) or request_batch(...); "
+            "AESPA brokers, scope-checks, and logs every request in Traffic."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "purpose": {
+                    "type": "string",
+                    "description": "Briefly explain why ordinary tools are insufficient.",
+                },
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Python source. Network and subprocess APIs are unavailable; "
+                        "use aespa_runtime for target requests."
+                    ),
+                },
+                "timeout_s": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60,
+                },
+            },
+            "required": ["purpose", "code"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "browser",
         "description": (
             "Interact with the target using a real browser. Use when JavaScript "
@@ -1397,6 +1430,7 @@ THINKING_AGENT_TOOLS: list[dict] = [
 _API_TEST_LEAD_TOOL_NAMES = frozenset(
     {
         "http_request",
+        "execute_python",
         "context_tool",
         "update_lead",
         "write_finding",
@@ -1413,6 +1447,7 @@ _SAST_VALIDATE_TOOL_NAMES = frozenset(
     {
         "context_tool",
         "http_request",
+        "execute_python",
         "browser",
         "reauthenticate",
         "write_finding",

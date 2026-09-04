@@ -18,6 +18,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
    - [LLM Configuration (`LLMProviderConfig` & `LLMConfig`)](#llm-configuration-llmproviderconfig--llmconfig-models)
    - [LLM Profiles (`LLMProfile`)](#llm-profiles-llmprofile-model)
    - [Scanner Policy](#scanner-policy-scannerpolicy-model)
+   - [Python Sandbox](#python-sandbox-codeexecutionconfig-model)
    - [Burp Suite REST API Config](#burp-suite-rest-api-config-burprestapiconfig-model)
    - [Upstream Proxy Config](#upstream-proxy-config-upstreamproxyconfig-model)
    - [Specialist Agent Config](#specialist-agent-config-specialistagentconfig-model)
@@ -262,6 +263,49 @@ Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm
 | `max_request_body` | `65536` | Probe body size cap (bytes) |
 | `follow_redirects` | `true` | |
 | `allow_subdomains` | `true` | Allow crawling/probing subdomains of the target |
+
+### Python Sandbox (`CodeExecutionConfig` model)
+
+Singleton row (id = 1). Enables an optional, disabled-by-default Python tool for
+A.L.I.C.E. and Specialist Agents. Untrusted code runs in a short-lived Docker
+container with no direct network namespace, a read-only root filesystem, an
+unprivileged user, dropped capabilities, bounded CPU/memory/processes, and a
+wall-clock timeout.
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Master switch for Python execution |
+| `image_ref` | `ledwardchow/aespa-python-executor:0.1` | Published multi-architecture executor image |
+| `allowed_roles_json` | `["alice", "specialist", "test_lead"]` | Agent roles that may receive the tool |
+| `max_concurrent_executions` | `2` | Concurrent executor container limit |
+| `timeout_s` | `30` | Per-execution wall-clock limit |
+| `memory_mb` | `256` | Container memory and swap ceiling |
+| `cpu_cores` | `0.5` | Container CPU quota |
+| `pids_limit` | `32` | Container PID ceiling |
+| `workspace_mb` | `16` | Size of the writable, no-exec temporary workspace |
+| `output_limit_bytes` | `65536` | Separate stdout/stderr capture limit |
+| `artifact_limit_bytes` | `10485760` | Reserved aggregate artifact limit for the execution audit model |
+| `max_requests_per_execution` | `20` | Brokered HTTP requests allowed per execution |
+| `max_concurrent_requests` | `5` | Concurrent requests within one execution |
+| `retain_redacted_source` | `true` | Retain source after replacing active-session secrets |
+
+Python cannot open target sockets itself. The bundled `aespa_runtime` SDK sends
+structured request commands over an inherited local socket to the trusted AESPA
+broker. The broker applies the run's ordinary scope, scan-mode, header, body,
+session, pacing, redirect, and request-budget rules before using the scanner HTTP
+client. Every transmitted request is written to `TrafficEntry` with
+`source="python"`, execution/batch/agent provenance, binary-safe body previews,
+byte counts, and SHA-256 hashes. Policy denials and local computation do not
+create synthetic traffic rows.
+
+Each invocation is persisted as `CodeExecution`, including its source, lifecycle,
+resource/request counters, captured output, and error. Source and output are
+redacted against the active session vault before storage. The settings API also
+reports whether Docker and the configured image are available. When enabled, it
+launches a disposable network-disabled probe with the exact production security
+profile and verifies that the non-root harness can write to its private tmpfs
+workspace. An incompatible Docker installation therefore fails readiness before
+an agent attempts execution.
 
 ### Burp Suite REST API Config (`BurpRestApiConfig` model)
 
@@ -679,6 +723,7 @@ never reject `done` indefinitely.
 | Action | Description |
 |---|---|
 | `http` | Issue an arbitrary HTTP request (method, URL, headers, body) |
+| `execute_python` | Run bounded Python computation; target HTTP is available only through the policy-enforcing `aespa_runtime` broker and is traffic-logged |
 | `browser` | Playwright commands: `goto`, `fill`, `click`, `wait`, `snapshot` |
 | `jwt` | Forge a signed HS256 JWT from a discovered secret |
 | `decode_jwt` | Decode a JWT's header and payload; optionally verify the HS256 signature against a known secret |
@@ -1056,6 +1101,8 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/settings/llm-config` | `settings.py` | Get/set LLM provider config |
 | `/api/settings/llm-profiles` | `settings.py` | CRUD for multi-role model routing profiles |
 | `/api/settings/scanner-policy` | `settings.py` | Get/set scanner policy |
+| `/api/settings/code-execution` | `settings.py` | Get/set Python sandbox limits and allowed roles |
+| `/api/settings/code-execution/status` | `settings.py` | Report Docker and executor-image readiness |
 | `/api/settings/specialist-agent` | `settings.py` | Get/set specialist agent config |
 | `/api/settings/burp-rest-api` | `settings.py` | Get/set Burp Suite REST API config |
 | `/api/settings/burp-rest-api/test-connection` | `settings.py` | Test connectivity to Burp REST API |
@@ -1067,6 +1114,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/test-runs/{id}/thinking-scan/` | `scan.py` | Start/stop/status/resume for dynamic scan |
 | `/api/test-runs/{id}/recon-summary` | `scan.py` | Get the structured attack surface summary for a run |
 | `/api/test-runs/{id}/findings/` | `test_runs.py` | List, import, validate findings |
+| `/api/test-runs/{id}/code-executions` | `traffic.py` | List and inspect Python execution audit records for a web run |
 | `/api/test-runs/{id}/coverage` | `test_runs.py` | Web OWASP Coverage matrix (OWASP Top-10) (`GET`); `coverage/seed` re-seeds cells |
 | `/api/test-runs/{id}/sast-runs/available` | `test_runs.py` | Completed SAST runs (with leads) available to import into this web run |
 | `/api/test-runs/{id}/import-leads` | `test_runs.py` | Copy a SAST run's leads into this web run |
@@ -1085,6 +1133,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/api-test-runs/{id}/scan/` | `api_test_runs.py` | Start/stop/status for API scans |
 | `/api/api-test-runs/{id}/coverage` | `api_test_runs.py` | OWASP API Top-10 coverage matrix |
 | `/api/api-test-runs/{id}/findings/` | `api_test_runs.py` | List, import, export API scan findings |
+| `/api/api-test-runs/{id}/code-executions` | `api_test_runs.py` | List and inspect Python execution audit records for an API run |
 | `/api/api-test-runs/{id}/traffic` | `api_test_runs.py` | API scan HTTP traffic log |
 | `/api/api-test-runs/{id}/alice/*` | `api_test_runs.py` | ALICE chat for API runs (same surface as web ALICE) |
 | `/api/sast-runs` | `sast_runs.py` | `POST` (multipart) create a **standalone** SAST run from an uploaded source ZIP; `GET` lists all SAST runs |
@@ -1297,6 +1346,7 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 | Tool | Description |
 |---|---|
 | `http_request` | Issue arbitrary HTTP requests; scope-checked; traffic logged |
+| `execute_python` | Run bounded Python computation; target requests must use `aespa_runtime` and appear in the Traffic log with execution provenance |
 | `browser` | Drive a live Playwright browser. `page_id` and `replay=true` restore a saved crawler state and preserve page/session traffic provenance |
 | `context_tool` | Read-only access to crawl data, request history, traffic, coverage gaps, response comparisons, and bounded mutation suggestions |
 | `reauthenticate` | Re-run the configured web login flow, including supported TOTP or email-OTP steps, and refresh the primary session |

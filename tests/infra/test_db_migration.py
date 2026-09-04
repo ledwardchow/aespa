@@ -3,6 +3,11 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa import db
+from alembic import command
+
+
+def _upgrade_to(engine, revision: str) -> None:
+    command.upgrade(db._get_alembic_config(engine), revision)
 
 
 def test_ensure_column_adds_missing_column():
@@ -801,7 +806,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "test_run" in tables
         assert was_pre_alembic is False
         # The migration chain now includes replay/session provenance fields.
-        assert version == "a8f2c6d9e4b1"
+        assert version == "8b4d2e6f9a10"
     finally:
         engine.dispose()
 
@@ -878,7 +883,7 @@ def test_global_run_identity_migration_remaps_collisions_and_drops_ambiguous_row
                 conn.execute(text(statement))
             conn.commit()
 
-        db.run_migrations(engine)
+        _upgrade_to(engine, "e1a7b9c3d5f0")
 
         with engine.connect() as conn:
             conn.execute(text("PRAGMA foreign_keys=ON"))
@@ -929,7 +934,7 @@ def test_replay_provenance_repair_migration_handles_existing_c4_database():
                 conn.execute(text(statement))
             conn.commit()
 
-        db.run_migrations(engine)
+        _upgrade_to(engine, "d2f9a6b1c340")
 
         with engine.connect() as conn:
             columns = {
@@ -951,7 +956,7 @@ def test_replay_provenance_repair_migration_handles_existing_c4_database():
         assert "replay_credential_id" in columns["crawled_page"]
         assert {"page_id", "session_label"} <= columns["traffic_entry"]
         assert "page_id" in columns["target_intel_item"]
-        assert version == "a8f2c6d9e4b1"
+        assert version == "d2f9a6b1c340"
     finally:
         engine.dispose()
 
@@ -1050,6 +1055,8 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
                 "CREATE TABLE test_run (id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL, name TEXT)",
                 "CREATE TABLE api_test_run (id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL, name TEXT)",
                 "CREATE TABLE crawler_config (id INTEGER PRIMARY KEY, test_run_id INTEGER)",
+                "CREATE TABLE scanner_policy (id INTEGER PRIMARY KEY)",
+                "CREATE TABLE traffic_entry (id INTEGER PRIMARY KEY)",
                 "INSERT INTO site VALUES (1, 'legacy site')",
                 "INSERT INTO run_identity VALUES (1, 'web', 1, CURRENT_TIMESTAMP)",
                 "INSERT INTO test_run VALUES (1, 1, 'legacy run')",
@@ -1102,7 +1109,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "a8f2c6d9e4b1"
+        assert version == "8b4d2e6f9a10"
     finally:
         engine.dispose()
 
@@ -1139,7 +1146,7 @@ def test_current_db_with_applications_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "a8f2c6d9e4b1"
+        assert version == "8b4d2e6f9a10"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -1171,7 +1178,7 @@ def test_explicit_target_component_migration_adds_nullable_column():
                 conn.execute(text(statement))
             conn.commit()
 
-        db.run_migrations(engine)
+        _upgrade_to(engine, "b8e2f4a6c901")
 
         with engine.connect() as conn:
             columns = {
@@ -1183,7 +1190,7 @@ def test_explicit_target_component_migration_adds_nullable_column():
             ).scalar_one()
 
         assert "component_id" in columns
-        assert version == "a8f2c6d9e4b1"
+        assert version == "b8e2f4a6c901"
     finally:
         engine.dispose()
 
@@ -1233,7 +1240,7 @@ def test_scope_host_port_migration_backfills_configured_effective_ports():
             )
             conn.commit()
 
-        db.run_migrations(engine)
+        _upgrade_to(engine, "d4e5f6a7b8c9")
 
         with engine.connect() as conn:
             site_scope = conn.execute(
@@ -1251,6 +1258,6 @@ def test_scope_host_port_migration_backfills_configured_effective_ports():
             '"secure.example.com:443"]'
         )
         assert api_scope == '["api.example.com:8080"]'
-        assert version == "a8f2c6d9e4b1"
+        assert version == "d4e5f6a7b8c9"
     finally:
         engine.dispose()

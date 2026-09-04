@@ -422,6 +422,7 @@ def test_api_test_lead_exposes_only_api_aware_tools():
     names = {tool["name"] for tool in get_api_test_lead_tools()}
     assert names == {
         "http_request",
+        "execute_python",
         "context_tool",
         "update_lead",
         "write_finding",

@@ -75,6 +75,7 @@ ALICE_MAX_STEPS = 300
 # Tools available to A.L.I.C.E. — same as specialist but without agent_dispatch loops.
 _ALICE_TOOL_NAMES = {
     "http_request",
+    "execute_python",
     "browser",
     "context_tool",
     "skip_coverage",
@@ -540,6 +541,32 @@ async def _execute_alice_tool(
                     "non-confirmed finding(s)."
                 ),
             }
+        )
+
+    # ── execute_python ───────────────────────────────────────────────────────
+    if tool_name == "execute_python":
+        from aespa.services.code_execution import execute_agent_python
+
+        execution_scope = (
+            scope_check_fn
+            if scope_check_fn
+            else (lambda url: check_scope(url, site_id, run_id))
+        )
+        with Session(get_engine()) as policy_session:
+            execution_policy = get_scanner_policy(policy_session)
+        return await execute_agent_python(
+            run_kind="api" if api_run_id is not None else "web",
+            run_id=run_id,
+            agent_id="alice",
+            agent_role="alice",
+            agent_step=step,
+            purpose=str(tool_input.get("purpose") or "User-directed custom test"),
+            code=str(tool_input.get("code") or ""),
+            session_vault=session_vault,
+            scanner_policy=execution_policy,
+            scope_check_fn=execution_scope,
+            post_probe_fn=post_probe_fn,
+            requested_timeout_s=tool_input.get("timeout_s"),
         )
 
     # ── http_request ─────────────────────────────────────────────────────────

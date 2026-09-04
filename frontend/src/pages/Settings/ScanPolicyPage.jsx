@@ -5,6 +5,7 @@ import { SpecialistAgentSettings } from "./SpecialistAgentSettings";
 import { ReportingSettings } from "./ReportingSettings";
 import { CrawlerSettings } from "./CrawlerSettings";
 import { ComponentMapperSettings } from "./ComponentMapperSettings";
+import { CodeExecutionSettings } from "./CodeExecutionSettings";
 
 
 export function ScanPolicyPage() {
@@ -30,6 +31,7 @@ export function ScanPolicyPage() {
         <button className={"tab-btn" + (tab === "validator" ? " active" : "")} onClick={() => setTab("validator")}>Validator</button>
         <button className={"tab-btn" + (tab === "reporting" ? " active" : "")} onClick={() => setTab("reporting")}>Reporting</button>
         <button className={"tab-btn" + (tab === "mapper" ? " active" : "")} onClick={() => setTab("mapper")}>Component Mapper</button>
+        <button className={"tab-btn" + (tab === "code" ? " active" : "")} onClick={() => setTab("code")}>Python Sandbox</button>
       </div>
       {tab === "global" && <GlobalPolicySubTabs tab={globalTab} setTab={setGlobalTab} />}
       <div className="scroll-content" style={{
@@ -47,6 +49,7 @@ export function ScanPolicyPage() {
         {tab === "specialists" && <SpecialistAgentSettings />}
         {tab === "validator" && <ValidatorSettings />}
         {tab === "reporting" && <ReportingSettings />}
+        {tab === "code" && <CodeExecutionSettings />}
       </div>
     </div></>;
 }

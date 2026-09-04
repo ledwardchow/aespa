@@ -17,6 +17,7 @@ from aespa.models import (
     BrowserDebugConfig,
     BurpRestApiConfig,
     CloudflareAccessConfig,
+    CodeExecutionConfig,
     ComponentMapperConfig,
     CrawlerConfig,
     GlobalHttpHeaderConfig,
@@ -37,6 +38,8 @@ from aespa.schemas import (
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
+    CodeExecutionConfigIn,
+    CodeExecutionConfigOut,
     ComponentMapperConfigIn,
     ComponentMapperConfigOut,
     CrawlerConfigIn,
@@ -890,6 +893,50 @@ def get_scanner_policy(session: Session) -> ScannerPolicyOut:
     if cfg is None:
         return ScannerPolicyOut(**ScannerPolicyIn().model_dump(), updated_at=_utcnow())
     return _policy_from_model(cfg)
+
+
+def get_code_execution_config(session: Session) -> CodeExecutionConfigOut:
+    cfg = session.get(CodeExecutionConfig, _SINGLETON_ID)
+    if cfg is None:
+        return CodeExecutionConfigOut(
+            **CodeExecutionConfigIn().model_dump(), updated_at=_utcnow()
+        )
+    return CodeExecutionConfigOut(
+        enabled=cfg.enabled,
+        backend=cfg.backend,
+        image_ref=cfg.image_ref,
+        allowed_roles=_json_loads(
+            cfg.allowed_roles_json, ["alice", "specialist", "test_lead"]
+        ),
+        timeout_s=cfg.timeout_s,
+        memory_mb=cfg.memory_mb,
+        cpu_cores=cfg.cpu_cores,
+        pids_limit=cfg.pids_limit,
+        workspace_mb=cfg.workspace_mb,
+        output_limit_bytes=cfg.output_limit_bytes,
+        artifact_limit_bytes=cfg.artifact_limit_bytes,
+        max_requests_per_execution=cfg.max_requests_per_execution,
+        max_concurrent_requests=cfg.max_concurrent_requests,
+        max_concurrent_executions=cfg.max_concurrent_executions,
+        retain_redacted_source=cfg.retain_redacted_source,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_code_execution_config(
+    session: Session, payload: CodeExecutionConfigIn
+) -> CodeExecutionConfigOut:
+    cfg = session.get(CodeExecutionConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = CodeExecutionConfig(id=_SINGLETON_ID)
+    for key, value in payload.model_dump(exclude={"allowed_roles"}).items():
+        setattr(cfg, key, value)
+    cfg.allowed_roles_json = _json_dumps(payload.allowed_roles)
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_code_execution_config(session)
 
 
 def upsert_scanner_policy(
