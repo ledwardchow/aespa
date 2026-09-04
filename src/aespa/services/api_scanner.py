@@ -1311,8 +1311,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         coll = s.get(ApiCollection, run.collection_id)
         base_url = (coll.base_url if coll else "").rstrip("/")
         coverage_mode = run.coverage_mode or "track"
-        for obj in [run, llm_cfg]:
-            s.expunge(obj)
+        s.expunge(run)
 
     scanner_proxy_url = (
         upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None

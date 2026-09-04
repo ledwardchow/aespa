@@ -1442,7 +1442,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 else []
             )
             detached: set[int] = set()
-            for obj in [run, coll, doc, llm_cfg_obj, validator_cfg_obj]:
+            for obj in [run, coll, doc]:
                 if obj is not None and id(obj) not in detached:
                     s.expunge(obj)
                     detached.add(id(obj))

@@ -628,7 +628,7 @@ def test_write_only_api_keys_behavior(client: TestClient):
     assert burp_get.json()["api_key"] is None
 
 
-def test_run_llm_config_resolves_provider_fields_on_session_instance():
+def test_run_llm_config_resolves_provider_fields_without_changing_session_instance():
     from aespa import models as _models  # noqa: F401
     from aespa.models import LLMConfig, LLMProviderConfig, Site, TestRun
     from aespa.services import settings as settings_service
@@ -669,19 +669,23 @@ def test_run_llm_config_resolves_provider_fields_on_session_instance():
 
             cfg = settings_service.get_llm_config_for_run(session, run)
 
-            assert inspect(cfg).session is session
-            assert session.is_modified(cfg) is False
+            assert inspect(cfg, raiseerr=False) is None
+            assert inspect(profile).session is session
+            assert session.is_modified(profile) is False
             assert cfg.provider == "azure_foundry_anthropic"
             assert cfg.api_key == "provider-key"
             assert cfg.base_url == "https://example.services.ai.azure.com/anthropic/v1"
 
             settings_service.get_run_scanner_policy(session, run)
-            assert session.is_modified(cfg) is False
-            session.expunge(cfg)
+            assert session.is_modified(profile) is False
+            assert profile.api_key is None
+            assert profile.base_url is None
+            profile_id = profile.id
+            session.expire_all()
             assert cfg.api_key == "provider-key"
 
         with Session(engine) as session:
-            persisted = session.get(LLMConfig, profile.id)
+            persisted = session.get(LLMConfig, profile_id)
             assert persisted.api_key is None
             assert persisted.base_url is None
     finally:

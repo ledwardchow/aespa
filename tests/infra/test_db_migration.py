@@ -1,8 +1,11 @@
+from __future__ import annotations
+
+import pytest
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa import db
+from aespa import db, db_legacy
 from alembic import command
 
 
@@ -21,7 +24,7 @@ def test_ensure_column_adds_missing_column():
             conn.execute(text("CREATE TABLE sample (id INTEGER PRIMARY KEY)"))
             conn.commit()
 
-        db._ensure_column(engine, "sample", "name", "TEXT")
+        db_legacy._ensure_column(engine, "sample", "name", "TEXT")
 
         with engine.connect() as conn:
             columns = {
@@ -153,8 +156,8 @@ def test_backfill_scanner_session_account_labels_replaces_opaque_subjects():
             )
             conn.commit()
 
-        db._backfill_scanner_session_account_labels(engine)
-        db._backfill_scanner_session_account_labels(engine)
+        db_legacy._backfill_scanner_session_account_labels(engine)
+        db_legacy._backfill_scanner_session_account_labels(engine)
 
         with engine.connect() as conn:
             rows = conn.execute(
@@ -198,7 +201,7 @@ def test_normalize_threshold_skips_does_not_mark_them_unconfirmed():
             session.refresh(finding)
             finding_id = finding.id
 
-        db._normalize_threshold_skipped_findings(engine)
+        db_legacy._normalize_threshold_skipped_findings(engine)
 
         with Session(engine) as session:
             normalized = session.get(ScanFinding, finding_id)
@@ -742,7 +745,7 @@ def test_ensure_scan_finding_test_run_id_nullable_decouples_api_findings():
             )
             conn.commit()
 
-        db._ensure_scan_finding_test_run_id_nullable(engine)
+        db_legacy._ensure_scan_finding_test_run_id_nullable(engine)
 
         with engine.connect() as conn:
             trn = next(
@@ -771,7 +774,7 @@ def test_ensure_scan_finding_test_run_id_nullable_decouples_api_findings():
             assert "ix_scan_finding_api_test_run_id" in indexes
 
         # Idempotent: a second pass is a no-op and does not error.
-        db._ensure_scan_finding_test_run_id_nullable(engine)
+        db_legacy._ensure_scan_finding_test_run_id_nullable(engine)
         with engine.connect() as conn:
             count = next(conn.execute(text("SELECT count(*) FROM scan_finding")))[0]
             assert count == 2
@@ -821,8 +824,8 @@ def test_migrate_skips_legacy_schema_repair_for_versioned_database(monkeypatch):
     try:
         monkeypatch.setattr(db, "run_migrations", lambda _engine: False)
         monkeypatch.setattr(
-            db,
-            "_upgrade_pre_alembic_schema",
+            db_legacy,
+            "upgrade_pre_alembic_schema",
             lambda _engine: calls.append("legacy_schema"),
         )
         monkeypatch.setattr(
@@ -978,8 +981,8 @@ def test_runtime_replay_provenance_backfill_is_idempotent():
                 conn.execute(text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
             conn.commit()
 
-        db._ensure_interactive_replay_provenance(engine)
-        db._ensure_interactive_replay_provenance(engine)
+        db_legacy._ensure_interactive_replay_provenance(engine)
+        db_legacy._ensure_interactive_replay_provenance(engine)
 
         with engine.connect() as conn:
             test_run_columns = {
@@ -1259,5 +1262,55 @@ def test_scope_host_port_migration_backfills_configured_effective_ports():
         )
         assert api_scope == '["api.example.com:8080"]'
         assert version == "d4e5f6a7b8c9"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("fail_upgrade", [False, True])
+def test_legacy_upgrade_restores_foreign_keys_before_recovery(
+    monkeypatch, fail_upgrade
+):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    engine._aespa_enforce_foreign_keys = True
+    calls = []
+
+    def foreign_keys_enabled():
+        with engine.connect() as connection:
+            return connection.exec_driver_sql("PRAGMA foreign_keys").scalar()
+
+    def migrate(_engine):
+        calls.append("alembic")
+        return True
+
+    def legacy_upgrade(_engine):
+        calls.append("legacy")
+        assert foreign_keys_enabled() == 0
+        if fail_upgrade:
+            raise RuntimeError("legacy upgrade failed")
+
+    def recover(_engine):
+        assert foreign_keys_enabled() == 1
+        calls.append("recovery")
+
+    monkeypatch.setattr(db, "run_migrations", migrate)
+    monkeypatch.setattr(db_legacy, "upgrade_pre_alembic_schema", legacy_upgrade)
+    monkeypatch.setattr(db, "_reset_orphaned_validating_findings", recover)
+    monkeypatch.setattr(db, "_reset_orphaned_running_runs", lambda _engine: None)
+    monkeypatch.setattr(db, "_cleanup_orphaned_sast_extractions", lambda: None)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        if fail_upgrade:
+            with pytest.raises(RuntimeError, match="legacy upgrade failed"):
+                db._migrate(engine)
+            assert calls == ["alembic", "legacy"]
+        else:
+            db._migrate(engine)
+            assert calls == ["alembic", "legacy", "recovery"]
+        assert foreign_keys_enabled() == 1
     finally:
         engine.dispose()

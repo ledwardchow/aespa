@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-from aespa.db import _ensure_default_llm_profile
+from aespa.db_legacy import _ensure_default_llm_profile
 from aespa.schemas import LLMConfigIn, LLMProfileIn, LLMProviderConfigIn
 from aespa.services import openrouter_provider
 from aespa.services import settings as settings_svc

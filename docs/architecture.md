@@ -78,7 +78,8 @@ src/aespa/
 ├── config.py              # Pydantic settings (host, port, db URL)
 ├── models.py              # SQLModel ORM table definitions
 ├── schemas.py             # Pydantic schemas for API I/O
-├── db.py                  # Database engine, session factory, migrations
+├── db.py                  # Database engine, sessions, migration order, restart recovery
+├── db_legacy.py           # Compatibility upgrades for pre-Alembic databases
 ├── api/
 │   ├── scan.py            # /api/test-runs/{id}/thinking-scan/* and crawl
 │   ├── test_runs.py       # /api/test-runs/* — CRUD, status, site map graph
@@ -92,6 +93,8 @@ src/aespa/
 │   ├── sast_runs.py       # /api/sast-runs/* and dynamic-run lead import routes
 │   └── reporting_debug.py # /api/reporting-debug/* — reporting-prompt editing & replay
 └── services/
+    ├── active_jobs.py     # Active job summaries for the UI
+    ├── campaign_results.py # Campaign finding grouping and mapping response data
     ├── sites.py           # CRUD service layer for Site and Credential
     ├── crawler.py         # LLM-guided parallel web crawl
     ├── scanner.py         # Dynamic agentic scan engine, specialist dispatch, finding dedup
@@ -245,7 +248,7 @@ Maps agent roles (`crawler`, `test_lead`, `mentor`, `specialist`, `validator`, `
 | `default_model_id` | — | Foreign key linking to the default fallback `LLMConfig` |
 | `role_models_json` | `{}` | JSON dictionary mapping role strings to specific `LLMConfig` IDs |
 
-Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm_profile_id` reference. Roles resolve their configuration via `get_llm_config_for_role(role, run_profile_id)`.
+Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm_profile_id` reference. Roles resolve their configuration via `get_llm_config_for_role(session, run, role)`. The resolver returns a `ResolvedLLMConfig` snapshot with provider settings applied. It leaves the saved ORM profile unchanged, and the snapshot remains usable after the database session closes.
 
 ### Scanner Policy (`ScannerPolicy` model)
 

@@ -499,7 +499,7 @@ async def _do_crawl_inner(run_id: int) -> None:
             upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
         )
         global_header_cfg = get_global_http_header_config(s)
-        for obj in [*creds, site, llm_cfg, run]:
+        for obj in [*creds, site, run]:
             s.expunge(obj)
 
     _pw_proxy = {"proxy": {"server": crawl_proxy_url}} if crawl_proxy_url else {}

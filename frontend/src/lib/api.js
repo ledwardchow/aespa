@@ -186,7 +186,6 @@ export const api = {
   resumeWebScan:    (id)          => req(`/api/test-runs/${id}/thinking-scan/resume`, { method:"POST" }),
   resumeWebCrawl:   (id)          => req(`/api/test-runs/${id}/crawl/resume`, { method:"POST" }),
   resumeApiScan:    (id)          => req(`/api/api-test-runs/${id}/scan/resume`, { method:"POST" }),
-  resumeSastScan:   (id)          => req(`/api/sast-runs/${id}/scan/resume`, { method:"POST" }),
   getScannerPolicy: ()            => req("/api/settings/scanner-policy"),
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
   getCodeExecutionConfig: ()      => req("/api/settings/code-execution"),
