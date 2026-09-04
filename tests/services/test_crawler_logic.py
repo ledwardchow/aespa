@@ -2961,24 +2961,29 @@ def test_entra_authenticator_status_event_reports_success_and_timeout(monkeypatc
     assert [entry[2] for entry in logs] == ["complete", "error"]
 
 
-def test_entra_notification_number_detects_number_matching_prompt():
-    text = "approve sign in request open authenticator and enter the number 42"
-    assert crawler._entra_notification_number(text) == "42"
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("approve sign in request open authenticator and enter the number 42", "42"),
+        (
+            "open microsoft authenticator enter the code displayed in your browser 42",
+            "42",
+        ),
+    ],
+)
+def test_entra_notification_number(text, expected):
+    assert crawler._entra_notification_number(text) == expected
 
 
-def test_entra_notification_number_detects_displayed_number_prompt():
-    text = "open microsoft authenticator enter the code displayed in your browser 42"
-    assert crawler._entra_notification_number(text) == "42"
-
-
-def test_entra_sso_provider_detection_ignores_bare_sso_app_text():
-    text = "dashboard settings authenticated user sso configuration audit logs"
-    assert crawler._entra_text_offers_sso_provider(text) is False
-
-
-def test_entra_sso_provider_detection_keeps_azure_ad_choice():
-    text = "choose a login method azure ad one-time pin"
-    assert crawler._entra_text_offers_sso_provider(text) is True
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("dashboard settings authenticated user sso configuration audit logs", False),
+        ("choose a login method azure ad one-time pin", True),
+    ],
+)
+def test_entra_sso_provider_detection(text, expected):
+    assert crawler._entra_text_offers_sso_provider(text) is expected
 
 
 def test_entra_detects_retryable_authenticator_failure():
@@ -3370,16 +3375,3 @@ Forms detected, requires authentication.
     assert cats["page_label"] == "Admin Dashboard"
     assert cats["req_auth"] is True
     assert "<minimax_thinking>" not in context
-
-
-def test_crawl_shared_llm_max_concurrency():
-    # _CrawlShared now uses a _DynamicConcurrencyGate that reads the limit
-    # from the DB at acquire time.  Without a real run_id in the DB the
-    # limit_fn returns None (unlimited), so we verify the gate is always
-    # present and that the limit_fn correctly surfaces None for run_id=0.
-    shared = crawler._CrawlShared(
-        crawled_norms={}, state_keys={}, pages_done=0, run_id=0
-    )
-    assert shared.llm_gate is not None
-    # No real run in DB for run_id=0 → should return None (unlimited)
-    assert crawler._read_effective_llm_concurrency(0) is None

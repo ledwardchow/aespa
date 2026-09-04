@@ -4,30 +4,10 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-import pytest
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
-from aespa.db import set_engine
 from aespa.models import ApiCollection, ApiTestRun, CodeExecutionConfig
 from aespa.services import mentor
-
-
-@pytest.fixture(name="db_engine")
-def db_engine_fixture():
-    from aespa.db import _engine as original_engine
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)
-    yield engine
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    set_engine(original_engine)
 
 
 def _mentor_json() -> str:

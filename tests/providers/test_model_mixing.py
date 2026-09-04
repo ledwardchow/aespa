@@ -9,38 +9,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
-from aespa.db import _ensure_default_llm_profile, set_engine
+from aespa.db import _ensure_default_llm_profile
 from aespa.schemas import LLMConfigIn, LLMProfileIn, LLMProviderConfigIn
 from aespa.services import openrouter_provider
 from aespa.services import settings as settings_svc
 
 # ── Service-layer fixtures (own engine via set_engine) ────────────────────────
-
-
-@pytest.fixture(name="db_engine")
-def db_engine_fixture():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa.db import _engine as original_engine
-
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)
-    yield engine
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    set_engine(original_engine)
-
-
-@pytest.fixture(name="db_session")
-def db_session_fixture(db_engine):
-    with Session(db_engine) as session:
-        yield session
 
 
 def _mk_model(session: Session, name: str, model: str = "m1"):

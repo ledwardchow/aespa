@@ -12,7 +12,20 @@ def test_get_llm_config_initially_null(client: TestClient):
     assert r.json() is None
 
 
-def test_get_default_models(client: TestClient):
+def test_get_default_models(client: TestClient, monkeypatch):
+    calls = []
+
+    async def fake_discover_models_for_format(**kwargs):
+        calls.append(kwargs["api_format"])
+        if kwargs["api_format"] == "openai":
+            return ["discovered-openai-model"]
+        return []
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_models_for_format",
+        fake_discover_models_for_format,
+    )
+
     r = client.get("/api/settings/llm/models")
     assert r.status_code == 200
     data = r.json()
@@ -31,8 +44,9 @@ def test_get_default_models(client: TestClient):
     assert isinstance(data["github_copilot"], list)
     assert "auto" in data["github_copilot"]
     assert isinstance(data["factory_droid"], list)
-    assert isinstance(data["openai"], list)
+    assert data["openai"] == ["discovered-openai-model"]
     assert isinstance(data["bedrock"], list)
+    assert set(calls) == set(data)
 
 
 def test_code_execution_config_round_trip(client: TestClient, monkeypatch):

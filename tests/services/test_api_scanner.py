@@ -19,10 +19,8 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
-from aespa.db import set_engine
 from aespa.models import (
     ApiCollection,
     ApiCredential,
@@ -35,29 +33,6 @@ from aespa.models import (
 )
 
 # ── DB fixtures ────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture(name="db_engine")
-def db_engine_fixture():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa.db import _engine as original_engine
-
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)
-    yield engine
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    set_engine(original_engine)
-
-
-@pytest.fixture(name="db_session")
-def db_session_fixture(db_engine):
-    with Session(db_engine) as session:
-        yield session
 
 
 @pytest.fixture(name="collection")
@@ -98,23 +73,6 @@ def bearer_cred_fixture(db_session, collection):
 
 
 # ── HTTP client fixture ────────────────────────────────────────────────────────
-
-
-@pytest.fixture(name="client")
-def client_fixture(db_engine):
-    from fastapi.testclient import TestClient
-
-    from aespa.db import get_session as gs
-    from aespa.main import create_app
-
-    def _override_session():
-        with Session(db_engine) as s:
-            yield s
-
-    app = create_app()
-    app.dependency_overrides[gs] = _override_session
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

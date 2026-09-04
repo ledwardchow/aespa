@@ -9,7 +9,7 @@ from aespa.db import _migrate, get_session, set_engine
 from aespa.main import create_app
 
 
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(scope="function")
 def isolated_db_engine():
     prev_engine = aespa.db._engine
     engine = create_engine(
@@ -33,7 +33,20 @@ def isolated_db_engine():
 
 
 @pytest.fixture(scope="function")
-def client(isolated_db_engine):
+def db_session(isolated_db_engine):
+    """Provide a session backed by the shared isolated test database."""
+    with Session(isolated_db_engine) as session:
+        yield session
+
+
+@pytest.fixture(scope="function")
+def db_engine(isolated_db_engine):
+    """Compatibility alias for tests that use the shared engine directly."""
+    return isolated_db_engine
+
+
+@pytest.fixture(scope="function")
+def isolated_client(isolated_db_engine):
     def _override_session():
         with Session(isolated_db_engine) as session:
             yield session
@@ -43,6 +56,11 @@ def client(isolated_db_engine):
 
     with TestClient(app, raise_server_exceptions=True) as c:
         yield c
+
+
+@pytest.fixture(scope="function")
+def client(isolated_client):
+    return isolated_client
 
 
 @pytest.fixture(scope="function")

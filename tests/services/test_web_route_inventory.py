@@ -7,10 +7,8 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
-from aespa.db import _migrate, set_engine
 from aespa.models import CrawledPage, PageOwaspTest, Site, TestRun
 from aespa.services.web_route_inventory import (
     classify_http_exchange,
@@ -18,24 +16,6 @@ from aespa.services.web_route_inventory import (
     merge_route_categories,
 )
 from aespa.services.web_workprogram import _make_web_post_probe_fn
-
-
-@pytest.fixture(name="db_engine")
-def db_engine_fixture():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa.db import _engine as original_engine
-
-    SQLModel.metadata.create_all(engine)
-    _migrate(engine)
-    set_engine(engine)
-    yield engine
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    set_engine(original_engine)
 
 
 @pytest.fixture(name="run")
