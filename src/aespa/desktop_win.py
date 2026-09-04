@@ -19,9 +19,16 @@ from PIL import Image
 
 from aespa.browser import configure_browsers_path, download_chromium_if_missing
 from aespa.config import DEFAULT_WEB_DIR
+from aespa.desktop_console import (
+    DesktopConsoleServer,
+)
+from aespa.desktop_console import (
+    main as console_client_main,
+)
 from aespa.desktop_server import start_local_server
 
 _window = None
+_console_server = None
 
 
 def _on_closing() -> bool:
@@ -39,7 +46,14 @@ def _on_quit(icon, _item) -> None:
     webview.destroy()
 
 
+def _on_console(_icon, _item) -> None:
+    _console_server.open()
+
+
 def main() -> None:
+    if "--desktop-console" in sys.argv:
+        console_client_main()
+        return
     if "--smoke-test" in sys.argv:
         import_module("webview.platforms.winforms")
         return
@@ -54,7 +68,8 @@ def main() -> None:
         print(f"[AESPA Startup Error] {exc}", file=sys.stderr)
         sys.exit(1)
 
-    global _window
+    global _console_server, _window
+    _console_server = DesktopConsoleServer(host="127.0.0.1", port=port)
     _window = webview.create_window(
         "AESPA",
         f"http://127.0.0.1:{port}/",
@@ -70,6 +85,7 @@ def main() -> None:
         "AESPA",
         menu=pystray.Menu(
             pystray.MenuItem("Open AESPA", _on_open, default=True),
+            pystray.MenuItem("Open Console", _on_console),
             pystray.MenuItem("Quit AESPA", _on_quit),
         ),
     )

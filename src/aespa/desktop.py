@@ -8,6 +8,7 @@ progress — keep running. Only "Quit" from the menubar stops the process.
 
 from __future__ import annotations
 
+import sys
 import threading
 
 import objc
@@ -62,6 +63,12 @@ from aespa.browser import (
     download_chromium_if_missing,
 )
 from aespa.config import DEFAULT_WEB_DIR, _pkg_version
+from aespa.desktop_console import (
+    DesktopConsoleServer,
+)
+from aespa.desktop_console import (
+    main as console_client_main,
+)
 from aespa.desktop_server import start_local_server
 
 _LATEST_RELEASE_API = "https://api.github.com/repos/ledwardchow/aespa/releases/latest"
@@ -165,9 +172,10 @@ def _install_edit_menu() -> None:
 
 
 class Controller(NSObject):
-    def initWithURL_(self, url):
+    def initWithURL_consoleServer_(self, url, console_server):
         self = objc.super(Controller, self).init()
         self._url = url
+        self._console_server = console_server
         self._window = None
         self._quitting = False
         self._dl_item = None
@@ -185,6 +193,11 @@ class Controller(NSObject):
         )
         open_item.setTarget_(self)
         menu.addItem_(open_item)
+        console_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Open Console", "openConsole:", ""
+        )
+        console_item.setTarget_(self)
+        menu.addItem_(console_item)
         menu.addItem_(NSMenuItem.separatorItem())
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Quit AESPA", "quit:", "q"
@@ -290,6 +303,9 @@ class Controller(NSObject):
 
     def showWindow_(self, _sender):
         self._presentWindow()
+
+    def openConsole_(self, _sender):
+        self._console_server.open()
 
     def windowShouldClose_(self, sender):
         # Hide instead of close: server + scans keep running. Drop the dock
@@ -452,14 +468,15 @@ class Controller(NSObject):
 
 
 def main() -> None:
+    if "--desktop-console" in sys.argv:
+        console_client_main()
+        return
     configure_browsers_path()
     # The Controller kicks off the first-run Chromium download once its menubar
     # is up, so the "Downloading browser…" indicator can reflect it.
     try:
         port = start_local_server()
     except Exception as exc:
-        import sys
-
         print(f"[AESPA Startup Error] {exc}", file=sys.stderr)
         alert = NSAlert.alloc().init()
         alert.setMessageText_("AESPA Launch Error")
@@ -471,7 +488,8 @@ def main() -> None:
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
     url = NSURL.URLWithString_(f"http://127.0.0.1:{port}/")
-    controller = Controller.alloc().initWithURL_(url)
+    console_server = DesktopConsoleServer(host="127.0.0.1", port=port)
+    controller = Controller.alloc().initWithURL_consoleServer_(url, console_server)
     app.setDelegate_(controller)
     app.run()
 

@@ -217,6 +217,33 @@ def test_contract_blocks_until_a_structured_vector_executes():
     assert monitor.active_contract is None
 
 
+def test_contract_can_require_a_python_recovery_action():
+    monitor = ExecutionMonitor()
+    monitor.set_strategy_contract(
+        8,
+        "Response parsing stalled",
+        [
+            StrategyVector(
+                id="parse-custom-envelope",
+                title="Parse the custom response envelope",
+                tool_names=["execute_python"],
+            )
+        ],
+    )
+
+    assert (
+        monitor.observe_tool_call(
+            "execute_python",
+            {
+                "purpose": "Parse the custom envelope and correlate IDs",
+                "code": "print('bounded recovery')",
+            },
+            9,
+        )[0]
+        == InterventionState.NORMAL
+    )
+
+
 def test_contract_third_rejection_stays_blocked_and_terminates():
     monitor = ExecutionMonitor(max_contract_rejections=3)
     monitor.set_strategy_contract(1, "Stalled", [_vector()])

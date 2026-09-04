@@ -706,6 +706,14 @@ Calls that match none of those constraints are rejected unless they carry an exp
 `strategy_pivot_justification`. Executed and rejected steps share the same completion
 accounting, so supervision cannot itself form an unbounded rejection loop. Monitor and
 contract state are stored in scan checkpoints.
+The Mentor's stall incident capsule includes the last eight bounded tool inputs and results,
+with credentials and bearer/JWT material redacted, plus the proposed action and current
+scan context. Its dedicated debugging prompt classifies browser obstruction, stale or
+missing elements, authentication failures, unchanged responses, tool limitations, and
+external target blockers. It can recommend `execute_python` only when that role is enabled;
+Python remains computation/HTTP-only and never receives a Playwright or DOM connection.
+The Test Lead—not the Mentor—executes the selected recovery under the ordinary scope,
+traffic, execution-monitor, and audit controls.
 Persisted activity entries use explicit emitter tags: `Execution Monitor` records every
 Mentor trigger, hard block, and contract rejection; `Mentor Guidance` records the full
 diagnosis, structured alternate vectors, and tactical next step; invalid-session
@@ -724,7 +732,7 @@ never reject `done` indefinitely.
 |---|---|
 | `http` | Issue an arbitrary HTTP request (method, URL, headers, body) |
 | `execute_python` | Run bounded Python computation; target HTTP is available only through the policy-enforcing `aespa_runtime` broker and is traffic-logged |
-| `browser` | Playwright commands: `goto`, `fill`, `click`, `wait`, `snapshot` |
+| `browser` | Playwright commands including `goto`, `fill`, `click`, `wait`, `snapshot`, read-only `inspect_element`, and non-forced `recover_click` |
 | `jwt` | Forge a signed HS256 JWT from a discovered secret |
 | `decode_jwt` | Decode a JWT's header and payload; optionally verify the HS256 signature against a known secret |
 | `credential_check` | Test a login URL with candidate credentials |

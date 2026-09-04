@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from aespa.db import set_engine
-from aespa.models import ApiCollection, ApiTestRun
+from aespa.models import ApiCollection, ApiTestRun, CodeExecutionConfig
 from aespa.services import mentor
 
 
@@ -65,6 +65,43 @@ def test_parse_mentor_response_validates_structured_vectors():
     assert "STRATEGY SHIFT CONTRACT" in advice.format_xml_block()
 
 
+def test_incident_history_keeps_failure_evidence_but_redacts_credentials():
+    history = mentor._recent_incident_history(
+        [
+            {
+                "step": 9,
+                "method": "BROWSER",
+                "url": "https://target.local/checkout",
+                "request_headers": {"Authorization": "Bearer top-secret"},
+                "request_body": {
+                    "steps": [{"op": "click", "selector": "#pay"}],
+                    "password": "hunter2",
+                },
+                "response_body": "click failed: overlay intercepted pointer events",
+            }
+        ]
+    )
+
+    assert history[0]["request"]["headers"]["Authorization"] == "[redacted]"
+    assert history[0]["request"]["body"]["password"] == "[redacted]"
+    assert history[0]["request"]["body"]["steps"][0]["selector"] == "#pay"
+    assert "overlay intercepted" in history[0]["result"]["body"]
+
+
+def test_parser_rejects_vectors_that_require_an_unavailable_tool():
+    payload = json.loads(_mentor_json())
+    payload["suggested_vectors"][0]["tool_names"] = ["execute_python"]
+    payload["failure_class"] = "tool_limit"
+    payload["recovery_kind"] = "execute_python"
+
+    advice = mentor.parse_mentor_response(
+        json.dumps(payload), available_tools={"http_request"}
+    )
+
+    assert [vector.id for vector in advice.suggested_vectors] == ["comment-xss"]
+    assert advice.recovery_kind == "pivot"
+
+
 def test_malformed_response_does_not_create_an_unenforceable_contract():
     advice = mentor.parse_mentor_response("not json")
     assert advice.suggested_vectors == []
@@ -79,6 +116,13 @@ def test_api_run_uses_run_scoped_resolver_and_real_completion(db_engine, monkeyp
         session.refresh(collection)
         run = ApiTestRun(collection_id=collection.id, name="run")
         session.add(run)
+        session.add(
+            CodeExecutionConfig(
+                id=1,
+                enabled=True,
+                allowed_roles_json='["test_lead"]',
+            )
+        )
         session.commit()
         session.refresh(run)
         run_id = run.id
@@ -92,8 +136,11 @@ def test_api_run_uses_run_scoped_resolver_and_real_completion(db_engine, monkeyp
 
     async def fake_completion(config, prompt, *, system_prompt=None):
         assert config.model == "mentor-model"
-        assert system_prompt and "Senior Security Mentor" in system_prompt
-        assert json.loads(prompt)["target_url"] == "http://api.local"
+        assert system_prompt and "bounded tool-failure debugger" in system_prompt
+        incident = json.loads(prompt)
+        assert incident["target_url"] == "http://api.local"
+        assert "execute_python" in incident["available_tools"]
+        assert incident["python_sandbox"]["browser_or_dom_access"] is False
         return _mentor_json()
 
     monkeypatch.setattr(mentor, "get_llm_config_for_role", fake_resolver)

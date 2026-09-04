@@ -4,6 +4,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+- **Desktop console access**: The macOS menu bar and Windows system tray menus can now open the interactive AESPA console in a terminal window. The console continuously buffers activity from the running desktop app, preserving its logs, selected view, and scrollback when the terminal is closed and reopened without interrupting active scans.
+- **Smarter recovery from stalled scans**: The Mentor now receives bounded, credential-redacted failure evidence and uses a dedicated debugging contract to recommend a browser inspection, safe retry, reauthentication, direct HTTP probe, Python-assisted workflow, or deliberate pivot. Browser agents can inspect hidden, disabled, or obstructed controls and retry a normal click without forcing interaction through an overlay.
 - **Reliable Python sandbox startup**: Executor workspaces now receive the sandbox user's explicit UID/GID and private permissions. AESPA verifies the complete offline container profile before reporting the runtime ready and surfaces the Docker runner exit code when the harness cannot return a result.
 - **Consistent Python Sandbox settings layout**: The Python Sandbox configuration now uses the same bounded content width as the other Agent Settings pages.
 - **Multi-architecture Python sandbox publishing**: A release script can now publish the optional Python executor to Docker Hub as one tag supporting both Intel/AMD64 and Apple Silicon/ARM64 systems, including provenance and SBOM attestations.

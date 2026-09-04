@@ -70,6 +70,8 @@ class InteractiveConsoleHandler(logging.Handler):
         host: str = "127.0.0.1",
         env_path: Path | None = None,
         on_port_change: Callable[[int], None] | None = None,
+        allow_port_change: bool = True,
+        terminal_size: tuple[int, int] | None = None,
     ) -> None:
         super().__init__(level=logging.DEBUG)
         self.stream = stream
@@ -92,6 +94,8 @@ class InteractiveConsoleHandler(logging.Handler):
         self.host = host
         self.env_path = env_path or Path(".env")
         self.on_port_change = on_port_change
+        self.allow_port_change = allow_port_change
+        self.fixed_terminal_size = terminal_size
         self.settings_editing = False
         self.settings_replace_on_digit = False
         self.settings_value = str(port)
@@ -139,6 +143,12 @@ class InteractiveConsoleHandler(logging.Handler):
         with self._output_lock:
             if not self.settings_editing:
                 if key in ("\r", "\n"):
+                    if not self.allow_port_change:
+                        self.settings_status = (
+                            "The desktop app selects its port automatically."
+                        )
+                        self._redraw_locked()
+                        return True
                     self.settings_editing = True
                     self.settings_replace_on_digit = True
                     self.settings_value = str(self.configured_port)
@@ -329,6 +339,8 @@ class InteractiveConsoleHandler(logging.Handler):
         self.stream.flush()
 
     def _terminal_size(self) -> tuple[int, int]:
+        if self.fixed_terminal_size is not None:
+            return self.fixed_terminal_size
         try:
             size = os.get_terminal_size(self.stream.fileno())
         except (AttributeError, OSError, ValueError):
@@ -359,15 +371,21 @@ class InteractiveConsoleHandler(logging.Handler):
             self.settings_value if self.settings_editing else str(self.configured_port)
         )
         cursor = "▌" if self.settings_editing else ""
+        guidance = (
+            "Press Enter to edit the port. AESPA restarts its listener after saving."
+            if self.allow_port_change
+            else "The desktop app selects an available local port automatically."
+        )
         lines = [
             "Server settings",
             "",
             f"  Listening address   http://{self.host}:{self.runtime_port}",
             f"  Port                {value}{cursor}",
             "",
-            "Press Enter to edit the port. AESPA restarts its listener after saving.",
-            f"The setting is saved in {self.env_path} for future launches.",
+            guidance,
         ]
+        if self.allow_port_change:
+            lines.append(f"The setting is saved in {self.env_path} for future launches.")
         if os.environ.get("AESPA_PORT"):
             lines.extend(
                 [
@@ -699,6 +717,9 @@ class InteractiveConsole:
         host: str = "127.0.0.1",
         env_path: Path | None = None,
         on_port_change: Callable[[int], None] | None = None,
+        allow_port_change: bool = True,
+        replace_logging_handlers: bool = True,
+        terminal_size: tuple[int, int] | None = None,
     ) -> None:
         self.input_stream = input_stream
         self.handler = InteractiveConsoleHandler(
@@ -707,36 +728,104 @@ class InteractiveConsole:
             host=host,
             env_path=env_path,
             on_port_change=on_port_change,
+            allow_port_change=allow_port_change,
+            terminal_size=terminal_size,
         )
+        self.replace_logging_handlers = replace_logging_handlers
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._terminal_state = None
         self._key_buffer = b""
+        self._previous_root_level: int | None = None
+        self._logger_states: dict[str, tuple[list[logging.Handler], bool]] = {}
+        self._capturing = False
+        self._attached = False
 
     def start(self) -> None:
+        self.start_capture()
+        self.attach(
+            input_stream=self.input_stream,
+            output_stream=self.handler.stream,
+            terminal_size=self.handler.fixed_terminal_size,
+        )
+
+    def start_capture(self) -> None:
+        """Capture console records without requiring a visible terminal."""
+        if self._capturing:
+            return
         self._configure_logging()
+        self._capturing = True
+
+    def attach(
+        self,
+        *,
+        input_stream: TextIO,
+        output_stream: TextIO,
+        terminal_size: tuple[int, int] | None = None,
+    ) -> None:
+        """Attach a terminal while retaining all previously captured state."""
+        if self._attached:
+            raise RuntimeError("The AESPA console already has an attached terminal")
+        self.start_capture()
+        self.input_stream = input_stream
+        self.handler.stream = output_stream
+        self.handler.fixed_terminal_size = terminal_size
+        self._stop.clear()
+        self._key_buffer = b""
         self._enable_immediate_keys()
         self.handler.start_screen()
+        self._attached = True
         self._thread = threading.Thread(
             target=self._read_keys, name="aespa-console-input", daemon=True
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def detach(self) -> None:
+        """Detach the terminal but continue buffering console records."""
+        if not self._attached:
+            return
         self._stop.set()
         self._restore_terminal()
-        self.handler.stop_screen()
-        logging.getLogger().removeHandler(self.handler)
+        try:
+            self.handler.stop_screen()
+        finally:
+            self._attached = False
+            self._thread = None
+
+    def stop(self) -> None:
+        self.detach()
+        if not self._capturing:
+            return
+        root = logging.getLogger()
+        root.removeHandler(self.handler)
+        if not self.replace_logging_handlers:
+            if self._previous_root_level is not None:
+                root.setLevel(self._previous_root_level)
+            for name, (handlers, propagate) in self._logger_states.items():
+                logger = logging.getLogger(name)
+                logger.handlers[:] = handlers
+                logger.propagate = propagate
+            self._logger_states.clear()
+        self._capturing = False
+
+    def wait(self) -> None:
+        """Wait until the console input stream closes."""
+        if self._thread is not None:
+            self._thread.join()
 
     def _configure_logging(self) -> None:
         root = logging.getLogger()
+        self._previous_root_level = root.level
         root.setLevel(logging.INFO)
-        for existing in list(root.handlers):
-            root.removeHandler(existing)
-            existing.close()
+        if self.replace_logging_handlers:
+            for existing in list(root.handlers):
+                root.removeHandler(existing)
+                existing.close()
         root.addHandler(self.handler)
         for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
             logger = logging.getLogger(name)
+            if not self.replace_logging_handlers:
+                self._logger_states[name] = (list(logger.handlers), logger.propagate)
             logger.handlers.clear()
             logger.propagate = True
         logging.getLogger("uvicorn.access").setLevel(logging.INFO)
@@ -770,6 +859,9 @@ class InteractiveConsole:
         self._terminal_state = None
 
     def _read_keys(self) -> None:
+        if not self.input_stream.isatty():
+            self._read_stream_keys()
+            return
         if os.name == "nt":
             self._read_windows_keys()
             return
@@ -781,6 +873,19 @@ class InteractiveConsole:
                     self._process_posix_keys(os.read(fd, 32))
                 self.handler.refresh_for_resize()
         except (AttributeError, OSError):
+            return
+
+    def _read_stream_keys(self) -> None:
+        """Read ANSI key bytes from a redirected stream or console bridge."""
+        try:
+            while not self._stop.is_set():
+                data = self.input_stream.read(32)
+                if not data:
+                    return
+                if isinstance(data, str):
+                    data = data.encode()
+                self._process_posix_keys(data)
+        except (AttributeError, OSError, ValueError):
             return
 
     def _process_posix_keys(self, data: bytes) -> None:
