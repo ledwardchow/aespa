@@ -4,7 +4,7 @@ import { truncUrl } from "../../lib/utilities";
 import { AliceChatPanel } from "./AliceChatPanel";
 import { FindingReferenceLink } from "../../components/FindingReferenceLink";
 export function WebRunActivityTab(props) {
-  const { activityLog, tokenUsage, setTokenExpanded, tokenExpanded, activitySubTab, setActivitySubTab, agents, normalizeAgentForRun, activityFeedRef, runId, clearBusy, setClearBusy, setClearError, setActivityLog, setSitePlanData, setTokenUsage, sitePlanData, expandedLogIds, toggleLogId, collapsedAgentIds, toggleAgentId, defaultAgentRoster, representsAgent, aliceChats, activeAliceTabId, setActiveAliceTabId, deleteAliceTab, createAliceTab, aliceChatHeight, aliceMessages, aliceExpandedThinkIds, setAliceExpandedThinkIds, aliceThinkingTabId, aliceIsThinking, startAliceResize, aliceInputText, handleAliceSend, setAliceInputText, handleAliceStop, agentRoleLabel, agentCurrentTask, agentCrawlEvents, agentTaskHistory, agentStatusLabel } = props;
+  const { activityLog, tokenUsage, setTokenExpanded, tokenExpanded, activitySubTab, setActivitySubTab, agents, normalizeAgentForRun, activityFeedRef, runId, clearBusy, setClearBusy, setClearError, setActivityLog, setSitePlanData, setTokenUsage, sitePlanData, expandedLogIds, toggleLogId, collapsedAgentIds, toggleAgentId, defaultAgentRoster, representsAgent, aliceChats, activeAliceTabId, setActiveAliceTabId, deleteAliceTab, createAliceTab, aliceChatHeight, aliceMessages, aliceExpandedThinkIds, setAliceExpandedThinkIds, aliceThinkingTabId, aliceIsThinking, startAliceResize, aliceInputText, handleAliceSend, setAliceInputText, handleAliceStop, submitAliceDirective, agentRoleLabel, agentCurrentTask, agentCrawlEvents, agentTaskHistory, agentStatusLabel } = props;
   return (
     <>
       <div className="activity-panel">
@@ -445,6 +445,7 @@ export function WebRunActivityTab(props) {
                         aliceIsThinking={aliceIsThinking}
                         handleAliceSend={handleAliceSend}
                         handleAliceStop={handleAliceStop}
+                        submitAliceDirective={submitAliceDirective}
                         onPopOut={() => toggleAgentId("alice")}
                       />}
                     </div>;

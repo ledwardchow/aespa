@@ -886,6 +886,7 @@ export function TestRunDetail({
         setAliceExpandedThinkIds={setAliceExpandedThinkIds} aliceThinkingTabId={aliceThinkingTabId}
         startAliceResize={startAliceResize} aliceInputText={aliceInputText} aliceIsThinking={aliceIsThinking}
         handleAliceSend={handleAliceSend} setAliceInputText={setAliceInputText} handleAliceStop={handleAliceStop}
+        submitAliceDirective={submitAliceDirective}
         agentRoleLabel={agentRoleLabel} agentCurrentTask={agentCurrentTask} agentCrawlEvents={agentCrawlEvents}
         agentTaskHistory={agentTaskHistory} agentStatusLabel={agentStatusLabel}
       />}

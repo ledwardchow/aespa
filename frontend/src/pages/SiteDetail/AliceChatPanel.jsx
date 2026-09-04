@@ -7,6 +7,7 @@ import {
   renderMarkdown
 } from "../../lib/aliceRender";
 import { useAutoFollowScroll } from "../../hooks/useAutoFollowScroll";
+import { AliceGoalBar } from "../../components/AliceGoalBar";
 
 /** Open the standalone A.L.I.C.E. view for a web test run. */
 export function openAlicePopout(runId) {
@@ -45,6 +46,7 @@ export function AliceChatPanel({
   aliceIsThinking = isActiveThinking,
   handleAliceSend,
   handleAliceStop,
+  submitAliceDirective,
   onPopOut,
   popout = false
 }) {
@@ -57,6 +59,12 @@ export function AliceChatPanel({
   const handlePopOut = () => {
     const openedWindow = openAlicePopout(runId);
     if (openedWindow && onPopOut) onPopOut();
+  };
+  const activeGoal = aliceChats.find(tab => tab.id === activeAliceTabId)?.goal;
+  const sendGoalCommand = command => submitAliceDirective && submitAliceDirective(command);
+  const editGoal = () => {
+    const objective = window.prompt("Update the goal objective", activeGoal?.objective || "");
+    if (objective?.trim()) sendGoalCommand(`/goal ${objective.trim()}`);
   };
 
   return <div className={"alice-chat-container" + (popout ? " alice-chat-container--popout" : "")} onClick={e => e.stopPropagation()}>
@@ -77,6 +85,14 @@ export function AliceChatPanel({
         <IconExternalLink />
       </button>}
     </div>
+    <AliceGoalBar
+      goal={activeGoal}
+      running={aliceIsThinking}
+      onPause={handleAliceStop}
+      onResume={() => sendGoalCommand("/goal resume")}
+      onEdit={editGoal}
+      onClear={() => sendGoalCommand("/goal clear")}
+    />
     <div
       className="alice-chat-history"
       style={{ height: popout ? undefined : `${aliceChatHeight}px` }}
@@ -128,13 +144,13 @@ export function AliceChatPanel({
     </div>
     {!popout && <div className="alice-chat-resizer" onMouseDown={startAliceResize}></div>}
     <div className="alice-chat-input-bar">
-      <input className="alice-chat-input" placeholder="Direct A.L.I.C.E. on what to test..." value={aliceInputText} disabled={aliceIsThinking} onKeyDown={e => {
+      <input className="alice-chat-input" placeholder={aliceIsThinking && activeGoal?.status === "active" ? "Add guidance to the active goal..." : "Direct A.L.I.C.E., or use /goal <objective>..."} value={aliceInputText} disabled={aliceIsThinking && activeGoal?.status !== "active"} onKeyDown={e => {
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
           handleAliceSend();
         }
       }} onInput={e => setAliceInputText(e.target.value)} />
-      {aliceIsThinking ? <button className="alice-chat-stop-btn" onClick={handleAliceStop} title="Stop Generation" aria-label="Stop Generation">
+      {aliceIsThinking && activeGoal?.status !== "active" ? <button className="alice-chat-stop-btn" onClick={handleAliceStop} title="Stop Generation" aria-label="Stop Generation">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
           <rect x="4" y="4" width="16" height="16" rx="1" ry="1"></rect>
         </svg>

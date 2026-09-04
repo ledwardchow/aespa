@@ -274,7 +274,7 @@ const parseAliceThinking = text => {
       });
       continue;
     }
-    if (trimmed.startsWith("Scope compliance verified") || trimmed.includes("Starting agentic assessment loop")) {
+    if (trimmed.startsWith("Scope compliance verified") || trimmed.startsWith("Scope compliance check passed") || trimmed.includes("Starting agentic assessment loop")) {
       if (currentParagraph.length > 0) {
         blocks.push({
           type: "thought",

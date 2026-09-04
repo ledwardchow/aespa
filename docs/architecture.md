@@ -440,6 +440,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `PageOwaspTest` | One cell in the web OWASP Coverage matrix (`TestRun` × `CrawledPage` × OWASP category, status, finding IDs, per-vulnerability-class coverage in `test_classes_json`) |
 | `ScanLog` | Audit event emitted during crawl/scan phases |
 | `AliceChatSession` | One ALICE chat tab per test run (title, ordering, active flag) |
+| `AliceGoal` | A durable ALICE objective, lifecycle state, checkpoint, evidence, and completion result |
 | `AliceChatMessage` | One chat bubble inside an `AliceChatSession` (sender, type, text) |
 | `ApiCollection` | A named REST API target (base URL, scope hosts, auth summary, readiness JSON) |
 | `ApiDocument` | Uploaded API spec or source file (`doc_type`: openapi, postman, credentials, freetext, source_zip) |
@@ -1399,6 +1400,25 @@ Chat history is stored server-side in a **normalised two-table schema** so any b
 | `AliceChatMessage` | One row per message bubble (`message_key`, `sender`, `type`, `text`, `ts`, `position`) |
 
 The frontend saves state via `PUT /alice/sessions` with a debounce of 800 ms. Message text is updated in place (`message_key` is the client-assigned stable ID), so a long streaming response produces only a single row update rather than rewriting a full JSON blob.
+
+### Goal mode
+
+`/goal <objective>` creates a durable objective for the current ALICE chat tab.
+`/goal` shows its state, while `/goal pause`, `/goal resume`, and `/goal clear`
+control it. Goal records are stored independently from chat bubbles, so a browser
+disconnect does not end the work. If AESPA restarts during a goal, startup recovery
+marks it paused and keeps its last checkpoint for an explicit resume.
+
+The normal `done` tool cannot directly finish a goal. It submits a completion or
+blocked proposal containing completed criteria, evidence, and remaining work. The
+coordinator rejects structurally incomplete proposals, waits for required specialists
+or validation, and asks a read-only reviewer to compare the proposal with the goal and
+saved tool evidence. Rejected proposals return a missing-work list to ALICE. Limits,
+provider errors, and user stops pause the goal instead of completing it.
+
+While a goal is active, chat messages are queued as steering and added to the model
+conversation between tool calls. The goal bar above the composer shows its current
+state and provides pause, resume, edit, and clear controls.
 
 `GET /alice/sessions` returns `{ chats, active_tab_id, updated_at }`. The `updated_at` timestamp (max across all sessions for the run) lets the client compare server state against local `savedAt` to decide which source is fresher — critical for the page-refresh case where local state is current but the server's debounced save is a few seconds behind.
 
