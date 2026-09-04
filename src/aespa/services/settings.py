@@ -7,7 +7,6 @@ import os
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, Request
-from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import Session, select
 
 from aespa.models import (
@@ -73,6 +72,7 @@ from aespa.services.model_capabilities import (
     enrich_model_options,
     validate_effort,
 )
+from aespa.services.resolved_llm_config import ResolvedLLMConfig
 
 _SINGLETON_ID = 1
 
@@ -166,22 +166,35 @@ def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
     )
 
 
-def _profile_with_provider(session: Session, cfg: LLMConfig) -> LLMConfig:
-    if cfg.provider_id is None:
+def resolve_llm_config(
+    session: Session, cfg: LLMConfig | ResolvedLLMConfig
+) -> ResolvedLLMConfig:
+    """Read provider settings without changing the saved profile object."""
+    if isinstance(cfg, ResolvedLLMConfig):
         return cfg
-    provider = session.get(LLMProviderConfig, cfg.provider_id)
+    resolved = ResolvedLLMConfig.model_validate(cfg)
+    provider = (
+        session.get(LLMProviderConfig, cfg.provider_id)
+        if cfg.provider_id is not None
+        else None
+    )
     if provider is None:
-        return cfg
-    set_committed_value(cfg, "provider", provider.api_format)
-    set_committed_value(cfg, "api_key", provider.api_key)
-    set_committed_value(cfg, "base_url", provider.base_url)
-    set_committed_value(cfg, "username", provider.username)
-    set_committed_value(cfg, "project_id", provider.project_id)
-    return cfg
+        return resolved
+    return resolved.model_copy(
+        update={
+            "provider": provider.api_format,
+            "api_key": provider.api_key,
+            "base_url": provider.base_url,
+            "username": provider.username,
+            "project_id": provider.project_id,
+        }
+    )
 
 
-def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
-    resolved = _profile_with_provider(session, cfg)
+def llm_profile_out_model(
+    session: Session, cfg: LLMConfig | ResolvedLLMConfig
+) -> LLMConfigOut:
+    resolved = resolve_llm_config(session, cfg)
     provider_name = None
     if cfg.provider_id is not None:
         provider = session.get(LLMProviderConfig, cfg.provider_id)
@@ -210,11 +223,11 @@ def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
     )
 
 
-def get_llm_config(session: Session) -> LLMConfig | None:
+def get_llm_config(session: Session) -> ResolvedLLMConfig | None:
     cfg = session.exec(select(LLMConfig).where(LLMConfig.is_active == True)).first()  # noqa: E712
     if cfg is None:
         return None
-    return _profile_with_provider(session, cfg)
+    return resolve_llm_config(session, cfg)
 
 
 def get_active_scan_profile(session: Session) -> LLMProfile | None:
@@ -223,7 +236,7 @@ def get_active_scan_profile(session: Session) -> LLMProfile | None:
 
 def _model_for_profile_role(
     session: Session, prof: LLMProfile, role: str | None
-) -> LLMConfig | None:
+) -> ResolvedLLMConfig | None:
     """Resolve a role model, with Mentor inheriting Test Lead before default."""
     model_id: int | None = None
     role_models = _json_loads(prof.role_models_json, {})
@@ -241,12 +254,12 @@ def _model_for_profile_role(
     if model_id is None:
         return None
     cfg = session.get(LLMConfig, model_id)
-    return _profile_with_provider(session, cfg) if cfg is not None else None
+    return resolve_llm_config(session, cfg) if cfg is not None else None
 
 
 def get_llm_config_for_role(
     session: Session, run: "TestRun", role: str | None = None
-) -> LLMConfig | None:
+) -> ResolvedLLMConfig | None:
     """Resolve the Model an agent should use for a run.
 
     Precedence: explicit per-run profile → explicit per-run (legacy) model →
@@ -266,7 +279,7 @@ def get_llm_config_for_role(
     if legacy_id is not None:
         cfg = session.get(LLMConfig, legacy_id)
         if cfg is not None:
-            return _profile_with_provider(session, cfg)
+            return resolve_llm_config(session, cfg)
     # 3. Globally active profile.
     prof = get_active_scan_profile(session)
     if prof is not None:
@@ -277,13 +290,15 @@ def get_llm_config_for_role(
     return get_llm_config(session)
 
 
-def get_llm_config_for_run(session: Session, run: "TestRun") -> LLMConfig | None:
+def get_llm_config_for_run(
+    session: Session, run: "TestRun"
+) -> ResolvedLLMConfig | None:
     """Role-agnostic config for a run (resolves to the profile's default model)."""
     return get_llm_config_for_role(session, run, None)
 
 
 def upsert_llm_config(session: Session, payload: LLMConfigIn) -> LLMConfig:
-    cfg = get_llm_config(session)
+    cfg = session.exec(select(LLMConfig).where(LLMConfig.is_active == True)).first()  # noqa: E712
     if cfg is None:
         cfg = LLMConfig(is_active=True)
 

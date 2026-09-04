@@ -6831,7 +6831,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         browser_debug_cfg = get_browser_debug_config(s)
 
         site_id = site.id  # captured before expunge for scope checks
-        for obj in [*creds, site, llm_cfg, run]:
+        for obj in [*creds, site, run]:
             s.expunge(obj)
 
     global_http_header = {
