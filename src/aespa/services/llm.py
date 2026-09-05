@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import itertools
 import json
 import logging
 import math
 import os
 import re
+import sys
 import tempfile
 import time
 from contextvars import ContextVar
@@ -56,6 +58,7 @@ from aespa.services.prompts.validator import (
 )
 
 log = logging.getLogger("aespa.llm")
+traffic_log = logging.getLogger("aespa.llm.traffic")
 
 REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
 
@@ -77,6 +80,10 @@ class LLMQuotaPauseError(RuntimeError):
         super().__init__(message)
         self.reset_at = reset_at
         self.snapshot = snapshot or {}
+
+
+class LLMContextLimitError(RuntimeError):
+    """The fixed prompt and tool overhead cannot fit the configured window."""
 
 
 _REFUSAL_MARKERS = (
@@ -122,6 +129,8 @@ _base_url_var: ContextVar[str | None] = ContextVar("_base_url", default=None)
 _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
+_operation_var: ContextVar[str | None] = ContextVar("llm_operation", default=None)
+_traffic_call_ids = itertools.count(1)
 
 
 def _usage_provider(config: LLMConfig) -> str:
@@ -160,6 +169,9 @@ _run_token_seeded: set[tuple[str, int]] = set()
 
 
 # ── Rate Limiting Core ────────────────────────────────────────────────────────
+
+
+LLM_PACING_NOTICE_THRESHOLD_S = 1.0
 
 
 class AsyncTokenBucketLimiter:
@@ -263,9 +275,10 @@ class AsyncTokenBucketLimiter:
                     else 0.0
                 )
                 wait_time = max(wait_tokens, wait_reqs, blocked_for)
-                slept = True
+                if wait_time >= LLM_PACING_NOTICE_THRESHOLD_S:
+                    slept = True
 
-            if on_wait and not notified:
+            if slept and on_wait and not notified:
                 notified = True
                 try:
                     on_wait(wait_time)
@@ -484,8 +497,6 @@ def _load_bucket_from_db(
                         changed = True
                     if not provider:
                         continue
-                    if counts.get("estimated_cost_available") is True:
-                        continue
                     rates = statistics_service._rates_for(s, provider, model)
                     cost = statistics_service.estimate_usage_cost(
                         provider,
@@ -509,6 +520,42 @@ def _load_bucket_from_db(
     except Exception:
         pass
     return {}
+
+
+def _reprice_bucket(bucket: dict[str, dict[str, Any]]) -> bool:
+    """Recalculate run costs from accumulated totals using the latest prices."""
+    changed = False
+    try:
+        from sqlmodel import Session as _Session
+
+        from aespa.db import get_engine
+        from aespa.services import statistics as statistics_service
+
+        with _Session(get_engine()) as session:
+            for model, counts in bucket.items():
+                if not isinstance(counts, dict):
+                    continue
+                provider = str(counts.get("provider") or "").strip()
+                if not provider or provider == "unknown":
+                    continue
+                rates = statistics_service._rates_for(session, provider, model)
+                cost = statistics_service.estimate_usage_cost(
+                    provider,
+                    input_tokens=counts.get("input", 0),
+                    output_tokens=counts.get("output", 0),
+                    cache_read_tokens=counts.get("cache_read", 0),
+                    cache_write_tokens=counts.get("cache_write", 0),
+                    ai_credits=counts.get("ai_credits", 0),
+                    factory_credits=counts.get("factory_credits", 0),
+                    rates=rates,
+                )
+                for key, value in cost.items():
+                    if counts.get(key) != value:
+                        counts[key] = value
+                        changed = True
+    except Exception:
+        log.debug("Failed to reprice accumulated run usage", exc_info=True)
+    return changed
 
 
 def _snapshot_provider_for_model(run: Any, model: str) -> str | None:
@@ -759,19 +806,15 @@ def _record_usage(
 
         usage_cost = statistics_service.estimate_usage_cost(
             usage_provider,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read_tokens,
-            cache_write_tokens=cache_write_tokens,
-            ai_credits=ai_credits,
-            factory_credits=factory_credits,
+            input_tokens=entry.get("input", 0),
+            output_tokens=entry.get("output", 0),
+            cache_read_tokens=entry.get("cache_read", 0),
+            cache_write_tokens=entry.get("cache_write", 0),
+            ai_credits=entry.get("ai_credits", 0),
+            factory_credits=entry.get("factory_credits", 0),
             rates=usage_rates,
         )
-        entry["estimated_cost_available"] = entry.get(
-            "estimated_cost_available", False
-        ) or usage_cost.pop("estimated_cost_available", False)
-        for key, value in usage_cost.items():
-            entry[key] = entry.get(key, 0) + value
+        entry.update(usage_cost)
     except Exception:
         # Cost telemetry must never make an otherwise successful LLM response fail.
         log.debug("Failed to estimate per-run LLM cost", exc_info=True)
@@ -828,6 +871,8 @@ def get_run_token_usage(run_id: int, run_kind: str = "web") -> dict:
     bucket = _run_token_usage.get(key)
     if bucket is None:
         bucket = _load_bucket_from_db(run_id, run_kind)
+    elif _reprice_bucket(bucket):
+        _persist_bucket_to_db(run_id, bucket, run_kind)
     return _usage_totals(bucket)
 
 
@@ -859,33 +904,31 @@ def _emit_run_event(event: dict) -> None:
             pass
 
 
-def _emit_rate_limit_waiting(
+def _emit_llm_pacing_waiting(
     model: str, reserved_tokens: float, wait_time: float
 ) -> None:
-    """Tell the user the scan is pacing for the rate limit (not stuck)."""
+    """Tell the user AESPA is waiting for its configured request budget."""
     _emit_run_event(
         {
             "type": "scanner_phase",
-            "phase": "rate_limit",
+            "phase": "llm_pacing",
             "status": "active",
             "message": (
-                f"LLM rate limit reached — pacing requests to stay within the "
-                f"configured limit (waiting ~{wait_time:.0f}s, reserved "
-                f"{int(reserved_tokens):,} tokens for {model})…"
+                f"Waiting about {math.ceil(wait_time)}s before the next LLM request "
+                f"to stay within the configured throughput (estimated request size: "
+                f"{int(reserved_tokens):,} tokens; model: {model})."
             ),
         }
     )
 
 
-def _emit_rate_limit_cleared(model: str, used_tokens: int) -> None:
+def _emit_llm_pacing_finished(model: str) -> None:
     _emit_run_event(
         {
             "type": "scanner_phase",
-            "phase": "rate_limit",
+            "phase": "llm_pacing",
             "status": "complete",
-            "message": (
-                f"LLM rate limit cleared — resuming (used {used_tokens:,} tokens for {model})."
-            ),
+            "message": f"Pacing wait finished. Sending the next request to {model}.",
         }
     )
 
@@ -1328,9 +1371,30 @@ async def decide_login_action(
     )
     try:
         raw = await _call(config, prompt, screenshot_b64 if config.use_vision else None)
+    except LLMQuotaPauseError as exc:
+        return {
+            "action": "give_up",
+            "reason": f"LLM request failed: {exc}",
+            "_llm_error": True,
+            "_llm_error_type": "quota",
+            "_llm_reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
+        }
+    except Exception as exc:
+        return {
+            "action": "give_up",
+            "reason": f"LLM request failed: {exc}",
+            "_llm_error": True,
+            "_llm_error_type": "request",
+        }
+    try:
         action = _extract_action_json(raw)
     except Exception as exc:
-        return {"action": "give_up", "reason": f"LLM action parse failed: {exc}"}
+        return {
+            "action": "give_up",
+            "reason": f"LLM action parse failed: {exc}",
+            "_llm_error": True,
+            "_llm_error_type": "response_parse",
+        }
 
     name = str(action.get("action") or "").strip().lower()
     if name not in _LOGIN_ACTIONS:
@@ -1388,7 +1452,9 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         return raw_cleaned, [], dict(_EMPTY_CATS)
 
 
-async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+async def _call_impl(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
     _last_call_tokens_var.set(None)
@@ -1426,14 +1492,16 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     estimated_output = config.max_tokens or 4096
     total_estimated = estimated_input + estimated_output
 
-    # Notify the user the moment pacing starts (on_wait fires before the sleep),
-    # so a rate-limited scan never looks frozen.
+    # Notify the user when a meaningful local pacing wait starts, so the scan
+    # does not look frozen.
     slept = await limiter.acquire(
         total_estimated,
-        on_wait=lambda wt: _emit_rate_limit_waiting(
+        on_wait=lambda wt: _emit_llm_pacing_waiting(
             config.model, min(total_estimated, limiter.max_tokens), wt
         ),
     )
+    if slept:
+        _emit_llm_pacing_finished(config.model)
 
     try:
         if config.provider == "factory_droid":
@@ -1471,15 +1539,111 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             actual_total = total_estimated
             await limiter.reconcile(total_estimated, total_estimated)
 
-        if slept:
-            _emit_rate_limit_cleared(config.model, actual_total)
-
         return resp
     except Exception as exc:
         if config.provider == "openai_codex" and isinstance(exc, LLMQuotaPauseError):
             await limiter.block_for(_codex_cooldown_seconds(exc))
         await limiter.reconcile(total_estimated, 0)
         raise
+
+
+def _traffic_context(config: LLMConfig) -> str:
+    run_id = _run_id_var.get()
+    run = f"{_run_kind_var.get()} run {run_id}" if run_id is not None else "no run"
+    return f"{config.provider}/{config.model} - {run}"
+
+
+def _infer_llm_operation() -> str:
+    """Return a stable module/function label for the code requesting the call."""
+    try:
+        frame = sys._getframe(2)
+    except ValueError:
+        return "unknown"
+    while frame and frame.f_code.co_name in {
+        "plain_completion",
+        "stream_chat_completion",
+        "_call_with_tools",
+    }:
+        frame = frame.f_back
+    if frame is None:
+        return "unknown"
+    module = str(frame.f_globals.get("__name__") or "unknown").rsplit(".", 1)[-1]
+    function = frame.f_code.co_name
+    return f"{module}.{function}"
+
+
+def _log_llm_traffic(
+    direction: str,
+    config: LLMConfig,
+    payload: Any,
+    *,
+    kind: str,
+    operation: str,
+    call_id: int,
+) -> None:
+    if not traffic_log.isEnabledFor(logging.INFO):
+        return
+    run_id = _run_id_var.get()
+    run_kind = _run_kind_var.get()
+    if isinstance(payload, str):
+        rendered = payload
+    else:
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    label = (
+        f"operation={operation} | type={kind} | call={call_id} | "
+        f"direction={direction} | {_traffic_context(config)}"
+    )
+    traffic_log.info(
+        "============ BEGIN LLM %s ============\n%s\n"
+        "============ END LLM %s ============",
+        label,
+        rendered,
+        label,
+        extra={
+            "aespa_llm_call_id": call_id,
+            "aespa_llm_operation": operation,
+            "aespa_llm_kind": kind,
+            "aespa_llm_direction": direction,
+            "aespa_llm_context": _traffic_context(config),
+            "aespa_llm_payload": rendered,
+            "aespa_llm_run_id": run_id,
+            "aespa_llm_run_kind": run_kind,
+        },
+    )
+
+
+async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    operation = _operation_var.get() or _infer_llm_operation()
+    call_id = next(_traffic_call_ids)
+    _log_llm_traffic(
+        "REQUEST",
+        config,
+        prompt,
+        kind="completion",
+        operation=operation,
+        call_id=call_id,
+    )
+    try:
+        response = await _call_impl(config, prompt, screenshot_b64)
+    except Exception as exc:
+        _log_llm_traffic(
+            "FAILED",
+            config,
+            str(exc),
+            kind="completion",
+            operation=operation,
+            call_id=call_id,
+        )
+        raise
+    _log_llm_traffic(
+        "RESPONSE",
+        config,
+        response,
+        kind="completion",
+        operation=operation,
+        call_id=call_id,
+    )
+    return response
 
 
 async def plain_completion(
@@ -1491,6 +1655,51 @@ async def plain_completion(
 
 
 async def stream_chat_completion(
+    config: LLMConfig,
+    system_message: str,
+    messages: list[dict],
+) -> AsyncGenerator[str, None]:
+    operation = _operation_var.get() or _infer_llm_operation()
+    call_id = next(_traffic_call_ids)
+    request = {"system": system_message, "messages": messages}
+    _log_llm_traffic(
+        "REQUEST",
+        config,
+        request,
+        kind="stream",
+        operation=operation,
+        call_id=call_id,
+    )
+    chunks: list[str] = []
+    try:
+        async for chunk in _stream_chat_completion_impl(
+            config, system_message, messages
+        ):
+            chunks.append(chunk)
+            yield chunk
+    except Exception as exc:
+        _log_llm_traffic(
+            "FAILED",
+            config,
+            str(exc),
+            kind="stream",
+            operation=operation,
+            call_id=call_id,
+        )
+        raise
+    finally:
+        if chunks:
+            _log_llm_traffic(
+                "RESPONSE",
+                config,
+                "".join(chunks),
+                kind="stream",
+                operation=operation,
+                call_id=call_id,
+            )
+
+
+async def _stream_chat_completion_impl(
     config: LLMConfig,
     system_message: str,
     messages: list[dict],
@@ -1614,11 +1823,7 @@ async def stream_chat_completion(
                 import boto3
                 from botocore.config import Config as _BotocoreConfig
 
-                region = (
-                    os.getenv("AWS_REGION")
-                    or os.getenv("AWS_DEFAULT_REGION")
-                    or _bedrock_region_from_url(config.base_url or "")
-                )
+                region = _bedrock_region(config)
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
@@ -2791,7 +2996,16 @@ def _extract_bedrock_text(data: dict[str, Any]) -> str:
 
 def _bedrock_region_from_url(base_url: str) -> str:
     match = re.search(r"bedrock-runtime[.-]([a-z0-9-]+)\.", base_url)
-    return match.group(1) if match else "us-east-1"
+    return match.group(1) if match else "ap-southeast-2"
+
+
+def _bedrock_region(config: LLMConfig) -> str:
+    """Resolve Runtime region, preferring the provider's selected endpoint."""
+    if config.base_url:
+        return _bedrock_region_from_url(config.base_url)
+    return (
+        os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "ap-southeast-2"
+    )
 
 
 # SigV4 signing name for the bedrock-mantle endpoint.  AWS signs Mantle requests
@@ -2993,11 +3207,7 @@ async def _bedrock(
         import boto3
         from botocore.config import Config as _BotocoreConfig
 
-        region = (
-            os.getenv("AWS_REGION")
-            or os.getenv("AWS_DEFAULT_REGION")
-            or _bedrock_region_from_url(config.base_url or "")
-        )
+        region = _bedrock_region(config)
         profile = os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
         _model = config.model
@@ -3254,7 +3464,7 @@ async def analyse_probes(
     if not results:
         return []
 
-    batches = _chunk_probe_results(results)
+    batches = _chunk_probe_results(results, config=config, url=url)
 
     async def _analyse(turn_num: int, batch: list[str]) -> list[dict]:
         batch_findings = await _analyse_probe_batch(config, url, batch)
@@ -3296,18 +3506,73 @@ def _format_probe_result(result: dict) -> str:
     )
 
 
-def _chunk_probe_results(results: list[dict]) -> list[list[str]]:
+def _fit_text_to_tokens(text: str, budget: int, model: str | None = None) -> str:
+    if budget <= 0 or estimate_tokens(text, model=model) <= budget:
+        return text
+    marker = "\n[… evidence excerpt trimmed; use the durable evidence record for the full response …]\n"
+    available = max(128, budget - estimate_tokens(marker, model=model))
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        candidate = text[: mid // 2] + marker + text[-(mid - mid // 2) :]
+        if estimate_tokens(candidate, model=model) <= available:
+            lo = mid
+        else:
+            hi = mid - 1
+    if lo <= 0:
+        return marker
+    return text[: lo // 2] + marker + text[-(lo - lo // 2) :]
+
+
+def _chunk_probe_results(
+    results: list[dict],
+    *,
+    config: LLMConfig | None = None,
+    url: str = "",
+) -> list[list[str]]:
     batches: list[list[str]] = []
     current_batch: list[str] = []
     current_size = 0
 
+    token_budget = 0
+    if config is not None and getattr(config, "max_context_tokens", 0):
+        safety = max(1024, min(8192, int(config.max_context_tokens) // 20))
+        empty_prompt = build_reporting_analyse_prompt(url, [])
+        overhead = estimate_tokens(
+            empty_prompt, model=config.model, provider=config.provider
+        )
+        token_budget = max(
+            1024,
+            int(config.max_context_tokens)
+            - int(config.max_tokens or 0)
+            - safety
+            - overhead,
+        )
+
     for result in results:
         formatted = _format_probe_result(result)
+        if token_budget:
+            formatted = _fit_text_to_tokens(formatted, token_budget, model=config.model)
         separator_size = 2 if current_batch else 0
         next_size = current_size + separator_size + len(formatted)
+        next_token_count = 0
+        if token_budget:
+            candidate_text = build_reporting_analyse_prompt(
+                url, [*current_batch, formatted]
+            )
+            next_token_count = estimate_tokens(
+                candidate_text, model=config.model, provider=config.provider
+            )
         if current_batch and (
             len(current_batch) >= ANALYSE_RESULTS_PER_BATCH
             or next_size > ANALYSE_RESULTS_TEXT_BUDGET
+            or (
+                token_budget
+                and next_token_count
+                > int(config.max_context_tokens)
+                - int(config.max_tokens or 0)
+                - max(1024, min(8192, int(config.max_context_tokens) // 20))
+            )
         ):
             batches.append(current_batch)
             current_batch = []
@@ -3906,7 +4171,13 @@ CONTEXT_TOOL_RESULT_CHAR_LIMIT = 12_000
 def compact_agentic_messages(
     messages: list[dict],
     *,
-    max_context_chars: int,
+    max_context_chars: int = 0,
+    max_context_tokens: int = 0,
+    max_output_tokens: int = 0,
+    system_message: str = "",
+    tools: list[dict] | None = None,
+    model: str | None = None,
+    provider: str = "openai",
     recent_messages: int = 32,
 ) -> tuple[list[dict], dict[str, int] | None]:
     """Compact completed tool exchanges while preserving protocol-valid pairs.
@@ -3916,60 +4187,206 @@ def compact_agentic_messages(
     and full response bodies are deliberately excluded from the journal.
     """
     before_chars = len(json.dumps(messages, default=str))
-    if max_context_chars <= 0 or before_chars <= max_context_chars or len(messages) < 8:
+    before_tokens = (
+        _estimate_tools_call_tokens(
+            system_message,
+            messages,
+            tools=tools,
+            model=model,
+            provider=provider,
+        )
+        if max_context_tokens > 0
+        else 0
+    )
+    safety_tokens = (
+        max(1024, min(8192, max_context_tokens // 20)) if max_context_tokens else 0
+    )
+    input_budget = (
+        max(1024, max_context_tokens - max_output_tokens - safety_tokens)
+        if max_context_tokens
+        else 0
+    )
+    over_limit = (
+        before_tokens > input_budget
+        if max_context_tokens
+        else before_chars > max_context_chars
+    )
+    if not over_limit or len(messages) < 8:
         return messages, None
 
-    suffix_start = max(1, len(messages) - max(8, recent_messages))
-    while (
-        suffix_start < len(messages)
-        and messages[suffix_start].get("role") != "assistant"
-    ):
-        suffix_start += 1
-    if suffix_start >= len(messages) - 1:
+    def _build(suffix_count: int, journal_limit: int) -> tuple[list[dict], int]:
+        suffix_start = max(1, len(messages) - max(4, suffix_count))
+        while (
+            suffix_start < len(messages)
+            and messages[suffix_start].get("role") != "assistant"
+        ):
+            suffix_start += 1
+        if suffix_start >= len(messages) - 1:
+            return messages, 0
+        removed = messages[1:suffix_start]
+        journal_lines: list[str] = []
+        for message in removed:
+            content = message.get("content")
+            blocks = content if isinstance(content, list) else []
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    tool_input = (
+                        block.get("input")
+                        if isinstance(block.get("input"), dict)
+                        else {}
+                    )
+                    details = [str(block.get("name") or "tool")]
+                    for key in (
+                        "method",
+                        "url",
+                        "owasp_category",
+                        "test_class",
+                        "title",
+                    ):
+                        value = tool_input.get(key)
+                        if value not in (None, ""):
+                            details.append(f"{key}={str(value)[:240]}")
+                    journal_lines.append("- " + " ".join(details))
+                elif block.get("type") == "tool_result":
+                    result = str(block.get("content") or "").replace("\n", " ").strip()
+                    if result:
+                        journal_lines.append(f"  result: {result[:360]}")
+        journal = (
+            f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
+            "Use context tools for full durable evidence.]\n"
+            + "\n".join(journal_lines[-journal_limit:])
+        )[:16_000]
+        first = dict(messages[0])
+        first_content = first.get("content")
+        if isinstance(first_content, list):
+            first["content"] = list(first_content) + [{"type": "text", "text": journal}]
+        else:
+            first["content"] = f"{first_content or ''}\n\n{journal}"
+        return [first, *messages[suffix_start:]], len(removed)
+
+    compacted, removed_count = _build(recent_messages, 80)
+    truncated_tool_results = 0
+    if max_context_tokens:
+        for suffix_count, journal_limit in ((16, 60), (8, 40), (4, 20)):
+            estimated = _estimate_tools_call_tokens(
+                system_message, compacted, tools=tools, model=model, provider=provider
+            )
+            if estimated <= input_budget:
+                break
+            compacted, removed_count = _build(suffix_count, journal_limit)
+        if (
+            _estimate_tools_call_tokens(
+                system_message, compacted, tools=tools, model=model, provider=provider
+            )
+            > input_budget
+        ):
+            compacted = [dict(message) for message in compacted]
+            for index in range(1, len(compacted)):
+                message = compacted[index]
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                blocks = [
+                    dict(block) if isinstance(block, dict) else block
+                    for block in content
+                ]
+                changed = False
+                for block in blocks:
+                    if (
+                        not isinstance(block, dict)
+                        or block.get("type") != "tool_result"
+                    ):
+                        continue
+                    result = block.get("content")
+                    if not isinstance(result, str) or len(result) < 256:
+                        continue
+                    block["content"] = _fit_text_to_tokens(
+                        result,
+                        max(128, input_budget // 8),
+                        model=model,
+                    )
+                    changed = True
+                    truncated_tool_results += 1
+                if changed:
+                    message["content"] = blocks
+                if (
+                    _estimate_tools_call_tokens(
+                        system_message,
+                        compacted,
+                        tools=tools,
+                        model=model,
+                        provider=provider,
+                    )
+                    <= input_budget
+                ):
+                    break
+    if removed_count == 0:
         return messages, None
-
-    removed = messages[1:suffix_start]
-    journal_lines: list[str] = []
-    for message in removed:
-        content = message.get("content")
-        blocks = content if isinstance(content, list) else []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_use":
-                tool_input = (
-                    block.get("input") if isinstance(block.get("input"), dict) else {}
-                )
-                details = [str(block.get("name") or "tool")]
-                for key in ("method", "url", "owasp_category", "test_class", "title"):
-                    value = tool_input.get(key)
-                    if value not in (None, ""):
-                        details.append(f"{key}={str(value)[:240]}")
-                journal_lines.append("- " + " ".join(details))
-            elif block.get("type") == "tool_result":
-                result = str(block.get("content") or "").replace("\n", " ").strip()
-                if result:
-                    journal_lines.append(f"  result: {result[:360]}")
-
-    journal = (
-        f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
-        "Use context tools for full durable evidence.]\n"
-        + "\n".join(journal_lines[-80:])
-    )[:16_000]
-    first = dict(messages[0])
-    first_content = first.get("content")
-    if isinstance(first_content, list):
-        first["content"] = list(first_content) + [{"type": "text", "text": journal}]
-    else:
-        first["content"] = f"{first_content or ''}\n\n{journal}"
-    compacted = [first, *messages[suffix_start:]]
     after_chars = len(json.dumps(compacted, default=str))
+    after_tokens = (
+        _estimate_tools_call_tokens(
+            system_message,
+            compacted,
+            tools=tools,
+            model=model,
+            provider=provider,
+        )
+        if max_context_tokens
+        else 0
+    )
     return compacted, {
         "before_chars": before_chars,
         "after_chars": after_chars,
-        "removed_messages": len(removed),
+        "before_tokens": before_tokens,
+        "after_tokens": after_tokens,
+        "context_budget_tokens": input_budget,
+        "removed_messages": removed_count,
+        "truncated_tool_results": truncated_tool_results,
         "remaining_messages": len(compacted),
     }
+
+
+def compact_messages_for_config(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> tuple[list[dict], dict[str, int] | None]:
+    """Apply the configured model context budget to a live transcript."""
+    compacted, stats = compact_agentic_messages(
+        messages,
+        max_context_tokens=int(getattr(config, "max_context_tokens", 0) or 0),
+        max_output_tokens=int(getattr(config, "max_tokens", 0) or 0),
+        system_message=system_message,
+        tools=tools,
+        model=getattr(config, "model", None),
+        provider=str(
+            getattr(getattr(config, "provider", None), "value", config.provider)
+        ),
+    )
+    context_limit = int(getattr(config, "max_context_tokens", 0) or 0)
+    if context_limit:
+        safety = max(1024, min(8192, context_limit // 20))
+        budget = max(
+            1024, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety
+        )
+        estimated = _estimate_tools_call_tokens(
+            system_message,
+            compacted,
+            tools=tools,
+            model=getattr(config, "model", None),
+            provider=str(
+                getattr(getattr(config, "provider", None), "value", config.provider)
+            ),
+        )
+        if estimated > budget:
+            raise LLMContextLimitError(
+                f"The configured context window cannot fit the fixed prompt and current turn "
+                f"({estimated:,} input tokens estimated; {budget:,} available)."
+            )
+    return compacted, stats
 
 
 # All providers that support native tool use and therefore run the continuous
@@ -4084,7 +4501,7 @@ def _estimate_tools_call_tokens(
     return estimated + 8 + (4 * len(messages)) + (8 if tools else 0)
 
 
-async def _call_with_tools(
+async def _call_with_tools_rate_limited(
     config: "LLMConfig",
     system_message: str,
     messages: list[dict],
@@ -4115,10 +4532,12 @@ async def _call_with_tools(
     ) + (config.max_tokens or 4096)
     slept = await limiter.acquire(
         estimated,
-        on_wait=lambda wt: _emit_rate_limit_waiting(
+        on_wait=lambda wt: _emit_llm_pacing_waiting(
             config.model, min(estimated, limiter.max_tokens), wt
         ),
     )
+    if slept:
+        _emit_llm_pacing_finished(config.model)
     try:
         result = await _call_with_tools_impl(
             config, system_message, messages, tools=tools
@@ -4126,14 +4545,60 @@ async def _call_with_tools(
         usage = _last_call_tokens_var.get()
         actual_total = (usage["input"] + usage["output"]) if usage else estimated
         await limiter.reconcile(estimated, actual_total)
-        if slept:
-            _emit_rate_limit_cleared(config.model, actual_total)
         return result
     except Exception as exc:
         if config.provider == "openai_codex" and isinstance(exc, LLMQuotaPauseError):
             await limiter.block_for(_codex_cooldown_seconds(exc))
         await limiter.reconcile(estimated, 0)
         raise
+
+
+async def _call_with_tools(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> "tuple[list[dict], str, Any]":
+    operation = _operation_var.get() or _infer_llm_operation()
+    call_id = next(_traffic_call_ids)
+    active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    request = {
+        "system": system_message,
+        "messages": messages,
+        "tools": [tool.get("name", "") for tool in active_tools],
+    }
+    _log_llm_traffic(
+        "REQUEST",
+        config,
+        request,
+        kind="tools",
+        operation=operation,
+        call_id=call_id,
+    )
+    try:
+        result = await _call_with_tools_rate_limited(
+            config, system_message, messages, tools=tools
+        )
+    except Exception as exc:
+        _log_llm_traffic(
+            "FAILED",
+            config,
+            str(exc),
+            kind="tools",
+            operation=operation,
+            call_id=call_id,
+        )
+        raise
+    blocks, stop_reason, raw_content = result
+    _log_llm_traffic(
+        "RESPONSE",
+        config,
+        {"stop_reason": stop_reason, "content": blocks},
+        kind="tools",
+        operation=operation,
+        call_id=call_id,
+    )
+    return blocks, stop_reason, raw_content
 
 
 async def _call_with_tools_impl(
@@ -4477,11 +4942,7 @@ async def _call_with_tools_impl(
                 import boto3
                 from botocore.config import Config as _BotocoreConfig
 
-                region = (
-                    os.getenv("AWS_REGION")
-                    or os.getenv("AWS_DEFAULT_REGION")
-                    or _bedrock_region_from_url(config.base_url or "")
-                )
+                region = _bedrock_region(config)
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
@@ -4795,7 +5256,28 @@ async def _call_with_tools_impl(
         else:
             call_kwargs["tool_choice"] = "required"
         resp = await _create_chat_completion(oai_client, call_kwargs)
-        choice = resp.choices[0]
+        _oai_u = getattr(resp, "usage", None)
+        _oai_cached = (
+            getattr(getattr(_oai_u, "prompt_tokens_details", None), "cached_tokens", 0)
+            if _oai_u
+            else 0
+        )
+        _record_usage(
+            config.model,
+            getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
+            getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0,
+            cache_read_tokens=_oai_cached,
+        )
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            log.warning(
+                "OpenAI-compatible provider returned no completion choices "
+                "(provider=%s, model=%s)",
+                config.provider,
+                config.model,
+            )
+            return [], "end_turn", []
+        choice = choices[0]
         msg = choice.message
         refusal = getattr(msg, "refusal", None)
         if refusal:
@@ -4817,18 +5299,6 @@ async def _call_with_tools_impl(
                 }
             )
         stop_reason = "tool_use" if finish == "tool_calls" else "end_turn"
-        _oai_u = getattr(resp, "usage", None)
-        _oai_cached = (
-            getattr(getattr(_oai_u, "prompt_tokens_details", None), "cached_tokens", 0)
-            if _oai_u
-            else 0
-        )
-        _record_usage(
-            config.model,
-            getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
-            getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0,
-            cache_read_tokens=_oai_cached,
-        )
         return blocks, stop_reason, blocks  # store Anthropic-format in history
 
     # ── Google Gemini (function calling) ──────────────────────────────────────
@@ -4951,6 +5421,32 @@ async def _call_with_tools_impl(
     raise ValueError(f"Provider {config.provider!r} does not support native tool use")
 
 
+def _normalize_agentic_tool_input(value: Any) -> tuple[dict[str, Any], str | None]:
+    """Normalize provider tool arguments to the mapping expected by executors."""
+    if value is None:
+        return {}, None
+    if isinstance(value, dict):
+        return value, None
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}, "Tool input must be a valid JSON object. Call the tool again."
+        if isinstance(parsed, dict):
+            return parsed, None
+    return {}, "Tool input must be a JSON object. Call the tool again."
+
+
+def _stringify_agentic_tool_result(value: Any) -> str:
+    """Convert executor results to canonical textual tool-result content."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 async def thinking_agentic_loop(
     config: "LLMConfig",
     *,
@@ -4971,6 +5467,7 @@ async def thinking_agentic_loop(
     execution_monitor_enabled: bool = True,
     max_consecutive_text_turns: int = 3,
     max_context_chars: int = 0,
+    max_context_tokens: int | None = None,
     on_context_compaction=None,
     text_only_repair_message: str | None = None,
 ) -> str:
@@ -5083,6 +5580,7 @@ async def thinking_agentic_loop(
         except Exception:
             pass
 
+    operation_token = _operation_var.set(_infer_llm_operation())
     try:
         while True:
             if stop_check and stop_check():
@@ -5114,6 +5612,14 @@ async def thinking_agentic_loop(
             messages, compaction = compact_agentic_messages(
                 messages,
                 max_context_chars=max_context_chars,
+                max_context_tokens=int(
+                    max_context_tokens or getattr(config, "max_context_tokens", 0) or 0
+                ),
+                max_output_tokens=int(getattr(config, "max_tokens", 0) or 0),
+                system_message=system_message,
+                tools=tools if tools is not None else THINKING_AGENT_TOOLS,
+                model=config.model,
+                provider=str(getattr(config.provider, "value", config.provider)),
             )
             if compaction:
                 if on_context_compaction:
@@ -5138,6 +5644,28 @@ async def thinking_agentic_loop(
                         )
                     except Exception:
                         pass
+
+            context_limit = int(
+                max_context_tokens or getattr(config, "max_context_tokens", 0) or 0
+            )
+            if context_limit:
+                safety = max(1024, min(8192, context_limit // 20))
+                budget = max(
+                    1024,
+                    context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety,
+                )
+                estimated = _estimate_tools_call_tokens(
+                    system_message,
+                    messages,
+                    tools=tools if tools is not None else THINKING_AGENT_TOOLS,
+                    model=config.model,
+                    provider=str(getattr(config.provider, "value", config.provider)),
+                )
+                if estimated > budget:
+                    raise LLMContextLimitError(
+                        f"The configured context window cannot fit the fixed prompt and current turn "
+                        f"({estimated:,} input tokens estimated; {budget:,} available)."
+                    )
 
             if emit_fn:
                 try:
@@ -5296,14 +5824,14 @@ async def thinking_agentic_loop(
                     response_status = "complete"
                     response_message = f"Step {tool_call_count + 1}: LLM → {action_label} (stop: {stop_reason})"
                 else:
-                    response_status = "warning"
+                    response_status = "retrying"
                     response_kind = (
                         "empty response" if no_usable_content else "text-only response"
                     )
                     response_message = (
                         f"Step {tool_call_count + 1}: LLM returned {response_kind} "
                         f"without a tool call (native stop: {stop_reason}); "
-                        f"retry {no_tool_attempt}/3"
+                        f"retrying {no_tool_attempt}/3"
                     )
                 try:
                     emit_fn(
@@ -5399,7 +5927,9 @@ async def thinking_agentic_loop(
             for block in tool_use_blocks:
                 tool_call_count += 1
                 tool_name = block.get("name") or ""
-                tool_input = block.get("input") or {}
+                tool_input, tool_input_error = _normalize_agentic_tool_input(
+                    block.get("input")
+                )
                 tool_use_id = block.get("id") or ""
 
                 if stop_check and stop_check():
@@ -5412,6 +5942,21 @@ async def thinking_agentic_loop(
                     )
                     session_done = True
                     break
+
+                if tool_input_error:
+                    log.warning(
+                        "thinking_agentic_loop: invalid input for tool %r: %s",
+                        tool_name,
+                        tool_input_error,
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": tool_input_error,
+                        }
+                    )
+                    continue
 
                 if tool_name == "done":
                     final_summary = str(tool_input.get("summary") or "")
@@ -5489,8 +6034,8 @@ async def thinking_agentic_loop(
                         )
 
                 try:
-                    result_str = await tool_executor(
-                        tool_name, tool_input, tool_call_count
+                    result_str = _stringify_agentic_tool_result(
+                        await tool_executor(tool_name, tool_input, tool_call_count)
                     )
                 except Exception as exc:
                     log.warning(
@@ -5583,6 +6128,7 @@ async def thinking_agentic_loop(
                 await on_checkpoint(messages, tool_call_count)
             except Exception:
                 pass
+        _operation_var.reset(operation_token)
 
     return final_summary
 

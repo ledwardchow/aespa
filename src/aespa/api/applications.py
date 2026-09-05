@@ -1,10 +1,8 @@
 """Thin API router for Applications: components, ZIP snapshots, targets,
 code-to-target routing associations, and multi-repository assessment campaigns.
 
-All real logic lives in ``services/applications.py``, ``services/campaigns.py``,
-and ``services/correlation.py`` — this module only validates the HTTP
-boundary, translates service errors into HTTP responses, and shapes output
-schemas.
+Campaign results are assembled in ``services/campaign_results.py``. This
+router also handles HTTP validation, uploads, and activity streams.
 """
 
 from __future__ import annotations
@@ -12,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 import uuid
 import zipfile
 from pathlib import Path
@@ -34,7 +31,6 @@ from sqlmodel import Session, select
 from aespa.config import get_settings
 from aespa.db import get_engine, get_session
 from aespa.models import (
-    AgentLog,
     ApplicationComponent,
     AssessmentCampaign,
     CampaignSourceMember,
@@ -42,10 +38,6 @@ from aespa.models import (
     ComponentConnection,
     ComponentFact,
     LeadTargetMapping,
-    ScanFinding,
-    ScanLead,
-    ScanLeadComponentProvenance,
-    ScanLog,
 )
 from aespa.schemas import (
     ApplicationComponentCreate,
@@ -76,14 +68,15 @@ from aespa.schemas import (
     LeadTargetMappingReviewResult,
 )
 from aespa.services import applications as applications_svc
+from aespa.services import campaign_results as campaign_results_svc
 from aespa.services import campaigns as campaigns_svc
 from aespa.services import correlation as correlation_svc
 from aespa.services import events as events_svc
-from aespa.services import scan_leads as scan_leads_svc
-from aespa.services.references import (
-    ensure_campaign_finding_reference,
-    ensure_finding_reference,
-    ensure_lead_references,
+from aespa.services.campaign_activity import (
+    _load_campaign_activity_entries as _load_campaign_activity_entries,
+)
+from aespa.services.campaign_activity import (
+    _parse_activity_cursor as _parse_activity_cursor,
 )
 
 router = APIRouter(prefix="/api/applications", tags=["applications"])
@@ -105,88 +98,6 @@ def _bad_request(exc: Exception) -> HTTPException:
 
 
 _ACTIVITY_STREAM_POLL_SECONDS = 1.0
-_ACTIVITY_CURSOR_RE = re.compile(r"^(\d+)\.(\d+)$")
-
-
-def _parse_activity_cursor(cursor: str | None) -> tuple[int, int]:
-    """Parse an ``event_id``/cursor of the form ``"<agent_id>.<scan_id>"``.
-
-    A missing, empty, or malformed cursor resumes from the very beginning
-    (``0, 0``) rather than raising — a stale or garbled ``Last-Event-ID``
-    must never wedge a reconnecting client.
-    """
-    if not cursor:
-        return (0, 0)
-    match = _ACTIVITY_CURSOR_RE.match(cursor.strip())
-    if not match:
-        return (0, 0)
-    return (int(match.group(1)), int(match.group(2)))
-
-
-def _load_campaign_activity_entries(
-    session: Session,
-    campaign_id: int,
-    after_agent_id: int = 0,
-    after_scan_id: int = 0,
-) -> tuple[list[CampaignActivityEntry], int, int]:
-    """Load every persisted campaign activity row strictly after the given
-    watermarks, in stable chronological order, and return the new watermarks.
-
-    AgentLog and ScanLog each have their own independent id sequence, so
-    "after cursor" is tracked as one watermark per table; ties in
-    ``created_at`` are broken by table then id so the merge order never
-    depends on incidental query/dict ordering.
-    """
-    agent_rows = session.exec(
-        select(AgentLog)
-        .where(AgentLog.test_run_id == campaign_id)
-        .where(AgentLog.run_kind == "campaign")
-        .where(AgentLog.id > after_agent_id)
-    ).all()
-    scan_rows = session.exec(
-        select(ScanLog)
-        .where(ScanLog.test_run_id == campaign_id)
-        .where(ScanLog.run_kind == "campaign")
-        .where(ScanLog.id > after_scan_id)
-    ).all()
-
-    combined: list[tuple[object, int, str, int]] = [
-        (e.created_at, 0, "agent", e.id) for e in agent_rows
-    ] + [(e.created_at, 1, "scan", e.id) for e in scan_rows]
-    combined.sort(key=lambda row: (row[0], row[1], row[3]))
-    by_id = {("agent", e.id): e for e in agent_rows}
-    by_id.update({("scan", e.id): e for e in scan_rows})
-
-    entries: list[CampaignActivityEntry] = []
-    max_agent, max_scan = after_agent_id, after_scan_id
-    for _created_at, _order, kind, row_id in combined:
-        row = by_id[(kind, row_id)]
-        if kind == "agent":
-            max_agent = max(max_agent, row_id)
-            entries.append(
-                CampaignActivityEntry(
-                    event_id=f"{max_agent}.{max_scan}",
-                    timestamp=row.created_at,
-                    type="agent_status",
-                    status=row.status,
-                    role=row.role,
-                    task=row.current_task,
-                    outcome=row.outcome,
-                )
-            )
-        else:
-            max_scan = max(max_scan, row_id)
-            entries.append(
-                CampaignActivityEntry(
-                    event_id=f"{max_agent}.{max_scan}",
-                    timestamp=row.created_at,
-                    type="scanner_phase",
-                    status=row.status,
-                    phase=row.phase,
-                    message=row.message,
-                )
-            )
-    return entries, max_agent, max_scan
 
 
 def _to_application_summary(session: Session, app) -> ApplicationSummary:
@@ -740,19 +651,37 @@ async def stop_campaign(
 
 
 @router.post(
+    "/{application_id}/campaigns/{campaign_id}/resume", response_model=CampaignDetail
+)
+async def resume_campaign(
+    application_id: int, campaign_id: int, session: Session = Depends(get_session)
+) -> CampaignDetail:
+    """Resume a stopped campaign without recreating completed work."""
+    try:
+        campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
+        await campaigns_svc.resume_campaign(campaign.id)
+    except campaigns_svc.CampaignNotFound as exc:
+        raise _not_found(exc) from exc
+    except campaigns_svc.InvalidCampaignState as exc:
+        raise _conflict(exc) from exc
+    session.refresh(campaign)
+    return _to_campaign_detail(session, campaign)
+
+
+@router.post(
     "/{application_id}/campaigns/{campaign_id}/retry", response_model=CampaignDetail
 )
 async def retry_campaign(
     application_id: int, campaign_id: int, session: Session = Depends(get_session)
 ) -> CampaignDetail:
-    """Resume a campaign left ``interrupted`` by a server restart.
+    """Backward-compatible route for resuming an interrupted campaign.
 
     Reuses every child run/lead the campaign already created — never
     recreates a ``SastRun``/``TestRun``/``ApiTestRun`` or duplicates a lead.
     """
     try:
         campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
-        await campaigns_svc.retry_campaign(campaign.id)
+        await campaigns_svc.resume_campaign(campaign.id)
     except campaigns_svc.CampaignNotFound as exc:
         raise _not_found(exc) from exc
     except campaigns_svc.InvalidCampaignState as exc:
@@ -1069,132 +998,7 @@ def campaign_mappings(
     mappings = session.exec(
         select(LeadTargetMapping).where(LeadTargetMapping.campaign_id == campaign_id)
     ).all()
-    return _enrich_mappings(session, campaign_id, mappings)
-
-
-def _component_id_by_sast_run_id(session: Session, campaign_id: int) -> dict[int, int]:
-    """One component per frozen SAST child this campaign created."""
-    return {
-        member.sast_run_id: member.component_id
-        for member in session.exec(
-            select(CampaignSourceMember).where(
-                CampaignSourceMember.campaign_id == campaign_id
-            )
-        ).all()
-        if member.sast_run_id is not None
-    }
-
-
-def _component_names_by_id(session: Session, component_ids: set[int]) -> dict[int, str]:
-    if not component_ids:
-        return {}
-    return {
-        component.id: component.name
-        for component in session.exec(
-            select(ApplicationComponent).where(
-                ApplicationComponent.id.in_(component_ids)
-            )
-        ).all()
-    }
-
-
-def _enrich_mappings(
-    session: Session, campaign_id: int, mappings: list[LeadTargetMapping]
-) -> list[LeadTargetMappingOut]:
-    """Attach lead context (title/description/severity/location/producer)
-    and contributing component ids/names to each mapping — bounded to a
-    handful of queries total regardless of mapping count (no N+1).
-    """
-    if not mappings:
-        return []
-
-    lead_ids = {m.lead_id for m in mappings}
-    leads_by_id = {
-        lead.id: lead
-        for lead in session.exec(
-            select(ScanLead).where(ScanLead.id.in_(lead_ids))
-        ).all()
-    }
-    ensure_lead_references(session, leads_by_id.values())
-
-    component_id_by_sast_run_id = _component_id_by_sast_run_id(session, campaign_id)
-
-    campaign_lead_ids = {
-        lead_id
-        for lead_id, lead in leads_by_id.items()
-        if lead.producer_run_type == "campaign"
-    }
-    provenance_by_lead: dict[int, list[int]] = {}
-    if campaign_lead_ids:
-        for row in session.exec(
-            select(ScanLeadComponentProvenance).where(
-                ScanLeadComponentProvenance.scan_lead_id.in_(campaign_lead_ids)
-            )
-        ).all():
-            provenance_by_lead.setdefault(row.scan_lead_id, []).append(row.component_id)
-
-    all_component_ids = set(component_id_by_sast_run_id.values()) | {
-        component_id
-        for component_ids in provenance_by_lead.values()
-        for component_id in component_ids
-    }
-    component_name_by_id = _component_names_by_id(session, all_component_ids)
-
-    enriched: list[LeadTargetMappingOut] = []
-    for mapping in mappings:
-        base = LeadTargetMappingOut.model_validate(mapping)
-        lead = leads_by_id.get(mapping.lead_id)
-        if lead is None:
-            enriched.append(base)
-            continue
-        if lead.producer_run_type == "sast":
-            component_id = component_id_by_sast_run_id.get(lead.producer_run_id)
-            component_ids = [component_id] if component_id is not None else []
-        else:
-            component_ids = provenance_by_lead.get(lead.id, [])
-        enriched.append(
-            base.model_copy(
-                update={
-                    "lead_reference": lead.reference,
-                    "lead_title": lead.title,
-                    "lead_description": lead.description,
-                    "lead_severity": lead.severity,
-                    "lead_location": lead.location,
-                    "lead_producer_run_type": lead.producer_run_type,
-                    "lead_producer_run_id": lead.producer_run_id,
-                    "lead_category": lead.category,
-                    "lead_confidence": lead.confidence,
-                    "lead_source": lead.source,
-                    "lead_fingerprint": lead.fingerprint,
-                    "lead_origin_lead_id": lead.origin_lead_id,
-                    "lead_origin_reference": lead.origin_reference,
-                    "lead_trace_path_key": lead.trace_path_key,
-                    "lead_trace_status": lead.trace_status,
-                    "lead_trace_confidence": lead.trace_confidence,
-                    "lead_suggested_endpoint": lead.suggested_endpoint,
-                    "lead_status": lead.status,
-                    "lead_validation_status": lead.validation_status,
-                    "lead_validation_reasoning": lead.validation_reasoning,
-                    "lead_reportable": lead.reportable,
-                    "lead_evidence": lead.evidence,
-                    "lead_note": lead.note,
-                    "lead_source_trace_json": lead.source_trace_json,
-                    "lead_control_trace_json": lead.control_trace_json,
-                    "lead_sink_trace_json": lead.sink_trace_json,
-                    "lead_counterevidence_json": lead.counterevidence_json,
-                    "lead_proof_gaps_json": lead.proof_gaps_json,
-                    "lead_attack_path_json": lead.attack_path_json,
-                    "component_ids": component_ids,
-                    "component_names": [
-                        component_name_by_id[cid]
-                        for cid in component_ids
-                        if cid in component_name_by_id
-                    ],
-                }
-            )
-        )
-    session.commit()
-    return enriched
+    return campaign_results_svc.enrich_mappings(session, campaign_id, mappings)
 
 
 @router.post(
@@ -1247,7 +1051,7 @@ def edit_campaign_mapping(
         raise _not_found(exc) from exc
     except correlation_svc.UnknownMappingError as exc:
         raise _conflict(exc) from exc
-    return _enrich_mappings(session, campaign_id, [mapping])[0]
+    return campaign_results_svc.enrich_mappings(session, campaign_id, [mapping])[0]
 
 
 @router.post(
@@ -1318,164 +1122,6 @@ def campaign_findings(
     except campaigns_svc.CampaignNotFound as exc:
         raise _not_found(exc) from exc
 
-    target_members = session.exec(
-        select(CampaignTargetMember).where(
-            CampaignTargetMember.campaign_id == campaign_id
-        )
-    ).all()
-
-    findings_by_target: list[tuple[CampaignTargetMember, int, list[ScanFinding]]] = []
-    all_findings: list[ScanFinding] = []
-    for target_member in target_members:
-        run_id = target_member.test_run_id or target_member.api_test_run_id
-        if run_id is None:
-            continue
-        if target_member.test_run_id is not None:
-            findings = session.exec(
-                select(ScanFinding).where(ScanFinding.test_run_id == run_id)
-            ).all()
-        else:
-            findings = session.exec(
-                select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
-            ).all()
-        findings_by_target.append((target_member, run_id, findings))
-        all_findings.extend(findings)
-
-    finding_ids = {f.id for f in all_findings if f.id is not None}
-    lead_by_finding_id: dict[int, ScanLead] = {}
-    if finding_ids:
-        for lead in session.exec(
-            select(ScanLead).where(ScanLead.linked_finding_id.in_(finding_ids))
-        ).all():
-            if lead.linked_finding_id is not None:
-                lead_by_finding_id[lead.linked_finding_id] = lead
-
-    component_id_by_sast_run_id = _component_id_by_sast_run_id(session, campaign_id)
-
-    # Campaign-produced copies need their *original* lead's id (provenance is
-    # keyed on the original, not the copy) — resolved by fingerprint, exactly
-    # how copy_lead_to_run itself finds an existing copy.
-    campaign_copy_fingerprints = {
-        lead.fingerprint
-        for lead in lead_by_finding_id.values()
-        if lead.producer_run_type == "campaign" and lead.fingerprint
-    }
-    original_id_by_fingerprint: dict[str, int] = {}
-    if campaign_copy_fingerprints:
-        for original in session.exec(
-            select(ScanLead)
-            .where(ScanLead.producer_run_type == "campaign")
-            .where(ScanLead.producer_run_id == campaign_id)
-            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-            .where(ScanLead.fingerprint.in_(campaign_copy_fingerprints))
-        ).all():
-            original_id_by_fingerprint[original.fingerprint] = original.id
-
-    provenance_by_original_lead: dict[int, list[int]] = {}
-    if original_id_by_fingerprint:
-        original_ids = set(original_id_by_fingerprint.values())
-        for row in session.exec(
-            select(ScanLeadComponentProvenance).where(
-                ScanLeadComponentProvenance.scan_lead_id.in_(original_ids)
-            )
-        ).all():
-            provenance_by_original_lead.setdefault(row.scan_lead_id, []).append(
-                row.component_id
-            )
-
-    all_component_ids = set(component_id_by_sast_run_id.values()) | {
-        component_id
-        for component_ids in provenance_by_original_lead.values()
-        for component_id in component_ids
-    }
-    component_name_by_id = _component_names_by_id(session, all_component_ids)
-
-    def _component_ids_for_finding(finding: ScanFinding) -> list[int]:
-        lead = lead_by_finding_id.get(finding.id)
-        if lead is None:
-            return []  # no linked campaign lead — never guessed
-        if lead.producer_run_type == "sast":
-            component_id = component_id_by_sast_run_id.get(lead.producer_run_id)
-            return [component_id] if component_id is not None else []
-        if lead.producer_run_type == "campaign":
-            original_id = original_id_by_fingerprint.get(lead.fingerprint)
-            if original_id is None:
-                return []
-            return provenance_by_original_lead.get(original_id, [])
-        return []
-
-    rows: list[CampaignFindingRow] = []
-    for target_member, run_id, findings in findings_by_target:
-        target = applications_svc.get_target(
-            session, application_id, target_member.target_id
-        )
-        target_name = applications_svc.target_display_name(session, target)
-        for finding in findings:
-            ensure_finding_reference(session, finding)
-            campaign_reference = ensure_campaign_finding_reference(
-                session,
-                campaign_id=campaign_id,
-                finding_id=finding.id,
-                target_member_id=target_member.id,
-            )
-            component_ids = _component_ids_for_finding(finding)
-            finding_lead = lead_by_finding_id.get(finding.id)
-            attack_path = (
-                scan_leads_svc.decode_attack_path(finding_lead.attack_path_json)
-                if finding_lead is not None
-                else {}
-            )
-            frontend_path = (
-                attack_path if attack_path.get("perspective") == "frontend" else None
-            )
-            backend_path = (
-                attack_path.get("origin_attack_path") if frontend_path else attack_path
-            )
-            component_names = [
-                component_name_by_id[cid]
-                for cid in component_ids
-                if cid in component_name_by_id
-            ]
-            rows.append(
-                CampaignFindingRow(
-                    finding_id=finding.id,
-                    reference=campaign_reference.public_reference,
-                    run_reference=finding.reference,
-                    target_type=target_member.target_type,
-                    target_run_id=run_id,
-                    component_id=component_ids[0] if component_ids else None,
-                    component_name=(
-                        ", ".join(component_names) if component_names else None
-                    ),
-                    component_ids=component_ids,
-                    component_names=component_names,
-                    target_name=target_name,
-                    title=finding.title,
-                    description=finding.description,
-                    impact=finding.impact,
-                    likelihood=finding.likelihood,
-                    recommendation=finding.recommendation,
-                    cvss_score=finding.cvss_score,
-                    cvss_vector=finding.cvss_vector,
-                    affected_url=finding.affected_url,
-                    evidence=finding.evidence,
-                    request_evidence=finding.request_evidence,
-                    response_evidence=finding.response_evidence,
-                    evidence_items=finding.evidence_items,
-                    validation_note=finding.validation_note,
-                    merged_instances=finding.merged_instances,
-                    poc_command=finding.poc_command,
-                    poc_setup=finding.poc_setup,
-                    finding_source=finding.finding_source,
-                    origin=finding.origin,
-                    validated_by=finding.validated_by,
-                    severity=finding.severity,
-                    status=finding.validation_status,
-                    frontend_attack_path=frontend_path,
-                    backend_attack_path=backend_path
-                    if isinstance(backend_path, dict)
-                    else None,
-                )
-            )
-    session.commit()
-    return rows
+    return campaign_results_svc.list_campaign_findings(
+        session, application_id, campaign_id
+    )

@@ -1,0 +1,101 @@
+// ── Scanner policy helpers ──────────────────────────────────────────────────
+
+export const SCAN_MODE_OPTIONS = [
+  ["passive", "Passive"],
+  ["safe_active", "Safe Active"],
+  ["aggressive", "Aggressive"],
+  ["destructive", "Destructive"],
+];
+export const scanModeLabel = (mode) =>
+  (SCAN_MODE_OPTIONS.find(([v]) => v === mode) || [])[1] || mode;
+export const csv = (value, transform = (x) => x) =>
+  String(value || "")
+    .split(",")
+    .map((x) => transform(x.trim()))
+    .filter(Boolean);
+export const defaultPolicyForm = () => ({
+  execution_monitor_enabled: false,
+  disable_deterministic_checks: false,
+  max_consecutive_text_turns: 0,
+  enforce_full_coverage_obligations: false,
+  standard_coverage_percent: 60,
+  scan_mode: "aggressive",
+  max_probes_per_page: 50,
+  thinking_max_steps: 120,
+  request_timeout_s: 10,
+  min_delay_s: 0.05,
+  max_request_body_bytes: 65536,
+  response_body_read_limit_bytes: 524288,
+  allowed_schemes: "http, https",
+  methods_passive: "GET, HEAD",
+  methods_safe_active: "GET, POST, HEAD",
+  methods_aggressive: "GET, POST, PUT, PATCH, HEAD, OPTIONS",
+  methods_destructive: "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
+  blocked_headers: "host, cookie",
+  follow_redirects: true,
+  allow_subdomains: true,
+  require_approval_for_destructive: true,
+  strict_locator_enforcement: true,
+});
+export const policyToForm = (p) => {
+  const f = defaultPolicyForm();
+  if (!p) return f;
+  const mbm = p.methods_by_mode || {};
+  return {
+    ...f,
+    execution_monitor_enabled: p.execution_monitor_enabled ?? false,
+    disable_deterministic_checks: p.disable_deterministic_checks ?? false,
+    max_consecutive_text_turns: p.max_consecutive_text_turns ?? f.max_consecutive_text_turns,
+    enforce_full_coverage_obligations:
+      p.enforce_full_coverage_obligations ?? f.enforce_full_coverage_obligations,
+    standard_coverage_percent: p.standard_coverage_percent ?? f.standard_coverage_percent,
+    scan_mode: p.scan_mode || f.scan_mode,
+    max_probes_per_page: p.max_probes_per_page ?? f.max_probes_per_page,
+    thinking_max_steps: p.thinking_max_steps ?? f.thinking_max_steps,
+    request_timeout_s: p.request_timeout_s ?? f.request_timeout_s,
+    min_delay_s: p.min_delay_s ?? f.min_delay_s,
+    max_request_body_bytes: p.max_request_body_bytes ?? f.max_request_body_bytes,
+    response_body_read_limit_bytes:
+      p.response_body_read_limit_bytes ?? f.response_body_read_limit_bytes,
+    allowed_schemes: (p.allowed_schemes || ["http", "https"]).join(", "),
+    methods_passive: (mbm.passive || ["GET", "HEAD"]).join(", "),
+    methods_safe_active: (mbm.safe_active || ["GET", "POST", "HEAD"]).join(", "),
+    methods_aggressive: (mbm.aggressive || ["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"]).join(
+      ", ",
+    ),
+    methods_destructive: (
+      mbm.destructive || ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+    ).join(", "),
+    blocked_headers: (p.blocked_headers || ["host", "cookie"]).join(", "),
+    follow_redirects: p.follow_redirects ?? true,
+    allow_subdomains: p.allow_subdomains ?? true,
+    require_approval_for_destructive: p.require_approval_for_destructive ?? true,
+    strict_locator_enforcement: p.strict_locator_enforcement ?? true,
+  };
+};
+export const policyPayload = (form) => ({
+  execution_monitor_enabled: !!form.execution_monitor_enabled,
+  disable_deterministic_checks: !!form.disable_deterministic_checks,
+  max_consecutive_text_turns: Number(form.max_consecutive_text_turns),
+  enforce_full_coverage_obligations: !!form.enforce_full_coverage_obligations,
+  standard_coverage_percent: Number(form.standard_coverage_percent),
+  scan_mode: form.scan_mode,
+  max_probes_per_page: Number(form.max_probes_per_page),
+  thinking_max_steps: Number(form.thinking_max_steps),
+  request_timeout_s: Number(form.request_timeout_s),
+  min_delay_s: Number(form.min_delay_s),
+  max_request_body_bytes: Number(form.max_request_body_bytes),
+  response_body_read_limit_bytes: Number(form.response_body_read_limit_bytes),
+  allowed_schemes: csv(form.allowed_schemes, (x) => x.toLowerCase()),
+  methods_by_mode: {
+    passive: csv(form.methods_passive, (x) => x.toUpperCase()),
+    safe_active: csv(form.methods_safe_active, (x) => x.toUpperCase()),
+    aggressive: csv(form.methods_aggressive, (x) => x.toUpperCase()),
+    destructive: csv(form.methods_destructive, (x) => x.toUpperCase()),
+  },
+  blocked_headers: csv(form.blocked_headers, (x) => x.toLowerCase()),
+  follow_redirects: !!form.follow_redirects,
+  allow_subdomains: !!form.allow_subdomains,
+  require_approval_for_destructive: !!form.require_approval_for_destructive,
+  strict_locator_enforcement: !!form.strict_locator_enforcement,
+});

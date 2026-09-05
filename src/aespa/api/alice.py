@@ -11,8 +11,8 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import AliceChatMessage, AliceChatSession, TestRun
-from aespa.services import alice_tasks
+from aespa.models import AliceChatMessage, AliceChatSession, AliceGoal, TestRun
+from aespa.services import alice_goals, alice_tasks
 
 router = APIRouter(tags=["alice"])
 
@@ -39,6 +39,10 @@ class AliceSessionsRequest(BaseModel):
     active_tab_id: str = "tab-default"
 
 
+class AliceSteerRequest(BaseModel):
+    message: str
+
+
 # ── Chat session persistence helpers ──────────────────────────────────────────
 
 
@@ -58,6 +62,14 @@ def _load_sessions(run_id: int, session: Session, run_kind: str = "web") -> dict
     ).all()
 
     chats = []
+    goals = {
+        goal.session_key: alice_goals.goal_out(goal)
+        for goal in session.exec(
+            select(AliceGoal).where(
+                AliceGoal.test_run_id == run_id, AliceGoal.run_kind == run_kind
+            )
+        ).all()
+    }
     for s in sess_rows:
         msg_rows = session.exec(
             select(AliceChatMessage)
@@ -76,6 +88,7 @@ def _load_sessions(run_id: int, session: Session, run_kind: str = "web") -> dict
             {
                 "id": s.session_key,
                 "title": s.title,
+                "goal": goals.get(s.session_key),
                 "messages": [
                     {
                         "id": m.message_key,
@@ -117,6 +130,15 @@ def _save_sessions(
 
     for s in existing_sess:
         if s.session_key not in incoming_keys:
+            goal = session.exec(
+                select(AliceGoal).where(
+                    AliceGoal.test_run_id == run_id,
+                    AliceGoal.run_kind == run_kind,
+                    AliceGoal.session_key == s.session_key,
+                )
+            ).first()
+            if goal is not None:
+                session.delete(goal)
             for m in session.exec(
                 select(AliceChatMessage).where(AliceChatMessage.session_id == s.id)
             ).all():
@@ -269,6 +291,20 @@ async def stop_alice_run(
         raise HTTPException(status_code=404, detail="Test run not found")
     stopped = await alice_tasks.stop(run_id)
     return {"ok": True, "stopped": stopped}
+
+
+@router.post("/api/test-runs/{run_id}/alice/goal/steer")
+async def steer_alice_goal(
+    run_id: int,
+    req: AliceSteerRequest,
+    session: Session = Depends(get_session),
+) -> dict:
+    if session.get(TestRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="Test run not found")
+    accepted = await alice_tasks.steer_goal(run_id, req.message)
+    if not accepted:
+        raise HTTPException(status_code=409, detail="No active ALICE goal")
+    return {"ok": True}
 
 
 @router.get("/api/test-runs/{run_id}/alice/status")

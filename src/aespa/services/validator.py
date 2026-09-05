@@ -328,7 +328,6 @@ async def _validate_finding_inline(
     scanner_policy=None,
 ) -> None:
     """Validate a newly-created finding while a scan is still running."""
-    loaded_llm_cfg = llm_cfg is None
     with Session(get_engine()) as s:
         finding = s.get(ScanFinding, finding_id)
         run = s.get(TestRun, run_id)
@@ -360,11 +359,9 @@ async def _validate_finding_inline(
         s.add(finding)
         # Session.commit() expires every ORM row still attached to the session.
         # Detach the read-only inputs first so their fields remain available to
-        # the background validator. This also preserves provider fields resolved
-        # onto llm_cfg in memory by get_llm_config_for_role().
+        # the background validator. The resolved config is already independent
+        # of the session.
         readonly_objs = [*creds, site, run]
-        if loaded_llm_cfg:
-            readonly_objs.append(llm_cfg)
         for obj in readonly_objs:
             if obj is not None:
                 s.expunge(obj)
@@ -497,6 +494,24 @@ async def _run_validation_batch(
     await asyncio.gather(*(_validate_limited(finding) for finding in findings))
 
 
+def _load_findings_for_validation(
+    run_id: int, finding_ids: list[int] | None = None
+) -> list[ScanFinding]:
+    """Load explicitly requested findings or all findings eligible for bulk validation."""
+    with Session(get_engine()) as s:
+        q = select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        if finding_ids:
+            q = q.where(ScanFinding.id.in_(finding_ids))
+        else:
+            q = q.where(
+                ScanFinding.validation_status.in_(("unvalidated", "unconfirmed"))
+            )
+        findings = list(s.exec(q).all())
+        for finding in findings:
+            s.expunge(finding)
+    return findings
+
+
 async def _do_validate(
     run_id: int,
     finding_ids: list[int] | None = None,
@@ -515,19 +530,10 @@ async def _do_validate(
         scanner_policy = get_run_scanner_policy(s, run)
         validator_cfg = get_adversarial_validator_config(s)
         creds = list(site.credentials)
-        for obj in [*creds, site, llm_cfg, run]:
+        for obj in [*creds, site, run]:
             s.expunge(obj)
 
-    # Load the findings to validate.
-    with Session(get_engine()) as s:
-        q = select(ScanFinding).where(ScanFinding.test_run_id == run_id)
-        if finding_ids:
-            q = q.where(ScanFinding.id.in_(finding_ids))
-        else:
-            q = q.where(ScanFinding.validation_status == "unvalidated")
-        findings = s.exec(q).all()
-        for f in findings:
-            s.expunge(f)
+    findings = _load_findings_for_validation(run_id, finding_ids)
 
     if not findings:
         log.info("Validation: no findings to validate for run_id=%s", run_id)
@@ -1299,6 +1305,7 @@ async def _persist_verdict(
 
 
 def _reset_validating_findings(run_id: int, note: str) -> None:
+    finding_ids: list[int] = []
     with Session(get_engine()) as s:
         findings = s.exec(
             select(ScanFinding)
@@ -1306,17 +1313,19 @@ def _reset_validating_findings(run_id: int, note: str) -> None:
             .where(ScanFinding.validation_status == "validating")
         ).all()
         for finding in findings:
+            if finding.id is not None:
+                finding_ids.append(finding.id)
             finding.validation_status = "unvalidated"
             finding.validation_note = note
             s.add(finding)
         s.commit()
 
-    for finding in findings:
+    for finding_id in finding_ids:
         events_svc.emit(
             run_id,
             {
                 "type": "finding_validation_update",
-                "finding_id": finding.id,
+                "finding_id": finding_id,
                 "validation_status": "unvalidated",
                 "validation_note": note,
             },

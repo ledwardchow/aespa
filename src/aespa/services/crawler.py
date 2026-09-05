@@ -6,9 +6,7 @@ import contextlib
 import hashlib
 import json
 import logging
-import os
 import re
-import sys
 import time
 import uuid
 from collections import deque
@@ -222,14 +220,34 @@ async def _crawl_task(run_id: int) -> None:
         await _do_crawl(run_id)
     except asyncio.CancelledError:
         log.info("Crawl task cancelled (stop requested) for run_id=%s", run_id)
+        crawl_owned_run_state = False
         with Session(get_engine()) as s:
             run = s.get(TestRun, run_id)
-            if run and run.status == TestRunStatus.running:
+            if run and run.phase in {
+                "created",
+                "crawling",
+                "reconciling",
+                "finalizing",
+            }:
                 run.status = TestRunStatus.stopped
                 run.completed_at = _utcnow()
                 s.add(run)
                 s.commit()
-        events_svc.emit(run_id, {"type": "run_update", "status": "stopped"})
+                crawl_owned_run_state = True
+        if crawl_owned_run_state:
+            events_svc.emit(run_id, {"type": "run_update", "status": "stopped"})
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "crawler",
+                "role": "Crawler",
+                "status": "complete",
+                "current_task": "Crawl stopped",
+                "outcome": "Stopped by user",
+                "_persist": True,
+            },
+        )
         raise
     except Exception as exc:
         from aespa.services import llm as llm_svc
@@ -479,7 +497,7 @@ async def _do_crawl_inner(run_id: int) -> None:
             upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
         )
         global_header_cfg = get_global_http_header_config(s)
-        for obj in [*creds, site, llm_cfg, run]:
+        for obj in [*creds, site, run]:
             s.expunge(obj)
 
     _pw_proxy = {"proxy": {"server": crawl_proxy_url}} if crawl_proxy_url else {}
@@ -5791,8 +5809,17 @@ _MODAL_CLOSE_SELECTORS = [
     "button:has-text('Not now')",
 ]
 
+_SELECTOR_CLICK_TIMEOUT_MS = 3_000
+_SELECTOR_CLICK_TOTAL_TIMEOUT_MS = 10_000
+_MODAL_DISMISS_TOTAL_TIMEOUT_MS = 5_000
 
-async def _dismiss_blocking_modal(page, max_attempts: int = 3) -> bool:
+
+async def _dismiss_blocking_modal(
+    page,
+    max_attempts: int = 3,
+    *,
+    total_timeout_ms: int = _MODAL_DISMISS_TOTAL_TIMEOUT_MS,
+) -> bool:
     """Best-effort close of a full-screen modal/overlay that blocks the page.
 
     Some apps show a "click X to close" interstitial (welcome tour, consent
@@ -5804,47 +5831,61 @@ async def _dismiss_blocking_modal(page, max_attempts: int = 3) -> bool:
     dismissed at least once.
     """
     dismissed_any = False
-    for _ in range(max_attempts):
-        container = None
-        try:
-            root = page.locator(_MODAL_CONTAINER_SELECTOR)
-            count = await root.count()
-            for idx in range(min(count, 5)):
-                loc = root.nth(idx)
-                if await loc.is_visible():
-                    container = loc
-                    break
-        except Exception:
-            container = None
 
-        if container is None:
+    async def _dismiss() -> bool:
+        nonlocal dismissed_any
+        for _ in range(max_attempts):
+            container = None
             try:
-                loc = page.locator("[class*='modal' i], [class*='overlay' i]").first
-                if await loc.count() > 0 and await loc.is_visible():
-                    container = loc
+                root = page.locator(_MODAL_CONTAINER_SELECTOR)
+                count = await root.count()
+                for idx in range(min(count, 5)):
+                    loc = root.nth(idx)
+                    if await loc.is_visible():
+                        container = loc
+                        break
             except Exception:
                 container = None
 
-        if container is None:
-            break
+            if container is None:
+                try:
+                    loc = page.locator(
+                        "[class*='modal' i], [class*='overlay' i]"
+                    ).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        container = loc
+                except Exception:
+                    container = None
 
-        closed = False
-        for sel in _MODAL_CLOSE_SELECTORS:
-            try:
-                close_loc = container.locator(sel).first
-                if await close_loc.count() > 0 and await close_loc.is_visible():
-                    await close_loc.click(timeout=3_000)
-                    closed = True
-                    break
-            except Exception:
-                continue
-        if not closed:
-            closed = await _click_first_visible(page, _MODAL_CLOSE_SELECTORS)
-        if not closed:
-            break
-        dismissed_any = True
-        await page.wait_for_timeout(400)
-    return dismissed_any
+            if container is None:
+                break
+
+            closed = await _click_first_visible(
+                container,
+                _MODAL_CLOSE_SELECTORS,
+                click_timeout_ms=1_000,
+                total_timeout_ms=2_000,
+            )
+            if not closed:
+                closed = await _click_first_visible(
+                    page,
+                    _MODAL_CLOSE_SELECTORS,
+                    click_timeout_ms=1_000,
+                    total_timeout_ms=2_000,
+                )
+            if not closed:
+                break
+            dismissed_any = True
+            await page.wait_for_timeout(400)
+        return dismissed_any
+
+    try:
+        async with asyncio.timeout(max(1, total_timeout_ms) / 1000):
+            return await _dismiss()
+    except TimeoutError:
+        # Dialog handling is best-effort. A stale, obscured, or continuously
+        # re-rendered control must not hold the crawl on one page.
+        return dismissed_any
 
 
 async def _detect_mfa_prompt(page) -> bool:
@@ -6354,14 +6395,28 @@ async def _visible_locator(page, selector: str):
     return None
 
 
-async def _click_first_visible(page, selectors: list[str]) -> bool:
+async def _click_first_visible(
+    page,
+    selectors: list[str],
+    *,
+    click_timeout_ms: int = _SELECTOR_CLICK_TIMEOUT_MS,
+    total_timeout_ms: int = _SELECTOR_CLICK_TOTAL_TIMEOUT_MS,
+) -> bool:
+    """Click the first usable match without letting stale matches stall a crawl."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(1, total_timeout_ms) / 1000
     for selector in selectors:
-        loc = await _visible_locator(page, selector)
-        if loc is None:
-            continue
+        remaining_ms = int((deadline - loop.time()) * 1000)
+        if remaining_ms <= 0:
+            break
+        attempt_timeout_ms = max(1, min(click_timeout_ms, remaining_ms))
         try:
-            await loc.click()
-            return True
+            async with asyncio.timeout(attempt_timeout_ms / 1000):
+                loc = await _visible_locator(page, selector)
+                if loc is None:
+                    continue
+                await loc.click()
+                return True
         except Exception:
             pass
     return False
@@ -7206,12 +7261,9 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
     Requires a graphical display.  On headless servers, raises RuntimeError
     with instructions to use ``seed`` mode instead.
     """
-    has_display = (
-        sys.platform == "darwin"
-        or bool(os.environ.get("DISPLAY"))
-        or bool(os.environ.get("WAYLAND_DISPLAY"))
-    )
-    if not has_display:
+    from aespa.runtime_capabilities import graphical_display_available
+
+    if not graphical_display_available():
         events_svc.emit(
             run_id,
             {
@@ -8086,12 +8138,33 @@ async def _authenticate_smart(
 
         name = action.get("action")
         reason = action.get("reason") or ""
-        log.info("  _authenticate_smart: step %d → %s (%s)", step + 1, name, reason)
+        llm_error = bool(action.get("_llm_error"))
+        if llm_error:
+            log.error(
+                "  _authenticate_smart: LLM %s error at step %d: %s",
+                action.get("_llm_error_type") or "request",
+                step + 1,
+                reason,
+            )
+        else:
+            log.info(
+                "  _authenticate_smart: step %d → %s (%s)",
+                step + 1,
+                name,
+                reason,
+            )
         _crawl_log(
             run_id,
             "auth",
-            "info",
+            "error" if llm_error else "info",
             f"AI login step {step + 1}: {name}" + (f" — {reason}" if reason else ""),
+            data={
+                "error_type": action.get("_llm_error_type"),
+                "model": getattr(llm_cfg, "model", None),
+                "reset_at": action.get("_llm_reset_at"),
+            }
+            if llm_error
+            else None,
         )
 
         if name == "done":

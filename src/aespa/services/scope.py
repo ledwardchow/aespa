@@ -20,7 +20,12 @@ log = logging.getLogger(__name__)
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
-def scope_authority(url: str, *, default_scheme: str | None = None) -> str:
+def scope_authority(
+    url: str,
+    *,
+    default_scheme: str | None = None,
+    default_port: int | None = None,
+) -> str:
     """Return a lower-case ``host:port`` identity for a URL or scope entry.
 
     Bare scope entries such as ``example.com`` use ``default_scheme`` to resolve
@@ -39,7 +44,12 @@ def scope_authority(url: str, *, default_scheme: str | None = None) -> str:
     except ValueError:
         return ""
     scheme = (parsed.scheme or default_scheme or "").lower()
-    port = _DEFAULT_PORTS.get(scheme) if port is None else port
+    if port is None:
+        port = (
+            default_port
+            if not parsed.scheme and default_port is not None
+            else _DEFAULT_PORTS.get(scheme)
+        )
     display_host = f"[{hostname}]" if ":" in hostname else hostname
     return f"{display_host}:{port}" if port is not None else display_host
 
@@ -52,8 +62,15 @@ def authority_is_allowed(
     allow_subdomains: bool = False,
 ) -> bool:
     """Check a URL against scope entries using hostname and effective port."""
-    default_scheme = urlparse(default_url).scheme
-    candidate = scope_authority(url, default_scheme=default_scheme)
+    parsed_default = urlparse(default_url)
+    default_scheme = parsed_default.scheme
+    try:
+        default_port = parsed_default.port or _DEFAULT_PORTS.get(default_scheme)
+    except ValueError:
+        return False
+    candidate = scope_authority(
+        url, default_scheme=default_scheme, default_port=default_port
+    )
     if not candidate:
         return False
     candidate_url = urlparse(url)
@@ -65,7 +82,9 @@ def authority_is_allowed(
     except ValueError:
         return False
     for entry in scope_entries:
-        if candidate == scope_authority(entry, default_scheme=default_scheme):
+        if candidate == scope_authority(
+            entry, default_scheme=default_scheme, default_port=default_port
+        ):
             return True
         if not allow_subdomains:
             continue
@@ -74,7 +93,11 @@ def authority_is_allowed(
         try:
             entry_port = parsed_entry.port
             if entry_port is None:
-                entry_port = _DEFAULT_PORTS.get(default_scheme)
+                entry_port = (
+                    default_port
+                    if not parsed_entry.scheme
+                    else _DEFAULT_PORTS.get(parsed_entry.scheme.lower())
+                )
         except ValueError:
             continue
         if (
@@ -88,10 +111,17 @@ def authority_is_allowed(
 
 def normalize_scope_entries(entries: list[str], *, default_url: str) -> list[str]:
     """Canonicalise user-provided scope entries as unique ``host:port`` values."""
-    default_scheme = urlparse(default_url).scheme
+    parsed_default = urlparse(default_url)
+    default_scheme = parsed_default.scheme
+    try:
+        default_port = parsed_default.port or _DEFAULT_PORTS.get(default_scheme)
+    except ValueError:
+        return []
     normalized: list[str] = []
     for entry in entries:
-        authority = scope_authority(entry, default_scheme=default_scheme)
+        authority = scope_authority(
+            entry, default_scheme=default_scheme, default_port=default_port
+        )
         if authority and authority not in normalized:
             normalized.append(authority)
     return normalized

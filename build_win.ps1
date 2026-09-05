@@ -54,7 +54,7 @@ if (Test-Path "dist\AESPA") { Remove-Item -Recurse -Force "dist\AESPA" }
     --add-data "alembic.ini;." `
     --add-data "alembic;alembic" `
     --add-data "THIRD_PARTY_LICENSES.txt;." `
-    --add-data "LICENSE;." `
+    --add-data "LICENSE.txt;." `
     --collect-all playwright `
     --collect-all webview `
     --collect-all alembic `
@@ -76,7 +76,7 @@ if ($SmokeProcess.ExitCode -ne 0) {
 
 # Keep attributions directly accessible in the release archive.
 Copy-Item "THIRD_PARTY_LICENSES.txt" "dist\AESPA\THIRD_PARTY_LICENSES.txt"
-Copy-Item "LICENSE" "dist\AESPA\LICENSE"
+Copy-Item "LICENSE.txt" "dist\AESPA\LICENSE.txt"
 
 Write-Host "==> Done: dist\AESPA\AESPA.exe"
 Write-Host "    Unsigned - SmartScreen may warn on first run (More info > Run anyway)."

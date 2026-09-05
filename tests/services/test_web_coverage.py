@@ -34,10 +34,8 @@ from datetime import timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import select
 
-from aespa.db import _migrate, set_engine
 from aespa.models import (
     CrawledPage,
     PageOwaspTest,
@@ -64,30 +62,6 @@ _UTC = timezone.utc
 
 
 # ── DB fixtures ────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture(name="db_engine")
-def db_engine_fixture():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa.db import _engine as original_engine
-
-    SQLModel.metadata.create_all(engine)
-    _migrate(engine)
-    set_engine(engine)
-    yield engine
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    set_engine(original_engine)
-
-
-@pytest.fixture(name="db_session")
-def db_session_fixture(db_engine):
-    with Session(db_engine) as session:
-        yield session
 
 
 @pytest.fixture(name="site")
@@ -124,23 +98,6 @@ def _make_page(
     db_session.commit()
     db_session.refresh(p)
     return p
-
-
-@pytest.fixture(name="client")
-def client_fixture(db_engine):
-    from fastapi.testclient import TestClient
-
-    from aespa.db import get_session as gs
-    from aespa.main import create_app
-
-    def _override_session():
-        with Session(db_engine) as s:
-            yield s
-
-    app = create_app()
-    app.dependency_overrides[gs] = _override_session
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c
 
 
 # ── 1. seed_web_workprogram creates rows ──────────────────────────────────────
@@ -630,6 +587,16 @@ def test_matrix_returns_coverage_mode(db_engine, db_session, run, site):
     assert matrix["coverage_mode"] == "enforce"
 
 
+def test_matrix_returns_standard_coverage_mode(db_engine, db_session, run, site):
+    run.coverage_mode = "standard"
+    db_session.add(run)
+    db_session.commit()
+    _make_page(db_session, run, "http://example.com/", ["A01"])
+    seed_web_workprogram(run.id)
+
+    assert get_web_coverage_matrix(run.id)["coverage_mode"] == "standard"
+
+
 # ── 15. _enforce_web_coverage_loop drives cells to terminal ──────────────────
 
 
@@ -836,6 +803,31 @@ def test_start_scan_persists_coverage_mode(client, db_engine, db_session):
         db_session.expire_all()
         run = db_session.get(TestRun, run_id)
         assert run.coverage_mode == "enforce"
+
+
+def test_start_scan_accepts_standard_coverage_mode(client, db_engine, db_session):
+    with (
+        patch("aespa.services.scanner.start_thinking_scan", return_value=None),
+        patch(
+            "aespa.services.scanner.get_thinking_scan_status",
+            return_value={"status": "running", "run_id": 1},
+        ),
+    ):
+        site = client.post(
+            "/api/sites", json={"name": "S", "base_url": "http://t.com"}
+        ).json()
+        run = client.post(
+            f"/api/sites/{site['id']}/test-runs", json={"name": "R"}
+        ).json()
+
+        response = client.post(
+            f"/api/test-runs/{run['id']}/thinking-scan/start",
+            json={"coverage_mode": "standard"},
+        )
+
+    assert response.status_code == 200
+    db_session.expire_all()
+    assert db_session.get(TestRun, run["id"]).coverage_mode == "standard"
 
 
 # ── 18. _clean_affected_url unit cases ────────────────────────────────────────

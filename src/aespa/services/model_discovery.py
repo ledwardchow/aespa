@@ -50,6 +50,50 @@ async def discover_openai_model_options(
         ]
 
 
+async def discover_bedrock_mantle_model_options(
+    api_key: str | None = None,
+    base_url: str | None = None,
+    proxy_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return models exposed by Mantle's OpenAI-compatible Models API."""
+    root = (base_url or "https://bedrock-mantle.us-east-2.api.aws").rstrip("/")
+    for suffix in ("/openai/v1", "/v1"):
+        if root.endswith(suffix):
+            root = root[: -len(suffix)]
+            break
+    url = f"{root}/v1/models"
+    headers: dict[str, str] = {"Accept": "application/json"}
+    client_kwargs: dict[str, Any] = {"timeout": 10.0, "headers": headers}
+    if api_key and api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+    else:
+        from aespa.services.llm import (
+            _bedrock_mantle_region_from_url,
+            _BedrockMantleSigV4Auth,
+        )
+
+        client_kwargs["auth"] = _BedrockMantleSigV4Auth(
+            region=_bedrock_mantle_region_from_url(root),
+            profile=os.getenv("AWS_PROFILE"),
+        )
+    if proxy_url:
+        client_kwargs["proxy"] = proxy_url
+        client_kwargs["verify"] = False
+
+    async with httpx.AsyncClient(**client_kwargs) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        payload = response.json()
+    data = payload.get("data") if isinstance(payload, dict) else []
+    return [
+        item
+        for item in (data or [])
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and item.get("id")
+    ]
+
+
 async def discover_azure_openai_model_options(
     api_key: str | None = None,
     base_url: str | None = None,
@@ -204,7 +248,7 @@ async def discover_bedrock_models(
             region
             or os.getenv("AWS_REGION")
             or os.getenv("AWS_DEFAULT_REGION")
-            or "us-east-1"
+            or "ap-southeast-2"
         )
 
         client_kwargs: dict[str, Any] = {"region_name": region}

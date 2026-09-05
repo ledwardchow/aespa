@@ -21,7 +21,9 @@ class _SpecialistConfig:
     def __init__(self, **kwargs):
         defaults = dict(
             enabled=True,
+            auto_dispatch_enabled=True,
             max_concurrent=5,
+            max_queued=20,
             max_steps=30,
             min_priority=7,
             dispatch_idor=True,
@@ -34,6 +36,7 @@ class _SpecialistConfig:
             dispatch_cors=False,
             dispatch_crypto=True,
             dispatch_config=False,
+            dispatch_file_upload=True,
         )
         defaults.update(kwargs)
         for k, v in defaults.items():
@@ -155,7 +158,9 @@ def test_specialist_config_defaults():
 
     cfg = SpecialistAgentConfig()
     assert cfg.enabled is True
+    assert cfg.auto_dispatch_enabled is True
     assert cfg.max_concurrent == 5
+    assert cfg.max_queued == 20
     assert cfg.max_steps == 30
     assert cfg.min_priority == 7
     # Core classes default on
@@ -177,7 +182,9 @@ def test_specialist_config_api_get_returns_defaults(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["enabled"] is True
+    assert data["auto_dispatch_enabled"] is True
     assert data["max_concurrent"] == 5
+    assert data["max_queued"] == 20
     assert data["min_priority"] == 7
     assert "dispatch_idor" in data
 
@@ -273,3 +280,151 @@ def test_agent_dispatch_schema_has_required_properties():
     assert "attack_class" in required
     assert "target_url" in required
     assert "rationale" in required
+    assert "priority" in required
+    assert "file_upload" in props["attack_class"]["enum"]
+
+
+def test_attack_class_aliases_are_normalized():
+    from aespa.services.specialist_handoffs import normalize_attack_class
+
+    assert normalize_attack_class("SQL Injection") == "sqli"
+    assert normalize_attack_class("business-logic") == "business_logic"
+    assert normalize_attack_class("file upload") == "file_upload"
+
+
+def test_automatic_candidate_detects_ssrf_parameter():
+    from aespa.services.specialist_handoffs import automatic_candidate
+
+    candidate = automatic_candidate(
+        {
+            "method": "POST",
+            "url": "https://target.test/hooks",
+            "body": {"webhook": "https://example.com"},
+        },
+        response_status=202,
+        response_headers={"content-type": "application/json"},
+        response_body="accepted",
+    )
+
+    assert candidate is not None
+    assert candidate["attack_class"] == "ssrf"
+    assert candidate["parameter"] == "webhook"
+
+
+def test_automatic_candidate_requires_database_error_for_sqli():
+    from aespa.services.specialist_handoffs import automatic_candidate
+
+    clean = automatic_candidate(
+        {
+            "method": "GET",
+            "url": "https://target.test/search?q=test",
+            "test_class": "sqli",
+        },
+        response_status=200,
+        response_headers={},
+        response_body="no results",
+    )
+    error = automatic_candidate(
+        {
+            "method": "GET",
+            "url": "https://target.test/search?q=%27",
+            "test_class": "sqli",
+        },
+        response_status=500,
+        response_headers={},
+        response_body="SQL syntax error near quote",
+    )
+
+    assert clean is None
+    assert error is not None
+    assert error["attack_class"] == "sqli"
+
+
+def test_handoff_reserves_scope_and_delivers_completion(isolated_db_engine):
+    from sqlmodel import Session
+
+    from aespa.models import RunIdentity
+    from aespa.services.specialist_handoffs import (
+        consume_feedback,
+        create_or_get_handoff,
+        find_active_conflict,
+        update_handoff,
+    )
+
+    with Session(isolated_db_engine) as session:
+        identity = RunIdentity(kind="web")
+        session.add(identity)
+        session.commit()
+        session.refresh(identity)
+        run_id = identity.id
+
+    handoff, created = create_or_get_handoff(
+        run_id=run_id,
+        run_kind="web",
+        attack_class="SQL Injection",
+        target_url="https://target.test/search?q=one",
+        parameter="q",
+        session_label=None,
+        priority=8,
+        rationale="Database error",
+        dispatch_source="automatic",
+        agent_id="specialist-sqli-1",
+    )
+
+    assert created is True
+    assert (
+        find_active_conflict(
+            run_id,
+            run_kind="web",
+            attack_class="sqli",
+            target_url="https://target.test/search?q=two",
+            parameter="q",
+        ).id
+        == handoff.id
+    )
+
+    update_handoff(handoff.id, status="completed", outcome="No SQL injection found")
+    assert consume_feedback(run_id, run_kind="web") == [
+        "specialist-sqli-1 finished sqli on https://target.test/search?q=one: No SQL injection found."
+    ]
+    assert consume_feedback(run_id, run_kind="web") == []
+
+
+def test_missing_priority_uses_configured_default_and_queues(isolated_db_engine):
+    from sqlmodel import Session
+
+    from aespa.models import RunIdentity
+    from aespa.services.scanner import (
+        _schedule_specialist_agent,
+        _specialist_pending,
+    )
+
+    with Session(isolated_db_engine) as session:
+        identity = RunIdentity(kind="web")
+        session.add(identity)
+        session.commit()
+        session.refresh(identity)
+        run_id = identity.id
+
+    config = _SpecialistConfig(max_concurrent=1, min_priority=7)
+    _specialist_running[run_id] = 1
+    try:
+        decision = _schedule_specialist_agent(
+            run_id=run_id,
+            dispatch={
+                "attack_class": "SQL Injection",
+                "target_url": "https://target.test/search?q=one",
+                "rationale": "Database error",
+            },
+            session_vault={},
+            llm_cfg=None,
+            base_url="https://target.test",
+            scanner_policy=None,
+            specialist_config=config,
+            site_id=1,
+        )
+        assert decision["status"] == "queued"
+        assert len(_specialist_pending[run_id]) == 1
+    finally:
+        _specialist_running.pop(run_id, None)
+        _specialist_pending.pop(run_id, None)

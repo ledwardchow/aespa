@@ -2,40 +2,13 @@
 
 from __future__ import annotations
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
-from aespa.db import get_session
 from aespa.main import create_app
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture()
-def client():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-
-    def _override_session():
-        with Session(engine) as session:
-            yield session
-
-    app = create_app()
-    app.dependency_overrides[get_session] = _override_session
-
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c
-
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -93,6 +66,16 @@ def test_create_run_coverage_mode(client):
     )
     assert r.status_code == 201
     assert r.json()["coverage_mode"] == "enforce"
+
+
+def test_create_run_standard_coverage_mode(client):
+    cid = _make_collection(client)
+    r = client.post(
+        f"/api/api-collections/{cid}/test-runs",
+        json={"name": "Standard run", "coverage_mode": "standard"},
+    )
+    assert r.status_code == 201
+    assert r.json()["coverage_mode"] == "standard"
 
 
 def test_validate_api_scanner_sessions_route(client, monkeypatch):

@@ -2,6 +2,94 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## Unreleased
+
+### New features
+
+- **A.L.I.C.E. goal mode**: Start a site or API chat with `/goal <objective>` to keep A.L.I.C.E. working until the outcome is verified or a specific blocker prevents further progress. Goals save checkpoints, survive browser navigation, and pause across restarts and provider limits. You can guide a running goal or use the pause, resume, edit, and clear controls.
+- **Interactive terminal console**: Running AESPA from a terminal now opens separate views for server requests, Python errors, LLM traffic, agent activity, and requests sent to test targets. Use the arrow keys and Enter to inspect target requests and responses, number keys to switch views, and Page Up and Page Down to browse buffered output. Position indicators help you keep your place, and the layout adjusts when the terminal is resized.
+- **Desktop console access**: The macOS menu bar and Windows system tray menus can now open the AESPA console in a terminal window. Activity is buffered continuously, so logs, the selected view, and scrollback are preserved when you close and reopen the terminal. Active scans continue running.
+- **Console database operations**: The console Settings menu now has separate Server Settings and Database Operations screens. You can back up the complete SQLite database, clear scan runs while keeping targets and configuration, or reset the database. Clearing and resetting require an exact typed confirmation and are unavailable while scan or agent work is active.
+- **Console port settings**: The terminal console now includes a Settings view showing the active listening address. You can choose an available port, restart the listener immediately, and save the choice for future launches.
+- **Sandboxed Python for agent workflows**: A.L.I.C.E., specialist agents, and Test Leads can now run limited Python programs in a network-isolated Docker sandbox for payload generation, parsing, and multi-step tests. Target requests pass through AESPA's scope and scan-policy checks and appear in the Traffic Log with links to the execution, agent, batch, and coverage records. The feature is disabled by default and can be configured under Agent Settings → Python Sandbox. The default image is `ledwardchow/aespa-python-executor:0.1`, which supports Intel/AMD64 and Apple Silicon/ARM64 systems.
+- **GitHub Copilot account sign-in and selection**: Copilot providers can now start device-code sign-in from AESPA and select a locally authenticated Copilot CLI account. Credentials stay in Copilot CLI's credential store and are never sent to the browser.
+
+### Updates
+
+- **Linux display detection**: AESPA now warns when a Linux host cannot access X11 or Wayland. Guided login and visible browser mode are disabled until a graphical display is available.
+- **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser, Reporting Lab, and Applications options are grouped under Feature Visibility.
+- **Configurable Standard scan mode**: Standard scans now continue until the Test Lead has tested the configured percentage of applicable OWASP coverage items. Set the target in the Test Lead agent settings; the default is 60%.
+- **Recovery guidance for stalled scans**: The Mentor now receives a limited set of failure details with credentials removed. It can recommend browser inspection, a retry, signing in again, an HTTP probe, a Python workflow, or a different approach. Browser agents can inspect hidden, disabled, or obstructed controls and retry a normal click without forcing it through an overlay.
+- **Easier LLM request inspection**: Console LLM calls are grouped by call number and collapsed to a header that shows when the request started and which run made it. Use the arrow keys and Enter to expand requests and responses. Each payload identifies its operation, request type, direction, provider, model, run, and call number.
+- **Agent console logo**: The Agent screen now shows a shaded, red-orange AESPA logo based on the macOS icon while waiting for activity. It uses a compact layout in narrow terminals and is replaced by the activity log when work starts.
+- **Visible console listening address**: The Agents view now opens with a ready message showing the host and port where AESPA is listening.
+- **Keyboard navigation in Settings**: Settings tabs now support keyboard navigation.
+
+### Fixes
+
+- **Clearer Python sandbox setup errors**: The settings page and terminal console now distinguish a missing executor image from a Docker service that is stopped or cannot be reached.
+- **Run tabs follow browser navigation**: Browser back and forward now restore the selected web and SAST run tabs.
+- **A.L.I.C.E. chat history keeps its place**: Incoming and streaming messages no longer move the chat to the bottom after you scroll up. The chat follows new messages again when you return to the bottom.
+- **Crawls continue past unclickable overlays**: Dialog and login control clicks now have short attempt limits and a total time budget. Stale, obscured, or repeatedly re-rendered controls no longer keep a crawl stuck on one page.
+- **Reliable Python sandbox startup**: Sandbox workspaces now use the correct user and group IDs with private permissions. AESPA checks the full offline container configuration before reporting the runtime ready and shows the Docker runner exit code if no result is returned.
+- **Consistent Python Sandbox settings layout**: Python Sandbox settings now use the same content width as other Agent Settings pages.
+- **More reliable Codex connections**: Codex processes now retain the Windows environment needed for DNS and HTTPS access. Temporary response-stream interruptions wait for Codex's announced reconnect attempt before failing the call.
+- **Independent Codex model allowances**: An exhausted Spark allowance no longer blocks other Codex models that still have capacity.
+- **Clearer crawler login errors**: Unavailable models, exhausted allowances, and malformed model responses during login now produce error events showing the affected model and reset time when available.
+- **Clearer startup port errors**: Terminal startup now reports when the configured address is already in use and explains how to select another port.
+- **More reliable desktop startup**: The macOS and Windows apps reserve their selected local port until the backend starts, preventing another process from taking it during launch. Startup failures are reported sooner, and database upgrades have more time to finish on slower systems.
+
+### Housekeeping
+
+- **Findings and settings maintenance**: Web and API findings now share editing and detail components. Regression checks cover saved changes, cancelled edits, and drafts retained across web-run tabs. Settings and saved-run data handling have been split into smaller modules, preserving existing formats and defaults.
+- **Frontend maintenance**: The UI has been reorganized into feature modules with shared components, API clients, and styles. Automated checks now cover routing, forms, and browser rendering.
+- **Multi-architecture Python sandbox publishing**: A release script can publish the optional Python executor to Docker Hub under one tag for Intel/AMD64 and Apple Silicon/ARM64 systems, with build provenance and a software bill of materials.
+
+## [PR #267] August 30 update - SAST, API scan and UI improvements
+
+This is a hotfix of PR #266, this additional PR fixes release scripts.
+
+- **More reliable and auditable SAST scans**: SAST now inventories entry points, inputs, and sensitive operations, assigns them to bounded workers, and records explicit results and detailed activity. Scans save progress after each agent step, can resume after pauses, provider outages, or process restarts, and clearly report partial coverage or authentication blockers. Existing campaigns wait for paused source scans, and SAST ZIP uploads can now be up to 250 MiB.
+- **Stronger Codex and long-scan recovery**: AESPA corrects recoverable Codex tool-call responses, replaces broken sessions, and restarts the local client when needed. Process and protocol failures now surface promptly, including with newer Codex CLI releases, large contexts, and concurrent scans. Model context limits can be detected or set manually, with conversation compaction and batched reporting to keep long scans within those limits. Activity messages now distinguish local request pacing from provider errors.
+- **Reusable API login sessions**: API scans now distinguish saved credentials from authenticated sessions. Successful logins can save returned tokens or cookies under a reusable label and replace expired sessions.
+- **Better dynamic scan coverage**: Quick web and API scans must resolve every imported SAST lead. Strong upload, SSRF, SQL error, and reflected XSS signals can automatically queue specialist work without repeating the same investigation, and matching evidence is merged into existing findings. XSS testing now covers plausible reflected and stored paths across discovered inputs and rendering contexts.
+- **More reliable application campaigns**: Cross-repository findings are grouped and merged across equivalent endpoints so the same root cause is easier to follow. Campaign stopping and resuming, endpoint matching, authentication-path details, and source-to-target correlation have also been improved.
+- **Simpler and safer LLM configuration**: AWS Bedrock connections now have a region selector, automatic regional endpoints, and model discovery for Bedrock Mantle. Model lists are sorted, OpenAI-compatible discovery failures provide a clear error, and AESPA prevents deleting a model while a scan profile still uses it.
+- **Validation and usage reporting fixes**: Stopping an active finding validation no longer returns a server error. Codex usage estimates now use official token prices and recognize model aliases.
+- **Safer Docker image dependencies**: The container now matches the installed Playwright version, applies available operating-system security updates, removes unused vulnerable components, and includes the patched Cryptography release identified by Docker Scout.
+- **Clearer scan controls and UI fixes**: Web scan controls now present crawl, pentest, resume, and export actions more clearly. UI elements also position better on smaller screens.
+
+## [PR #265] August 19 Update — new LLM providers and scan improvements
+
+**Branch:** `develop → main`
+
+### New LLM providers
+
+- **OpenAI Codex**: Scans can now use models available through a Codex subscription. AESPA handles sign-in, model selection, conversation history, and usage reporting. Codex support is included in the packaged macOS and Windows applications.
+- **Google Antigravity**: Antigravity is now available as an LLM provider, with sign-in, model selection, conversation history, and usage reporting.
+- **Scans wait for sign-in when necessary**: If Codex or Antigravity requires the user to sign in, AESPA pauses the scan and shows its current state. The scan continues after sign-in without losing its progress.
+
+### Model selection and settings
+
+- **Reasoning settings match each model**: AESPA now detects which reasoning levels a model supports and shows only the available choices. Invalid combinations are rejected when a profile is saved.
+- **Simpler LLM configuration**: The provider and model forms have been clarified. Profile names can be generated automatically, and deleting a profile returns affected scans and campaigns to the current default profile.
+- **Improved compatibility between providers**: Tool calls and responses are handled more consistently across OpenAI, Codex, Copilot, Droid, OpenRouter, Azure, and Bedrock. Malformed tool calls are returned to the model for correction instead of ending the scan.
+
+### Validation and SAST improvements
+
+- **Validation from A.L.I.C.E.**: A.L.I.C.E. can ask the validator to review a finding and report the result in the conversation. The bulk validation action now retries findings that could not previously be confirmed.
+- **Export completed SAST runs**: SAST results can now be exported with their findings, evidence, coverage, and related scan information.
+- **SAST evidence displays correctly**: Controls, counterevidence, missing evidence, and attack paths are now handled correctly when an LLM returns them in an unexpected format.
+- **More reliable application scans**: Cross-repository route matching, source references, campaign progress, and the connection between backend findings and frontend targets have been improved.
+
+### Usage reporting and other fixes
+
+- **Estimated cost for each run**: The usage display now includes estimated token and credit costs and updates earlier estimates when pricing changes. Codex and Antigravity usage is identified as part of the relevant subscription rather than given a separate estimated cost.
+- **More accurate scan scope**: AESPA now preserves port restrictions when matching hosts, preventing a target from being widened unintentionally.
+- **Interface and run-state fixes**: This update includes fixes to job status, crawl progress, statistics, application campaigns, provider settings, and transitions between scan stages. Playwright and frontend dependencies have also been updated.
+
+---
+
 ## [PR #262] August 9 Update — Applications and multi-repository campaign scanning
 
 ### "Applications" targets

@@ -27,6 +27,7 @@ from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
 from aespa.config import Settings, get_settings
 from aespa.db import get_session, init_db
+from aespa.services import alice_goals as alice_goals_svc
 from aespa.services import antigravity_provider as antigravity_provider_svc
 from aespa.services import campaigns as campaigns_svc
 from aespa.services import codex_provider as codex_provider_svc
@@ -39,6 +40,7 @@ from aespa.services.settings import get_cloudflare_access_config
 @asynccontextmanager
 async def _lifespan(app: FastAPI):  # noqa: ARG001
     init_db()
+    alice_goals_svc.reconcile_interrupted_goals()
     await validator_svc.resume_interrupted_validations()
     campaigns_svc.reconcile_campaigns()
     try:
@@ -220,8 +222,7 @@ app = create_app()
 
 
 def _build_frontend_if_stale() -> None:
-    # ponytail: rebuild only when a src file is newer than the built index.html.
-    # Skips the ~10-30s npm build on every start; full rebuild if triggered.
+    # Public assets and build configuration affect the output just as source does.
     import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -229,30 +230,112 @@ def _build_frontend_if_stale() -> None:
     built = get_settings().web_dir / "index.html"
     if not frontend.exists():
         return  # installed without sources; nothing to build
-    src = frontend / "src"
-    newest_src = max(
-        (p.stat().st_mtime for p in src.rglob("*") if p.is_file()), default=0
-    )
+    inputs = [
+        frontend / name
+        for name in (
+            "index.html",
+            "package.json",
+            "package-lock.json",
+            "vite.config.js",
+        )
+    ]
+    for directory in ("src", "public"):
+        inputs.extend((frontend / directory).rglob("*"))
+    newest_src = max((p.stat().st_mtime for p in inputs if p.is_file()), default=0)
     if built.exists() and built.stat().st_mtime >= newest_src:
         return
     print("[aespa] frontend changed — running npm run build...")
     subprocess.run(["npm", "run", "build"], cwd=frontend, check=True)
 
 
+def _ensure_port_available(host: str, port: int) -> None:
+    """Exit with an actionable message when the configured listener is occupied."""
+    import errno
+    import socket
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        # create_server mirrors a real listener and enables safe address reuse
+        # on POSIX, avoiding false positives from recently closed connections.
+        with socket.create_server((host, port), family=family):
+            pass
+    except OSError as exc:
+        address_in_use = exc.errno in {errno.EADDRINUSE, 10048} or (
+            getattr(exc, "winerror", None) == 10048
+        )
+        if address_in_use:
+            raise SystemExit(
+                f"[aespa] Cannot start: {host}:{port} is already in use. "
+                "Stop the process using that port, or choose another port by "
+                f"setting AESPA_PORT={port + 1} in .env."
+            ) from exc
+        raise SystemExit(f"[aespa] Cannot listen on {host}:{port}: {exc}") from exc
+
+
 def main() -> None:
     import uvicorn
 
     from aespa.browser import ensure_chromium
+    from aespa.console import InteractiveConsole, interactive_console_available
 
+    settings = get_settings()
+    _ensure_port_available(settings.host, settings.port)
     _build_frontend_if_stale()
     ensure_chromium()
-    settings = get_settings()
-    uvicorn.run(
-        "aespa.main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=False,
+    restart: dict[str, object | None] = {"port": None, "server": None}
+
+    def change_port(port: int) -> None:
+        restart["port"] = port
+        server = restart["server"]
+        if server is not None:
+            server.should_exit = True
+
+    console = (
+        InteractiveConsole(
+            port=settings.port,
+            host=settings.host,
+            env_path=Path.cwd() / ".env",
+            on_port_change=change_port,
+        )
+        if interactive_console_available()
+        else None
     )
+    if console:
+        console.start()
+        from aespa.runtime_capabilities import (
+            NO_GRAPHICAL_DISPLAY_MESSAGE,
+            graphical_display_available,
+        )
+        from aespa.services.events import agent_activity_log
+
+        if not graphical_display_available():
+            agent_activity_log.warning(NO_GRAPHICAL_DISPLAY_MESSAGE)
+    try:
+        port = settings.port
+        while True:
+            _ensure_port_available(settings.host, port)
+            server = uvicorn.Server(
+                uvicorn.Config(
+                    "aespa.main:app",
+                    host=settings.host,
+                    port=port,
+                    reload=False,
+                    log_config=None if console else uvicorn.config.LOGGING_CONFIG,
+                )
+            )
+            restart["server"] = server
+            if console:
+                console.handler.set_runtime_port(port)
+            server.run()
+            next_port = restart["port"]
+            if next_port is None:
+                break
+            port = int(next_port)
+            restart["port"] = None
+    finally:
+        restart["server"] = None
+        if console:
+            console.stop()
 
 
 if __name__ == "__main__":

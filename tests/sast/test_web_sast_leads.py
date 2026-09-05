@@ -22,7 +22,16 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from aespa import db as db_mod
 from aespa.db import get_session, set_engine
 from aespa.main import create_app
-from aespa.models import AgentLog, ComponentFact, SastRun, ScanLead, ScanLog, Site
+from aespa.models import (
+    AgentLog,
+    ComponentFact,
+    SastRun,
+    SastSourceFile,
+    SastWorkItem,
+    ScanLead,
+    ScanLog,
+    Site,
+)
 from aespa.models import TestRun as WebTestRun
 
 _UTC = timezone.utc
@@ -219,6 +228,17 @@ def test_sast_run_export_import_round_trip_preserves_run_state_and_archive(
         session.commit()
         original_id = original.id
 
+    source_root = tmp_path / "export-source"
+    source_root.mkdir()
+    (source_root / "app.py").write_text(
+        "def handler(req):\n    return db.query(req['id'])\n"
+    )
+    from aespa.services import sast_workprogram
+
+    original_work_program = sast_workprogram.build_source_atlas(
+        original_id, source_root
+    )
+
     exported = client.get(f"/api/sast-runs/{original_id}/export")
     assert exported.status_code == 200, exported.text
     assert exported.headers["content-disposition"].endswith(
@@ -231,6 +251,7 @@ def test_sast_run_export_import_round_trip_preserves_run_state_and_archive(
     assert len(bundle["scan_logs"]) == 1
     assert len(bundle["agent_logs"]) == 1
     assert len(bundle["component_facts"]) == 1
+    assert len(bundle["work_program"]["sast_source_file"]) == 1
 
     imported = client.post(
         "/api/sast-runs/import",
@@ -265,6 +286,14 @@ def test_sast_run_export_import_round_trip_preserves_run_state_and_archive(
         assert leads[0].title == "SQL injection candidate"
         assert leads[0].validation_status == "confirmed"
         assert leads[0].public_reference == "TEST-001"
+        restored_files = session.exec(
+            select(SastSourceFile).where(SastSourceFile.sast_run_id == imported_id)
+        ).all()
+        restored_work_items = session.exec(
+            select(SastWorkItem).where(SastWorkItem.sast_run_id == imported_id)
+        ).all()
+        assert len(restored_files) == original_work_program["files"]["total"]
+        assert len(restored_work_items) == original_work_program["work_items"]["total"]
         assert (
             len(
                 session.exec(
@@ -445,6 +474,7 @@ def test_standalone_sast_upload_streams_and_enforces_limit(env, tmp_path, monkey
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
     from aespa.api import sast_runs as sast_api
 
+    assert sast_api._MAX_UPLOAD_BYTES == 250 * 1024 * 1024
     monkeypatch.setattr(sast_api, "_MAX_UPLOAD_BYTES", 4)
     resp = client.post(
         "/api/sast-runs",

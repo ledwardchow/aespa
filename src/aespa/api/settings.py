@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlmodel import Session, select
 
 from aespa.db import get_session
@@ -15,6 +15,9 @@ from aespa.schemas import (
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
+    CodeExecutionConfigIn,
+    CodeExecutionConfigOut,
+    CodeExecutionRuntimeStatus,
     CodexIntegrationConfigIn,
     CodexIntegrationConfigOut,
     ComponentMapperConfigIn,
@@ -47,11 +50,26 @@ from aespa.schemas import (
 from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import crawler as crawler_svc
 from aespa.services import settings as settings_service
+from aespa.services import settings_integrations as integration_settings
+from aespa.services import settings_profiles as profile_settings
+from aespa.services import settings_providers as provider_settings
 from aespa.services.model_capabilities import documented_model_capability
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+def _model_discovery_error(api_format: str) -> HTTPException:
+    if api_format == "openai_compatible":
+        return HTTPException(
+            status_code=502,
+            detail=(
+                "Could not load models from the OpenAI-compatible API. "
+                "Check the base URL and API key, or enter the model names manually."
+            ),
+        )
+    return HTTPException(status_code=502, detail="Could not load models from the API.")
 
 
 @router.get("/llm/codex/status", response_model=CodexIntegrationConfigOut)
@@ -119,6 +137,50 @@ async def logout_codex() -> dict:
     return await codex_provider.logout()
 
 
+@router.get("/llm/copilot/accounts")
+def list_copilot_accounts() -> dict[str, list[dict]]:
+    from aespa.services import copilot_provider
+
+    try:
+        return {"accounts": copilot_provider.list_accounts()}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/llm/copilot/login")
+async def start_copilot_login() -> dict:
+    from aespa.services import copilot_provider
+
+    try:
+        return await copilot_provider.login_start()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/llm/copilot/login/{login_id}")
+async def copilot_login_status(login_id: str) -> dict:
+    from aespa.services import copilot_provider
+
+    try:
+        return copilot_provider.login_status(login_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="Copilot login was not found"
+        ) from exc
+
+
+@router.post("/llm/copilot/login/{login_id}/cancel")
+async def cancel_copilot_login(login_id: str) -> dict:
+    from aespa.services import copilot_provider
+
+    try:
+        return await copilot_provider.login_cancel(login_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="Copilot login was not found"
+        ) from exc
+
+
 @router.get("/llm", response_model=LLMConfigOut | None)
 def get_llm_config(session: Session = Depends(get_session)) -> LLMConfigOut | None:
     cfg = settings_service.get_llm_config(session)
@@ -132,7 +194,7 @@ def upsert_llm_config(
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = settings_service.upsert_llm_config(session, payload)
+    cfg = profile_settings.upsert_llm_config(session, payload)
     return settings_service.llm_profile_out_model(session, cfg)
 
 
@@ -143,7 +205,7 @@ def upsert_llm_config(
 def list_llm_models(session: Session = Depends(get_session)) -> list[LLMConfigOut]:
     return [
         settings_service.llm_profile_out_model(session, cfg)
-        for cfg in settings_service.list_llm_profiles(session)
+        for cfg in profile_settings.list_llm_profiles(session)
     ]
 
 
@@ -152,7 +214,7 @@ def create_llm_model(
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = settings_service.create_llm_profile(session, payload)
+    cfg = profile_settings.create_llm_profile(session, payload)
     return settings_service.llm_profile_out_model(session, cfg)
 
 
@@ -162,7 +224,7 @@ def update_llm_model(
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = settings_service.update_llm_profile(session, model_id, payload)
+    cfg = profile_settings.update_llm_profile(session, model_id, payload)
     return settings_service.llm_profile_out_model(session, cfg)
 
 
@@ -171,7 +233,7 @@ def activate_llm_model(
     model_id: int,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = settings_service.activate_llm_profile(session, model_id)
+    cfg = profile_settings.activate_llm_profile(session, model_id)
     return settings_service.llm_profile_out_model(session, cfg)
 
 
@@ -180,7 +242,7 @@ def delete_llm_model(
     model_id: int,
     session: Session = Depends(get_session),
 ) -> Response:
-    settings_service.delete_llm_profile(session, model_id)
+    profile_settings.delete_llm_profile(session, model_id)
     return Response(status_code=204)
 
 
@@ -190,8 +252,8 @@ def delete_llm_model(
 @router.get("/llm/profiles", response_model=list[LLMProfileOut])
 def list_scan_profiles(session: Session = Depends(get_session)) -> list[LLMProfileOut]:
     return [
-        settings_service.llm_profile_out(session, p)
-        for p in settings_service.list_scan_profiles(session)
+        profile_settings.llm_profile_out(session, p)
+        for p in profile_settings.list_scan_profiles(session)
     ]
 
 
@@ -200,8 +262,8 @@ def create_scan_profile(
     payload: LLMProfileIn,
     session: Session = Depends(get_session),
 ) -> LLMProfileOut:
-    prof = settings_service.create_scan_profile(session, payload)
-    return settings_service.llm_profile_out(session, prof)
+    prof = profile_settings.create_scan_profile(session, payload)
+    return profile_settings.llm_profile_out(session, prof)
 
 
 @router.put("/llm/profiles/{profile_id}", response_model=LLMProfileOut)
@@ -210,8 +272,8 @@ def update_scan_profile(
     payload: LLMProfileIn,
     session: Session = Depends(get_session),
 ) -> LLMProfileOut:
-    prof = settings_service.update_scan_profile(session, profile_id, payload)
-    return settings_service.llm_profile_out(session, prof)
+    prof = profile_settings.update_scan_profile(session, profile_id, payload)
+    return profile_settings.llm_profile_out(session, prof)
 
 
 @router.post("/llm/profiles/{profile_id}/activate", response_model=LLMProfileOut)
@@ -219,8 +281,8 @@ def activate_scan_profile(
     profile_id: int,
     session: Session = Depends(get_session),
 ) -> LLMProfileOut:
-    prof = settings_service.activate_scan_profile(session, profile_id)
-    return settings_service.llm_profile_out(session, prof)
+    prof = profile_settings.activate_scan_profile(session, profile_id)
+    return profile_settings.llm_profile_out(session, prof)
 
 
 @router.delete("/llm/profiles/{profile_id}", status_code=204)
@@ -228,7 +290,7 @@ def delete_scan_profile(
     profile_id: int,
     session: Session = Depends(get_session),
 ) -> Response:
-    settings_service.delete_scan_profile(session, profile_id)
+    profile_settings.delete_scan_profile(session, profile_id)
     return Response(status_code=204)
 
 
@@ -236,7 +298,7 @@ def delete_scan_profile(
 def list_llm_providers(
     session: Session = Depends(get_session),
 ) -> list[LLMProviderConfigOut]:
-    return settings_service.list_llm_providers(session)
+    return provider_settings.list_llm_providers(session)
 
 
 @router.post("/llm/providers", response_model=LLMProviderConfigOut)
@@ -244,7 +306,7 @@ def create_llm_provider(
     payload: LLMProviderConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMProviderConfigOut:
-    return settings_service.create_llm_provider(session, payload)
+    return provider_settings.create_llm_provider(session, payload)
 
 
 @router.put("/llm/providers/{provider_id}", response_model=LLMProviderConfigOut)
@@ -253,7 +315,7 @@ def update_llm_provider(
     payload: LLMProviderConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMProviderConfigOut:
-    return settings_service.update_llm_provider(session, provider_id, payload)
+    return provider_settings.update_llm_provider(session, provider_id, payload)
 
 
 @router.delete("/llm/providers/{provider_id}", status_code=204)
@@ -261,7 +323,7 @@ def delete_llm_provider(
     provider_id: int,
     session: Session = Depends(get_session),
 ) -> Response:
-    settings_service.delete_llm_provider(session, provider_id)
+    provider_settings.delete_llm_provider(session, provider_id)
     return Response(status_code=204)
 
 
@@ -335,8 +397,13 @@ async def discover_llm_models(
         log.warning(
             "Explicit model discovery for format '%s' failed: %s", api_format, exc
         )
+        if api_format == "openai_compatible":
+            raise _model_discovery_error(api_format) from exc
 
-    return list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
+    fallback = list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
+    if api_format == "openai_compatible" and not fallback:
+        raise _model_discovery_error(api_format)
+    return fallback
 
 
 @router.post("/llm/discover-model-options", response_model=LLMModelDiscoveryOut)
@@ -384,6 +451,8 @@ async def discover_llm_model_options(
         log.warning(
             "Structured model discovery for format '%s' failed: %s", api_format, exc
         )
+        if api_format == "openai_compatible":
+            raise _model_discovery_error(api_format) from exc
         models = payload.models or list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
         capabilities = {
             model: capability
@@ -414,7 +483,7 @@ def import_llm_config(
 
 @router.get("/scanner-policy", response_model=ScannerPolicyOut)
 def get_scanner_policy(session: Session = Depends(get_session)) -> ScannerPolicyOut:
-    return settings_service.get_scanner_policy(session)
+    return integration_settings.get_scanner_policy(session)
 
 
 @router.put("/scanner-policy", response_model=ScannerPolicyOut)
@@ -422,12 +491,37 @@ def upsert_scanner_policy(
     payload: ScannerPolicyIn,
     session: Session = Depends(get_session),
 ) -> ScannerPolicyOut:
-    return settings_service.upsert_scanner_policy(session, payload)
+    return integration_settings.upsert_scanner_policy(session, payload)
+
+
+@router.get("/code-execution", response_model=CodeExecutionConfigOut)
+def get_code_execution_config(
+    session: Session = Depends(get_session),
+) -> CodeExecutionConfigOut:
+    return integration_settings.get_code_execution_config(session)
+
+
+@router.put("/code-execution", response_model=CodeExecutionConfigOut)
+def upsert_code_execution_config(
+    payload: CodeExecutionConfigIn,
+    session: Session = Depends(get_session),
+) -> CodeExecutionConfigOut:
+    return integration_settings.upsert_code_execution_config(session, payload)
+
+
+@router.get("/code-execution/status", response_model=CodeExecutionRuntimeStatus)
+async def code_execution_status(
+    session: Session = Depends(get_session),
+) -> CodeExecutionRuntimeStatus:
+    from aespa.services.code_execution import runtime_status
+
+    cfg = integration_settings.get_code_execution_config(session)
+    return CodeExecutionRuntimeStatus(**(await runtime_status(cfg)))
 
 
 @router.get("/crawler-config", response_model=CrawlerConfigOut)
 def get_crawler_config(session: Session = Depends(get_session)) -> CrawlerConfigOut:
-    return settings_service.get_crawler_config(session)
+    return integration_settings.get_crawler_config(session)
 
 
 @router.put("/crawler-config", response_model=CrawlerConfigOut)
@@ -435,7 +529,7 @@ async def upsert_crawler_config(
     payload: CrawlerConfigIn,
     session: Session = Depends(get_session),
 ) -> CrawlerConfigOut:
-    result = settings_service.upsert_crawler_config(session, payload)
+    result = integration_settings.upsert_crawler_config(session, payload)
     # Wake any blocked LLM-analysis tasks so they pick up the new limit.
     for run_id in list(crawler_svc._active_shared):
         await crawler_svc.notify_limit_change(run_id)
@@ -447,7 +541,7 @@ def get_component_mapper_config(
     session: Session = Depends(get_session),
 ) -> ComponentMapperConfigOut:
     """Return component-mapper budgets, including bounded trace settings."""
-    return settings_service.get_component_mapper_config(session)
+    return integration_settings.get_component_mapper_config(session)
 
 
 @router.put("/component-mapper-config", response_model=ComponentMapperConfigOut)
@@ -456,14 +550,14 @@ def upsert_component_mapper_config(
     session: Session = Depends(get_session),
 ) -> ComponentMapperConfigOut:
     """Persist component-mapper budgets and attack-path trace limits."""
-    return settings_service.upsert_component_mapper_config(session, payload)
+    return integration_settings.upsert_component_mapper_config(session, payload)
 
 
 @router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)
 def get_burp_rest_api_config(
     session: Session = Depends(get_session),
 ) -> BurpRestApiConfigOut:
-    return settings_service.get_burp_rest_api_config(session)
+    return integration_settings.get_burp_rest_api_config(session)
 
 
 @router.put("/burp-rest-api", response_model=BurpRestApiConfigOut)
@@ -471,14 +565,14 @@ def upsert_burp_rest_api_config(
     payload: BurpRestApiConfigIn,
     session: Session = Depends(get_session),
 ) -> BurpRestApiConfigOut:
-    return settings_service.upsert_burp_rest_api_config(session, payload)
+    return integration_settings.upsert_burp_rest_api_config(session, payload)
 
 
 @router.post("/burp-rest-api/test-connection")
 async def test_burp_rest_api_connection(
     session: Session = Depends(get_session),
 ) -> dict:
-    cfg = settings_service.get_burp_rest_api_config_model(session)
+    cfg = integration_settings.get_burp_rest_api_config_model(session)
     ok, message = await burp_rest_svc.test_connection(cfg)
     return {"ok": ok, "message": message}
 
@@ -487,7 +581,7 @@ async def test_burp_rest_api_connection(
 def get_upstream_proxy_config(
     session: Session = Depends(get_session),
 ) -> UpstreamProxyConfigOut:
-    return settings_service.get_upstream_proxy_config(session)
+    return integration_settings.get_upstream_proxy_config(session)
 
 
 @router.put("/upstream-proxy", response_model=UpstreamProxyConfigOut)
@@ -495,14 +589,14 @@ def upsert_upstream_proxy_config(
     payload: UpstreamProxyConfigIn,
     session: Session = Depends(get_session),
 ) -> UpstreamProxyConfigOut:
-    return settings_service.upsert_upstream_proxy_config(session, payload)
+    return integration_settings.upsert_upstream_proxy_config(session, payload)
 
 
 @router.get("/specialist-agent-config", response_model=SpecialistAgentConfigOut)
 def get_specialist_agent_config(
     session: Session = Depends(get_session),
 ) -> SpecialistAgentConfigOut:
-    return settings_service.get_specialist_agent_config(session)
+    return integration_settings.get_specialist_agent_config(session)
 
 
 @router.put("/specialist-agent-config", response_model=SpecialistAgentConfigOut)
@@ -510,14 +604,14 @@ def upsert_specialist_agent_config(
     payload: SpecialistAgentConfigIn,
     session: Session = Depends(get_session),
 ) -> SpecialistAgentConfigOut:
-    return settings_service.upsert_specialist_agent_config(session, payload)
+    return integration_settings.upsert_specialist_agent_config(session, payload)
 
 
 @router.get("/adversarial-validator-config", response_model=ValidatorConfigOut)
 def get_adversarial_validator_config(
     session: Session = Depends(get_session),
 ) -> ValidatorConfigOut:
-    return settings_service.get_adversarial_validator_config(session)
+    return integration_settings.get_adversarial_validator_config(session)
 
 
 @router.put("/adversarial-validator-config", response_model=ValidatorConfigOut)
@@ -525,14 +619,14 @@ def upsert_adversarial_validator_config(
     payload: ValidatorConfigIn,
     session: Session = Depends(get_session),
 ) -> ValidatorConfigOut:
-    return settings_service.upsert_adversarial_validator_config(session, payload)
+    return integration_settings.upsert_adversarial_validator_config(session, payload)
 
 
 @router.get("/global-http-header", response_model=GlobalHttpHeaderConfigOut)
 def get_global_http_header_config(
     session: Session = Depends(get_session),
 ) -> GlobalHttpHeaderConfigOut:
-    return settings_service.get_global_http_header_config(session)
+    return integration_settings.get_global_http_header_config(session)
 
 
 @router.put("/global-http-header", response_model=GlobalHttpHeaderConfigOut)
@@ -540,14 +634,14 @@ def upsert_global_http_header_config(
     payload: GlobalHttpHeaderConfigIn,
     session: Session = Depends(get_session),
 ) -> GlobalHttpHeaderConfigOut:
-    return settings_service.upsert_global_http_header_config(session, payload)
+    return integration_settings.upsert_global_http_header_config(session, payload)
 
 
 @router.get("/reporting-debug", response_model=ReportingDebugConfigOut)
 def get_reporting_debug_config(
     session: Session = Depends(get_session),
 ) -> ReportingDebugConfigOut:
-    return settings_service.get_reporting_debug_config(session)
+    return integration_settings.get_reporting_debug_config(session)
 
 
 @router.put("/reporting-debug", response_model=ReportingDebugConfigOut)
@@ -555,14 +649,14 @@ def upsert_reporting_debug_config(
     payload: ReportingDebugConfigIn,
     session: Session = Depends(get_session),
 ) -> ReportingDebugConfigOut:
-    return settings_service.upsert_reporting_debug_config(session, payload)
+    return integration_settings.upsert_reporting_debug_config(session, payload)
 
 
 @router.get("/browser-debug", response_model=BrowserDebugConfigOut)
 def get_browser_debug_config(
     session: Session = Depends(get_session),
 ) -> BrowserDebugConfigOut:
-    return settings_service.get_browser_debug_config(session)
+    return integration_settings.get_browser_debug_config(session)
 
 
 @router.put("/browser-debug", response_model=BrowserDebugConfigOut)
@@ -570,14 +664,14 @@ def upsert_browser_debug_config(
     payload: BrowserDebugConfigIn,
     session: Session = Depends(get_session),
 ) -> BrowserDebugConfigOut:
-    return settings_service.upsert_browser_debug_config(session, payload)
+    return integration_settings.upsert_browser_debug_config(session, payload)
 
 
 @router.get("/cloudflare-access", response_model=CloudflareAccessConfigOut)
 def get_cloudflare_access_config(
     session: Session = Depends(get_session),
 ) -> CloudflareAccessConfigOut:
-    return settings_service.get_cloudflare_access_config(session)
+    return integration_settings.get_cloudflare_access_config(session)
 
 
 @router.put("/cloudflare-access", response_model=CloudflareAccessConfigOut)
@@ -585,4 +679,4 @@ def upsert_cloudflare_access_config(
     payload: CloudflareAccessConfigIn,
     session: Session = Depends(get_session),
 ) -> CloudflareAccessConfigOut:
-    return settings_service.upsert_cloudflare_access_config(session, payload)
+    return integration_settings.upsert_cloudflare_access_config(session, payload)

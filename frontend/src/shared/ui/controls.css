@@ -1,0 +1,253 @@
+/* ── Buttons ────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 7px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    box-shadow 0.12s;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 0 12px var(--accent-glow);
+  color: white;
+}
+.btn.secondary {
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  color: var(--text-2);
+}
+.btn.secondary:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+.btn.danger {
+  background: var(--danger);
+  color: #fff;
+  border: none;
+}
+.btn.danger:hover {
+  filter: brightness(1.15);
+}
+.btn.danger-outline {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+.btn.danger-outline:hover {
+  background: var(--danger-bg);
+}
+.btn.ghost {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border-2);
+}
+.btn.ghost:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+.btn.sm {
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 5px;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.inline-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.75s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Utilities ──────────────────────────────────────────────── */
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.row.spread {
+  justify-content: space-between;
+}
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Table ──────────────────────────────────────────────────── */
+
+.table-wrap {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: auto; /* scroll table content without moving the header */
+}
+
+.table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel-2);
+}
+
+/* Keep long list tables inside the content viewport so their headers stay
+   visible while the rows scroll. Short tables keep their natural height. */
+.content.scroll-content > .table-wrap {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 100%;
+}
+
+/* Detail pages can have several table sections above one another. Give each
+   long section its own body scroller instead of letting it push the page. */
+.content.scroll-content.stack .table-wrap {
+  max-height: min(520px, 60vh);
+}
+
+/* Run tabs with a direct table use the content viewport as their scroll area. */
+.content.scroll-content table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel-2);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed; /* honour explicit column widths; prevents starvation */
+  min-width: 480px; /* never compress below this before scrolling kicks in */
+}
+.stats-table {
+  min-width: 1050px;
+}
+.stats-table .stats-provider-col {
+  width: 25%;
+}
+.stats-table .stats-calls-col {
+  width: 6%;
+}
+.stats-table .stats-token-col {
+  width: 7%;
+}
+.stats-table .stats-credit-col {
+  width: 10%;
+}
+.stats-table .stats-cost-col {
+  width: 8%;
+}
+.stats-table .stats-action-col {
+  width: 7%;
+}
+.stats-table th,
+.stats-table td {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.stats-table th:last-child,
+.stats-table td:last-child {
+  width: 7%;
+}
+.stats-table th:first-child,
+.stats-table td:first-child {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.stats-table td:first-child > div:first-child {
+  color: var(--text);
+}
+.stats-base-url {
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+th,
+td {
+  padding: 11px 16px;
+  text-align: left;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* In fixed-layout tables let cells wrap so summaries / paths aren't truncated */
+table[style*="table-layout:fixed"] td,
+table[style*="table-layout: fixed"] td {
+  white-space: normal;
+  word-break: break-word;
+}
+/* Let action/button cells in the last column size to content */
+th:last-child,
+td:last-child {
+  white-space: normal;
+  overflow: visible;
+  width: auto;
+}
+th {
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  overflow: hidden;
+  position: relative;
+}
+
+.global-header-table-wrap {
+  margin-bottom: 0;
+}
+.global-header-table {
+  min-width: 600px;
+}
+.global-header-table td {
+  padding: 7px 8px;
+}
+.global-header-table .form-input {
+  width: 100%;
+}
+.global-header-empty {
+  padding: 16px;
+  text-align: center;
+}
+tr:last-child td {
+  border-bottom: none;
+}
+tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* URL/monospace cells — allow to fill space but wrap long values gracefully */
+td.url,
+.url {
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", monospace;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
