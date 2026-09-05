@@ -1,3 +1,4 @@
+import { activityPresentation } from "./activityPresentation.js";
 import { normaliseWebTab } from "./tabs.js";
 import { runHref } from "../../shared/navigation/links.ts";
 import * as settingsApi from "../../shared/api/settings.js";
@@ -8,8 +9,8 @@ import { ScopeHostsPanel } from "../../shared/runs/ScopeHostsPanel.jsx";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
-import { useAliceChat } from "./useAliceChat.js";
-import { useFindings } from "./useFindings.js";
+import { WebRunChatProvider, useWebRunChat } from "./WebRunChat.jsx";
+import { FindingsDataProvider, useFindingsData } from "./FindingsData.jsx";
 import { useActivity } from "./useActivity.js";
 import { isCrawlerAgentActive } from "./runState.js";
 
@@ -28,7 +29,17 @@ import { WebRunHeader } from "./WebRunHeader.jsx";
 import { WebRunSastLeadsTab } from "../../shared/leads/RunLeadsTab.jsx";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
 
-export function TestRunDetail({ runId, initialTab, initialFindingRef, initialLeadRef }) {
+export function TestRunDetail(props) {
+  return (
+    <FindingsDataProvider key={props.runId}>
+      <WebRunChatProvider runId={props.runId}>
+        <TestRunContent {...props} />
+      </WebRunChatProvider>
+    </FindingsDataProvider>
+  );
+}
+
+function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }) {
   const [run, setRun] = useState(null);
   const [siteName, setSiteName] = useState(null);
   const [graph, setGraph] = useState(null);
@@ -40,8 +51,6 @@ export function TestRunDetail({ runId, initialTab, initialFindingRef, initialLea
   const [attackSurfaceTotal, setAttackSurfaceTotal] = useState(0);
   const [sessionsTotal, setSessionsTotal] = useState(0);
   const [crawlUsername, setCrawlUsername] = useState(null);
-  const [clearBusy, setClearBusy] = useState(""); // which section is clearing
-  const [, setClearError] = useState(null);
   // per-user crawl progress is read directly from run.per_user_progress (kept in sync
   // by the periodic poll + SSE run_update events) — no separate state needed.
   const [runProfiles, setRunProfiles] = useState([]);
@@ -58,76 +67,8 @@ export function TestRunDetail({ runId, initialTab, initialFindingRef, initialLea
       .then(setRunProfiles)
       .catch(() => {});
   }, []);
-  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
-  const toggleAgentId = (aid) =>
-    setCollapsedAgentIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(aid)) next.delete(aid);
-      else next.add(aid);
-      return next;
-    });
-  const {
-    aliceChats,
-    activeAliceTabId,
-    setActiveAliceTabId,
-    aliceInputText,
-    setAliceInputText,
-    aliceChatHeight,
-    aliceThinkingTabId,
-    aliceIsThinking,
-    aliceGlobalRunning,
-    aliceExpandedThinkIds,
-    setAliceExpandedThinkIds,
-    aliceMessages,
-    setAliceChats,
-    createAliceTab,
-    deleteAliceTab,
-    startAliceResize,
-    handleAliceStop,
-    handleAliceSend,
-    submitAliceDirective,
-  } = useAliceChat(runId, {
-    onActivate: () =>
-      setCollapsedAgentIds((prev) => {
-        if (!prev.has("alice")) return prev;
-        const next = new Set(prev);
-        next.delete("alice");
-        return next;
-      }),
-  });
-  useEffect(() => {
-    const reopenAlicePanel = () => {
-      setCollapsedAgentIds((prev) => {
-        if (!prev.has("alice")) return prev;
-        const next = new Set(prev);
-        next.delete("alice");
-        return next;
-      });
-    };
-    const applyAlicePopoutState = (data) => {
-      if (Array.isArray(data?.chats)) setAliceChats(data.chats);
-      if (data?.active_tab_id) setActiveAliceTabId(data.active_tab_id);
-      reopenAlicePanel();
-    };
-    const handleAlicePopoutClose = (event) => {
-      if (event.origin !== window.location.origin) return;
-      if (event.data?.type !== "aespa-alice-popout-close" || Number(event.data.runId) !== runId)
-        return;
-      applyAlicePopoutState(event.data);
-    };
-    const handleAlicePopoutStorage = (event) => {
-      if (event.key !== `aespa-alice-popout-close:${runId}`) return;
-      try {
-        applyAlicePopoutState(JSON.parse(event.newValue || "null"));
-      } catch {}
-    };
-    window.addEventListener("message", handleAlicePopoutClose);
-    window.addEventListener("storage", handleAlicePopoutStorage);
-    return () => {
-      window.removeEventListener("message", handleAlicePopoutClose);
-      window.removeEventListener("storage", handleAlicePopoutStorage);
-    };
-  }, [runId, setActiveAliceTabId, setAliceChats]);
+  const { aliceIsThinking, aliceGlobalRunning, handleAliceStop, submitAliceDirective } =
+    useWebRunChat();
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState(null);
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
@@ -140,80 +81,25 @@ export function TestRunDetail({ runId, initialTab, initialFindingRef, initialLea
 
   const [error, setError] = useState(null);
   const lastRunPollOkRef = useRef(Date.now());
-  // Findings state, effects and handlers live in this hook; the SSE stream
-  // below writes through the setFindings/setValidateStatus it returns.
-  const {
-    findings,
-    setFindings,
-    validateStatus,
-    setValidateStatus,
-    validateBusy,
-    setValidateBusy,
-    dedupeBusy,
-    expandedFinding,
-    setExpandedFinding,
-    editingFinding,
-    editDraft,
-    setEditDraft,
-    editBusy,
-    expandedGroups,
-    toggleGroup,
-    issueImportInputRef,
-    findColW,
-    startFindResize,
-    onDeleteFinding,
-    onDeleteFindingGroup,
-    onValidateAll,
-    onDeduplicateFindings,
-    onExportFindingsMarkdown,
-    onImportFindingsClick,
-    onImportFindingsFile,
-    onValidateFinding,
-    onEditFinding,
-    onCancelEditFinding,
-    onSaveEditFinding,
-    onStopValidation,
-  } = useFindings(runId, activeTab, {
-    run,
-    siteName,
-    submitAliceDirective,
-    aliceIsThinking,
-    setRun,
-    setGraph,
-    setError,
-    initialFindingRef,
-  });
+  const { findings, setFindings, setValidateStatus, setValidateBusy } = useFindingsData();
   // Activity log, agent roster + its label/task helpers, and token usage. The
   // SSE stream below writes through the setters this returns.
   const {
     activityLog,
     setActivityLog,
-    expandedLogIds,
-    toggleLogId,
-    activitySubTab,
-    setActivitySubTab,
     agents,
     setAgents,
     tokenUsage,
     setTokenUsage,
-    tokenExpanded,
-    setTokenExpanded,
     sitePlanData,
     setSitePlanData,
-    activityFeedRef,
     upsertAgent,
-    normalizeAgentForRun,
-    defaultAgentRoster,
-    representsAgent,
-    agentRoleLabel,
-    agentCurrentTask,
-    agentCrawlEvents,
-    agentTaskHistory,
-    agentStatusLabel,
-  } = useActivity(runId, activeTab, {
+  } = useActivity(runId);
+  const { agentCurrentTask } = activityPresentation({
     run,
     thinkingStatus,
     aliceIsThinking,
+    activityLog,
   });
 
   const crawlerAgent = agents.find((agent) => agent.id === "crawler");
@@ -687,45 +573,22 @@ export function TestRunDetail({ runId, initialTab, initialFindingRef, initialLea
           onError={setError}
         />
 
-        {activeTab === "findings" && (
+        <div style={{ display: activeTab === "findings" ? "contents" : "none" }}>
           <WebRunFindingsTab
+            runId={runId}
+            activeTab={activeTab}
+            run={run}
+            siteName={siteName}
+            initialFindingRef={initialFindingRef}
             thinkingStatus={thinkingStatus}
             thinkingStopRequested={thinkingStopRequested}
-            validateStatus={validateStatus}
-            onStopValidation={onStopValidation}
-            dedupeBusy={dedupeBusy}
-            findings={findings}
-            onExportFindingsMarkdown={onExportFindingsMarkdown}
-            onImportFindingsClick={onImportFindingsClick}
-            issueImportInputRef={issueImportInputRef}
-            onImportFindingsFile={onImportFindingsFile}
-            validateBusy={validateBusy}
-            onValidateAll={onValidateAll}
             aliceIsThinking={aliceIsThinking}
-            onDeduplicateFindings={onDeduplicateFindings}
-            clearBusy={clearBusy}
-            setClearBusy={setClearBusy}
-            setClearError={setClearError}
-            runId={runId}
-            setFindings={setFindings}
-            editingFinding={editingFinding}
-            setExpandedFinding={setExpandedFinding}
-            expandedFinding={expandedFinding}
-            onValidateFinding={onValidateFinding}
-            onEditFinding={onEditFinding}
-            onDeleteFinding={onDeleteFinding}
-            editDraft={editDraft}
-            setEditDraft={setEditDraft}
-            editBusy={editBusy}
-            onCancelEditFinding={onCancelEditFinding}
-            onSaveEditFinding={onSaveEditFinding}
-            toggleGroup={toggleGroup}
-            expandedGroups={expandedGroups}
-            findColW={findColW}
-            startFindResize={startFindResize}
-            onDeleteFindingGroup={onDeleteFindingGroup}
+            submitAliceDirective={submitAliceDirective}
+            onRunChange={setRun}
+            onGraphChange={setGraph}
+            onError={setError}
           />
-        )}
+        </div>
 
         <WebRunAttackSurfaceTab
           runId={runId}
@@ -753,55 +616,25 @@ export function TestRunDetail({ runId, initialTab, initialFindingRef, initialLea
           onTotalChange={setSessionsTotal}
         />
 
-        {activeTab === "activity" && (
+        <div style={{ display: activeTab === "activity" ? "contents" : "none" }}>
           <WebRunActivityTab
-            activityLog={activityLog}
-            tokenUsage={tokenUsage}
-            setTokenExpanded={setTokenExpanded}
-            tokenExpanded={tokenExpanded}
-            activitySubTab={activitySubTab}
-            setActivitySubTab={setActivitySubTab}
-            agents={agents}
-            normalizeAgentForRun={normalizeAgentForRun}
-            activityFeedRef={activityFeedRef}
+            activeTab={activeTab}
             runId={runId}
-            clearBusy={clearBusy}
-            setClearBusy={setClearBusy}
-            setClearError={setClearError}
-            setActivityLog={setActivityLog}
-            setSitePlanData={setSitePlanData}
-            setTokenUsage={setTokenUsage}
+            run={run}
+            thinkingStatus={thinkingStatus}
+            activityLog={activityLog}
+            agents={agents}
+            tokenUsage={tokenUsage}
             sitePlanData={sitePlanData}
-            expandedLogIds={expandedLogIds}
-            toggleLogId={toggleLogId}
-            collapsedAgentIds={collapsedAgentIds}
-            toggleAgentId={toggleAgentId}
-            defaultAgentRoster={defaultAgentRoster}
-            representsAgent={representsAgent}
-            aliceChats={aliceChats}
-            activeAliceTabId={activeAliceTabId}
-            setActiveAliceTabId={setActiveAliceTabId}
-            deleteAliceTab={deleteAliceTab}
-            createAliceTab={createAliceTab}
-            aliceChatHeight={aliceChatHeight}
-            aliceMessages={aliceMessages}
-            aliceExpandedThinkIds={aliceExpandedThinkIds}
-            setAliceExpandedThinkIds={setAliceExpandedThinkIds}
-            aliceThinkingTabId={aliceThinkingTabId}
-            startAliceResize={startAliceResize}
-            aliceInputText={aliceInputText}
-            aliceIsThinking={aliceIsThinking}
-            handleAliceSend={handleAliceSend}
-            setAliceInputText={setAliceInputText}
-            handleAliceStop={handleAliceStop}
-            submitAliceDirective={submitAliceDirective}
-            agentRoleLabel={agentRoleLabel}
-            agentCurrentTask={agentCurrentTask}
-            agentCrawlEvents={agentCrawlEvents}
-            agentTaskHistory={agentTaskHistory}
-            agentStatusLabel={agentStatusLabel}
+            onClearLog={async () => {
+              await webRunsApi.clearScanLog(runId);
+              setActivityLog([]);
+              setSitePlanData(null);
+              setTokenUsage(null);
+            }}
+            onError={setError}
           />
-        )}
+        </div>
 
         <WebRunTrafficTab
           runId={runId}

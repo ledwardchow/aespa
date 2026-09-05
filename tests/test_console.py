@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import sys
+from datetime import datetime
 from types import SimpleNamespace
 
 from aespa.console import (
@@ -32,6 +33,8 @@ def _llm_record(
     payload: str,
     *,
     operation: str = "scanner.thinking_scan",
+    run_id: int | None = 7,
+    run_kind: str = "web",
 ) -> logging.LogRecord:
     record = _record("aespa.llm.traffic", logging.INFO, "structured LLM traffic")
     record.aespa_llm_call_id = call_id
@@ -40,6 +43,9 @@ def _llm_record(
     record.aespa_llm_direction = direction
     record.aespa_llm_context = "openai/test-model - web run 7"
     record.aespa_llm_payload = payload
+    record.aespa_llm_run_id = run_id
+    record.aespa_llm_run_kind = run_kind
+    record.created = datetime(2026, 9, 5, 18, 34, 46).timestamp()
     return record
 
 
@@ -388,6 +394,7 @@ def test_llm_calls_are_collapsed_navigable_and_expandable(monkeypatch) -> None:
     handler.switch(LLM)
 
     collapsed = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "2026-09-05 18:34:46 web run 7" in collapsed
     assert "#10 api_docs.parse [tools] COMPLETE" in collapsed
     assert "#11 scanner.thinking_scan [tools] PENDING" in collapsed
     assert "first request" not in collapsed
@@ -407,6 +414,20 @@ def test_llm_calls_are_collapsed_navigable_and_expandable(monkeypatch) -> None:
     handler.toggle_selected_llm()
     contracted = output.getvalue().split("\x1b[2J\x1b[H")[-1]
     assert "first request" not in contracted
+
+
+def test_llm_call_header_identifies_calls_without_run_context(monkeypatch) -> None:
+    output = io.StringIO()
+    handler = InteractiveConsoleHandler(output)
+    monkeypatch.setattr(
+        "aespa.console.shutil.get_terminal_size", lambda fallback: (140, 12)
+    )
+    handler.emit(_llm_record(12, "REQUEST", "request", run_id=None))
+    handler.start_screen()
+    handler.switch(LLM)
+
+    rendered = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "2026-09-05 18:34:46 no run #12" in rendered
 
 
 def test_testing_traffic_is_collapsed_navigable_and_expandable(monkeypatch) -> None:
@@ -627,7 +648,11 @@ def test_llm_traffic_delimiters_identify_operation_and_pair(
     async def console_operation():
         return await llm._call(config, "model prompt", None)
 
-    assert asyncio.run(console_operation()) == "model response"
+    llm.set_run_context(217, lambda event: None, run_kind="web")
+    try:
+        assert asyncio.run(console_operation()) == "model response"
+    finally:
+        llm.clear_run_context()
 
     assert len(caplog.messages) == 2
     request, response = caplog.messages
@@ -640,3 +665,5 @@ def test_llm_traffic_delimiters_identify_operation_and_pair(
     request_call = request.split("call=", 1)[1].split(" |", 1)[0]
     response_call = response.split("call=", 1)[1].split(" |", 1)[0]
     assert request_call == response_call
+    assert caplog.records[0].aespa_llm_run_id == 217
+    assert caplog.records[0].aespa_llm_run_kind == "web"

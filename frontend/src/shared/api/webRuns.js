@@ -1,3 +1,4 @@
+import { getFindings as readFindings, updateFinding as patchFinding } from "./findings.ts";
 import { req } from "./request.ts";
 
 export const getWebCoverageMatrix = (id) => req(`/api/test-runs/${id}/coverage`);
@@ -119,13 +120,13 @@ export const stopAliceRun = (id) => req(`/api/test-runs/${id}/alice/run`, { meth
 export const steerAliceGoal = (id, b) =>
   req(`/api/test-runs/${id}/alice/goal/steer`, { method: "POST", body: b });
 
-export const getFindings = (id) => req(`/api/test-runs/${id}/findings`);
+export const getFindings = (id) => readFindings({ runKind: "web", runId: id });
 
 export const deleteFinding = (id, fid) =>
   req(`/api/test-runs/${id}/findings/${fid}`, { method: "DELETE" });
 
-export const updateFinding = (id, fid, b) =>
-  req(`/api/test-runs/${id}/findings/${fid}`, { method: "PATCH", body: b });
+export const updateFinding = (id, fid, body) =>
+  patchFinding({ runKind: "web", runId: id }, fid, body);
 
 export const deleteFindingGroup = (id, title) =>
   req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method: "DELETE" });
