@@ -116,6 +116,41 @@ export async function installFixtures(page, { empty = false } = {}) {
       "/api/applications/1/campaigns": empty ? [] : [campaign],
       "/api/applications/1/campaigns/1": campaign,
       "/api/settings/llm/models": {},
+      "/api/settings/browser-debug": {
+        browser_engine: "playwright_chromium",
+        browser_visible: false,
+        graphical_display_available: true,
+        graphical_display_message: null,
+      },
+      "/api/settings/reporting-debug": {
+        capture_enabled: false,
+        panel_enabled: false,
+      },
+      "/api/settings/cloudflare-access": { audience: null },
+      "/api/settings/code-execution": {
+        enabled: true,
+        image_ref: "ledwardchow/aespa-python-executor:0.1",
+        allowed_roles: ["alice", "specialist", "test_lead"],
+        timeout_s: 30,
+        memory_mb: 256,
+        cpu_cores: 0.5,
+        pids_limit: 32,
+        workspace_mb: 16,
+        output_limit_bytes: 65536,
+        artifact_limit_bytes: 10485760,
+        max_requests_per_execution: 20,
+        max_concurrent_requests: 5,
+        max_concurrent_executions: 2,
+        retain_redacted_source: true,
+      },
+      "/api/settings/code-execution/status": {
+        available: false,
+        docker_installed: true,
+        docker_available: false,
+        image_present: false,
+        message:
+          "Docker is installed, but its service is not running or cannot be reached. Start Docker and try again.",
+      },
     };
     if (path in tables) return route.fulfill({ json: tables[path] });
     if (path.endsWith("/events") || path.includes("/stream"))

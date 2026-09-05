@@ -72,6 +72,55 @@ test("settings tabs, edit cancellation, and sidebar history work", async ({ page
   await expect(page.getByText("LLM Profiles", { exact: true })).toBeVisible();
 });
 
+test("System Settings groups feature visibility and debug controls into tabs", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/debug");
+
+  const featureTab = page.getByRole("tab", { name: "Feature Visibility", exact: true });
+  const debugTab = page.getByRole("tab", { name: "Debug Settings", exact: true });
+  await expect(featureTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByText("Browser", { exact: true })).toBeVisible();
+  await expect(page.getByText("Reporting Lab", { exact: true })).toBeVisible();
+  await expect(page.getByText("Applications", { exact: true })).toBeVisible();
+  await expect(page.getByText("Sitemap Graph", { exact: true })).toHaveCount(0);
+
+  await debugTab.click();
+  await expect(debugTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByText("Sitemap Graph", { exact: true })).toBeVisible();
+  await expect(page.getByText("Cloudflare Access", { exact: true })).toBeVisible();
+  await expect(page.getByText("Browser", { exact: true })).toHaveCount(0);
+});
+
+test("headless Linux disables browser windows and guided login", async ({ page }) => {
+  const message =
+    "No graphical display is available. Guided login and visible browser mode are disabled. Set DISPLAY or WAYLAND_DISPLAY, then restart AESPA.";
+  await installFixtures(page);
+  await page.route("**/api/settings/browser-debug", (route) =>
+    route.fulfill({
+      json: {
+        browser_engine: "playwright_chromium",
+        browser_visible: false,
+        graphical_display_available: false,
+        graphical_display_message: message,
+      },
+    }),
+  );
+
+  await page.goto("/#/debug");
+  await expect(page.getByRole("checkbox", { name: "Make browser visible to user" })).toBeDisabled();
+  await expect(page.getByText(message, { exact: true })).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-headless-browser-settings.png") });
+
+  await page.goto("/#/sites/new");
+  await page.getByRole("checkbox", { name: "This site requires authentication" }).check();
+  await page.getByRole("button", { name: "Add credential" }).click();
+  const authMode = page.locator(".field", { hasText: "Auth Mode" }).locator("select");
+  await expect(authMode.locator('option[value="guided"]')).toBeDisabled();
+  await expect(page.getByText(message, { exact: true })).toBeVisible();
+  await authMode.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-headless-guided-login.png") });
+});
+
 test("Agent Settings keeps inner tabs flush with its content column", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/scan-policy");
@@ -89,6 +138,24 @@ test("Agent Settings keeps inner tabs flush with its content column", async ({ p
   await expect(inner).toBeVisible();
   await expect(page.getByRole("button", { name: "Save policy", exact: true })).toBeVisible();
   await page.screenshot({ path: path.join(tmpdir(), "aespa-agent-settings-desktop.png") });
+});
+
+test("Python Sandbox explains when the Docker service is unavailable", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.goto("/#/scan-policy");
+  await page.getByRole("tab", { name: "Python Sandbox", exact: true }).click();
+
+  await expect(page.getByText("Runtime unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Docker is installed, but its service is not running/)).toBeVisible();
+  await expect(page.getByText(/Build it with:/)).toHaveCount(0);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-docker-service-unavailable.png") });
 });
 
 test("empty sites and a narrow viewport remain usable", async ({ page }) => {

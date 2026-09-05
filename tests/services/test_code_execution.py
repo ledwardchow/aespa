@@ -133,6 +133,59 @@ async def test_runtime_status_rejects_incompatible_container_profile(monkeypatch
     )
 
 
+@pytest.mark.anyio
+async def test_runtime_status_reports_unavailable_docker_service(monkeypatch):
+    monkeypatch.setattr(code_execution.shutil, "which", lambda _name: "/usr/bin/docker")
+    commands: list[tuple[str, ...]] = []
+
+    async def docker_unavailable(*args, **_kwargs):
+        commands.append(args)
+        return 1, "Cannot connect to the Docker daemon"
+
+    monkeypatch.setattr(code_execution, "_run_command", docker_unavailable)
+
+    status = await code_execution.runtime_status(_runner_config())
+
+    assert commands == [("docker", "info", "--format", "{{.ServerVersion}}")]
+    assert status["docker_installed"] is True
+    assert status["docker_available"] is False
+    assert status["image_present"] is False
+    assert status["available"] is False
+    assert status["message"] == (
+        "Docker is installed, but its service is not running or cannot be reached. "
+        "Start Docker and try again."
+    )
+
+
+@pytest.mark.anyio
+async def test_runtime_status_checks_image_after_docker_service(monkeypatch):
+    monkeypatch.setattr(code_execution.shutil, "which", lambda _name: "/usr/bin/docker")
+    commands: list[tuple[str, ...]] = []
+
+    async def image_missing(*args, **_kwargs):
+        commands.append(args)
+        return (0, "27.0.0") if args[1] == "info" else (1, "No such image")
+
+    monkeypatch.setattr(code_execution, "_run_command", image_missing)
+
+    status = await code_execution.runtime_status(_runner_config())
+
+    assert commands == [
+        ("docker", "info", "--format", "{{.ServerVersion}}"),
+        (
+            "docker",
+            "image",
+            "inspect",
+            "ledwardchow/aespa-python-executor:0.1",
+        ),
+    ]
+    assert status["docker_available"] is True
+    assert status["image_present"] is False
+    assert status["message"] == (
+        "Sandbox image 'ledwardchow/aespa-python-executor:0.1' is not installed."
+    )
+
+
 def test_execution_audit_routes_are_scoped_by_run_kind(client):
     with Session(get_engine()) as session:
         web_run = TestRun(site_id=1, name="Web audit")

@@ -74,6 +74,7 @@ def test_code_execution_config_round_trip(client: TestClient, monkeypatch):
             "backend": config.backend,
             "image_ref": config.image_ref,
             "docker_installed": True,
+            "docker_available": True,
             "image_present": True,
             "message": "Sandbox runtime is ready.",
         }
@@ -222,7 +223,10 @@ def test_cloudflare_access_config_round_trip(client: TestClient):
     assert r.json()["audience"] is None
 
 
-def test_browser_debug_config_round_trip(client: TestClient):
+def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
+    monkeypatch.setattr(
+        "aespa.runtime_capabilities.graphical_display_available", lambda: True
+    )
     initial = client.get("/api/settings/browser-debug")
     assert initial.status_code == 200
     assert initial.json()["browser_engine"] == "playwright_chromium"
@@ -235,6 +239,26 @@ def test_browser_debug_config_round_trip(client: TestClient):
     assert updated.status_code == 200
     assert updated.json()["browser_engine"] == "system_chrome"
     assert updated.json()["browser_visible"] is True
+    assert updated.json()["graphical_display_available"] is True
+    assert updated.json()["graphical_display_message"] is None
+
+
+def test_browser_debug_disables_visible_mode_without_display(
+    client: TestClient, monkeypatch
+):
+    monkeypatch.setattr(
+        "aespa.runtime_capabilities.graphical_display_available", lambda: False
+    )
+
+    updated = client.put(
+        "/api/settings/browser-debug",
+        json={"browser_engine": "playwright_chromium", "browser_visible": True},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["browser_visible"] is False
+    assert updated.json()["graphical_display_available"] is False
+    assert "Guided login" in updated.json()["graphical_display_message"]
 
 
 def test_global_http_headers_round_trip(client: TestClient):

@@ -442,7 +442,18 @@ class InteractiveConsoleHandler(logging.Handler):
                 self.buffers[AGENT].append(
                     f"Ready - listening on {_listening_url(self.host, self.runtime_port)}"
                 )
-                if not _python_executor_image_present():
+                python_executor_status = _python_executor_runtime_status()
+                if python_executor_status == "docker_not_installed":
+                    self.buffers[AGENT].append(
+                        "Python sandbox is unavailable - Docker is not installed"
+                    )
+                elif python_executor_status == "docker_unavailable":
+                    self.buffers[AGENT].append(
+                        "Python sandbox is unavailable - Docker is installed, but its "
+                        "service is not running or cannot be reached. Start Docker and "
+                        "try again"
+                    )
+                elif python_executor_status == "image_missing":
                     self.buffers[AGENT].append(
                         "Python executor image is not installed - run "
                         f"docker pull {_PYTHON_EXECUTOR_IMAGE}"
@@ -1003,12 +1014,22 @@ def _port_available(host: str, port: int) -> bool:
     return True
 
 
-def _python_executor_image_present() -> bool:
-    """Return whether the optional Python executor image is available locally."""
+def _python_executor_runtime_status() -> str:
+    """Return the availability state of Docker and the optional executor image."""
     if shutil.which("docker") is None:
-        return False
+        return "docker_not_installed"
     try:
-        result = subprocess.run(
+        info = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        if info.returncode != 0:
+            return "docker_unavailable"
+        image = subprocess.run(
             ["docker", "image", "inspect", _PYTHON_EXECUTOR_IMAGE],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1017,8 +1038,8 @@ def _python_executor_image_present() -> bool:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+        return "docker_unavailable"
+    return "ready" if image.returncode == 0 else "image_missing"
 
 
 def _write_port_setting(path: Path, port: int) -> None:

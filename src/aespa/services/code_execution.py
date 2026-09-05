@@ -210,28 +210,45 @@ async def runtime_status(config=None) -> dict[str, Any]:
         with Session(get_engine()) as session:
             config = get_code_execution_config(session)
     docker_installed = shutil.which("docker") is not None
+    docker_available = False
     image_present = False
     runtime_compatible = False
     detail = "Docker is not installed."
     if docker_installed:
-        code, output = await _run_command(
-            "docker", "image", "inspect", config.image_ref, timeout=5
+        info_code, info_output = await _run_command(
+            "docker", "info", "--format", "{{.ServerVersion}}", timeout=5
         )
-        image_present = code == 0
-        detail = f"Sandbox image {config.image_ref!r} is not installed."
-        if image_present and config.enabled:
-            runtime_compatible, probe_detail = await _runtime_self_test(config)
+        docker_available = info_code == 0
+        if not docker_available:
             detail = (
-                probe_detail
-                if runtime_compatible
-                else f"Sandbox runtime is incompatible: {probe_detail}"
+                "Docker is installed, but its service is not running or cannot be "
+                "reached. Start Docker and try again."
             )
+            if info_output:
+                log.debug("Docker service readiness check: %s", info_output)
         else:
-            runtime_compatible = image_present
-        if output and not image_present:
-            log.debug("Docker image readiness check: %s", output)
+            code, output = await _run_command(
+                "docker", "image", "inspect", config.image_ref, timeout=5
+            )
+            image_present = code == 0
+            detail = f"Sandbox image {config.image_ref!r} is not installed."
+            if image_present and config.enabled:
+                runtime_compatible, probe_detail = await _runtime_self_test(config)
+                detail = (
+                    probe_detail
+                    if runtime_compatible
+                    else f"Sandbox runtime is incompatible: {probe_detail}"
+                )
+            else:
+                runtime_compatible = image_present
+            if output and not image_present:
+                log.debug("Docker image readiness check: %s", output)
     available = bool(
-        config.enabled and docker_installed and image_present and runtime_compatible
+        config.enabled
+        and docker_installed
+        and docker_available
+        and image_present
+        and runtime_compatible
     )
     if not config.enabled:
         detail = "Sandboxed Python execution is disabled."
@@ -241,6 +258,7 @@ async def runtime_status(config=None) -> dict[str, Any]:
         "backend": config.backend,
         "image_ref": config.image_ref,
         "docker_installed": docker_installed,
+        "docker_available": docker_available,
         "image_present": image_present,
         "message": detail,
     }

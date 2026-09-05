@@ -16,6 +16,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Linux display detection**: AESPA now warns when a Linux host cannot access X11 or Wayland. Guided login and visible browser mode are disabled until a graphical display is available.
+- **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser, Reporting Lab, and Applications options are grouped under Feature Visibility.
 - **Configurable Standard scan mode**: Standard scans now continue until the Test Lead has tested the configured percentage of applicable OWASP coverage items. Set the target in the Test Lead agent settings; the default is 60%.
 - **Recovery guidance for stalled scans**: The Mentor now receives a limited set of failure details with credentials removed. It can recommend browser inspection, a retry, signing in again, an HTTP probe, a Python workflow, or a different approach. Browser agents can inspect hidden, disabled, or obstructed controls and retry a normal click without forcing it through an overlay.
 - **Easier LLM request inspection**: Console LLM calls are grouped by call number and collapsed to a header that shows when the request started and which run made it. Use the arrow keys and Enter to expand requests and responses. Each payload identifies its operation, request type, direction, provider, model, run, and call number.
@@ -25,6 +27,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Clearer Python sandbox setup errors**: The settings page and terminal console now distinguish a missing executor image from a Docker service that is stopped or cannot be reached.
 - **Run tabs follow browser navigation**: Browser back and forward now restore the selected web and SAST run tabs.
 - **A.L.I.C.E. chat history keeps its place**: Incoming and streaming messages no longer move the chat to the bottom after you scroll up. The chat follows new messages again when you return to the bottom.
 - **Crawls continue past unclickable overlays**: Dialog and login control clicks now have short attempt limits and a total time budget. Stale, obscured, or repeatedly re-rendered controls no longer keep a crawl stuck on one page.

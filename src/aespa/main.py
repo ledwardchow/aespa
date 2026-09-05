@@ -302,6 +302,14 @@ def main() -> None:
     )
     if console:
         console.start()
+        from aespa.runtime_capabilities import (
+            NO_GRAPHICAL_DISPLAY_MESSAGE,
+            graphical_display_available,
+        )
+        from aespa.services.events import agent_activity_log
+
+        if not graphical_display_available():
+            agent_activity_log.warning(NO_GRAPHICAL_DISPLAY_MESSAGE)
     try:
         port = settings.port
         while True:

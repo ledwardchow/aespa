@@ -77,7 +77,7 @@ export function CodeExecutionSettings() {
         <div className={"alert " + (runtime?.available ? "success" : "warning")}>
           <strong>{runtime?.available ? "Runtime ready" : "Runtime unavailable"}</strong>
           <div>{runtime?.message || "Checking Docker runtime…"}</div>
-          {!runtime?.image_present && runtime?.docker_installed && (
+          {!runtime?.image_present && runtime?.docker_available && (
             <div className="field-hint">
               Build it with: <code>docker build -t {form.image_ref} runtime/python-executor</code>
             </div>
