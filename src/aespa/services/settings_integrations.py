@@ -523,27 +523,43 @@ def upsert_reporting_debug_config(
 
 
 def get_browser_debug_config(session: Session) -> BrowserDebugConfigOut:
+    from aespa.runtime_capabilities import (
+        NO_GRAPHICAL_DISPLAY_MESSAGE,
+        graphical_display_available,
+    )
+
+    display_available = graphical_display_available()
     cfg = session.get(BrowserDebugConfig, _SINGLETON_ID)
     if cfg is None:
         return BrowserDebugConfigOut(
             **BrowserDebugConfigIn().model_dump(),
             updated_at=_utcnow(),
+            graphical_display_available=display_available,
+            graphical_display_message=(
+                None if display_available else NO_GRAPHICAL_DISPLAY_MESSAGE
+            ),
         )
     return BrowserDebugConfigOut(
         browser_engine=cfg.browser_engine,
-        browser_visible=cfg.browser_visible,
+        browser_visible=cfg.browser_visible and display_available,
         updated_at=cfg.updated_at,
+        graphical_display_available=display_available,
+        graphical_display_message=(
+            None if display_available else NO_GRAPHICAL_DISPLAY_MESSAGE
+        ),
     )
 
 
 def upsert_browser_debug_config(
     session: Session, payload: BrowserDebugConfigIn
 ) -> BrowserDebugConfigOut:
+    from aespa.runtime_capabilities import graphical_display_available
+
     cfg = session.get(BrowserDebugConfig, _SINGLETON_ID)
     if cfg is None:
         cfg = BrowserDebugConfig(id=_SINGLETON_ID)
     cfg.browser_engine = payload.browser_engine
-    cfg.browser_visible = payload.browser_visible
+    cfg.browser_visible = payload.browser_visible and graphical_display_available()
     cfg.updated_at = _utcnow()
     session.add(cfg)
     session.commit()

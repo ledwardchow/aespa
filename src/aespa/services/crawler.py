@@ -6,9 +6,7 @@ import contextlib
 import hashlib
 import json
 import logging
-import os
 import re
-import sys
 import time
 import uuid
 from collections import deque
@@ -7263,12 +7261,9 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
     Requires a graphical display.  On headless servers, raises RuntimeError
     with instructions to use ``seed`` mode instead.
     """
-    has_display = (
-        sys.platform == "darwin"
-        or bool(os.environ.get("DISPLAY"))
-        or bool(os.environ.get("WAYLAND_DISPLAY"))
-    )
-    if not has_display:
+    from aespa.runtime_capabilities import graphical_display_available
+
+    if not graphical_display_available():
         events_svc.emit(
             run_id,
             {

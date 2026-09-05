@@ -18,7 +18,7 @@ from aespa.console import (
     InteractiveConsole,
     InteractiveConsoleHandler,
     _aespa_logo_lines,
-    _python_executor_image_present,
+    _python_executor_runtime_status,
     _write_port_setting,
 )
 
@@ -144,7 +144,7 @@ def test_agent_is_initial_view_and_number_keys_switch_all_views() -> None:
 def test_agent_logo_is_colored_and_clears_on_first_agent_message(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output, terminal_size=(100, 35))
-    monkeypatch.setattr("aespa.console._python_executor_image_present", lambda: True)
+    monkeypatch.setattr("aespa.console._python_executor_runtime_status", lambda: "ready")
 
     handler.start_screen()
 
@@ -164,7 +164,7 @@ def test_agent_logo_is_colored_and_clears_on_first_agent_message(monkeypatch) ->
 def test_agent_logo_has_a_compact_narrow_terminal_variant(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output, terminal_size=(40, 24))
-    monkeypatch.setattr("aespa.console._python_executor_image_present", lambda: True)
+    monkeypatch.setattr("aespa.console._python_executor_runtime_status", lambda: "ready")
 
     handler.start_screen()
 
@@ -184,7 +184,7 @@ def test_agent_logo_has_a_compact_narrow_terminal_variant(monkeypatch) -> None:
 def test_console_ready_line_uses_configured_ipv6_host_and_port(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output, host="::1", port=8123)
-    monkeypatch.setattr("aespa.console._python_executor_image_present", lambda: True)
+    monkeypatch.setattr("aespa.console._python_executor_runtime_status", lambda: "ready")
 
     handler.start_screen()
     handler.start_screen()
@@ -197,7 +197,9 @@ def test_console_warns_below_ready_line_when_python_executor_is_missing(
 ) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output)
-    monkeypatch.setattr("aespa.console._python_executor_image_present", lambda: False)
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "image_missing"
+    )
 
     handler.start_screen()
     handler.start_screen()
@@ -211,18 +213,37 @@ def test_console_warns_below_ready_line_when_python_executor_is_missing(
     ]
 
 
+def test_console_warns_when_docker_service_is_unavailable(monkeypatch) -> None:
+    output = io.StringIO()
+    handler = InteractiveConsoleHandler(output)
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "docker_unavailable"
+    )
+
+    handler.start_screen()
+
+    assert list(handler.buffers[AGENT]) == [
+        "Ready - listening on http://127.0.0.1:8000",
+        (
+            "Python sandbox is unavailable - Docker is installed, but its service is "
+            "not running or cannot be reached. Start Docker and try again"
+        ),
+    ]
+
+
 def test_python_executor_check_inspects_the_published_image(monkeypatch) -> None:
     commands: list[list[str]] = []
     monkeypatch.setattr("aespa.console.shutil.which", lambda command: "/bin/docker")
 
     def fake_run(command, **_kwargs):
         commands.append(command)
-        return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=0 if command[1] == "info" else 1)
 
     monkeypatch.setattr("aespa.console.subprocess.run", fake_run)
 
-    assert _python_executor_image_present() is False
+    assert _python_executor_runtime_status() == "image_missing"
     assert commands == [
+        ["docker", "info", "--format", "{{.ServerVersion}}"],
         [
             "docker",
             "image",

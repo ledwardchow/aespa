@@ -915,6 +915,7 @@ class CodeExecutionRuntimeStatus(BaseModel):
     backend: str
     image_ref: str
     docker_installed: bool = False
+    docker_available: bool = False
     image_present: bool = False
     message: str
 
@@ -1169,6 +1170,8 @@ class BrowserDebugConfigIn(BrowserDebugConfigBase):
 
 class BrowserDebugConfigOut(BrowserDebugConfigBase):
     updated_at: datetime
+    graphical_display_available: bool = True
+    graphical_display_message: str | None = None
 
 
 # ── Cloudflare Access config schemas ─────────────────────────────────────────

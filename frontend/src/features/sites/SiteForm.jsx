@@ -1,4 +1,5 @@
 import * as sitesApi from "../../shared/api/sites.js";
+import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
@@ -50,6 +51,13 @@ export function SiteForm({ siteId }) {
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [browserCapabilities, setBrowserCapabilities] = useState(null);
+  useEffect(() => {
+    settingsApi
+      .getBrowserDebugConfig()
+      .then(setBrowserCapabilities)
+      .catch(() => {});
+  }, []);
   useEffect(() => {
     if (!isEdit) return;
     (async () => {
@@ -421,6 +429,11 @@ export function SiteForm({ siteId }) {
                           <label>Auth Mode</label>
                           <select
                             value={c.auth_mode || "auto"}
+                            title={
+                              browserCapabilities?.graphical_display_available === false
+                                ? browserCapabilities.graphical_display_message
+                                : undefined
+                            }
                             onChange={(e) =>
                               updC(i, {
                                 auth_mode: e.target.value,
@@ -433,8 +446,18 @@ export function SiteForm({ siteId }) {
                               email OTP — form fill + test mailbox code
                             </option>
                             <option value="entra_id">entra id — Microsoft multi-page login</option>
-                            <option value="guided">guided — interactive browser login</option>
+                            <option
+                              value="guided"
+                              disabled={browserCapabilities?.graphical_display_available === false}
+                            >
+                              guided — interactive browser login
+                            </option>
                           </select>
+                          {browserCapabilities?.graphical_display_available === false && (
+                            <div className="field-hint" style={{ marginTop: 6 }}>
+                              {browserCapabilities.graphical_display_message}
+                            </div>
+                          )}
                         </div>
                         {["totp", "entra_id"].includes(c.auth_mode || "auto") && (
                           <div className="field">
