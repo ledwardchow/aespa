@@ -1,6 +1,10 @@
 # Frontend cleanup plan
 
-Reviewed 5 September 2026. This is an implementation plan, not a completed refactor.
+Reviewed 5 September 2026. The implementation below was carried out as a behavior-preserving frontend refactor. The original inventory remains here as the starting point; see [frontend/README.md](../frontend/README.md) for the current layout and commands.
+
+Implemented: feature folders, direct route loaders, settings dependency cleanup, shared domain components and API modules, typed core contracts, scoped settings styles, named utility modules, automatic test discovery, browser fixtures, CI, and generated-asset checks. The old SAST detail implementation and unused `htm` dependency were removed. Browser history now restores web and SAST run tabs.
+
+TypeScript adoption remains incremental for existing JavaScript. The fixed production asset names, established minifier settings, and service-worker cache strategy are retained for compatibility. Native installer and old-cache upgrade validation require separate release testing; the browser fixture suite exercises development and compiled production pages with service workers blocked.
 
 The goal is a frontend where a developer can find a feature, change its behavior, and test it without understanding the former monolithic application. Keep the existing product behavior and URLs while establishing clear component ownership, reliable state handling, and a predictable Vite development workflow.
 

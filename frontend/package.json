@@ -1,30 +1,50 @@
 {
-  "name": "frontend",
+  "name": "aespa-frontend",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/pages/SiteDetail/runState.test.js src/lib/bedrock.test.js src/lib/modelSorting.test.js src/hooks/useAutoFollowScroll.test.js",
+    "test": "vitest run",
     "lint": "oxlint --deny-warnings src && eslint --max-warnings 0 src",
-    "check": "npm run lint && npm run build",
-    "preview": "vite preview"
+    "check": "npm run format:check && npm run lint && npm run check:architecture && npm run typecheck && npm test && npm run build && npm run check:build",
+    "preview": "vite preview",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --noEmit",
+    "check:architecture": "node scripts/check-architecture.mjs",
+    "format": "prettier --write src scripts e2e *.js *.mjs *.json",
+    "format:check": "prettier --check src scripts e2e *.js *.mjs *.json",
+    "check:build": "node scripts/check-build.mjs"
   },
   "dependencies": {
     "d3": "^7.9.0",
-    "htm": "^3.1.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
+    "@babel/parser": "^8.0.4",
+    "@playwright/test": "^1.63.0",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/node": "^26.4.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "esbuild": "^0.28.1",
     "eslint": "^9.39.4",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
     "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "^30.0.1",
     "oxlint": "^1.71.0",
-    "vite": "^8.1.1"
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.1",
+    "vitest": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=24"
   }
 }

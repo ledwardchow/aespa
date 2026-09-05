@@ -1,0 +1,101 @@
+export const API_FORMAT_LABELS = {
+  anthropic: "Anthropic API",
+  factory_droid: "Factory Droid subscription",
+  github_copilot: "GitHub Copilot subscription",
+  openai_codex: "OpenAI Codex subscription",
+  google_antigravity: "Google Antigravity subscription",
+  openai: "OpenAI API",
+  openai_compatible: "OpenAI-compatible API",
+  openrouter: "OpenRouter",
+  google: "Google Gemini API",
+  bedrock: "Amazon Bedrock Runtime",
+  bedrock_mantle: "Amazon Bedrock Mantle",
+  azure_openai: "Azure OpenAI",
+  azure_foundry: "Azure AI Foundry (OpenAI API)",
+  azure_foundry_openai: "Azure AI Foundry (OpenAI API)",
+  azure_foundry_anthropic: "Azure AI Foundry (Anthropic API)",
+};
+
+export const DEFAULT_PROVIDER_FORM = {
+  name: "",
+  api_format: "anthropic",
+  base_url: "",
+  region: "",
+  username: "",
+  project_id: "",
+  models: "",
+  model_capabilities: {},
+  api_key: "",
+  max_tpm: "",
+  max_rpm: "",
+};
+
+export const DEFAULT_LLM_FORM = {
+  name: "",
+  provider_id: "",
+  model: "",
+  max_tokens: 70000,
+  max_context_tokens: 128000,
+  max_context_auto: true,
+  temperature: 0.2,
+  use_temperature: false,
+  use_vision: false,
+  force_tool_choice: false,
+  reasoning_effort: "",
+};
+
+export const PROVIDER_BASE_URL_PLACEHOLDERS = {
+  anthropic: "https://api.anthropic.com",
+  factory_droid: "Not required",
+  github_copilot: "Not required",
+  openai_codex: "Not required",
+  google_antigravity: "Not required",
+  openai: "https://api.openai.com/v1",
+  openai_compatible: "http://localhost:1234/v1",
+  openrouter: "https://openrouter.ai/api/v1",
+  google: "https://generativelanguage.googleapis.com",
+  bedrock: "https://bedrock-runtime.ap-southeast-2.amazonaws.com",
+  bedrock_mantle: "https://bedrock-mantle.us-east-2.api.aws/v1",
+  azure_openai: "https://myresource.openai.azure.com",
+  azure_foundry: "https://myresource.services.ai.azure.com",
+  azure_foundry_openai: "https://myresource.services.ai.azure.com/openai/v1",
+  azure_foundry_anthropic: "https://myresource.services.ai.azure.com/anthropic/v1",
+};
+
+export const PROVIDER_DEFAULT_BASE_URLS = {
+  anthropic: "https://api.anthropic.com",
+  factory_droid: "Droid CLI (signed-in account)",
+  github_copilot: "Copilot SDK (selected default account)",
+  openai_codex: "Codex app-server (ChatGPT account)",
+  google_antigravity: "Antigravity CLI (signed-in account)",
+  openai: "https://api.openai.com/v1",
+  openai_compatible: null,
+  // no sensible default — must be set
+  openrouter: "https://openrouter.ai/api/v1",
+  google: "https://generativelanguage.googleapis.com",
+  bedrock: "AWS SDK default (ap-southeast-2)",
+  bedrock_mantle: "https://bedrock-mantle.us-east-2.api.aws/v1",
+  azure_openai: null,
+  // must be set
+  azure_foundry: null,
+  azure_foundry_openai: null,
+  azure_foundry_anthropic: null,
+};
+
+export const PROVIDER_MODEL_PLACEHOLDERS = {
+  anthropic: "claude-opus-4-8\nclaude-sonnet-4-5",
+  factory_droid: "Models are loaded from the signed-in Droid CLI",
+  github_copilot: "auto\nModels are loaded from GitHub Copilot API",
+  openai_codex: "auto\nModels are loaded from the signed-in ChatGPT account",
+  google_antigravity: "auto\nGemini 3.7 Flash (High)\nGemini 3.1 Pro (High)",
+  openai: "gpt-5.6-luna\ngpt-5.6-terra\ngpt-5.6-sol\ngpt-5.5\ngpt-5.4\ngpt-4.1",
+  openai_compatible: "llama-3.1-8b-instruct\nqwen2.5-coder",
+  openrouter: "Models are loaded from OpenRouter API",
+  google: "gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",
+  bedrock: "global.anthropic.claude-opus-4-8\nglobal.anthropic.claude-sonnet-4-6",
+  bedrock_mantle: "openai.gpt-5.5\nopenai.gpt-oss-120b",
+  azure_openai: "gpt-5.5\ngpt-4o\ngpt-4.1",
+  azure_foundry: "gpt-4o\nMeta-Llama-3.3-70B-Instruct",
+  azure_foundry_openai: "gpt-4o\nMeta-Llama-3.3-70B-Instruct",
+  azure_foundry_anthropic: "claude-sonnet-4-5\nclaude-opus-4-1",
+};

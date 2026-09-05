@@ -173,6 +173,8 @@ npm ci            # first time only
 npm run build     # regenerates src/aespa/web/
 ```
 
+See [frontend/README.md](frontend/README.md) for the development server, tests, and source layout.
+
 ### Run notes
 
 Crawls work well enough on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models; for best results, use Sonnet, or the budget option is Minimax M3.

@@ -1,0 +1,278 @@
+/* ── Main content area ──────────────────────────────────────── */
+
+.main {
+  margin-left: var(--sidebar-w);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  transition: margin-left 0.2s ease;
+  min-width: 0;
+}
+
+.topbar {
+  min-height: var(--topbar-h);
+  flex-shrink: 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  container: page-header / inline-size;
+}
+.topbar-layout {
+  min-height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 28px;
+  gap: 8px;
+}
+.topbar:not(:has(> .topbar-layout)) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 28px;
+  gap: 8px;
+}
+.topbar-title {
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.topbar-title .breadcrumb-sep {
+  color: var(--muted);
+  font-weight: 400;
+}
+.topbar-actions {
+  min-width: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.topbar-actions > * {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+@container page-header (max-width: 1200px) {
+  .topbar-title .badge,
+  .topbar-title .run-status-badge,
+  .topbar-title .run-agent-badges {
+    display: none;
+  }
+}
+
+@container page-header (max-width: 640px) {
+  .web-run-topbar .topbar-layout {
+    padding-block: 7px;
+    flex-wrap: wrap;
+    align-content: center;
+    gap: 6px;
+  }
+  .web-run-topbar .topbar-title,
+  .web-run-topbar .topbar-actions {
+    width: 100%;
+  }
+  .web-run-topbar .topbar-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+}
+
+@container page-header (max-width: 1250px) {
+  .sast-run-topbar .topbar-layout {
+    padding-block: 7px;
+    flex-wrap: wrap;
+    align-content: center;
+    gap: 6px;
+  }
+  .sast-run-topbar .topbar-title,
+  .sast-run-topbar .topbar-actions {
+    width: 100%;
+  }
+  .sast-run-topbar .topbar-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .sast-run-topbar .topbar-title .badge {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .topbar-layout {
+    padding: 7px 10px;
+  }
+  .topbar:not(:has(> .topbar-layout)) {
+    padding: 7px 10px;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .topbar-title {
+    min-width: 0;
+    flex: 1 0 100%;
+    gap: 5px;
+    overflow-wrap: anywhere;
+  }
+  .topbar-actions {
+    min-width: 0;
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .topbar-actions .btn {
+    padding: 6px 8px;
+  }
+  .sast-header-title > a,
+  .sast-header-title .breadcrumb-sep {
+    display: none;
+  }
+}
+
+.content {
+  padding: 28px;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.content.scroll-content {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.content.scroll-content.no-padding {
+  padding: 0;
+}
+.content:has(> .tab-bar:first-child),
+.content:has(> .settings-tab-bar:first-child),
+.content:has(> .web-run-navigation:first-child),
+.content:has(> *:first-child > .tab-bar:first-child) {
+  padding-top: 0;
+}
+
+.page-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.panel-header h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+.stats-month-controls {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.stats-month-controls select {
+  min-width: 150px;
+}
+.stats-price-meta {
+  margin-left: 2px;
+}
+.stats-summary-meta {
+  margin-left: auto;
+}
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+.stat-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.stat-card span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.stat-card strong {
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 650;
+}
+.stat-card small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.form-grid.two {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.form-grid.two label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.form-grid.two input {
+  width: 100%;
+}
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 12px;
+}
+.form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.error-text,
+.error-banner {
+  color: #ffb0b0;
+  font-size: 12px;
+}
+.error-banner {
+  padding: 10px 12px;
+  border: 1px solid rgba(224, 92, 92, 0.35);
+  border-radius: 7px;
+  background: var(--danger-bg);
+}
+@media (max-width: 1100px) {
+  .stats-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 650px) {
+  .stats-grid,
+  .form-grid.two {
+    grid-template-columns: 1fr;
+  }
+}
+/* Tab content that manages its own internal scroll (e.g. Status sub-tabs) */
+.content.flex-fill-noscroll {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
