@@ -1,48 +1,63 @@
+import { FindingDetails } from "../../shared/findings/FindingDetails.tsx";
+import { FindingEditor } from "../../shared/findings/FindingEditor.tsx";
+import { FindingFileControls } from "../../shared/findings/FindingFileControls.tsx";
+import { useState } from "react";
+import { useFindings } from "./useFindings.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import React from "react";
 
-import { renderMarkdown } from "../../shared/alice/markdown.jsx";
 import { sourceLabel } from "../../shared/findings/files.js";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
 import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
-export function WebRunFindingsTab(props) {
+export function WebRunFindingsTab({
+  runId,
+  activeTab,
+  run,
+  siteName,
+  initialFindingRef,
+  thinkingStatus,
+  thinkingStopRequested,
+  aliceIsThinking,
+  submitAliceDirective,
+  onRunChange,
+  onGraphChange,
+  onError,
+}) {
+  const [clearBusy, setClearBusy] = useState("");
+  const setClearError = onError;
   const {
-    thinkingStatus,
-    thinkingStopRequested,
     validateStatus,
     onStopValidation,
     dedupeBusy,
     findings,
     onExportFindingsMarkdown,
-    onImportFindingsClick,
-    issueImportInputRef,
     onImportFindingsFile,
     validateBusy,
     onValidateAll,
-    aliceIsThinking,
     onDeduplicateFindings,
-    clearBusy,
-    setClearBusy,
-    setClearError,
-    runId,
     setFindings,
+    editor,
     editingFinding,
     setExpandedFinding,
     expandedFinding,
     onValidateFinding,
     onEditFinding,
     onDeleteFinding,
-    editDraft,
-    setEditDraft,
-    editBusy,
-    onCancelEditFinding,
-    onSaveEditFinding,
     toggleGroup,
     expandedGroups,
     findColW,
     startFindResize,
     onDeleteFindingGroup,
-  } = props;
+  } = useFindings(runId, activeTab, {
+    run,
+    siteName,
+    initialFindingRef,
+    aliceIsThinking,
+    submitAliceDirective,
+    setRun: onRunChange,
+    setGraph: onGraphChange,
+    setError: onError,
+  });
   return (
     <>
       <div className="findings-panel">
@@ -104,22 +119,10 @@ export function WebRunFindingsTab(props) {
             )}
           </div>
           <div className="findings-actions">
-            {findings.length > 0 && (
-              <button className="btn sm" onClick={onExportFindingsMarkdown}>
-                Export Issues
-              </button>
-            )}
-            <button className="btn sm" onClick={onImportFindingsClick}>
-              Import Issues
-            </button>
-            <input
-              ref={issueImportInputRef}
-              type="file"
-              accept=".md,text/markdown,text/plain"
-              style={{
-                display: "none",
-              }}
-              onChange={onImportFindingsFile}
+            <FindingFileControls
+              hasFindings={findings.length > 0}
+              onExport={onExportFindingsMarkdown}
+              onImport={onImportFindingsFile}
             />
             {findings.length > 0 && (
               <button
@@ -386,224 +389,17 @@ export function WebRunFindingsTab(props) {
                       </div>
                     </td>
                   </tr>
-                  {expandedFinding === f.id && editingFinding === f.id && editDraft && (
+                  {expandedFinding === f.id && editingFinding === f.id && editor.draft && (
                     <tr key={"edit-" + keyPrefix + f.id} className="finding-evidence-row">
                       <td colSpan="5">
-                        <div className="finding-edit-form" onClick={(e) => e.stopPropagation()}>
-                          <div className="finding-edit-row">
-                            <label className="finding-edit-field">
-                              <span>Severity</span>
-                              <select
-                                value={editDraft.severity}
-                                onChange={(e) =>
-                                  setEditDraft((d) => ({
-                                    ...d,
-                                    severity: e.target.value,
-                                  }))
-                                }
-                              >
-                                {["critical", "high", "medium", "low", "info"].map((s) => (
-                                  <option key={s} value={s}>
-                                    {s}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="finding-edit-field">
-                              <span>Status</span>
-                              <select
-                                value={editDraft.validation_status}
-                                onChange={(e) =>
-                                  setEditDraft((d) => ({
-                                    ...d,
-                                    validation_status: e.target.value,
-                                  }))
-                                }
-                              >
-                                {[
-                                  ["unvalidated", "unvalidated"],
-                                  ["skipped", "not validated"],
-                                  ["confirmed", "confirmed"],
-                                  ["unconfirmed", "unconfirmed"],
-                                  ["false_positive", "low confidence"],
-                                ].map(([v, l]) => (
-                                  <option key={v} value={v}>
-                                    {l}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label
-                              className="finding-edit-field"
-                              style={{
-                                maxWidth: 90,
-                              }}
-                            >
-                              <span>CVSS</span>
-                              <input
-                                type="number"
-                                min="0"
-                                max="10"
-                                step="0.1"
-                                value={editDraft.cvss_score}
-                                onChange={(e) =>
-                                  setEditDraft((d) => ({
-                                    ...d,
-                                    cvss_score: e.target.value,
-                                  }))
-                                }
-                              />
-                            </label>
-                            <label
-                              className="finding-edit-field"
-                              style={{
-                                flex: 2,
-                              }}
-                            >
-                              <span>CVSS Vector</span>
-                              <input
-                                type="text"
-                                value={editDraft.cvss_vector}
-                                onChange={(e) =>
-                                  setEditDraft((d) => ({
-                                    ...d,
-                                    cvss_vector: e.target.value,
-                                  }))
-                                }
-                              />
-                            </label>
-                          </div>
-                          <label className="finding-edit-field">
-                            <span>Title</span>
-                            <input
-                              type="text"
-                              value={editDraft.title}
-                              onChange={(e) =>
-                                setEditDraft((d) => ({
-                                  ...d,
-                                  title: e.target.value,
-                                }))
-                              }
-                            />
-                          </label>
-                          <label className="finding-edit-field">
-                            <span>Affected URL</span>
-                            <input
-                              type="text"
-                              value={editDraft.affected_url}
-                              onChange={(e) =>
-                                setEditDraft((d) => ({
-                                  ...d,
-                                  affected_url: e.target.value,
-                                }))
-                              }
-                            />
-                          </label>
-                          {[
-                            ["description", "Description"],
-                            ["impact", "Impact"],
-                            ["likelihood", "Likelihood"],
-                            ["recommendation", "Recommendation"],
-                          ].map(([k, label]) => (
-                            <label key={k} className="finding-edit-field">
-                              <span>{label}</span>
-                              <textarea
-                                rows="3"
-                                value={editDraft[k]}
-                                onChange={(e) =>
-                                  setEditDraft((d) => ({
-                                    ...d,
-                                    [k]: e.target.value,
-                                  }))
-                                }
-                              ></textarea>
-                            </label>
-                          ))}
-                          <div
-                            className="row"
-                            style={{
-                              gap: 8,
-                              marginTop: 4,
-                              justifyContent: "flex-end",
-                            }}
-                          >
-                            <button
-                              className="btn ghost sm"
-                              disabled={editBusy}
-                              onClick={onCancelEditFinding}
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              className="btn sm"
-                              disabled={editBusy}
-                              onClick={(e) => onSaveEditFinding(e, f.id)}
-                            >
-                              {editBusy ? "Saving…" : "Save"}
-                            </button>
-                          </div>
-                        </div>
+                        <FindingEditor editor={editor} runKind="web" />
                       </td>
                     </tr>
                   )}
                   {expandedFinding === f.id && editingFinding !== f.id && (
                     <tr key={"ev-" + keyPrefix + f.id} className="finding-evidence-row">
                       <td colSpan="5">
-                        <div className="finding-description">
-                          <div>
-                            <strong>Description</strong>
-                          </div>
-                          <div>{renderMarkdown(f.description) || "—"}</div>
-                          <div
-                            style={{
-                              marginTop: 8,
-                            }}
-                          >
-                            <strong>Impact</strong>
-                          </div>
-                          <div>{renderMarkdown(f.impact) || "—"}</div>
-                          <div
-                            style={{
-                              marginTop: 8,
-                            }}
-                          >
-                            <strong>Likelihood</strong>
-                          </div>
-                          <div>{renderMarkdown(f.likelihood) || "—"}</div>
-                          <div
-                            style={{
-                              marginTop: 8,
-                            }}
-                          >
-                            <strong>Recommendation</strong>
-                          </div>
-                          <div>{renderMarkdown(f.recommendation) || "—"}</div>
-                          <div
-                            style={{
-                              marginTop: 8,
-                            }}
-                          >
-                            <strong>CVSS 3.1</strong>
-                          </div>
-                          <div>
-                            {f.cvss_score !== undefined && f.cvss_score !== null
-                              ? `${Number(f.cvss_score).toFixed(1)} (${f.severity})`
-                              : "—"}
-                            {f.cvss_vector ? (
-                              <span
-                                className="mono"
-                                style={{
-                                  marginLeft: 8,
-                                  fontSize: 11,
-                                }}
-                              >
-                                {f.cvss_vector}
-                              </span>
-                            ) : (
-                              ""
-                            )}
-                          </div>
-                        </div>
+                        <FindingDetails finding={f} runKind="web" />
                         {f.validation_note && (
                           <div
                             className={"finding-validation-note val-note-" + f.validation_status}

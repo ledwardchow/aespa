@@ -1,7 +1,10 @@
+import { FindingDetails } from "../../shared/findings/FindingDetails.tsx";
+import { FindingEditor } from "../../shared/findings/FindingEditor.tsx";
+import { FindingFileControls } from "../../shared/findings/FindingFileControls.tsx";
+import { useFindingEditor } from "../../shared/findings/useFindingEditor.ts";
 import * as apiRunsApi from "../../shared/api/apiRuns.js";
-import { renderMarkdown } from "../../shared/alice/markdown.jsx";
 import { ALICE_DEDUP_DIRECTIVE } from "../../shared/findings/reviewDirective.js";
-import { useState, useRef, useCallback } from "react";
+import { useState, useCallback } from "react";
 
 import {
   markdownExportFilename,
@@ -19,10 +22,6 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
   const [expanded, setExpanded] = useState(new Set());
   const [clearBusy, setClearBusy] = useState(false);
   const [dedupeBusy, setDedupeBusy] = useState(false);
-  const [editingFinding, setEditingFinding] = useState(null); // finding id being edited
-  const [editDraft, setEditDraft] = useState(null); // working copy
-  const [editBusy, setEditBusy] = useState(false);
-  const issueImportInputRef = useRef(null);
   const load = useCallback(async () => {
     try {
       const data = await apiRunsApi.getApiFindings(runId);
@@ -56,9 +55,6 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
     } catch (e) {
       setError(e.message);
     }
-  };
-  const onImportFindingsClick = () => {
-    issueImportInputRef.current?.click();
   };
   const onImportFindingsFile = async (e) => {
     const file = e.target.files?.[0];
@@ -199,50 +195,20 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
       setError(err.message);
     }
   };
-  const onEditApiFinding = (e, f) => {
-    e.stopPropagation();
-    setExpanded((prev) => new Set(prev).add(f.id));
-    setEditingFinding(f.id);
-    setEditDraft({
-      severity: f.severity,
-      validation_status: f.validation_status,
-      title: f.title || "",
-      affected_url: f.affected_url || "",
-      owasp_api_category: f.owasp_api_category || "",
-      description: f.description || "",
-      impact: f.impact || "",
-      recommendation: f.recommendation || "",
-      evidence: f.evidence || "",
-    });
-  };
-  const onCancelEditApiFinding = (e) => {
-    e?.stopPropagation?.();
-    setEditingFinding(null);
-    setEditDraft(null);
-  };
-  const onSaveEditApiFinding = async (e, findingId) => {
-    e?.stopPropagation?.();
-    if (!editDraft || editBusy) return;
-    setEditBusy(true);
-    try {
-      const updated = await apiRunsApi.updateApiFinding(runId, findingId, editDraft);
-      setFindings((prev) =>
-        prev.map((f) =>
-          f.id === findingId
-            ? {
-                ...f,
-                ...updated,
-              }
-            : f,
-        ),
-      );
-      setEditingFinding(null);
-      setEditDraft(null);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setEditBusy(false);
-    }
+  const editor = useFindingEditor({
+    runId,
+    runKind: "api",
+    onError: setError,
+    onSaved: (id, updated) =>
+      setFindings((previous) =>
+        previous.map((finding) => (finding.id === id ? { ...finding, ...updated } : finding)),
+      ),
+  });
+  const editingFinding = editor.editingId;
+  const onEditApiFinding = (event, finding) => {
+    event.stopPropagation();
+    setExpanded((previous) => new Set(previous).add(finding.id));
+    editor.edit(finding);
   };
   const sevCls = (s) =>
     ({
@@ -322,22 +288,10 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
         <button className="btn sm" onClick={load}>
           Refresh
         </button>
-        {findings.length > 0 && (
-          <button className="btn sm" onClick={onExportFindingsMarkdown}>
-            Export Issues
-          </button>
-        )}
-        <button className="btn sm" onClick={onImportFindingsClick}>
-          Import Issues
-        </button>
-        <input
-          ref={issueImportInputRef}
-          type="file"
-          accept=".md,text/markdown,text/plain"
-          style={{
-            display: "none",
-          }}
-          onChange={onImportFindingsFile}
+        <FindingFileControls
+          hasFindings={findings.length > 0}
+          onExport={onExportFindingsMarkdown}
+          onImport={onImportFindingsFile}
         />
         {findings.length > 0 && (
           <button
@@ -467,146 +421,8 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
                 🗑
               </button>
             </div>
-            {expanded.has(f.id) && editingFinding === f.id && editDraft && (
-              <div
-                className="finding-edit-form"
-                style={{
-                  borderTop: "1px solid var(--border)",
-                  background: "var(--bg)",
-                }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="finding-edit-row">
-                  <label className="finding-edit-field">
-                    <span>Severity</span>
-                    <select
-                      value={editDraft.severity}
-                      onChange={(e) =>
-                        setEditDraft((d) => ({
-                          ...d,
-                          severity: e.target.value,
-                        }))
-                      }
-                    >
-                      {["critical", "high", "medium", "low", "info"].map((s) => (
-                        <option key={s} value={s}>
-                          {s}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="finding-edit-field">
-                    <span>Status</span>
-                    <select
-                      value={editDraft.validation_status}
-                      onChange={(e) =>
-                        setEditDraft((d) => ({
-                          ...d,
-                          validation_status: e.target.value,
-                        }))
-                      }
-                    >
-                      {[
-                        ["unvalidated", "unvalidated"],
-                        ["confirmed", "confirmed"],
-                        ["unconfirmed", "unconfirmed"],
-                        ["false_positive", "low confidence"],
-                      ].map(([v, l]) => (
-                        <option key={v} value={v}>
-                          {l}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label
-                    className="finding-edit-field"
-                    style={{
-                      maxWidth: 120,
-                    }}
-                  >
-                    <span>OWASP API</span>
-                    <input
-                      type="text"
-                      value={editDraft.owasp_api_category}
-                      onChange={(e) =>
-                        setEditDraft((d) => ({
-                          ...d,
-                          owasp_api_category: e.target.value,
-                        }))
-                      }
-                    />
-                  </label>
-                </div>
-                <label className="finding-edit-field">
-                  <span>Title</span>
-                  <input
-                    type="text"
-                    value={editDraft.title}
-                    onChange={(e) =>
-                      setEditDraft((d) => ({
-                        ...d,
-                        title: e.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label className="finding-edit-field">
-                  <span>Affected URL</span>
-                  <input
-                    type="text"
-                    value={editDraft.affected_url}
-                    onChange={(e) =>
-                      setEditDraft((d) => ({
-                        ...d,
-                        affected_url: e.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                {[
-                  ["description", "Description"],
-                  ["impact", "Impact"],
-                  ["recommendation", "Recommendation"],
-                  ["evidence", "Evidence"],
-                ].map(([k, label]) => (
-                  <label key={k} className="finding-edit-field">
-                    <span>{label}</span>
-                    <textarea
-                      rows="3"
-                      value={editDraft[k]}
-                      onChange={(e) =>
-                        setEditDraft((d) => ({
-                          ...d,
-                          [k]: e.target.value,
-                        }))
-                      }
-                    ></textarea>
-                  </label>
-                ))}
-                <div
-                  className="row"
-                  style={{
-                    gap: 8,
-                    marginTop: 4,
-                    justifyContent: "flex-end",
-                  }}
-                >
-                  <button
-                    className="btn ghost sm"
-                    disabled={editBusy}
-                    onClick={onCancelEditApiFinding}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    className="btn sm"
-                    disabled={editBusy}
-                    onClick={(e) => onSaveEditApiFinding(e, f.id)}
-                  >
-                    {editBusy ? "Saving…" : "Save"}
-                  </button>
-                </div>
-              </div>
+            {expanded.has(f.id) && editingFinding === f.id && editor.draft && (
+              <FindingEditor editor={editor} runKind="api" />
             )}
             {expanded.has(f.id) && editingFinding !== f.id && (
               <div
@@ -616,79 +432,7 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
                   background: "var(--bg)",
                 }}
               >
-                {f.affected_url && (
-                  <div
-                    style={{
-                      marginBottom: 8,
-                    }}
-                  >
-                    <b>URL:</b>{" "}
-                    <code
-                      style={{
-                        fontSize: 12,
-                      }}
-                    >
-                      {f.affected_url}
-                    </code>
-                  </div>
-                )}
-                {f.description && (
-                  <div
-                    style={{
-                      marginBottom: 8,
-                    }}
-                  >
-                    <b>Description:</b>
-                    <div
-                      style={{
-                        marginTop: 4,
-                      }}
-                    >
-                      {renderMarkdown(f.description)}
-                    </div>
-                  </div>
-                )}
-                {f.impact && (
-                  <div
-                    style={{
-                      marginBottom: 8,
-                    }}
-                  >
-                    <b>Impact:</b> {f.impact}
-                  </div>
-                )}
-                {f.recommendation && (
-                  <div
-                    style={{
-                      marginBottom: 8,
-                    }}
-                  >
-                    <b>Recommendation:</b> {f.recommendation}
-                  </div>
-                )}
-                {f.evidence && (
-                  <div
-                    style={{
-                      marginBottom: 8,
-                    }}
-                  >
-                    <b>Evidence:</b>
-                    <pre
-                      style={{
-                        fontSize: 11,
-                        background: "var(--code-bg,#1e1e2e)",
-                        color: "var(--code-fg,#cdd6f4)",
-                        padding: 8,
-                        borderRadius: 4,
-                        overflow: "auto",
-                        maxHeight: 200,
-                        whiteSpace: "pre-wrap",
-                      }}
-                    >
-                      {f.evidence}
-                    </pre>
-                  </div>
-                )}
+                <FindingDetails finding={f} runKind="api" />
                 <div
                   style={{
                     fontSize: 11,

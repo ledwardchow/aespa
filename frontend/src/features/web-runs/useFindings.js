@@ -1,5 +1,7 @@
+import { useFindingEditor } from "../../shared/findings/useFindingEditor.ts";
+import { useFindingsData } from "./FindingsData.jsx";
 import * as webRunsApi from "../../shared/api/webRuns.js";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 
 import { useColResize } from "../../shared/hooks/useColResize.js";
 import { ALICE_DEDUP_DIRECTIVE } from "../../shared/findings/reviewDirective.js";
@@ -30,11 +32,7 @@ function findingGroupKey(finding) {
   return finding.title;
 }
 
-// Owns everything the Findings tab needs: the findings list, validation +
-// dedup status, per-row edit/expand UI state, and the handlers that mutate
-// them. Extracted from TestRunDetail so the tab is driven by one cohesive
-// object instead of ~40 loose props. The live SSE stream still lives in the
-// parent; it writes through the setFindings/setValidateStatus this returns.
+// Panel interactions and refreshes share server data with the route event subscription.
 export function useFindings(
   runId,
   activeTab,
@@ -49,14 +47,16 @@ export function useFindings(
     initialFindingRef,
   },
 ) {
-  const [validateStatus, setValidateStatus] = useState(null);
-  const [validateBusy, setValidateBusy] = useState(false);
+  const {
+    findings,
+    setFindings,
+    validateStatus,
+    setValidateStatus,
+    validateBusy,
+    setValidateBusy,
+  } = useFindingsData();
   const [dedupeBusy, setDedupeBusy] = useState(false);
-  const [findings, setFindings] = useState([]);
   const [expandedFinding, setExpandedFinding] = useState(null);
-  const [editingFinding, setEditingFinding] = useState(null); // finding id being edited
-  const [editDraft, setEditDraft] = useState(null); // working copy of the edited finding
-  const [editBusy, setEditBusy] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState(new Set(["__unconfirmed__"]));
   const toggleGroup = (title) =>
     setExpandedGroups((prev) => {
@@ -65,7 +65,6 @@ export function useFindings(
       else next.add(title);
       return next;
     });
-  const issueImportInputRef = useRef(null);
   const [findColW, startFindResize] = useColResize("colw:findings:v2", [120, 52, null, 28, 60]);
 
   // Poll findings when on findings tab.
@@ -93,7 +92,7 @@ export function useFindings(
         .catch(() => {});
     }, 4000);
     return () => clearInterval(iv);
-  }, [runId, activeTab, initialFindingRef]);
+  }, [runId, activeTab, initialFindingRef, setFindings]);
 
   // Poll validation status while validating is running. Keep polling while the
   // local busy flag is true too, because the final SSE event can race with the
@@ -115,7 +114,15 @@ export function useFindings(
         .catch(() => {});
     }, 3000);
     return () => clearInterval(iv);
-  }, [runId, validateBusy, validateStatus?.status, activeTab]);
+  }, [
+    runId,
+    validateBusy,
+    validateStatus?.status,
+    activeTab,
+    setFindings,
+    setValidateStatus,
+    setValidateBusy,
+  ]);
 
   // Fetch findings when switching to findings tab
   useEffect(() => {
@@ -128,7 +135,7 @@ export function useFindings(
       .getValidateStatus(runId)
       .then(setValidateStatus)
       .catch(() => {});
-  }, [activeTab, runId]);
+  }, [activeTab, runId, setFindings, setValidateStatus]);
 
   const onDeleteFinding = async (e, findingId) => {
     e.stopPropagation();
@@ -197,9 +204,6 @@ export function useFindings(
       setError(err.message);
     }
   };
-  const onImportFindingsClick = () => {
-    issueImportInputRef.current?.click();
-  };
   const onImportFindingsFile = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -248,54 +252,20 @@ export function useFindings(
       setError(err.message);
     }
   };
-  const onEditFinding = (e, f) => {
-    e.stopPropagation();
-    setExpandedFinding(f.id);
-    setEditingFinding(f.id);
-    setEditDraft({
-      severity: f.severity,
-      validation_status: f.validation_status,
-      title: f.title || "",
-      affected_url: f.affected_url || "",
-      cvss_score: f.cvss_score ?? 0,
-      cvss_vector: f.cvss_vector || "",
-      description: f.description || "",
-      impact: f.impact || "",
-      likelihood: f.likelihood || "",
-      recommendation: f.recommendation || "",
-    });
-  };
-  const onCancelEditFinding = (e) => {
-    e?.stopPropagation?.();
-    setEditingFinding(null);
-    setEditDraft(null);
-  };
-  const onSaveEditFinding = async (e, findingId) => {
-    e?.stopPropagation?.();
-    if (!editDraft || editBusy) return;
-    setEditBusy(true);
-    try {
-      const updated = await webRunsApi.updateFinding(runId, findingId, {
-        ...editDraft,
-        cvss_score: Number(editDraft.cvss_score) || 0,
-      });
-      setFindings((prev) =>
-        prev.map((f) =>
-          f.id === findingId
-            ? {
-                ...f,
-                ...updated,
-              }
-            : f,
-        ),
-      );
-      setEditingFinding(null);
-      setEditDraft(null);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setEditBusy(false);
-    }
+  const editor = useFindingEditor({
+    runId,
+    runKind: "web",
+    onError: setError,
+    onSaved: (id, updated) =>
+      setFindings((previous) =>
+        previous.map((finding) => (finding.id === id ? { ...finding, ...updated } : finding)),
+      ),
+  });
+  const editingFinding = editor.editingId;
+  const onEditFinding = (event, finding) => {
+    event.stopPropagation();
+    setExpandedFinding(finding.id);
+    editor.edit(finding);
   };
   const onStopValidation = async () => {
     try {
@@ -318,13 +288,10 @@ export function useFindings(
     dedupeBusy,
     expandedFinding,
     setExpandedFinding,
+    editor,
     editingFinding,
-    editDraft,
-    setEditDraft,
-    editBusy,
     expandedGroups,
     toggleGroup,
-    issueImportInputRef,
     findColW,
     startFindResize,
     onDeleteFinding,
@@ -332,12 +299,9 @@ export function useFindings(
     onValidateAll,
     onDeduplicateFindings,
     onExportFindingsMarkdown,
-    onImportFindingsClick,
     onImportFindingsFile,
     onValidateFinding,
     onEditFinding,
-    onCancelEditFinding,
-    onSaveEditFinding,
     onStopValidation,
   };
 }

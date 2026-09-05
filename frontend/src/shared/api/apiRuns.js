@@ -1,3 +1,4 @@
+import { getFindings as readFindings, updateFinding as patchFinding } from "./findings.ts";
 import { req } from "./request.ts";
 
 export const getApiRun = (id) => req(`/api/api-test-runs/${id}`);
@@ -47,7 +48,7 @@ export const stopApiScan = (id) => req(`/api/api-test-runs/${id}/scan/stop`, { m
 
 export const getApiScanStatus = (id) => req(`/api/api-test-runs/${id}/scan/status`);
 
-export const getApiFindings = (id) => req(`/api/api-test-runs/${id}/findings`);
+export const getApiFindings = (id) => readFindings({ runKind: "api", runId: id });
 
 export const clearApiFindings = (id) =>
   req(`/api/api-test-runs/${id}/findings`, { method: "DELETE" });
@@ -55,8 +56,8 @@ export const clearApiFindings = (id) =>
 export const deleteApiFinding = (id, fid) =>
   req(`/api/api-test-runs/${id}/findings/${fid}`, { method: "DELETE" });
 
-export const updateApiFinding = (id, fid, b) =>
-  req(`/api/api-test-runs/${id}/findings/${fid}`, { method: "PATCH", body: b });
+export const updateApiFinding = (id, fid, body) =>
+  patchFinding({ runKind: "api", runId: id }, fid, body);
 
 export const importApiFindings = (id, b) =>
   req(`/api/api-test-runs/${id}/findings/import`, { method: "POST", body: b });

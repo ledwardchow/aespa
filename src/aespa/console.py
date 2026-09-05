@@ -642,7 +642,8 @@ class InteractiveConsoleHandler(logging.Handler):
             disclosure = "▾" if expanded else "▸"
             status = _llm_call_status(call)
             header = (
-                f"{marker} {disclosure} #{call_id} {call['operation']} "
+                f"{marker} {disclosure} {call['created_at']} {call['run_label']} "
+                f"#{call_id} {call['operation']} "
                 f"[{call['kind']}] {status}"
             )
             lines.extend(_wrap_console_line(header, width))
@@ -706,8 +707,14 @@ class InteractiveConsoleHandler(logging.Handler):
             (item for item in self.llm_calls if item["call_id"] == call_id), None
         )
         if call is None:
+            run_id = getattr(record, "aespa_llm_run_id", None)
+            run_kind = str(getattr(record, "aespa_llm_run_kind", "web"))
             call = {
                 "call_id": call_id,
+                "created_at": datetime.fromtimestamp(record.created).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+                "run_label": f"{run_kind} run {run_id}" if run_id is not None else "no run",
                 "operation": str(record.aespa_llm_operation),
                 "kind": str(record.aespa_llm_kind),
                 "context": str(record.aespa_llm_context),

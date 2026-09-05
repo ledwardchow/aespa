@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from urllib.parse import urlparse, urlsplit, urlunparse
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -11,14 +10,11 @@ from sqlmodel import Session, select
 
 from aespa.db import get_session
 from aespa.models import (
-    AgentLog,
     CrawledPage,
     PageCredentialView,
     PageLink,
-    PageOwaspTest,
     SastRun,
     ScanFinding,
-    ScanLog,
     ScannerSession,
     Site,
     TargetIntelItem,
@@ -32,8 +28,6 @@ from aespa.schemas import (
     CrawledPageOut,
     CredentialSummary,
     GraphData,
-    GraphLink,
-    GraphNode,
     PageCredentialViewOut,
     ScanLeadOut,
     ScannerSessionOut,
@@ -49,20 +43,20 @@ from aespa.schemas import (
     TestRunUpdate,
 )
 from aespa.services import active_jobs as active_jobs_svc
+from aespa.services import crawl_archives, run_cleanup
 from aespa.services import crawler as crawler_svc
 from aespa.services import recon_summary as recon_summary_svc
-from aespa.services import run_cleanup
 from aespa.services import scanner as scanner_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services import settings as settings_service
 from aespa.services import validator as validator_svc
+from aespa.services.crawl_archives import _json_dict, _redacted_metadata
 from aespa.services.references import ensure_finding_reference, ensure_lead_reference
+from aespa.services.run_graph import build_run_graph
 from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["test_runs"])
 
-_CRAWL_ARCHIVE_FORMAT = "aespa-crawl-export"
-_CRAWL_ARCHIVE_VERSION = 1
 _CRAWL_OWNED_PHASES = {"created", "crawling", "reconciling", "finalizing"}
 
 
@@ -111,258 +105,6 @@ def _get_site_or_404(session: Session, site_id: int):
     if site is None:
         raise HTTPException(status_code=404, detail=f"Site {site_id} not found")
     return site
-
-
-def _json_dict(value: str | None) -> dict:
-    try:
-        parsed = json.loads(value or "{}")
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
-
-
-def _redacted_metadata(value: dict) -> dict:
-    sensitive_terms = ("password", "secret", "token", "cookie", "authorization")
-    redacted: dict = {}
-    for key, raw in value.items():
-        if any(term in str(key).lower() for term in sensitive_terms):
-            redacted[key] = "[REDACTED]"
-        elif isinstance(raw, dict):
-            redacted[key] = _redacted_metadata(raw)
-        else:
-            redacted[key] = raw
-    return redacted
-
-
-def _normalise_base_url(url: str) -> str:
-    """Compare target origins without treating a trailing slash as a mismatch."""
-    parts = urlsplit(url.strip())
-    return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path.rstrip('/')}"
-
-
-def _crawl_archive(session: Session, run: TestRun) -> dict:
-    """Create a complete crawl snapshot that can be scanned without recrawling."""
-    site = _get_site_or_404(session, run.site_id)
-    pages = list(
-        session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run.id))
-    )
-    page_urls = {page.id: page.url for page in pages}
-    page_state_keys = {page.id: page.state_key for page in pages}
-    credentials = {cred.id: cred.username for cred in site.credentials}
-    page_fields = (
-        "url",
-        "state_key",
-        "state_label",
-        "state_kind",
-        "replay_steps_json",
-        "replay_credential_id",
-        "title",
-        "page_text",
-        "screenshot_b64",
-        "llm_context",
-        "depth",
-        "status",
-        "error_message",
-        "in_scope",
-        "scan_status",
-        "req_auth",
-        "takes_input",
-        "has_object_ref",
-        "has_business_logic",
-        "accessible_by",
-        "owasp_applicable_json",
-    )
-    return {
-        "format": _CRAWL_ARCHIVE_FORMAT,
-        "version": _CRAWL_ARCHIVE_VERSION,
-        # The archive includes captured cookies, bearer tokens, and full HTTP
-        # exchanges so the destination run behaves like the source after crawl.
-        "contains_sensitive_authentication_data": True,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
-        "source": {
-            "site_base_url": site.base_url,
-            "run_id": run.id,
-            "run_name": run.name,
-        },
-        "crawl": {
-            "progress": {
-                "per_user_progress": run.per_user_progress,
-                "started_at": run.started_at.isoformat() if run.started_at else None,
-                "completed_at": run.completed_at.isoformat()
-                if run.completed_at
-                else None,
-            },
-            "pages": [
-                {field: getattr(page, field) for field in page_fields} for page in pages
-            ],
-            "links": [
-                {
-                    "source_url": page_urls.get(link.source_page_id),
-                    "source_state_key": page_state_keys.get(link.source_page_id),
-                    "target_url": link.target_url,
-                    "target_state_key": page_state_keys.get(link.target_page_id),
-                    "link_text": link.link_text,
-                    "action_kind": link.action_kind,
-                    "action_data_json": link.action_data_json,
-                    "interaction_id": link.interaction_id,
-                }
-                for link in session.exec(
-                    select(PageLink).where(PageLink.test_run_id == run.id)
-                )
-                if page_urls.get(link.source_page_id)
-            ],
-            "credential_views": [
-                {
-                    "page_url": page_urls.get(view.page_id),
-                    "page_state_key": page_state_keys.get(view.page_id),
-                    "username": credentials.get(view.credential_id, view.username),
-                    "screenshot_b64": view.screenshot_b64,
-                    "llm_context": view.llm_context,
-                    "page_text": view.page_text,
-                    "req_auth": view.req_auth,
-                    "takes_input": view.takes_input,
-                    "has_object_ref": view.has_object_ref,
-                    "has_business_logic": view.has_business_logic,
-                    "owasp_applicable_json": view.owasp_applicable_json,
-                }
-                for view in session.exec(
-                    select(PageCredentialView).where(
-                        PageCredentialView.test_run_id == run.id
-                    )
-                )
-                if page_urls.get(view.page_id)
-            ],
-            "target_intelligence": [
-                {
-                    "kind": item.kind,
-                    "key": item.key,
-                    "value": item.value,
-                    "url": item.url,
-                    "method": item.method,
-                    "source": item.source,
-                    "confidence": item.confidence,
-                    "evidence": item.evidence,
-                    "item_metadata": item.item_metadata,
-                    "page_id": item.page_id,
-                    "page_url": page_urls.get(item.page_id),
-                    "page_state_key": page_state_keys.get(item.page_id),
-                }
-                for item in session.exec(
-                    select(TargetIntelItem).where(TargetIntelItem.test_run_id == run.id)
-                )
-            ],
-            # Keep the seeded coverage categories too.  The page JSON is the
-            # source of truth for a fresh crawl, but these rows make archives
-            # resilient to runs created before applicability was persisted.
-            "owasp_categories": [
-                {"page_url": page_urls.get(row.page_id), "category": row.owasp_category}
-                for row in session.exec(
-                    select(PageOwaspTest).where(PageOwaspTest.test_run_id == run.id)
-                )
-                if page_urls.get(row.page_id)
-            ],
-            "traffic": [
-                {
-                    "source": entry.source,
-                    "method": entry.method,
-                    "url": entry.url,
-                    "request_headers": entry.request_headers,
-                    "request_body": entry.request_body,
-                    "status": entry.status,
-                    "response_headers": entry.response_headers,
-                    "response_body": entry.response_body,
-                    "duration_ms": entry.duration_ms,
-                    "username": entry.username,
-                    "page_id": entry.page_id,
-                    "page_url": page_urls.get(entry.page_id),
-                    "page_state_key": page_state_keys.get(entry.page_id),
-                    "interaction_id": entry.interaction_id,
-                }
-                for entry in session.exec(
-                    select(TrafficEntry).where(TrafficEntry.test_run_id == run.id)
-                )
-            ],
-            "scanner_sessions": [
-                {
-                    "label": record.label,
-                    "kind": record.kind,
-                    "username": record.username,
-                    "credential_username": credentials.get(record.credential_id),
-                    "source": record.source,
-                    "cookies_json": record.cookies_json,
-                    "extra_headers_json": record.extra_headers_json,
-                    "session_metadata": record.session_metadata,
-                    "token_hint": record.token_hint,
-                    "lifecycle_state": record.lifecycle_state,
-                    "validation_url": record.validation_url,
-                    "last_status": record.last_status,
-                    "is_active": record.is_active,
-                }
-                for record in session.exec(
-                    select(ScannerSession)
-                    .where(ScannerSession.test_run_id == run.id)
-                    .where(ScannerSession.run_kind == "web")
-                )
-            ],
-            # Preserve the crawl-only activity history for a destination run
-            # that looks and behaves like it just completed that crawl.
-            "activity": {
-                "scan_log": [
-                    {
-                        "phase": entry.phase,
-                        "status": entry.status,
-                        "message": entry.message,
-                        "page_url": entry.page_url,
-                        "data_json": entry.data_json,
-                    }
-                    for entry in session.exec(
-                        select(ScanLog)
-                        .where(ScanLog.test_run_id == run.id)
-                        .where(ScanLog.run_kind == "web")
-                        .where(ScanLog.phase.in_(("crawl", "auth")))
-                    )
-                ],
-                "agent_log": [
-                    {
-                        "agent_id": entry.agent_id,
-                        "role": entry.role,
-                        "status": entry.status,
-                        "current_task": entry.current_task,
-                        "outcome": entry.outcome,
-                    }
-                    for entry in session.exec(
-                        select(AgentLog)
-                        .where(AgentLog.test_run_id == run.id)
-                        .where(AgentLog.run_kind == "web")
-                        .where(AgentLog.agent_id == "crawler")
-                    )
-                ],
-            },
-        },
-    }
-
-
-def _validate_crawl_archive(payload: object, site_base_url: str) -> dict:
-    if not isinstance(payload, dict) or payload.get("format") != _CRAWL_ARCHIVE_FORMAT:
-        raise HTTPException(status_code=400, detail="Not an AESPA crawl export file")
-    if payload.get("version") != _CRAWL_ARCHIVE_VERSION:
-        raise HTTPException(status_code=400, detail="Unsupported crawl export version")
-    source = payload.get("source")
-    crawl = payload.get("crawl")
-    if (
-        not isinstance(source, dict)
-        or not isinstance(crawl, dict)
-        or not isinstance(crawl.get("pages"), list)
-    ):
-        raise HTTPException(status_code=400, detail="Crawl export is missing page data")
-    source_url = source.get("site_base_url")
-    if not isinstance(source_url, str) or _normalise_base_url(
-        source_url
-    ) != _normalise_base_url(site_base_url):
-        raise HTTPException(
-            status_code=400, detail="This crawl export belongs to a different site URL"
-        )
-    return crawl
 
 
 def _scanner_session_out(record: ScannerSession) -> ScannerSessionOut:
@@ -866,7 +608,10 @@ def export_test_run_crawl(
         select(CrawledPage).where(CrawledPage.test_run_id == run_id)
     ).first():
         raise HTTPException(status_code=400, detail="There is no crawl data to export")
-    archive = _crawl_archive(session, run)
+    try:
+        archive = crawl_archives.build_archive(session, run)
+    except crawl_archives.ArchiveError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     filename = f"aespa-crawl-run-{run_id}.json"
     return JSONResponse(
         archive,
@@ -901,302 +646,19 @@ async def import_test_run_crawl(
             status_code=400, detail="Crawl export must be valid JSON"
         ) from exc
     site = _get_site_or_404(session, run.site_id)
-    crawl = _validate_crawl_archive(payload, site.base_url)
-
-    pages_by_identity: dict[str, CrawledPage] = {}
-    pages_by_url: dict[str, CrawledPage] = {}
-    allowed_page_fields = {
-        "url",
-        "state_key",
-        "state_label",
-        "state_kind",
-        "replay_steps_json",
-        "replay_credential_id",
-        "title",
-        "page_text",
-        "screenshot_b64",
-        "llm_context",
-        "depth",
-        "status",
-        "error_message",
-        "in_scope",
-        "scan_status",
-        "req_auth",
-        "takes_input",
-        "has_object_ref",
-        "has_business_logic",
-        "accessible_by",
-        "owasp_applicable_json",
-    }
     try:
-        for item in crawl["pages"]:
-            if (
-                not isinstance(item, dict)
-                or not isinstance(item.get("url"), str)
-                or not item["url"]
-            ):
-                raise ValueError("page URL missing")
-            page_identity = item.get("state_key") or item["url"]
-            if page_identity in pages_by_identity:
-                continue
-            page = CrawledPage(
-                test_run_id=run_id,
-                **{
-                    key: value
-                    for key, value in item.items()
-                    if key in allowed_page_fields
-                },
-            )
-            session.add(page)
-            session.flush()
-            pages_by_identity[page_identity] = page
-            pages_by_url.setdefault(page.url, page)
+        crawl = crawl_archives.validate_archive(payload, site.base_url)
+    except crawl_archives.ArchiveError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
-        for item in crawl.get("links", []):
-            if not isinstance(item, dict) or not isinstance(
-                item.get("target_url"), str
-            ):
-                continue
-            source = pages_by_identity.get(
-                item.get("source_state_key")
-            ) or pages_by_url.get(item.get("source_url"))
-            if source is None:
-                continue
-            target = pages_by_identity.get(
-                item.get("target_state_key")
-            ) or pages_by_url.get(item["target_url"])
-            session.add(
-                PageLink(
-                    test_run_id=run_id,
-                    source_page_id=source.id,
-                    target_page_id=target.id if target else None,
-                    target_url=item["target_url"],
-                    link_text=item.get("link_text"),
-                    action_kind=item.get("action_kind") or "navigate",
-                    action_data_json=item.get("action_data_json") or "{}",
-                    interaction_id=item.get("interaction_id"),
-                )
-            )
+    try:
+        pages_by_url = crawl_archives.restore_archive_records(
+            session, run_id, crawl, site
+        )
+    except crawl_archives.ArchiveError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
-        credential_ids = {
-            credential.username: credential.id for credential in site.credentials
-        }
-        for item in crawl.get("credential_views", []):
-            if not isinstance(item, dict):
-                continue
-            page = pages_by_identity.get(
-                item.get("page_state_key")
-            ) or pages_by_url.get(item.get("page_url"))
-            if page is None:
-                continue
-            username = (
-                item.get("username") if isinstance(item.get("username"), str) else None
-            )
-            session.add(
-                PageCredentialView(
-                    test_run_id=run_id,
-                    page_id=page.id,
-                    credential_id=credential_ids.get(username),
-                    username=username,
-                    **{
-                        key: item.get(key)
-                        for key in (
-                            "screenshot_b64",
-                            "llm_context",
-                            "page_text",
-                            "req_auth",
-                            "takes_input",
-                            "has_object_ref",
-                            "has_business_logic",
-                            "owasp_applicable_json",
-                        )
-                    },
-                )
-            )
-
-        for item in crawl.get("target_intelligence", []):
-            if not isinstance(item, dict) or not isinstance(item.get("kind"), str):
-                continue
-            intel_page = pages_by_identity.get(
-                item.get("page_state_key")
-            ) or pages_by_url.get(item.get("page_url"))
-            session.add(
-                TargetIntelItem(
-                    test_run_id=run_id,
-                    **{
-                        key: item.get(key)
-                        for key in (
-                            "kind",
-                            "key",
-                            "value",
-                            "url",
-                            "method",
-                            "source",
-                            "confidence",
-                            "evidence",
-                            "item_metadata",
-                        )
-                    },
-                    page_id=intel_page.id if intel_page else None,
-                )
-            )
-        for item in crawl.get("traffic", []):
-            if (
-                not isinstance(item, dict)
-                or not isinstance(item.get("method"), str)
-                or not isinstance(item.get("url"), str)
-            ):
-                continue
-            session.add(
-                TrafficEntry(
-                    test_run_id=run_id,
-                    **{
-                        key: item.get(key)
-                        for key in (
-                            "source",
-                            "method",
-                            "url",
-                            "request_headers",
-                            "request_body",
-                            "status",
-                            "response_headers",
-                            "response_body",
-                            "duration_ms",
-                            "username",
-                            "interaction_id",
-                        )
-                    },
-                    page_id=(
-                        (
-                            pages_by_identity.get(item.get("page_state_key"))
-                            or pages_by_url.get(item.get("page_url"))
-                        ).id
-                        if (
-                            pages_by_identity.get(item.get("page_state_key"))
-                            or pages_by_url.get(item.get("page_url"))
-                        )
-                        else None
-                    ),
-                    session_label=item.get("session_label"),
-                )
-            )
-        for item in crawl.get("scanner_sessions", []):
-            if not isinstance(item, dict) or not isinstance(item.get("label"), str):
-                continue
-            username = (
-                item.get("username") if isinstance(item.get("username"), str) else None
-            )
-            credential_username = item.get("credential_username")
-            if not isinstance(credential_username, str):
-                credential_username = username
-            session.add(
-                ScannerSession(
-                    test_run_id=run_id,
-                    run_kind="web",
-                    label=item["label"],
-                    kind=item.get("kind") or "cookie",
-                    username=username,
-                    credential_id=credential_ids.get(credential_username),
-                    source=item.get("source") or "crawler",
-                    cookies_json=item.get("cookies_json") or "{}",
-                    extra_headers_json=item.get("extra_headers_json") or "{}",
-                    session_metadata=item.get("session_metadata") or "{}",
-                    token_hint=item.get("token_hint"),
-                    lifecycle_state=item.get("lifecycle_state") or "candidate",
-                    validation_url=item.get("validation_url"),
-                    last_status=item.get("last_status"),
-                    is_active=bool(item.get("is_active", True)),
-                )
-            )
-        activity = crawl.get("activity")
-        if isinstance(activity, dict):
-            for item in activity.get("scan_log", []):
-                if not isinstance(item, dict) or not isinstance(item.get("phase"), str):
-                    continue
-                session.add(
-                    ScanLog(
-                        test_run_id=run_id,
-                        run_kind="web",
-                        phase=item["phase"],
-                        status=item.get("status") or "",
-                        message=item.get("message") or "",
-                        page_url=item.get("page_url"),
-                        data_json=item.get("data_json"),
-                    )
-                )
-            for item in activity.get("agent_log", []):
-                if not isinstance(item, dict) or not isinstance(
-                    item.get("agent_id"), str
-                ):
-                    continue
-                session.add(
-                    AgentLog(
-                        test_run_id=run_id,
-                        run_kind="web",
-                        agent_id=item["agent_id"],
-                        role=item.get("role") or "Crawler",
-                        status=item.get("status") or "complete",
-                        current_task=item.get("current_task") or "",
-                        outcome=item.get("outcome"),
-                    )
-                )
-    except (TypeError, ValueError) as exc:
-        session.rollback()
-        raise HTTPException(
-            status_code=400, detail=f"Invalid crawl export data: {exc}"
-        ) from exc
-
-    # A real crawl leaves a recon summary behind.  Build it from the restored
-    # pages and intelligence now so the Attack Surface panel is immediately
-    # useful—without requiring a Dynamic Scan to run first.
-    recon_summary_svc.build_recon_summary(run_id, session=session)
-
-    # Older runs can have coverage cells even when their page applicability JSON
-    # was not retained.  Fold those categories back into the imported page data,
-    # then seed a fresh workprogram without copying coverage progress/results.
-    archived_categories: dict[str, set[str]] = {}
-    for item in crawl.get("owasp_categories", []):
-        if not isinstance(item, dict):
-            continue
-        url, category = item.get("page_url"), item.get("category")
-        if url in pages_by_url and isinstance(category, str):
-            archived_categories.setdefault(url, set()).add(category)
-    for page in pages_by_url.values():
-        try:
-            applicable = json.loads(page.owasp_applicable_json or "{}")
-        except (TypeError, json.JSONDecodeError):
-            applicable = {}
-        if not isinstance(applicable, dict):
-            applicable = {}
-        categories = {
-            category
-            for category, is_applicable in applicable.items()
-            if is_applicable and isinstance(category, str)
-        } | archived_categories.get(page.url, set())
-        for category in archived_categories.get(page.url, set()):
-            applicable[category] = True
-        page.owasp_applicable_json = json.dumps(applicable)
-        session.add(page)
-        for category in categories:
-            session.add(
-                PageOwaspTest(
-                    test_run_id=run_id, page_id=page.id, owasp_category=category
-                )
-            )
-    now = datetime.now(timezone.utc)
-    run.status = TestRunStatus.complete
-    run.pages_discovered = len(pages_by_url)
-    run.started_at = now
-    run.completed_at = now
-    run.current_url = None
-    progress = crawl.get("progress")
-    run.per_user_progress = (
-        progress.get("per_user_progress") if isinstance(progress, dict) else None
-    )
-    run.error_message = None
-    session.add(run)
-    session.commit()
-    session.refresh(run)
+    crawl_archives.finish_archive_import(session, run, crawl, pages_by_url)
     return _run_summary(run, session)
 
 
@@ -1357,164 +819,9 @@ def get_page_views(
     return [PageCredentialViewOut.model_validate(v) for v in views]
 
 
-def _infer_parent_url_candidates(url_str: str) -> list[str]:
-    candidates = []
-    parsed = urlparse(url_str)
-    if parsed.query:
-        no_query = urlunparse(
-            (
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                "",
-                parsed.fragment,
-            )
-        )
-        candidates.append(no_query)
-        url_str = no_query
-
-    scheme, netloc, path, params, query, fragment = urlparse(url_str)
-    if fragment and fragment.startswith("/"):
-        frag_parts = [p for p in fragment.split("/") if p]
-        while len(frag_parts) > 1:
-            frag_parts.pop()
-            parent_frag = "/" + "/".join(frag_parts)
-            candidates.append(
-                urlunparse((scheme, netloc, path, params, "", parent_frag))
-            )
-        cand_base = urlunparse((scheme, netloc, path, params, "", ""))
-        candidates.append(cand_base)
-        if cand_base.endswith("/"):
-            candidates.append(cand_base.rstrip("/"))
-    else:
-        path_parts = [p for p in path.split("/") if p]
-        while len(path_parts) > 1:
-            path_parts.pop()
-            parent_path = "/" + "/".join(path_parts)
-            cand = urlunparse((scheme, netloc, parent_path, params, "", fragment))
-            candidates.append(cand)
-            if not parent_path.endswith("/"):
-                candidates.append(cand + "/")
-
-    seen = set()
-    res = []
-    for c in candidates:
-        c_norm = c.rstrip("/") if len(c) > len(scheme + "://" + netloc) else c
-        if c != url_str and c_norm not in seen:
-            seen.add(c_norm)
-            res.append(c)
-    return res
-
-
 @router.get("/api/test-runs/{run_id}/graph", response_model=GraphData)
 def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData:
-    run = _get_run_or_404(session, run_id)
-    pages = session.exec(
-        select(CrawledPage).where(CrawledPage.test_run_id == run_id)
-    ).all()
-    pages = [
-        page
-        for page in pages
-        if not (
-            page.status == "failed"
-            and (page.error_message or "").strip().upper() == "HTTP 404"
-        )
-    ]
-    links = session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all()
-    anonymously_accessible_page_ids = set(
-        session.exec(
-            select(PageCredentialView.page_id)
-            .where(PageCredentialView.test_run_id == run_id)
-            .where(PageCredentialView.credential_id.is_(None))
-        ).all()
-    )
-    run_finished = run.status in {
-        TestRunStatus.complete,
-        TestRunStatus.failed,
-        TestRunStatus.stopped,
-    }
-
-    def _analysis_status(page: CrawledPage) -> str:
-        if page.status == "redirect":
-            return "skipped"
-        if page.llm_context:
-            return "complete"
-        # The crawler waits for all page-analysis tasks before marking a run
-        # complete. Empty shell pages in a finished run were therefore
-        # skipped (usually because authentication was required), not left in
-        # an LLM queue.
-        if run_finished and not page.title and not page.page_text:
-            return "skipped"
-        if run_finished:
-            return "complete"
-        return "pending"
-
-    nodes = [
-        GraphNode(
-            id=p.id,
-            url=p.url,
-            state_label=p.state_label,
-            state_kind=p.state_kind,
-            title=p.title,
-            depth=p.depth,
-            status=p.status,
-            error_message=p.error_message,
-            context=p.llm_context,
-            analysis_status=_analysis_status(p),
-            in_scope=p.in_scope,
-            scan_status=p.scan_status,
-            accessible_by=json.loads(p.accessible_by or "[]"),
-            accessible_anonymously=p.id in anonymously_accessible_page_ids,
-            replay_available=bool(p.replay_steps_json and p.replay_steps_json != "[]"),
-            replay_credential_id=p.replay_credential_id,
-        )
-        for p in pages
-    ]
-    page_ids = {p.id for p in pages}
-    edges = [
-        GraphLink(
-            source=link.source_page_id,
-            target=link.target_page_id,
-            link_text=link.link_text,
-            action_kind=link.action_kind,
-        )
-        for link in links
-        if link.target_page_id is not None
-        and link.source_page_id in page_ids
-        and link.target_page_id in page_ids
-    ]
-
-    targeted_page_ids = {e.target for e in edges}
-    root_page_id = min((p.id for p in pages), default=None)
-    page_url_map = {p.url: p.id for p in pages}
-    page_url_map_norm = {p.url.rstrip("/"): p.id for p in pages if len(p.url) > 8}
-
-    for p in pages:
-        if p.id == root_page_id or p.id in targeted_page_ids:
-            continue
-        candidates = _infer_parent_url_candidates(p.url)
-        parent_id = None
-        for cand in candidates:
-            cand_norm = cand.rstrip("/")
-            if cand in page_url_map:
-                parent_id = page_url_map[cand]
-                break
-            elif cand_norm in page_url_map_norm:
-                parent_id = page_url_map_norm[cand_norm]
-                break
-        if parent_id and parent_id != p.id and parent_id in page_ids:
-            edges.append(
-                GraphLink(
-                    source=parent_id,
-                    target=p.id,
-                    link_text=None,
-                    action_kind="inferred",
-                )
-            )
-            targeted_page_ids.add(p.id)
-
-    return GraphData(nodes=nodes, links=edges)
+    return build_run_graph(session, _get_run_or_404(session, run_id))
 
 
 @router.delete("/api/test-runs/{run_id}/target-intelligence", status_code=204)

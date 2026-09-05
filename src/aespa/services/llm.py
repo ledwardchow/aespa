@@ -1583,6 +1583,8 @@ def _log_llm_traffic(
 ) -> None:
     if not traffic_log.isEnabledFor(logging.INFO):
         return
+    run_id = _run_id_var.get()
+    run_kind = _run_kind_var.get()
     if isinstance(payload, str):
         rendered = payload
     else:
@@ -1604,6 +1606,8 @@ def _log_llm_traffic(
             "aespa_llm_direction": direction,
             "aespa_llm_context": _traffic_context(config),
             "aespa_llm_payload": rendered,
+            "aespa_llm_run_id": run_id,
+            "aespa_llm_run_kind": run_kind,
         },
     )
 

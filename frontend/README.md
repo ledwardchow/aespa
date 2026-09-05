@@ -40,7 +40,7 @@ Keep local state, handlers, and effects with the component that owns the interac
 
 ## Routes and state
 
-`app/routes.jsx` maps parsed route names to direct lazy imports, props, and sidebar sections. `shared/navigation/parseRoute.ts` handles existing hash URLs and query references. Keep hash URLs compatible with copied links, desktop windows, and browser history. Web and SAST tab selection comes from the URL, so back/forward works without resetting the rest of the screen.
+`app/routes.js` maps parsed route names to direct lazy imports, props, and sidebar sections. `shared/navigation/parseRoute.ts` handles existing hash URLs and query references. Keep hash URLs compatible with copied links, desktop windows, and browser history. Web and SAST tab selection comes from the URL, so back/forward works without resetting the rest of the screen.
 
 Use `runHref` for new run links. Shared run identities include both kind and ID; numeric IDs alone are not unique across web, API, and SAST runs.
 
@@ -48,11 +48,17 @@ Server responses, form drafts, URL state, and browser preferences have separate 
 
 `usePolling` passes an abort signal to its loader and skips overlapping ticks for that loader. Cleanup aborts the signal; loaders must forward or inspect it to discard their own late responses. `useIncrementalCollection` additionally discards responses from an older loader/reset and deduplicates records. `useEventStream` owns reconnect timers and visibility handling. Chat cursor replay uses its separate session transport; preserve that protocol when editing presentation code.
 
+The web-run route keeps its event subscription and run metadata. `FindingsDataProvider` shares only server findings/status data with the mounted findings panel, while `WebRunChatProvider` keeps chat sessions and popout handling alive across tabs. The findings panel owns editing, expansion, grouping, and column widths. `ActivityLog`, `ActivityAgents`, and `ActivitySpecialists` own their corresponding views; the log owns local expansion and scrolling.
+
+Web and API findings use shared typed editor/detail/file-control components in `shared/findings`. Their read/edit endpoints are defined in `shared/api/findings.ts`. The compatibility names in `webRuns.js` and `apiRuns.js` forward to that adapter. Keep web/API identity explicit when adding new calls.
+
 ## Styles and types
 
 Shared and feature styles are owned by the corresponding directory. `styles/index.css` explicitly preserves their cascade order. Use CSS Modules for new local component rules, as in `ScanPolicyPage.module.css`, and retain computed dimensions as inline values where appropriate. Moving CSS must preserve the parent layout, scroll containers, and selector order. In particular, Agent Settings has 16px content padding while the generic tab bar assumes 28px.
 
-TypeScript checks the new transport, navigation contracts, run identity, and tab component. Existing JavaScript remains supported with `allowJs`; it has not all been converted or type checked. Use typed contracts for new shared boundaries and convert existing modules as their data contracts are clarified. `tsc --noEmit` is separate from the Vite build.
+TypeScript checks the transport, navigation contracts, run identity, tab component, finding contracts, and shared finding components. Existing JavaScript remains supported with `allowJs`; it has not all been converted or type checked. Use typed contracts for new shared boundaries and convert existing modules as their data contracts are clarified. `tsc --noEmit` is separate from the Vite build.
+
+The former shared `run.css` is split into `run-header.css`, `run-layout.css`, shared finding/activity rules, and web-run intelligence/attack-surface rules. Keep their imports in the order in `styles/index.css`. `FindingEditor.module.css` owns the editor's local selectors.
 
 ## Browser checks
 
