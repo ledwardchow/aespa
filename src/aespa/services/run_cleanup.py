@@ -29,6 +29,7 @@ from aespa.models import (
     AgentLog,
     AliceChatMessage,
     AliceChatSession,
+    AliceGoal,
     ApiEndpointTest,
     ApiTestRun,
     AssessmentCampaign,
@@ -46,6 +47,7 @@ from aespa.models import (
     PhaseCheckpoint,
     ProbeExecution,
     RunIdentity,
+    RunPause,
     SastRun,
     ScanCheckpoint,
     ScanFinding,
@@ -135,6 +137,12 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
 
     # Messages depend on chat sessions.  Evidence depends on probe executions,
     # which depend on obligations and may reference captured traffic.
+    for goal in session.exec(
+        select(AliceGoal)
+        .where(AliceGoal.test_run_id == run_id)
+        .where(AliceGoal.run_kind == "web")
+    ).all():
+        session.delete(goal)
     for chat in session.exec(
         select(AliceChatSession)
         .where(AliceChatSession.test_run_id == run_id)
@@ -197,6 +205,12 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)
     ).all():
         session.delete(checkpoint)
+    for pause in session.exec(
+        select(RunPause)
+        .where(RunPause.run_kind == "sast")
+        .where(RunPause.run_id == run_id)
+    ).all():
+        session.delete(pause)
     for checkpoint in session.exec(
         select(PhaseCheckpoint)
         .where(PhaseCheckpoint.run_kind == "web")
@@ -292,6 +306,12 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
         .where(ScanLog.run_kind == "api")
     ).all():
         session.delete(slog)
+    for goal in session.exec(
+        select(AliceGoal)
+        .where(AliceGoal.test_run_id == run_id)
+        .where(AliceGoal.run_kind == "api")
+    ).all():
+        session.delete(goal)
     for sess in session.exec(
         select(AliceChatSession)
         .where(AliceChatSession.test_run_id == run_id)
@@ -346,6 +366,12 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         .where(AgentLog.run_kind == "sast")
     ).all():
         session.delete(log)
+    for checkpoint in session.exec(
+        select(PhaseCheckpoint)
+        .where(PhaseCheckpoint.run_kind == "sast")
+        .where(PhaseCheckpoint.run_id == run_id)
+    ).all():
+        session.delete(checkpoint)
     for fact in session.exec(
         select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
     ).all():

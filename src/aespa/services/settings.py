@@ -2,139 +2,255 @@
 
 from __future__ import annotations
 
-import json
 import os
-from datetime import datetime, timezone
 
 from fastapi import HTTPException, Request
-from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import Session, select
 
 from aespa.models import (
-    AdversarialValidatorConfig,
-    BrowserDebugConfig,
-    BurpRestApiConfig,
-    CloudflareAccessConfig,
-    ComponentMapperConfig,
-    CrawlerConfig,
-    GlobalHttpHeaderConfig,
     LLMConfig,
     LLMProfile,
     LLMProviderConfig,
-    ReportingDebugConfig,
-    ScannerPolicy,
-    SpecialistAgentConfig,
     TestRun,
-    UpstreamProxyConfig,
 )
 from aespa.schemas import (
-    PROVIDER_DEFAULT_MODELS,
-    BrowserDebugConfigIn,
-    BrowserDebugConfigOut,
-    BurpRestApiConfigIn,
-    BurpRestApiConfigOut,
-    CloudflareAccessConfigIn,
-    CloudflareAccessConfigOut,
-    ComponentMapperConfigIn,
-    ComponentMapperConfigOut,
-    CrawlerConfigIn,
-    CrawlerConfigOut,
-    GlobalHttpHeaderConfigIn,
-    GlobalHttpHeaderConfigOut,
     LLMConfigExport,
-    LLMConfigIn,
     LLMConfigOut,
     LLMExportProfileItem,
     LLMExportProviderItem,
     LLMImportResult,
-    LLMProfileIn,
-    LLMProfileOut,
-    LLMProviderConfigIn,
-    LLMProviderConfigOut,
-    ReportingDebugConfigIn,
-    ReportingDebugConfigOut,
-    RunScannerPolicyOut,
-    ScannerPolicyIn,
-    ScannerPolicyOut,
-    SpecialistAgentConfigIn,
-    SpecialistAgentConfigOut,
-    UpstreamProxyConfigIn,
-    UpstreamProxyConfigOut,
-    ValidatorConfigIn,
-    ValidatorConfigOut,
 )
 from aespa.services.model_capabilities import (
     documented_model_capability,
     enrich_model_options,
     validate_effort,
 )
+from aespa.services.resolved_llm_config import ResolvedLLMConfig
+from aespa.services.settings_integrations import (
+    _burp_rest_api_config_from_model as _burp_rest_api_config_from_model,
+)
+from aespa.services.settings_integrations import (
+    _policy_from_model as _policy_from_model,
+)
+from aespa.services.settings_integrations import (
+    get_adversarial_validator_config as get_adversarial_validator_config,
+)
+from aespa.services.settings_integrations import (
+    get_browser_debug_config as get_browser_debug_config,
+)
+from aespa.services.settings_integrations import (
+    get_burp_rest_api_config as get_burp_rest_api_config,
+)
+from aespa.services.settings_integrations import (
+    get_burp_rest_api_config_model as get_burp_rest_api_config_model,
+)
+from aespa.services.settings_integrations import (
+    get_cloudflare_access_config as get_cloudflare_access_config,
+)
+from aespa.services.settings_integrations import (
+    get_code_execution_config as get_code_execution_config,
+)
+from aespa.services.settings_integrations import (
+    get_component_mapper_config as get_component_mapper_config,
+)
+from aespa.services.settings_integrations import (
+    get_crawler_config as get_crawler_config,
+)
+from aespa.services.settings_integrations import (
+    get_global_http_header_config as get_global_http_header_config,
+)
+from aespa.services.settings_integrations import (
+    get_reporting_debug_config as get_reporting_debug_config,
+)
+from aespa.services.settings_integrations import (
+    get_run_scanner_policy as get_run_scanner_policy,
+)
+from aespa.services.settings_integrations import (
+    get_scanner_policy as get_scanner_policy,
+)
+from aespa.services.settings_integrations import (
+    get_specialist_agent_config as get_specialist_agent_config,
+)
+from aespa.services.settings_integrations import (
+    get_upstream_proxy_config as get_upstream_proxy_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_adversarial_validator_config as upsert_adversarial_validator_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_browser_debug_config as upsert_browser_debug_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_burp_rest_api_config as upsert_burp_rest_api_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_cloudflare_access_config as upsert_cloudflare_access_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_code_execution_config as upsert_code_execution_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_component_mapper_config as upsert_component_mapper_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_crawler_config as upsert_crawler_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_global_http_header_config as upsert_global_http_header_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_reporting_debug_config as upsert_reporting_debug_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_scanner_policy as upsert_scanner_policy,
+)
+from aespa.services.settings_integrations import (
+    upsert_specialist_agent_config as upsert_specialist_agent_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_upstream_proxy_config as upsert_upstream_proxy_config,
+)
+from aespa.services.settings_profiles import (
+    _apply_llm_config as _apply_llm_config,
+)
+from aespa.services.settings_profiles import (
+    _apply_scan_profile as _apply_scan_profile,
+)
+from aespa.services.settings_profiles import (
+    _ensure_unique_llm_profile_name as _ensure_unique_llm_profile_name,
+)
+from aespa.services.settings_profiles import (
+    _ensure_unique_scan_profile_name as _ensure_unique_scan_profile_name,
+)
+from aespa.services.settings_profiles import (
+    activate_llm_profile as activate_llm_profile,
+)
+from aespa.services.settings_profiles import (
+    activate_scan_profile as activate_scan_profile,
+)
+from aespa.services.settings_profiles import (
+    create_llm_profile as create_llm_profile,
+)
+from aespa.services.settings_profiles import (
+    create_scan_profile as create_scan_profile,
+)
+from aespa.services.settings_profiles import (
+    delete_llm_profile as delete_llm_profile,
+)
+from aespa.services.settings_profiles import (
+    delete_scan_profile as delete_scan_profile,
+)
+from aespa.services.settings_profiles import (
+    get_llm_profile as get_llm_profile,
+)
+from aespa.services.settings_profiles import (
+    get_scan_profile as get_scan_profile,
+)
+from aespa.services.settings_profiles import (
+    list_llm_profiles as list_llm_profiles,
+)
+from aespa.services.settings_profiles import (
+    list_scan_profiles as list_scan_profiles,
+)
+from aespa.services.settings_profiles import (
+    llm_profile_out as llm_profile_out,
+)
+from aespa.services.settings_profiles import (
+    update_llm_profile as update_llm_profile,
+)
+from aespa.services.settings_profiles import (
+    update_scan_profile as update_scan_profile,
+)
+from aespa.services.settings_profiles import (
+    upsert_llm_config as upsert_llm_config,
+)
+from aespa.services.settings_providers import (
+    _apply_llm_provider as _apply_llm_provider,
+)
+from aespa.services.settings_providers import (
+    _context_window_from_capability as _context_window_from_capability,
+)
+from aespa.services.settings_providers import (
+    _ensure_unique_llm_provider_name as _ensure_unique_llm_provider_name,
+)
+from aespa.services.settings_providers import (
+    _provider_capabilities as _provider_capabilities,
+)
+from aespa.services.settings_providers import (
+    _provider_models as _provider_models,
+)
+from aespa.services.settings_providers import (
+    _provider_out as _provider_out,
+)
+from aespa.services.settings_providers import (
+    create_llm_provider as create_llm_provider,
+)
+from aespa.services.settings_providers import (
+    delete_llm_provider as delete_llm_provider,
+)
+from aespa.services.settings_providers import (
+    detect_context_window as detect_context_window,
+)
+from aespa.services.settings_providers import (
+    get_llm_provider as get_llm_provider,
+)
+from aespa.services.settings_providers import (
+    list_llm_providers as list_llm_providers,
+)
+from aespa.services.settings_providers import (
+    update_llm_provider as update_llm_provider,
+)
+from aespa.services.settings_values import (
+    _SINGLETON_ID as _SINGLETON_ID,
+)
 
-_SINGLETON_ID = 1
-
-# Canonical agent roles a profile can assign a Model to. A scan resolves each
-# agent's model via get_llm_config_for_role(); unmapped roles fall back to the
-# profile's default model.
-AGENT_ROLES: tuple[str, ...] = (
-    "crawler",
-    "test_lead",
-    "specialist",
-    "validator",
-    "api_scanner",
-    "sast",
-    "component_mapper",
-    "alice",
-    "mentor",
+# Compatibility exports for existing API and service callers.
+from aespa.services.settings_values import (
+    AGENT_ROLES as AGENT_ROLES,
+)
+from aespa.services.settings_values import (
+    CONTEXT_WINDOW_FALLBACK as CONTEXT_WINDOW_FALLBACK,
+)
+from aespa.services.settings_values import (
+    _json_dumps as _json_dumps,
+)
+from aespa.services.settings_values import (
+    _json_loads as _json_loads,
+)
+from aespa.services.settings_values import (
+    _utcnow as _utcnow,
 )
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _provider_models(provider: LLMProviderConfig) -> list[str]:
-    models = _json_loads(provider.models_json, [])
-    return [m for m in models if isinstance(m, str) and m.strip()]
-
-
-def _provider_capabilities(provider: LLMProviderConfig) -> dict[str, dict]:
-    value = _json_loads(getattr(provider, "model_capabilities_json", "{}"), {})
-    return value if isinstance(value, dict) else {}
-
-
-def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
-    return LLMProviderConfigOut(
-        id=provider.id,
-        name=provider.name,
-        api_format=provider.api_format,
-        base_url=provider.base_url,
-        username=provider.username,
-        project_id=provider.project_id,
-        models=_provider_models(provider),
-        model_capabilities=_provider_capabilities(provider),
-        has_api_key=bool(provider.api_key and provider.api_key.strip()),
-        api_key=None,
-        max_tpm=provider.max_tpm,
-        max_rpm=provider.max_rpm,
-        updated_at=provider.updated_at,
+def resolve_llm_config(
+    session: Session, cfg: LLMConfig | ResolvedLLMConfig
+) -> ResolvedLLMConfig:
+    """Read provider settings without changing the saved profile object."""
+    if isinstance(cfg, ResolvedLLMConfig):
+        return cfg
+    resolved = ResolvedLLMConfig.model_validate(cfg)
+    provider = (
+        session.get(LLMProviderConfig, cfg.provider_id)
+        if cfg.provider_id is not None
+        else None
+    )
+    if provider is None:
+        return resolved
+    return resolved.model_copy(
+        update={
+            "provider": provider.api_format,
+            "api_key": provider.api_key,
+            "base_url": provider.base_url,
+            "username": provider.username,
+            "project_id": provider.project_id,
+        }
     )
 
 
-def _profile_with_provider(session: Session, cfg: LLMConfig) -> LLMConfig:
-    if cfg.provider_id is None:
-        return cfg
-    provider = session.get(LLMProviderConfig, cfg.provider_id)
-    if provider is None:
-        return cfg
-    set_committed_value(cfg, "provider", provider.api_format)
-    set_committed_value(cfg, "api_key", provider.api_key)
-    set_committed_value(cfg, "base_url", provider.base_url)
-    set_committed_value(cfg, "username", provider.username)
-    set_committed_value(cfg, "project_id", provider.project_id)
-    return cfg
-
-
-def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
-    resolved = _profile_with_provider(session, cfg)
+def llm_profile_out_model(
+    session: Session, cfg: LLMConfig | ResolvedLLMConfig
+) -> LLMConfigOut:
+    resolved = resolve_llm_config(session, cfg)
     provider_name = None
     if cfg.provider_id is not None:
         provider = session.get(LLMProviderConfig, cfg.provider_id)
@@ -153,6 +269,8 @@ def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
         project_id=resolved.project_id,
         model=resolved.model,
         max_tokens=resolved.max_tokens,
+        max_context_tokens=resolved.max_context_tokens,
+        context_limit_source=resolved.context_limit_source,
         temperature=resolved.temperature,
         use_vision=resolved.use_vision,
         force_tool_choice=resolved.force_tool_choice,
@@ -161,11 +279,11 @@ def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
     )
 
 
-def get_llm_config(session: Session) -> LLMConfig | None:
+def get_llm_config(session: Session) -> ResolvedLLMConfig | None:
     cfg = session.exec(select(LLMConfig).where(LLMConfig.is_active == True)).first()  # noqa: E712
     if cfg is None:
         return None
-    return _profile_with_provider(session, cfg)
+    return resolve_llm_config(session, cfg)
 
 
 def get_active_scan_profile(session: Session) -> LLMProfile | None:
@@ -174,7 +292,7 @@ def get_active_scan_profile(session: Session) -> LLMProfile | None:
 
 def _model_for_profile_role(
     session: Session, prof: LLMProfile, role: str | None
-) -> LLMConfig | None:
+) -> ResolvedLLMConfig | None:
     """Resolve a role model, with Mentor inheriting Test Lead before default."""
     model_id: int | None = None
     role_models = _json_loads(prof.role_models_json, {})
@@ -192,12 +310,12 @@ def _model_for_profile_role(
     if model_id is None:
         return None
     cfg = session.get(LLMConfig, model_id)
-    return _profile_with_provider(session, cfg) if cfg is not None else None
+    return resolve_llm_config(session, cfg) if cfg is not None else None
 
 
 def get_llm_config_for_role(
     session: Session, run: "TestRun", role: str | None = None
-) -> LLMConfig | None:
+) -> ResolvedLLMConfig | None:
     """Resolve the Model an agent should use for a run.
 
     Precedence: explicit per-run profile → explicit per-run (legacy) model →
@@ -217,7 +335,7 @@ def get_llm_config_for_role(
     if legacy_id is not None:
         cfg = session.get(LLMConfig, legacy_id)
         if cfg is not None:
-            return _profile_with_provider(session, cfg)
+            return resolve_llm_config(session, cfg)
     # 3. Globally active profile.
     prof = get_active_scan_profile(session)
     if prof is not None:
@@ -228,30 +346,11 @@ def get_llm_config_for_role(
     return get_llm_config(session)
 
 
-def get_llm_config_for_run(session: Session, run: "TestRun") -> LLMConfig | None:
+def get_llm_config_for_run(
+    session: Session, run: "TestRun"
+) -> ResolvedLLMConfig | None:
     """Role-agnostic config for a run (resolves to the profile's default model)."""
     return get_llm_config_for_role(session, run, None)
-
-
-def upsert_llm_config(session: Session, payload: LLMConfigIn) -> LLMConfig:
-    cfg = get_llm_config(session)
-    if cfg is None:
-        cfg = LLMConfig(is_active=True)
-
-    return _apply_llm_config(session, cfg, payload, activate=True)
-
-
-def list_llm_profiles(session: Session) -> list[LLMConfig]:
-    return list(
-        session.exec(select(LLMConfig).order_by(LLMConfig.updated_at.desc())).all()
-    )
-
-
-def list_llm_providers(session: Session) -> list[LLMProviderConfigOut]:
-    providers = session.exec(
-        select(LLMProviderConfig).order_by(LLMProviderConfig.updated_at.desc())
-    ).all()
-    return [_provider_out(provider) for provider in providers]
 
 
 async def discover_models_for_format(
@@ -391,13 +490,15 @@ async def discover_model_options_for_format(
             if (capability := documented_model_capability("bedrock", model)) is not None
         }
     elif api_format == "bedrock_mantle":
-        discovered = list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
-        native = {
-            model: capability
-            for model in discovered
-            if (capability := documented_model_capability("bedrock_mantle", model))
-            is not None
-        }
+        from aespa.services import model_discovery
+
+        raw = await model_discovery.discover_bedrock_mantle_model_options(
+            api_key=api_key,
+            base_url=base_url,
+        )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
+    discovered = sorted(dict.fromkeys(discovered), key=str.casefold)
     for model in discovered:
         capability = documented_model_capability(api_format, model)
         existing = native.get(model)
@@ -414,808 +515,6 @@ async def discover_model_options_for_format(
             native[model] = capability
     capabilities = await enrich_model_options(api_format, discovered, native)
     return {"models": discovered, "capabilities": capabilities}
-
-
-def get_llm_provider(session: Session, provider_id: int) -> LLMProviderConfig:
-    provider = session.get(LLMProviderConfig, provider_id)
-    if provider is None:
-        raise HTTPException(status_code=404, detail="LLM provider not found")
-    return provider
-
-
-def create_llm_provider(
-    session: Session, payload: LLMProviderConfigIn
-) -> LLMProviderConfigOut:
-    provider = LLMProviderConfig()
-    return _apply_llm_provider(session, provider, payload)
-
-
-def update_llm_provider(
-    session: Session, provider_id: int, payload: LLMProviderConfigIn
-) -> LLMProviderConfigOut:
-    provider = get_llm_provider(session, provider_id)
-    return _apply_llm_provider(session, provider, payload)
-
-
-def delete_llm_provider(session: Session, provider_id: int) -> None:
-    provider = get_llm_provider(session, provider_id)
-    if (
-        session.exec(
-            select(LLMConfig).where(LLMConfig.provider_id == provider_id)
-        ).first()
-        is not None
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Cannot delete an LLM provider that is used by a profile",
-        )
-    session.delete(provider)
-    session.commit()
-
-
-def _apply_llm_provider(
-    session: Session, provider: LLMProviderConfig, payload: LLMProviderConfigIn
-) -> LLMProviderConfigOut:
-    _ensure_unique_llm_provider_name(session, payload.name, provider.id)
-    provider.name = payload.name
-    provider.api_format = payload.api_format
-    if payload.api_format in {"factory_droid", "openai_codex"}:
-        provider.api_key = None
-    elif payload.api_key is not None:
-        key_str = payload.api_key.strip()
-        provider.api_key = key_str if key_str else None
-    provider.base_url = (
-        None
-        if payload.api_format in {"factory_droid", "openai_codex"}
-        else payload.base_url
-    )
-    username = (payload.username or "").strip()
-    provider.username = (
-        username or None if payload.api_format == "github_copilot" else None
-    )
-    provider.project_id = (
-        None
-        if payload.api_format in {"factory_droid", "openai_codex"}
-        else payload.project_id
-    )
-    provider.models_json = _json_dumps(payload.models)
-    provider.model_capabilities_json = _json_dumps(
-        {
-            model: payload.model_capabilities.get(model, {})
-            for model in payload.models
-            if model in payload.model_capabilities
-        }
-    )
-    provider.max_tpm = payload.max_tpm
-    provider.max_rpm = payload.max_rpm
-    provider.updated_at = _utcnow()
-    session.add(provider)
-    session.commit()
-    session.refresh(provider)
-    return _provider_out(provider)
-
-
-def get_llm_profile(session: Session, profile_id: int) -> LLMConfig:
-    cfg = session.get(LLMConfig, profile_id)
-    if cfg is None:
-        raise HTTPException(status_code=404, detail="LLM settings profile not found")
-    return cfg
-
-
-def create_llm_profile(session: Session, payload: LLMConfigIn) -> LLMConfig:
-    cfg = LLMConfig()
-    return _apply_llm_config(
-        session, cfg, payload, activate=(len(list_llm_profiles(session)) == 0)
-    )
-
-
-def update_llm_profile(
-    session: Session, profile_id: int, payload: LLMConfigIn
-) -> LLMConfig:
-    cfg = get_llm_profile(session, profile_id)
-    return _apply_llm_config(session, cfg, payload, activate=cfg.is_active)
-
-
-def activate_llm_profile(session: Session, profile_id: int) -> LLMConfig:
-    cfg = get_llm_profile(session, profile_id)
-    for profile in session.exec(select(LLMConfig)).all():
-        profile.is_active = profile.id == profile_id
-        session.add(profile)
-    session.commit()
-    session.refresh(cfg)
-    return cfg
-
-
-def delete_llm_profile(session: Session, profile_id: int) -> None:
-    cfg = get_llm_profile(session, profile_id)
-    was_active = cfg.is_active
-    session.delete(cfg)
-    session.commit()
-    if was_active:
-        replacement = session.exec(
-            select(LLMConfig).order_by(LLMConfig.updated_at.desc())
-        ).first()
-        if replacement is not None:
-            activate_llm_profile(session, replacement.id)
-
-
-# ── Scan profiles (per-agent-role model assignment) ───────────────────────────
-
-
-def list_scan_profiles(session: Session) -> list[LLMProfile]:
-    return list(
-        session.exec(select(LLMProfile).order_by(LLMProfile.updated_at.desc())).all()
-    )
-
-
-def get_scan_profile(session: Session, profile_id: int) -> LLMProfile:
-    prof = session.get(LLMProfile, profile_id)
-    if prof is None:
-        raise HTTPException(status_code=404, detail="Scan profile not found")
-    return prof
-
-
-def create_scan_profile(session: Session, payload: LLMProfileIn) -> LLMProfile:
-    prof = LLMProfile()
-    return _apply_scan_profile(
-        session, prof, payload, activate=(len(list_scan_profiles(session)) == 0)
-    )
-
-
-def update_scan_profile(
-    session: Session, profile_id: int, payload: LLMProfileIn
-) -> LLMProfile:
-    prof = get_scan_profile(session, profile_id)
-    return _apply_scan_profile(session, prof, payload, activate=prof.is_active)
-
-
-def activate_scan_profile(session: Session, profile_id: int) -> LLMProfile:
-    prof = get_scan_profile(session, profile_id)
-    for p in session.exec(select(LLMProfile)).all():
-        p.is_active = p.id == profile_id
-        session.add(p)
-    session.commit()
-    session.refresh(prof)
-    return prof
-
-
-def delete_scan_profile(session: Session, profile_id: int) -> None:
-    prof = get_scan_profile(session, profile_id)
-    was_active = prof.is_active
-    session.delete(prof)
-    session.commit()
-    if was_active:
-        replacement = session.exec(
-            select(LLMProfile).order_by(LLMProfile.updated_at.desc())
-        ).first()
-        if replacement is not None:
-            activate_scan_profile(session, replacement.id)
-
-
-def _apply_scan_profile(
-    session: Session, prof: LLMProfile, payload: LLMProfileIn, activate: bool
-) -> LLMProfile:
-    _ensure_unique_scan_profile_name(session, payload.name, prof.id)
-    if session.get(LLMConfig, payload.default_model_id) is None:
-        raise HTTPException(
-            status_code=422,
-            detail="default_model_id does not reference an existing Model",
-        )
-    role_models: dict[str, int] = {}
-    for role, model_id in (payload.role_models or {}).items():
-        if role not in AGENT_ROLES:
-            raise HTTPException(status_code=422, detail=f"Unknown agent role: {role}")
-        if model_id is None:
-            continue
-        if session.get(LLMConfig, model_id) is None:
-            raise HTTPException(
-                status_code=422,
-                detail=f"role_models[{role}] does not reference an existing Model",
-            )
-        role_models[role] = int(model_id)
-
-    prof.name = payload.name
-    prof.default_model_id = payload.default_model_id
-    prof.role_models_json = _json_dumps(role_models)
-    prof.is_active = bool(activate)
-    prof.updated_at = _utcnow()
-
-    if prof.is_active:
-        for p in session.exec(select(LLMProfile)).all():
-            if p.id != prof.id:
-                p.is_active = False
-                session.add(p)
-
-    session.add(prof)
-    session.commit()
-    session.refresh(prof)
-    return prof
-
-
-def _ensure_unique_scan_profile_name(
-    session: Session, name: str, current_id: int | None
-) -> None:
-    normalized = name.strip().casefold()
-    for p in session.exec(select(LLMProfile)).all():
-        if p.id != current_id and p.name.strip().casefold() == normalized:
-            raise HTTPException(
-                status_code=409, detail="A profile with that name already exists"
-            )
-
-
-def llm_profile_out(session: Session, prof: LLMProfile) -> LLMProfileOut:
-    role_models = {
-        k: int(v)
-        for k, v in _json_loads(prof.role_models_json, {}).items()
-        if v is not None
-    }
-
-    def _model_name(model_id: int | None) -> str | None:
-        if model_id is None:
-            return None
-        model = session.get(LLMConfig, model_id)
-        return model.name if model is not None else None
-
-    return LLMProfileOut(
-        id=prof.id,
-        name=prof.name,
-        is_active=prof.is_active,
-        default_model_id=prof.default_model_id,
-        default_model_name=_model_name(prof.default_model_id),
-        role_models=role_models,
-        role_model_names={k: _model_name(v) for k, v in role_models.items()},
-        updated_at=prof.updated_at,
-    )
-
-
-def _apply_llm_config(
-    session: Session, cfg: LLMConfig, payload: LLMConfigIn, activate: bool
-) -> LLMConfig:
-    provider = get_llm_provider(session, payload.provider_id)
-    if payload.model not in _provider_models(provider):
-        raise HTTPException(
-            status_code=422, detail="Model is not configured for the selected provider"
-        )
-
-    name = (payload.name or "").strip()
-    if not name:
-        name = f"{provider.name}/{payload.model}"
-
-    _ensure_unique_llm_profile_name(session, name, cfg.id)
-
-    cfg.name = name
-    cfg.is_active = bool(activate)
-
-    cfg.provider_id = payload.provider_id
-    cfg.provider = provider.api_format
-    cfg.api_key = provider.api_key
-    cfg.base_url = provider.base_url
-    cfg.username = provider.username
-    cfg.project_id = provider.project_id
-    cfg.model = payload.model
-    cfg.max_tokens = payload.max_tokens
-    cfg.temperature = payload.temperature
-    cfg.use_vision = payload.use_vision
-    cfg.force_tool_choice = payload.force_tool_choice
-    capability = _provider_capabilities(provider).get(payload.model)
-    try:
-        cfg.reasoning_effort = validate_effort(capability, payload.reasoning_effort)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    cfg.updated_at = _utcnow()
-
-    if cfg.is_active:
-        for profile in session.exec(select(LLMConfig)).all():
-            if profile.id != cfg.id:
-                profile.is_active = False
-                session.add(profile)
-
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return cfg
-
-
-def _ensure_unique_llm_profile_name(
-    session: Session, name: str, current_id: int | None
-) -> None:
-    normalized = name.strip().casefold()
-    for profile in session.exec(select(LLMConfig)).all():
-        if profile.id != current_id and profile.name.strip().casefold() == normalized:
-            raise HTTPException(
-                status_code=409,
-                detail="An LLM settings profile with that name already exists",
-            )
-
-
-def _ensure_unique_llm_provider_name(
-    session: Session, name: str, current_id: int | None
-) -> None:
-    normalized = name.strip().casefold()
-    for provider in session.exec(select(LLMProviderConfig)).all():
-        if provider.id != current_id and provider.name.strip().casefold() == normalized:
-            raise HTTPException(
-                status_code=409, detail="An LLM provider with that name already exists"
-            )
-
-
-def _json_loads(value: str | None, fallback):
-    if not value:
-        return fallback
-    try:
-        return json.loads(value)
-    except Exception:
-        return fallback
-
-
-def _json_dumps(value) -> str:
-    return json.dumps(value, separators=(",", ":"), sort_keys=True)
-
-
-def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
-    return ScannerPolicyOut(
-        execution_monitor_enabled=cfg.execution_monitor_enabled,
-        disable_deterministic_checks=getattr(
-            cfg, "disable_deterministic_checks", False
-        ),
-        max_consecutive_text_turns=getattr(cfg, "max_consecutive_text_turns", 0),
-        enforce_full_coverage_obligations=getattr(
-            cfg, "enforce_full_coverage_obligations", False
-        ),
-        scan_mode=cfg.scan_mode,
-        max_probes_per_page=cfg.max_probes_per_page,
-        thinking_max_steps=cfg.thinking_max_steps,
-        request_timeout_s=cfg.request_timeout_s,
-        min_delay_s=cfg.min_delay_s,
-        max_request_body_bytes=cfg.max_request_body_bytes,
-        response_body_read_limit_bytes=cfg.response_body_read_limit_bytes,
-        allowed_schemes=_json_loads(cfg.allowed_schemes, ["http", "https"]),
-        methods_by_mode=_json_loads(cfg.methods_by_mode, None),
-        blocked_headers=_json_loads(cfg.blocked_headers, ["host", "cookie"]),
-        follow_redirects=cfg.follow_redirects,
-        allow_subdomains=cfg.allow_subdomains,
-        require_approval_for_destructive=cfg.require_approval_for_destructive,
-        strict_locator_enforcement=getattr(cfg, "strict_locator_enforcement", True),
-        updated_at=cfg.updated_at,
-    )
-
-
-def get_scanner_policy(session: Session) -> ScannerPolicyOut:
-    cfg = session.get(ScannerPolicy, _SINGLETON_ID)
-    if cfg is None:
-        return ScannerPolicyOut(**ScannerPolicyIn().model_dump(), updated_at=_utcnow())
-    return _policy_from_model(cfg)
-
-
-def upsert_scanner_policy(
-    session: Session, payload: ScannerPolicyIn
-) -> ScannerPolicyOut:
-    cfg = session.get(ScannerPolicy, _SINGLETON_ID)
-    if cfg is None:
-        cfg = ScannerPolicy(id=_SINGLETON_ID)
-
-    cfg.execution_monitor_enabled = payload.execution_monitor_enabled
-    cfg.disable_deterministic_checks = payload.disable_deterministic_checks
-    cfg.max_consecutive_text_turns = payload.max_consecutive_text_turns
-    cfg.enforce_full_coverage_obligations = payload.enforce_full_coverage_obligations
-    cfg.scan_mode = payload.scan_mode
-    cfg.max_probes_per_page = payload.max_probes_per_page
-    cfg.thinking_max_steps = payload.thinking_max_steps
-    cfg.request_timeout_s = payload.request_timeout_s
-    cfg.min_delay_s = payload.min_delay_s
-    cfg.max_request_body_bytes = payload.max_request_body_bytes
-    cfg.response_body_read_limit_bytes = payload.response_body_read_limit_bytes
-    cfg.allowed_schemes = _json_dumps(payload.allowed_schemes)
-    cfg.methods_by_mode = _json_dumps(payload.methods_by_mode)
-    cfg.blocked_headers = _json_dumps(payload.blocked_headers)
-    cfg.follow_redirects = payload.follow_redirects
-    cfg.allow_subdomains = payload.allow_subdomains
-    cfg.require_approval_for_destructive = payload.require_approval_for_destructive
-    cfg.strict_locator_enforcement = payload.strict_locator_enforcement
-    cfg.updated_at = _utcnow()
-
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return _policy_from_model(cfg)
-
-
-def get_crawler_config(session: Session) -> CrawlerConfigOut:
-    cfg = session.get(CrawlerConfig, _SINGLETON_ID)
-    if cfg is None:
-        return CrawlerConfigOut(
-            **CrawlerConfigIn().model_dump(),
-            updated_at=_utcnow(),
-        )
-    return CrawlerConfigOut(
-        js_endpoint_discovery_enabled=cfg.js_endpoint_discovery_enabled,
-        skip_dangerous_actions=cfg.skip_dangerous_actions,
-        suppress_form_submit_actions=cfg.suppress_form_submit_actions,
-        block_non_idempotent_interactive_replay=cfg.block_non_idempotent_interactive_replay,
-        enable_access_reconciliation=cfg.enable_access_reconciliation,
-        llm_max_concurrency=cfg.llm_max_concurrency,
-        updated_at=cfg.updated_at,
-    )
-
-
-def upsert_crawler_config(
-    session: Session, payload: CrawlerConfigIn
-) -> CrawlerConfigOut:
-    cfg = session.get(CrawlerConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = CrawlerConfig(id=_SINGLETON_ID)
-    cfg.js_endpoint_discovery_enabled = payload.js_endpoint_discovery_enabled
-    cfg.skip_dangerous_actions = payload.skip_dangerous_actions
-    cfg.suppress_form_submit_actions = payload.suppress_form_submit_actions
-    cfg.block_non_idempotent_interactive_replay = (
-        payload.block_non_idempotent_interactive_replay
-    )
-    cfg.enable_access_reconciliation = payload.enable_access_reconciliation
-    cfg.llm_max_concurrency = payload.llm_max_concurrency
-    cfg.updated_at = _utcnow()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return get_crawler_config(session)
-
-
-def get_component_mapper_config(session: Session) -> ComponentMapperConfigOut:
-    cfg = session.get(ComponentMapperConfig, _SINGLETON_ID)
-    if cfg is None:
-        return ComponentMapperConfigOut(
-            **ComponentMapperConfigIn().model_dump(),
-            updated_at=_utcnow(),
-        )
-    return ComponentMapperConfigOut(
-        max_tool_calls=cfg.max_tool_calls,
-        max_source_files=cfg.max_source_files,
-        max_source_bytes=cfg.max_source_bytes,
-        max_facts=cfg.max_facts,
-        max_concurrent=cfg.max_concurrent,
-        max_trace_edges=cfg.max_trace_edges,
-        max_trace_components=cfg.max_trace_components,
-        max_paths_per_lead=cfg.max_paths_per_lead,
-        min_trace_confidence=cfg.min_trace_confidence,
-        updated_at=cfg.updated_at,
-    )
-
-
-def upsert_component_mapper_config(
-    session: Session, payload: ComponentMapperConfigIn
-) -> ComponentMapperConfigOut:
-    cfg = session.get(ComponentMapperConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = ComponentMapperConfig(id=_SINGLETON_ID)
-    cfg.max_tool_calls = payload.max_tool_calls
-    cfg.max_source_files = payload.max_source_files
-    cfg.max_source_bytes = payload.max_source_bytes
-    cfg.max_facts = payload.max_facts
-    cfg.max_concurrent = payload.max_concurrent
-    cfg.max_trace_edges = payload.max_trace_edges
-    cfg.max_trace_components = payload.max_trace_components
-    cfg.max_paths_per_lead = payload.max_paths_per_lead
-    cfg.min_trace_confidence = payload.min_trace_confidence
-    cfg.updated_at = _utcnow()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return get_component_mapper_config(session)
-
-
-def get_run_scanner_policy(session: Session, run: TestRun) -> RunScannerPolicyOut:
-    policy = get_scanner_policy(session)
-    return RunScannerPolicyOut(
-        **policy.model_dump(exclude={"updated_at"}),
-        source="global_default",
-        updated_at=policy.updated_at,
-    )
-
-
-def get_upstream_proxy_config(session: Session) -> UpstreamProxyConfigOut:
-    cfg = session.get(UpstreamProxyConfig, _SINGLETON_ID)
-    if cfg is None:
-        return UpstreamProxyConfigOut(
-            **UpstreamProxyConfigIn().model_dump(), updated_at=_utcnow()
-        )
-    return UpstreamProxyConfigOut(
-        proxy_url=cfg.proxy_url,
-        proxy_scanner=cfg.proxy_scanner,
-        proxy_llm=cfg.proxy_llm,
-        updated_at=cfg.updated_at,
-    )
-
-
-def upsert_upstream_proxy_config(
-    session: Session, payload: UpstreamProxyConfigIn
-) -> UpstreamProxyConfigOut:
-    cfg = session.get(UpstreamProxyConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = UpstreamProxyConfig(id=_SINGLETON_ID)
-    cfg.proxy_url = payload.proxy_url
-    cfg.proxy_scanner = payload.proxy_scanner
-    cfg.proxy_llm = payload.proxy_llm
-    cfg.updated_at = _utcnow()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return get_upstream_proxy_config(session)
-
-
-def _burp_rest_api_config_from_model(cfg: BurpRestApiConfig) -> BurpRestApiConfigOut:
-    return BurpRestApiConfigOut(
-        enabled=cfg.enabled,
-        api_url=cfg.api_url,
-        has_api_key=bool(cfg.api_key and cfg.api_key.strip()),
-        api_key=None,
-        scan_configuration_name=cfg.scan_configuration_name,
-        scan_sqli=cfg.scan_sqli,
-        scan_xss=cfg.scan_xss,
-        scan_command_injection=cfg.scan_command_injection,
-        scan_path_traversal=cfg.scan_path_traversal,
-        scan_ssrf=cfg.scan_ssrf,
-        scan_xxe=cfg.scan_xxe,
-        scan_ssti=cfg.scan_ssti,
-        updated_at=cfg.updated_at,
-    )
-
-
-def get_burp_rest_api_config_model(session: Session) -> BurpRestApiConfig:
-    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
-    if cfg is None:
-        return BurpRestApiConfig(id=_SINGLETON_ID)
-    return cfg
-
-
-def get_burp_rest_api_config(session: Session) -> BurpRestApiConfigOut:
-    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
-    if cfg is None:
-        return BurpRestApiConfigOut(
-            **BurpRestApiConfigIn().model_dump(), updated_at=_utcnow()
-        )
-    return _burp_rest_api_config_from_model(cfg)
-
-
-def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
-    cfg = session.get(SpecialistAgentConfig, _SINGLETON_ID)
-    if cfg is None:
-        return SpecialistAgentConfigOut(
-            **SpecialistAgentConfigIn().model_dump(), updated_at=_utcnow()
-        )
-    return SpecialistAgentConfigOut(
-        enabled=cfg.enabled,
-        max_concurrent=cfg.max_concurrent,
-        max_steps=cfg.max_steps,
-        min_priority=cfg.min_priority,
-        dispatch_idor=cfg.dispatch_idor,
-        dispatch_auth_bypass=cfg.dispatch_auth_bypass,
-        dispatch_sqli=cfg.dispatch_sqli,
-        dispatch_xss=cfg.dispatch_xss,
-        dispatch_business_logic=cfg.dispatch_business_logic,
-        dispatch_ssrf=cfg.dispatch_ssrf,
-        dispatch_path_traversal=cfg.dispatch_path_traversal,
-        dispatch_cors=cfg.dispatch_cors,
-        dispatch_crypto=cfg.dispatch_crypto,
-        dispatch_config=cfg.dispatch_config,
-        trigger_specialist_on_burp=cfg.trigger_specialist_on_burp,
-        updated_at=cfg.updated_at,
-    )
-
-
-def upsert_specialist_agent_config(
-    session: Session, payload: SpecialistAgentConfigIn
-) -> SpecialistAgentConfigOut:
-    cfg = session.get(SpecialistAgentConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = SpecialistAgentConfig(id=_SINGLETON_ID)
-    cfg.enabled = payload.enabled
-    cfg.max_concurrent = payload.max_concurrent
-    cfg.max_steps = payload.max_steps
-    cfg.min_priority = payload.min_priority
-    cfg.dispatch_idor = payload.dispatch_idor
-    cfg.dispatch_auth_bypass = payload.dispatch_auth_bypass
-    cfg.dispatch_sqli = payload.dispatch_sqli
-    cfg.dispatch_xss = payload.dispatch_xss
-    cfg.dispatch_business_logic = payload.dispatch_business_logic
-    cfg.dispatch_ssrf = payload.dispatch_ssrf
-    cfg.dispatch_path_traversal = payload.dispatch_path_traversal
-    cfg.dispatch_cors = payload.dispatch_cors
-    cfg.dispatch_crypto = payload.dispatch_crypto
-    cfg.dispatch_config = payload.dispatch_config
-    cfg.trigger_specialist_on_burp = payload.trigger_specialist_on_burp
-    cfg.updated_at = _utcnow()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return get_specialist_agent_config(session)
-
-
-def upsert_burp_rest_api_config(
-    session: Session, payload: BurpRestApiConfigIn
-) -> BurpRestApiConfigOut:
-    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = BurpRestApiConfig(id=_SINGLETON_ID)
-
-    cfg.enabled = payload.enabled
-    cfg.api_url = payload.api_url
-    if payload.api_key is not None:
-        key_str = payload.api_key.strip()
-        cfg.api_key = key_str if key_str else None
-    cfg.scan_configuration_name = payload.scan_configuration_name
-    cfg.scan_sqli = payload.scan_sqli
-    cfg.scan_xss = payload.scan_xss
-    cfg.scan_command_injection = payload.scan_command_injection
-    cfg.scan_path_traversal = payload.scan_path_traversal
-    cfg.scan_ssrf = payload.scan_ssrf
-    cfg.scan_xxe = payload.scan_xxe
-    cfg.scan_ssti = payload.scan_ssti
-    cfg.updated_at = _utcnow()
-
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return _burp_rest_api_config_from_model(cfg)
-
-
-def get_adversarial_validator_config(session: Session) -> ValidatorConfigOut:
-    cfg = session.get(AdversarialValidatorConfig, _SINGLETON_ID)
-    if cfg is None:
-        return ValidatorConfigOut(
-            **ValidatorConfigIn().model_dump(), updated_at=_utcnow()
-        )
-    return ValidatorConfigOut(
-        enabled=cfg.enabled,
-        max_steps=cfg.max_steps,
-        min_severity=cfg.min_severity,
-        end_scan_max_concurrent=cfg.end_scan_max_concurrent,
-        auto_validate_inline=cfg.auto_validate_inline,
-        require_concrete_disproof=cfg.require_concrete_disproof,
-        updated_at=cfg.updated_at,
-    )
-
-
-def upsert_adversarial_validator_config(
-    session: Session, payload: ValidatorConfigIn
-) -> ValidatorConfigOut:
-    cfg = session.get(AdversarialValidatorConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = AdversarialValidatorConfig(id=_SINGLETON_ID)
-    cfg.enabled = payload.enabled
-    cfg.max_steps = payload.max_steps
-    cfg.min_severity = payload.min_severity
-    cfg.end_scan_max_concurrent = payload.end_scan_max_concurrent
-    cfg.auto_validate_inline = payload.auto_validate_inline
-    cfg.require_concrete_disproof = payload.require_concrete_disproof
-    cfg.updated_at = _utcnow()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return get_adversarial_validator_config(session)
-
-
-def get_global_http_header_config(session: Session) -> GlobalHttpHeaderConfigOut:
-    cfg = session.get(GlobalHttpHeaderConfig, _SINGLETON_ID)
-    if cfg is None:
-        return GlobalHttpHeaderConfigOut(
-            **GlobalHttpHeaderConfigIn().model_dump(), updated_at=_utcnow()
-        )
-    try:
-        parsed_headers = json.loads(cfg.headers_json or "[]")
-        headers = parsed_headers if isinstance(parsed_headers, list) else []
-    except (TypeError, json.JSONDecodeError):
-        headers = []
-    # Databases created before multi-header support have values only in these
-    # legacy fields. Return that value until the user saves the new table.
-    if not headers and cfg.header_name and cfg.header_value:
-        headers = [{"header_name": cfg.header_name, "header_value": cfg.header_value}]
-    return GlobalHttpHeaderConfigOut(
-        headers=headers,
-        updated_at=cfg.updated_at,
-    )
-
-
-def upsert_global_http_header_config(
-    session: Session, payload: GlobalHttpHeaderConfigIn
-) -> GlobalHttpHeaderConfigOut:
-    cfg = session.get(GlobalHttpHeaderConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = GlobalHttpHeaderConfig(id=_SINGLETON_ID)
-    cfg.headers_json = json.dumps(
-        [header.model_dump() for header in payload.headers], separators=(",", ":")
-    )
-    # Keep the old columns in sync with the first header for a graceful rollback
-    # to an earlier AESPA version.
-    first_header = payload.headers[0] if payload.headers else None
-    cfg.header_name = first_header.header_name if first_header else None
-    cfg.header_value = first_header.header_value if first_header else None
-    cfg.updated_at = _utcnow()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return get_global_http_header_config(session)
-
-
-def get_reporting_debug_config(session: Session) -> ReportingDebugConfigOut:
-    cfg = session.get(ReportingDebugConfig, _SINGLETON_ID)
-    if cfg is None:
-        return ReportingDebugConfigOut(
-            **ReportingDebugConfigIn().model_dump(),
-            updated_at=_utcnow(),
-        )
-    return ReportingDebugConfigOut(
-        capture_enabled=cfg.capture_enabled,
-        panel_enabled=cfg.panel_enabled,
-        batch_max_concurrent=cfg.batch_max_concurrent,
-        updated_at=cfg.updated_at,
-    )
-
-
-def upsert_reporting_debug_config(
-    session: Session, payload: ReportingDebugConfigIn
-) -> ReportingDebugConfigOut:
-    cfg = session.get(ReportingDebugConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = ReportingDebugConfig(id=_SINGLETON_ID)
-    cfg.capture_enabled = payload.capture_enabled
-    cfg.panel_enabled = payload.panel_enabled
-    cfg.batch_max_concurrent = payload.batch_max_concurrent
-    cfg.updated_at = _utcnow()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return get_reporting_debug_config(session)
-
-
-def get_browser_debug_config(session: Session) -> BrowserDebugConfigOut:
-    cfg = session.get(BrowserDebugConfig, _SINGLETON_ID)
-    if cfg is None:
-        return BrowserDebugConfigOut(
-            **BrowserDebugConfigIn().model_dump(),
-            updated_at=_utcnow(),
-        )
-    return BrowserDebugConfigOut(
-        browser_engine=cfg.browser_engine,
-        browser_visible=cfg.browser_visible,
-        updated_at=cfg.updated_at,
-    )
-
-
-def upsert_browser_debug_config(
-    session: Session, payload: BrowserDebugConfigIn
-) -> BrowserDebugConfigOut:
-    cfg = session.get(BrowserDebugConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = BrowserDebugConfig(id=_SINGLETON_ID)
-    cfg.browser_engine = payload.browser_engine
-    cfg.browser_visible = payload.browser_visible
-    cfg.updated_at = _utcnow()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return get_browser_debug_config(session)
-
-
-def get_cloudflare_access_config(session: Session) -> CloudflareAccessConfigOut:
-    cfg = session.get(CloudflareAccessConfig, _SINGLETON_ID)
-    if cfg is None:
-        return CloudflareAccessConfigOut(audience=None, updated_at=_utcnow())
-    return CloudflareAccessConfigOut(audience=cfg.audience, updated_at=cfg.updated_at)
-
-
-def upsert_cloudflare_access_config(
-    session: Session, payload: CloudflareAccessConfigIn
-) -> CloudflareAccessConfigOut:
-    cfg = session.get(CloudflareAccessConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = CloudflareAccessConfig(id=_SINGLETON_ID)
-    # Normalise blank → None so the verifier cleanly falls back to "no audience".
-    audience = (payload.audience or "").strip()
-    cfg.audience = audience or None
-    cfg.updated_at = _utcnow()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return get_cloudflare_access_config(session)
 
 
 # ── LLM config export / import ────────────────────────────────────────────────
@@ -1284,6 +583,7 @@ def export_llm_config(
             else "",
             model=c.model,
             max_tokens=c.max_tokens,
+            max_context_tokens=c.max_context_tokens,
             temperature=c.temperature,
             reasoning_effort=c.reasoning_effort,
             use_vision=c.use_vision,
@@ -1420,6 +720,18 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         cfg.base_url = provider.base_url
         cfg.model = item.model
         cfg.max_tokens = item.max_tokens
+        if item.max_context_tokens is None:
+            cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
+                provider, item.model
+            )
+        else:
+            cfg.max_context_tokens = item.max_context_tokens
+            cfg.context_limit_source = "manual"
+        if cfg.max_context_tokens <= item.max_tokens + 1024:
+            raise HTTPException(
+                status_code=422,
+                detail="The model context window must leave at least 1024 tokens for input",
+            )
         cfg.temperature = item.temperature
         try:
             cfg.reasoning_effort = validate_effort(

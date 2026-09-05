@@ -510,7 +510,7 @@ def delete_hint(session: Session, application_id: int, hint_id: int) -> None:
 
 # ── ZIP upload helpers (mirrors services/sast_runs upload limits) ───────────
 
-MAX_SNAPSHOT_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_SNAPSHOT_UPLOAD_BYTES = 250 * 1024 * 1024
 SNAPSHOT_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 

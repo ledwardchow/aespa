@@ -363,6 +363,34 @@ def test_validation_batch_respects_concurrency_limit():
     assert peak == 3
 
 
+def test_bulk_validation_loads_unvalidated_and_unconfirmed_findings(
+    isolated_db_engine, monkeypatch
+):
+    monkeypatch.setattr(validator, "get_engine", lambda: isolated_db_engine)
+    statuses = ("unvalidated", "unconfirmed", "confirmed", "false_positive")
+    with Session(isolated_db_engine) as session:
+        for index, status in enumerate(statuses, start=1):
+            session.add(
+                ScanFinding(
+                    test_run_id=77,
+                    page_id=None,
+                    owasp_category="A05",
+                    severity="medium",
+                    title=f"Finding {index}",
+                    description="Bulk validation selection test.",
+                    validation_status=status,
+                )
+            )
+        session.commit()
+
+    findings = validator._load_findings_for_validation(77)
+
+    assert {finding.validation_status for finding in findings} == {
+        "unvalidated",
+        "unconfirmed",
+    }
+
+
 def test_manual_inline_validation_is_bounded_and_deduplicated(monkeypatch):
     run_id = 98001
     active = 0
@@ -1391,6 +1419,55 @@ def test_request_stop_noops_when_validation_not_running(monkeypatch):
     assert validator.request_stop(456) is False
     assert 456 not in validator._stop_requested
     assert reset_calls == []
+
+
+def test_reset_validating_findings_emits_ids_after_session_closes(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    emitted = []
+    monkeypatch.setattr(validator, "get_engine", lambda: engine)
+    monkeypatch.setattr(
+        validator.events_svc,
+        "emit",
+        lambda run_id, event: emitted.append((run_id, event)),
+    )
+
+    with Session(engine) as session:
+        finding = ScanFinding(
+            test_run_id=9,
+            owasp_category="A01",
+            severity="high",
+            title="Authorization bypass",
+            description="A protected resource was accessible.",
+            validation_status="validating",
+        )
+        session.add(finding)
+        session.commit()
+        finding_id = finding.id
+
+    validator._reset_validating_findings(9, "Validation stopped by user.")
+
+    with Session(engine) as session:
+        updated = session.get(ScanFinding, finding_id)
+        assert updated is not None
+        assert updated.validation_status == "unvalidated"
+        assert updated.validation_note == "Validation stopped by user."
+
+    assert emitted == [
+        (
+            9,
+            {
+                "type": "finding_validation_update",
+                "finding_id": finding_id,
+                "validation_status": "unvalidated",
+                "validation_note": "Validation stopped by user.",
+            },
+        )
+    ]
 
 
 def test_static_assets_are_not_protected_endpoints():

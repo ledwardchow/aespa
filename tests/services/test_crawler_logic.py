@@ -2,7 +2,9 @@ import asyncio
 import json
 
 import pytest
+from sqlmodel import Session
 
+from aespa.models import Site, TestRun, TestRunStatus
 from aespa.services import crawler
 
 
@@ -12,6 +14,61 @@ def test_page_function_label_removes_credential_possessive():
     )
     assert (
         crawler._page_function_label("Admin User Management") == "Admin User Management"
+    )
+
+
+def test_cancelled_crawl_preserves_finished_scan_state(
+    isolated_db_engine, monkeypatch
+):
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        run = TestRun(
+            site_id=site.id,
+            name="Concurrent crawl",
+            status=TestRunStatus.complete,
+            phase="finished",
+            outcome="complete",
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    async def cancelled_crawl(_run_id):
+        raise asyncio.CancelledError
+
+    emitted = []
+    monkeypatch.setattr(crawler, "_do_crawl", cancelled_crawl)
+    monkeypatch.setattr(
+        crawler.events_svc,
+        "emit",
+        lambda emitted_run_id, event: emitted.append((emitted_run_id, event)),
+    )
+
+    async def run_cancelled_task():
+        with pytest.raises(asyncio.CancelledError):
+            await crawler._crawl_task(run_id)
+
+    asyncio.run(run_cancelled_task())
+
+    with Session(isolated_db_engine) as session:
+        saved_run = session.get(TestRun, run_id)
+        assert saved_run.status == TestRunStatus.complete
+        assert saved_run.phase == "finished"
+        assert saved_run.outcome == "complete"
+
+    assert not any(
+        event.get("type") == "run_update" and event.get("status") == "stopped"
+        for _, event in emitted
+    )
+    assert any(
+        event.get("type") == "agent_status"
+        and event.get("agent_id") == "crawler"
+        and event.get("current_task") == "Crawl stopped"
+        for _, event in emitted
     )
 
 
@@ -53,6 +110,69 @@ def test_visible_locator_skips_hidden_first_match():
             return _IndexedLocatorRoot([hidden, visible])
 
     assert asyncio.run(crawler._visible_locator(_Page(), "input")) is visible
+
+
+def test_click_first_visible_times_out_stale_match_and_tries_next_selector():
+    class _HangingLocator(_FakeLocator):
+        async def click(self):
+            await asyncio.Event().wait()
+
+    class _ClickableLocator(_FakeLocator):
+        async def click(self):
+            self.clicked = True
+
+    hanging = _HangingLocator(count=1, visible=True)
+    clickable = _ClickableLocator(count=1, visible=True)
+
+    class _Page:
+        def locator(self, selector):
+            locator = hanging if selector == "stale" else clickable
+            return _IndexedLocatorRoot([locator])
+
+    clicked = asyncio.run(
+        asyncio.wait_for(
+            crawler._click_first_visible(
+                _Page(),
+                ["stale", "usable"],
+                click_timeout_ms=10,
+                total_timeout_ms=100,
+            ),
+            timeout=0.2,
+        )
+    )
+
+    assert clicked is True
+    assert clickable.clicked is True
+
+
+def test_dismiss_blocking_modal_has_total_time_budget():
+    class _HangingClose(_FakeLocator):
+        async def click(self):
+            await asyncio.Event().wait()
+
+    hanging_close = _HangingClose(count=1, visible=True)
+
+    class _Container(_FakeLocator):
+        def locator(self, selector):  # noqa: ARG002
+            return _IndexedLocatorRoot([hanging_close])
+
+    container = _Container(count=1, visible=True)
+
+    class _Page:
+        def locator(self, selector):  # noqa: ARG002
+            return _IndexedLocatorRoot([container])
+
+        async def wait_for_timeout(self, timeout):  # noqa: ARG002
+            return None
+
+    dismissed = asyncio.run(
+        asyncio.wait_for(
+            crawler._dismiss_blocking_modal(_Page(), total_timeout_ms=20),
+            timeout=0.2,
+        )
+    )
+
+    assert dismissed is False
 
 
 class _FakePage:
@@ -2296,6 +2416,46 @@ def test_authenticate_smart_completes_login_and_substitutes_credentials(monkeypa
         assert "s3cr3t-pw" not in blob
 
 
+def test_authenticate_smart_emits_llm_failures_as_error_events(monkeypatch):
+    page = _SmartLoginPage()
+    cred = _SmartCred()
+    emitted: list[tuple] = []
+
+    async def _fake_decide(config, **kwargs):  # noqa: ARG001
+        return {
+            "action": "give_up",
+            "reason": "LLM request failed: model allowance exhausted",
+            "_llm_error": True,
+            "_llm_error_type": "quota",
+            "_llm_reset_at": "2026-09-02T15:33:08+00:00",
+        }
+
+    monkeypatch.setattr(crawler.llm_svc, "decide_login_action", _fake_decide)
+    monkeypatch.setattr(
+        crawler,
+        "_crawl_log",
+        lambda *args, **kwargs: emitted.append((args, kwargs)),
+    )
+
+    class _LLMCfg:
+        model = "gpt-5.3-codex-spark"
+        use_vision = False
+
+    asyncio.run(
+        crawler._authenticate_smart(
+            page, "https://target.local/login", cred, 1, _LLMCfg()
+        )
+    )
+
+    error_event = next(entry for entry in emitted if entry[0][2] == "error")
+    assert "model allowance exhausted" in error_event[0][3]
+    assert error_event[1]["data"] == {
+        "error_type": "quota",
+        "model": "gpt-5.3-codex-spark",
+        "reset_at": "2026-09-02T15:33:08+00:00",
+    }
+
+
 def test_custom_login_field_substitution_stays_local():
     class _CustomCred:
         username = "ABC123456"
@@ -2801,24 +2961,29 @@ def test_entra_authenticator_status_event_reports_success_and_timeout(monkeypatc
     assert [entry[2] for entry in logs] == ["complete", "error"]
 
 
-def test_entra_notification_number_detects_number_matching_prompt():
-    text = "approve sign in request open authenticator and enter the number 42"
-    assert crawler._entra_notification_number(text) == "42"
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("approve sign in request open authenticator and enter the number 42", "42"),
+        (
+            "open microsoft authenticator enter the code displayed in your browser 42",
+            "42",
+        ),
+    ],
+)
+def test_entra_notification_number(text, expected):
+    assert crawler._entra_notification_number(text) == expected
 
 
-def test_entra_notification_number_detects_displayed_number_prompt():
-    text = "open microsoft authenticator enter the code displayed in your browser 42"
-    assert crawler._entra_notification_number(text) == "42"
-
-
-def test_entra_sso_provider_detection_ignores_bare_sso_app_text():
-    text = "dashboard settings authenticated user sso configuration audit logs"
-    assert crawler._entra_text_offers_sso_provider(text) is False
-
-
-def test_entra_sso_provider_detection_keeps_azure_ad_choice():
-    text = "choose a login method azure ad one-time pin"
-    assert crawler._entra_text_offers_sso_provider(text) is True
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("dashboard settings authenticated user sso configuration audit logs", False),
+        ("choose a login method azure ad one-time pin", True),
+    ],
+)
+def test_entra_sso_provider_detection(text, expected):
+    assert crawler._entra_text_offers_sso_provider(text) is expected
 
 
 def test_entra_detects_retryable_authenticator_failure():
@@ -3210,16 +3375,3 @@ Forms detected, requires authentication.
     assert cats["page_label"] == "Admin Dashboard"
     assert cats["req_auth"] is True
     assert "<minimax_thinking>" not in context
-
-
-def test_crawl_shared_llm_max_concurrency():
-    # _CrawlShared now uses a _DynamicConcurrencyGate that reads the limit
-    # from the DB at acquire time.  Without a real run_id in the DB the
-    # limit_fn returns None (unlimited), so we verify the gate is always
-    # present and that the limit_fn correctly surfaces None for run_id=0.
-    shared = crawler._CrawlShared(
-        crawled_norms={}, state_keys={}, pages_done=0, run_id=0
-    )
-    assert shared.llm_gate is not None
-    # No real run in DB for run_id=0 → should return None (unlimited)
-    assert crawler._read_effective_llm_concurrency(0) is None

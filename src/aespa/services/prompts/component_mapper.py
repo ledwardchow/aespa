@@ -33,6 +33,8 @@ Record only concrete, evidence-backed facts:
 - ui_action: a concrete click or form-submit action on a UI route that triggers a request;
 - handler: a local handler/function that dispatches a request or reaches a lead;
 - lead_anchor: a supplied validated SAST lead location that a route reaches;
+- auth_flow: a proven credential lifecycle where one outbound HTTP call obtains
+  a token/session/credential and later outbound HTTP calls use it;
 - queue_publish / queue_consume: a concrete message destination;
 - rpc_client / rpc_server: a concrete RPC service or method.
 
@@ -44,6 +46,13 @@ When a relationship is proven across files, include the related file:line
 locations in detail using only these keys as applicable: handler_locations,
 route_locations, trigger_locations, source_locations, and related_locations.
 For a lead_anchor, include the supplied lead_id and source_location in detail.
+For an auth_flow, set method/path to the credential-acquisition HTTP call and
+include detail.acquisition_call_locations plus detail.credential_use_locations.
+Each must contain file:line evidence you read. Record an auth_flow only when
+the code proves both that the first call establishes a credential and that the
+later calls attach or otherwise use that credential. Include credential_kind
+when known, but never include a credential value. Do not infer an auth flow
+from route names such as login, auth, token, or session alone.
 Do not report vulnerabilities. Call done promptly after all cross-service API endpoints and outbound calls are mapped.
 
 Examples:
@@ -81,6 +90,7 @@ _RECORD_INTERFACE_FACT = {
                     "ui_action",
                     "handler",
                     "lead_anchor",
+                    "auth_flow",
                     "queue_publish",
                     "queue_consume",
                     "rpc_client",

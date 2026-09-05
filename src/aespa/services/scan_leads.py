@@ -962,6 +962,22 @@ def format_leads_for_run(
     return _format_leads_block(get_leads_for_run(target_run_type, target_run_id)[:cap])
 
 
+def format_leads_for_scan_context(
+    target_run_type: str,
+    target_run_id: int,
+    coverage_mode: str,
+) -> str:
+    """Return the lead context appropriate for a dynamic scan mode.
+
+    Quick and Standard scans must resolve every imported lead, so they receive
+    the complete compact index and fetch full lead details as they work. Full
+    scans retain the detailed, capped context used by the general coverage workflow.
+    """
+    if coverage_mode in {"track", "standard", "sast_validate"}:
+        return format_lead_index_for_validation(target_run_type, target_run_id)
+    return format_leads_for_run(target_run_type, target_run_id)
+
+
 def format_lead_index_for_validation(
     target_run_type: str,
     target_run_id: int,

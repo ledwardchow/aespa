@@ -9,8 +9,8 @@ and reconciles the DB:
   * No matching ``SastRun`` row, or the run is in a terminal state
     (``completed`` / ``failed`` / ``cancelled``) → the dir is just deleted.
   * A workspace leased by a live process → the run and directory are untouched.
-  * An unleased run still marked ``scanning`` → the run is marked ``failed``
-    with a note that the process was interrupted, and the dir is deleted.
+  * An unleased run still marked ``scanning`` → the run is marked ``paused``
+    with a resumable interruption note, and the dir is deleted.
   * The run is ``pending`` → the dir is left alone (the user may still
     start the scan). It also should not exist in this case under normal
     operation.
@@ -23,41 +23,23 @@ from datetime import datetime, timezone  # noqa: F401  (datetime used in fixture
 from pathlib import Path
 
 import pytest
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, select
 
-from aespa import db as db_mod
 from aespa.config import get_settings
 from aespa.db import (
     _cleanup_orphaned_sast_extractions,
     get_engine,
     init_db,
-    set_engine,
 )
-from aespa.models import SastRun
+from aespa.models import RunPause, SastRun, ScanLog
 from aespa.sast_workspace import try_acquire_sast_workspace_lease
 
 _UTC = timezone.utc
 
 
 @pytest.fixture(name="engine")
-def engine_fixture():
-    """A fresh in-memory SQLite engine wired into the db module + a tmp
-    data_dir for the on-disk extraction root."""
-    prev_engine = db_mod._engine
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)
-    yield engine
-    set_engine(prev_engine)
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
+def engine_fixture(db_engine):
+    return db_engine
 
 
 def _write_run(status: str, **kwargs) -> int:
@@ -121,7 +103,7 @@ def test_sweep_removes_dir_for_terminal_run(engine, tmp_path, monkeypatch):
         assert run.status == status  # terminal status is preserved, not touched
 
 
-def test_sweep_marks_scanning_run_failed_and_removes_dir(engine, tmp_path, monkeypatch):
+def test_sweep_marks_scanning_run_paused_and_removes_dir(engine, tmp_path, monkeypatch):
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
     run_id = _write_run(status="scanning")
     d = _seed_dir(run_id=run_id)
@@ -132,9 +114,40 @@ def test_sweep_marks_scanning_run_failed_and_removes_dir(engine, tmp_path, monke
     assert not d.exists()
     with Session(engine) as s:
         run = s.get(SastRun, run_id)
-    assert run.status == "failed"
+        pause = s.exec(
+            select(RunPause)
+            .where(RunPause.run_kind == "sast")
+            .where(RunPause.run_id == run_id)
+        ).one()
+        restart_log = s.exec(
+            select(ScanLog)
+            .where(ScanLog.test_run_id == run_id)
+            .where(ScanLog.run_kind == "sast")
+            .where(ScanLog.phase == "restart_recovery")
+        ).one()
+    assert run.status == "paused"
     assert "interrupted" in (run.error_message or "").lower()
-    assert run.completed_at is not None
+    assert run.completed_at is None
+    assert pause.reason == "interrupted"
+    assert restart_log.status == "paused"
+    assert "interrupted" in restart_log.message.lower()
+
+
+def test_sweep_pauses_scanning_run_without_workspace(engine, tmp_path, monkeypatch):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    run_id = _write_run(status="scanning")
+
+    _cleanup_orphaned_sast_extractions()
+
+    with Session(engine) as s:
+        run = s.get(SastRun, run_id)
+        pause = s.exec(
+            select(RunPause)
+            .where(RunPause.run_kind == "sast")
+            .where(RunPause.run_id == run_id)
+        ).one()
+    assert run.status == "paused"
+    assert pause.reason == "interrupted"
 
 
 def test_sweep_leaves_live_scanning_workspace_untouched(engine, tmp_path, monkeypatch):
@@ -198,14 +211,14 @@ def test_sweep_is_idempotent(engine, tmp_path, monkeypatch):
 
     _cleanup_orphaned_sast_extractions()
     # Second call after the dir is gone must still succeed and leave the run
-    # in 'failed' (not re-write the error message).
+    # in 'paused' (not re-write the error message).
     _cleanup_orphaned_sast_extractions()
     _cleanup_orphaned_sast_extractions()
 
     assert not d.exists()
     with Session(engine) as s:
         run = s.get(SastRun, run_id)
-    assert run.status == "failed"
+    assert run.status == "paused"
     # error_message should not keep being overwritten; the timestamp may
     # change on updated_at, which is fine.
 
@@ -222,4 +235,4 @@ def test_sweep_wired_into_init_db(engine, tmp_path, monkeypatch):
     assert not d.exists()
     with Session(engine) as s:
         run = s.get(SastRun, run_id)
-    assert run.status == "failed"
+    assert run.status == "paused"

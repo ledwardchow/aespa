@@ -127,6 +127,15 @@ _AUTH_MARKERS = re.compile(
     r"\s*get_current_user|passport\.authenticate|@PreAuthorize|IsAuthenticated",
     re.IGNORECASE,
 )
+_SPRING_SECURITY_MATCHER = re.compile(
+    r"\.securityMatcher\((?P<args>[^)]*)\)", re.IGNORECASE
+)
+_SPRING_PERMIT_ALL = re.compile(
+    r"\.requestMatchers\((?P<args>[^)]*)\)\.permitAll", re.IGNORECASE
+)
+_SPRING_ANY_REQUEST_AUTHENTICATED = re.compile(
+    r"\.anyRequest\(\)\.authenticated\(\)", re.IGNORECASE
+)
 
 _QUEUE_PATTERNS = [
     re.compile(
@@ -158,23 +167,71 @@ def interface_fact_fingerprint(
     host: str | None,
     name: str | None,
 ) -> str:
-    """Fingerprint interface identity without tying it to one evidence line."""
+    """Fingerprint interface identity without tying it to one evidence line.
+
+    ``name`` and descriptive host text are mapper metadata, not interface
+    identity. LLM mapping often gives the same call a different label or
+    explains a default host in prose; those variants must still merge.
+    """
     raw_path = (path or "").strip().lower()
     if "://" in raw_path:
         raw_path = urlparse(raw_path).path
     raw_path = raw_path.split("?", 1)[0].rstrip("/") or "/"
     raw_path = re.sub(r"\{[^}]+\}", "{}", raw_path)
     raw_path = re.sub(r"/:[\w-]+", "/{}", raw_path)
+    raw_host = (host or "").strip().lower()
+    if raw_host:
+        first_host_token = raw_host.split()[0]
+        parsed_host = urlparse(
+            first_host_token if "://" in first_host_token else f"//{first_host_token}"
+        ).hostname
+        raw_host = (parsed_host or "").lower()
+    identity_name = name or ""
+    if fact_type in {
+        "http_call",
+        "route",
+        "ui_route",
+        "auth_flow",
+        "rpc_client",
+        "rpc_server",
+    } and (path or method):
+        identity_name = ""
     canonical = "|".join(
         (
             (fact_type or "").strip().lower(),
             (method or "").strip().lower(),
             re.sub(r"\s+", " ", raw_path),
-            (host or "").strip().lower(),
-            (name or "").strip().lower(),
+            raw_host,
+            identity_name.strip().lower(),
         )
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _spring_security_context(text: str) -> dict[str, object]:
+    """Extract small, path-aware Spring Security rules from one source file."""
+    protected_paths: list[str] = []
+    for match in _SPRING_SECURITY_MATCHER.finditer(text):
+        protected_paths.extend(re.findall(r"[\"']([^\"']+)[\"']", match.group("args")))
+
+    public_rules: list[dict[str, object]] = []
+    for match in _SPRING_PERMIT_ALL.finditer(text):
+        args = match.group("args")
+        paths = re.findall(r"[\"']([^\"']+)[\"']", args)
+        method_match = re.search(r"HttpMethod\.([A-Z]+)", args)
+        for path in paths:
+            public_rules.append(
+                {
+                    "path": path,
+                    "method": method_match.group(1) if method_match else None,
+                }
+            )
+
+    return {
+        "protected_paths": protected_paths or ["*"],
+        "public_rules": public_rules,
+        "has_global_auth": bool(_SPRING_ANY_REQUEST_AUTHENTICATED.search(text)),
+    }
 
 
 def _iter_source_files(root: Path):
@@ -268,6 +325,7 @@ def extract_component_facts(root: Path) -> list[dict]:
         except OSError:
             continue
         rel = path.relative_to(root).as_posix()
+        spring_security = _spring_security_context(text)
 
         # Next.js file-system routes are concrete browser roots even when no
         # JSX route declaration exists in the file.
@@ -412,15 +470,52 @@ def extract_component_facts(root: Path) -> list[dict]:
                     )
                     break
 
-            if _AUTH_MARKERS.search(line):
+            permit_all = _SPRING_PERMIT_ALL.search(line)
+            if permit_all:
+                args = permit_all.group("args")
+                public_paths = re.findall(r"[\"']([^\"']+)[\"']", args)
+                public_method = re.search(r"HttpMethod\.([A-Z]+)", args)
+                for public_path in public_paths:
+                    _add(
+                        {
+                            "fact_type": "auth_boundary",
+                            "method": public_method.group(1) if public_method else None,
+                            "path": public_path,
+                            "host": None,
+                            "name": "permitAll",
+                            "detail": {
+                                "scope": "path",
+                                "public_paths": [public_path],
+                                "public_methods": (
+                                    [public_method.group(1)] if public_method else []
+                                ),
+                            },
+                            "evidence_location": location,
+                        }
+                    )
+
+            auth_marker = _AUTH_MARKERS.search(line)
+            if auth_marker:
+                is_global_spring_rule = bool(
+                    spring_security["has_global_auth"]
+                    and _SPRING_ANY_REQUEST_AUTHENTICATED.search(line)
+                )
                 _add(
                     {
                         "fact_type": "auth_boundary",
                         "method": None,
                         "path": None,
                         "host": None,
-                        "name": _AUTH_MARKERS.search(line).group(0),
-                        "detail": {},
+                        "name": auth_marker.group(0),
+                        "detail": (
+                            {
+                                "scope": "global",
+                                "protected_paths": spring_security["protected_paths"],
+                                "rule": "anyRequest.authenticated",
+                            }
+                            if is_global_spring_rule
+                            else {"scope": "local"}
+                        ),
                         "evidence_location": location,
                     }
                 )
@@ -493,7 +588,6 @@ def persist_component_facts(sast_run_id: int, root: Path) -> int:
                 select(ComponentFact).where(ComponentFact.sast_run_id == sast_run_id)
             ).all()
         )
-        existing_by_fingerprint = {row.fingerprint: row for row in existing_rows}
         desired: dict[str, dict] = {}
         for raw in raw_facts:
             fp = interface_fact_fingerprint(
@@ -505,13 +599,33 @@ def persist_component_facts(sast_run_id: int, root: Path) -> int:
             )
             desired[fp] = raw
 
+        existing_by_fingerprint = {row.fingerprint: row for row in existing_rows}
+        for row in existing_rows:
+            semantic_fingerprint = interface_fact_fingerprint(
+                fact_type=row.fact_type,
+                method=row.method,
+                path=row.path,
+                host=row.host,
+                name=row.name,
+            )
+            existing_by_fingerprint.setdefault(semantic_fingerprint, row)
+
         for existing in existing_rows:
             try:
                 detail = json.loads(existing.detail_json or "{}")
             except (TypeError, ValueError):
                 detail = {}
-            if "llm" not in str(detail.get("origin") or "").lower() and (
-                existing.fingerprint not in desired
+            semantic_fingerprint = interface_fact_fingerprint(
+                fact_type=existing.fact_type,
+                method=existing.method,
+                path=existing.path,
+                host=existing.host,
+                name=existing.name,
+            )
+            if (
+                "llm" not in str(detail.get("origin") or "").lower()
+                and existing.fingerprint not in desired
+                and semantic_fingerprint not in desired
             ):
                 session.delete(existing)
 
@@ -523,6 +637,8 @@ def persist_component_facts(sast_run_id: int, root: Path) -> int:
                 except (TypeError, ValueError):
                     detail = {}
                 if "llm" in str(detail.get("origin") or "").lower():
+                    existing.fingerprint = fp
+                    session.add(existing)
                     continue
                 existing.component_id = component_id
                 existing.fact_type = raw["fact_type"]

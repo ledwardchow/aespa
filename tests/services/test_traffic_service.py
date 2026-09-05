@@ -170,6 +170,62 @@ async def test_logging_async_client_success(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_python_traffic_keeps_execution_and_body_provenance(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+    mock_resp = httpx.Response(
+        status_code=201,
+        headers={"Content-Type": "application/octet-stream"},
+        content=b"\x00\xffresult",
+        request=httpx.Request("POST", "https://target.local/test"),
+    )
+    monkeypatch.setattr(httpx.AsyncClient, "send", AsyncMock(return_value=mock_resp))
+
+    async with LoggingAsyncClient(
+        run_id=42,
+        source="python",
+        provenance={
+            "code_execution_id": 7,
+            "batch_id": "batch-1",
+            "batch_index": 2,
+            "agent_id": "specialist-1",
+            "agent_step": 4,
+            "owasp_category": "A03",
+            "test_class": "sqli",
+        },
+    ) as client:
+        request = httpx.Request(
+            "POST",
+            "https://target.local/test",
+            content=b"\x00\x01payload",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        await client.send(request)
+
+    with Session(engine) as session:
+        entry = session.exec(select(TrafficEntry)).one()
+        assert entry.source == "python"
+        assert entry.code_execution_id == 7
+        assert entry.batch_id == "batch-1"
+        assert entry.batch_index == 2
+        assert entry.agent_id == "specialist-1"
+        assert entry.agent_step == 4
+        assert entry.owasp_category == "A03"
+        assert entry.test_class == "sqli"
+        assert entry.request_body_encoding == "base64"
+        assert entry.request_body_size == 9
+        assert entry.request_body_sha256
+        assert entry.response_body_encoding == "base64"
+        assert entry.response_body_size == 8
+        assert entry.response_body_sha256
+
+
+@pytest.mark.anyio
 async def test_logging_async_client_failure(monkeypatch):
     engine = create_engine(
         "sqlite:///:memory:",
@@ -486,3 +542,46 @@ def test_maybe_record_waf_records_in_scope_traffic(monkeypatch):
         assert run_db.waf_provider == "Cloudflare"
         assert run_db.waf_confidence == "high"
         assert run_db.waf_evidence == "server: cloudflare"
+
+
+def test_write_emits_structured_testing_traffic_for_console(monkeypatch, caplog):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        run = RunModel(site_id=1, name="Run #52")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    caplog.set_level("INFO", logger="aespa.testing.traffic")
+    traffic._write(
+        run_id=run_id,
+        source="httpx",
+        method="POST",
+        url="https://target.local/login",
+        request_headers={"content-type": "application/json"},
+        request_body='{"user":"alice"}',
+        status=401,
+        response_headers={"content-type": "application/json"},
+        response_body='{"error":"denied"}',
+        duration_ms=42,
+        username="alice",
+        session_label="configured_alice",
+    )
+
+    record = next(
+        item for item in caplog.records if item.name == "aespa.testing.traffic"
+    )
+    assert record.aespa_testing_run_kind == "web"
+    assert record.aespa_testing_run_id == run_id
+    assert record.aespa_testing_method == "POST"
+    assert record.aespa_testing_status == 401
+    assert record.aespa_testing_request_body == '{"user":"alice"}'
+    assert record.aespa_testing_response_body == '{"error":"denied"}'

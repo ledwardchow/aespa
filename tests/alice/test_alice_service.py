@@ -8,43 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
-from aespa.db import get_session, set_engine
+from aespa.db import get_session
 from aespa.main import create_app
 from aespa.models import CrawledPage, LLMConfig, Site
 from aespa.models import TestRun as RunModel
 from aespa.services import alice_tasks as at
 from aespa.services.alice import run_alice_turn, run_alice_turn_stream
-
-
-@pytest.fixture(name="db_engine")
-def db_engine_fixture():
-    """Create an in-memory database engine for testing, and set it globally."""
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    from aespa.db import _engine as original_engine
-
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)
-
-    yield engine
-
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    set_engine(original_engine)
-
-
-@pytest.fixture(name="db_session")
-def db_session_fixture(db_engine):
-    """Provide a database Session for populating test data."""
-    with Session(db_engine) as session:
-        yield session
 
 
 @pytest.fixture(name="test_data")
@@ -164,6 +135,183 @@ def test_alice_operational_question_tool_gate_preserves_explicit_testing():
     assert _classify_alice_intent("Test the crawl for XSS") == "testing"
     assert _classify_alice_intent("Probe the API for IDOR") == "testing"
     assert _classify_alice_intent("Re-run validation for all findings") == "testing"
+
+
+def test_goal_mode_done_schema_requires_completion_state():
+    from aespa.services.alice import _get_alice_tools, _goal_mode_tools
+
+    tools = _goal_mode_tools(_get_alice_tools())
+    done = next(tool for tool in tools if tool["name"] == "done")
+
+    assert done["input_schema"]["properties"]["status"]["enum"] == [
+        "completed",
+        "blocked",
+    ]
+    assert "remaining_work" in done["input_schema"]["required"]
+
+
+def test_alice_goal_lifecycle_is_persistent(db_session, test_data):
+    from aespa.services import alice_goals
+
+    run = test_data["run"]
+    goal = alice_goals.create_goal("web", run.id, "tab-goal", "Test account recovery")
+    alice_goals.update_goal(
+        goal.id,
+        checkpoint={"remaining_work": ["Test email enumeration"]},
+        increment_cycle=True,
+    )
+
+    loaded = alice_goals.goal_out(alice_goals.get_goal("web", run.id, "tab-goal"))
+    assert loaded["status"] == "active"
+    assert loaded["cycle_count"] == 1
+    assert loaded["checkpoint"]["remaining_work"] == ["Test email enumeration"]
+
+    alice_goals.reconcile_interrupted_goals()
+    paused = alice_goals.goal_out(alice_goals.get_goal("web", run.id, "tab-goal"))
+    assert paused["status"] == "paused"
+    assert "restarted" in paused["pause_reason"]
+
+
+@pytest.mark.anyio
+async def test_goal_mode_rejects_partial_done_then_accepts_verified_completion(
+    db_session, test_data
+):
+    from aespa.services import alice_goals
+
+    run = test_data["run"]
+    row = alice_goals.create_goal("web", run.id, "tab-goal", "Test account recovery")
+    goal = alice_goals.goal_out(row)
+    replies = [
+        [
+            {
+                "type": "tool_use",
+                "id": "tool-1",
+                "name": "context_tool",
+                "input": {"tool": "site_map", "args": {}},
+            }
+        ],
+        [
+            {
+                "type": "tool_use",
+                "id": "done-1",
+                "name": "done",
+                "input": {
+                    "status": "completed",
+                    "summary": "Partly checked",
+                    "completed_criteria": ["Loaded the route inventory"],
+                    "evidence": ["site_map result"],
+                    "remaining_work": ["Probe the recovery endpoint"],
+                },
+            }
+        ],
+        [
+            {
+                "type": "tool_use",
+                "id": "done-2",
+                "name": "done",
+                "input": {
+                    "status": "completed",
+                    "summary": "Recovery behavior verified",
+                    "completed_criteria": ["Tested account recovery"],
+                    "evidence": ["The recovery probe returned a uniform response"],
+                    "remaining_work": [],
+                },
+            }
+        ],
+    ]
+    calls = 0
+
+    async def mock_call(*args, **kwargs):  # noqa: ARG001
+        nonlocal calls
+        blocks = replies[calls]
+        calls += 1
+        return blocks, "tool_use", blocks
+
+    lines = []
+    with (
+        patch("aespa.services.llm._call_with_tools", side_effect=mock_call),
+        patch("aespa.services.alice._execute_alice_tool", new=AsyncMock(return_value="site map evidence")),
+        patch("aespa.services.llm.plain_completion", new=AsyncMock(return_value='{"verdict":"completed","reason":"verified","missing_work":[]}')),
+        patch("aespa.services.validator.is_validating", return_value=False),
+    ):
+        async for line in run_alice_turn_stream(
+            run.id, "Test account recovery", [], goal=goal
+        ):
+            lines.append(line)
+
+    events = [json.loads(line[6:].strip()) for line in lines if line.startswith("data: ")]
+    assert calls == 3
+    assert any(event["type"] == "goal_progress" for event in events)
+    assert any(event["type"] == "goal_completed" for event in events)
+    completed = alice_goals.get_goal("web", run.id, "tab-goal")
+    assert completed.status == "completed"
+
+
+@pytest.mark.anyio
+async def test_goal_mode_requires_repeated_confirmation_of_a_blocker(test_data):
+    from aespa.services.alice import _check_goal_completion
+
+    proposal = {
+        "status": "blocked",
+        "summary": "Testing needs a valid customer account.",
+        "completed_criteria": ["Confirmed the route requires authentication"],
+        "evidence": ["The endpoint returned 401 for the available session"],
+        "remaining_work": ["Test the authenticated customer flow"],
+        "blocker": "No valid customer account is available.",
+    }
+    checkpoint = {}
+
+    with patch(
+        "aespa.services.llm.plain_completion",
+        new=AsyncMock(
+            return_value=(
+                '{"verdict":"blocked","reason":"external access is required",'
+                '"missing_work":[]}'
+            )
+        ),
+    ):
+        results = [
+            await _check_goal_completion(
+                test_data["llm_cfg"],
+                objective="Test the authenticated customer flow",
+                proposal=proposal,
+                evidence=[{"tool": "http_request", "result": "401"}],
+                run_id=test_data["run"].id,
+                is_api=True,
+                checkpoint=checkpoint,
+            )
+            for _ in range(3)
+        ]
+
+    assert [accepted for accepted, _, _ in results] == [False, False, True]
+    assert checkpoint["blocker_confirmations"] == 3
+
+
+@pytest.mark.anyio
+async def test_active_goal_accepts_steering(test_data):
+    from aespa.services import alice_goals
+
+    goal = alice_goals.create_goal(
+        "web", test_data["run"].id, "tab-goal", "Test account recovery"
+    )
+    task = at.AliceTask(
+        run_id=test_data["run"].id,
+        tab_id="tab-goal",
+        think_msg_id="think",
+        reply_msg_id="reply",
+        goal_id=goal.id,
+        goal=alice_goals.goal_out(goal),
+    )
+    at._registry[("site", test_data["run"].id)] = task
+    try:
+        assert (
+            await at.steer_goal(test_data["run"].id, "Focus on the reset token")
+            is True
+        )
+        assert task.steering.get_nowait() == "Focus on the reset token"
+        assert task.events[-1]["type"] == "goal_steered"
+    finally:
+        at._registry.pop(("site", test_data["run"].id), None)
 
 
 def test_alice_run_status_prefers_live_scan_state(db_session, test_data):

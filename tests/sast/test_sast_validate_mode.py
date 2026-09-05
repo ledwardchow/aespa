@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from sqlmodel import Session
 
 from aespa.models import ApiCollection, ApiTestRun, ScanLead, Site
@@ -14,9 +17,13 @@ from aespa.services.prompts.test_lead import (
 )
 from aespa.services.scan_leads import (
     format_lead_index_for_validation,
+    format_leads_for_scan_context,
     get_lead_detail_for_run,
 )
-from aespa.services.scanner import _run_thinking_context_tool
+from aespa.services.scanner import (
+    _do_agentic_thinking_loop,
+    _run_thinking_context_tool,
+)
 
 
 def _web_run(
@@ -211,6 +218,94 @@ def test_validation_index_includes_all_leads_and_dynamic_objective(
     assert "static-analysis hypothesis" in index.lower()
 
 
+def test_quick_scan_context_includes_every_open_lead(isolated_db_engine):
+    run = _web_run(isolated_db_engine)
+    for index in range(25):
+        _imported_lead(
+            isolated_db_engine,
+            run_type="web",
+            run_id=run.id,
+            title=f"Quick lead {index}",
+        )
+
+    quick_context = format_leads_for_scan_context("web", run.id, "track")
+    full_context = format_leads_for_scan_context("web", run.id, "enforce")
+
+    assert quick_context.count("context_tool(tool=lead_detail") == 25
+    assert "Quick lead 24" in quick_context
+    assert full_context.count("[Lead ") == 20
+
+
+def test_quick_resume_refreshes_leads_and_blocks_done(isolated_db_engine, monkeypatch):
+    run = _api_run(isolated_db_engine)
+    lead = _imported_lead(
+        isolated_db_engine,
+        run_type="api",
+        run_id=run.id,
+        title="Lead added after checkpoint",
+    )
+    captured = {}
+
+    async def fake_agentic_loop(_config, **kwargs):
+        captured["system_message"] = kwargs["system_message"]
+        allowed, feedback = kwargs["done_check"]({}, 5)
+        assert allowed is False
+        assert "still open" in feedback
+
+        with Session(isolated_db_engine) as session:
+            row = session.get(ScanLead, lead.id)
+            row.status = "dismissed"
+            session.add(row)
+            session.commit()
+
+        allowed, feedback = kwargs["done_check"]({}, 6)
+        assert allowed is True
+        return "done"
+
+    monkeypatch.setattr(
+        "aespa.services.scanner.llm_svc.thinking_agentic_loop",
+        fake_agentic_loop,
+    )
+    monkeypatch.setattr(
+        "aespa.services.scanner.events_svc.emit", lambda *args, **kwargs: None
+    )
+
+    asyncio.run(
+        _do_agentic_thinking_loop(
+            run_id=run.id,
+            is_api_run=True,
+            llm_cfg=SimpleNamespace(),
+            base_url="https://api.local",
+            crawl_context="old context",
+            creds_for_llm=[],
+            session_vault={},
+            pages_snapshot=[],
+            findings_snapshot=[],
+            first_page_id=None,
+            scanner_policy=SimpleNamespace(
+                execution_monitor_enabled=False,
+                max_consecutive_text_turns=0,
+                enforce_full_coverage_obligations=False,
+            ),
+            hx=SimpleNamespace(),
+            browser_ctx=None,
+            pw_page=None,
+            history=[],
+            all_results=[],
+            resume_from={
+                "messages": [{"role": "user", "content": "checkpoint context"}],
+                "step_count": 4,
+            },
+            system_message_override="API Test Lead",
+            tools_override=[],
+            coverage_mode="track",
+        )
+    )
+
+    assert "resumed Quick run" in captured["system_message"]
+    assert "Lead added after checkpoint" in captured["system_message"]
+
+
 def test_lead_detail_returns_full_owned_data_and_rejects_foreign_leads(
     isolated_db_engine,
 ):
@@ -394,12 +489,167 @@ def test_sast_validate_prompt_and_tools_are_focused():
     assert "browser" not in {
         tool["name"] for tool in get_sast_validate_tools(is_api_run=True)
     }
+    assert "execute_python" in {
+        tool["name"] for tool in get_sast_validate_tools(is_api_run=False)
+    }
+    assert "execute_python" in {
+        tool["name"] for tool in get_sast_validate_tools(is_api_run=True)
+    }
     assert "agent_dispatch" not in {
         tool["name"] for tool in get_sast_validate_tools(is_api_run=False)
     }
     assert "coverage_gaps" not in {
         tool["name"] for tool in get_sast_validate_tools(is_api_run=False)
     }
+    api_http_tool = next(
+        tool
+        for tool in get_sast_validate_tools(is_api_run=True)
+        if tool["name"] == "http_request"
+    )
+    assert "store_as" in api_http_tool["input_schema"]["properties"]
+    assert "store_as" in api_prompt
     from aespa.services.prompts.test_lead import _API_THINKING_AGENT_SYSTEM
 
     assert "lead_detail" in _API_THINKING_AGENT_SYSTEM
+
+
+def test_api_login_response_session_is_reused_by_stable_label(
+    isolated_db_engine, monkeypatch
+):
+    run = _api_run(isolated_db_engine)
+    from aespa.services.scanner_sessions import load_session_vault, upsert_session
+
+    upsert_session(
+        run.id,
+        label="configured_primary",
+        kind="bearer",
+        extra_headers={"Authorization": "Bearer stale-token"},
+        run_kind="api",
+    )
+    session_vault = load_session_vault(run.id, run_kind="api")
+    observed_authorization = []
+    observed_cookies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/auth":
+            return httpx.Response(
+                200,
+                json={"token": "eyJheader.eyJpayload.signature"},
+                request=request,
+            )
+        if request.url.path == "/api/cookie-auth":
+            return httpx.Response(
+                200,
+                json={"ok": True},
+                headers={"set-cookie": "sid=fresh-cookie; Path=/; HttpOnly"},
+                request=request,
+            )
+        if request.url.path == "/api/private":
+            observed_authorization.append(request.headers.get("authorization"))
+        if request.url.path == "/api/cookie-private":
+            observed_cookies.append(request.headers.get("cookie"))
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    async def fake_agentic_loop(_config, **kwargs):
+        login_result = await kwargs["tool_executor"](
+            "http_request",
+            {
+                "method": "POST",
+                "url": "https://api.local/api/auth",
+                "body": {"email": "user@example.com", "password": "correct"},
+                "use_session": "anonymous",
+                "store_as": "configured_primary",
+                "owasp_category": "API2",
+            },
+            1,
+        )
+        assert "[SESSION STORED]" in login_result
+        assert "configured_primary" in session_vault
+
+        protected_result = await kwargs["tool_executor"](
+            "http_request",
+            {
+                "method": "GET",
+                "url": "https://api.local/api/private",
+                "use_session": "configured_primary",
+                "owasp_category": "API2",
+            },
+            2,
+        )
+        assert "Status: 200" in protected_result
+
+        cookie_login_result = await kwargs["tool_executor"](
+            "http_request",
+            {
+                "method": "POST",
+                "url": "https://api.local/api/cookie-auth",
+                "body": {"username": "cookie-user", "password": "correct"},
+                "use_session": "anonymous",
+                "store_as": "cookie_primary",
+                "owasp_category": "API2",
+            },
+            3,
+        )
+        assert "[SESSION STORED]" in cookie_login_result
+        assert session_vault["cookie_primary"]["kind"] == "cookie"
+
+        cookie_protected_result = await kwargs["tool_executor"](
+            "http_request",
+            {
+                "method": "GET",
+                "url": "https://api.local/api/cookie-private",
+                "use_session": "cookie_primary",
+                "owasp_category": "API2",
+            },
+            4,
+        )
+        assert "Status: 200" in cookie_protected_result
+        return "done"
+
+    monkeypatch.setattr(
+        "aespa.services.scanner.llm_svc.thinking_agentic_loop",
+        fake_agentic_loop,
+    )
+    monkeypatch.setattr(
+        "aespa.services.scanner.events_svc.emit", lambda *args, **kwargs: None
+    )
+
+    async def run_scan():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await _do_agentic_thinking_loop(
+                run_id=run.id,
+                is_api_run=True,
+                llm_cfg=SimpleNamespace(),
+                base_url="https://api.local",
+                crawl_context="API context",
+                creds_for_llm=[],
+                session_vault=session_vault,
+                pages_snapshot=[],
+                findings_snapshot=[],
+                first_page_id=None,
+                scanner_policy=SimpleNamespace(
+                    execution_monitor_enabled=False,
+                    max_consecutive_text_turns=0,
+                    enforce_full_coverage_obligations=False,
+                    min_delay_s=0,
+                    scan_mode="safe_active",
+                ),
+                hx=client,
+                browser_ctx=None,
+                pw_page=None,
+                history=[],
+                all_results=[],
+                scope_check_fn=lambda _url: None,
+                system_message_override="API Test Lead",
+                tools_override=get_sast_validate_tools(is_api_run=True),
+                coverage_mode="sast_validate",
+            )
+
+    asyncio.run(run_scan())
+
+    assert observed_authorization == ["Bearer eyJheader.eyJpayload.signature"]
+    assert observed_cookies == ["sid=fresh-cookie"]
+    persisted = load_session_vault(run.id, run_kind="api")
+    assert "configured_primary" in persisted
+    assert persisted["configured_primary"]["kind"] == "bearer"
+    assert persisted["cookie_primary"]["cookies"] == {"sid": "fresh-cookie"}

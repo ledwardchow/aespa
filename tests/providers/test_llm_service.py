@@ -56,6 +56,54 @@ def test_agentic_context_compaction_preserves_recent_tool_pairs():
     assert compacted[-1]["role"] == "user"
 
 
+def test_agentic_context_compaction_uses_model_token_budget():
+    config = LLMConfig(
+        provider="openai_compatible",
+        model="local",
+        max_tokens=1000,
+        max_context_tokens=20_000,
+    )
+    messages = [{"role": "user", "content": "initial brief"}]
+    for index in range(80):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"call-{index}",
+                            "name": "http_request",
+                            "input": {"url": f"https://target.local/{index}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": f"call-{index}",
+                            "content": "response " + ("x" * 900),
+                        }
+                    ],
+                },
+            ]
+        )
+
+    compacted, stats = llm.compact_messages_for_config(
+        config,
+        "system prompt",
+        messages,
+        tools=[],
+    )
+
+    assert stats is not None
+    assert stats["before_tokens"] > stats["after_tokens"]
+    assert stats["after_tokens"] <= stats["context_budget_tokens"]
+    assert compacted[0]["role"] == "user"
+
+
 def test_limiter_oversized_estimate_does_not_hang():
     # A single request estimated larger than the entire per-minute budget must
     # not loop forever waiting for capacity that can never exist. Pre-fix, this
@@ -65,9 +113,10 @@ def test_limiter_oversized_estimate_does_not_hang():
     assert slept is False  # clamped to max_tokens; the full bucket satisfies it at once
 
 
-def test_limiter_on_wait_fires_when_pacing():
+def test_limiter_on_wait_fires_when_pacing(monkeypatch):
     # When the bucket is empty the next acquire must pace, and on_wait must fire
     # (before the sleep) so callers can tell the user it is not stuck.
+    monkeypatch.setattr(llm, "LLM_PACING_NOTICE_THRESHOLD_S", 0.01)
     limiter = llm.AsyncTokenBucketLimiter(tpm=6000)  # 100 tokens/sec
     waits: list[float] = []
 
@@ -77,6 +126,36 @@ def test_limiter_on_wait_fires_when_pacing():
 
     asyncio.run(asyncio.wait_for(_run(), timeout=10))
     assert waits and waits[0] > 0
+
+
+def test_limiter_does_not_report_subsecond_rounding_wait():
+    limiter = llm.AsyncTokenBucketLimiter(tpm=60_000)  # 1,000 tokens/sec
+    waits: list[float] = []
+
+    async def _run():
+        await limiter.acquire(60_000)
+        return await limiter.acquire(1, on_wait=lambda wt: waits.append(wt))
+
+    reported_wait = asyncio.run(asyncio.wait_for(_run(), timeout=5))
+
+    assert reported_wait is False
+    assert waits == []
+
+
+def test_llm_pacing_events_describe_local_scheduling(monkeypatch):
+    events = []
+    monkeypatch.setattr(llm, "_emit_run_event", events.append)
+
+    llm._emit_llm_pacing_waiting("example-model", 75_558, 1.2)
+    llm._emit_llm_pacing_finished("example-model")
+
+    assert [event["phase"] for event in events] == ["llm_pacing", "llm_pacing"]
+    assert "Waiting about 2s" in events[0]["message"]
+    assert "estimated request size: 75,558 tokens" in events[0]["message"]
+    assert "rate limit" not in events[0]["message"].lower()
+    assert events[1]["message"] == (
+        "Pacing wait finished. Sending the next request to example-model."
+    )
 
 
 def test_limiter_reconcile_only_credits_what_was_reserved():
@@ -179,6 +258,145 @@ def test_agentic_loop_recovers_from_text_only_turn(monkeypatch):
         and msg["content"][0].get("type") == "text"
     ]
     assert "did not call a tool" in correction_messages[-1]["content"][0]["text"]
+
+
+def test_agentic_loop_normalizes_json_string_tool_input(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    received = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        block = {
+            "type": "tool_use",
+            "id": "call_done",
+            "name": "done",
+            "input": '{"verdict":"confirmed","reasoning":"Reproduced."}',
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        raise AssertionError("done must not reach the tool executor")
+
+    def done_check(tool_input, step):
+        received.append(tool_input)
+        return True, ""
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+            done_check=done_check,
+        )
+    )
+
+    assert received == [{"verdict": "confirmed", "reasoning": "Reproduced."}]
+
+
+def test_agentic_loop_rejects_malformed_string_tool_input(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            block = {
+                "type": "tool_use",
+                "id": "call_bad",
+                "name": "done",
+                "input": "not-json",
+                "text": None,
+            }
+            return [block], "tool_use", [block]
+        assert "valid JSON object" in messages[-1]["content"][0]["content"]
+        block = {
+            "type": "tool_use",
+            "id": "call_done",
+            "name": "done",
+            "input": {"summary": "Recovered."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        raise AssertionError("done must not reach the tool executor")
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+        )
+    )
+
+    assert summary == "Recovered."
+    assert calls == 2
+
+
+def test_agentic_loop_serializes_mapping_tool_result_for_next_turn(monkeypatch):
+    config = LLMConfig(
+        provider="bedrock",
+        model="global.anthropic.claude-sonnet-5",
+    )
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            block = {
+                "type": "tool_use",
+                "id": "call_http",
+                "name": "http_request",
+                "input": {"method": "GET", "url": "https://target.local/health"},
+                "text": None,
+            }
+            return [block], "tool_use", [block]
+        tool_result = messages[-1]["content"][0]["content"]
+        assert isinstance(tool_result, str)
+        assert json.loads(tool_result) == {"status": 200, "body": {"ok": True}}
+        block = {
+            "type": "tool_use",
+            "id": "call_done",
+            "name": "done",
+            "input": {"summary": "Complete."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        return {"status": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+        )
+    )
+
+    assert summary == "Complete."
+    assert calls == 2
 
 
 def test_agentic_loop_accepts_mapper_text_only_repair_message(monkeypatch):
@@ -504,15 +722,15 @@ def test_agentic_loop_logs_native_stop_and_terminal_no_tool_failure(monkeypatch)
     )
 
     assert summary == ""
-    warnings = [
+    retries = [
         event
         for event in emitted
-        if event.get("phase") == "llm_response" and event.get("status") == "warning"
+        if event.get("phase") == "llm_response" and event.get("status") == "retrying"
     ]
-    assert len(warnings) == 3
-    assert warnings[0]["data"]["native_stop_reason"] == "guardrail_intervened"
-    assert warnings[0]["data"]["no_tool_retry"] == 1
-    assert warnings[0]["data"]["provider_diagnostics"][0]["transport"] == {
+    assert len(retries) == 3
+    assert retries[0]["data"]["native_stop_reason"] == "guardrail_intervened"
+    assert retries[0]["data"]["no_tool_retry"] == 1
+    assert retries[0]["data"]["provider_diagnostics"][0]["transport"] == {
         "request_id": "request-123",
         "http_status": 200,
     }
@@ -1932,7 +2150,8 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
     fake_boto3 = SimpleNamespace(Session=FakeSession)
     monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
     monkeypatch.setenv("AWS_PROFILE", "bedrock-dev")
-    monkeypatch.delenv("AWS_REGION", raising=False)
+    # The configured endpoint/region must win over ambient AWS settings.
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
     monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
 
     config = LLMConfig(
@@ -1958,6 +2177,21 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
         "messages": [{"role": "user", "content": [{"text": "hello"}]}],
         "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
     }
+
+
+def test_bedrock_runtime_defaults_to_sydney_when_region_is_unconfigured(monkeypatch):
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url=None,
+        model="global.anthropic.claude-sonnet-4-6",
+        max_tokens=2048,
+    )
+
+    assert llm._bedrock_region(config) == "ap-southeast-2"
 
 
 def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blank(
@@ -3072,6 +3306,61 @@ def test_call_with_tools_preempts_tool_choice_for_reasoning_models(monkeypatch):
 
     assert blocks[0]["text"] == "ok"
     assert "tool_choice" not in captured["completion"]
+
+
+@pytest.mark.parametrize("choices", [None, []])
+def test_call_with_tools_normalizes_missing_openai_choices(monkeypatch, choices):
+    recorded_usage: dict[str, object] = {}
+
+    def fake_record_usage(model, input_tokens, output_tokens, **kwargs):
+        recorded_usage.update(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            **kwargs,
+        )
+
+    class FakeCompletions:
+        async def create(self, **kwargs):  # noqa: ARG002
+            usage = SimpleNamespace(
+                prompt_tokens=123,
+                completion_tokens=0,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=23),
+            )
+            return SimpleNamespace(choices=choices, usage=usage)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):  # noqa: ARG002
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+    config = LLMConfig(
+        provider="openai_compatible",
+        api_key=None,
+        base_url="http://localhost:1234",
+        model="local-model",
+        max_tokens=2048,
+    )
+
+    blocks, stop_reason, raw_content = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        )
+    )
+
+    assert blocks == []
+    assert stop_reason == "end_turn"
+    assert raw_content == []
+    assert recorded_usage == {
+        "model": "local-model",
+        "input_tokens": 123,
+        "output_tokens": 0,
+        "cache_read_tokens": 23,
+    }
 
 
 def test_call_with_tools_normalizes_minimax_reasoning_fields(monkeypatch):
