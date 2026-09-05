@@ -222,8 +222,7 @@ app = create_app()
 
 
 def _build_frontend_if_stale() -> None:
-    # ponytail: rebuild only when a src file is newer than the built index.html.
-    # Skips the ~10-30s npm build on every start; full rebuild if triggered.
+    # Public assets and build configuration affect the output just as source does.
     import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -231,10 +230,18 @@ def _build_frontend_if_stale() -> None:
     built = get_settings().web_dir / "index.html"
     if not frontend.exists():
         return  # installed without sources; nothing to build
-    src = frontend / "src"
-    newest_src = max(
-        (p.stat().st_mtime for p in src.rglob("*") if p.is_file()), default=0
-    )
+    inputs = [
+        frontend / name
+        for name in (
+            "index.html",
+            "package.json",
+            "package-lock.json",
+            "vite.config.js",
+        )
+    ]
+    for directory in ("src", "public"):
+        inputs.extend((frontend / directory).rglob("*"))
+    newest_src = max((p.stat().st_mtime for p in inputs if p.is_file()), default=0)
     if built.exists() and built.stat().st_mtime >= newest_src:
         return
     print("[aespa] frontend changed — running npm run build...")
@@ -262,9 +269,7 @@ def _ensure_port_available(host: str, port: int) -> None:
                 "Stop the process using that port, or choose another port by "
                 f"setting AESPA_PORT={port + 1} in .env."
             ) from exc
-        raise SystemExit(
-            f"[aespa] Cannot listen on {host}:{port}: {exc}"
-        ) from exc
+        raise SystemExit(f"[aespa] Cannot listen on {host}:{port}: {exc}") from exc
 
 
 def main() -> None:

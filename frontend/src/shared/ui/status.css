@@ -1,0 +1,74 @@
+/* ── Save confirmation ──────────────────────────────────────── */
+
+.save-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ok);
+  font-weight: 500;
+}
+
+/* ── Stats ──────────────────────────────────────────────────── */
+
+.stat-strip {
+  display: flex;
+  gap: 24px;
+  padding: 0 0 20px;
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.stat .stat-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text);
+}
+.stat .stat-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+/* ── Status badges (extended) ───────────────────────────────── */
+
+.badge.running {
+  color: var(--warn);
+  background: rgba(245, 166, 35, 0.1);
+  border-color: rgba(245, 166, 35, 0.35);
+}
+.badge.stopping {
+  color: var(--warn);
+  background: rgba(245, 166, 35, 0.1);
+  border-color: rgba(245, 166, 35, 0.35);
+}
+/* Aliases so legacy status vocabularies render (previously undefined → colourless). */
+.badge.warning {
+  color: var(--warn);
+  background: rgba(245, 166, 35, 0.1);
+  border-color: rgba(245, 166, 35, 0.35);
+}
+.badge.success {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-color: rgba(63, 207, 112, 0.3);
+}
+.badge.partial {
+  color: var(--text-2);
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.25);
+}
+.badge.danger {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-color: rgba(224, 92, 92, 0.35);
+}

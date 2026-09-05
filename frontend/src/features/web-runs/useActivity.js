@@ -1,0 +1,480 @@
+import * as webRunsApi from "../../shared/api/webRuns.js";
+import { useState, useEffect, useRef, useCallback } from "react";
+
+import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
+import { truncUrl } from "../../shared/lib/urls.js";
+import { parseDate } from "../../shared/lib/dates.js";
+
+// Owns the Activity tab's world: the event log, the derived agent roster and
+// its label/task/status helpers, token usage, and the site-plan card. The live
+// SSE stream stays in TestRunDetail; it writes through the setAgents /
+// setActivityLog / setTokenUsage / setSitePlanData / upsertAgent returned here.
+export function useActivity(runId, activeTab, { run, thinkingStatus, aliceIsThinking }) {
+  const [activityLog, setActivityLog] = useState([]);
+  const [expandedLogIds, setExpandedLogIds] = useState(new Set());
+  const toggleLogId = (id) =>
+    setExpandedLogIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const [activitySubTab, setActivitySubTab] = useState("agents");
+  const [agents, setAgents] = useState([]);
+  const [tokenUsage, setTokenUsage] = useState(null); // {total_input, total_output, by_model}
+  const [tokenExpanded, setTokenExpanded] = useState(false);
+  const [sitePlanData, setSitePlanData] = useState(null);
+  const activityFeedRef = useRef(null);
+
+  const agentRoleLabel = (agent) => {
+    if (agent?.id === "crawler") return "Crawler";
+    if (agent?.id === "scanner") return "Test Lead";
+    if (agent?.id === "alice") return "A.L.I.C.E";
+    return agent?.role || "Agent";
+  };
+  const normalizeAgentForRun = (agent) => {
+    if (agent?.id !== "crawler") return agent;
+    return agent;
+  };
+  const defaultAgentRoster = () => [
+    {
+      id: "alice",
+      role: "A.L.I.C.E",
+      status: aliceIsThinking ? "active" : "idle",
+      currentTask: aliceIsThinking ? "Processing directive..." : "Waiting for instruction",
+    },
+    {
+      id: "crawler",
+      role: "Crawler",
+      status: "idle",
+      currentTask: "Waiting for crawl",
+    },
+    {
+      id: "scanner",
+      role: "Test Lead",
+      status: isDynamicScanActive(thinkingStatus?.status) ? "active" : "idle",
+      currentTask: isDynamicScanActive(thinkingStatus?.status)
+        ? "Coordinating pentest"
+        : "Standing by",
+    },
+    {
+      id: "specialist",
+      role: "Specialist",
+      status: "idle",
+      currentTask: "No specialist dispatched",
+    },
+    {
+      id: "burp",
+      role: "Burp",
+      status: "idle",
+      currentTask: "No active scan dispatched",
+    },
+    {
+      id: "validator",
+      role: "Validator",
+      status: "idle",
+      currentTask: "No validation running",
+    },
+    {
+      id: "reporting",
+      role: "Reporting",
+      status:
+        thinkingStatus?.status === "analysing" || thinkingStatus?.status === "analyzing"
+          ? "active"
+          : "idle",
+      currentTask:
+        thinkingStatus?.status === "analysing" || thinkingStatus?.status === "analyzing"
+          ? "Analysing probe results…"
+          : "Standing by",
+    },
+  ];
+  const representsAgent = (agent, placeholder) => {
+    if (agent.id === placeholder.id) return true;
+    if (placeholder.id === "burp") return agent.role === "Burp" || agent.id?.startsWith("burp-");
+    if (placeholder.id === "validator")
+      return agent.role === "Validator" || agent.id?.startsWith("validator-");
+    if (placeholder.id === "specialist")
+      return agent.role === "Specialist" || agent.id?.startsWith("specialist-");
+    if (placeholder.id === "reporting")
+      return agent.role === "Reporting" || agent.id === "reporting";
+    return false;
+  };
+  const fmtEventTime = (value) => {
+    if (!value) return "--:--:--";
+    try {
+      return parseDate(value).toLocaleTimeString("en-US", {
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+    } catch {
+      return "--:--:--";
+    }
+  };
+  const crawlEventsFromRun = () => {
+    const progress = run?.per_user_progress || {};
+    const labelByUsername = new Map(
+      (run?.credentials || []).map((c) => [c.username, c.label || c.username]),
+    );
+    return Object.entries(progress)
+      .filter(([, p]) => p && (p.current_url || p.done || p.pages_visited))
+      .map(([username, p]) => ({
+        ts: fmtEventTime(p.updated_at),
+        username: labelByUsername.get(username) || username || "anonymous",
+        url: p.current_url || "",
+        pagesVisited: p.pages_visited || 0,
+        done: !!p.done,
+        stage: p.stage || (p.done ? "phase_complete" : "page_visit"),
+        stageLabel: p.stage_label || (p.done ? "Credential phase complete" : "Opening page"),
+        phaseIndex: p.phase_index,
+        phaseTotal: p.phase_total,
+      }));
+  };
+  const crawlEventsFromActivityLog = () =>
+    activityLog
+      .filter(
+        (entry) =>
+          ["crawl", "reconcile"].includes(entry.phase) &&
+          entry.data?.stage &&
+          (entry.page_url || entry.data?.username),
+      )
+      .map((entry) => ({
+        ts: entry._ts || "--:--:--",
+        username: entry.data?.username || "",
+        url: entry.page_url || "",
+        pagesVisited: entry.data?.pages_visited || 0,
+        done: entry.data?.stage === "phase_complete",
+        stage: entry.data.stage,
+        stageLabel: entry.data.stage_label || entry.message,
+        phaseIndex: entry.data.phase_index,
+        phaseTotal: entry.data.phase_total,
+        task: entry.message,
+      }));
+  const mergeCrawlEvents = (liveEvents, threadEvents) => {
+    const seen = new Set();
+    return [...(liveEvents || []), ...threadEvents].filter((event) => {
+      const key = `${event.username || ""}:${event.url || ""}:${event.pagesVisited || 0}:${event.stage || ""}:${event.done ? 1 : 0}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const agentCrawlEvents = (agent) =>
+    agent?.id === "crawler"
+      ? mergeCrawlEvents(agent.crawlEvents || [], [
+          ...crawlEventsFromRun(),
+          ...crawlEventsFromActivityLog(),
+        ])
+      : [];
+  const compactAgentText = (value, max = 180) => {
+    const text = String(value || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  };
+  const thinkingStepTitle = (entry) => {
+    const step = entry.data?.step;
+    const prefix = step ? `Step ${step}` : "Step";
+    const message = String(entry.message || "")
+      .replace(/^Step\s+\d+:\s*/i, "")
+      .trim();
+    const isDuplicateStep = (value) => !value || /^Step\s+\d+$/i.test(String(value).trim());
+    let detail =
+      entry.data?.payload_purpose ||
+      entry.data?.hypothesis ||
+      entry.data?.observation ||
+      entry.data?.payload_summary ||
+      message;
+    if (isDuplicateStep(detail)) {
+      if (entry.data?.tool) {
+        detail = `Context tool: ${entry.data.tool}`;
+      } else if (entry.data?.method && entry.data?.url) {
+        detail = `${entry.data.method} ${truncUrl(entry.data.url, 110)}${entry.data.status !== undefined ? ` → ${entry.data.status}` : ""}`;
+      } else if (message && !isDuplicateStep(message)) {
+        detail = message;
+      } else if (entry.status === "deciding") {
+        detail = "LLM deciding next action";
+      } else {
+        detail = "Reviewing scan state";
+      }
+    }
+    const cleaned = compactAgentText(detail || "Reviewing next action");
+    return `${prefix}: ${cleaned}`;
+  };
+  const thinkingStepOutcome = (entry) => {
+    const parts = [];
+    if (entry.data?.tool) parts.push(`Tool: ${entry.data.tool}`);
+    if (entry.data?.method && entry.data?.url)
+      parts.push(`${entry.data.method}: ${truncUrl(entry.data.url, 120)}`);
+    if (entry.data?.observation)
+      parts.push(`Observed: ${compactAgentText(entry.data.observation, 140)}`);
+    if (entry.data?.hypothesis)
+      parts.push(`Hypothesis: ${compactAgentText(entry.data.hypothesis, 140)}`);
+    if (entry.data?.payload_purpose)
+      parts.push(`Purpose: ${compactAgentText(entry.data.payload_purpose, 140)}`);
+    if (entry.data?.payload_summary)
+      parts.push(`Payload: ${compactAgentText(entry.data.payload_summary, 120)}`);
+    if (entry.data?.status !== undefined) parts.push(`Status: ${entry.data.status}`);
+    return parts.join(" · ");
+  };
+  const testLeadHistory = () =>
+    activityLog
+      .filter((entry) => entry.phase === "thinking_step")
+      .map((entry) => ({
+        ts: entry._ts || "--:--:--",
+        task: thinkingStepTitle(entry),
+        outcome: thinkingStepOutcome(entry),
+      }));
+  const agentTaskHistory = (agent) =>
+    agent?.id === "scanner" && testLeadHistory().length
+      ? testLeadHistory()
+      : agent?.taskHistory || [];
+  const formatCrawlEvent = (event) => {
+    const phaseLabel =
+      event.phaseIndex && event.phaseTotal
+        ? `Phase ${event.phaseIndex}/${event.phaseTotal} · `
+        : "";
+    if (event.done)
+      return `${phaseLabel}Completed crawl as ${event.username || "anonymous"} (${event.pagesVisited || 0} pg)`;
+    if (event.task && !event.url) return event.task;
+    return `${phaseLabel}${event.stageLabel || "Crawling"} · ${event.username || "anonymous"}${event.url ? `: ${truncUrl(event.url, 88)}` : ""}`;
+  };
+  const agentCurrentTask = (agent) => {
+    agent = normalizeAgentForRun(agent);
+    const crawlEvents = agentCrawlEvents(agent);
+    const explicitCrawlerStage =
+      agent?.id === "crawler" &&
+      agent.status === "active" &&
+      /^(?:Preparing|Authenticating|Signing in|Access check|Verifying page access|Finali[sz]ing crawl|Phase \d+\/\d+)/i.test(
+        String(agent.currentTask || ""),
+      );
+    if (explicitCrawlerStage) return agent.currentTask;
+    if (agent?.id === "crawler" && crawlEvents.length) {
+      if (agent.status !== "active") {
+        const label =
+          run?.status === "failed"
+            ? "Crawl failed"
+            : run?.status === "stopped"
+              ? "Crawl stopped"
+              : run?.status === "complete"
+                ? "Crawl complete"
+                : "Crawl is not running";
+        return agent.outcome ? `${label} · ${agent.outcome}` : label;
+      }
+      const active = [...crawlEvents].reverse().find((h) => !h.done && h.url);
+      const latest = active || crawlEvents[crawlEvents.length - 1];
+      return formatCrawlEvent(latest);
+    }
+    // Lifecycle updates are emitted by the backend after the Test Lead has
+    // delegated probe analysis (and again once every finalisation phase ends).
+    // They must take precedence over the last per-step activity-log entry,
+    // otherwise the UI incorrectly keeps showing "Step N: LLM deciding…".
+    const lifecycleTasks = new Set([
+      // Keep scans that were already running during the wording update visible.
+      "Handed probe analysis to Reporting",
+      "Testing complete - handed traffic to reporting agent for analysis...",
+      "Scan complete",
+      "Scan stopped",
+    ]);
+    if (agent?.id === "scanner" && lifecycleTasks.has(agent.currentTask)) {
+      return agent.currentTask;
+    }
+    if (agent?.id === "scanner" && testLeadHistory().length) {
+      if (agent.status !== "active") return "Standing by";
+      return testLeadHistory()[testLeadHistory().length - 1].task;
+    }
+    return agent?.currentTask || "Waiting for work";
+  };
+  const agentStatusLabel = (agent) => {
+    if (agent?.status === "active") return "ACTIVE";
+    if (agent?.status === "idle") return "IDLE";
+    if (agent?.status === "failed") return "FAILED";
+    return "COMPLETE";
+  };
+  const upsertAgent = useCallback((items, patch, histEntry = null) => {
+    const normalized = {
+      ...patch,
+      role: patch.id === "crawler" ? "Crawler" : patch.id === "scanner" ? "Test Lead" : patch.role,
+    };
+    const idx = items.findIndex((a) => a.id === normalized.id);
+    if (idx === -1) {
+      return [
+        ...items,
+        {
+          ...normalized,
+          taskHistory: histEntry ? [histEntry] : [],
+          crawlEvents: normalized.crawlEvents || [],
+        },
+      ];
+    }
+    const updated = [...items];
+    const prev = updated[idx];
+    updated[idx] = {
+      ...prev,
+      ...normalized,
+      taskHistory: histEntry
+        ? [...(prev.taskHistory || []), histEntry].slice(-200)
+        : prev.taskHistory || [],
+      crawlEvents: normalized.crawlEvents || prev.crawlEvents || [],
+    };
+    return updated;
+  }, []);
+
+  // Seed activity log from persisted DB entries on mount so it survives navigation.
+  useEffect(() => {
+    webRunsApi
+      .getScanLog(runId)
+      .then((entries) => {
+        entries = entries || [];
+        setActivityLog(
+          entries.map((e) => {
+            const ts = e._persisted_at
+              ? parseDate(e._persisted_at).toLocaleTimeString("en-US", {
+                  hour12: false,
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  second: "2-digit",
+                })
+              : "--:--:--";
+            return {
+              ...e,
+              _ts: ts,
+              _id: "db-" + e._persisted_at + "-" + e.phase + "-" + e.status,
+            };
+          }),
+        );
+        // Restore site plan data from persisted log.
+        const planComplete = entries.find(
+          (e) => e.phase === "site_plan" && e.status === "complete" && e.data,
+        );
+        if (planComplete) setSitePlanData(planComplete.data);
+      })
+      .catch(() => {});
+  }, [runId]);
+
+  // Seed agents panel from persisted DB entries on mount. Reconcile stale
+  // active agents, while preserving validators whose managed validation task
+  // is still running after the pentest itself has completed.
+  useEffect(() => {
+    Promise.all([
+      webRunsApi.getAgentLog(runId),
+      webRunsApi.getThinkingStatus(runId),
+      webRunsApi.getValidateStatus(runId),
+      webRunsApi.getCrawlStatus(runId).catch(() => null),
+    ])
+      .then(([entries, scanStatus, validationStatus, crawlStatus]) => {
+        entries = entries || [];
+        const scanRunning = isDynamicScanActive(scanStatus?.status);
+        const validationRunning = validationStatus?.status === "running";
+        const agentsMap = new Map();
+        for (const e of entries) {
+          const entryTs = e.created_at
+            ? parseDate(e.created_at).toLocaleTimeString("en-US", {
+                hour12: false,
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })
+            : "--:--:--";
+          const role =
+            e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
+          const existing = agentsMap.get(e.agent_id) || {
+            id: e.agent_id,
+            role,
+            status: e.status,
+            currentTask: e.current_task,
+            taskHistory: [],
+            crawlEvents: [],
+          };
+          existing.status = e.status;
+          existing.role = role;
+          existing.currentTask = e.current_task;
+          existing.taskHistory.push({
+            ts: entryTs,
+            task: e.current_task,
+            outcome: e.outcome,
+          });
+          agentsMap.set(e.agent_id, existing);
+        }
+        const crawler = agentsMap.get("crawler");
+        if (crawlStatus?.running) {
+          agentsMap.set("crawler", {
+            id: "crawler",
+            role: "Crawler",
+            currentTask: crawler?.currentTask || "Crawling application…",
+            taskHistory: crawler?.taskHistory || [],
+            crawlEvents: crawler?.crawlEvents || [],
+            ...crawler,
+            status: "active",
+          });
+        } else if (crawler?.status === "active") {
+          agentsMap.set("crawler", {
+            ...crawler,
+            status: "idle",
+            currentTask: "Crawl is not running",
+          });
+        }
+        // If no scan is running, reset stale "active" agents to "idle". A
+        // validator is an exception: it can legitimately continue after scan
+        // completion when the user clicked Validate Issues.
+        if (!scanRunning) {
+          for (const [id, agent] of agentsMap) {
+            const activeValidator =
+              validationRunning && (id.startsWith("validator-") || agent.role === "Validator");
+            if (agent.status === "active" && id !== "crawler" && !activeValidator) {
+              agentsMap.set(id, {
+                ...agent,
+                status: "idle",
+              });
+            }
+          }
+        }
+        setAgents([...agentsMap.values()]);
+      })
+      .catch(() => {});
+  }, [runId]);
+
+  // Load token usage from the API on mount (in-process memory, best effort).
+  useEffect(() => {
+    webRunsApi
+      .getTokenUsage(runId)
+      .then((d) => {
+        if (d) setTokenUsage(d);
+      })
+      .catch(() => {});
+  }, [runId]);
+
+  // Auto-scroll activity feed when new entries arrive
+  useEffect(() => {
+    if (activeTab !== "activity" || !activityFeedRef.current) return;
+    activityFeedRef.current.scrollTop = activityFeedRef.current.scrollHeight;
+  }, [activityLog.length, activeTab]);
+
+  return {
+    activityLog,
+    setActivityLog,
+    expandedLogIds,
+    toggleLogId,
+    activitySubTab,
+    setActivitySubTab,
+    agents,
+    setAgents,
+    tokenUsage,
+    setTokenUsage,
+    tokenExpanded,
+    setTokenExpanded,
+    sitePlanData,
+    setSitePlanData,
+    activityFeedRef,
+    upsertAgent,
+    normalizeAgentForRun,
+    defaultAgentRoster,
+    representsAgent,
+    agentRoleLabel,
+    agentCurrentTask,
+    agentCrawlEvents,
+    agentTaskHistory,
+    agentStatusLabel,
+  };
+}

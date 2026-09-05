@@ -1,0 +1,396 @@
+import * as apiRunsApi from "../api/apiRuns.js";
+import * as webRunsApi from "../api/webRuns.js";
+import { useState, useEffect, useCallback, useRef } from "react";
+
+import { leadsExportFilename, leadsToMarkdown } from "./files.js";
+import { downloadTextFile } from "../lib/download.js";
+import { usePolling } from "../hooks/usePolling.js";
+import { SastLeadDetails } from "../ui/SastLeadDetails.jsx";
+import { LeadReferenceLink } from "../ui/FindingReferenceLink.jsx";
+
+export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initialLeadRef }) {
+  const isApi = runKind === "api";
+  const [available, setAvailable] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [selected, setSelected] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const [expanded, setExpanded] = useState(new Set());
+  const prevScanRunning = useRef(scanRunning);
+  const loadLeads = useCallback(
+    () =>
+      (isApi ? apiRunsApi.getApiRunLeads(runId) : webRunsApi.getRunLeads(runId))
+        .then(setLeads)
+        .catch(() => {}),
+    [isApi, runId],
+  );
+  const loadAvailable = useCallback(
+    () =>
+      (isApi
+        ? apiRunsApi.getApiRunAvailableSastRuns(runId)
+        : webRunsApi.getRunAvailableSastRuns(runId)
+      )
+        .then(setAvailable)
+        .catch(() => {}),
+    [isApi, runId],
+  );
+  usePolling(loadLeads, { enabled: scanRunning, intervalMs: 3000 });
+  usePolling(loadAvailable, { enabled: false });
+  // Final refresh when the scan stops so the last investigation outcomes appear.
+  useEffect(() => {
+    if (initialLeadRef) {
+      const match = leads.find((lead) => lead.reference === initialLeadRef);
+      if (match) setExpanded((previous) => new Set(previous).add(match.id));
+    }
+  }, [initialLeadRef, leads]);
+  useEffect(() => {
+    if (prevScanRunning.current && !scanRunning) {
+      loadLeads();
+    }
+    prevScanRunning.current = scanRunning;
+  }, [scanRunning, loadLeads]);
+  const toggle = (id) =>
+    setExpanded((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  const onImport = async () => {
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    setMsg(null);
+    try {
+      const r = await (isApi
+        ? apiRunsApi.importApiSastLeads(runId, {
+            sast_run_id: +selected,
+          })
+        : webRunsApi.importSastLeads(runId, {
+            sast_run_id: +selected,
+          }));
+      setMsg(
+        r.imported > 0 ? `Imported ${r.imported} lead(s).` : "Already imported (no new leads).",
+      );
+      await loadLeads();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const onClearAll = async () => {
+    if (
+      !confirm(
+        "Remove all imported SAST leads from this run?\nThe original SAST scan is not affected.",
+      )
+    )
+      return;
+    setClearBusy(true);
+    setError(null);
+    setMsg(null);
+    try {
+      await (isApi ? apiRunsApi.clearApiRunLeads(runId) : webRunsApi.clearRunLeads(runId));
+      setLeads([]);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setClearBusy(false);
+    }
+  };
+  const onDeleteRow = async (leadId) => {
+    setError(null);
+    try {
+      await (isApi
+        ? apiRunsApi.deleteApiRunLead(runId, leadId)
+        : webRunsApi.deleteRunLead(runId, leadId));
+      setLeads((prev) => prev.filter((l) => l.id !== leadId));
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+  const sevCls = (s) =>
+    ({
+      high: "sev-high",
+      critical: "sev-high",
+      medium: "sev-medium",
+      low: "sev-low",
+      info: "sev-info",
+    })[s] || "sev-medium";
+  const statCls = (s) =>
+    ({
+      open: "neutral",
+      investigating: "warning",
+      confirmed: "success",
+      dismissed: "neutral",
+      inconclusive: "neutral",
+    })[s] || "neutral";
+  return (
+    <div className={"findings-panel" + (isApi ? " flush" : "")}>
+      <div
+        className="findings-status-bar"
+        style={{
+          flexWrap: "wrap",
+        }}
+      >
+        <span
+          className="badge neutral"
+          style={{
+            fontSize: 12,
+          }}
+        >
+          {leads.length} lead{leads.length !== 1 ? "s" : ""}
+        </span>
+        {scanRunning && (
+          <span
+            className="badge warning"
+            style={{
+              fontSize: 12,
+            }}
+          >
+            Scan running…
+          </span>
+        )}
+        <div
+          style={{
+            flex: 1,
+          }}
+        ></div>
+        <div
+          className="row"
+          style={{
+            gap: 8,
+            flexWrap: "wrap",
+            maxWidth: "100%",
+          }}
+        >
+          <select
+            value={selected}
+            onChange={(e) => setSelected(e.target.value)}
+            style={{
+              minWidth: 0,
+              width: 240,
+              maxWidth: "100%",
+              flex: "1 1 240px",
+            }}
+          >
+            <option value="">Import from SAST scan…</option>
+            {available.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name} ({r.leads_count} lead{r.leads_count === 1 ? "" : "s"})
+              </option>
+            ))}
+          </select>
+          <button className="btn sm" disabled={!selected || busy} onClick={onImport}>
+            {busy ? "Importing…" : "Import leads"}
+          </button>
+          {leads.length > 0 && (
+            <button
+              className="btn sm"
+              onClick={() =>
+                downloadTextFile(
+                  leadsExportFilename(`${isApi ? "api" : "web"}-run-${runId}`),
+                  leadsToMarkdown(leads, {
+                    runName: `${isApi ? "API" : "Web"} run #${runId}`,
+                    generatedAt: new Date(),
+                  }),
+                  "text/markdown;charset=utf-8",
+                )
+              }
+            >
+              Export leads
+            </button>
+          )}
+          {leads.length > 0 && (
+            <button className="btn danger-outline sm" disabled={clearBusy} onClick={onClearAll}>
+              {clearBusy ? "Clearing…" : "Clear all"}
+            </button>
+          )}
+        </div>
+      </div>
+      {error && (
+        <div
+          className="alert error"
+          style={{
+            margin: "8px 16px",
+          }}
+        >
+          {error}
+        </div>
+      )}
+      {msg && (
+        <div
+          className="subtle"
+          style={{
+            margin: "8px 16px",
+          }}
+        >
+          {msg}
+        </div>
+      )}
+      {leads.length === 0 ? (
+        <div
+          className="subtle"
+          style={{
+            padding: 24,
+            textAlign: "center",
+          }}
+        >
+          {available.length === 0
+            ? "No completed SAST scans with leads yet. Run one from the SAST tab, then import its leads here."
+            : "No leads imported into this run yet. Pick a SAST scan above and click Import leads."}
+        </div>
+      ) : (
+        <div className="findings-table-wrap">
+          <table className="findings-table">
+            <thead>
+              <tr>
+                <th
+                  style={{
+                    width: 90,
+                  }}
+                >
+                  Severity
+                </th>
+                <th>Title</th>
+                <th
+                  style={{
+                    width: 90,
+                  }}
+                >
+                  Category
+                </th>
+                <th
+                  style={{
+                    width: 90,
+                  }}
+                >
+                  Conf.
+                </th>
+                <th>Location</th>
+                <th
+                  style={{
+                    width: 110,
+                  }}
+                >
+                  Status
+                </th>
+                <th
+                  style={{
+                    width: 70,
+                  }}
+                ></th>
+              </tr>
+            </thead>
+            <tbody>
+              {leads.map((l) => {
+                const isExpanded = expanded.has(l.id);
+                const investigated = l.status && l.status !== "open";
+                return [
+                  <tr
+                    key={l.id}
+                    style={{
+                      cursor: "pointer",
+                      background: investigated
+                        ? "var(--surface, rgba(255,255,255,0.02))"
+                        : undefined,
+                    }}
+                    onClick={() => toggle(l.id)}
+                  >
+                    <td>
+                      <span className={"sev-badge " + sevCls(l.severity)}>
+                        {l.severity || "medium"}
+                      </span>
+                    </td>
+                    <td
+                      style={{
+                        fontWeight: 600,
+                      }}
+                    >
+                      <LeadReferenceLink
+                        reference={l.reference}
+                        title={l.title}
+                        description={l.description}
+                        severity={l.severity}
+                        href={`#/runs/${runId}/leads?lead=${encodeURIComponent(l.reference || "")}`}
+                      />{" "}
+                      <span>{l.title}</span>
+                    </td>
+                    <td>{l.category || "—"}</td>
+                    <td>{Math.round((l.confidence || 0) * 100)}%</td>
+                    <td
+                      className="subtle"
+                      style={{
+                        fontSize: "0.85em",
+                      }}
+                    >
+                      {l.location || "—"}
+                    </td>
+                    <td>
+                      <span
+                        className={"badge " + statCls(l.status)}
+                        style={{
+                          fontSize: 11,
+                        }}
+                      >
+                        {l.status || "open"}
+                      </span>
+                    </td>
+                    <td
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                        justifyContent: "flex-end",
+                      }}
+                    >
+                      <span
+                        className="subtle"
+                        style={{
+                          fontSize: 11,
+                        }}
+                      >
+                        {isExpanded ? "▲" : "▼"}
+                      </span>
+                      <button
+                        className="btn ghost sm"
+                        title="Delete lead"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteRow(l.id);
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </td>
+                  </tr>,
+                  isExpanded && (
+                    <tr key={l.id + "-detail"} className="findings-detail-row">
+                      <td
+                        colSpan={7}
+                        style={{
+                          padding: "12px 16px",
+                          background: "var(--bg, rgba(0,0,0,0.15))",
+                          borderTop: "1px solid var(--border, rgba(255,255,255,0.06))",
+                        }}
+                      >
+                        <SastLeadDetails
+                          lead={l}
+                          findingHref={`#/${isApi ? "api-runs" : "runs"}/${runId}/findings`}
+                        />
+                      </td>
+                    </tr>
+                  ),
+                ];
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── WebRunWorkProgramTab ───────────────────────────────────────────────────────

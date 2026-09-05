@@ -40,7 +40,7 @@ The frontend is a Vite + React application located in `frontend/`.
 
 When making UI changes:
 
-1. Make UI edits in the Vite JSX files within `frontend/src/`, such as `frontend/src/App.jsx` or files under `frontend/src/pages/`.
+1. Make UI edits in the Vite JSX files within `frontend/src/`, such as `frontend/src/app/App.jsx` or files under `frontend/src/features/`.
 2. Do not edit files directly in `src/aespa/web/`; these are generated build artifacts.
 3. After completing UI changes, run `npm run build` inside `frontend/`. This rebuild places compiled assets in `src/aespa/web/` so they are served by `uv run aespa`.
 

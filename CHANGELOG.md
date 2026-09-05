@@ -4,6 +4,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+- **Frontend maintenance**: Reorganized the UI into feature modules with shared components, API clients, and styles. Added automated checks for routing, forms, and browser rendering. Browser back and forward now restore the selected web and SAST run tabs, and Settings tabs support keyboard navigation.
+
 - **A.L.I.C.E. goal mode**: Start a site or API chat with `/goal <objective>` to keep A.L.I.C.E. working until the requested outcome is verified or a specific blocker prevents more progress. Goals save their checkpoints, survive browser navigation, pause safely across restarts and provider limits, accept guidance while running, and include pause, resume, edit, and clear controls.
 - **Agent console logo**: The Agent screen now shows a large, shaded circuit-style AESPA logo while it waits for its first agent activity message. Different character densities and red-orange colors reproduce the macOS icon in the terminal. The logo is replaced by the activity log as soon as work starts, with a fixed-grid compact layout for narrow terminals.
 - **Console database operations**: The console Settings menu can now open separate Server Settings and Database Operations screens using the arrow keys and Enter. Database Operations can create a complete SQLite backup, clear all scan runs while keeping targets and configuration, or reset the database. Clear and Reset require typing an exact confirmation, and neither operation runs while scan or agent work is active.
