@@ -3,7 +3,8 @@ claude-sonnet-4-5`,factory_droid:"Models are loaded from the signed-in Droid CLI
 Models are loaded from GitHub Copilot API`,openai_codex:`auto
 Models are loaded from the signed-in ChatGPT account`,google_antigravity:`auto
 Gemini 3.7 Flash (High)
-Gemini 3.1 Pro (High)`,openai:`gpt-5.6-luna
+Gemini 3.1 Pro (High)`,openai:`gpt-6-astra
+gpt-5.6-luna
 gpt-5.6-terra
 gpt-5.6-sol
 gpt-5.5

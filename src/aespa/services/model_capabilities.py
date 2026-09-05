@@ -280,6 +280,34 @@ def documented_model_capability(api_format: str, model: str) -> dict[str, Any] |
         "bedrock_mantle",
     }:
         name = normalize_model_name(model)
+        if api_format == "openai" and name == "gpt-6-astra":
+            return {
+                "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+                "context_window_tokens": 1_050_000,
+                "context_window_source": "openai_documentation",
+                "source": "native",
+                "confidence": "documented",
+                "strategy": "documented_registry",
+            }
+        if api_format == "openai" and (
+            name == "gpt-5-6"
+            or name.startswith(("gpt-5-6-luna", "gpt-5-6-terra", "gpt-5-6-sol"))
+        ):
+            return {
+                "supported_efforts": [
+                    "none",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max",
+                ],
+                "context_window_tokens": 1_050_000,
+                "context_window_source": "openai_documentation",
+                "source": "native",
+                "confidence": "documented",
+                "strategy": "documented_registry",
+            }
         if name.startswith(("gpt-5", "o3", "o4")):
             return {
                 "supported_efforts": ["low", "medium", "high"],

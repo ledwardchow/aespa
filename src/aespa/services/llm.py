@@ -1482,7 +1482,7 @@ async def _call_impl(
             return await _openrouter(config, prompt, screenshot_b64)
         if config.provider == "bedrock":
             return await _bedrock(config, prompt, screenshot_b64)
-        if config.provider == "bedrock_mantle":
+        if config.provider == "bedrock_mantle" or _uses_openai_responses(config):
             return await _openai_responses(config, prompt, screenshot_b64)
         return await _openai_compat(config, prompt, screenshot_b64)
 
@@ -1526,7 +1526,7 @@ async def _call_impl(
             resp = await _openrouter(config, prompt, screenshot_b64)
         elif config.provider == "bedrock":
             resp = await _bedrock(config, prompt, screenshot_b64)
-        elif config.provider == "bedrock_mantle":
+        elif config.provider == "bedrock_mantle" or _uses_openai_responses(config):
             resp = await _openai_responses(config, prompt, screenshot_b64)
         else:
             resp = await _openai_compat(config, prompt, screenshot_b64)
@@ -1878,9 +1878,8 @@ async def _stream_chat_completion_impl(
                 elif item_type == "error":
                     raise RuntimeError(f"Bedrock SDK stream failed: {val}") from val
 
-    elif config.provider == "bedrock_mantle":
-        # Mantle uses the OpenAI Responses API (gpt-5.x are Responses-only).
-        client = _make_bedrock_mantle_client(config)
+    elif config.provider == "bedrock_mantle" or _uses_openai_responses(config):
+        client = _make_responses_client(config)
         r_input = [
             {"type": "message", "role": m["role"], "content": m["content"]}
             for m in messages
@@ -1889,7 +1888,7 @@ async def _stream_chat_completion_impl(
         try:
             stream = await _create_response(
                 client,
-                _mantle_response_kwargs(
+                _responses_request_kwargs(
                     config, input=r_input, instructions=system_message, stream=True
                 ),
             )
@@ -1899,8 +1898,8 @@ async def _stream_chat_completion_impl(
                     if delta:
                         yield delta
         except Exception as e:
-            log.exception("Error in Bedrock Mantle responses stream")
-            raise RuntimeError(f"Bedrock Mantle responses stream failed: {e}") from e
+            log.exception("Error in OpenAI Responses stream")
+            raise RuntimeError(f"OpenAI Responses stream failed: {e}") from e
 
     else:
         from openai import AsyncOpenAI
@@ -2138,8 +2137,26 @@ def _model_needs_reasoning_params(model: str) -> bool:
     lowered = (model or "").lower().split("/")[-1]
     return (
         lowered.startswith(("o1", "o3", "o4"))
-        or lowered.startswith("gpt-5")
+        or lowered.startswith(("gpt-5", "gpt-6"))
         or "reasoning" in lowered
+    )
+
+
+def _is_gpt_6_astra(model: str) -> bool:
+    return (model or "").lower().split("/")[-1].startswith("gpt-6-astra")
+
+
+def _is_gpt_5_6(model: str) -> bool:
+    model = (model or "").lower().split("/")[-1]
+    return model == "gpt-5.6" or model.startswith(
+        ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
+    )
+
+
+def _uses_openai_responses(config: LLMConfig) -> bool:
+    """Return whether this direct OpenAI model uses the Responses API."""
+    return config.provider == "openai" and (
+        _is_gpt_6_astra(config.model) or _is_gpt_5_6(config.model)
     )
 
 
@@ -2652,16 +2669,34 @@ def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
     return items
 
 
-def _is_mantle_reasoning_model(model: str) -> bool:
-    """True for Mantle reasoning models (gpt-5.x, o-series) that reject temperature.
+def _is_reasoning_model_without_sampling(model: str) -> bool:
+    """True for reasoning models that reject temperature.
 
     Mantle ids carry a vendor prefix (e.g. ``openai.gpt-5.5``), which the slash-based
     ``_model_needs_reasoning_params`` split doesn't catch — so match the substring too.
     """
-    return "gpt-5" in (model or "").lower() or _model_needs_reasoning_params(model)
+    return any(
+        marker in (model or "").lower() for marker in ("gpt-5", "gpt-6")
+    ) or _model_needs_reasoning_params(model)
 
 
-def _mantle_response_kwargs(
+def _make_responses_client(config: LLMConfig) -> Any:
+    if config.provider == "bedrock_mantle":
+        return _make_bedrock_mantle_client(config)
+
+    from openai import AsyncOpenAI
+
+    kwargs: dict[str, Any] = {"api_key": config.api_key or "not-needed"}
+    if config.base_url:
+        base = config.base_url.rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
+        kwargs["base_url"] = base
+    kwargs.update(_llm_client_kwargs())
+    return AsyncOpenAI(**kwargs)
+
+
+def _responses_request_kwargs(
     config: LLMConfig,
     *,
     input: Any,
@@ -2676,11 +2711,16 @@ def _mantle_response_kwargs(
     }
     if instructions is not None:
         kwargs["instructions"] = instructions
-    if config.reasoning_effort:
-        kwargs["reasoning"] = {"effort": config.reasoning_effort}
+    reasoning_effort = config.reasoning_effort
+    if _is_gpt_6_astra(config.model) and reasoning_effort in {"none", "minimal"}:
+        reasoning_effort = "low"
+    if reasoning_effort:
+        kwargs["reasoning"] = {"effort": reasoning_effort}
     # Reasoning models (gpt-5.x / o-series) reject a custom temperature; skip it
     # for them rather than pay a failed round-trip (the retry below is a backstop).
-    if config.temperature is not None and not _is_mantle_reasoning_model(config.model):
+    if config.temperature is not None and not _is_reasoning_model_without_sampling(
+        config.model
+    ):
         kwargs["temperature"] = config.temperature
     if tools is not None:
         kwargs["tools"] = tools
@@ -2742,7 +2782,7 @@ def _extract_responses_text(resp: Any) -> str:
 async def _openai_responses(
     config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
 ) -> str:
-    client = _make_bedrock_mantle_client(config)
+    client = _make_responses_client(config)
     if screenshot_b64:
         r_input: Any = [
             {
@@ -2760,7 +2800,7 @@ async def _openai_responses(
     else:
         r_input = prompt
     resp = await _create_response(
-        client, _mantle_response_kwargs(config, input=r_input)
+        client, _responses_request_kwargs(config, input=r_input)
     )
     _record_responses_usage(config, resp)
     return _extract_responses_text(resp)
@@ -5050,10 +5090,10 @@ async def _call_with_tools_impl(
             )
         return blocks, str(stop_reason_raw), raw_content_ant
 
-    # ── Bedrock Mantle (OpenAI Responses API with function tools) ─────────────
-    if config.provider == "bedrock_mantle":
-        client = _make_bedrock_mantle_client(config)
-        r_kwargs = _mantle_response_kwargs(
+    # ── OpenAI Responses API with function tools ──────────────────────────────
+    if config.provider == "bedrock_mantle" or _uses_openai_responses(config):
+        client = _make_responses_client(config)
+        r_kwargs = _responses_request_kwargs(
             config,
             input=_ant_messages_to_responses(messages),
             instructions=system_message,

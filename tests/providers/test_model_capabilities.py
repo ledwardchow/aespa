@@ -3,10 +3,41 @@ from __future__ import annotations
 import asyncio
 
 from aespa.services.model_capabilities import (
+    documented_model_capability,
     enrich_model_options,
     fuzzy_match_model,
     gemini_capability,
 )
+
+
+def test_gpt_6_astra_has_documented_reasoning_and_context_limits():
+    capability = documented_model_capability("openai", "gpt-6-astra")
+
+    assert capability is not None
+    assert capability["supported_efforts"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert capability["context_window_tokens"] == 1_050_000
+
+
+def test_gpt_5_6_family_has_documented_reasoning_and_context_limits():
+    for model in ("gpt-5.6", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"):
+        capability = documented_model_capability("openai", model)
+
+        assert capability is not None
+        assert capability["supported_efforts"] == [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ]
+        assert capability["context_window_tokens"] == 1_050_000
 
 
 def test_openrouter_fuzzy_match_requires_a_clear_winner():

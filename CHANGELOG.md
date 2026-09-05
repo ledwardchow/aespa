@@ -16,6 +16,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **GPT-6 Astra support**: OpenAI connections can now use GPT-6 Astra for scans and agent workflows. Astra requests use the Responses API, including tool calls, and the model form shows its supported reasoning levels and context window.
 - **Linux display detection**: AESPA now warns when a Linux host cannot access X11 or Wayland. Guided login and visible browser mode are disabled until a graphical display is available.
 - **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser, Reporting Lab, and Applications options are grouped under Feature Visibility.
 - **Configurable Standard scan mode**: Standard scans now continue until the Test Lead has tested the configured percentage of applicable OWASP coverage items. Set the target in the Test Lead agent settings; the default is 60%.
@@ -27,6 +28,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **GPT-5.6 OpenAI compatibility**: Direct OpenAI connections now use the Responses API for GPT-5.6 Luna, Terra, Sol, and the Sol alias. Their complete reasoning options and 1,050,000-token context window are now available when configuring a model.
 - **Clearer Python sandbox setup errors**: The settings page and terminal console now distinguish a missing executor image from a Docker service that is stopped or cannot be reached.
 - **Run tabs follow browser navigation**: Browser back and forward now restore the selected web and SAST run tabs.
 - **A.L.I.C.E. chat history keeps its place**: Incoming and streaming messages no longer move the chat to the bottom after you scroll up. The chat follows new messages again when you return to the bottom.

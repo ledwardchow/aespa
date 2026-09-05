@@ -506,6 +506,7 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "claude-3-5-sonnet-20241022",
     ],
     "openai": [
+        "gpt-6-astra",
         "gpt-5.6-luna",
         "gpt-5.6-terra",
         "gpt-5.6-sol",
