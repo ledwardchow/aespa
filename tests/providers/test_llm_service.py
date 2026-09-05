@@ -1909,6 +1909,111 @@ def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(
     }
 
 
+@pytest.mark.parametrize(
+    ("model", "reasoning_effort", "expected_effort"),
+    [
+        ("gpt-6-astra", "minimal", "low"),
+        ("gpt-5.6", "none", "none"),
+        ("gpt-5.6-luna", "none", "none"),
+        ("gpt-5.6-terra", "none", "none"),
+        ("gpt-5.6-sol", "none", "none"),
+    ],
+)
+def test_direct_openai_frontier_models_use_responses_api(
+    monkeypatch, model, reasoning_effort, expected_effort
+):
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(
+                output_text="ok",
+                output=[],
+                usage=SimpleNamespace(
+                    input_tokens=4,
+                    output_tokens=2,
+                    input_tokens_details=SimpleNamespace(cached_tokens=1),
+                ),
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model=model,
+        max_tokens=4096,
+        temperature=0.7,
+        reasoning_effort=reasoning_effort,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["request"] == {
+        "model": model,
+        "input": "hello",
+        "max_output_tokens": 4096,
+        "reasoning": {"effort": expected_effort},
+    }
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-6-astra", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+)
+@pytest.mark.anyio
+async def test_direct_openai_frontier_models_stream_with_responses_api(
+    monkeypatch, model
+):
+    captured: dict[str, object] = {}
+
+    class FakeStream:
+        def __aiter__(self):
+            async def events():
+                yield SimpleNamespace(type="response.output_text.delta", delta="hello ")
+                yield SimpleNamespace(type="response.output_text.delta", delta="world")
+
+            return events()
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            return FakeStream()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model=model,
+        max_tokens=4096,
+        temperature=0.4,
+        reasoning_effort="medium",
+    )
+    chunks = []
+    async for chunk in llm.stream_chat_completion(
+        config, "Be concise.", [{"role": "user", "content": "Say hello."}]
+    ):
+        chunks.append(chunk)
+
+    assert "".join(chunks) == "hello world"
+    assert captured["request"]["model"] == model
+    assert captured["request"]["stream"] is True
+    assert captured["request"]["instructions"] == "Be concise."
+    assert "temperature" not in captured["request"]
+
+
 def test_openai_caching_tokens_extraction_and_recording(monkeypatch):
     recorded_usages = []
 
@@ -3634,6 +3739,73 @@ def test_call_with_tools_bedrock_mantle_uses_responses_api(monkeypatch):
     assert tool_use["id"] == "call_9"
     assert tool_use["name"] == "http_request"
     assert tool_use["input"] == {"url": "/x"}
+    assert stop_reason == "tool_use"
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-6-astra", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+)
+def test_call_with_tools_direct_openai_frontier_models_use_responses_api(
+    monkeypatch, model
+):
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            call = SimpleNamespace(
+                type="function_call",
+                call_id="call_astra",
+                name="http_request",
+                arguments='{"url": "/health"}',
+            )
+            return SimpleNamespace(
+                output=[call],
+                usage=SimpleNamespace(
+                    input_tokens=5,
+                    output_tokens=3,
+                    input_tokens_details=SimpleNamespace(cached_tokens=0),
+                ),
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model=model,
+        max_tokens=4096,
+        temperature=0.2,
+        reasoning_effort="high",
+        force_tool_choice=True,
+    )
+    blocks, stop_reason, _ = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="Use tools.",
+            messages=[{"role": "user", "content": "Check health."}],
+            tools=[
+                {
+                    "name": "http_request",
+                    "description": "Send a request.",
+                    "input_schema": {"type": "object"},
+                }
+            ],
+        )
+    )
+
+    request = captured["request"]
+    assert request["model"] == model
+    assert request["reasoning"] == {"effort": "high"}
+    assert request["tool_choice"] == "required"
+    assert request["tools"][0]["type"] == "function"
+    assert "temperature" not in request
+    assert blocks[0]["id"] == "call_astra"
     assert stop_reason == "tool_use"
 
 

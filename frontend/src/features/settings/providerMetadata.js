@@ -88,7 +88,7 @@ export const PROVIDER_MODEL_PLACEHOLDERS = {
   github_copilot: "auto\nModels are loaded from GitHub Copilot API",
   openai_codex: "auto\nModels are loaded from the signed-in ChatGPT account",
   google_antigravity: "auto\nGemini 3.7 Flash (High)\nGemini 3.1 Pro (High)",
-  openai: "gpt-5.6-luna\ngpt-5.6-terra\ngpt-5.6-sol\ngpt-5.5\ngpt-5.4\ngpt-4.1",
+  openai: "gpt-6-astra\ngpt-5.6-luna\ngpt-5.6-terra\ngpt-5.6-sol\ngpt-5.5\ngpt-5.4\ngpt-4.1",
   openai_compatible: "llama-3.1-8b-instruct\nqwen2.5-coder",
   openrouter: "Models are loaded from OpenRouter API",
   google: "gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",
