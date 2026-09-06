@@ -1,7 +1,7 @@
 import * as applicationsApi from "../../shared/api/applications.js";
 import { useState, useEffect, useRef } from "react";
 
-import { safeParseJson } from "../../shared/runs/campaignPresentation.js";
+import { campaignDisplayWarnings } from "../../shared/runs/campaignPresentation.js";
 
 const MAX_ENTRIES = 300;
 // If the stream is truly silent (a genuinely empty activity history), no
@@ -119,7 +119,7 @@ export function CampaignActivityTab({ applicationId, campaignId, campaign }) {
     );
   }, [streaming, campaign]);
 
-  const warnings = safeParseJson(campaign?.warnings_json, []);
+  const warnings = campaignDisplayWarnings(campaign);
 
   return (
     <div>

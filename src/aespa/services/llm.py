@@ -6261,6 +6261,20 @@ async def thinking_agentic_loop(
             ]
             messages.append({"role": "assistant", "content": assistant_content})
 
+            # Save the model turn before any requested tool runs. A process can
+            # be killed while a browser, shell, or source tool is executing, in
+            # which case the normal post-tool checkpoint and finally block do
+            # not run. On resume, a trailing assistant tool call is repaired
+            # with an interrupted result so the model can reassess it safely.
+            if on_checkpoint:
+                try:
+                    await on_checkpoint(messages, tool_call_count)
+                except Exception:
+                    log.warning(
+                        "thinking_agentic_loop: pre-tool checkpoint failed",
+                        exc_info=True,
+                    )
+
             if not tool_use_blocks:
                 # OpenAI-style reasoning models occasionally narrate the next step instead
                 # of emitting the required tool call. Treat that as a recoverable protocol

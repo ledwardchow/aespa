@@ -19,7 +19,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
 from sqlmodel import Session, select
@@ -33,12 +35,16 @@ from aespa.models import (
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
+    CampaignValidationCase,
+    ComponentConnection,
     ComponentMapperConfig,
     ComponentSnapshot,
     CrawledPage,
     LeadTargetMapping,
     PageLink,
     SastRun,
+    ScanLead,
+    ScanLeadComponentProvenance,
     Site,
     TestRun,
     TrafficEntry,
@@ -67,6 +73,7 @@ _SOURCE_FAILURE_WARNING_MARKERS = (
     "A source-code scan did not finish successfully",
     "A resumed source-code scan did not finish successfully",
 )
+_RESTART_WARNING_MARKER = "The application restarted while this stage was running."
 
 
 class CampaignServiceError(Exception):
@@ -434,6 +441,11 @@ def _set_campaign_status(campaign_id: int, status: str) -> None:
         campaign = s.get(AssessmentCampaign, campaign_id)
         if campaign is not None:
             campaign.status = status
+            if status in _ACTIVE_STATUSES or status == "awaiting_review":
+                campaign.interrupted_stage = None
+                campaign.completed_at = None
+                campaign.error_message = None
+                _clear_resolved_source_warnings(s, campaign)
             campaign.updated_at = _utcnow()
             s.add(campaign)
             s.commit()
@@ -469,8 +481,8 @@ def _clear_resolved_source_warnings(
     A source run can be restarted from its normal SAST page. In that case the
     old campaign warning is no longer current while the restarted run is
     scanning, and should not remain in the campaign's partial-results banner.
-    The restart warning is intentionally retained because it explains why the
-    campaign had to be resumed.
+    Restart guidance is removed once the campaign is running again because its
+    instruction to retry no longer applies.
     """
     try:
         warnings = json.loads(campaign.warnings_json or "[]")
@@ -486,12 +498,19 @@ def _clear_resolved_source_warnings(
         )
         .where(CampaignSourceMember.campaign_id == campaign.id)
     ).all()
-    if any(run.status in {"failed", "cancelled"} for run in source_runs):
-        return
+    failed_source_remains = any(
+        run.status in {"failed", "cancelled"} for run in source_runs
+    )
     filtered = [
         warning
         for warning in warnings
-        if not any(marker in str(warning) for marker in _SOURCE_FAILURE_WARNING_MARKERS)
+        if _RESTART_WARNING_MARKER not in str(warning)
+        and (
+            failed_source_remains
+            or not any(
+                marker in str(warning) for marker in _SOURCE_FAILURE_WARNING_MARKERS
+            )
+        )
     ]
     if filtered != warnings:
         campaign.warnings_json = json.dumps(filtered)
@@ -874,7 +893,7 @@ async def start_campaign(campaign_id: int) -> None:
 
 
 async def rebuild_campaign_connections(campaign_id: int) -> dict:
-    """Re-map immutable source snapshots without rerunning child scans."""
+    """Re-run context matching from the frozen source snapshots."""
     if is_campaign_running(campaign_id):
         raise InvalidCampaignState(
             "Cannot rebuild connections while another campaign action is running"
@@ -887,22 +906,53 @@ async def rebuild_campaign_connections(campaign_id: int) -> dict:
             raise InvalidCampaignState(
                 f"Cannot rebuild connections while campaign is '{campaign.status}'"
             )
-        preserve_downstream = campaign.status in {
-            "awaiting_review",
-            "completed",
-            "stopped",
-        }
-        if not preserve_downstream:
-            campaign.status = "correlating"
-            campaign.error_message = None
-            campaign.updated_at = _utcnow()
-            session.add(campaign)
-            session.commit()
+        target_members = list(
+            session.exec(
+                select(CampaignTargetMember).where(
+                    CampaignTargetMember.campaign_id == campaign_id
+                )
+            ).all()
+        )
+        if any(
+            member.test_run_id is not None or member.api_test_run_id is not None
+            for member in target_members
+        ):
+            raise InvalidCampaignState(
+                "Context matching cannot be reset after live target scans have "
+                "been created. Start a new campaign to keep the existing scan "
+                "evidence intact."
+            )
+
+        _validate_context_matching_sources(session, campaign_id)
+
+        _clear_context_matching_outputs(session, campaign_id, target_members)
+        campaign.status = "correlating"
+        campaign.review_submitted_at = None
+        campaign.completed_at = None
+        campaign.error_message = None
+        campaign.interrupted_stage = None
+        try:
+            warnings = json.loads(campaign.warnings_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            warnings = []
+        campaign.warnings_json = json.dumps(
+            [
+                warning
+                for warning in warnings
+                if any(
+                    marker in str(warning) for marker in _SOURCE_FAILURE_WARNING_MARKERS
+                )
+            ]
+        )
+        campaign.updated_at = _utcnow()
+        session.add(campaign)
+        session.commit()
 
     try:
+        await asyncio.to_thread(_refresh_component_facts, campaign_id)
         result = await correlation_svc.correlate_campaign_with_llm(
             campaign_id,
-            preserve_downstream=preserve_downstream,
+            preserve_downstream=False,
         )
     except asyncio.CancelledError:
         raise
@@ -915,9 +965,126 @@ async def rebuild_campaign_connections(campaign_id: int) -> dict:
             _finish_campaign(campaign_id, "failed", error=str(exc))
         raise
 
-    if not preserve_downstream:
-        _set_campaign_status(campaign_id, "awaiting_review")
+    _set_campaign_status(campaign_id, "awaiting_review")
     return result
+
+
+def _clear_context_matching_outputs(
+    session: Session,
+    campaign_id: int,
+    target_members: list[CampaignTargetMember],
+) -> None:
+    """Delete data produced after the source-code scans completed."""
+    for connection in session.exec(
+        select(ComponentConnection).where(
+            ComponentConnection.campaign_id == campaign_id
+        )
+    ).all():
+        session.delete(connection)
+
+    for case in session.exec(
+        select(CampaignValidationCase).where(
+            CampaignValidationCase.campaign_id == campaign_id
+        )
+    ).all():
+        session.delete(case)
+
+    for mapping in session.exec(
+        select(LeadTargetMapping).where(LeadTargetMapping.campaign_id == campaign_id)
+    ).all():
+        session.delete(mapping)
+
+    generated_leads = list(
+        session.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_type == "campaign")
+            .where(ScanLead.producer_run_id == campaign_id)
+            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+        ).all()
+    )
+    lead_ids = [lead.id for lead in generated_leads if lead.id is not None]
+    if lead_ids:
+        for provenance in session.exec(
+            select(ScanLeadComponentProvenance).where(
+                ScanLeadComponentProvenance.scan_lead_id.in_(lead_ids)
+            )
+        ).all():
+            session.delete(provenance)
+
+    session.flush()
+    for lead in generated_leads:
+        session.delete(lead)
+
+    for member in target_members:
+        member.status = "pending"
+        member.status_message = None
+        member.validation_summary_json = "{}"
+        member.updated_at = _utcnow()
+        session.add(member)
+
+
+def _refresh_component_facts(campaign_id: int) -> None:
+    """Re-extract deterministic facts from each completed frozen snapshot."""
+    from aespa.services import component_mapper
+    from aespa.services.component_facts import persist_component_facts
+    from aespa.services.source_tools import safe_unzip
+
+    with Session(get_engine()) as session:
+        members = list(
+            session.exec(
+                select(CampaignSourceMember).where(
+                    CampaignSourceMember.campaign_id == campaign_id
+                )
+            ).all()
+        )
+        snapshots: list[tuple[int, Path]] = []
+        for member in members:
+            if member.sast_run_id is None:
+                continue
+            run = session.get(SastRun, member.sast_run_id)
+            if run is None or run.status != "completed":
+                continue
+            snapshot = session.get(ComponentSnapshot, member.snapshot_id)
+            if snapshot is None:
+                raise InvalidCampaignState(
+                    f"Source member {member.id} no longer has a frozen snapshot"
+                )
+            archive_path = Path(snapshot.stored_path)
+            if not archive_path.is_file():
+                raise InvalidCampaignState(
+                    f"Frozen source snapshot is missing: {snapshot.filename}"
+                )
+            snapshots.append((member.sast_run_id, archive_path))
+
+    for sast_run_id, archive_path in snapshots:
+        component_mapper.purge_llm_component_facts(sast_run_id)
+        with tempfile.TemporaryDirectory(prefix="aespa-context-match-") as temp_dir:
+            safe_unzip(str(archive_path), temp_dir)
+            persist_component_facts(sast_run_id, Path(temp_dir))
+
+
+def _validate_context_matching_sources(session: Session, campaign_id: int) -> None:
+    """Check frozen snapshots before deleting the current matching output."""
+    members = session.exec(
+        select(CampaignSourceMember).where(
+            CampaignSourceMember.campaign_id == campaign_id
+        )
+    ).all()
+    for member in members:
+        if member.sast_run_id is None:
+            continue
+        run = session.get(SastRun, member.sast_run_id)
+        if run is None or run.status != "completed":
+            continue
+        snapshot = session.get(ComponentSnapshot, member.snapshot_id)
+        if snapshot is None:
+            raise InvalidCampaignState(
+                f"Source member {member.id} no longer has a frozen snapshot"
+            )
+        if not Path(snapshot.stored_path).is_file():
+            raise InvalidCampaignState(
+                f"Frozen source snapshot is missing: {snapshot.filename}"
+            )
 
 
 async def _run_campaign(campaign_id: int) -> None:
@@ -1716,9 +1883,7 @@ async def supplemental_validate_target(
                 session.add(run)
             if member is not None:
                 member.status = "incomplete"
-                member.status_message = (
-                    "No selected frontend path is runnable. Review the validation-case blockers."
-                )
+                member.status_message = "No selected frontend path is runnable. Review the validation-case blockers."
                 member.validation_summary_json = json.dumps(
                     {
                         "total": sum(resolution.counts.values()),

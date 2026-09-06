@@ -29,6 +29,7 @@ from aespa.models import (
     SastRun,
     ScanLead,
     ScanLeadComponentProvenance,
+    Site,
 )
 from aespa.services.correlation import (
     apply_review_decisions,
@@ -203,6 +204,716 @@ def test_correlate_campaign_builds_deterministic_connection(isolated_db_engine):
     assert connection.confidence >= 0.7
     assert connection.source_component_id == ctx["ui_component_id"]
     assert connection.target_component_id == ctx["api_component_id"]
+
+
+def test_same_component_browser_request_connects_to_matching_server_ingress(
+    isolated_db_engine,
+):
+    """A browser call served by the same component can reach its API route."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        browser_call = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="http_call",
+            method="POST",
+            path="/api/payment/process",
+            host="checkout.acme.test",
+            evidence_location="src/payment.js:10",
+            detail_json=json.dumps({"request_role": "browser_request"}),
+            fingerprint="payment-browser-call",
+        )
+        ingress = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="route",
+            method="POST",
+            path="/api/payment/process",
+            evidence_location="src/app.py:40",
+            fingerprint="payment-ingress",
+        )
+        unrelated = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="route",
+            method="GET",
+            path="/api/payment/process",
+            evidence_location="src/app.py:41",
+            fingerprint="payment-unrelated-method",
+        )
+        session.add_all([browser_call, ingress, unrelated])
+        session.flush()
+        browser_call_id = browser_call.id
+        ingress_id = ingress.id
+        session.commit()
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as session:
+        edges = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.edge_kind == "calls")
+            .where(ComponentConnection.source_fact_id == browser_call_id)
+        ).all()
+
+    assert len(edges) == 1
+    assert edges[0].target_fact_id == ingress_id
+    assert edges[0].source_component_id == edges[0].target_component_id
+    assert edges[0].confidence >= 0.8
+    assert "same-component" in edges[0].rationale
+
+
+def test_proxy_transit_requires_explicit_ownership_metadata(isolated_db_engine):
+    """A route and egress share a proxy edge only when ownership is recorded."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        handler_location = "src/app.py:30"
+        owned_route = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="route",
+            method="POST",
+            path="/api/quotes/motor",
+            evidence_location="src/app.py:20",
+            detail_json=json.dumps({"handler_locations": [handler_location]}),
+            fingerprint="owned-quote-route",
+        )
+        owned_egress = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="http_call",
+            method="POST",
+            path="/api/customer/quotes/motor",
+            evidence_location="src/client.py:12",
+            detail_json=json.dumps(
+                {
+                    "request_role": "server_egress",
+                    "handler_locations": [handler_location],
+                }
+            ),
+            fingerprint="owned-quote-egress",
+        )
+        unowned_egress = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="http_call",
+            method="POST",
+            path="/api/customer/quotes/motor",
+            evidence_location="src/other.py:12",
+            detail_json=json.dumps({"request_role": "server_egress"}),
+            fingerprint="unowned-quote-egress",
+        )
+        session.add_all([owned_route, owned_egress, unowned_egress])
+        session.flush()
+        owned_route_id = owned_route.id
+        owned_egress_id = owned_egress.id
+        session.commit()
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as session:
+        edges = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.source_fact_id == owned_route_id)
+            .where(ComponentConnection.edge_kind == "dispatches")
+        ).all()
+
+    assert [edge.target_fact_id for edge in edges] == [owned_egress_id]
+    assert edges[0].confidence >= 0.75
+    assert "ownership metadata" in edges[0].rationale
+
+
+def test_proxy_transit_binds_each_egress_to_nearest_preceding_route(
+    isolated_db_engine,
+):
+    """Separate handler lines map adjacent routes without cross-route fanout."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    route_specs = (
+        ("motor", 262, 264),
+        ("home", 270, 272),
+        ("contents", 278, 280),
+    )
+    with Session(isolated_db_engine) as session:
+        facts: list[ComponentFact] = []
+        for name, route_line, owner_line in route_specs:
+            facts.extend(
+                [
+                    ComponentFact(
+                        sast_run_id=9001,
+                        component_id=ctx["ui_component_id"],
+                        fact_type="route",
+                        method="POST",
+                        path=f"/api/quotes/{name}",
+                        evidence_location=f"app/main.py:{route_line}",
+                        fingerprint=f"nearest-route-{name}",
+                    ),
+                    ComponentFact(
+                        sast_run_id=9001,
+                        component_id=ctx["ui_component_id"],
+                        fact_type="http_call",
+                        method="POST",
+                        path=f"/api/customer/quotes/{name}",
+                        evidence_location=f"app/client.py:{owner_line}",
+                        detail_json=json.dumps(
+                            {
+                                "request_role": "server_egress",
+                                "handler_locations": [f"app/main.py:{owner_line}"],
+                            }
+                        ),
+                        fingerprint=f"nearest-egress-{name}",
+                    ),
+                ]
+            )
+        # Keep the route and handler locations in the same file while the
+        # egress fact's primary location remains its client call site.
+        session.add_all(facts)
+        session.flush()
+        route_ids = {
+            fact.path.rsplit("/", 1)[-1]: fact.id
+            for fact in facts
+            if fact.fact_type == "route"
+        }
+        egress_ids = {
+            fact.path.rsplit("/", 1)[-1]: fact.id
+            for fact in facts
+            if fact.fact_type == "http_call"
+        }
+        session.commit()
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as session:
+        edges = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.edge_kind == "dispatches")
+            .where(
+                ComponentConnection.source_fact_id.in_(
+                    [fact_id for fact_id in route_ids.values()]
+                )
+            )
+        ).all()
+
+    assert {(edge.source_fact_id, edge.target_fact_id) for edge in edges} == {
+        (route_ids[name], egress_ids[name]) for name, _route, _owner in route_specs
+    }
+
+
+def test_proxy_transit_prefers_exact_adjacent_route_owner_location(
+    isolated_db_engine,
+):
+    """An exact decorator/handler line wins over an earlier route."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    route_specs = (
+        ("motor", 262),
+        ("home", 268),
+        ("contents", 274),
+    )
+    with Session(isolated_db_engine) as session:
+        facts: list[ComponentFact] = []
+        for name, line in route_specs:
+            owner_location = f"FACE/app.py:{line}"
+            facts.extend(
+                [
+                    ComponentFact(
+                        sast_run_id=9001,
+                        component_id=ctx["ui_component_id"],
+                        fact_type="route",
+                        method="POST",
+                        path=f"/api/quotes/{name}",
+                        evidence_location=owner_location,
+                        fingerprint=f"exact-route-{name}",
+                    ),
+                    ComponentFact(
+                        sast_run_id=9001,
+                        component_id=ctx["ui_component_id"],
+                        fact_type="http_call",
+                        method="POST",
+                        path=f"/api/customer/quotes/{name}",
+                        evidence_location=f"FACE/client.py:{line + 1}",
+                        detail_json=json.dumps(
+                            {
+                                "request_role": "server_egress",
+                                "handler_locations": [owner_location],
+                            }
+                        ),
+                        fingerprint=f"exact-egress-{name}",
+                    ),
+                ]
+            )
+        session.add_all(facts)
+        session.flush()
+        route_ids = {
+            fact.path.rsplit("/", 1)[-1]: fact.id
+            for fact in facts
+            if fact.fact_type == "route"
+        }
+        egress_ids = {
+            fact.path.rsplit("/", 1)[-1]: fact.id
+            for fact in facts
+            if fact.fact_type == "http_call"
+        }
+        session.commit()
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as session:
+        edges = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.edge_kind == "dispatches")
+            .where(
+                ComponentConnection.source_fact_id.in_(
+                    [fact_id for fact_id in route_ids.values()]
+                )
+            )
+        ).all()
+
+    assert {(edge.source_fact_id, edge.target_fact_id) for edge in edges} == {
+        (route_ids[name], egress_ids[name]) for name, _line in route_specs
+    }
+
+
+def test_multistep_quote_anchor_does_not_attach_to_bind_route(
+    isolated_db_engine,
+):
+    """A quote-then-bind lead must retain its quote input route."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    quote_names = ("motor", "home", "contents")
+    with Session(isolated_db_engine) as session:
+        bind_route = ComponentFact(
+            sast_run_id=9002,
+            component_id=ctx["api_component_id"],
+            fact_type="route",
+            method="POST",
+            path="/api/customer/policies/{id}/bind",
+            evidence_location="goose/CustomerApiController.java:114",
+            fingerprint="bind-route-for-quote-leads",
+        )
+        session.add(bind_route)
+        session.flush()
+        anchors: list[ComponentFact] = []
+        for index, name in enumerate(quote_names):
+            lead = ScanLead(
+                producer_run_id=9002,
+                producer_run_type="sast",
+                title=f"Legacy {name} quote bypass",
+                category="A04",
+                severity="high",
+                confidence=0.9,
+                location=f"goose/PolicyService.java:{200 + index}",
+                suggested_endpoint=(
+                    f"POST /api/customer/quotes/{name} then "
+                    "POST /api/customer/policies/{id}/bind"
+                ),
+                reportable=True,
+                validation_status="confirmed",
+            )
+            session.add(lead)
+            session.flush()
+            anchor = ComponentFact(
+                sast_run_id=9002,
+                component_id=ctx["api_component_id"],
+                fact_type="lead_anchor",
+                method="POST",
+                # The mapper may anchor the finding at the downstream sink
+                # even though its suggested endpoint starts at the quote.
+                path="/api/customer/policies/{id}/bind",
+                evidence_location=f"goose/PolicyService.java:{200 + index}",
+                detail_json=json.dumps(
+                    {
+                        "lead_id": lead.id,
+                        "route_locations": [
+                            f"goose/CustomerApiController.java:{210 + index * 20}",
+                            bind_route.evidence_location,
+                        ],
+                    }
+                ),
+                fingerprint=f"quote-anchor-{name}",
+            )
+            session.add(anchor)
+            anchors.append(anchor)
+        session.flush()
+        bind_route_id = bind_route.id
+        anchor_ids = [anchor.id for anchor in anchors]
+        session.commit()
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as session:
+        shortcut_edges = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.edge_kind == "reaches")
+            .where(ComponentConnection.source_fact_id == bind_route_id)
+            .where(ComponentConnection.target_fact_id.in_(anchor_ids))
+        ).all()
+
+    assert shortcut_edges == []
+
+
+def test_single_endpoint_anchor_keeps_explicit_alternate_sink_route(
+    isolated_db_engine,
+):
+    """A single-endpoint lead can name more than one explicit route."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        alternate_route = ComponentFact(
+            sast_run_id=9002,
+            component_id=ctx["api_component_id"],
+            fact_type="route",
+            method="POST",
+            path="/claims/{id}/review",
+            evidence_location="goose/ClaimController.java:144",
+            fingerprint="alternate-review-route",
+        )
+        lead = ScanLead(
+            producer_run_id=9002,
+            producer_run_type="sast",
+            title="Invalid claim transition",
+            category="A04",
+            severity="high",
+            confidence=0.9,
+            location="goose/ClaimService.java:115",
+            suggested_endpoint="POST /claims/{id}/approve",
+            reportable=True,
+            validation_status="confirmed",
+        )
+        session.add_all([alternate_route, lead])
+        session.flush()
+        anchor = ComponentFact(
+            sast_run_id=9002,
+            component_id=ctx["api_component_id"],
+            fact_type="lead_anchor",
+            method="POST",
+            path="/claims/{id}/approve",
+            evidence_location="goose/ClaimService.java:115",
+            detail_json=json.dumps(
+                {
+                    "lead_id": lead.id,
+                    "route_locations": [alternate_route.evidence_location],
+                }
+            ),
+            fingerprint="transition-anchor",
+        )
+        session.add(anchor)
+        session.flush()
+        alternate_route_id = alternate_route.id
+        anchor_id = anchor.id
+        session.commit()
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as session:
+        edges = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.edge_kind == "reaches")
+            .where(ComponentConnection.source_fact_id == alternate_route_id)
+            .where(ComponentConnection.target_fact_id == anchor_id)
+        ).all()
+
+    assert len(edges) == 1
+
+
+def test_anchor_supporting_location_does_not_attach_unrelated_review_route(
+    isolated_db_engine,
+):
+    """A supporting controller location is context, not route ownership."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        review_route = ComponentFact(
+            sast_run_id=9002,
+            component_id=ctx["api_component_id"],
+            fact_type="route",
+            method="POST",
+            path="/claims/{id}/review",
+            evidence_location="goose/ClaimController.java:144",
+            fingerprint="review-route-context",
+        )
+        lead = ScanLead(
+            producer_run_id=9002,
+            producer_run_type="sast",
+            title="Missing claim note role check",
+            category="A01",
+            severity="high",
+            confidence=0.9,
+            location="goose/ClaimController.java:103",
+            suggested_endpoint="POST /claims/{id}/note",
+            reportable=True,
+            validation_status="confirmed",
+        )
+        session.add_all([review_route, lead])
+        session.flush()
+        anchor = ComponentFact(
+            sast_run_id=9002,
+            component_id=ctx["api_component_id"],
+            fact_type="lead_anchor",
+            method="POST",
+            path="/claims/{id}/note",
+            evidence_location="goose/ClaimController.java:103",
+            detail_json=json.dumps(
+                {
+                    "lead_id": lead.id,
+                    "supporting_locations": [review_route.evidence_location],
+                    "route_locations": ["goose/ClaimController.java:103"],
+                }
+            ),
+            fingerprint="note-anchor-with-review-context",
+        )
+        session.add(anchor)
+        session.flush()
+        review_route_id = review_route.id
+        anchor_id = anchor.id
+        session.commit()
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as session:
+        edges = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.edge_kind == "reaches")
+            .where(ComponentConnection.source_fact_id == review_route_id)
+            .where(ComponentConnection.target_fact_id == anchor_id)
+        ).all()
+
+    assert edges == []
+
+
+def test_face_quote_proxy_facts_infer_egress_and_preserve_one_to_one_hops(
+    isolated_db_engine,
+):
+    """FACE proxy calls without an explicit role still form complete hops."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    quote_names = ("motor", "home", "contents")
+    with Session(isolated_db_engine) as session:
+        source_facts: list[ComponentFact] = []
+        target_facts: list[ComponentFact] = []
+        for index, name in enumerate(quote_names):
+            route_location = f"FACE/app.py:{260 + index * 6}"
+            egress_location = f"FACE/app.py:{263 + index * 6}"
+            source_facts.extend(
+                [
+                    ComponentFact(
+                        sast_run_id=9001,
+                        component_id=ctx["ui_component_id"],
+                        fact_type="route",
+                        method="POST",
+                        path=f"/api/quotes/{name}",
+                        evidence_location=route_location,
+                        detail_json=json.dumps(
+                            {"supporting_locations": [egress_location]}
+                        ),
+                        fingerprint=f"face-route-{name}",
+                    ),
+                    ComponentFact(
+                        sast_run_id=9001,
+                        component_id=ctx["ui_component_id"],
+                        fact_type="http_call",
+                        method="POST",
+                        path=f"/api/customer/quotes/{name}",
+                        evidence_location=egress_location,
+                        detail_json=json.dumps(
+                            {
+                                "supporting_locations": [route_location],
+                                "reasoning": f"Outbound proxy call for {name} quote",
+                            }
+                        ),
+                        fingerprint=f"face-egress-{name}",
+                    ),
+                ]
+            )
+            target_facts.append(
+                ComponentFact(
+                    sast_run_id=9002,
+                    component_id=ctx["api_component_id"],
+                    fact_type="route",
+                    method="POST",
+                    path=f"/api/customer/quotes/{name}",
+                    evidence_location=f"Goose/{name}.java:10",
+                    fingerprint=f"goose-route-{name}",
+                )
+            )
+        session.add_all([*source_facts, *target_facts])
+        session.flush()
+        egress_ids = {
+            fact.path.rsplit("/", 1)[-1]: fact.id
+            for fact in source_facts
+            if fact.fact_type == "http_call"
+        }
+        route_ids = {
+            fact.path.rsplit("/", 1)[-1]: fact.id
+            for fact in source_facts
+            if fact.fact_type == "route"
+        }
+        session.commit()
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as session:
+        dispatches = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.edge_kind == "dispatches")
+            .where(
+                ComponentConnection.source_fact_id.in_(
+                    [fact_id for fact_id in route_ids.values()]
+                )
+            )
+        ).all()
+        egress_facts = session.exec(
+            select(ComponentFact).where(
+                ComponentFact.id.in_([fact_id for fact_id in egress_ids.values()])
+            )
+        ).all()
+        cross_hops = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.edge_kind == "calls")
+            .where(
+                ComponentConnection.source_fact_id.in_(
+                    [fact_id for fact_id in egress_ids.values()]
+                )
+            )
+        ).all()
+
+    assert {(edge.source_fact_id, edge.target_fact_id) for edge in dispatches} == {
+        (route_ids[name], egress_ids[name]) for name in quote_names
+    }
+    assert {
+        fact.path.rsplit("/", 1)[-1]
+        for fact in egress_facts
+        if json.loads(fact.detail_json)["request_role"] == "server_egress"
+    } == set(quote_names)
+    assert {edge.source_fact_id for edge in cross_hops} == set(egress_ids.values())
+
+
+def test_semantic_edges_include_late_browser_calls_beyond_legacy_limit(
+    isolated_db_engine,
+):
+    """A call discovered after the old first-20 window remains reachable."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    action_location = "templates/claims/view.html:222"
+    late_call_location = "templates/claims/view.html:222"
+    with Session(isolated_db_engine) as session:
+        action = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="ui_action",
+            name="Disburse claim",
+            evidence_location=action_location,
+            detail_json=json.dumps({"trigger": "submit"}),
+            fingerprint="late-form-action",
+        )
+        session.add(action)
+        for index in range(25):
+            session.add(
+                ComponentFact(
+                    sast_run_id=9001,
+                    component_id=ctx["ui_component_id"],
+                    fact_type="http_call",
+                    method="GET",
+                    path=f"/noise/{index}",
+                    evidence_location=f"templates/noise-{index}.html:1",
+                    detail_json=json.dumps({"request_role": "browser_request"}),
+                    fingerprint=f"noise-call-{index}",
+                )
+            )
+        late_call = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="http_call",
+            method="POST",
+            path="/claims/{id}/disburse",
+            evidence_location=late_call_location,
+            detail_json=json.dumps(
+                {
+                    "request_role": "browser_request",
+                    "handler_locations": [action_location],
+                }
+            ),
+            fingerprint="late-form-call",
+        )
+        session.add(late_call)
+        session.flush()
+        late_call_id = late_call.id
+        session.commit()
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as session:
+        edges = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.edge_kind == "triggers")
+            .where(ComponentConnection.target_fact_id == late_call_id)
+        ).all()
+
+    assert len(edges) == 1
+    assert edges[0].source_fact_id is not None
+
+
+def test_ui_action_request_edges_use_handler_ownership_not_shared_supporting_context(
+    isolated_db_engine,
+):
+    """A shared helper location must not bind a request to every action."""
+    ctx = _seed_two_component_campaign(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        first_action = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="ui_action",
+            name="submitMotorQuote",
+            evidence_location="ui/form.tsx:10",
+            detail_json=json.dumps(
+                {"handler_locations": ["ui/app.ts:100"], "trigger": "submit"}
+            ),
+            fingerprint="motor-action",
+        )
+        second_action = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="ui_action",
+            name="submitResidentialQuote",
+            evidence_location="ui/form.tsx:20",
+            detail_json=json.dumps(
+                {"handler_locations": ["ui/app.ts:200"], "trigger": "submit"}
+            ),
+            fingerprint="residential-action",
+        )
+        motor_call = ComponentFact(
+            sast_run_id=9001,
+            component_id=ctx["ui_component_id"],
+            fact_type="http_call",
+            method="POST",
+            path="/api/quotes/motor",
+            evidence_location="ui/app.ts:300",
+            detail_json=json.dumps(
+                {
+                    "request_role": "browser_request",
+                    "handler_locations": ["ui/app.ts:100"],
+                    "supporting_locations": [
+                        "ui/form.tsx:10",
+                        # Shared extraction context must not establish a
+                        # second action-to-request edge.
+                        "ui/form.tsx:20",
+                    ],
+                }
+            ),
+            fingerprint="motor-request",
+        )
+        session.add_all([first_action, second_action, motor_call])
+        session.flush()
+        first_action_id = first_action.id
+        second_action_id = second_action.id
+        motor_call_id = motor_call.id
+        session.commit()
+
+    correlate_campaign(ctx["campaign_id"])
+    with Session(isolated_db_engine) as session:
+        edges = session.exec(
+            select(ComponentConnection)
+            .where(ComponentConnection.campaign_id == ctx["campaign_id"])
+            .where(ComponentConnection.edge_kind == "triggers")
+            .where(ComponentConnection.target_fact_id == motor_call_id)
+        ).all()
+
+    assert [edge.source_fact_id for edge in edges] == [first_action_id]
+    assert second_action_id not in {edge.source_fact_id for edge in edges}
 
 
 def test_purge_llm_component_facts_clears_dependent_rows_with_fk_enforcement(
@@ -1401,3 +2112,193 @@ def test_cross_repo_backend_lead_groups_endpoint_instances(isolated_db_engine):
             "/orders",
             "/orders/second",
         }
+
+
+def _seed_single_component_frontend_campaign(
+    engine, *, include_other_site: bool = False
+) -> dict:
+    """Create one action with both direct and handler-backed graph variants."""
+    with Session(engine) as session:
+        app = Application(name="Frontend quality")
+        session.add(app)
+        session.flush()
+        ui = ApplicationComponent(application_id=app.id, name="face-ui")
+        other = ApplicationComponent(application_id=app.id, name="other-ui")
+        session.add_all([ui, other])
+        session.flush()
+        snapshot = ComponentSnapshot(
+            component_id=ui.id,
+            filename="face.zip",
+            stored_path="/tmp/face.zip",
+            size_bytes=1,
+            sha256="f" * 64,
+        )
+        session.add(snapshot)
+        session.flush()
+        own_site = Site(name="FACE site", base_url="https://face.example.test")
+        session.add(own_site)
+        session.flush()
+        own_target = ApplicationTarget(
+            application_id=app.id,
+            target_type="site",
+            target_id=own_site.id,
+            component_id=ui.id,
+        )
+        session.add(own_target)
+        other_target = None
+        if include_other_site:
+            other_site = Site(name="Other site", base_url="https://other.example.test")
+            session.add(other_site)
+            session.flush()
+            other_target = ApplicationTarget(
+                application_id=app.id,
+                target_type="site",
+                target_id=other_site.id,
+                component_id=other.id,
+            )
+            session.add(other_target)
+        session.flush()
+        campaign = AssessmentCampaign(application_id=app.id, name="frontend quality")
+        session.add(campaign)
+        session.flush()
+        session.add(
+            CampaignSourceMember(
+                campaign_id=campaign.id,
+                component_id=ui.id,
+                snapshot_id=snapshot.id,
+                sast_run_id=9401,
+                status="completed",
+            )
+        )
+        session.add(
+            CampaignTargetMember(
+                campaign_id=campaign.id,
+                target_id=own_target.id,
+                target_type="site",
+            )
+        )
+        if other_target is not None:
+            session.add(
+                CampaignTargetMember(
+                    campaign_id=campaign.id,
+                    target_id=other_target.id,
+                    target_type="site",
+                )
+            )
+        lead = ScanLead(
+            producer_run_id=9401,
+            producer_run_type="sast",
+            title="Payment amount is trusted",
+            description="The server accepts a client controlled payment amount.",
+            category="A04",
+            severity="high",
+            confidence=0.9,
+            location="server/payment.py:40",
+            suggested_endpoint="POST /api/payment/process",
+            reportable=True,
+        )
+        session.add(lead)
+        session.flush()
+        action_location = "ui/payment.js:10"
+        handler_location = "ui/payment.js:20"
+        call_location = "ui/payment.js:30"
+        route_location = "server/payment.py:40"
+        session.add_all(
+            [
+                ComponentFact(
+                    sast_run_id=9401,
+                    component_id=ui.id,
+                    fact_type="ui_action",
+                    name="Pay now",
+                    evidence_location=action_location,
+                    detail_json=json.dumps(
+                        {
+                            "action_kind": "click",
+                            "handler_locations": [handler_location],
+                            "supporting_locations": [call_location],
+                        }
+                    ),
+                    fingerprint="frontend-action",
+                ),
+                ComponentFact(
+                    sast_run_id=9401,
+                    component_id=ui.id,
+                    fact_type="handler",
+                    name="processPayment",
+                    evidence_location=handler_location,
+                    detail_json=json.dumps({"supporting_locations": [call_location]}),
+                    fingerprint="frontend-handler",
+                ),
+                ComponentFact(
+                    sast_run_id=9401,
+                    component_id=ui.id,
+                    fact_type="http_call",
+                    method="POST",
+                    path="/api/payment/process",
+                    evidence_location=call_location,
+                    detail_json=json.dumps({"request_role": "browser_request"}),
+                    fingerprint="frontend-call",
+                ),
+                ComponentFact(
+                    sast_run_id=9401,
+                    component_id=ui.id,
+                    fact_type="route",
+                    method="POST",
+                    path="/api/payment/process",
+                    evidence_location=route_location,
+                    fingerprint="frontend-route",
+                ),
+            ]
+        )
+        session.commit()
+        return {
+            "campaign_id": campaign.id,
+            "own_target_id": own_target.id,
+            "other_target_id": other_target.id if other_target else None,
+        }
+
+
+def test_equivalent_handler_and_direct_paths_create_one_campaign_lead(
+    isolated_db_engine,
+):
+    ctx = _seed_single_component_frontend_campaign(isolated_db_engine)
+
+    correlate_campaign(ctx["campaign_id"])
+
+    with Session(isolated_db_engine) as session:
+        leads = session.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_type == "campaign")
+            .where(ScanLead.producer_run_id == ctx["campaign_id"])
+        ).all()
+        assert len(leads) == 1
+        path = json.loads(leads[0].attack_path_json)
+        assert path["path_status"] == "complete"
+        fact_kinds = [fact["kind"] for fact in path["static_trace"]["facts"]]
+        assert "handler" in fact_kinds
+        assert leads[0].trace_path_key
+
+
+def test_complete_single_component_path_only_maps_to_owning_site(
+    isolated_db_engine,
+):
+    ctx = _seed_single_component_frontend_campaign(
+        isolated_db_engine, include_other_site=True
+    )
+
+    correlate_campaign(ctx["campaign_id"])
+
+    with Session(isolated_db_engine) as session:
+        campaign_lead = session.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_type == "campaign")
+            .where(ScanLead.producer_run_id == ctx["campaign_id"])
+        ).one()
+        mappings = session.exec(
+            select(LeadTargetMapping)
+            .where(LeadTargetMapping.campaign_id == ctx["campaign_id"])
+            .where(LeadTargetMapping.lead_id == campaign_lead.id)
+        ).all()
+
+    assert [mapping.target_id for mapping in mappings] == [ctx["own_target_id"]]
+    assert mappings[0].status == "approved"
