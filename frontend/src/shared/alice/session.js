@@ -106,7 +106,12 @@ export async function aliceSessionConnect(
             session.accumulatedMessage = normalizeAliceText(
               session.accumulatedMessage + event.delta,
             );
-          else if (event.type === "done") {
+          else if (event.type === "message_retract")
+            session.accumulatedMessage = normalizeAliceText(event.message || "");
+          else if (event.type === "state_snapshot") {
+            session.accumulatedThought = normalizeAliceText(event.thought || "");
+            session.accumulatedMessage = normalizeAliceText(event.message || "");
+          } else if (event.type === "done") {
             if (event.thought) session.accumulatedThought = normalizeAliceText(event.thought);
             if (event.message) session.accumulatedMessage = normalizeAliceText(event.message);
           } else if (event.type === "step_llm_call") {

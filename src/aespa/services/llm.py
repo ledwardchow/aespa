@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 from urllib.parse import quote
 
 import httpx
@@ -59,6 +59,10 @@ from aespa.services.prompts.validator import (
 
 log = logging.getLogger("aespa.llm")
 traffic_log = logging.getLogger("aespa.llm.traffic")
+
+_tool_text_delta_var: ContextVar[
+    Callable[[str], Awaitable[None]] | None
+] = ContextVar("llm_tool_text_delta", default=None)
 
 REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
 
@@ -2309,6 +2313,11 @@ async def _create_chat_completion(client: Any, kwargs: dict[str, Any]) -> Any:
         ):
             retry_kwargs.pop("tool_choice", None)
             changed = True
+        if "stream_options" in retry_kwargs and (
+            "stream_options" in message or "stream options" in message
+        ):
+            retry_kwargs.pop("stream_options", None)
+            changed = True
 
         if not changed:
             raise
@@ -3072,7 +3081,9 @@ def _bedrock_region(config: LLMConfig) -> str:
     )
 
 
-def _consume_bedrock_converse_stream(response: dict[str, Any]) -> dict[str, Any]:
+def _consume_bedrock_converse_stream(
+    response: dict[str, Any], on_text_delta: Callable[[str], None] | None = None
+) -> dict[str, Any]:
     """Collect ConverseStream events into the shape returned by Converse."""
     content: dict[int, dict[str, Any]] = {}
     tool_inputs: dict[int, str] = {}
@@ -3104,10 +3115,13 @@ def _consume_bedrock_converse_stream(response: dict[str, Any]) -> dict[str, Any]
                 index = int(changed.get("contentBlockIndex", len(content)))
                 delta = changed.get("delta") or {}
                 if "text" in delta:
+                    text_delta = str(delta.get("text") or "")
                     block = content.setdefault(index, {"text": ""})
                     block["text"] = str(block.get("text") or "") + str(
-                        delta.get("text") or ""
+                        text_delta
                     )
+                    if text_delta and on_text_delta is not None:
+                        on_text_delta(text_delta)
                 tool_delta = delta.get("toolUse")
                 if isinstance(tool_delta, dict):
                     tool_inputs[index] = tool_inputs.get(index, "") + str(
@@ -4753,6 +4767,66 @@ async def _call_with_tools(
     return blocks, stop_reason, raw_content
 
 
+async def stream_tools_call(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Run a tool-capable call and yield provider text before its final result.
+
+    Providers without native tool streaming simply yield the final result. This
+    keeps ALICE compatible with every configured provider while allowing native
+    streams to update the chat as tokens arrive.
+    """
+    queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def _on_text(delta: str) -> None:
+        if delta:
+            queue.put_nowait(delta)
+
+    async def _run() -> tuple[list[dict], str, Any]:
+        token = _tool_text_delta_var.set(_on_text)
+        try:
+            return await _call_with_tools(
+                config, system_message, messages, tools=tools
+            )
+        finally:
+            _tool_text_delta_var.reset(token)
+
+    task = asyncio.create_task(_run())
+    try:
+        while True:
+            if task.done() and queue.empty():
+                break
+            queue_get = asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait(
+                {task, queue_get}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if queue_get in done:
+                delta = queue_get.result()
+                # Provider streams often send one token per event. Briefly
+                # coalesce ready tokens so React does not render for every one.
+                await asyncio.sleep(0.02)
+                while not queue.empty():
+                    delta += queue.get_nowait()
+                yield {"type": "text_delta", "delta": delta}
+            else:
+                queue_get.cancel()
+                try:
+                    await queue_get
+                except asyncio.CancelledError:
+                    pass
+        yield {"type": "result", "result": await task}
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
 async def _call_with_tools_impl(
     config: "LLMConfig",
     system_message: str,
@@ -4835,7 +4909,7 @@ async def _call_with_tools_impl(
 
         client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
         cached_messages, cached_tools = _with_anthropic_cache(messages, _active_tools)
-        resp = await client.messages.create(
+        request_kwargs = dict(
             model=config.model,
             max_tokens=config.max_tokens,
             **_anthropic_reasoning_kwargs(config),
@@ -4854,6 +4928,14 @@ async def _call_with_tools_impl(
             tools=cached_tools,
             messages=cached_messages,
         )
+        on_text_delta = _tool_text_delta_var.get()
+        if on_text_delta is None:
+            resp = await client.messages.create(**request_kwargs)
+        else:
+            async with client.messages.stream(**request_kwargs) as stream:
+                async for text_delta in stream.text_stream:
+                    await on_text_delta(text_delta)
+                resp = await stream.get_final_message()
         blocks = [
             {
                 "type": b.type,
@@ -5089,6 +5171,15 @@ async def _call_with_tools_impl(
             # Env-credential path (IAM role, ~/.aws/credentials, instance profile …).
             # Capture proxy URL now — ContextVar values are not inherited by threads.
             _proxy_url = _llm_proxy_var.get()
+            _on_text_delta = _tool_text_delta_var.get()
+            loop = _asyncio.get_event_loop()
+
+            def _forward_text_delta(delta: str) -> None:
+                if _on_text_delta is not None:
+                    future = _asyncio.run_coroutine_threadsafe(
+                        _on_text_delta(delta), loop
+                    )
+                    future.result()
 
             def _run_converse_stream():
                 import boto3
@@ -5116,10 +5207,10 @@ async def _call_with_tools_impl(
                         toolConfig=tool_config,
                         inferenceConfig=_infer_converse,
                         **_bedrock_sdk_reasoning_kwargs(config),
-                    )
+                    ),
+                    _forward_text_delta if _on_text_delta is not None else None,
                 )
 
-            loop = _asyncio.get_event_loop()
             data = await loop.run_in_executor(None, _run_converse_stream)
             response_metadata = data.get("ResponseMetadata") or {}
             bedrock_transport = {
@@ -5212,7 +5303,24 @@ async def _call_with_tools_impl(
         # choice, _create_response retries once without it.
         if getattr(config, "force_tool_choice", False):
             r_kwargs["tool_choice"] = "required"
-        resp = await _create_response(client, r_kwargs)
+        on_text_delta = _tool_text_delta_var.get()
+        if on_text_delta is None:
+            resp = await _create_response(client, r_kwargs)
+        else:
+            stream_kwargs = dict(r_kwargs)
+            stream_kwargs["stream"] = True
+            response_stream = await _create_response(client, stream_kwargs)
+            resp = None
+            async for event in response_stream:
+                event_type = getattr(event, "type", None)
+                if event_type == "response.output_text.delta":
+                    delta = getattr(event, "delta", None)
+                    if delta:
+                        await on_text_delta(delta)
+                elif event_type in ("response.completed", "response.incomplete"):
+                    resp = getattr(event, "response", None)
+            if resp is None:
+                raise RuntimeError("Responses API stream ended without a response")
 
         blocks = []
         for item in getattr(resp, "output", None) or []:
@@ -5404,6 +5512,100 @@ async def _call_with_tools_impl(
             pass
         else:
             call_kwargs["tool_choice"] = "required"
+        on_text_delta = _tool_text_delta_var.get()
+        if on_text_delta is not None:
+            stream_kwargs = dict(call_kwargs)
+            stream_kwargs["stream"] = True
+            stream_kwargs["stream_options"] = {"include_usage": True}
+            stream = await _create_chat_completion(oai_client, stream_kwargs)
+            text_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            tool_parts: dict[int, dict[str, str]] = {}
+            finish = "stop"
+            stream_usage = None
+            async for chunk in stream:
+                if getattr(chunk, "usage", None) is not None:
+                    stream_usage = chunk.usage
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish = choice.finish_reason
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+                content_delta = getattr(delta, "content", None)
+                if content_delta:
+                    text_parts.append(content_delta)
+                    await on_text_delta(content_delta)
+                reasoning_delta = getattr(delta, "reasoning_content", None)
+                if reasoning_delta:
+                    reasoning_parts.append(reasoning_delta)
+                for tool_delta in getattr(delta, "tool_calls", None) or []:
+                    index = int(getattr(tool_delta, "index", 0) or 0)
+                    part = tool_parts.setdefault(
+                        index, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if getattr(tool_delta, "id", None):
+                        part["id"] += tool_delta.id
+                    function = getattr(tool_delta, "function", None)
+                    if function is not None:
+                        part["name"] += getattr(function, "name", None) or ""
+                        part["arguments"] += (
+                            getattr(function, "arguments", None) or ""
+                        )
+            blocks: list[dict[str, Any]] = []
+            reasoning_text = "".join(reasoning_parts)
+            if reasoning_text:
+                blocks.append({"type": "thinking", "thinking": reasoning_text})
+            visible_text = "".join(text_parts)
+            if visible_text:
+                blocks.append(
+                    {
+                        "type": "text",
+                        "id": None,
+                        "name": None,
+                        "input": None,
+                        "text": visible_text,
+                    }
+                )
+            for index in sorted(tool_parts):
+                part = tool_parts[index]
+                try:
+                    tool_input = json.loads(part["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    tool_input = {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": part["id"] or f"call_{index}",
+                        "name": part["name"],
+                        "input": tool_input,
+                        "text": None,
+                    }
+                )
+            _record_usage(
+                config.model,
+                getattr(stream_usage, "prompt_tokens", 0) if stream_usage else 0,
+                getattr(stream_usage, "completion_tokens", 0) if stream_usage else 0,
+                cache_read_tokens=(
+                    getattr(
+                        getattr(stream_usage, "prompt_tokens_details", None),
+                        "cached_tokens",
+                        0,
+                    )
+                    if stream_usage
+                    else 0
+                ),
+            )
+            stop_reason = (
+                "tool_use"
+                if finish == "tool_calls"
+                or any(block["type"] == "tool_use" for block in blocks)
+                else "end_turn"
+            )
+            return blocks, stop_reason, blocks
         resp = await _create_chat_completion(oai_client, call_kwargs)
         _oai_u = getattr(resp, "usage", None)
         _oai_cached = (
@@ -5522,20 +5724,73 @@ async def _call_with_tools_impl(
         g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
         g_tools = _ant_tools_to_gemini()
         g_contents = _ant_contents_to_gemini(messages)
+        generate_config = _gtypes.GenerateContentConfig(
+            system_instruction=system_message,
+            tools=g_tools,
+            max_output_tokens=config.max_tokens,
+            **_google_thinking_config(_gtypes, config),
+            **(
+                {"temperature": config.temperature}
+                if config.temperature is not None
+                else {}
+            ),
+        )
+        on_text_delta = _tool_text_delta_var.get()
+        if on_text_delta is not None:
+            text_parts: list[str] = []
+            streamed_functions: list[dict[str, Any]] = []
+            usage_metadata = None
+            g_stream = await g_client.aio.models.generate_content_stream(
+                model=config.model,
+                contents=g_contents,
+                config=generate_config,
+            )
+            async for chunk in g_stream:
+                usage_metadata = getattr(chunk, "usage_metadata", None) or usage_metadata
+                candidates = getattr(chunk, "candidates", None) or []
+                parts = candidates[0].content.parts if candidates else []
+                for part in parts:
+                    if getattr(part, "text", None):
+                        text_parts.append(part.text)
+                        await on_text_delta(part.text)
+                    elif getattr(part, "function_call", None):
+                        fc = part.function_call
+                        streamed_functions.append(
+                            {
+                                "type": "tool_use",
+                                "id": fc.name,
+                                "name": fc.name,
+                                "input": dict(fc.args) if fc.args else {},
+                                "text": None,
+                                "thought_signature": getattr(
+                                    part, "thought_signature", None
+                                ),
+                            }
+                        )
+            blocks: list[dict[str, Any]] = []
+            streamed_text = "".join(text_parts)
+            if streamed_text:
+                blocks.append(
+                    {
+                        "type": "text",
+                        "id": None,
+                        "name": None,
+                        "input": None,
+                        "text": streamed_text,
+                    }
+                )
+            blocks.extend(streamed_functions)
+            stop_reason = (
+                "tool_use"
+                if any(block["type"] == "tool_use" for block in blocks)
+                else "end_turn"
+            )
+            _record_google_usage(config.model, usage_metadata)
+            return blocks, stop_reason, blocks
         g_resp = await g_client.aio.models.generate_content(
             model=config.model,
             contents=g_contents,
-            config=_gtypes.GenerateContentConfig(
-                system_instruction=system_message,
-                tools=g_tools,
-                max_output_tokens=config.max_tokens,
-                **_google_thinking_config(_gtypes, config),
-                **(
-                    {"temperature": config.temperature}
-                    if config.temperature is not None
-                    else {}
-                ),
-            ),
+            config=generate_config,
         )
         blocks = []
         for part in g_resp.candidates[0].content.parts if g_resp.candidates else []:

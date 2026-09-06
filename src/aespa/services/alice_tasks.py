@@ -238,7 +238,11 @@ async def stream_events(
     # the logical stream; the buffer may have dropped older events, so translate
     # to a buffer index. A cursor older than the retained window resyncs from the
     # buffer start (best effort — those events are gone).
-    start = max(0, cursor - task.dropped)
+    if cursor < task.dropped:
+        yield f"data: {json.dumps({'type': 'state_snapshot', 'thought': task.accumulated_thought, 'message': task.accumulated_message, 'tab_id': task.tab_id, 'think_msg_id': task.think_msg_id, 'reply_msg_id': task.reply_msg_id})}\n\n"
+        start = len(task.events)
+    else:
+        start = cursor - task.dropped
     for event in task.events[start:]:
         yield f"data: {json.dumps(event)}\n\n"
 
@@ -281,6 +285,9 @@ def _append(task: AliceTask, event: dict) -> None:
         event = {**event, "tab_id": task.tab_id, "msg_id": task.think_msg_id}
     elif t == "message_chunk" and event.get("delta"):
         task.accumulated_message += event["delta"]
+        event = {**event, "tab_id": task.tab_id, "msg_id": task.reply_msg_id}
+    elif t == "message_retract":
+        task.accumulated_message = str(event.get("message") or "")
         event = {**event, "tab_id": task.tab_id, "msg_id": task.reply_msg_id}
     elif t in ("step_llm_call", "step_tool_call", "step_tool_result"):
         # Route step detail events to the thinking message so the client can

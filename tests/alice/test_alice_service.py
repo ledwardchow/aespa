@@ -555,6 +555,82 @@ async def test_run_alice_turn_stream_yields_correct_chunks(db_session, test_data
 
 
 @pytest.mark.anyio
+async def test_run_alice_turn_forwards_native_provider_deltas_once(
+    db_session, test_data
+):
+    run = test_data["run"]
+    from aespa.services import llm as llm_service
+
+    async def mock_call_with_tools(*args, **kwargs):
+        on_delta = llm_service._tool_text_delta_var.get()
+        assert on_delta is not None
+        await on_delta("Live ")
+        await asyncio.sleep(0)
+        await on_delta("reply")
+        text_block = {"type": "text", "text": "Live reply"}
+        return [text_block], "end_turn", [text_block]
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        chunks = []
+        async for line in run_alice_turn_stream(
+            run.id, "What is the current run status?", []
+        ):
+            if line.startswith("data: "):
+                chunks.append(json.loads(line[6:].strip()))
+
+    message = "".join(
+        chunk.get("delta", "")
+        for chunk in chunks
+        if chunk.get("type") == "message_chunk"
+    )
+    assert message == "Live reply"
+    assert [chunk["type"] for chunk in chunks].index("message_chunk") < [
+        chunk["type"] for chunk in chunks
+    ].index("done")
+    assert chunks[-1]["message"] == "Live reply"
+
+
+@pytest.mark.anyio
+async def test_run_alice_turn_retracts_streamed_text_when_tools_follow(
+    db_session, test_data
+):
+    run = test_data["run"]
+    from aespa.services import llm as llm_service
+
+    calls = 0
+
+    async def mock_call_with_tools(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            on_delta = llm_service._tool_text_delta_var.get()
+            assert on_delta is not None
+            await on_delta("Checking now.")
+            text = {"type": "text", "text": "Checking now."}
+            tool = {
+                "type": "tool_use",
+                "id": "done-1",
+                "name": "done",
+                "input": {"summary": "Finished"},
+            }
+            return [text, tool], "tool_use", [text, tool]
+        raise AssertionError("ALICE should stop after done")
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        chunks = []
+        async for line in run_alice_turn_stream(run.id, "Check the target", []):
+            if line.startswith("data: "):
+                chunks.append(json.loads(line[6:].strip()))
+
+    assert any(chunk.get("type") == "message_retract" for chunk in chunks)
+    assert "Checking now." in "".join(
+        chunk.get("delta", "")
+        for chunk in chunks
+        if chunk.get("type") == "thinking_chunk"
+    )
+
+
+@pytest.mark.anyio
 async def test_alice_quota_pause_is_emitted_as_warning_and_chat_message(
     db_session, test_data
 ):
@@ -1285,3 +1361,24 @@ def test_stream_events_replays_exactly_from_cursor_after_trim():
         assert [e["i"] for e in got] == list(range(cursor, total))
     finally:
         at._registry.pop(("site", 42), None)
+
+
+def test_stream_events_sends_snapshot_when_cursor_was_trimmed():
+    task = _alice_task(run_id=43)
+    for i in range(at.BUFFER_LIMIT + 1):
+        at._append(task, {"type": "message_chunk", "delta": str(i % 10)})
+    task.done = True
+    at._registry[("site", 43)] = task
+    try:
+        async def _drain():
+            return [
+                line
+                async for line in at.stream_events(43, cursor=0, run_type="site")
+            ]
+
+        got = [json.loads(line[6:]) for line in asyncio.run(_drain())]
+        assert len(got) == 1
+        assert got[0]["type"] == "state_snapshot"
+        assert got[0]["message"] == task.accumulated_message
+    finally:
+        at._registry.pop(("site", 43), None)

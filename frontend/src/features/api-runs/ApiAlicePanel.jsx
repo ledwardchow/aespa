@@ -101,7 +101,26 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
               ),
             );
           }
-          if (
+          if (event.type === "state_snapshot" && event.tab_id) {
+            textAcc[event.think_msg_id] = normalizeAliceText(event.thought || "");
+            textAcc[event.reply_msg_id] = normalizeAliceText(event.message || "");
+            setAliceChats((prev) =>
+              prev.map((s) =>
+                s.id !== event.tab_id
+                  ? s
+                  : {
+                      ...s,
+                      messages: s.messages.map((m) => {
+                        if (m.id === event.think_msg_id)
+                          return { ...m, text: textAcc[event.think_msg_id] };
+                        if (m.id === event.reply_msg_id)
+                          return { ...m, text: textAcc[event.reply_msg_id] };
+                        return m;
+                      }),
+                    },
+              ),
+            );
+          } else if (
             (event.type === "thinking_chunk" || event.type === "message_chunk") &&
             event.delta &&
             event.tab_id &&
@@ -123,6 +142,19 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
                             }
                           : m,
                       ),
+                    },
+              ),
+            );
+          } else if (event.type === "message_retract" && event.tab_id && event.msg_id) {
+            textAcc[event.msg_id] = normalizeAliceText(event.message || "");
+            const text = textAcc[event.msg_id];
+            setAliceChats((prev) =>
+              prev.map((s) =>
+                s.id !== event.tab_id
+                  ? s
+                  : {
+                      ...s,
+                      messages: s.messages.map((m) => (m.id === event.msg_id ? { ...m, text } : m)),
                     },
               ),
             );
