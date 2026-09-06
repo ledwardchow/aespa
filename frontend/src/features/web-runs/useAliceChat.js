@@ -279,13 +279,24 @@ export function useAliceChat(runId, { onActivate } = {}) {
             return {
               ...tab,
               messages: tab.messages.map((m) => {
+                if (event.type === "state_snapshot" && m.id === thinkMsgId)
+                  return {
+                    ...m,
+                    text: session.accumulatedThought,
+                    stepData: session.stepData,
+                  };
+                if (event.type === "state_snapshot" && m.id === replyMsgId)
+                  return { ...m, text: session.accumulatedMessage };
                 if (event.type === "thinking_chunk" && m.id === thinkMsgId)
                   return {
                     ...m,
                     text: session.accumulatedThought,
                     stepData: session.stepData,
                   };
-                if (event.type === "message_chunk" && m.id === replyMsgId)
+                if (
+                  (event.type === "message_chunk" || event.type === "message_retract") &&
+                  m.id === replyMsgId
+                )
                   return {
                     ...m,
                     text: session.accumulatedMessage,

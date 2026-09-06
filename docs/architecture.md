@@ -1345,14 +1345,26 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 4. Loop (max ALICE_MAX_STEPS = 300):
      a. Emit [Step N] Calling LLM... thinking chunk
      b. Call LLM with tools (ALICE tool set — see below)
-     c. Stream thinking blocks → thinking_chunk SSE events
-     d. Stream text blocks → message_chunk SSE events
+     c. Forward native provider text deltas → message_chunk SSE events
+     d. Stream completed thinking blocks → thinking_chunk SSE events
         (prepend \n\n separator if prior message content exists)
      e. Execute tool calls → emit step status + tool result chunks
      f. If model calls done tool → break
      g. If 3 consecutive text-only turns → break (nudge model back to tools)
 5. Emit done SSE event with final accumulated thought + message
 ```
+
+Anthropic, OpenAI-compatible Chat Completions, OpenAI Responses, Google, and AWS
+Bedrock calls stream text while the provider is still generating. Other
+providers use the same path but return one completed text block. Tool arguments
+are collected before a tool is executed. If streamed text is followed by a tool
+call, ALICE emits a `message_retract` event and places that text in the activity trace. This keeps
+the final reply separate from commentary while still showing immediate output.
+
+When a reconnect cursor is older than the retained event buffer, the stream
+sends a `state_snapshot` containing the current thought and reply text. The UI
+uses this snapshot instead of rebuilding an incomplete message from the events
+that remain in memory.
 
 ### Tools available to ALICE
 

@@ -2152,13 +2152,26 @@ async def run_alice_turn_stream(
                 pass
 
             try:
-                (
-                    content_blocks,
-                    stop_reason,
-                    raw_content,
-                ) = await llm_svc._call_with_tools(
+                streamed_text = ""
+                streamed_payload = ""
+                stream_prefix = ""
+                async for call_event in llm_svc.stream_tools_call(
                     llm_cfg, system_message, messages, tools=alice_tools
-                )
+                ):
+                    if call_event["type"] == "text_delta":
+                        delta = call_event["delta"]
+                        if not streamed_text and accumulated_message:
+                            stream_prefix = (
+                                "" if accumulated_message.endswith("\n") else "\n\n"
+                            )
+                            if stream_prefix:
+                                streamed_payload += stream_prefix
+                                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': stream_prefix})}\n\n"
+                        streamed_text += delta
+                        streamed_payload += delta
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': delta})}\n\n"
+                    else:
+                        content_blocks, stop_reason, raw_content = call_event["result"]
             except llm_svc.LLMQuotaPauseError:
                 # Preserve the structured pause so the outer handler emits a
                 # visible warning and chat reply instead of a generic step error.
@@ -2211,6 +2224,21 @@ async def run_alice_turn_stream(
                 intent == "operational"
                 and any(block.get("name") == "done" for block in tool_use_blocks)
             )
+            combined_text = "".join(
+                str(block.get("text") or "") for block in text_blocks
+            )
+            streamed_is_final = bool(streamed_text) and combined_text == streamed_text
+            if streamed_text and (
+                has_tools
+                or "<think>" in streamed_text.lower()
+                or "<thinking>" in streamed_text.lower()
+            ):
+                yield f"data: {json.dumps({'type': 'message_retract', 'message': accumulated_message})}\n\n"
+                streamed_text = ""
+                streamed_payload = ""
+                streamed_is_final = False
+            elif streamed_is_final:
+                accumulated_message += streamed_payload
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -2234,6 +2262,8 @@ async def run_alice_turn_stream(
                     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': wrapped})}\n\n"
                 else:
                     # Final tool-less turn: this text is the actual answer.
+                    if streamed_is_final:
+                        continue
                     if accumulated_message and not accumulated_message.endswith("\n"):
                         accumulated_message += "\n\n"
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
@@ -3457,13 +3487,25 @@ async def run_api_alice_turn_stream(
                 pass
 
             try:
-                (
-                    content_blocks,
-                    stop_reason,
-                    raw_content,
-                ) = await llm_svc._call_with_tools(
+                streamed_text = ""
+                streamed_payload = ""
+                async for call_event in llm_svc.stream_tools_call(
                     llm_cfg, system_message, messages, tools=alice_tools
-                )
+                ):
+                    if call_event["type"] == "text_delta":
+                        delta = call_event["delta"]
+                        if not streamed_text and accumulated_message:
+                            separator = (
+                                "" if accumulated_message.endswith("\n") else "\n\n"
+                            )
+                            if separator:
+                                streamed_payload += separator
+                                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': separator})}\n\n"
+                        streamed_text += delta
+                        streamed_payload += delta
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': delta})}\n\n"
+                    else:
+                        content_blocks, stop_reason, raw_content = call_event["result"]
             except llm_svc.LLMQuotaPauseError:
                 # Preserve the structured pause so the outer handler emits a
                 # visible warning and chat reply instead of a generic step error.
@@ -3509,6 +3551,21 @@ async def run_api_alice_turn_stream(
                 intent == "operational"
                 and any(block.get("name") == "done" for block in tool_use_blocks)
             )
+            combined_text = "".join(
+                str(block.get("text") or "") for block in text_blocks
+            )
+            streamed_is_final = bool(streamed_text) and combined_text == streamed_text
+            if streamed_text and (
+                has_tools
+                or "<think>" in streamed_text.lower()
+                or "<thinking>" in streamed_text.lower()
+            ):
+                yield f"data: {json.dumps({'type': 'message_retract', 'message': accumulated_message})}\n\n"
+                streamed_text = ""
+                streamed_payload = ""
+                streamed_is_final = False
+            elif streamed_is_final:
+                accumulated_message += streamed_payload
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -3529,6 +3586,8 @@ async def run_api_alice_turn_stream(
                     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': wrapped})}\n\n"
                 else:
                     # Final tool-less turn: this text is the actual answer.
+                    if streamed_is_final:
+                        continue
                     if accumulated_message and not accumulated_message.endswith("\n"):
                         accumulated_message += "\n\n"
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"

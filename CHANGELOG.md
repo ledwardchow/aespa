@@ -16,6 +16,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Streaming A.L.I.C.E. replies**: Site and API chats now show text while Anthropic, OpenAI-compatible, Google, and AWS Bedrock models are generating it. Tool calls still wait for complete arguments, and reconnecting after a long response restores the current reply even when older stream events have expired.
 - **Application campaign validation cases**: Campaigns now trace each approved backend SAST finding to a specific frontend page, action, and browser request before live testing begins. Browser requests are kept separate from server-to-server calls, so unresolved, ambiguous, stale, or wrong-target paths do not enter the scan queue. Campaign pages show the resolved path, readiness blockers, live request binding, and validation outcome for each case.
 - **GPT-6 Astra support**: OpenAI connections can now use GPT-6 Astra for scans and agent workflows. Astra requests use the Responses API, including tool calls, and the model form shows its supported reasoning levels and context window.
 - **Linux display detection**: AESPA now warns when a Linux host cannot access X11 or Wayland. Guided login and visible browser mode are disabled until a graphical display is available.
