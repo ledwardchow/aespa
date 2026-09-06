@@ -1152,6 +1152,26 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "inconclusive: tested but could not determine exploitability."
                     ),
                 },
+                "outcome_reason": {
+                    "type": "string",
+                    "enum": [
+                        "confirmed",
+                        "secure_behavior_observed",
+                        "stale_path",
+                        "missing_runtime_prerequisite",
+                        "insufficient_consequence_evidence",
+                        "execution_failed",
+                    ],
+                    "description": "The precise result of this validation case.",
+                },
+                "baseline_evidence": {
+                    "type": "string",
+                    "description": "The request and response observed before applying the test mutation.",
+                },
+                "mutated_evidence": {
+                    "type": "string",
+                    "description": "The changed input or state and the resulting response or consequence.",
+                },
                 "note": {
                     "type": "string",
                     "description": "What you tested and what happened (required).",
@@ -1478,8 +1498,13 @@ or test hypotheses that are not part of a listed lead.
 The lead index is compact and incomplete. Before investigating each lead, call
 context_tool with tool=lead_detail and args={"lead_reference": "ABCD-001"}. Read the complete static
 evidence, source/control/sink traces, counterevidence, proof gaps, validation reasoning,
-and ordered attack path. Treat every path hop as an unproven hypothesis and verify it
-with focused live evidence, following the attack path's dynamic-test objective.
+and ordered attack path. For a compiled version 3 validation case, start from its
+resolved page, action, browser request, session, and replay evidence. Reproduce the
+baseline request before changing it. Mutate only the listed input or state relevant to
+the validation assertion, and compare the result with its stated secure and vulnerable
+outcomes. If the stored binding is stale, record that outcome instead of searching
+unrelated routes. Legacy attack paths remain hypotheses whose hops require focused live
+verification.
 
 Use the configured credentials and authenticated sessions supplied in the user message
 to reach protected functionality. Use existing session labels, HTTP use_session,
@@ -1488,7 +1513,8 @@ perform credential attacks, spraying, account registration, or JWT forging.
 
 Work through leads one at a time. A confirmed lead requires concrete live evidence and
 write_finding, followed immediately by update_lead with finding_reference. Dismiss or mark
-inconclusive when the live evidence does not prove exploitability. Resolve every
+inconclusive when the live evidence does not prove exploitability. Include the precise
+outcome reason and both baseline and mutated evidence in update_lead. Resolve every
 imported lead before calling done.
 
 An unrelated issue may be recorded only when it is directly visible in a response or
@@ -1508,8 +1534,12 @@ coverage gaps, or test hypotheses that are not part of a listed lead.
 The lead index is compact and incomplete. Before investigating each lead, call
 context_tool with tool=lead_detail and args={"lead_reference": "ABCD-001"}. Read the complete static
 evidence, source/control/sink traces, counterevidence, proof gaps, validation reasoning,
-and ordered attack path. Treat every path hop as an unproven hypothesis and verify it
-with focused live evidence, following the attack path's dynamic-test objective.
+and ordered attack path. For a compiled version 3 validation case, start from its exact
+resolved endpoint and replay evidence. Reproduce the baseline request before changing
+it. Mutate only the listed input or state relevant to the validation assertion, and
+compare the result with its stated secure and vulnerable outcomes. If the stored
+binding is stale, record that outcome instead of searching unrelated routes. Legacy
+attack paths remain hypotheses whose hops require focused live verification.
 
 Use the configured API credentials and seeded HTTP session labels to authenticate and
 reach protected functionality described by the attack path. Login credentials are not
@@ -1519,7 +1549,8 @@ spraying, account registration, or JWT forging.
 
 Work through leads one at a time. A confirmed lead requires concrete live evidence and
 write_finding, followed immediately by update_lead with finding_reference. Dismiss or mark
-inconclusive when the live evidence does not prove exploitability. Resolve every
+inconclusive when the live evidence does not prove exploitability. Include the precise
+outcome reason and both baseline and mutated evidence in update_lead. Resolve every
 imported lead before calling done.
 
 An unrelated issue may be recorded only when it is directly visible in a response

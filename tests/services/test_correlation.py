@@ -33,7 +33,6 @@ from aespa.models import (
 from aespa.services.correlation import (
     apply_review_decisions,
     copy_approved_mappings_for_target,
-    copy_explicit_component_leads_for_target,
     correlate_campaign,
     correlate_campaign_with_llm,
 )
@@ -480,7 +479,7 @@ def test_correlate_campaign_proposes_lead_target_mapping_via_endpoint_match(
     assert mapping.status == "proposed"
 
 
-def test_explicit_target_component_copies_its_own_sast_leads_without_review(
+def test_explicit_target_component_creates_approved_mapping_before_copy(
     isolated_db_engine,
 ):
     ctx = _seed_two_component_campaign(isolated_db_engine)
@@ -502,11 +501,10 @@ def test_explicit_target_component_copies_its_own_sast_leads_without_review(
             .where(LeadTargetMapping.campaign_id == ctx["campaign_id"])
             .where(LeadTargetMapping.lead_id == ctx["source_lead_id"])
         ).first()
-    assert own_mapping is None
-    copied = copy_explicit_component_leads_for_target(
-        ctx["campaign_id"], ctx["target_id"], "api", target_run_id
-    )
-    assert copied == 1
+    assert own_mapping is not None
+    assert own_mapping.status == "approved"
+    assert own_mapping.auto_approved is True
+    assert own_mapping.copied_lead_id is None
 
     with Session(isolated_db_engine) as s:
         copies = s.exec(
@@ -514,8 +512,7 @@ def test_explicit_target_component_copies_its_own_sast_leads_without_review(
             .where(ScanLead.imported_into_run_type == "api")
             .where(ScanLead.imported_into_run_id == target_run_id)
         ).all()
-    assert len(copies) == 1
-    assert copies[0].producer_run_id == 9001
+    assert copies == []
 
 
 def test_correlate_campaign_generates_cross_repo_lead_with_provenance(

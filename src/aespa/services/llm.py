@@ -62,6 +62,12 @@ traffic_log = logging.getLogger("aespa.llm.traffic")
 
 REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
 
+# Bedrock can spend several minutes reasoning before it emits the first stream
+# event.  Botocore's default read timeout is too short for those requests.  The
+# stream keeps this timeout as an idle limit once output starts.
+BEDROCK_CONNECT_TIMEOUT_S = 30
+BEDROCK_READ_TIMEOUT_S = 3600
+
 
 class LLMRefusalError(RuntimeError):
     """The provider refused to process an agentic scan request."""
@@ -989,6 +995,27 @@ def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
     return httpx.AsyncClient(**kwargs)
 
 
+def _bedrock_botocore_config(proxy_url: str | None):
+    """Build the Bedrock SDK transport settings used by every request path."""
+    from botocore.config import Config as BotocoreConfig
+
+    kwargs: dict[str, Any] = {
+        "connect_timeout": BEDROCK_CONNECT_TIMEOUT_S,
+        "read_timeout": BEDROCK_READ_TIMEOUT_S,
+    }
+    if proxy_url:
+        kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+    return BotocoreConfig(**kwargs)
+
+
+def _bedrock_http_timeout() -> httpx.Timeout:
+    """Use the same long read allowance for bearer-token Bedrock requests."""
+    return httpx.Timeout(
+        BEDROCK_READ_TIMEOUT_S,
+        connect=BEDROCK_CONNECT_TIMEOUT_S,
+    )
+
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 ANALYSE_RESULTS_TEXT_BUDGET = 80_000
 ANALYSE_RESULTS_PER_BATCH = 20
@@ -1787,7 +1814,9 @@ async def _stream_chat_completion_impl(
                 "Accept": "application/json",
             }
             try:
-                async with _make_llm_http_client(timeout=120) as client:
+                async with _make_llm_http_client(
+                    timeout=_bedrock_http_timeout()
+                ) as client:
                     async with client.stream(
                         "POST", url, headers=headers, json=payload
                     ) as response:
@@ -1821,23 +1850,18 @@ async def _stream_chat_completion_impl(
 
             def _run_converse_stream():
                 import boto3
-                from botocore.config import Config as _BotocoreConfig
 
                 region = _bedrock_region(config)
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
-                _boto_cfg = (
-                    _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
-                    if _proxy_url
-                    else None
-                )
+                _boto_cfg = _bedrock_botocore_config(_proxy_url)
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=_endpoint,
                     verify=not _proxy_url,
-                    **{"config": _boto_cfg} if _boto_cfg else {},
+                    config=_boto_cfg,
                 )
                 return client.converse_stream(
                     modelId=_model,
@@ -3048,6 +3072,99 @@ def _bedrock_region(config: LLMConfig) -> str:
     )
 
 
+def _consume_bedrock_converse_stream(response: dict[str, Any]) -> dict[str, Any]:
+    """Collect ConverseStream events into the shape returned by Converse."""
+    content: dict[int, dict[str, Any]] = {}
+    tool_inputs: dict[int, str] = {}
+    stop_reason = "end_turn"
+    usage: dict[str, Any] = {}
+    metrics: dict[str, Any] = {}
+    trace: dict[str, Any] | None = None
+    stream = response.get("stream")
+
+    try:
+        for event in stream or ():
+            started = event.get("contentBlockStart")
+            if isinstance(started, dict):
+                index = int(started.get("contentBlockIndex", len(content)))
+                start = started.get("start") or {}
+                if isinstance(start.get("toolUse"), dict):
+                    tool = start["toolUse"]
+                    content[index] = {
+                        "toolUse": {
+                            "toolUseId": tool.get("toolUseId"),
+                            "name": tool.get("name"),
+                            "input": {},
+                        }
+                    }
+                    tool_inputs[index] = ""
+
+            changed = event.get("contentBlockDelta")
+            if isinstance(changed, dict):
+                index = int(changed.get("contentBlockIndex", len(content)))
+                delta = changed.get("delta") or {}
+                if "text" in delta:
+                    block = content.setdefault(index, {"text": ""})
+                    block["text"] = str(block.get("text") or "") + str(
+                        delta.get("text") or ""
+                    )
+                tool_delta = delta.get("toolUse")
+                if isinstance(tool_delta, dict):
+                    tool_inputs[index] = tool_inputs.get(index, "") + str(
+                        tool_delta.get("input") or ""
+                    )
+                reasoning_delta = delta.get("reasoningContent")
+                if isinstance(reasoning_delta, dict):
+                    block = content.setdefault(index, {"reasoningContent": {}})
+                    native = block.setdefault("reasoningContent", {})
+                    reasoning_text = native.setdefault("reasoningText", {})
+                    if "text" in reasoning_delta:
+                        reasoning_text["text"] = str(
+                            reasoning_text.get("text") or ""
+                        ) + str(reasoning_delta.get("text") or "")
+                    if "signature" in reasoning_delta:
+                        reasoning_text["signature"] = reasoning_delta["signature"]
+                    if "redactedContent" in reasoning_delta:
+                        native["redactedContent"] = reasoning_delta["redactedContent"]
+
+            stopped = event.get("messageStop")
+            if isinstance(stopped, dict):
+                stop_reason = str(stopped.get("stopReason") or stop_reason)
+
+            metadata = event.get("metadata")
+            if isinstance(metadata, dict):
+                usage = metadata.get("usage") or usage
+                metrics = metadata.get("metrics") or metrics
+                trace = metadata.get("trace") or trace
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+
+    for index, raw_input in tool_inputs.items():
+        tool = content[index]["toolUse"]
+        if raw_input:
+            try:
+                tool["input"] = json.loads(raw_input)
+            except json.JSONDecodeError:
+                tool["input"] = raw_input
+
+    result = {
+        "stopReason": stop_reason,
+        "output": {
+            "message": {
+                "content": [content[index] for index in sorted(content)],
+            }
+        },
+        "usage": usage,
+        "metrics": metrics,
+        "ResponseMetadata": response.get("ResponseMetadata") or {},
+    }
+    if trace is not None:
+        result["trace"] = trace
+    return result
+
+
 # SigV4 signing name for the bedrock-mantle endpoint.  AWS signs Mantle requests
 # (like the bedrock-runtime OpenAI-compatible endpoint) under the "bedrock"
 # service name — NOT "bedrock-mantle".  Confirmed by the AWS SigV4 curl example
@@ -3245,7 +3362,6 @@ async def _bedrock(
         import asyncio as _aio
 
         import boto3
-        from botocore.config import Config as _BotocoreConfig
 
         region = _bedrock_region(config)
         profile = os.getenv("AWS_PROFILE")
@@ -3258,17 +3374,13 @@ async def _bedrock(
         def _run_sync() -> dict:
             _session_kwargs = {"profile_name": profile} if profile else {}
             _session = boto3.Session(**_session_kwargs)
-            _boto_cfg = (
-                _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
-                if _proxy_url
-                else None
-            )
+            _boto_cfg = _bedrock_botocore_config(_proxy_url)
             _client = _session.client(
                 "bedrock-runtime",
                 region_name=region,
                 endpoint_url=_endpoint,
                 verify=not _proxy_url,
-                **{"config": _boto_cfg} if _boto_cfg else {},
+                config=_boto_cfg,
             )
             return _client.converse(
                 modelId=_model,
@@ -3299,7 +3411,7 @@ async def _bedrock(
         "Accept": "application/json",
     }
 
-    async with _make_llm_http_client(timeout=120) as client:
+    async with _make_llm_http_client(timeout=_bedrock_http_timeout()) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         _resp_data = resp.json()
@@ -4961,7 +5073,7 @@ async def _call_with_tools_impl(
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
-            async with _make_llm_http_client(timeout=120) as _hx:
+            async with _make_llm_http_client(timeout=_bedrock_http_timeout()) as _hx:
                 _resp = await _hx.post(url, headers=headers, json=payload)
                 _resp.raise_for_status()
                 data = _resp.json()
@@ -4978,40 +5090,37 @@ async def _call_with_tools_impl(
             # Capture proxy URL now — ContextVar values are not inherited by threads.
             _proxy_url = _llm_proxy_var.get()
 
-            def _run_converse():
+            def _run_converse_stream():
                 import boto3
-                from botocore.config import Config as _BotocoreConfig
 
                 region = _bedrock_region(config)
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
-                _boto_cfg = (
-                    _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
-                    if _proxy_url
-                    else None
-                )
+                _boto_cfg = _bedrock_botocore_config(_proxy_url)
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=config.base_url or None,
                     verify=not _proxy_url,
-                    **{"config": _boto_cfg} if _boto_cfg else {},
+                    config=_boto_cfg,
                 )
                 _infer_converse: dict = {"maxTokens": config.max_tokens}
                 if config.temperature is not None:
                     _infer_converse["temperature"] = config.temperature
-                return client.converse(
-                    modelId=config.model,
-                    system=system_list,
-                    messages=converse_messages,
-                    toolConfig=tool_config,
-                    inferenceConfig=_infer_converse,
-                    **_bedrock_sdk_reasoning_kwargs(config),
+                return _consume_bedrock_converse_stream(
+                    client.converse_stream(
+                        modelId=config.model,
+                        system=system_list,
+                        messages=converse_messages,
+                        toolConfig=tool_config,
+                        inferenceConfig=_infer_converse,
+                        **_bedrock_sdk_reasoning_kwargs(config),
+                    )
                 )
 
             loop = _asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, _run_converse)
+            data = await loop.run_in_executor(None, _run_converse_stream)
             response_metadata = data.get("ResponseMetadata") or {}
             bedrock_transport = {
                 "http_status": response_metadata.get("HTTPStatusCode"),

@@ -2001,6 +2001,62 @@ class LeadTargetMapping(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class CampaignValidationCase(SQLModel, table=True):
+    """Executable validation work produced from a reviewed target mapping.
+
+    A mapping records a review decision.  This row records the later, target
+    specific readiness and execution state so an approved mapping cannot be
+    mistaken for a runnable dynamic test.
+    """
+
+    __tablename__ = "campaign_validation_case"
+    __table_args__ = (
+        UniqueConstraint(
+            "mapping_id",
+            "target_member_id",
+            "assertion_key",
+            name="uq_campaign_validation_case_scope",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    campaign_id: int = Field(foreign_key="assessment_campaign.id", index=True)
+    mapping_id: int = Field(foreign_key="lead_target_mapping.id", index=True)
+    target_member_id: int = Field(
+        foreign_key="campaign_target_member.id", index=True
+    )
+    origin_lead_id: int = Field(foreign_key="scan_lead.id", index=True)
+    assertion_key: str = Field(default="default", index=True)
+    static_path_json: str = Field(default="{}")
+    live_binding_json: str = Field(default="{}")
+    readiness_status: str = Field(default="pending", index=True)
+    blocker_codes_json: str = Field(default="[]")
+    copied_lead_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("scan_lead.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    finding_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("scan_finding.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    execution_status: str = Field(default="not_queued", index=True)
+    outcome_reason: Optional[str] = Field(default=None)
+    baseline_evidence_json: str = Field(default="{}")
+    mutated_evidence_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class ScanLeadComponentProvenance(SQLModel, table=True):
     """Many-component provenance for a campaign-generated cross-repo ScanLead."""
 

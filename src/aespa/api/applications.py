@@ -58,6 +58,7 @@ from aespa.schemas import (
     CampaignSummary,
     CampaignSupplementalValidationRequest,
     CampaignTargetMemberOut,
+    CampaignValidationCaseOut,
     ComponentConnectionOut,
     ComponentSnapshotOut,
     ComponentTargetHintCreate,
@@ -69,6 +70,7 @@ from aespa.schemas import (
 )
 from aespa.services import applications as applications_svc
 from aespa.services import campaign_results as campaign_results_svc
+from aespa.services import campaign_validation_cases as validation_cases_svc
 from aespa.services import campaigns as campaigns_svc
 from aespa.services import correlation as correlation_svc
 from aespa.services import events as events_svc
@@ -601,6 +603,32 @@ def get_campaign(
     except campaigns_svc.CampaignNotFound as exc:
         raise _not_found(exc) from exc
     return _to_campaign_detail(session, campaign)
+
+
+@router.get(
+    "/{application_id}/campaigns/{campaign_id}/validation-cases",
+    response_model=list[CampaignValidationCaseOut],
+)
+def campaign_validation_cases(
+    application_id: int,
+    campaign_id: int,
+    target_member_id: int | None = Query(default=None),
+    session: Session = Depends(get_session),
+) -> list[CampaignValidationCaseOut]:
+    """Return structured readiness and execution state for campaign cases."""
+    try:
+        campaigns_svc.get_campaign(session, application_id, campaign_id)
+    except campaigns_svc.CampaignNotFound as exc:
+        raise _not_found(exc) from exc
+    cases = validation_cases_svc.list_validation_cases(
+        session, campaign_id, target_member_id
+    )
+    return [
+        CampaignValidationCaseOut.model_validate(
+            validation_cases_svc.case_to_output(session, case)
+        )
+        for case in cases
+    ]
 
 
 @router.delete(

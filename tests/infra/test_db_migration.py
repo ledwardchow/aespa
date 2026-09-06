@@ -809,7 +809,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "test_run" in tables
         assert was_pre_alembic is False
         # The migration chain now includes replay/session provenance fields.
-        assert version == "91c4e7a2d5b8"
+        assert version == "7a9d3c1e5f20"
     finally:
         engine.dispose()
 
@@ -1107,12 +1107,13 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
             "component_fact",
             "component_connection",
             "lead_target_mapping",
+            "campaign_validation_case",
             "scan_lead_component_provenance",
         } <= tables_after
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "91c4e7a2d5b8"
+        assert version == "7a9d3c1e5f20"
     finally:
         engine.dispose()
 
@@ -1149,7 +1150,7 @@ def test_current_db_with_applications_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "91c4e7a2d5b8"
+        assert version == "7a9d3c1e5f20"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

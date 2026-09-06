@@ -101,6 +101,64 @@ _HTTP_CALL_PATTERNS = [
     ),
 ]
 
+# Request-bearing facts use this field to keep browser traffic separate from
+# calls made by a server.  The field lives in detail_json so existing
+# ComponentFact rows remain readable without a schema migration.
+REQUEST_ROLES = frozenset({"browser_request", "server_ingress", "server_egress"})
+
+
+def normalize_request_role(value: object) -> str | None:
+    """Return a supported request role, or ``None`` for an unknown role.
+
+    Unknown legacy facts are intentionally left unknown.  A caller can then
+    record a proof gap instead of treating a server-to-server URL as a browser
+    entry point.
+    """
+    if value is None:
+        return None
+    role = str(value).strip().casefold().replace("-", "_")
+    aliases = {
+        "browser": "browser_request",
+        "frontend": "browser_request",
+        "client": "browser_request",
+        "ingress": "server_ingress",
+        "server_in": "server_ingress",
+        "egress": "server_egress",
+        "server_out": "server_egress",
+    }
+    role = aliases.get(role, role)
+    if role not in REQUEST_ROLES:
+        raise ValueError(
+            "request_role must be one of browser_request, server_ingress, "
+            "or server_egress"
+        )
+    return role
+
+
+def request_role_for_fact(
+    fact_type: str,
+    detail: dict | None = None,
+    *,
+    source_suffix: str | None = None,
+) -> str | None:
+    """Resolve a request role from explicit detail and deterministic hints."""
+    detail = detail if isinstance(detail, dict) else {}
+    if "request_role" in detail:
+        return normalize_request_role(detail.get("request_role"))
+    if fact_type == "route":
+        return "server_ingress"
+    if fact_type != "http_call":
+        return None
+    if detail.get("frontend") or detail.get("ui_route") or detail.get("trigger"):
+        return "browser_request"
+    if source_suffix and source_suffix.casefold() in {".js", ".jsx", ".ts", ".tsx"}:
+        return "browser_request"
+    if detail.get("handler") or detail.get("handler_location") or detail.get(
+        "handler_locations"
+    ):
+        return "server_egress"
+    return None
+
 _UI_ROUTE_PATTERNS = [
     re.compile(
         r"(?:<Route|route)\s*(?:[^>]*?)path\s*=\s*[\"'](?P<path>/[^\"']*)[\"']",
@@ -350,7 +408,11 @@ def extract_component_facts(root: Path) -> list[dict]:
                     "path": route.rstrip("/") or "/",
                     "host": None,
                     "name": "Next.js App Router page",
-                    "detail": {"route_kind": "next_app", "trigger": "page_load"},
+                    "detail": {
+                        "route_kind": "next_app",
+                        "trigger": "page_load",
+                        "request_role": None,
+                    },
                     "evidence_location": f"{rel}:1",
                 }
             )
@@ -375,7 +437,11 @@ def extract_component_facts(root: Path) -> list[dict]:
                     "path": route.rstrip("/") or "/",
                     "host": None,
                     "name": "Next.js Pages Router page",
-                    "detail": {"route_kind": "next_pages", "trigger": "page_load"},
+                    "detail": {
+                        "route_kind": "next_pages",
+                        "trigger": "page_load",
+                        "request_role": None,
+                    },
                     "evidence_location": f"{rel}:1",
                 }
             )
@@ -400,6 +466,7 @@ def extract_component_facts(root: Path) -> list[dict]:
                                 "detail": {
                                     "route_kind": "react_router",
                                     "trigger": "page_load",
+                                    "request_role": None,
                                 },
                                 "evidence_location": location,
                             }
@@ -443,7 +510,7 @@ def extract_component_facts(root: Path) -> list[dict]:
                             "path": m.group("path"),
                             "host": None,
                             "name": None,
-                            "detail": {},
+                            "detail": {"request_role": "server_ingress"},
                             "evidence_location": location,
                         }
                     )
@@ -463,7 +530,13 @@ def extract_component_facts(root: Path) -> list[dict]:
                             "name": None,
                             "detail": {
                                 "frontend": path.suffix.lower()
-                                in {".js", ".jsx", ".ts", ".tsx"}
+                                in {".js", ".jsx", ".ts", ".tsx"},
+                                "request_role": (
+                                    "browser_request"
+                                    if path.suffix.lower()
+                                    in {".js", ".jsx", ".ts", ".tsx"}
+                                    else "server_egress"
+                                ),
                             },
                             "evidence_location": location,
                         }

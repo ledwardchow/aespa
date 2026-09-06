@@ -38,6 +38,15 @@ Record only concrete, evidence-backed facts:
 - queue_publish / queue_consume: a concrete message destination;
 - rpc_client / rpc_server: a concrete RPC service or method.
 
+For every route or http_call, set detail.request_role when the evidence supports
+one of these roles: browser_request (a fetch, Axios, or form submission tied to
+UI code), server_ingress (a route served by this component), or server_egress
+(an HTTP client call dispatched by a server handler). A browser request and a
+server egress may use different paths even when they belong to one workflow.
+Include handler_locations, route_locations, or trigger_locations in detail when
+they prove how the request is connected. Leave the role absent when the source
+does not prove it. Never promote a server egress URL to a frontend entrypoint.
+
 Use the actual HTTP method when known. Record separate facts for distinct
 method/path pairs. A fact's primary evidence location must be a file and line
 you read. Add supporting locations when composition depends on another file.

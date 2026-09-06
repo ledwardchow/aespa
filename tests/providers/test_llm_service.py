@@ -2212,7 +2212,9 @@ def test_bedrock_call_uses_converse_api_key(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert {"timeout": 120}.items() <= captured["client"].items()
+    timeout = captured["client"]["timeout"]
+    assert timeout.connect == llm.BEDROCK_CONNECT_TIMEOUT_S
+    assert timeout.read == llm.BEDROCK_READ_TIMEOUT_S
     assert captured["url"] == (
         "https://bedrock-runtime.us-east-1.amazonaws.com/model/"
         "anthropic.claude-3-7-sonnet-20250219-v1%3A0/converse"
@@ -2277,6 +2279,9 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
         "region_name": "us-east-1",
         "endpoint_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
     }.items() <= captured["client"].items()
+    sdk_config = captured["client"]["config"]
+    assert sdk_config.connect_timeout == llm.BEDROCK_CONNECT_TIMEOUT_S
+    assert sdk_config.read_timeout == llm.BEDROCK_READ_TIMEOUT_S
     assert captured["converse"] == {
         "modelId": "anthropic.claude-3-7-sonnet-20250219-v1:0",
         "messages": [{"role": "user", "content": [{"text": "hello"}]}],
@@ -2347,6 +2352,9 @@ def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blan
         "region_name": "ap-southeast-2",
         "endpoint_url": None,
     }.items() <= captured["client"].items()
+    sdk_config = captured["client"]["config"]
+    assert sdk_config.connect_timeout == llm.BEDROCK_CONNECT_TIMEOUT_S
+    assert sdk_config.read_timeout == llm.BEDROCK_READ_TIMEOUT_S
     assert captured["converse"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
 
 
@@ -2795,7 +2803,9 @@ async def test_bedrock_stream_uses_converse_api_key(monkeypatch):
         chunks.append(chunk)
 
     assert "".join(chunks) == "streaming response"
-    assert {"timeout": 120}.items() <= captured["client"].items()
+    timeout = captured["client"]["timeout"]
+    assert timeout.connect == llm.BEDROCK_CONNECT_TIMEOUT_S
+    assert timeout.read == llm.BEDROCK_READ_TIMEOUT_S
     assert captured["method"] == "POST"
     assert captured["url"] == (
         "https://bedrock-runtime.us-east-1.amazonaws.com/model/"
@@ -3262,19 +3272,27 @@ def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
     monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
 
     class FakeBedrockClient:
-        def converse(self, **kwargs):
+        def converse_stream(self, **kwargs):
             return {
-                "output": {
-                    "message": {
-                        "content": [{"text": "ok"}],
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {"text": "ok"},
+                        }
                     },
-                },
-                "usage": {
-                    "inputTokens": 2000,
-                    "outputTokens": 250,
-                    "cacheReadInputTokens": 800,
-                    "cacheWriteInputTokens": 400,
-                },
+                    {"messageStop": {"stopReason": "end_turn"}},
+                    {
+                        "metadata": {
+                            "usage": {
+                                "inputTokens": 2000,
+                                "outputTokens": 250,
+                                "cacheReadInputTokens": 800,
+                                "cacheWriteInputTokens": 400,
+                            }
+                        }
+                    },
+                ]
             }
 
     class FakeSession:
@@ -3318,18 +3336,23 @@ def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
 
 def test_bedrock_empty_response_preserves_native_diagnostics(monkeypatch):
     class FakeBedrockClient:
-        def converse(self, **kwargs):  # noqa: ARG002
+        def converse_stream(self, **kwargs):  # noqa: ARG002
             return {
-                "stopReason": "guardrail_intervened",
-                "output": {"message": {"content": []}},
-                "usage": {
-                    "inputTokens": 1234,
-                    "outputTokens": 0,
-                    "cacheReadInputTokens": 1000,
-                    "cacheWriteInputTokens": 0,
-                },
-                "metrics": {"latencyMs": 42},
-                "trace": {"guardrail": "present"},
+                "stream": [
+                    {"messageStop": {"stopReason": "guardrail_intervened"}},
+                    {
+                        "metadata": {
+                            "usage": {
+                                "inputTokens": 1234,
+                                "outputTokens": 0,
+                                "cacheReadInputTokens": 1000,
+                                "cacheWriteInputTokens": 0,
+                            },
+                            "metrics": {"latencyMs": 42},
+                            "trace": {"guardrail": "present"},
+                        }
+                    },
+                ],
                 "ResponseMetadata": {
                     "RequestId": "bedrock-request-123",
                     "HTTPStatusCode": 200,
@@ -3894,20 +3917,28 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakeBedrockClient:
-        def converse(self, **kwargs):
+        def converse_stream(self, **kwargs):
             captured["converse_kwargs"] = kwargs
             return {
-                "output": {
-                    "message": {
-                        "content": [{"text": "ok"}],
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {"text": "ok"},
+                        }
                     },
-                },
-                "usage": {
-                    "inputTokens": 2000,
-                    "outputTokens": 250,
-                    "cacheReadInputTokens": 800,
-                    "cacheWriteInputTokens": 400,
-                },
+                    {"messageStop": {"stopReason": "end_turn"}},
+                    {
+                        "metadata": {
+                            "usage": {
+                                "inputTokens": 2000,
+                                "outputTokens": 250,
+                                "cacheReadInputTokens": 800,
+                                "cacheWriteInputTokens": 400,
+                            }
+                        }
+                    },
+                ]
             }
 
     class FakeSession:
@@ -3963,25 +3994,48 @@ def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
     }
 
     class FakeBedrockClient:
-        def converse(self, **kwargs):
+        def converse_stream(self, **kwargs):
             captured["converse_kwargs"] = kwargs
             return {
-                "stopReason": "tool_use",
-                "output": {
-                    "message": {
-                        "content": [
-                            {"reasoningContent": reasoning},
-                            {
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {
+                                "reasoningContent": {
+                                    "text": "signed internal reasoning"
+                                }
+                            },
+                        }
+                    },
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {
+                                "reasoningContent": {"signature": "bedrock-signature"}
+                            },
+                        }
+                    },
+                    {
+                        "contentBlockStart": {
+                            "contentBlockIndex": 1,
+                            "start": {
                                 "toolUse": {
                                     "toolUseId": "tool-2",
                                     "name": "context_tool",
-                                    "input": {"tool": "site_map"},
                                 }
                             },
-                        ],
+                        }
                     },
-                },
-                "usage": {},
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 1,
+                            "delta": {"toolUse": {"input": '{"tool":"site_map"}'}},
+                        }
+                    },
+                    {"messageStop": {"stopReason": "tool_use"}},
+                    {"metadata": {"usage": {}}},
+                ]
             }
 
     class FakeSession:
