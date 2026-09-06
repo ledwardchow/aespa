@@ -691,6 +691,44 @@ def test_agentic_loop_checkpoints_nonempty_assistant_turns(monkeypatch):
     )
 
 
+def test_agentic_loop_checkpoints_tool_request_before_execution(monkeypatch):
+    config = LLMConfig(provider="bedrock", model="anthropic.claude-opus-test")
+    checkpoints: list[list[dict]] = []
+    tool_block = {
+        "type": "tool_use",
+        "id": "tool-before-crash",
+        "name": "context_tool",
+        "input": {"tool": "site_map"},
+        "text": None,
+    }
+
+    async def fake_call_with_tools(*args, **kwargs):
+        return [tool_block], "tool_use", [tool_block]
+
+    async def checkpoint(messages, step_count=0):
+        checkpoints.append(messages.copy())
+
+    async def crashing_tool(*args):
+        assert checkpoints
+        assert checkpoints[-1][-1] == {
+            "role": "assistant",
+            "content": [tool_block],
+        }
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                config,
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=crashing_tool,
+                on_checkpoint=checkpoint,
+            )
+        )
+
+
 def test_agentic_loop_logs_native_stop_and_terminal_no_tool_failure(monkeypatch):
     config = LLMConfig(
         provider="bedrock",

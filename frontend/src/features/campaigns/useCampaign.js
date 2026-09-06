@@ -30,26 +30,21 @@ export function useCampaign(applicationId, campaignId) {
   const load = useCallback(async () => {
     try {
       const c = await applicationsApi.getCampaign(applicationId, campaignId);
-      if (mountedRef.current) setCampaign(c);
+      if (mountedRef.current) {
+        setCampaign(c);
+        setError(null);
+      }
     } catch (e) {
       if (mountedRef.current) setError(e.message);
     }
   }, [applicationId, campaignId]);
 
-  const hasRunningMember = campaign
-    ? [...(campaign.source_members || []), ...(campaign.target_members || [])].some(
-        (member) =>
-          member.status === "running" ||
-          ["running", "scanning", "analysing", "analyzing", "crawling", "stopping"].includes(
-            member.run_status,
-          ),
-      )
-    : false;
   const displayedStatus = campaignDisplayStatus(campaign);
   usePolling(load, {
-    enabled: campaign
-      ? ACTIVE_STAGES.has(campaign.status) || ACTIVE_STAGES.has(displayedStatus) || hasRunningMember
-      : true,
+    // A child scan can resume its parent campaign from another page. Keep
+    // polling paused and terminal snapshots too, otherwise this screen can
+    // remain stuck on "interrupted" after the backend advances to correlation.
+    enabled: true,
     intervalMs: 4000,
   });
 

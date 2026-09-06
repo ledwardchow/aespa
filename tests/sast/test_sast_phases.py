@@ -5,6 +5,7 @@ import json
 import zipfile
 from datetime import datetime, timezone
 
+import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
@@ -306,6 +307,75 @@ def test_provider_network_failure_pauses_sast_run(
     assert saved.status == "paused"
     assert pause.reason == "network"
     assert "resumed safely" in pause.message
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason", "expected_phase"),
+    [
+        (asyncio.CancelledError(), "interrupted", "discovery"),
+        (RuntimeError("source inventory crashed"), "error", "scope"),
+    ],
+)
+def test_sast_task_crashes_pause_for_resume(
+    isolated_db_engine,
+    tmp_path,
+    monkeypatch,
+    failure,
+    expected_reason,
+    expected_phase,
+):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "crashing-source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.py", "print('ok')\n")
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="resumable crash",
+            status="scanning",
+            source_archive_path=str(archive),
+            source_filename="crashing-source.zip",
+            llm_config_id=config.id,
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    async def crash_agent(_config, **_kwargs):
+        raise failure
+
+    from aespa.services import llm
+
+    if expected_reason == "interrupted":
+        monkeypatch.setattr(llm, "thinking_agentic_loop", crash_agent)
+    else:
+
+        def crash_inventory(_root):
+            raise failure
+
+        monkeypatch.setattr(sast_scanner, "_build_source_inventory", crash_inventory)
+    monkeypatch.setattr(llm, "set_run_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm, "clear_run_context", lambda: None)
+    monkeypatch.setattr(sast_scanner, "_SAST_NETWORK_RETRY_DELAYS", ())
+
+    asyncio.run(sast_scanner._sast_scan_task(run_id))
+
+    with Session(isolated_db_engine) as session:
+        saved = session.get(SastRun, run_id)
+        pause = session.exec(
+            select(RunPause)
+            .where(RunPause.run_kind == "sast")
+            .where(RunPause.run_id == run_id)
+        ).one()
+    assert saved.status == "paused"
+    assert saved.completed_at is None
+    assert pause.reason == expected_reason
+    assert pause.resume_stage == expected_phase
+    assert "last saved step" in pause.message
 
 
 def test_sast_model_profile_can_be_changed_after_creation(client, isolated_db_engine):

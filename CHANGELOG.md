@@ -17,7 +17,7 @@ All pull requests merged to `main`, in reverse chronological order.
 ### Updates
 
 - **Streaming A.L.I.C.E. replies**: Site and API chats now show text while Anthropic, OpenAI-compatible, Google, and AWS Bedrock models are generating it. Tool calls still wait for complete arguments, and reconnecting after a long response restores the current reply even when older stream events have expired.
-- **Application campaign validation cases**: Campaigns now trace each approved backend SAST finding to a specific frontend page, action, and browser request before live testing begins. Browser requests are kept separate from server-to-server calls, so unresolved, ambiguous, stale, or wrong-target paths do not enter the scan queue. Campaign pages show the resolved path, readiness blockers, live request binding, and validation outcome for each case.
+- **Application campaign validation cases**: Campaigns now trace each approved backend SAST finding to a specific frontend page or action and browser request before live testing begins. Frontend analysis follows custom request wrappers, imported helpers, state-held route values, async event callbacks, and server-template form actions across common JavaScript, TypeScript, React, Vue, Angular, Axios, HTML, Thymeleaf, and Spring MVC patterns. Traces inspect all relevant interface facts and can cross a frontend request, same-application server route, proxy call, and downstream service route without confusing browser and server requests. Equivalent paths are combined, paths stay attached to the site that owns them, and multi-step findings must begin at their stated first endpoint. Backend ownership without a proven frontend path stays unresolved, so unresolved, ambiguous, stale, or wrong-target paths do not enter the scan queue. Re-running context matching clears generated leads, mappings, validation cases, and review decisions, then rebuilds them from the frozen source snapshots. Campaign pages show the resolved path, readiness blockers, live request binding, and validation outcome for each case.
 - **GPT-6 Astra support**: OpenAI connections can now use GPT-6 Astra for scans and agent workflows. Astra requests use the Responses API, including tool calls, and the model form shows its supported reasoning levels and context window.
 - **Linux display detection**: AESPA now warns when a Linux host cannot access X11 or Wayland. Guided login and visible browser mode are disabled until a graphical display is available.
 - **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser, Reporting Lab, and Applications options are grouped under Feature Visibility.
@@ -29,6 +29,10 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Keyboard navigation in Settings**: Settings tabs now support keyboard navigation.
 
 ### Fixes
+
+- **Campaign progress stays current after a resumed scan**: Campaign pages continue refreshing after an interrupted child scan and remove the old interruption message when matching resumes.
+
+- **SAST scans resume after application or tool crashes**: The requested tool call is saved before execution. Application shutdowns and unexpected scan errors now pause at the saved step instead of cancelling the run, while the explicit Stop action still cancels it.
 
 - **Long Bedrock scan requests no longer time out while the model is working**: Agent scans now read Bedrock responses as a stream and allow long reasoning requests to remain idle for up to one hour. Tool calls, reasoning signatures, usage totals, and provider diagnostics are retained from the stream.
 

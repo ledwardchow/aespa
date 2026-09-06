@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import zipfile
 from types import SimpleNamespace
 
 import pytest
@@ -24,11 +25,15 @@ from aespa.models import (
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
+    CampaignValidationCase,
+    ComponentConnection,
     ComponentFact,
     ComponentSnapshot,
+    LeadTargetMapping,
     RunIdentity,
     SastRun,
     ScanLead,
+    ScanLeadComponentProvenance,
     Site,
     TestRun,
 )
@@ -95,6 +100,30 @@ def test_campaign_id_joins_global_run_identity_namespace(isolated_db_engine):
         identity = s.get(RunIdentity, campaign.id)
     assert identity is not None
     assert identity.kind == "campaign"
+
+
+def test_forward_campaign_status_clears_old_interruption(isolated_db_engine):
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        campaign = _create_draft_campaign(s, ctx)
+        campaign.status = "interrupted"
+        campaign.interrupted_stage = "sast_running"
+        campaign.error_message = "Scan interrupted"
+        campaign.warnings_json = json.dumps(
+            ["The application restarted while this stage was running. Retry to resume."]
+        )
+        s.add(campaign)
+        s.commit()
+        campaign_id = campaign.id
+
+    campaigns_svc._set_campaign_status(campaign_id, "correlating")
+
+    with Session(isolated_db_engine) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        assert campaign.status == "correlating"
+        assert campaign.interrupted_stage is None
+        assert campaign.error_message is None
+        assert json.loads(campaign.warnings_json) == []
 
 
 def test_create_campaign_rejects_duplicate_component_selection(isolated_db_engine):
@@ -296,6 +325,7 @@ async def test_child_sast_page_resume_reactivates_failed_campaign(
         assert campaign.error_message is None
         assert member.status == "running"
         assert campaign.warnings_json.count("did not finish successfully") == 0
+        assert "The application restarted" not in campaign.warnings_json
 
     with Session(isolated_db_engine) as s:
         run = s.get(SastRun, sast_run_id)
@@ -439,6 +469,12 @@ async def test_continue_to_live_testing_skips_scan_without_runnable_cases(
         campaign = _create_draft_campaign(s, ctx)
         campaign.status = "awaiting_review"
         campaign.review_submitted_at = campaign.created_at
+        campaign.warnings_json = json.dumps(
+            [
+                "Lead 12: pre-crawl path wording was not rewritten (bad response)",
+                "A source-code scan did not finish successfully - matches may be incomplete.",
+            ]
+        )
         s.add(campaign)
         s.commit()
         campaign_id = campaign.id
@@ -1171,16 +1207,12 @@ async def test_dast_stage_marks_target_failed_when_scan_status_is_failed(
     monkeypatch.setattr(
         campaigns_svc.validation_cases_svc,
         "resolve_cases_for_web_target",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            counts={"resolved": 1}, warnings=[]
-        ),
+        lambda *_args, **_kwargs: SimpleNamespace(counts={"resolved": 1}, warnings=[]),
     )
     monkeypatch.setattr(
         campaigns_svc.validation_cases_svc,
         "compile_runnable_cases",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            copied_lead_ids=[1], warnings=[]
-        ),
+        lambda *_args, **_kwargs: SimpleNamespace(copied_lead_ids=[1], warnings=[]),
     )
 
     await campaigns_svc.continue_to_live_testing(campaign_id)
@@ -1281,23 +1313,17 @@ async def test_dast_stage_is_incomplete_when_one_of_two_targets_fails(
     monkeypatch.setattr(
         campaigns_svc.validation_cases_svc,
         "resolve_cases_for_web_target",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            counts={"resolved": 1}, warnings=[]
-        ),
+        lambda *_args, **_kwargs: SimpleNamespace(counts={"resolved": 1}, warnings=[]),
     )
     monkeypatch.setattr(
         campaigns_svc.validation_cases_svc,
         "resolve_cases_for_api_target",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            counts={"resolved": 1}, warnings=[]
-        ),
+        lambda *_args, **_kwargs: SimpleNamespace(counts={"resolved": 1}, warnings=[]),
     )
     monkeypatch.setattr(
         campaigns_svc.validation_cases_svc,
         "compile_runnable_cases",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            copied_lead_ids=[1], warnings=[]
-        ),
+        lambda *_args, **_kwargs: SimpleNamespace(copied_lead_ids=[1], warnings=[]),
     )
 
     await campaigns_svc.continue_to_live_testing(campaign_id)
@@ -1504,6 +1530,256 @@ def test_retry_campaign_rejected_when_not_interrupted(isolated_db_engine):
             await campaigns_svc.retry_campaign(campaign_id)
 
     asyncio.run(_run())
+
+
+@pytest.mark.anyio
+async def test_rebuild_context_matching_clears_all_generated_review_data(
+    isolated_db_engine, monkeypatch, tmp_path
+):
+    archive = tmp_path / "ui.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.js", "fetch('/api/orders')")
+
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        snapshot = s.get(ComponentSnapshot, ctx["snapshot_id"])
+        snapshot.stored_path = str(archive)
+        s.add(snapshot)
+        campaign = _create_draft_campaign(s, ctx)
+        campaign.status = "awaiting_review"
+        campaign.review_submitted_at = campaign.created_at
+        s.add(campaign)
+        s.flush()
+
+        sast_run = SastRun(name="source", status="completed")
+        s.add(sast_run)
+        s.flush()
+        source_member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign.id
+            )
+        ).one()
+        source_member.sast_run_id = sast_run.id
+        source_member.status = "completed"
+        s.add(source_member)
+
+        call = ComponentFact(
+            sast_run_id=sast_run.id,
+            component_id=ctx["component_id"],
+            fact_type="http_call",
+            method="POST",
+            path="/api/orders",
+            fingerprint="call",
+        )
+        route = ComponentFact(
+            sast_run_id=sast_run.id,
+            component_id=ctx["component_id"],
+            fact_type="route",
+            method="POST",
+            path="/api/orders",
+            fingerprint="route",
+        )
+        s.add(call)
+        s.add(route)
+        s.flush()
+        s.add(
+            ComponentConnection(
+                campaign_id=campaign.id,
+                source_component_id=ctx["component_id"],
+                source_fact_id=call.id,
+                target_component_id=ctx["component_id"],
+                target_fact_id=route.id,
+            )
+        )
+
+        original_lead = ScanLead(
+            producer_run_type="sast",
+            producer_run_id=sast_run.id,
+            title="Original SAST lead",
+        )
+        generated_lead = ScanLead(
+            producer_run_type="campaign",
+            producer_run_id=campaign.id,
+            source="campaign",
+            title="Generated path lead",
+        )
+        s.add(original_lead)
+        s.add(generated_lead)
+        s.flush()
+        s.add(
+            ScanLeadComponentProvenance(
+                scan_lead_id=generated_lead.id,
+                component_id=ctx["component_id"],
+                fact_id=call.id,
+            )
+        )
+        mapping = LeadTargetMapping(
+            campaign_id=campaign.id,
+            lead_id=generated_lead.id,
+            target_id=ctx["target_id"],
+            target_type="site",
+            status="approved",
+            approved=True,
+        )
+        s.add(mapping)
+        s.flush()
+        target_member = s.exec(
+            select(CampaignTargetMember).where(
+                CampaignTargetMember.campaign_id == campaign.id
+            )
+        ).one()
+        target_member.status = "completed"
+        target_member.status_message = "Old result"
+        target_member.validation_summary_json = '{"confirmed": 1}'
+        s.add(target_member)
+        s.add(
+            CampaignValidationCase(
+                campaign_id=campaign.id,
+                mapping_id=mapping.id,
+                target_member_id=target_member.id,
+                origin_lead_id=generated_lead.id,
+            )
+        )
+        s.commit()
+        campaign_id = campaign.id
+        original_lead_id = original_lead.id
+
+    refreshed = []
+    monkeypatch.setattr(
+        campaigns_svc,
+        "_refresh_component_facts",
+        lambda value: refreshed.append(value),
+    )
+
+    async def _fake_correlate(value, *, preserve_downstream):
+        assert value == campaign_id
+        assert preserve_downstream is False
+        with Session(isolated_db_engine) as s:
+            assert not s.exec(
+                select(ComponentConnection).where(
+                    ComponentConnection.campaign_id == campaign_id
+                )
+            ).all()
+            assert not s.exec(
+                select(LeadTargetMapping).where(
+                    LeadTargetMapping.campaign_id == campaign_id
+                )
+            ).all()
+            assert not s.exec(
+                select(CampaignValidationCase).where(
+                    CampaignValidationCase.campaign_id == campaign_id
+                )
+            ).all()
+        return {"connections": 0, "cross_component_leads": 0, "lead_target_mappings": 0}
+
+    monkeypatch.setattr(
+        campaigns_svc.correlation_svc,
+        "correlate_campaign_with_llm",
+        _fake_correlate,
+    )
+
+    await campaigns_svc.rebuild_campaign_connections(campaign_id)
+
+    assert refreshed == [campaign_id]
+    with Session(isolated_db_engine) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        assert campaign.status == "awaiting_review"
+        assert campaign.review_submitted_at is None
+        assert json.loads(campaign.warnings_json) == []
+        assert s.get(ScanLead, original_lead_id) is not None
+        assert not s.exec(
+            select(ScanLead).where(
+                ScanLead.producer_run_type == "campaign",
+                ScanLead.producer_run_id == campaign_id,
+            )
+        ).all()
+        assert not s.exec(select(ScanLeadComponentProvenance)).all()
+        target_member = s.exec(
+            select(CampaignTargetMember).where(
+                CampaignTargetMember.campaign_id == campaign_id
+            )
+        ).one()
+        assert target_member.status == "pending"
+        assert target_member.status_message is None
+        assert target_member.validation_summary_json == "{}"
+
+
+@pytest.mark.anyio
+async def test_rebuild_context_matching_rejects_existing_live_child_run(
+    isolated_db_engine,
+):
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        campaign = _create_draft_campaign(s, ctx)
+        campaign.status = "completed"
+        s.add(campaign)
+        run = TestRun(site_id=ctx["site_id"], name="existing live scan")
+        s.add(run)
+        s.flush()
+        member = s.exec(
+            select(CampaignTargetMember).where(
+                CampaignTargetMember.campaign_id == campaign.id
+            )
+        ).one()
+        member.test_run_id = run.id
+        s.add(member)
+        s.commit()
+        campaign_id = campaign.id
+
+    with pytest.raises(campaigns_svc.InvalidCampaignState, match="live target scans"):
+        await campaigns_svc.rebuild_campaign_connections(campaign_id)
+
+    with Session(isolated_db_engine) as s:
+        assert s.get(AssessmentCampaign, campaign_id).status == "completed"
+
+
+def test_refresh_component_facts_uses_frozen_snapshot(isolated_db_engine, tmp_path):
+    archive = tmp_path / "ui.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("src/client.js", "fetch('/api/orders', { method: 'POST' })")
+
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        snapshot = s.get(ComponentSnapshot, ctx["snapshot_id"])
+        snapshot.stored_path = str(archive)
+        s.add(snapshot)
+        campaign = _create_draft_campaign(s, ctx)
+        run = SastRun(name="source", status="completed")
+        s.add(run)
+        s.flush()
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign.id
+            )
+        ).one()
+        member.sast_run_id = run.id
+        member.status = "completed"
+        s.add(member)
+        s.add(
+            ComponentFact(
+                sast_run_id=run.id,
+                component_id=ctx["component_id"],
+                fact_type="http_call",
+                path="/old",
+                detail_json='{"origin": "llm_mapper"}',
+                fingerprint="old-llm",
+            )
+        )
+        s.commit()
+        campaign_id = campaign.id
+        run_id = run.id
+
+    campaigns_svc._refresh_component_facts(campaign_id)
+
+    with Session(isolated_db_engine) as s:
+        facts = s.exec(
+            select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
+        ).all()
+        assert not any(fact.path == "/old" for fact in facts)
+        assert any(
+            fact.fact_type == "http_call" and fact.path == "/api/orders"
+            for fact in facts
+        )
 
 
 # ── Regression: submit_review gating (finding 7) ────────────────────────────

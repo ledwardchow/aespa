@@ -1384,6 +1384,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             )
         _sast_workspace_leases[sast_run_id] = lease
     run: SastRun | None = None  # populated early; used in except blocks
+    llm_cfg_obj = None
     validation_tasks: list[asyncio.Task] = []
     current_phase = "scope"
     try:
@@ -2164,43 +2165,70 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             },
         )
     except asyncio.CancelledError:
-        log.info("SAST scan cancelled: sast_run_id=%s", sast_run_id)
-        total = 0
-        if run is not None:
-            for candidate in _candidates.get(sast_run_id, []):
-                if candidate.get("validation_status") == "pending":
-                    candidate["validation_status"] = "inconclusive"
-                    candidate["validation_reasoning"] = (
-                        "Scan stopped before validation completed."
-                    )
-                    candidate["reportable"] = False
-            _, total = _sync_candidates_to_db(sast_run_id, run.collection_id)
-            with Session(get_engine()) as s:
-                r = s.get(SastRun, sast_run_id)
-                if r is not None:
-                    r.leads_count = total
-                    s.add(r)
-                    s.commit()
-        _update_sast_run_status(sast_run_id, "cancelled")
-        _notify_campaign_source_finished(sast_run_id, "cancelled")
-        _set_phase(
-            sast_run_id,
-            current_phase,
-            "cancelled",
-            f"SAST scan stopped. {total} reportable lead(s) preserved.",
-        )
-        events_svc.emit(
-            sast_run_id,
-            {
-                "type": "agent_status",
-                "agent_id": "sast-scanner",
-                "role": "SAST Analyst",
-                "status": "stopped",
-                "current_task": "Scan stopped",
-                "outcome": "cancelled",
-                "_persist": True,
-            },
-        )
+        if sast_run_id not in _sast_stop_requested:
+            message = (
+                "The SAST task was interrupted while running. Resume the scan "
+                "to continue from its last saved step."
+            )
+            log.info("SAST scan interrupted: sast_run_id=%s", sast_run_id)
+            _persist_candidate_state(sast_run_id)
+            _persist_paused_run(
+                sast_run_id,
+                phase=current_phase,
+                reason="interrupted",
+                provider=str(getattr(llm_cfg_obj, "provider", "")),
+                message=message,
+            )
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "sast-scanner",
+                    "role": "SAST Analyst",
+                    "status": "paused",
+                    "current_task": "Scan interrupted",
+                    "outcome": "resumable",
+                    "_persist": True,
+                },
+            )
+        else:
+            log.info("SAST scan cancelled: sast_run_id=%s", sast_run_id)
+            total = 0
+            if run is not None:
+                for candidate in _candidates.get(sast_run_id, []):
+                    if candidate.get("validation_status") == "pending":
+                        candidate["validation_status"] = "inconclusive"
+                        candidate["validation_reasoning"] = (
+                            "Scan stopped before validation completed."
+                        )
+                        candidate["reportable"] = False
+                _, total = _sync_candidates_to_db(sast_run_id, run.collection_id)
+                with Session(get_engine()) as s:
+                    r = s.get(SastRun, sast_run_id)
+                    if r is not None:
+                        r.leads_count = total
+                        s.add(r)
+                        s.commit()
+            _update_sast_run_status(sast_run_id, "cancelled")
+            _notify_campaign_source_finished(sast_run_id, "cancelled")
+            _set_phase(
+                sast_run_id,
+                current_phase,
+                "cancelled",
+                f"SAST scan stopped. {total} reportable lead(s) preserved.",
+            )
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "sast-scanner",
+                    "role": "SAST Analyst",
+                    "status": "stopped",
+                    "current_task": "Scan stopped",
+                    "outcome": "cancelled",
+                    "_persist": True,
+                },
+            )
     except llm_svc.LLMQuotaPauseError as exc:
         log.warning("SAST scan paused: sast_run_id=%s: %s", sast_run_id, exc)
         _persist_candidate_state(sast_run_id)
@@ -2215,31 +2243,18 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         )
     except Exception as exc:
         log.exception("SAST scan error: sast_run_id=%s", sast_run_id)
-        if run is not None:
-            try:
-                for candidate in _candidates.get(sast_run_id, []):
-                    if candidate.get("validation_status") == "pending":
-                        candidate["validation_status"] = "inconclusive"
-                        candidate["validation_reasoning"] = (
-                            "Scan failed before validation completed."
-                        )
-                        candidate["reportable"] = False
-                _, total = _sync_candidates_to_db(sast_run_id, run.collection_id)
-                with Session(get_engine()) as s:
-                    r = s.get(SastRun, sast_run_id)
-                    if r is not None:
-                        r.leads_count = total
-                        s.add(r)
-                        s.commit()
-            except Exception:
-                pass
-        _update_sast_run_status(sast_run_id, "failed", str(exc))
-        _notify_campaign_source_finished(sast_run_id, "failed")
-        _set_phase(
+        message = (
+            f"The SAST task stopped after an error: {exc}. Resume the scan to "
+            "continue from its last saved step."
+        )
+        _persist_candidate_state(sast_run_id)
+        _persist_paused_run(
             sast_run_id,
-            current_phase,
-            "failed",
-            f"SAST scan failed: {exc}",
+            phase=current_phase,
+            reason="error",
+            provider=str(getattr(llm_cfg_obj, "provider", "")),
+            message=message,
+            snapshot={"error_type": type(exc).__name__},
         )
         events_svc.emit(
             sast_run_id,
@@ -2247,9 +2262,9 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "type": "agent_status",
                 "agent_id": "sast-scanner",
                 "role": "SAST Analyst",
-                "status": "failed",
-                "current_task": "Scan failed",
-                "outcome": str(exc),
+                "status": "paused",
+                "current_task": "Scan paused after an error",
+                "outcome": "resumable",
                 "_persist": True,
             },
         )

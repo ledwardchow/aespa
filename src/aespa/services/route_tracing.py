@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from sqlmodel import Session, select
 
 from aespa.models import ComponentConnection, ComponentFact, ScanLead
+from aespa.services.campaign_mapping_quality import choose_canonical_trace_paths
 from aespa.services.component_facts import request_role_for_fact
 from aespa.services.scan_leads import decode_attack_path
 
@@ -75,6 +76,15 @@ def _has_valid_frontend_sequence(
         return False
     if facts[-1].fact_type != "lead_anchor":
         return False
+
+    # Keep these markers separate from the edge grammar below.  A wrapper such
+    # as FACE can contain both a browser request and a server-side request in
+    # one component, so fact types alone cannot prove that the chain crossed
+    # the browser boundary in the right order.
+    saw_browser_request = False
+    saw_server_ingress = False
+    saw_server_egress = False
+    saw_downstream_route = False
     for source, target, edge in zip(facts[:-1], facts[1:], edges, strict=True):
         kind = _edge_kind(edge)
         if "same source file" in str(getattr(edge, "rationale", "") or "").casefold():
@@ -83,6 +93,35 @@ def _has_valid_frontend_sequence(
             return False
         source_role = _request_role(source)
         target_role = _request_role(target)
+        if target.fact_type == "http_call" and target_role == "browser_request":
+            # A browser request is the only valid transition out of the UI
+            # portion of a path.  A server egress must never be relabelled as
+            # the frontend request just because its URL looks familiar.
+            if source.fact_type not in {"ui_route", "ui_action", "handler"}:
+                return False
+            saw_browser_request = True
+        elif target.fact_type == "route" and target_role == "server_ingress":
+            if source.fact_type == "http_call" and source_role == "browser_request":
+                saw_server_ingress = True
+            elif source.fact_type == "http_call" and source_role == "server_egress":
+                # Egress calls must enter a different component's route.  A
+                # same-component hop is an internal request and does not prove
+                # the downstream service boundary required for this trace.
+                if (
+                    source.component_id is None
+                    or target.component_id is None
+                    or source.component_id == target.component_id
+                ):
+                    return False
+                if not saw_browser_request:
+                    return False
+                saw_downstream_route = True
+        elif target.fact_type == "http_call" and target_role == "server_egress":
+            if source.fact_type not in {"route", "handler"}:
+                return False
+            if not saw_browser_request or not saw_server_ingress:
+                return False
+            saw_server_egress = True
         allowed = (
             (
                 kind == "contains"
@@ -92,8 +131,13 @@ def _has_valid_frontend_sequence(
             or (
                 kind == "triggers"
                 and source.fact_type in {"ui_route", "ui_action"}
-                and target.fact_type == "http_call"
-                and target_role == "browser_request"
+                and (
+                    target.fact_type == "handler"
+                    or (
+                        target.fact_type == "http_call"
+                        and target_role == "browser_request"
+                    )
+                )
             )
             or (
                 kind == "calls"
@@ -108,21 +152,25 @@ def _has_valid_frontend_sequence(
                 and target.fact_type in {"handler", "http_call"}
                 and (
                     target.fact_type != "http_call"
-                    or target_role == "server_egress"
+                    or target_role in {"browser_request", "server_egress"}
                 )
             )
             or (
                 kind == "reaches"
                 and source.fact_type in {"route", "handler", "http_call"}
                 and (
-                    source.fact_type != "http_call"
-                    or source_role == "browser_request"
+                    source.fact_type != "http_call" or source_role == "browser_request"
                 )
                 and target.fact_type == "lead_anchor"
             )
         )
         if not allowed:
             return False
+    # A server egress is meaningful only when the path continues into its
+    # downstream route.  This prevents a path ending at an internal outbound
+    # call from being marked complete.
+    if saw_server_egress and not saw_downstream_route:
+        return False
     return True
 
 
@@ -299,7 +347,7 @@ def trace_lead_paths(
             path.key,
         )
     )
-    return results[:max_paths]
+    return choose_canonical_trace_paths(results)[:max_paths]
 
 
 def attack_path_for_trace(

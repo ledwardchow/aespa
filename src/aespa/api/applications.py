@@ -999,7 +999,7 @@ def campaign_connections(
 async def rebuild_campaign_connections(
     application_id: int, campaign_id: int, session: Session = Depends(get_session)
 ) -> CampaignDetail:
-    """Rebuild the connection map from immutable snapshots without child scans."""
+    """Reset and repeat context matching from immutable source snapshots."""
     try:
         campaign = campaigns_svc.get_campaign(session, application_id, campaign_id)
         with events_svc.run_kind_scope("campaign"):

@@ -8,8 +8,9 @@ import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import {
   campaignDisplayStatus,
+  campaignDisplayWarnings,
   campaignMemberDisplayStatus,
-  safeParseJson,
+  isTerminalPause,
 } from "../../shared/runs/campaignPresentation.js";
 import {
   ValidationCaseList,
@@ -151,7 +152,7 @@ export function CampaignRunsTab({
     campaignDisplayStatus(campaign),
   );
   const resumable = (status) => ["pending", "failed", "skipped", "incomplete"].includes(status);
-  const warnings = safeParseJson(campaign.warnings_json, []);
+  const warnings = campaignDisplayWarnings(campaign);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -164,7 +165,9 @@ export function CampaignRunsTab({
       </div>
 
       {error && <div className="alert error">{error}</div>}
-      {campaign.error_message && <div className="alert error">{campaign.error_message}</div>}
+      {campaign.error_message && isTerminalPause(campaignDisplayStatus(campaign)) && (
+        <div className="alert error">{campaign.error_message}</div>
+      )}
       {warnings.length > 0 && (
         <div className="alert warning">
           <div style={{ fontWeight: 700, marginBottom: 4 }}>Partial-context warnings</div>

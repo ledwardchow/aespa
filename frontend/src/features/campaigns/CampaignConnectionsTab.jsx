@@ -54,9 +54,14 @@ export function CampaignConnectionsTab({
     };
   }, [applicationId, campaignId, campaign?.status, campaign?.updated_at]);
 
-  const canRebuild = ["failed", "interrupted", "awaiting_review", "completed", "stopped"].includes(
-    campaign?.status,
+  const hasLiveRuns = (campaign?.target_members || []).some(
+    (member) => member.test_run_id != null || member.api_test_run_id != null,
   );
+  const canRebuild =
+    !hasLiveRuns &&
+    ["failed", "interrupted", "awaiting_review", "completed", "stopped"].includes(
+      campaign?.status,
+    );
   const retrying = campaign?.status === "failed" || campaign?.status === "interrupted";
   const rebuildLabel = retrying ? "Resume context matching" : "Re-run context matching";
   const matchingControls = (
@@ -64,7 +69,8 @@ export function CampaignConnectionsTab({
       <div>
         <div className="form-section-title">Context matching</div>
         <div className="subtle" style={{ fontSize: 12 }}>
-          Trace data flows by discovering API calls between components.
+          Re-running clears generated leads, mappings, and review decisions, then rebuilds them
+          from the frozen source snapshots.
         </div>
       </div>
       {canRebuild && (

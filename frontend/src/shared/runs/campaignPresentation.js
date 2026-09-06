@@ -126,6 +126,19 @@ export function safeParseJson(text, fallback) {
   }
 }
 
+const RESOLVED_CAMPAIGN_WARNING_MARKERS = [
+  "The application restarted while this stage was running.",
+];
+
+export function campaignDisplayWarnings(campaign) {
+  const warnings = safeParseJson(campaign?.warnings_json, []);
+  if (!campaign || isTerminalPause(campaignDisplayStatus(campaign))) return warnings;
+  return warnings.filter(
+    (warning) =>
+      !RESOLVED_CAMPAIGN_WARNING_MARKERS.some((marker) => String(warning).includes(marker)),
+  );
+}
+
 export function confidencePct(score) {
   return `${Math.round((score || 0) * 100)}%`;
 }

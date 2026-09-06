@@ -46,6 +46,11 @@ from aespa.models import (
     Site,
 )
 from aespa.services import events as events_svc
+from aespa.services.campaign_mapping_quality import (
+    canonical_path_identity,
+    complete_path_can_map_to_site,
+)
+from aespa.services.component_facts import request_role_for_fact
 from aespa.services.frontend_path_resolver import (
     is_frontend_path,
     resolve_approved_path,
@@ -479,6 +484,60 @@ def _fact_detail(fact: ComponentFact) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _request_role(fact: ComponentFact) -> str | None:
+    """Resolve the role of a request fact without trusting malformed detail."""
+    try:
+        return request_role_for_fact(fact.fact_type, _fact_detail(fact))
+    except ValueError:
+        return None
+
+
+def _infer_owned_server_egress(
+    session: Session,
+    call: ComponentFact,
+    ingress_routes: list[ComponentFact],
+) -> str | None:
+    """Infer a missing egress role from an explicit route-to-call relation.
+
+    LLM mapper facts sometimes describe a proxy call in ``supporting_locations``
+    without repeating ``request_role``.  A location link from exactly one
+    server route to the call is enough to classify it.  The one-owner rule is
+    deliberate: a shared helper or a broad file-level summary must not turn
+    every request in a component into a proxy hop.
+    """
+    role = _request_role(call)
+    if role is not None or call.fact_type != "http_call":
+        return role
+    owners = [route for route in ingress_routes if _detail_connects(route, call)]
+    if len(owners) != 1:
+        return None
+    route = owners[0]
+    detail = _fact_detail(call)
+    detail["request_role"] = "server_egress"
+    detail["request_role_inferred"] = True
+    detail["role_evidence"] = [route.evidence_location]
+    call.detail_json = json.dumps(detail, separators=(",", ":"))
+    session.add(call)
+    return "server_egress"
+
+
+def _unique_route_facts(routes: list[ComponentFact]) -> list[ComponentFact]:
+    """Drop duplicate route observations while retaining every route shape."""
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[ComponentFact] = []
+    for route in sorted(routes, key=lambda fact: fact.id or 0):
+        key = (
+            (route.method or "").upper(),
+            _normalize_path(route.path or ""),
+            route.host or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(route)
+    return unique
+
+
 def _detail_locations(fact: ComponentFact) -> set[str]:
     detail = _fact_detail(fact)
     locations: set[str] = set()
@@ -511,6 +570,103 @@ def _detail_connects(source: ComponentFact, target: ComponentFact) -> bool:
     )
 
 
+def _semantic_connection(
+    source: ComponentFact,
+    target: ComponentFact,
+    *,
+    allowed_source_types: set[str],
+    allowed_target_types: set[str],
+) -> bool:
+    """Return true only when mapper metadata names both constructs.
+
+    A component and a source file are useful scopes for searching, but they
+    do not establish a call relationship.  The mapper records the locations
+    it used to prove a relationship in the fact detail, so all intra-source
+    graph edges go through this check.
+    """
+    return (
+        source.fact_type in allowed_source_types
+        and target.fact_type in allowed_target_types
+        and bool(source.evidence_location)
+        and bool(target.evidence_location)
+        and _detail_connects(source, target)
+    )
+
+
+def _ui_route_action_connection(
+    route: ComponentFact,
+    action: ComponentFact,
+    routes: list[ComponentFact],
+) -> bool:
+    """Require a route/action binding to identify one route unambiguously."""
+    route_detail = _fact_detail(route)
+    action_detail = _fact_detail(action)
+    action_location = action.evidence_location
+    explicit_action_locations = set()
+    for key in ("action_locations", "trigger_locations"):
+        values = route_detail.get(key) or []
+        if isinstance(values, str):
+            values = [values]
+        if isinstance(values, list):
+            explicit_action_locations.update(str(value) for value in values)
+    if action_location in explicit_action_locations:
+        return True
+
+    route_locations = action_detail.get("route_locations") or []
+    if isinstance(route_locations, str):
+        route_locations = [route_locations]
+    if (
+        not isinstance(route_locations, list)
+        or route.evidence_location not in route_locations
+    ):
+        return False
+    candidates = {
+        candidate.evidence_location
+        for candidate in routes
+        if candidate.evidence_location in route_locations
+    }
+    # A file-level analyzer may attach every route location to every action.
+    # Treat that as context until one route is named explicitly.
+    return len(candidates) == 1
+
+
+def _ui_action_call_connection(
+    action: ComponentFact,
+    call: ComponentFact,
+) -> bool:
+    """Require an action to own the browser request it triggers.
+
+    Supporting locations often contain shared helpers used by several UI
+    actions.  They are useful context, but cannot identify which action owns a
+    request.  Prefer the function locations recorded on both facts, with an
+    exact source location as the compatibility path for server-rendered forms.
+    """
+    if call.fact_type != "http_call" or _request_role(call) != "browser_request":
+        return False
+
+    def locations(fact: ComponentFact, *keys: str) -> set[str]:
+        detail = _fact_detail(fact)
+        result: set[str] = set()
+        for key in keys:
+            values = detail.get(key)
+            if isinstance(values, str):
+                values = [values]
+            if isinstance(values, list):
+                result.update(str(value) for value in values if value)
+        return result
+
+    action_handlers = locations(action, "handler_locations", "handler_location")
+    call_handlers = locations(call, "handler_locations", "handler_location")
+    if action_handlers & call_handlers:
+        return True
+    if action.evidence_location and action.evidence_location == call.evidence_location:
+        return True
+    return bool(
+        action.evidence_location in call_handlers
+        or call.evidence_location in action_handlers
+    )
+
+
 def _detail_location_set(fact: ComponentFact, key: str) -> set[str]:
     values = _fact_detail(fact).get(key)
     if isinstance(values, str):
@@ -518,6 +674,139 @@ def _detail_location_set(fact: ComponentFact, key: str) -> set[str]:
     if not isinstance(values, list):
         return set()
     return {str(value) for value in values if value}
+
+
+def _explicit_ownership_locations(fact: ComponentFact) -> set[str]:
+    """Return locations that explicitly identify a request owner.
+
+    Supporting locations are deliberately excluded.  They describe context
+    used by the mapper, but do not prove that a route dispatches a particular
+    server-side request.  The ownership fields are the bounded metadata the
+    mapper records for that relationship.
+    """
+    detail = _fact_detail(fact)
+    locations: set[str] = set()
+    for key in (
+        "handler_locations",
+        "handler_location",
+        "route_locations",
+        "route_location",
+        "source_locations",
+        "source_location",
+    ):
+        values = detail.get(key)
+        if isinstance(values, str):
+            values = [values]
+        if isinstance(values, list):
+            locations.update(str(value) for value in values if value)
+    return locations
+
+
+def _evidence_line(location: str | None) -> tuple[str, int] | None:
+    """Split a ``file:line`` location when its line is usable."""
+    if not location or ":" not in location:
+        return None
+    path, separator, line = location.rpartition(":")
+    if not separator or not path or not line.isdigit():
+        return None
+    return path, int(line)
+
+
+def _nearest_preceding_route(
+    source: ComponentFact,
+    owner_location: str,
+    routes: list[ComponentFact],
+) -> bool:
+    """Bind one egress owner line to the nearest preceding route.
+
+    Some framework adapters report a route decorator and the request's
+    handler location separately.  In that shape the two facts cannot share a
+    location, but source order still identifies the route.  Selecting the
+    nearest route keeps adjacent endpoints from becoming a fanout.
+    """
+    if source.fact_type != "route":
+        return False
+    owner_position = _evidence_line(owner_location)
+    if owner_position is None:
+        return False
+    exact_routes = [
+        route
+        for route in routes
+        if route.fact_type == "route"
+        and route.evidence_location == owner_location
+    ]
+    if exact_routes:
+        return any(route.id == source.id for route in exact_routes)
+
+    source_position = _evidence_line(source.evidence_location)
+    if source_position is None:
+        return False
+    source_file, source_line = source_position
+    owner_file, owner_line = owner_position
+    if source_file != owner_file or source_line >= owner_line:
+        return False
+    preceding = [
+        route
+        for route in routes
+        if route.fact_type == "route"
+        and (position := _evidence_line(route.evidence_location)) is not None
+        and position[0] == owner_file
+        and position[1] < owner_line
+    ]
+    if not preceding:
+        return False
+    nearest = max(
+        preceding,
+        key=lambda route: _evidence_line(route.evidence_location)[1],
+    )
+    return nearest.id == source.id
+
+
+def _proxy_ownership_connection(
+    source: ComponentFact,
+    target: ComponentFact,
+    *,
+    routes: list[ComponentFact] | None = None,
+) -> tuple[bool, dict]:
+    """Check explicit ownership metadata for a route/handler -> server egress.
+
+    A proxy hop is proven when one fact names the other's evidence location or
+    both facts name the same handler/route/source location.  Path similarity
+    alone is intentionally not sufficient because a component can issue many
+    requests from one handler.
+    """
+    if source.fact_type not in {"route", "handler"}:
+        return False, {}
+    if target.fact_type != "http_call" or _request_role(target) != "server_egress":
+        return False, {}
+    source_locations = _explicit_ownership_locations(source)
+    target_locations = _explicit_ownership_locations(target)
+    shared = sorted(source_locations & target_locations)
+    target_named_source = source.evidence_location in target_locations
+    source_named_target = target.evidence_location in source_locations
+    nearest_owner_locations = [
+        location
+        for location in target_locations
+        if _nearest_preceding_route(source, location, routes or [source])
+    ]
+    if (
+        not shared
+        and not target_named_source
+        and not source_named_target
+        and not nearest_owner_locations
+    ):
+        return False, {}
+    evidence = {
+        "source": _fact_evidence(source),
+        "server_egress": _fact_evidence(target),
+        "ownership": {
+            "shared_locations": shared,
+            "target_named_source": target_named_source,
+            "source_named_target": source_named_target,
+            "nearest_preceding_route": nearest_owner_locations,
+        },
+    }
+    return True, evidence
 
 
 def _authenticated_route_access(
@@ -651,9 +940,122 @@ def _extract_method_path(text: str) -> tuple[str | None, str | None]:
     return None, path_match.group(1) if path_match else None
 
 
+def _extract_method_paths(text: str) -> list[tuple[str | None, str | None]]:
+    """Extract the ordered HTTP endpoints named by a lead."""
+    return [
+        (match.group(1).upper(), match.group(2))
+        for match in re.finditer(
+            r"\b(GET|POST|PUT|PATCH|DELETE)\b\s+(/[\w\-/{}.:]+)",
+            text or "",
+            re.IGNORECASE,
+        )
+    ]
+
+
+def _anchor_lead(session: Session, anchor: ComponentFact) -> ScanLead | None:
+    """Load the source lead represented by a persisted anchor fact."""
+    try:
+        lead_id = int(_fact_detail(anchor).get("lead_id"))
+    except (TypeError, ValueError):
+        return None
+    lead = session.get(ScanLead, lead_id)
+    if (
+        lead is None
+        or lead.producer_run_type != "sast"
+        or lead.producer_run_id != anchor.sast_run_id
+    ):
+        return None
+    return lead
+
+
+def _anchor_reachability_connection(
+    session: Session,
+    source: ComponentFact,
+    anchor: ComponentFact,
+) -> tuple[bool, str]:
+    """Allow only a route that can supply the lead's vulnerable input.
+
+    ``route_locations`` is useful evidence for single-endpoint findings, but
+    it can also list a downstream endpoint for a finding whose suggested
+    endpoint is a sequence such as ``quote then bind``.  In that case the
+    first endpoint is the required entry into the vulnerable flow.  Keeping a
+    direct path match still supports findings whose sink route differs from
+    the route where the lead was recorded when the lead describes one route.
+    """
+    lead = _anchor_lead(session, anchor)
+    endpoint_paths = _extract_method_paths(lead.suggested_endpoint) if lead else []
+    if len(endpoint_paths) > 1:
+        first_method, first_path = endpoint_paths[0]
+        if (
+            source.fact_type != "route"
+            or not _paths_match(source.path, first_path)
+            or (
+                first_method
+                and source.method
+                and first_method.upper() != source.method.upper()
+            )
+        ):
+            return False, "multi-step lead requires its first endpoint"
+        return True, "route path matches the lead's first endpoint"
+
+    detail = _fact_detail(anchor)
+    source_location = detail.get("source_location")
+    if (
+        source.fact_type in {"route", "handler", "http_call"}
+        and source_location
+        and source.evidence_location == str(source_location)
+    ):
+        return True, "source location matches the lead anchor"
+
+    if (
+        source.fact_type == "route"
+        and anchor.path
+        and _paths_match(source.path, anchor.path)
+        and (
+            not anchor.method
+            or not source.method
+            or anchor.method.upper() == source.method.upper()
+        )
+    ):
+        return True, "route path matches the lead anchor"
+
+    explicit_locations: set[str] = set()
+    for key in ("route_locations", "route_location"):
+        values = detail.get(key)
+        if isinstance(values, str):
+            values = [values]
+        if isinstance(values, list):
+            explicit_locations.update(str(value) for value in values if value)
+    if source.fact_type == "route" and source.evidence_location in explicit_locations:
+        return True, "explicit route evidence links this route to the lead anchor"
+
+    handler_locations: set[str] = set()
+    for key in ("handler_locations", "handler_location"):
+        values = detail.get(key)
+        if isinstance(values, str):
+            values = [values]
+        if isinstance(values, list):
+            handler_locations.update(str(value) for value in values if value)
+    if source.fact_type == "handler" and source.evidence_location in handler_locations:
+        return True, "explicit handler evidence links this handler to the lead anchor"
+
+    return False, ""
+
+
 def _score_call_to_route(
     call: ComponentFact, route: ComponentFact
 ) -> tuple[float, str, dict]:
+    """Score a request against a served route using its method and path."""
+    if route.fact_type != "route" or _request_role(route) != "server_ingress":
+        return 0.0, "", {}
+    call_role = _request_role(call)
+    if call_role not in {None, "browser_request", "server_egress"}:
+        return 0.0, "", {}
+    # A path-only match can connect unrelated operations that happen to share
+    # a URL.  Keep the cross-repository edge closed until both dimensions are
+    # known and equal.
+    if not call.method or not route.method or not _paths_match(call.path, route.path):
+        return 0.0, "", {}
     score = 0.0
     parts: list[str] = []
     call_host = _host_of(call.host)
@@ -663,7 +1065,7 @@ def _score_call_to_route(
     if call_host and route_host and call_host == route_host:
         score += 0.15
         parts.append("service host matches")
-    if call.method and route.method and call.method.upper() == route.method.upper():
+    if call.method.upper() == route.method.upper():
         score += 0.3
         parts.append("HTTP method matches")
     if _paths_match(call.path, route.path):
@@ -809,8 +1211,8 @@ def _build_component_connections(
         handlers = [fact for fact in facts if fact.fact_type in {"route", "handler"}]
         anchors = [fact for fact in facts if fact.fact_type == "lead_anchor"]
         for route in ui_routes:
-            for action in ui_actions[:8]:
-                if not _same_evidence_file(route, action):
+            for action in ui_actions:
+                if not _ui_route_action_connection(route, action, ui_routes):
                     continue
                 evidence = {
                     "route": _fact_evidence(route),
@@ -822,14 +1224,24 @@ def _build_component_connections(
                     target=action,
                     match_kind="deterministic",
                     confidence=0.65,
-                    rationale="UI route and action reside in the same source file",
+                    rationale="Code analysis linked the UI route to this action",
                     evidence=evidence,
                     edge_kind="contains",
                 )
                 session.add(edge)
                 connections.append(edge)
-            for call in calls[:20]:
-                if not _same_evidence_file(route, call):
+            for call in calls:
+                if not _semantic_connection(
+                    route,
+                    call,
+                    allowed_source_types={"ui_route"},
+                    allowed_target_types={"handler", "http_call"},
+                ):
+                    continue
+                if (
+                    call.fact_type == "http_call"
+                    and _request_role(call) != "browser_request"
+                ):
                     continue
                 edge = _make_connection(
                     campaign_id=campaign_id,
@@ -837,7 +1249,7 @@ def _build_component_connections(
                     target=call,
                     match_kind="deterministic",
                     confidence=0.55,
-                    rationale="UI route and outbound HTTP request reside in the same source file",
+                    rationale="Code analysis linked the UI route to this browser request",
                     evidence={
                         "route": _fact_evidence(route),
                         "call": _fact_evidence(call),
@@ -846,9 +1258,58 @@ def _build_component_connections(
                 )
                 session.add(edge)
                 connections.append(edge)
+
+        # A frontend and its server route can live in the same component
+        # (for example, a Flask app serving both the page and its API).  Keep
+        # this hop explicit so route tracing can continue through the ingress
+        # route instead of stopping at the browser request.
+        ingress_routes = [
+            fact
+            for fact in handlers
+            if fact.fact_type == "route" and _request_role(fact) == "server_ingress"
+        ]
+        for call in calls:
+            _infer_owned_server_egress(session, call, ingress_routes)
+        browser_calls = [
+            fact for fact in calls if _request_role(fact) == "browser_request"
+        ]
+        for call in browser_calls:
+            candidates = [
+                route
+                for route in ingress_routes
+                if call.method
+                and route.method
+                and call.method.upper() == route.method.upper()
+                and _paths_match(call.path, route.path)
+            ]
+            if not candidates:
+                continue
+            # Duplicate route facts can be produced by framework adapters.
+            # Select one deterministic route for a semantic method/path pair
+            # rather than creating a fanout of equivalent edges.
+            route = min(candidates, key=lambda fact: fact.id or 0)
+            edge = _make_connection(
+                campaign_id=campaign_id,
+                source=call,
+                target=route,
+                match_kind="deterministic",
+                confidence=0.85,
+                rationale=(
+                    "Browser request method and path match this same-component "
+                    "server ingress route"
+                ),
+                evidence={
+                    "browser_request": _fact_evidence(call),
+                    "server_ingress": _fact_evidence(route),
+                },
+                edge_kind="calls",
+            )
+            session.add(edge)
+            connections.append(edge)
+
         for action in ui_actions:
-            for call in calls[:20]:
-                if not _same_evidence_file(action, call):
+            for call in calls:
+                if not _ui_action_call_connection(action, call):
                     continue
                 edge = _make_connection(
                     campaign_id=campaign_id,
@@ -856,7 +1317,7 @@ def _build_component_connections(
                     target=call,
                     match_kind="deterministic",
                     confidence=0.60,
-                    rationale="UI action and outbound HTTP request reside in the same source file",
+                    rationale="Code analysis linked the UI action to this browser request",
                     evidence={
                         "action": _fact_evidence(action),
                         "call": _fact_evidence(call),
@@ -865,21 +1326,70 @@ def _build_component_connections(
                 )
                 session.add(edge)
                 connections.append(edge)
-        for handler in handlers:
-            for call in calls[:20]:
-                if (
-                    handler.evidence_location.split(":", 1)[0]
-                    != call.evidence_location.split(":", 1)[0]
+        for source in (*ui_routes, *ui_actions):
+            for handler in handlers:
+                if not _semantic_connection(
+                    source,
+                    handler,
+                    allowed_source_types={"ui_route", "ui_action"},
+                    allowed_target_types={"handler"},
                 ):
+                    continue
+                edge = _make_connection(
+                    campaign_id=campaign_id,
+                    source=source,
+                    target=handler,
+                    match_kind="deterministic",
+                    confidence=0.75,
+                    rationale="Code analysis linked the UI entrypoint to this handler",
+                    evidence={
+                        "source": _fact_evidence(source),
+                        "handler": _fact_evidence(handler),
+                    },
+                    edge_kind="triggers",
+                )
+                session.add(edge)
+                connections.append(edge)
+        for handler in handlers:
+            for call in calls:
+                semantic_connection = _semantic_connection(
+                    handler,
+                    call,
+                    allowed_source_types={"route", "handler"},
+                    allowed_target_types={"handler", "http_call"},
+                )
+                proxy_connection = False
+                proxy_evidence: dict = {}
+                if not semantic_connection:
+                    proxy_connection, proxy_evidence = _proxy_ownership_connection(
+                        handler,
+                        call,
+                        routes=ingress_routes,
+                    )
+                if not semantic_connection and not proxy_connection:
+                    continue
+                target_role = _request_role(call)
+                if call.fact_type == "http_call" and target_role not in {
+                    "browser_request",
+                    "server_egress",
+                }:
                     continue
                 edge = _make_connection(
                     campaign_id=campaign_id,
                     source=handler,
                     target=call,
                     match_kind="deterministic",
-                    confidence=0.60,
-                    rationale="Backend handler and outbound HTTP call reside in the same source file",
-                    evidence={
+                    confidence=0.78 if proxy_connection else 0.60,
+                    rationale=(
+                        "Explicit ownership metadata links this route/handler "
+                        "to its server egress proxy request"
+                        if proxy_connection
+                        else "Code analysis linked the handler to this "
+                        f"{target_role or 'HTTP'} request"
+                    ),
+                    evidence=proxy_evidence
+                    if proxy_connection
+                    else {
                         "handler": _fact_evidence(handler),
                         "call": _fact_evidence(call),
                     },
@@ -888,27 +1398,17 @@ def _build_component_connections(
                 session.add(edge)
                 connections.append(edge)
         for anchor in anchors:
-            anchor_file = anchor.evidence_location.split(":", 1)[0]
             for source in (
                 fact
                 for fact in facts
                 if fact.fact_type in {"route", "handler", "http_call"}
                 and fact.id != anchor.id
-                and (
-                    fact.evidence_location.split(":", 1)[0] == anchor_file
-                    or (
-                        fact.fact_type == "route"
-                        and anchor.path
-                        and _paths_match(fact.path, anchor.path)
-                        and (
-                            not anchor.method
-                            or not fact.method
-                            or anchor.method.upper() == fact.method.upper()
-                        )
-                    )
-                )
             ):
-                same_file = source.evidence_location.split(":", 1)[0] == anchor_file
+                reaches_anchor, reachability_reason = _anchor_reachability_connection(
+                    session, source, anchor
+                )
+                if not reaches_anchor:
+                    continue
                 edge = _make_connection(
                     campaign_id=campaign_id,
                     source=source,
@@ -916,9 +1416,8 @@ def _build_component_connections(
                     match_kind="deterministic",
                     confidence=0.60,
                     rationale=(
-                        "API route/handler and SAST vulnerability lead reside in the same source file"
-                        if same_file
-                        else "SAST lead endpoint matches the API route"
+                        "Code analysis linked this route or handler to the SAST "
+                        f"lead anchor: {reachability_reason}"
                     ),
                     evidence={
                         "source": _fact_evidence(source),
@@ -929,37 +1428,15 @@ def _build_component_connections(
                 session.add(edge)
                 connections.append(edge)
 
-        # Mapper-produced relationship evidence can span files. Only locations
-        # the mapper supplied are used; component membership alone is not a
-        # relationship.
-        for source in facts:
-            for target in facts:
-                if source.id == target.id or not _detail_connects(source, target):
-                    continue
-                if source.fact_type == "ui_route" and target.fact_type == "ui_action":
-                    edge_kind = "contains"
-                elif (
-                    source.fact_type in {"ui_route", "ui_action"}
-                    and target.fact_type == "http_call"
-                ):
-                    edge_kind = "triggers"
-                elif source.fact_type in {"route", "handler"} and target.fact_type in {
-                    "handler",
-                    "http_call",
-                }:
-                    edge_kind = "dispatches"
-                elif (
-                    source.fact_type in {"route", "handler"}
-                    and target.fact_type == "lead_anchor"
-                ):
-                    edge_kind = "reaches"
-                else:
-                    continue
-                if any(
-                    existing.source_fact_id == source.id
-                    and existing.target_fact_id == target.id
-                    and getattr(existing, "edge_kind", "") == edge_kind
-                    for existing in connections
+        # A handler chain can span several files.  Preserve only relationships
+        # for which one fact explicitly names the other's evidence location.
+        for source in handlers:
+            for target in handlers:
+                if source.id == target.id or not _semantic_connection(
+                    source,
+                    target,
+                    allowed_source_types={"route", "handler"},
+                    allowed_target_types={"handler"},
                 ):
                     continue
                 edge = _make_connection(
@@ -968,12 +1445,12 @@ def _build_component_connections(
                     target=target,
                     match_kind="deterministic",
                     confidence=0.75,
-                    rationale="Code analysis identified supporting references linking these constructs",
+                    rationale="Code analysis linked these handler functions",
                     evidence={
                         "source": _fact_evidence(source),
                         "target": _fact_evidence(target),
                     },
-                    edge_kind=edge_kind,
+                    edge_kind="dispatches",
                 )
                 session.add(edge)
                 connections.append(edge)
@@ -989,11 +1466,13 @@ def _build_component_connections(
         for target_component_id in component_ids:
             if target_component_id == source_component_id:
                 continue
-            routes = [
-                f
-                for f in facts_by_component[target_component_id]
-                if f.fact_type == "route"
-            ]
+            routes = _unique_route_facts(
+                [
+                    f
+                    for f in facts_by_component[target_component_id]
+                    if f.fact_type == "route"
+                ]
+            )
             unmatched_calls: list[ComponentFact] = []
             for call in calls:
                 best: tuple[float, str, dict, ComponentFact] | None = None
@@ -1119,16 +1598,18 @@ def _ambiguous_calls(
             for target_component_id, target_facts in facts_by_component.items():
                 if target_component_id == source_component_id:
                     continue
-                routes = [
-                    fact
-                    for fact in target_facts
-                    if fact.fact_type == "route"
-                    and (
-                        not call.method
-                        or not fact.method
-                        or call.method.upper() == fact.method.upper()
-                    )
-                ]
+                routes = _unique_route_facts(
+                    [
+                        fact
+                        for fact in target_facts
+                        if fact.fact_type == "route"
+                        and (
+                            not call.method
+                            or not fact.method
+                            or call.method.upper() == fact.method.upper()
+                        )
+                    ]
+                )
                 routes.sort(
                     key=lambda fact: (
                         0
@@ -1306,6 +1787,9 @@ def _target_leads_for_route(
         except (TypeError, ValueError):
             continue
 
+    # A lead's file location is an anchor candidate, not proof that its
+    # vulnerability is reached by this route.  Only an explicit lead_anchor
+    # edge is sufficient here.
     return [
         lead
         for lead in session.exec(
@@ -1316,7 +1800,6 @@ def _target_leads_for_route(
             .where(ScanLead.reportable == True)  # noqa: E712
         ).all()
         if lead.id in lead_ids
-        or _same_file(lead.location, target_fact.evidence_location)
     ]
 
 
@@ -1648,6 +2131,7 @@ def _generate_frontend_path_leads(
             )
             for path in paths:
                 attack_path = attack_path_for_trace(path, original)
+                path_identity = canonical_path_identity(original.id, attack_path)
                 title = f"Frontend path: {original.title}"
                 location = " -> ".join(
                     fact.evidence_location
@@ -1656,8 +2140,11 @@ def _generate_frontend_path_leads(
                 )
                 fingerprint = lead_fingerprint(
                     category=original.category,
-                    title=f"{title}:{path.key}",
-                    location=location or original.location,
+                    title=f"{title}:{path_identity}",
+                    # Path evidence lines remain in the derived lead's
+                    # location, but the database identity must survive an
+                    # equivalent mapper path choosing a different anchor.
+                    location=original.location,
                 )
                 lead = upsert_lead(
                     session,
@@ -1689,7 +2176,7 @@ def _generate_frontend_path_leads(
                     ("origin_sast_run_id", original.producer_run_id),
                     ("origin_component_id", member.component_id),
                     ("origin_path_json", original.attack_path_json or "{}"),
-                    ("trace_path_key", path.key),
+                    ("trace_path_key", path_identity),
                     ("trace_status", "complete" if path.complete else "incomplete"),
                     ("trace_confidence", path.confidence),
                 ):
@@ -1970,6 +2457,30 @@ def _lead_has_proof_gaps(lead: ScanLead) -> bool:
     return bool(gaps) if isinstance(gaps, list | dict) else bool(str(raw).strip())
 
 
+def _has_frontend_trace(attack_path: object) -> bool:
+    """Return whether a path proves a schema-v3 browser entrypoint."""
+    if not isinstance(attack_path, dict):
+        return False
+    if (
+        attack_path.get("schema_version") != 3
+        or attack_path.get("perspective") != "frontend"
+    ):
+        return False
+    surface = attack_path.get("frontend_surface")
+    if not isinstance(surface, dict):
+        return False
+
+    def has_evidence(node: object) -> bool:
+        return isinstance(node, dict) and any(
+            node.get(key) not in (None, "", [])
+            for key in ("fact_id", "kind", "evidence_location", "method", "path")
+        )
+
+    return has_evidence(surface.get("browser_request")) and any(
+        has_evidence(surface.get(key)) for key in ("ui_route", "ui_action")
+    )
+
+
 def _propose_mappings_for_lead(
     session: Session,
     campaign_id: int,
@@ -1983,14 +2494,17 @@ def _propose_mappings_for_lead(
     except (TypeError, json.JSONDecodeError):
         attack_path = {}
     for target in targets:
+        has_frontend_trace = _has_frontend_trace(attack_path)
+        if (
+            target.target_type == "site"
+            and has_frontend_trace
+            and not complete_path_can_map_to_site(attack_path, target.component_id)
+        ):
+            continue
         if (
             target.target_type == "site"
             and lead.producer_run_type == "campaign"
-            and not (
-                isinstance(attack_path, dict)
-                and attack_path.get("schema_version") == 3
-                and attack_path.get("perspective") == "frontend"
-            )
+            and not has_frontend_trace
         ):
             # Site mappings come only from the role-aware frontend tracing
             # pipeline. Cross-service summaries remain available to API
@@ -2020,19 +2534,38 @@ def _propose_mappings_for_lead(
         # A campaign-derived frontend path is safe to auto-route only when its
         # entire trace comes from the one component that owns the target.  A
         # path spanning repositories needs a reviewer to confirm the hop.
-        explicitly_owned = (
-            len(component_ids) == 1
-            and target.component_id in component_ids
-            and (
-                lead.producer_run_type == "sast"
-                or (
-                    lead.producer_run_type == "campaign"
-                    and str(getattr(lead, "trace_status", "") or "") == "complete"
-                    and not _lead_has_proof_gaps(lead)
+        owned_by_component = (
+            len(component_ids) == 1 and target.component_id in component_ids
+        )
+        explicitly_owned = owned_by_component and (
+            target.target_type == "api_collection"
+            or (
+                target.target_type == "site"
+                and has_frontend_trace
+                and (
+                    lead.producer_run_type == "sast"
+                    or (
+                        lead.producer_run_type == "campaign"
+                        and str(getattr(lead, "trace_status", "") or "") == "complete"
+                        and not _lead_has_proof_gaps(lead)
+                    )
                 )
             )
         )
-        if explicitly_owned:
+        if (
+            owned_by_component
+            and target.target_type == "site"
+            and not has_frontend_trace
+        ):
+            # Keep useful ownership evidence visible for review, but do not
+            # turn a backend lead into an approved browser path.
+            score = max(score, 1.0)
+            rationale = (
+                "Component ownership suggests this site may be relevant, but "
+                "no schema-v3 frontend trace proves a browser entrypoint."
+            )
+            evidence = {**evidence, "frontend_trace_required": True}
+        elif explicitly_owned:
             score = max(score, 1.0)
             rationale = (
                 "Explicit component ownership links this source lead to the "
@@ -2067,7 +2600,11 @@ def _propose_mappings_for_lead(
         if hasattr(mapping, "approved_attack_path_json"):
             mapping.approved_attack_path_json = lead.attack_path_json or "{}"
         if hasattr(mapping, "path_status"):
-            mapping.path_status = getattr(lead, "trace_status", None)
+            mapping.path_status = (
+                getattr(lead, "trace_status", None)
+                if has_frontend_trace
+                else "unresolved"
+            )
         if getattr(mapping, "status", "") == "approved":
             if hasattr(mapping, "auto_approved"):
                 mapping.auto_approved = True
