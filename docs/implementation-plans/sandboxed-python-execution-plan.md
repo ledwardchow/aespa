@@ -799,7 +799,7 @@ Build the image reproducibly in CI, run sandbox escape/negative tests, generate 
 
 Do not bundle a Docker daemon inside the PyInstaller application. Bundle only the small runner metadata/protocol definitions and detect an external supported runtime.
 
-Update `build_mac.sh`, `build_win.ps1`, and `AESPA.spec` if new runtime manifests, seccomp profiles, templates, or helper binaries are read at runtime. Frozen path resolution must check `sys.frozen`/`sys._MEIPASS`.
+Update `scripts/build_mac.sh`, `scripts/build_win.ps1`, and `scripts/AESPA.spec` if new runtime manifests, seccomp profiles, templates, or helper binaries are read at runtime. Frozen path resolution must check `sys.frozen`/`sys._MEIPASS`.
 
 macOS and Windows releases should:
 
@@ -1029,7 +1029,7 @@ The feature cannot ship if any negative test reaches an unbrokered network desti
 | Frontend settings | `frontend/src/pages/Settings/`, `frontend/src/lib/policy.jsx` or a separate execution-config helper, API client |
 | Frontend traffic | `frontend/src/components/TrafficView.jsx`, web/API traffic tabs, CSS |
 | Runtime image | new `runtime/python-executor/` |
-| Desktop packaging | `AESPA.spec`, `build_mac.sh`, `build_win.ps1`, frozen path helpers if runtime manifests are bundled |
+| Desktop packaging | `scripts/AESPA.spec`, `scripts/build_mac.sh`, `scripts/build_win.ps1`, frozen path helpers if runtime manifests are bundled |
 | Documentation | `docs/architecture.md`, user setup/security documentation, `CHANGELOG.md` at implementation time |
 | Tests | traffic, scanner, API scanner, A.L.I.C.E., settings, migration, cleanup, failure injection, frontend, and new runtime isolation suites |
 

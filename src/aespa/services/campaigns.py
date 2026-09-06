@@ -45,6 +45,7 @@ from aespa.models import (
 )
 from aespa.schemas import CampaignCreate
 from aespa.services import applications as applications_svc
+from aespa.services import campaign_validation_cases as validation_cases_svc
 from aespa.services import correlation as correlation_svc
 from aespa.services import events as events_svc
 
@@ -704,7 +705,13 @@ def _update_target_member_status(member_id: int, status: str) -> None:
             s.commit()
 
 
-def _validation_summary(run_type: str, run_id: int | None) -> dict:
+def _validation_summary(
+    run_type: str,
+    run_id: int | None,
+    *,
+    campaign_id: int | None = None,
+    target_member_id: int | None = None,
+) -> dict:
     """Summarise imported SAST leads for a target member's progress row."""
     if run_id is None:
         return {
@@ -731,7 +738,16 @@ def _validation_summary(run_type: str, run_id: int | None) -> dict:
     for lead in leads:
         status = lead.status or "open"
         counts[status] = counts.get(status, 0) + 1
-    return {"total": len(leads), **counts}
+    summary = {"total": len(leads), **counts}
+    if campaign_id is not None and target_member_id is not None:
+        with Session(get_engine()) as session:
+            case_summary = validation_cases_svc.summarize_cases(
+                session, campaign_id, target_member_id
+            )
+        summary["readiness"] = case_summary["readiness"]
+        summary["execution"] = case_summary["execution"]
+        summary["validation_cases"] = case_summary["total"]
+    return summary
 
 
 def _set_target_validation_status(
@@ -1278,14 +1294,6 @@ async def _execute_target_member(
                 live_context = _crawl_frontend_context(
                     s, test_run_id, crawl_ok=crawl_ok
                 )
-                campaign = s.get(AssessmentCampaign, campaign_id)
-                from aespa.services.settings import get_llm_config_for_role
-
-                path_llm_config = (
-                    get_llm_config_for_role(s, campaign, "test_lead")
-                    if campaign is not None
-                    else None
-                )
             discovered_paths = correlation_svc.propose_crawl_discovered_paths(
                 campaign_id,
                 target_id,
@@ -1299,25 +1307,51 @@ async def _execute_target_member(
                         "were saved for review and were not added to the active scan."
                     ],
                 )
-            correlation_svc.copy_explicit_component_leads_for_target(
-                campaign_id, target_id, "web", test_run_id
-            )
-            correlation_svc.copy_approved_mappings_for_target(
-                campaign_id, target_id, "web", test_run_id
-            )
-            (
-                _,
-                rewrite_warnings,
-            ) = await correlation_svc.enrich_copied_web_leads_for_target_with_llm(
+            resolution = validation_cases_svc.resolve_cases_for_web_target(
                 campaign_id,
-                target_id,
+                member_id,
                 test_run_id,
-                context=live_context,
-                warning=warning,
-                llm_config=path_llm_config,
+                live_context,
             )
-            if rewrite_warnings:
-                _append_campaign_warnings(campaign_id, rewrite_warnings)
+            compilation = validation_cases_svc.compile_runnable_cases(
+                campaign_id, member_id
+            )
+            readiness_summary = {
+                "total": sum(resolution.counts.values()),
+                "readiness": resolution.counts,
+                "runnable": len(compilation.copied_lead_ids),
+            }
+            case_warnings = [*resolution.warnings, *compilation.warnings]
+            if case_warnings:
+                _append_campaign_warnings(campaign_id, case_warnings)
+            if not compilation.copied_lead_ids:
+                retryable = any(
+                    resolution.counts.get(status, 0)
+                    for status in (
+                        validation_cases_svc.READINESS_PENDING,
+                        validation_cases_svc.READINESS_STATIC_COMPLETE,
+                        validation_cases_svc.READINESS_CRAWL_FAILED,
+                    )
+                )
+                if retryable:
+                    message = (
+                        "No validation case is runnable yet. Resolve the remaining "
+                        "crawl or path evidence and resume this target."
+                    )
+                    _set_target_validation_status(
+                        member_id,
+                        "incomplete",
+                        message=message,
+                        summary=readiness_summary,
+                    )
+                    return False, message
+                _set_target_validation_status(
+                    member_id,
+                    "completed",
+                    message="No approved SAST path could be resolved into a runnable validation case.",
+                    summary=readiness_summary,
+                )
+                return True, warning
             await scanner_svc.start_sast_validation_resume(test_run_id)
             while scanner_svc.is_thinking_running(test_run_id):
                 if campaign_id in _campaign_stop_requested:
@@ -1329,7 +1363,12 @@ async def _execute_target_member(
                 run = s.get(TestRun, test_run_id)
                 scan_ok = run is not None and run.status == "complete"
                 incomplete = run is not None and run.status == "incomplete"
-            summary = _validation_summary("web", test_run_id)
+            summary = _validation_summary(
+                "web",
+                test_run_id,
+                campaign_id=campaign_id,
+                target_member_id=member_id,
+            )
             if scan_ok:
                 _set_target_validation_status(
                     member_id,
@@ -1364,12 +1403,48 @@ async def _execute_target_member(
                 run.coverage_mode = "sast_validate"
                 s.add(run)
                 s.commit()
-        correlation_svc.copy_explicit_component_leads_for_target(
-            campaign_id, target_id, "api", api_test_run_id
+        resolution = validation_cases_svc.resolve_cases_for_api_target(
+            campaign_id, member_id, api_test_run_id
         )
-        correlation_svc.copy_approved_mappings_for_target(
-            campaign_id, target_id, "api", api_test_run_id
+        compilation = validation_cases_svc.compile_runnable_cases(
+            campaign_id, member_id
         )
+        readiness_summary = {
+            "total": sum(resolution.counts.values()),
+            "readiness": resolution.counts,
+            "runnable": len(compilation.copied_lead_ids),
+        }
+        case_warnings = [*resolution.warnings, *compilation.warnings]
+        if case_warnings:
+            _append_campaign_warnings(campaign_id, case_warnings)
+        if not compilation.copied_lead_ids:
+            retryable = any(
+                resolution.counts.get(status, 0)
+                for status in (
+                    validation_cases_svc.READINESS_PENDING,
+                    validation_cases_svc.READINESS_STATIC_COMPLETE,
+                    validation_cases_svc.READINESS_MISSING_PREREQUISITE,
+                )
+            )
+            if retryable:
+                message = (
+                    "No API validation case is runnable yet. Resolve the endpoint "
+                    "or authentication prerequisite and resume this target."
+                )
+                _set_target_validation_status(
+                    member_id,
+                    "incomplete",
+                    message=message,
+                    summary=readiness_summary,
+                )
+                return False, message
+            _set_target_validation_status(
+                member_id,
+                "completed",
+                message="No approved SAST path matched a runnable API endpoint.",
+                summary=readiness_summary,
+            )
+            return True, None
         await api_scanner_svc.start_sast_validation_resume(api_test_run_id)
         while api_scanner_svc.is_api_scan_running(api_test_run_id):
             if campaign_id in _campaign_stop_requested:
@@ -1381,7 +1456,12 @@ async def _execute_target_member(
             run = s.get(ApiTestRun, api_test_run_id)
             scan_ok = run is not None and run.status == "completed"
             incomplete = run is not None and run.status == "incomplete"
-        summary = _validation_summary("api", api_test_run_id)
+        summary = _validation_summary(
+            "api",
+            api_test_run_id,
+            campaign_id=campaign_id,
+            target_member_id=member_id,
+        )
         if scan_ok:
             _set_target_validation_status(
                 member_id,
@@ -1616,19 +1696,41 @@ async def supplemental_validate_target(
 
         live_context = _crawl_frontend_context(session, test_run_id, crawl_ok=crawl_ok)
 
-    correlation_svc.copy_approved_mappings_for_target(
+    resolution = validation_cases_svc.resolve_cases_for_web_target(
         campaign_id,
-        target_id,
-        "web",
+        target_member_id,
         test_run_id,
         mapping_ids=mapping_ids,
+        live_context=live_context,
     )
-    correlation_svc.enrich_copied_web_leads_for_target(
-        campaign_id,
-        target_id,
-        test_run_id,
-        context=live_context,
+    compilation = validation_cases_svc.compile_runnable_cases(
+        campaign_id, target_member_id, mapping_ids=mapping_ids
     )
+    if not compilation.copied_lead_ids:
+        with Session(get_engine()) as session:
+            run = session.get(TestRun, test_run_id)
+            member = session.get(CampaignTargetMember, target_member_id)
+            if run is not None:
+                run.status = "incomplete"
+                run.outcome = "No selected frontend path resolved against the crawl."
+                session.add(run)
+            if member is not None:
+                member.status = "incomplete"
+                member.status_message = (
+                    "No selected frontend path is runnable. Review the validation-case blockers."
+                )
+                member.validation_summary_json = json.dumps(
+                    {
+                        "total": sum(resolution.counts.values()),
+                        "readiness": resolution.counts,
+                        "runnable": 0,
+                    }
+                )
+                session.add(member)
+            session.commit()
+        raise InvalidCampaignState(
+            "No selected frontend path resolved into a runnable validation case"
+        )
     with events_svc.run_kind_scope("campaign"):
         events_svc.emit(
             campaign_id,
@@ -1637,7 +1739,7 @@ async def supplemental_validate_target(
                 "phase": "supplemental_sast_validate",
                 "status": "running",
                 "message": (
-                    f"Validating {len(mapping_ids)} newly approved frontend path(s)."
+                    f"Validating {len(compilation.copied_lead_ids)} newly resolved frontend path(s)."
                 ),
                 "data": {"target_id": target_id, "mapping_ids": sorted(mapping_ids)},
                 "_persist": True,
@@ -1892,11 +1994,22 @@ async def _run_dast_wrapper(campaign_id: int) -> None:
                         .where(CampaignTargetMember.status == "incomplete")
                     ).first()
                 )
-            if has_incomplete:
+                has_failed = bool(
+                    s.exec(
+                        select(CampaignTargetMember.id)
+                        .where(CampaignTargetMember.campaign_id == campaign_id)
+                        .where(CampaignTargetMember.status == "failed")
+                    ).first()
+                )
+            if has_incomplete or (has_failed and any_target_completed):
                 _finish_campaign(
                     campaign_id,
                     "incomplete",
-                    error="One or more target validations stopped with unresolved SAST leads. Resume to continue.",
+                    error=(
+                        "One or more target validations failed. Resume those targets to continue."
+                        if has_failed
+                        else "One or more target validations stopped with unresolved SAST leads. Resume to continue."
+                    ),
                 )
             elif any_target_completed:
                 _finish_campaign(campaign_id, "completed")

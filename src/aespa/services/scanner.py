@@ -9706,6 +9706,9 @@ async def _do_agentic_thinking_loop(
             lead_id = tool_input.get("lead_id")
             lead_reference = str(tool_input.get("lead_reference") or "").strip()
             outcome = str(tool_input.get("outcome") or "")
+            outcome_reason = str(tool_input.get("outcome_reason") or "").strip()
+            baseline_evidence = tool_input.get("baseline_evidence")
+            mutated_evidence = tool_input.get("mutated_evidence")
             lead_note = str(tool_input.get("note") or "")
             finding_id = tool_input.get("finding_id")
             finding_reference = str(tool_input.get("finding_reference") or "").strip()
@@ -9751,6 +9754,27 @@ async def _do_agentic_thinking_loop(
                 resolved_lead_id = (
                     int(lead_detail["id"]) if lead_detail else int(lead_id)
                 )
+                attack_path = (
+                    lead_detail.get("attack_path", {}) if lead_detail else {}
+                )
+                is_compiled_case = (
+                    isinstance(attack_path, dict)
+                    and attack_path.get("schema_version") == 3
+                    and attack_path.get("validation_case_id") is not None
+                )
+                if is_compiled_case and outcome == "confirmed":
+                    if outcome_reason != "confirmed":
+                        return (
+                            "A confirmed validation case requires "
+                            "outcome_reason=confirmed."
+                        )
+                    if not baseline_evidence or not mutated_evidence:
+                        return (
+                            "A confirmed validation case requires both baseline_evidence "
+                            "and mutated_evidence."
+                        )
+                if is_compiled_case and outcome != "confirmed" and outcome_reason == "confirmed":
+                    return "outcome_reason=confirmed requires outcome=confirmed."
                 if finding_reference and not finding_id:
                     from aespa.services.references import find_finding_by_reference
 
@@ -9772,6 +9796,9 @@ async def _do_agentic_thinking_loop(
                     investigated_by_run_id=run_id,
                     linked_finding_id=int(finding_id) if finding_id else None,
                     link_coverage=coverage_mode != "sast_validate",
+                    outcome_reason=outcome_reason or None,
+                    baseline_evidence=baseline_evidence,
+                    mutated_evidence=mutated_evidence,
                 )
                 if updated is None:
                     return f"Lead {lead_reference or f'#{lead_id}'} not found."

@@ -42,7 +42,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
 
       - name: Build
-        run: pwsh .\build_win.ps1
+        run: pwsh .\scripts\build_win.ps1
 
       - name: Zip
         run: Compress-Archive -Path dist\AESPA -DestinationPath "AESPA-windows-v${{ needs.check.outputs.version }}.zip"
@@ -88,8 +88,8 @@ jobs:
 
       - name: Build, sign, notarize, and staple app + dmg
         run: |
-          ./build_mac.sh
-          ./make_dmg.sh
+          ./scripts/build_mac.sh
+          ./scripts/make_dmg.sh
 
       - name: Store release artifact
         uses: actions/upload-artifact@v4

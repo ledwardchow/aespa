@@ -16,6 +16,7 @@ from aespa.models import (
 from aespa.services.correlation import propose_crawl_discovered_paths
 from aespa.services.frontend_path_resolver import (
     resolve_approved_path,
+    resolve_frontend_path,
     revise_path_with_llm,
 )
 from aespa.services.route_tracing import attack_path_for_trace, trace_lead_paths
@@ -258,7 +259,7 @@ def test_resolver_does_not_attach_crawl_evidence_to_plain_sast_path():
     assert resolve_approved_path(approved, live_context) == approved
 
 
-def test_resolver_uses_cross_component_frontend_request_metadata():
+def test_resolver_rejects_cross_component_server_egress_as_frontend_request():
     approved = {
         "frontend_entrypoint": {
             "method": "POST",
@@ -291,17 +292,8 @@ def test_resolver_uses_cross_component_frontend_request_metadata():
         },
     )
 
-    assert final["live_frontend_context"]["resolution_status"] == "matched"
-    assert final["live_frontend_context"]["route"] == "/checkout"
-    assert final["live_frontend_context"]["request"] == {
-        "method": "POST",
-        "path": "/api/orders/42",
-        "evidence_id": "traffic:9",
-    }
-    assert final["live_frontend_context"]["evidence_ids"] == [
-        "page:4",
-        "traffic:9",
-    ]
+    assert final["live_frontend_context"]["resolution_status"] == "legacy_unresolved"
+    assert "request" not in final["live_frontend_context"]
 
 
 @pytest.mark.anyio
@@ -404,6 +396,90 @@ def test_resolver_does_not_call_llm_when_crawl_is_unavailable(monkeypatch):
     )
 
     assert final["live_frontend_context"]["resolution_status"] == "unavailable"
+
+
+def test_v3_resolver_uses_browser_hop_when_server_egress_has_different_path():
+    approved = {
+        "schema_version": 3,
+        "perspective": "frontend",
+        "frontend_surface": {
+            "ui_route": {"kind": "ui_route", "path": "/quotes/motor"},
+            "ui_action": {
+                "kind": "ui_action",
+                "action_kind": "form_submit",
+                "label": "Submit quote",
+            },
+            "browser_request": {
+                "kind": "http_call",
+                "request_role": "browser_request",
+                "method": "POST",
+                "path": "/api/quotes/motor",
+                "body_fields": ["startDate", "endDate"],
+            },
+        },
+        "service_hops": [
+            {"kind": "http_call", "request_role": "server_egress", "method": "POST", "path": "/api/customer/quotes/motor"},
+            {"kind": "route", "request_role": "server_ingress", "method": "POST", "path": "/api/customer/quotes/motor"},
+        ],
+        "static_trace": {"status": "complete", "proof_gaps": []},
+    }
+    final = resolve_approved_path(
+        approved,
+        {
+            "crawl_status": "completed",
+            "pages": [{"id": 1, "route": "/quotes/motor", "url": "https://face.test/quotes/motor"}],
+            "actions": [{"id": 2, "page_id": 1, "action_kind": "form_submit", "label": "Submit quote", "interaction_id": "i1"}],
+            "requests": [{"id": 3, "page_id": 1, "method": "POST", "url": "https://face.test/api/quotes/motor", "interaction_id": "i1", "fields": ["startDate", "endDate"]}],
+        },
+    )
+    assert final["live_binding"]["status"] == "resolved"
+    assert final["live_binding"]["observed_request"]["path"] == "/api/quotes/motor"
+    assert final["live_frontend_context"]["resolution_status"] == "resolved"
+
+
+def test_v3_resolver_reports_ambiguous_equal_bindings():
+    approved = {
+        "schema_version": 3,
+        "perspective": "frontend",
+        "frontend_surface": {
+            "ui_route": {"kind": "ui_route", "path": "/checkout"},
+            "browser_request": {"kind": "http_call", "request_role": "browser_request", "method": "POST", "path": "/api/orders"},
+        },
+        "static_trace": {"status": "complete"},
+    }
+    final = resolve_approved_path(
+        approved,
+        {
+            "crawl_status": "completed",
+            "pages": [{"id": 1, "route": "/checkout"}],
+            "actions": [],
+            "requests": [
+                {"id": 2, "page_id": 1, "method": "POST", "url": "https://app.test/api/orders"},
+                {"id": 3, "page_id": 1, "method": "POST", "url": "https://app.test/api/orders"},
+            ],
+        },
+    )
+    assert final["live_binding"]["status"] == "ambiguous"
+    assert final["live_binding"]["candidate_count"] == 2
+
+
+def test_legacy_server_entrypoint_is_not_used_as_browser_request():
+    approved = {
+        "schema_version": 2,
+        "perspective": "frontend",
+        "frontend_entrypoint": {"method": "POST", "path": "/api/customer/quotes/motor"},
+        "backend_route": {"method": "POST", "path": "/api/customer/quotes/motor"},
+    }
+    result = resolve_frontend_path(
+        approved,
+        {
+            "crawl_status": "completed",
+            "pages": [{"id": 1, "route": "/quotes/motor"}],
+            "actions": [],
+            "requests": [{"id": 2, "page_id": 1, "method": "POST", "url": "https://app.test/api/customer/quotes/motor"}],
+        },
+    )
+    assert result["status"] == "legacy_unresolved"
 
 
 @pytest.mark.anyio

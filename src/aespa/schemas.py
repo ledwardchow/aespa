@@ -2000,6 +2000,85 @@ class LeadTargetMappingEditRequest(BaseModel):
     path: dict = Field(default_factory=dict)
 
 
+class FrontendSurfaceOut(BaseModel):
+    """Browser-visible page, action, and request for a validation case."""
+
+    ui_route: dict = Field(default_factory=dict)
+    ui_action: dict = Field(default_factory=dict)
+    browser_request: dict = Field(default_factory=dict)
+
+
+class ServiceHopOut(BaseModel):
+    """One server-side route or handler in an ordered static path."""
+
+    fact_id: int | None = None
+    component_id: int | None = None
+    component_name: str | None = None
+    kind: str = ""
+    method: str | None = None
+    path: str | None = None
+    request_role: str | None = None
+    evidence_location: str | None = None
+    detail: dict = Field(default_factory=dict)
+
+
+class LiveBindingOut(BaseModel):
+    """Crawl evidence bound to a browser request."""
+
+    status: str = "pending"
+    candidate_count: int = 0
+    page_id: int | None = None
+    action_id: int | None = None
+    traffic_id: int | None = None
+    endpoint_id: int | None = None
+    interaction_id: str | None = None
+    session_label: str | None = None
+    observed_request: dict = Field(default_factory=dict)
+    evidence_ids: list[str] = Field(default_factory=list)
+    candidates: list[dict] = Field(default_factory=list)
+
+
+class ValidationAssertionOut(BaseModel):
+    """The claim and outcomes used by a focused validation."""
+
+    claim: str = ""
+    mutation_points: list = Field(default_factory=list)
+    secure_outcome: str = ""
+    vulnerable_outcome: str = ""
+    prerequisites: list = Field(default_factory=list)
+
+
+class CampaignValidationCaseOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    mapping_id: int
+    target_member_id: int
+    origin_lead_id: int
+    source_lead: dict = Field(default_factory=dict)
+    assertion_key: str
+    frontend_surface: FrontendSurfaceOut = Field(default_factory=FrontendSurfaceOut)
+    service_hops: list[ServiceHopOut] = Field(default_factory=list)
+    live_binding: LiveBindingOut = Field(default_factory=LiveBindingOut)
+    validation_assertion: ValidationAssertionOut = Field(
+        default_factory=ValidationAssertionOut
+    )
+    static_path: dict = Field(default_factory=dict)
+    readiness_status: str
+    blocker_codes: list[str] = Field(default_factory=list)
+    copied_lead_id: int | None = None
+    copied_lead_reference: str | None = None
+    finding_id: int | None = None
+    finding_reference: str | None = None
+    execution_status: str
+    outcome_reason: str | None = None
+    baseline_evidence: dict = Field(default_factory=dict)
+    mutated_evidence: dict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
 class CampaignSupplementalValidationRequest(BaseModel):
     mapping_ids: list[int] = Field(min_length=1)
 

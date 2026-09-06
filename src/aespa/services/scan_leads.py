@@ -823,6 +823,9 @@ def update_lead(
     investigated_by_run_id: int | None = None,
     linked_finding_id: int | None = None,
     link_coverage: bool = True,
+    outcome_reason: str | None = None,
+    baseline_evidence: object | None = None,
+    mutated_evidence: object | None = None,
 ) -> ScanLead | None:
     """Record the outcome of a dynamic investigation on a lead.
 
@@ -947,6 +950,22 @@ def update_lead(
             _link_promoted_finding_to_coverage(**cov_args)
         except Exception as exc:
             log.debug("update_lead: coverage link failed: %s", exc)
+
+    # Campaign validation cases own the more precise execution result. This
+    # hook is harmless for ordinary SAST leads because no case will match.
+    try:
+        from aespa.services.campaign_validation_cases import (
+            sync_case_outcome_from_lead,
+        )
+
+        sync_case_outcome_from_lead(
+            lead.id,
+            outcome_reason=outcome_reason,
+            baseline_evidence=baseline_evidence,
+            mutated_evidence=mutated_evidence,
+        )
+    except Exception as exc:
+        log.debug("update_lead: validation-case sync failed: %s", exc)
 
     return lead
 

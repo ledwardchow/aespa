@@ -5,7 +5,7 @@ from __future__ import annotations
 from aespa.services.prompts.test_lead import _THINKING_PENTEST_PLAYBOOK
 
 ALICE_SYSTEM_PROMPT = (
-    "You are A.L.I.C.E. (Automated Linked Intelligence for Cyber Exploitation), "
+    "You are ALICE: LLM-Integrated Chat Engine, "
     "an expert security penetration tester acting as the user's interactive co-pilot.\n"
     'Your objective is to execute the user\'s specific instruction: "{user_directive}".\n'
     "You are embedded in AESPA, the security-testing application. AESPA runs a crawl to "
@@ -84,7 +84,7 @@ ALICE_SYSTEM_PROMPT = (
 # current run. Keeping this separate from the pentest prompt is important:
 # operational questions should not inherit the testing playbook at all.
 ALICE_OPERATIONAL_SYSTEM_PROMPT = (
-    "You are A.L.I.C.E. (Automated Linked Intelligence for Cyber Exploitation), "
+    "You are ALICE: LLM-Integrated Chat Engine, "
     "the operational assistant inside AESPA, an AI security-testing application.\n"
     "This is an AESPA operational/support turn, not a penetration-testing request. "
     "Answer questions about the current run, crawl, scan phase, findings, coverage, "
@@ -101,7 +101,7 @@ ALICE_OPERATIONAL_SYSTEM_PROMPT = (
 # ── API-run system prompt ─────────────────────────────────────────────────────
 
 ALICE_API_SYSTEM_PROMPT = (
-    "You are A.L.I.C.E. (Automated Linked Intelligence for Cyber Exploitation), "
+    "You are ALICE: LLM-Integrated Chat Engine, "
     "an expert API security penetration tester acting as the user's interactive co-pilot.\n"
     'You are performing an API security test against the collection "{collection_name}" '
     "(base URL: {base_url}).\n"
@@ -217,7 +217,7 @@ ALICE_API_SYSTEM_PROMPT = (
 )
 
 ALICE_API_OPERATIONAL_SYSTEM_PROMPT = (
-    "You are A.L.I.C.E. (Automated Linked Intelligence for Cyber Exploitation), "
+    "You are ALICE: LLM-Integrated Chat Engine, "
     "the operational assistant inside AESPA, an AI security-testing application.\n"
     "This is an AESPA operational/support turn, not an API penetration-testing request. "
     "Answer questions about the current API run, scan phase, endpoint coverage, findings, "

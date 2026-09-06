@@ -1984,6 +1984,20 @@ def _propose_mappings_for_lead(
         attack_path = {}
     for target in targets:
         if (
+            target.target_type == "site"
+            and lead.producer_run_type == "campaign"
+            and not (
+                isinstance(attack_path, dict)
+                and attack_path.get("schema_version") == 3
+                and attack_path.get("perspective") == "frontend"
+            )
+        ):
+            # Site mappings come only from the role-aware frontend tracing
+            # pipeline. Cross-service summaries remain available to API
+            # targets and as correlation evidence, but cannot claim a browser
+            # entrypoint or become web validation work.
+            continue
+        if (
             target.target_type == "api_collection"
             and isinstance(attack_path, dict)
             and attack_path.get("perspective") == "frontend"
@@ -2000,15 +2014,6 @@ def _propose_mappings_for_lead(
                 # The Site should investigate each frontend-rooted path rather
                 # than receive an additional backend-only duplicate.
                 continue
-        # An explicit target ownership link is a direct routing decision, not
-        # a review proposal. Cross-component leads still go through review
-        # because their provenance spans more than the linked component.
-        if (
-            lead.producer_run_type == "sast"
-            and len(component_ids) == 1
-            and target.component_id in component_ids
-        ):
-            continue
         score, rationale, evidence = _best_score_across_components(
             session, lead, component_ids, target
         )
@@ -2016,17 +2021,22 @@ def _propose_mappings_for_lead(
         # entire trace comes from the one component that owns the target.  A
         # path spanning repositories needs a reviewer to confirm the hop.
         explicitly_owned = (
-            lead.producer_run_type == "campaign"
-            and len(component_ids) == 1
+            len(component_ids) == 1
             and target.component_id in component_ids
-            and str(getattr(lead, "trace_status", "") or "") == "complete"
-            and not _lead_has_proof_gaps(lead)
+            and (
+                lead.producer_run_type == "sast"
+                or (
+                    lead.producer_run_type == "campaign"
+                    and str(getattr(lead, "trace_status", "") or "") == "complete"
+                    and not _lead_has_proof_gaps(lead)
+                )
+            )
         )
         if explicitly_owned:
             score = max(score, 1.0)
             rationale = (
-                "Explicit component ownership links this frontend path to the "
-                "selected live target."
+                "Explicit component ownership links this source lead to the "
+                "selected live target; runtime path resolution is still required."
             )
             evidence = {
                 **evidence,

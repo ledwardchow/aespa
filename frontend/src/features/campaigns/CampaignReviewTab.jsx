@@ -10,6 +10,7 @@ import {
   confidencePct,
   safeParseJson,
 } from "../../shared/runs/campaignPresentation.js";
+import { ValidationCaseList, ValidationCaseSummary } from "./ValidationCases.jsx";
 
 const HIGH_CONFIDENCE = 0.8;
 
@@ -98,7 +99,7 @@ export function CampaignReviewTab({
   continueBusy,
   onSubmitted,
 }) {
-  const { mappings, targets, error, setError, submitReview } = useReviewLeads(
+  const { mappings, targets, validationCases, error, setError, submitReview } = useReviewLeads(
     applicationId,
     campaignId,
   );
@@ -186,16 +187,30 @@ export function CampaignReviewTab({
   };
 
   const pendingDecisionCount = Object.keys(decisions).length;
+  const casesByMapping = useMemo(() => {
+    const byMapping = new Map();
+    for (const validationCase of validationCases || []) {
+      const key = String(validationCase.mapping_id);
+      if (key == null) continue;
+      if (!byMapping.has(key)) byMapping.set(key, []);
+      byMapping.get(key).push(validationCase);
+    }
+    return byMapping;
+  }, [validationCases]);
   const supplementalTargets = useMemo(() => {
     const byTarget = new Map();
     for (const mapping of mappings || []) {
       if (mapping.status !== "approved" || mapping.copied_lead_id) continue;
-      if (!["live_resolved", "crawl_partial"].includes(mapping.path_status)) continue;
+      const mappingCases = casesByMapping.get(String(mapping.id));
+      if (mappingCases?.length > 0) {
+        if (!mappingCases.some((validationCase) => validationCase.readiness_status === "resolved"))
+          continue;
+      } else if (!["live_resolved", "crawl_partial"].includes(mapping.path_status)) continue;
       if (!byTarget.has(mapping.target_id)) byTarget.set(mapping.target_id, []);
       byTarget.get(mapping.target_id).push(mapping.id);
     }
     return byTarget;
-  }, [mappings]);
+  }, [mappings, casesByMapping]);
 
   const onSubmit = async () => {
     setSubmitting(true);
@@ -351,6 +366,21 @@ export function CampaignReviewTab({
         </label>
       </div>
 
+      {validationCases.length > 0 && (
+        <div className="alert info app-review-readiness" style={{ marginBottom: 14 }}>
+          <div className="row spread" style={{ gap: 10, flexWrap: "wrap" }}>
+            <div>
+              <strong>Validation readiness</strong>
+              <div className="subtle" style={{ marginTop: 4 }}>
+                Approval allows AESPA to resolve and validate a route. It does not prove that the
+                browser can reach it.
+              </div>
+            </div>
+            <ValidationCaseSummary cases={validationCases} />
+          </div>
+        </div>
+      )}
+
       <div className="row spread" style={{ marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
         <div className="row" style={{ gap: 8 }}>
           <button
@@ -426,6 +456,7 @@ export function CampaignReviewTab({
           onToggleSelected={toggleSelected}
           applicationId={applicationId}
           campaignId={campaignId}
+          casesByMapping={casesByMapping}
         />
       ))}
     </div>
@@ -441,6 +472,7 @@ function LeadGroup({
   onToggleSelected,
   applicationId,
   campaignId,
+  casesByMapping,
 }) {
   const [expanded, setExpanded] = useState(false);
   const first = mappings[0];
@@ -575,6 +607,7 @@ function LeadGroup({
               onToggleSelected={onToggleSelected}
               applicationId={applicationId}
               campaignId={campaignId}
+              validationCases={casesByMapping.get(String(mapping.id)) || []}
             />
           ))}
         </tbody>
@@ -592,6 +625,7 @@ function MappingRow({
   onToggleSelected,
   applicationId,
   campaignId,
+  validationCases,
 }) {
   const [pathEditorOpen, setPathEditorOpen] = useState(false);
   const decision = decisions[mapping.id] || (mapping.status !== "proposed" ? mapping.status : null);
@@ -620,7 +654,7 @@ function MappingRow({
               className={"btn sm" + (decision === "approve" ? "" : " ghost")}
               onClick={() => onSetDecision(mapping.id, "approve")}
             >
-              Approve
+              Approve for validation
             </button>
             <button
               className={"btn danger-outline sm" + (decision === "reject" ? "" : "")}
@@ -649,6 +683,16 @@ function MappingRow({
               mapping={mapping}
               editorId={editorId}
             />
+          </td>
+        </tr>
+      )}
+      {validationCases.length > 0 && (
+        <tr className="app-review-validation-row">
+          <td colSpan={5}>
+            <div className="validation-case-inline">
+              <div className="validation-detail-label">Validation case</div>
+              <ValidationCaseList cases={validationCases} />
+            </div>
           </td>
         </tr>
       )}

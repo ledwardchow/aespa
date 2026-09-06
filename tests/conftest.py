@@ -9,8 +9,9 @@ from aespa.db import _migrate, get_session, set_engine
 from aespa.main import create_app
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="function", autouse=True)
 def isolated_db_engine():
+    """Keep every test, including mocked provider calls, off the local database."""
     prev_engine = aespa.db._engine
     engine = create_engine(
         "sqlite:///:memory:",

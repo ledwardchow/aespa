@@ -11,6 +11,11 @@ import {
   campaignMemberDisplayStatus,
   safeParseJson,
 } from "../../shared/runs/campaignPresentation.js";
+import {
+  ValidationCaseList,
+  ValidationCaseSummary,
+  validationCasesFromResponse,
+} from "./ValidationCases.jsx";
 
 // ── CampaignRunsTab ──────────────────────────────────────────────────────────
 // Every child SAST/web/API run this campaign created, with a deep link to its
@@ -30,6 +35,7 @@ export function CampaignRunsTab({
   const [tokenExpanded, setTokenExpanded] = useState(false);
   const [componentNames, setComponentNames] = useState({});
   const [targetNames, setTargetNames] = useState({});
+  const [validationCases, setValidationCases] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -55,6 +61,23 @@ export function CampaignRunsTab({
       cancelled = true;
     };
   }, [applicationId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    applicationsApi
+      .getCampaignValidationCases(applicationId, campaign.id)
+      .then((value) => {
+        if (!cancelled) setValidationCases(validationCasesFromResponse(value));
+      })
+      .catch(() => {
+        // A missing endpoint is expected while reading older campaigns. The
+        // existing run tables remain useful in that case.
+        if (!cancelled) setValidationCases([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [applicationId, campaign.id, campaign.updated_at, campaign.status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -151,6 +174,24 @@ export function CampaignRunsTab({
             ))}
           </ul>
         </div>
+      )}
+
+      {validationCases?.length > 0 && (
+        <section className="campaign-validation-cases">
+          <div className="row spread" style={{ gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div>
+              <div className="form-section-title" style={{ margin: 0 }}>
+                Validation cases
+              </div>
+              <div className="subtle" style={{ fontSize: 12, marginTop: 4 }}>
+                Each case is tied to one source assertion and target path. Readiness controls what
+                can enter a live scan.
+              </div>
+            </div>
+            <ValidationCaseSummary cases={validationCases} />
+          </div>
+          <ValidationCaseList cases={validationCases} />
+        </section>
       )}
 
       <div>

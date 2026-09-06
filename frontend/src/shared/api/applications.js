@@ -116,3 +116,10 @@ export const continueCampaign = (id, cid) =>
 
 export const getCampaignFindings = (id, cid) =>
   req(`/api/applications/${id}/campaigns/${cid}/findings`);
+
+// Validation cases are the executable, readiness-gated units produced from
+// reviewed campaign mappings. Older campaign endpoints may not expose this
+// resource yet, so callers should treat a failed request as an empty case list
+// when they need to keep legacy campaign pages readable.
+export const getCampaignValidationCases = (id, cid) =>
+  req(`/api/applications/${id}/campaigns/${cid}/validation-cases`);

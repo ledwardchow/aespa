@@ -483,6 +483,8 @@ def test_sast_validate_prompt_and_tools_are_focused():
         assert "attack path" in prompt
         assert "configured" in prompt
         assert "incidental" in prompt
+        assert "baseline" in prompt
+        assert "binding is stale" in prompt
     assert "browser" in {
         tool["name"] for tool in get_sast_validate_tools(is_api_run=False)
     }
@@ -508,6 +510,15 @@ def test_sast_validate_prompt_and_tools_are_focused():
     )
     assert "store_as" in api_http_tool["input_schema"]["properties"]
     assert "store_as" in api_prompt
+    update_tool = next(
+        tool
+        for tool in get_sast_validate_tools(is_api_run=True)
+        if tool["name"] == "update_lead"
+    )
+    update_schema = update_tool["input_schema"]
+    assert "outcome_reason" in update_schema["properties"]
+    assert "baseline_evidence" in update_schema["properties"]
+    assert "mutated_evidence" in update_schema["properties"]
     from aespa.services.prompts.test_lead import _API_THINKING_AGENT_SYSTEM
 
     assert "lead_detail" in _API_THINKING_AGENT_SYSTEM

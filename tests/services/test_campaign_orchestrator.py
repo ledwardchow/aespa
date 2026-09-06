@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlmodel import Session, select
@@ -430,7 +431,7 @@ async def test_continue_to_live_testing_gated_until_review_submitted(
 
 
 @pytest.mark.anyio
-async def test_continue_to_live_testing_sequences_crawl_then_scan(
+async def test_continue_to_live_testing_skips_scan_without_runnable_cases(
     isolated_db_engine, monkeypatch
 ):
     with Session(isolated_db_engine) as s:
@@ -463,11 +464,10 @@ async def test_continue_to_live_testing_sequences_crawl_then_scan(
     monkeypatch.setattr(crawler_svc, "is_running", lambda run_id: False)
     monkeypatch.setattr(scanner_svc, "start_thinking_scan", _fake_start_thinking_scan)
     monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: False)
-
     await campaigns_svc.continue_to_live_testing(campaign_id)
     await campaigns_svc._campaign_tasks[campaign_id]
 
-    assert call_order == ["crawl_start", "scan_start"]  # crawl always before scan
+    assert call_order == ["crawl_start"]
 
     with Session(isolated_db_engine) as s:
         campaign = s.get(AssessmentCampaign, campaign_id)
@@ -1166,6 +1166,23 @@ async def test_dast_stage_marks_target_failed_when_scan_status_is_failed(
     monkeypatch.setattr(scanner_svc, "start_thinking_scan", _fake_start_thinking_scan)
     monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: False)
 
+    # This test exercises scan terminal-state handling. Supply one resolved
+    # case so the readiness gate allows the mocked scanner to start.
+    monkeypatch.setattr(
+        campaigns_svc.validation_cases_svc,
+        "resolve_cases_for_web_target",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            counts={"resolved": 1}, warnings=[]
+        ),
+    )
+    monkeypatch.setattr(
+        campaigns_svc.validation_cases_svc,
+        "compile_runnable_cases",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            copied_lead_ids=[1], warnings=[]
+        ),
+    )
+
     await campaigns_svc.continue_to_live_testing(campaign_id)
     await campaigns_svc._campaign_tasks[campaign_id]
 
@@ -1187,12 +1204,10 @@ async def test_dast_stage_marks_target_failed_when_scan_status_is_failed(
 
 
 @pytest.mark.anyio
-async def test_dast_stage_completes_when_one_of_two_targets_succeeds(
+async def test_dast_stage_is_incomplete_when_one_of_two_targets_fails(
     isolated_db_engine, monkeypatch
 ):
-    """One target genuinely failing while another genuinely succeeds should
-    still report the campaign 'completed' (with a warning), not falsely
-    'failed' either."""
+    """A successful target must not hide a failed sibling target."""
     with Session(isolated_db_engine) as s:
         ctx = _seed_application(s)
         collection = None
@@ -1263,13 +1278,34 @@ async def test_dast_stage_completes_when_one_of_two_targets_succeeds(
     monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: False)
     monkeypatch.setattr(api_scanner_svc, "start_api_scan", _fake_start_api_scan)
     monkeypatch.setattr(api_scanner_svc, "is_api_scan_running", lambda run_id: False)
+    monkeypatch.setattr(
+        campaigns_svc.validation_cases_svc,
+        "resolve_cases_for_web_target",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            counts={"resolved": 1}, warnings=[]
+        ),
+    )
+    monkeypatch.setattr(
+        campaigns_svc.validation_cases_svc,
+        "resolve_cases_for_api_target",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            counts={"resolved": 1}, warnings=[]
+        ),
+    )
+    monkeypatch.setattr(
+        campaigns_svc.validation_cases_svc,
+        "compile_runnable_cases",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            copied_lead_ids=[1], warnings=[]
+        ),
+    )
 
     await campaigns_svc.continue_to_live_testing(campaign_id)
     await campaigns_svc._campaign_tasks[campaign_id]
 
     with Session(isolated_db_engine) as s:
         campaign = s.get(AssessmentCampaign, campaign_id)
-        assert campaign.status == "completed"  # one real success is enough
+        assert campaign.status == "incomplete"
         members = s.exec(
             select(CampaignTargetMember).where(
                 CampaignTargetMember.campaign_id == campaign_id

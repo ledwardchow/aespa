@@ -20,6 +20,7 @@ to ``pending`` so the campaign can resume the action without a stale run id.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, text
@@ -35,6 +36,7 @@ from aespa.models import (
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
+    CampaignValidationCase,
     ComponentConnection,
     ComponentFact,
     ComponentSnapshot,
@@ -74,6 +76,46 @@ def _delete_run_identity(session: Session, run_id: int, run) -> None:
         session.delete(run)
         session.flush()
     session.execute(delete(RunIdentity).where(RunIdentity.id == run_id))
+
+
+def _detach_validation_cases_for_leads(
+    session: Session, lead_ids: list[int], *, reason: str = "child_run_deleted"
+) -> None:
+    """Leave cases reviewable when their imported child lead is removed."""
+    if not lead_ids:
+        return
+    for case in session.exec(
+        select(CampaignValidationCase).where(
+            CampaignValidationCase.copied_lead_id.in_(lead_ids)
+        )
+    ).all():
+        case.copied_lead_id = None
+        case.execution_status = "not_queued"
+        case.readiness_status = "pending"
+        try:
+            blockers = json.loads(case.blocker_codes_json or "[]")
+        except (TypeError, ValueError):
+            blockers = []
+        if reason not in blockers:
+            blockers.append(reason)
+        case.blocker_codes_json = json.dumps(blockers, separators=(",", ":"))
+        case.updated_at = datetime.now(timezone.utc)
+        session.add(case)
+
+
+def _detach_validation_cases_for_findings(
+    session: Session, finding_ids: list[int]
+) -> None:
+    if not finding_ids:
+        return
+    for case in session.exec(
+        select(CampaignValidationCase).where(
+            CampaignValidationCase.finding_id.in_(finding_ids)
+        )
+    ).all():
+        case.finding_id = None
+        case.updated_at = datetime.now(timezone.utc)
+        session.add(case)
 
 
 def cascade_delete_web_run(session: Session, run_id: int) -> None:
@@ -119,6 +161,8 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         .where(ScanLead.imported_into_run_type == "web")
         .where(ScanLead.imported_into_run_id == run_id)
     ).all():
+        if lead.id is not None:
+            _detach_validation_cases_for_leads(session, [lead.id])
         session.delete(lead)
     for lead in session.exec(
         select(ScanLead)
@@ -129,6 +173,7 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         lead.investigated_by_run_id = None
         session.add(lead)
     if finding_ids:
+        _detach_validation_cases_for_findings(session, finding_ids)
         for lead in session.exec(
             select(ScanLead).where(ScanLead.linked_finding_id.in_(finding_ids))
         ).all():
@@ -276,9 +321,13 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
         member.updated_at = datetime.now(timezone.utc)
         session.add(member)
 
-    for finding in session.exec(
+    api_findings = session.exec(
         select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
-    ).all():
+    ).all()
+    _detach_validation_cases_for_findings(
+        session, [finding.id for finding in api_findings if finding.id is not None]
+    )
+    for finding in api_findings:
         session.delete(finding)
     for entry in session.exec(
         select(TrafficEntry).where(TrafficEntry.api_test_run_id == run_id)
@@ -293,6 +342,8 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
         .where(ScanLead.imported_into_run_type == "api")
         .where(ScanLead.imported_into_run_id == run_id)
     ).all():
+        if lead.id is not None:
+            _detach_validation_cases_for_leads(session, [lead.id])
         session.delete(lead)
     for ss in session.exec(
         select(ScannerSession)
@@ -430,6 +481,15 @@ def cascade_delete_campaign(session: Session, campaign_id: int) -> None:
         )
     ).all():
         session.delete(connection)
+
+    # Validation cases reference mappings, target members, source leads, and
+    # copied leads. Remove them before any of those campaign-owned rows.
+    for case in session.exec(
+        select(CampaignValidationCase).where(
+            CampaignValidationCase.campaign_id == campaign_id
+        )
+    ).all():
+        session.delete(case)
 
     for mapping in session.exec(
         select(LeadTargetMapping).where(LeadTargetMapping.campaign_id == campaign_id)

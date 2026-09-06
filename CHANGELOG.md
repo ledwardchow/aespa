@@ -16,6 +16,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Application campaign validation cases**: Campaigns now trace each approved backend SAST finding to a specific frontend page, action, and browser request before live testing begins. Browser requests are kept separate from server-to-server calls, so unresolved, ambiguous, stale, or wrong-target paths do not enter the scan queue. Campaign pages show the resolved path, readiness blockers, live request binding, and validation outcome for each case.
 - **GPT-6 Astra support**: OpenAI connections can now use GPT-6 Astra for scans and agent workflows. Astra requests use the Responses API, including tool calls, and the model form shows its supported reasoning levels and context window.
 - **Linux display detection**: AESPA now warns when a Linux host cannot access X11 or Wayland. Guided login and visible browser mode are disabled until a graphical display is available.
 - **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser, Reporting Lab, and Applications options are grouped under Feature Visibility.
@@ -28,20 +29,27 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Long Bedrock scan requests no longer time out while the model is working**: Agent scans now read Bedrock responses as a stream and allow long reasoning requests to remain idle for up to one hour. Tool calls, reasoning signatures, usage totals, and provider diagnostics are retained from the stream.
+
+- **Reliable usage statistics**: Automated tests now use an isolated database for all model calls, preventing test usage from appearing in your statistics. Models without recorded prices show an unavailable estimate instead of a zero cost.
+
+- **API and SAST pages recover after an update**: The desktop interface now refreshes its main script before loading pages that are split into separate files. If an old page file is no longer available after an update, AESPA reloads once and opens the current version instead of showing a page-load error.
 - **GPT-5.6 OpenAI compatibility**: Direct OpenAI connections now use the Responses API for GPT-5.6 Luna, Terra, Sol, and the Sol alias. Their complete reasoning options and 1,050,000-token context window are now available when configuring a model.
 - **Clearer Python sandbox setup errors**: The settings page and terminal console now distinguish a missing executor image from a Docker service that is stopped or cannot be reached.
 - **Run tabs follow browser navigation**: Browser back and forward now restore the selected web and SAST run tabs.
 - **A.L.I.C.E. chat history keeps its place**: Incoming and streaming messages no longer move the chat to the bottom after you scroll up. The chat follows new messages again when you return to the bottom.
 - **Crawls continue past unclickable overlays**: Dialog and login control clicks now have short attempt limits and a total time budget. Stale, obscured, or repeatedly re-rendered controls no longer keep a crawl stuck on one page.
-- **Reliable Python sandbox startup**: Sandbox workspaces now use the correct user and group IDs with private permissions. AESPA checks the full offline container configuration before reporting the runtime ready and shows the Docker runner exit code if no result is returned.
 - **Consistent Python Sandbox settings layout**: Python Sandbox settings now use the same content width as other Agent Settings pages.
 - **More reliable Codex connections**: Codex processes now retain the Windows environment needed for DNS and HTTPS access. Temporary response-stream interruptions wait for Codex's announced reconnect attempt before failing the call.
 - **Independent Codex model allowances**: An exhausted Spark allowance no longer blocks other Codex models that still have capacity.
 - **Clearer crawler login errors**: Unavailable models, exhausted allowances, and malformed model responses during login now produce error events showing the affected model and reset time when available.
-- **Clearer startup port errors**: Terminal startup now reports when the configured address is already in use and explains how to select another port.
-- **More reliable desktop startup**: The macOS and Windows apps reserve their selected local port until the backend starts, preventing another process from taking it during launch. Startup failures are reported sooner, and database upgrades have more time to finish on slower systems.
+- **Clearer startup port errors**: Terminal startup now reports when the configured address is already in use.
 
 ### Housekeeping
+
+- **Build script organisation**: Build, signing, packaging, and Docker publishing scripts now live in `scripts/`. Release workflows use the new paths, and scripts resolve inputs from the repository root even when launched from another directory.
+
+- **ALICE naming**: Standardised the full name as “ALICE: LLM-Integrated Chat Engine” in documentation and agent prompts.
 
 - **Findings and settings maintenance**: Web and API findings now share editing and detail components. Regression checks cover saved changes, cancelled edits, and drafts retained across web-run tabs. Settings and saved-run data handling have been split into smaller modules, preserving existing formats and defaults.
 - **Frontend maintenance**: The UI has been reorganized into feature modules with shared components, API clients, and styles. Automated checks now cover routing, forms, and browser rendering.
@@ -869,7 +877,7 @@ Four targeted fixes addressing ALICE session persistence, job visibility, token 
 
 **Merged:** 2026-05-30 22:49 AEST | Branch: `tester-chat → main`
 
-Introduces A.L.I.C.E. (AI LLM-Integrated Chat Engine), an interactive user-directed pentesting agent embedded directly in the scan UI. Covers the full feature from initial chat interface through background task persistence, stream resume after page refresh, server-side session storage, and a suite of correctness fixes (~40 files changed).
+Introduces ALICE: LLM-Integrated Chat Engine, an interactive user-directed pentesting agent embedded directly in the scan UI. Covers the full feature from initial chat interface through background task persistence, stream resume after page refresh, server-side session storage, and a suite of correctness fixes (~40 files changed).
 
 ### Architecture
 
