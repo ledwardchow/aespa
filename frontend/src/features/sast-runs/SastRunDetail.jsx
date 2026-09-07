@@ -333,7 +333,11 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                 Stop
               </button>
             )}
-            <SastRunActionsMenu runId={runId} onDelete={onDelete} />
+            <SastRunActionsMenu
+              runId={runId}
+              onDelete={onDelete}
+              onExportMarkdown={onExportReport}
+            />
           </>
         }
       />

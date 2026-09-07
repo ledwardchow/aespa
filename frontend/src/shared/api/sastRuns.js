@@ -43,3 +43,11 @@ export const createStandaloneSastRun = (file, name, llm_profile_id) => {
   if (llm_profile_id) fd.append("llm_profile_id", llm_profile_id);
   return req(`/api/sast-runs`, { method: "POST", body: fd });
 };
+
+export const getSastSarifUrl = (id, reportableOnly = false) =>
+  `/api/sast-runs/${id}/sarif${reportableOnly ? "?reportable_only=true" : ""}`;
+
+export const getSastSarif = (id, reportableOnly = false) =>
+  req(getSastSarifUrl(id, reportableOnly));
+
+
