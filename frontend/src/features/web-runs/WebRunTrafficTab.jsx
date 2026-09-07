@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 import { useColResize } from "../../shared/hooks/useColResize.js";
 import { TrafficDetail, TrafficTable } from "../../shared/ui/TrafficView.jsx";
+import { nav } from "../../shared/navigation/router.js";
+import { runHref } from "../../shared/navigation/links.ts";
 
 function parseExcludedExtensions(value) {
   return new Set(
@@ -43,6 +45,7 @@ export function WebRunTrafficTab({
   captureActive,
   runStatus,
   onTotalChange,
+  coverageFilter,
 }) {
   const [traffic, setTraffic] = useState([]);
   const [trafficTotal, setTrafficTotal] = useState(0);
@@ -57,11 +60,12 @@ export function WebRunTrafficTab({
   });
   const trafficTableRef = useRef(null);
   const lastTrafficIdRef = useRef(0);
-  const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v2", [
+  const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v3", [
     30,
     88,
     68,
     70,
+    180,
     62,
     52,
     null,
@@ -135,9 +139,18 @@ export function WebRunTrafficTab({
             e.url.toLowerCase().includes(trafficFilter.toLowerCase()) ||
             (e.method || "").toLowerCase().includes(trafficFilter.toLowerCase()) ||
             String(e.status || "").includes(trafficFilter) ||
-            (e.source || "").toLowerCase().includes(trafficFilter.toLowerCase()),
+            (e.source || "").toLowerCase().includes(trafficFilter.toLowerCase()) ||
+            (e.purpose || "").toLowerCase().includes(trafficFilter.toLowerCase()),
         )
       : traffic;
+    if (coverageFilter?.cellIds?.length) {
+      const cellIds = new Set(coverageFilter.cellIds);
+      list = list.filter(
+        (entry) =>
+          cellIds.has(entry.coverage_cell_id) &&
+          (!coverageFilter.testClass || entry.test_class === coverageFilter.testClass),
+      );
+    }
     if (excludedExtensions.size > 0) {
       list = list.filter((entry) => {
         const ext = extractUrlExtension(entry.url);
@@ -188,6 +201,19 @@ export function WebRunTrafficTab({
           {filteredTraffic.length} shown
           {trafficTotal > filteredTraffic.length ? ` of ${trafficTotal}` : ""}
         </span>
+        {coverageFilter?.cellIds?.length ? (
+          <span className="traffic-coverage-filter">
+            OWASP {coverageFilter.category || "cell"}
+            {coverageFilter.testClass ? ` · ${coverageFilter.testClass.replace(/_/g, " ")}` : ""}
+            <button
+              className="btn ghost sm"
+              aria-label="Clear OWASP traffic filter"
+              onClick={() => nav(runHref({ runKind: "web", runId }, "traffic"))}
+            >
+              ✕
+            </button>
+          </span>
+        ) : null}
         <label className="traffic-autoscroll">
           <input
             type="checkbox"

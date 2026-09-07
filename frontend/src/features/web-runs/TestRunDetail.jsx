@@ -39,7 +39,13 @@ export function TestRunDetail(props) {
   );
 }
 
-function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }) {
+function TestRunContent({
+  runId,
+  initialTab,
+  initialFindingRef,
+  initialLeadRef,
+  initialTrafficCoverage,
+}) {
   const [run, setRun] = useState(null);
   const [siteName, setSiteName] = useState(null);
   const [graph, setGraph] = useState(null);
@@ -648,6 +654,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
           }
           runStatus={run?.status}
           onTotalChange={setTrafficTotal}
+          coverageFilter={initialTrafficCoverage}
         />
         {activeTab === "leads" && (
           <WebRunSastLeadsTab

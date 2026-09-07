@@ -3,8 +3,10 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 import { useIncrementalCollection } from "../../shared/hooks/useIncrementalCollection.js";
 import { TrafficDetail, TrafficTable } from "../../shared/ui/TrafficView.jsx";
+import { nav } from "../../shared/navigation/router.js";
+import { runHref } from "../../shared/navigation/links.ts";
 
-export function ApiRunTrafficTab({ runId, scanRunning }) {
+export function ApiRunTrafficTab({ runId, scanRunning, coverageFilter }) {
   const [total, setTotal] = useState(0);
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState(null);
@@ -12,7 +14,7 @@ export function ApiRunTrafficTab({ runId, scanRunning }) {
   const tableRef = useRef(null);
   const loadAfter = useCallback((cursor) => apiRunsApi.getApiTraffic(runId, cursor), [runId]);
   const { items: traffic, reset } = useIncrementalCollection(loadAfter, {
-    enabled: scanRunning,
+    enabled: true,
     intervalMs: 4000,
   });
   const refreshTotal = useCallback(
@@ -31,13 +33,17 @@ export function ApiRunTrafficTab({ runId, scanRunning }) {
       tableRef.current.scrollTop = tableRef.current.scrollHeight;
     }
   }, [traffic.length, autoScroll]);
-  const filtered = filter
+  let filtered = filter
     ? traffic.filter((entry) =>
-        (entry.url + entry.method + (entry.status ?? "") + entry.source)
+        (entry.url + entry.method + (entry.status ?? "") + entry.source + (entry.purpose || ""))
           .toLowerCase()
           .includes(filter.toLowerCase()),
       )
     : traffic;
+  if (coverageFilter?.cellIds?.length) {
+    const cellIds = new Set(coverageFilter.cellIds);
+    filtered = filtered.filter((entry) => cellIds.has(entry.coverage_cell_id));
+  }
   return (
     <div className="traffic-panel">
       <div className="traffic-toolbar">
@@ -50,6 +56,18 @@ export function ApiRunTrafficTab({ runId, scanRunning }) {
         <span className="traffic-count-label">
           {filtered.length} shown{total > filtered.length ? ` of ${total}` : ""}
         </span>
+        {coverageFilter?.cellIds?.length ? (
+          <span className="traffic-coverage-filter">
+            OWASP {coverageFilter.category || "cell"}
+            <button
+              className="btn ghost sm"
+              aria-label="Clear OWASP traffic filter"
+              onClick={() => nav(runHref({ runKind: "api", runId }, "traffic"))}
+            >
+              ✕
+            </button>
+          </span>
+        ) : null}
         <label className="traffic-autoscroll">
           <input
             type="checkbox"

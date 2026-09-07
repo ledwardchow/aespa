@@ -47,7 +47,12 @@ const API_RUN_TABS = [
 // Reuse the same alice session management infrastructure as TestRunDetail but
 // bound to the /api/api-test-runs/{id}/* alias routes.
 
-export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
+export function ApiTestRunDetail({
+  runId,
+  initialTab,
+  initialFindingRef,
+  initialTrafficCoverage,
+}) {
   const [run, setRun] = useState(null);
   const [error, setError] = useState(null);
   const [scanStatus, setScanStatus] = useState(null);
@@ -264,7 +269,13 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
         )}
         {tab === "leads" && <ApiRunLeadsTab runId={runId} scanRunning={scanRunning} />}
         {tab === "sessions" && <ApiRunSessionsTab runId={runId} scanRunning={scanRunning} />}
-        {tab === "traffic" && <ApiRunTrafficTab runId={runId} scanRunning={scanRunning} />}
+        {tab === "traffic" && (
+          <ApiRunTrafficTab
+            runId={runId}
+            scanRunning={scanRunning}
+            coverageFilter={initialTrafficCoverage}
+          />
+        )}
         {tab === "endpoints" && <ApiRunEndpointsTab run={run} />}
         {tab === "workprogram" && (
           <ApiRunWorkProgramTab runId={runId} scanRunning={scanRunning} run={run} />

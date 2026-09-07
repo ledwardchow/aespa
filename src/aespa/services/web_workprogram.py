@@ -1712,6 +1712,7 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                     )
             if cat not in g["cells"]:
                 g["cells"][cat] = {
+                    "cell_ids": [cell.id] if cell.id is not None else [],
                     "status": status,
                     "skip_reason": skip_reason,
                     "finding_ids": all_fids,
@@ -1719,6 +1720,8 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                     "test_classes": test_classes,
                 }
             else:
+                if cell.id is not None and cell.id not in g["cells"][cat]["cell_ids"]:
+                    g["cells"][cat]["cell_ids"].append(cell.id)
                 # Promote to highest status seen across pages in this group
                 if _STATUS_RANK.get(status, 0) > _STATUS_RANK.get(
                     g["cells"][cat]["status"], 0
@@ -1768,6 +1771,7 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                     continue
                 class_fids = list(class_state.get("finding_ids") or [])
                 g["cells"][f"A03:{test_class}"] = {
+                    "cell_ids": list(a03_cell.get("cell_ids") or []),
                     "status": str(class_state.get("status") or "not_started"),
                     "skip_reason": class_state.get("skip_reason"),
                     "finding_ids": class_fids,

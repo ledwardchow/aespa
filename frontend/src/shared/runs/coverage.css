@@ -58,6 +58,10 @@
   z-index: 1;
 }
 
+.coverage-matrix td.coverage-traffic-cell:hover {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
 /* Coverage cell pill */
 .cov-cell {
   display: inline-flex;

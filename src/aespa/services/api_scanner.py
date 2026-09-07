@@ -690,6 +690,7 @@ def get_coverage_matrix(api_run_id: int) -> dict:
                 cell_status = "not_started"
                 fids = []
             ep_cells[cat] = {
+                "cell_id": cell.id if cell else None,
                 "status": cell_status,
                 "finding_ids": fids,
                 "findings": [finding_lookup[i] for i in fids if i in finding_lookup],

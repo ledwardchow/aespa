@@ -79,6 +79,7 @@ export const routes = {
       runId: route.id,
       initialTab: route.tab,
       initialFindingRef: route.findingRef,
+      initialTrafficCoverage: route.trafficCoverage,
     }),
   },
   "sast-list": {
@@ -185,6 +186,7 @@ export const routes = {
       initialTab: route.tab,
       initialFindingRef: route.findingRef,
       initialLeadRef: route.leadRef,
+      initialTrafficCoverage: route.trafficCoverage,
     }),
   },
   settings: {

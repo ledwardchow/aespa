@@ -995,7 +995,11 @@ class TrafficEntry(SQLModel, table=True):
     batch_index: Optional[int] = Field(default=None)
     agent_id: Optional[str] = Field(default=None, index=True)
     agent_step: Optional[int] = Field(default=None)
+    purpose: Optional[str] = Field(default=None)
     owasp_category: Optional[str] = Field(default=None, index=True)
+    # The exact PageOwaspTest or ApiEndpointTest row exercised by this request.
+    # The owning run kind identifies which coverage table the id belongs to.
+    coverage_cell_id: Optional[int] = Field(default=None, index=True)
     test_class: Optional[str] = Field(default=None, index=True)
     obligation_id: Optional[int] = Field(default=None, index=True)
     request_body_encoding: Optional[str] = Field(default=None)

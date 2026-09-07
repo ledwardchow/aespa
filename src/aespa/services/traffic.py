@@ -58,6 +58,7 @@ def _body_preview(
 # default prevents scanner payloads from spilling into ordinary server logs.
 testing_traffic_log = logging.getLogger("aespa.testing.traffic")
 testing_traffic_log.setLevel(logging.WARNING)
+log = logging.getLogger(__name__)
 
 # In-memory cache of WAF detections, keyed by (run_kind, run_id), so the
 # agentic scan loop can check "is this run behind a WAF?" on every tool call
@@ -70,9 +71,7 @@ _waf_cache_hydrated: set[tuple[str, int]] = set()
 # The active browser target is tagged on the context while one self-contained
 # browser action runs.  This lets asynchronous Playwright listeners persist the
 # originating SPA page without depending on Playwright object internals.
-_browser_context_tags: dict[
-    int, tuple[Optional[int], Optional[str], Optional[str]]
-] = {}
+_browser_context_tags: dict[int, dict] = {}
 
 
 def set_browser_context_tag(
@@ -80,18 +79,147 @@ def set_browser_context_tag(
     page_id: Optional[int],
     session_label: Optional[str],
     interaction_id: Optional[str] = None,
+    *,
+    username: Optional[str] = None,
+    purpose: Optional[str] = None,
+    owasp_category: Optional[str] = None,
+    test_class: Optional[str] = None,
+    obligation_id: Optional[int] = None,
 ) -> None:
-    _browser_context_tags[id(ctx)] = (page_id, session_label, interaction_id)
+    tag = {
+        "page_id": page_id,
+        "session_label": session_label,
+        "interaction_id": interaction_id,
+    }
+    for key, value in {
+        "username": username,
+        "purpose": purpose,
+        "owasp_category": owasp_category,
+        "test_class": test_class,
+        "obligation_id": obligation_id,
+    }.items():
+        if value is not None:
+            tag[key] = value
+    _browser_context_tags[id(ctx)] = tag
 
 
 def clear_browser_context_tag(ctx) -> None:
     _browser_context_tags.pop(id(ctx), None)
 
 
-def _browser_context_tag(
-    ctx,
-) -> tuple[Optional[int], Optional[str], Optional[str]]:
-    return _browser_context_tags.get(id(ctx), (None, None, None))
+def _browser_context_tag(ctx) -> dict:
+    return dict(_browser_context_tags.get(id(ctx), {}))
+
+
+def request_purpose(
+    tool_input: dict,
+    fallback: str,
+    *,
+    agent_name: Optional[str] = None,
+    owasp_category: Optional[str] = None,
+    test_class: Optional[str] = None,
+) -> str:
+    """Return the same concise request intent used by agent activity logs."""
+    purpose = fallback
+    for key in ("payload_purpose", "hypothesis", "note", "purpose"):
+        value = str(tool_input.get(key) or "").strip()
+        if value:
+            purpose = value
+            break
+    category = (
+        str(owasp_category or tool_input.get("owasp_category") or "").strip().upper()
+    )
+    label = str(test_class or tool_input.get("test_class") or "").strip()
+    coverage = " ".join(value for value in (category, label) if value)
+    prefix = " - ".join(value for value in (agent_name, coverage) if value)
+    if prefix:
+        purpose = f"{prefix}: {purpose}"
+    return purpose[:500]
+
+
+def _resolve_coverage_cell_id(
+    run_id: Optional[int],
+    api_run_id: Optional[int],
+    method: str,
+    url: str,
+    page_id: Optional[int],
+    owasp_category: Optional[str],
+) -> Optional[int]:
+    """Resolve the exact coverage row named by a traffic entry."""
+    category = str(owasp_category or "").strip().upper()
+    if not category:
+        return None
+    try:
+        if api_run_id is not None:
+            from aespa.models import (
+                ApiCollection,
+                ApiEndpoint,
+                ApiEndpointTest,
+                ApiTestRun,
+            )
+            from aespa.services.api_scanner import _match_endpoint_for_url
+
+            with Session(get_engine()) as session:
+                api_run = session.get(ApiTestRun, api_run_id)
+                if api_run is None:
+                    return None
+                endpoints = list(
+                    session.exec(
+                        select(ApiEndpoint).where(
+                            ApiEndpoint.collection_id == api_run.collection_id
+                        )
+                    ).all()
+                )
+                method_endpoints = [
+                    endpoint
+                    for endpoint in endpoints
+                    if endpoint.method.upper() == method.upper()
+                ]
+                collection = session.get(ApiCollection, api_run.collection_id)
+                endpoint = _match_endpoint_for_url(
+                    url, method_endpoints, (collection.base_url if collection else "")
+                )
+                if endpoint is None:
+                    return None
+                cell = session.exec(
+                    select(ApiEndpointTest)
+                    .where(ApiEndpointTest.api_test_run_id == api_run_id)
+                    .where(ApiEndpointTest.endpoint_id == endpoint.id)
+                    .where(ApiEndpointTest.owasp_api_category == category)
+                ).first()
+                return int(cell.id) if cell and cell.id is not None else None
+
+        if run_id is not None:
+            from aespa.models import CrawledPage, PageOwaspTest
+            from aespa.services.web_workprogram import (
+                _match_page_for_url,
+                _normalize_owasp_category,
+            )
+
+            resolved_page_id = page_id
+            with Session(get_engine()) as session:
+                if resolved_page_id is None:
+                    pages = list(
+                        session.exec(
+                            select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+                        ).all()
+                    )
+                    resolved_page_id = _match_page_for_url(url, pages)
+                if resolved_page_id is None:
+                    return None
+                cell = session.exec(
+                    select(PageOwaspTest)
+                    .where(PageOwaspTest.test_run_id == run_id)
+                    .where(PageOwaspTest.page_id == resolved_page_id)
+                    .where(
+                        PageOwaspTest.owasp_category
+                        == _normalize_owasp_category(category)
+                    )
+                ).first()
+                return int(cell.id) if cell and cell.id is not None else None
+    except Exception:
+        log.debug("Could not associate traffic with a coverage cell", exc_info=True)
+    return None
 
 
 def get_cached_waf(run_id: int, *, api_run_id: Optional[int] = None) -> Optional[dict]:
@@ -194,7 +322,9 @@ def _write(
     batch_index: Optional[int] = None,
     agent_id: Optional[str] = None,
     agent_step: Optional[int] = None,
+    purpose: Optional[str] = None,
     owasp_category: Optional[str] = None,
+    coverage_cell_id: Optional[int] = None,
     test_class: Optional[str] = None,
     obligation_id: Optional[int] = None,
     request_body_encoding: Optional[str] = None,
@@ -205,6 +335,11 @@ def _write(
     response_body_sha256: Optional[str] = None,
 ) -> int:
     from aespa.models import TrafficEntry
+
+    if coverage_cell_id is None and owasp_category:
+        coverage_cell_id = _resolve_coverage_cell_id(
+            run_id, api_run_id, method, url, page_id, owasp_category
+        )
 
     with Session(get_engine()) as s:
         entry = TrafficEntry(
@@ -229,7 +364,9 @@ def _write(
             batch_index=batch_index,
             agent_id=agent_id,
             agent_step=agent_step,
+            purpose=purpose,
             owasp_category=owasp_category,
+            coverage_cell_id=coverage_cell_id,
             test_class=test_class,
             obligation_id=obligation_id,
             request_body_encoding=request_body_encoding,
@@ -415,7 +552,9 @@ def get_traffic(
                 "batch_index": e.batch_index,
                 "agent_id": e.agent_id,
                 "agent_step": e.agent_step,
+                "purpose": e.purpose,
                 "owasp_category": e.owasp_category,
+                "coverage_cell_id": e.coverage_cell_id,
                 "test_class": e.test_class,
                 "obligation_id": e.obligation_id,
                 "request_body_encoding": e.request_body_encoding,
@@ -529,7 +668,9 @@ class LoggingAsyncClient(httpx.AsyncClient):
                 self.provenance.get("batch_index"),
                 self.provenance.get("agent_id"),
                 self.provenance.get("agent_step"),
+                self.provenance.get("purpose"),
                 self.provenance.get("owasp_category"),
+                self.provenance.get("coverage_cell_id"),
                 self.provenance.get("test_class"),
                 self.provenance.get("obligation_id"),
                 req_encoding,
@@ -576,7 +717,9 @@ class LoggingAsyncClient(httpx.AsyncClient):
                 self.provenance.get("batch_index"),
                 self.provenance.get("agent_id"),
                 self.provenance.get("agent_step"),
+                self.provenance.get("purpose"),
                 self.provenance.get("owasp_category"),
+                self.provenance.get("coverage_cell_id"),
                 self.provenance.get("test_class"),
                 self.provenance.get("obligation_id"),
                 req_encoding,
@@ -657,6 +800,7 @@ def setup_playwright_logging(
     run_id: Optional[int],
     username: Optional[str] = None,
     api_run_id: Optional[int] = None,
+    purpose: Optional[str] = None,
 ) -> None:
     """Register request/response listeners on a Playwright BrowserContext.
 
@@ -737,6 +881,8 @@ def setup_playwright_logging(
         except Exception:
             all_resp_hdrs = dict(response.headers)
 
+        tag = {"purpose": purpose, **_browser_context_tag(ctx)}
+        effective_username = tag.pop("username", username)
         await asyncio.to_thread(
             _write,
             effective_run_id,
@@ -749,9 +895,9 @@ def setup_playwright_logging(
             all_resp_hdrs,
             resp_body,
             duration_ms,
-            username,
+            effective_username,
             api_run_id,
-            *_browser_context_tag(ctx),
+            **tag,
         )
 
     async def on_request_failed(request) -> None:
@@ -779,6 +925,8 @@ def setup_playwright_logging(
 
         error_text = request.failure or "Request failed"
 
+        tag = {"purpose": purpose, **_browser_context_tag(ctx)}
+        effective_username = tag.pop("username", username)
         await asyncio.to_thread(
             _write,
             effective_run_id,
@@ -791,9 +939,9 @@ def setup_playwright_logging(
             {},
             f"[Browser Request Failed: {error_text}]",
             duration_ms,
-            username,
+            effective_username,
             api_run_id,
-            *_browser_context_tag(ctx),
+            **tag,
         )
 
     ctx.on("request", on_request)

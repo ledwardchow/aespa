@@ -157,13 +157,13 @@ def _persist_execution_snapshot(
             "schema_version": 1,
             "captured_at": datetime.now(timezone.utc).isoformat(),
             "aespa_version": version,
-                "model": {
-                    "provider": getattr(llm_cfg, "provider", None),
-                    "model": getattr(llm_cfg, "model", None),
-                    "max_tokens": getattr(llm_cfg, "max_tokens", None),
-                    "max_context_tokens": getattr(llm_cfg, "max_context_tokens", None),
-                    "context_limit_source": getattr(llm_cfg, "context_limit_source", None),
-                    "temperature": getattr(llm_cfg, "temperature", None),
+            "model": {
+                "provider": getattr(llm_cfg, "provider", None),
+                "model": getattr(llm_cfg, "model", None),
+                "max_tokens": getattr(llm_cfg, "max_tokens", None),
+                "max_context_tokens": getattr(llm_cfg, "max_context_tokens", None),
+                "context_limit_source": getattr(llm_cfg, "context_limit_source", None),
+                "temperature": getattr(llm_cfg, "temperature", None),
                 "use_vision": getattr(llm_cfg, "use_vision", False),
                 "force_tool_choice": getattr(llm_cfg, "force_tool_choice", False),
             },
@@ -5171,7 +5171,14 @@ async def _run_specialist_agent(
             )
             async with _make_scanner_client(
                 run_id=run_id,
-                username="specialist",
+                username=(
+                    (
+                        selected_session
+                        if selected_session is not None
+                        else primary_session
+                    )
+                    or {}
+                ).get("username"),
                 cookies=req_cookies,
                 headers=req_headers,
                 timeout=scanner_policy.request_timeout_s
@@ -5179,7 +5186,16 @@ async def _run_specialist_agent(
                 else REQUEST_TIMEOUT,
                 follow_redirects=True,
                 verify=False,
-                event_hooks=traffic_svc.make_httpx_hooks(run_id, username="specialist"),
+                provenance={
+                    "agent_id": agent_id,
+                    "agent_step": step,
+                    "purpose": traffic_svc.request_purpose(
+                        tool_input, "Probe target", agent_name="Specialist"
+                    ),
+                    "owasp_category": tool_input.get("owasp_category"),
+                    "test_class": tool_input.get("test_class"),
+                    "obligation_id": tool_input.get("obligation_id"),
+                },
             ) as _hx:
                 if isinstance(_hx, traffic_svc.LoggingAsyncClient):
                     _hx.page_id = target_page_id
@@ -5296,10 +5312,23 @@ async def _run_specialist_agent(
                         if cookies_to_add:
                             await _ctx.add_cookies(cookies_to_add)
                     traffic_svc.setup_playwright_logging(
-                        _ctx, run_id, username="specialist"
+                        _ctx,
+                        run_id,
+                        username=(browser_session or {}).get("username"),
                     )
                     traffic_svc.set_browser_context_tag(
-                        _ctx, browser_page_id, browser_session_label
+                        _ctx,
+                        browser_page_id,
+                        browser_session_label,
+                        username=(browser_session or {}).get("username"),
+                        purpose=traffic_svc.request_purpose(
+                            tool_input,
+                            "Browser probe",
+                            agent_name="Specialist",
+                        ),
+                        owasp_category=tool_input.get("owasp_category"),
+                        test_class=tool_input.get("test_class"),
+                        obligation_id=tool_input.get("obligation_id"),
                     )
                     _page = await _ctx.new_page()
                     try:
@@ -6899,7 +6928,10 @@ async def _do_thinking_scan(run_id: int) -> None:
         # loop starts. The thinking-scan agent can then find them via target_inventory
         # without re-fetching and re-parsing JS source itself.
         async with _make_scanner_client(
-            run_id=run_id, username="js_sink", verify=False, timeout=REQUEST_TIMEOUT
+            run_id=run_id,
+            verify=False,
+            timeout=REQUEST_TIMEOUT,
+            provenance={"purpose": "Test Lead: Analyze JavaScript sinks"},
         ) as _hx_sink:
             await _analyse_js_sinks(run_id, _hx_sink, scanner_policy=scanner_policy)
 
@@ -8699,7 +8731,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                 first_page_id=first_page_id,
                 results=all_results,
             )
-        total_batches = len(llm_svc._chunk_probe_results(all_results, config=llm_cfg, url=base_url))
+        total_batches = len(
+            llm_svc._chunk_probe_results(all_results, config=llm_cfg, url=base_url)
+        )
         events_svc.emit(
             run_id,
             {
@@ -9269,7 +9303,10 @@ async def _do_agentic_thinking_loop(
         _blocked: set[str] = set()
         _failed: dict[str, int] = {}
 
-    if coverage_mode in {"track", "standard", "sast_validate"} and resume_messages is not None:
+    if (
+        coverage_mode in {"track", "standard", "sast_validate"}
+        and resume_messages is not None
+    ):
         from aespa.services.scan_leads import format_lead_index_for_validation
 
         current_lead_index = format_lead_index_for_validation(
@@ -9754,9 +9791,7 @@ async def _do_agentic_thinking_loop(
                 resolved_lead_id = (
                     int(lead_detail["id"]) if lead_detail else int(lead_id)
                 )
-                attack_path = (
-                    lead_detail.get("attack_path", {}) if lead_detail else {}
-                )
+                attack_path = lead_detail.get("attack_path", {}) if lead_detail else {}
                 is_compiled_case = (
                     isinstance(attack_path, dict)
                     and attack_path.get("schema_version") == 3
@@ -9773,7 +9808,11 @@ async def _do_agentic_thinking_loop(
                             "A confirmed validation case requires both baseline_evidence "
                             "and mutated_evidence."
                         )
-                if is_compiled_case and outcome != "confirmed" and outcome_reason == "confirmed":
+                if (
+                    is_compiled_case
+                    and outcome != "confirmed"
+                    and outcome_reason == "confirmed"
+                ):
                     return "outcome_reason=confirmed requires outcome=confirmed."
                 if finding_reference and not finding_id:
                     from aespa.services.references import find_finding_by_reference
@@ -10201,7 +10240,24 @@ async def _do_agentic_thinking_loop(
             except Exception:
                 pass
             traffic_svc.set_browser_context_tag(
-                browser_ctx, br_page_id, use_session_label
+                browser_ctx,
+                br_page_id,
+                use_session_label,
+                username=(
+                    (selected_session or {}).get("username")
+                    if selected_session is not None
+                    else (creds[0].username if creds else None)
+                ),
+                purpose=traffic_svc.request_purpose(
+                    tool_input,
+                    "Browser probe",
+                    agent_name="Test Lead",
+                    owasp_category=br_owasp or None,
+                    test_class=br_test_class or None,
+                ),
+                owasp_category=br_owasp or None,
+                test_class=br_test_class or None,
+                obligation_id=tool_input.get("obligation_id"),
             )
             try:
                 br_result = await _run_thinking_browser_action(
@@ -11263,8 +11319,23 @@ async def _do_agentic_thinking_loop(
             _resolve_requested_scan_session(session_vault, hr_use_session)
         )
         if isinstance(hx, traffic_svc.LoggingAsyncClient):
+            hx.username = (hr_sel_session or {}).get("username")
             hx.page_id = hr_page_id
             hx.session_label = hr_use_session
+            hx.provenance = {
+                "agent_id": "scanner",
+                "agent_step": step,
+                "purpose": traffic_svc.request_purpose(
+                    tool_input,
+                    "Probe target",
+                    agent_name="Test Lead",
+                    owasp_category=_hr_owasp or None,
+                    test_class=_hr_test_class or None,
+                ),
+                "owasp_category": _hr_owasp or None,
+                "test_class": _hr_test_class or None,
+                "obligation_id": tool_input.get("obligation_id"),
+            }
         events_svc.emit(
             run_id,
             {
@@ -11441,8 +11512,10 @@ async def _do_agentic_thinking_loop(
             hr_resp_body = f"Request failed: {exc}"
         finally:
             if isinstance(hx, traffic_svc.LoggingAsyncClient):
+                hx.username = creds[0].username if creds else None
                 hx.page_id = None
                 hx.session_label = None
+                hx.provenance = {}
 
         hr_sent_headers = hr_r.request.headers if hr_resp_status else {}
         hr_req_ev = _request_evidence(

@@ -48,4 +48,18 @@ test("run links round-trip run kind and encoded references", async () => {
   expect(
     parseRoute(runHref({ runKind: "sast", runId: 7 }, "candidates", { lead: "L-7" })),
   ).toMatchObject({ name: "sast-run-detail", id: 7, leadRef: "L-7" });
+  expect(
+    parseRoute(
+      runHref({ runKind: "web", runId: 9 }, "traffic", {
+        coverage_cells: "12,13",
+        coverage_category: "A03",
+        test_class: "sqli",
+      }),
+    ),
+  ).toMatchObject({
+    name: "run-detail",
+    id: 9,
+    tab: "traffic",
+    trafficCoverage: { cellIds: [12, 13], category: "A03", testClass: "sqli" },
+  });
 });
