@@ -324,7 +324,9 @@ class _Broker:
     run_id: int
     execution_id: int
     agent_id: str
+    agent_name: str
     agent_step: int
+    purpose: str
     session_vault: dict[str, dict]
     scanner_policy: Any
     scope_check: Callable[[str], str | None]
@@ -446,12 +448,17 @@ class _Broker:
             **headers,
         }
         cookies = (selected or {}).get("cookies") or {}
+        from aespa.services import traffic as traffic_svc
+
         provenance = {
             "code_execution_id": self.execution_id,
             "batch_id": batch_id,
             "batch_index": batch_index,
             "agent_id": self.agent_id,
             "agent_step": self.agent_step,
+            "purpose": traffic_svc.request_purpose(
+                spec, self.purpose, agent_name=self.agent_name
+            ),
             "owasp_category": spec.get("owasp_category"),
             "test_class": spec.get("test_class"),
             "obligation_id": spec.get("obligation_id"),
@@ -788,7 +795,11 @@ async def execute_agent_python(
         run_id=run_id,
         execution_id=execution_id,
         agent_id=agent_id,
+        agent_name="ALICE"
+        if agent_role == "alice"
+        else agent_role.replace("_", " ").title(),
         agent_step=agent_step,
+        purpose=purpose,
         session_vault=session_vault,
         scanner_policy=scanner_policy,
         scope_check=scope_check_fn,

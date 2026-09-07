@@ -1570,6 +1570,10 @@ class TrafficEntryOut(BaseModel):
     page_id: int | None = None
     session_label: str | None = None
     interaction_id: str | None = None
+    purpose: str | None = None
+    owasp_category: str | None = None
+    coverage_cell_id: int | None = None
+    test_class: str | None = None
 
 
 class ScanFindingOut(BaseModel):

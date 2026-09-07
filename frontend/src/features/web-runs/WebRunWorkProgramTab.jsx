@@ -12,6 +12,8 @@ import { useEventStream } from "../../shared/hooks/useEventStream.js";
 import { LoadingState } from "../../shared/ui/LoadingState.jsx";
 import { CoverageStatusBadges } from "../../shared/ui/CoverageStatusBadges.jsx";
 import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
+import { nav } from "../../shared/navigation/router.js";
+import { runHref } from "../../shared/navigation/links.ts";
 
 export function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
   const [matrix, setMatrix] = useState(null);
@@ -397,10 +399,26 @@ export function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 })
                       return (
                         <td
                           key={cat}
+                          className="coverage-traffic-cell"
                           style={{
                             textAlign: "center",
                             padding: "2px 4px",
+                            cursor: "pointer",
                           }}
+                          title={`Show traffic for ${cat} on ${pg.url}`}
+                          onClick={() =>
+                            nav(
+                              runHref(
+                                { runKind: "web", runId },
+                                "traffic",
+                                {
+                                  coverage_cells: (cell.cell_ids || []).join(","),
+                                  coverage_category: column.category,
+                                  test_class: column.test_class || undefined,
+                                },
+                              ),
+                            )
+                          }
                         >
                           <span
                             className={
@@ -427,22 +445,23 @@ export function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 })
                             style={{
                               cursor: fids.length || classEntries.length ? "pointer" : "default",
                             }}
-                            onClick={() =>
-                              (fids.length || classEntries.length) &&
-                              setSelectedCell(
-                                isSelected
-                                  ? null
-                                  : {
-                                      page_id: pg.page_id,
-                                      cat,
-                                      label: column.label,
-                                      url: pg.url,
-                                      fids,
-                                      findings: cell.findings,
-                                      testClasses: cell.test_classes || {},
-                                    },
-                              )
-                            }
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (fids.length || classEntries.length)
+                                setSelectedCell(
+                                  isSelected
+                                    ? null
+                                    : {
+                                        page_id: pg.page_id,
+                                        cat,
+                                        label: column.label,
+                                        url: pg.url,
+                                        fids,
+                                        findings: cell.findings,
+                                        testClasses: cell.test_classes || {},
+                                      },
+                                );
+                            }}
                           >
                             {fids.length > 0 ? fids.length : ""}
                           </span>

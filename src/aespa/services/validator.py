@@ -39,6 +39,7 @@ from aespa.models import (
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
+from aespa.services import traffic as traffic_svc
 from aespa.services.references import ensure_finding_reference
 from aespa.services.settings import (
     get_adversarial_validator_config,
@@ -724,6 +725,20 @@ async def _run_adversarial_validator_loop(
                 user_sessions_by_name,
                 scanner_policy,
                 run_id=run_id,
+                traffic_provenance={
+                    "agent_id": f"validator-{finding.id}",
+                    "agent_step": step,
+                    "purpose": traffic_svc.request_purpose(
+                        tool_input,
+                        f"Validate finding {finding.reference or finding.id}",
+                        agent_name="Validator",
+                        owasp_category=finding.owasp_category,
+                        test_class=tool_input.get("test_class"),
+                    ),
+                    "owasp_category": finding.owasp_category,
+                    "test_class": tool_input.get("test_class"),
+                    "page_id": finding.page_id,
+                },
             )
         if tool_name == "compare_responses":
             return await _validator_compare_responses(
@@ -732,6 +747,20 @@ async def _run_adversarial_validator_loop(
                 user_sessions_by_name,
                 scanner_policy,
                 run_id=run_id,
+                traffic_provenance={
+                    "agent_id": f"validator-{finding.id}",
+                    "agent_step": step,
+                    "purpose": traffic_svc.request_purpose(
+                        tool_input,
+                        f"Compare responses for {finding.reference or finding.id}",
+                        agent_name="Validator",
+                        owasp_category=finding.owasp_category,
+                        test_class=tool_input.get("test_class"),
+                    ),
+                    "owasp_category": finding.owasp_category,
+                    "test_class": tool_input.get("test_class"),
+                    "page_id": finding.page_id,
+                },
             )
         if tool_name == "context_tool":
             return await _validator_context_tool(tool_input, run_id, finding)
@@ -775,6 +804,7 @@ async def _validator_http_request(
     user_sessions: dict[str, dict],
     scanner_policy,
     run_id: Optional[int] = None,
+    traffic_provenance: Optional[dict] = None,
 ) -> dict:
     method = (tool_input.get("method") or "GET").upper()
     url = tool_input.get("url", "")
@@ -802,12 +832,14 @@ async def _validator_http_request(
     try:
         async with LoggingAsyncClient(
             run_id=run_id,
-            username=use_session or "validator",
+            username=(session or {}).get("username"),
             cookies=cookies,
             headers=hdrs,
             timeout=REQUEST_TIMEOUT,
             follow_redirects=getattr(scanner_policy, "follow_redirects", True),
             verify=False,
+            page_id=(traffic_provenance or {}).get("page_id"),
+            provenance=traffic_provenance,
         ) as client:
             req = client.build_request(method, url, content=content, headers=headers_in)
             t0 = time.perf_counter()
@@ -835,12 +867,35 @@ async def _validator_compare_responses(
     user_sessions: dict[str, dict],
     scanner_policy,
     run_id: Optional[int] = None,
+    traffic_provenance: Optional[dict] = None,
 ) -> dict:
     """Execute baseline and test requests then return a comparison."""
 
     async def _fetch(spec: dict) -> dict:
         return await _validator_http_request(
-            spec, primary_session, user_sessions, scanner_policy, run_id=run_id
+            spec,
+            primary_session,
+            user_sessions,
+            scanner_policy,
+            run_id=run_id,
+            traffic_provenance={
+                **(traffic_provenance or {}),
+                "purpose": (
+                    traffic_svc.request_purpose(
+                        spec,
+                        "Compare response",
+                        agent_name="Validator",
+                        owasp_category=(traffic_provenance or {}).get("owasp_category"),
+                        test_class=(traffic_provenance or {}).get("test_class"),
+                    )
+                    if any(
+                        spec.get(key)
+                        for key in ("payload_purpose", "hypothesis", "note", "purpose")
+                    )
+                    else (traffic_provenance or {}).get("purpose")
+                    or "Validator: Compare response"
+                ),
+            },
         )
 
     baseline_spec = tool_input.get("baseline", {})
@@ -1546,6 +1601,17 @@ async def _request_access_validation_actor(
             timeout=scanner_policy.request_timeout_s,
             follow_redirects=scanner_policy.follow_redirects,
             verify=False,
+            page_id=finding.page_id,
+            provenance={
+                "agent_id": f"validator-{finding.id}",
+                "purpose": traffic_svc.request_purpose(
+                    {},
+                    f"Check access to {finding.reference or finding.id} as {username}",
+                    agent_name="Validator",
+                    owasp_category=finding.owasp_category,
+                ),
+                "owasp_category": finding.owasp_category,
+            },
         ) as client:
             resp = await client.request(method, finding.affected_url)
         body = resp.text[: scanner_policy.response_body_read_limit_bytes]
@@ -2301,12 +2367,20 @@ async def _run_validation_probe(
 
         async with LoggingAsyncClient(
             run_id=run_id,
-            username=as_user or "validator",
+            username=(session or {}).get("username"),
             cookies=cookies,
             headers=hdrs,
             timeout=scanner_policy.request_timeout_s,
             follow_redirects=scanner_policy.follow_redirects,
             verify=False,
+            provenance={
+                "agent_id": "validator",
+                "purpose": traffic_svc.request_purpose(
+                    {"purpose": desc}, "Probe target", agent_name="Validator"
+                ),
+                "owasp_category": probe.get("owasp_category"),
+                "test_class": probe.get("test_class"),
+            },
         ) as client:
             req = client.build_request(
                 method,

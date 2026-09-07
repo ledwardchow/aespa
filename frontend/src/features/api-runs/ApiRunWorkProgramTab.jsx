@@ -9,6 +9,8 @@ import { usePolling } from "../../shared/hooks/usePolling.js";
 import { LoadingState } from "../../shared/ui/LoadingState.jsx";
 import { CoverageStatusBadges } from "../../shared/ui/CoverageStatusBadges.jsx";
 import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
+import { nav } from "../../shared/navigation/router.js";
+import { runHref } from "../../shared/navigation/links.ts";
 
 export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
   const [matrix, setMatrix] = useState(null);
@@ -339,10 +341,25 @@ export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
                     return (
                       <td
                         key={cat}
+                        className="coverage-traffic-cell"
                         style={{
                           textAlign: "center",
                           padding: "2px 4px",
+                          cursor: "pointer",
                         }}
+                        title={`Show traffic for ${cat} on ${ep.method} ${ep.path}`}
+                        onClick={() =>
+                          nav(
+                            runHref(
+                              { runKind: "api", runId },
+                              "traffic",
+                              {
+                                coverage_cells: cell.cell_id ? String(cell.cell_id) : undefined,
+                                coverage_category: cat,
+                              },
+                            ),
+                          )
+                        }
                       >
                         <span
                           className={
@@ -362,21 +379,22 @@ export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
                           style={{
                             cursor: fids.length ? "pointer" : "default",
                           }}
-                          onClick={() =>
-                            fids.length &&
-                            setSelectedCell(
-                              isSelected
-                                ? null
-                                : {
-                                    endpoint_id: ep.endpoint_id,
-                                    cat,
-                                    path: ep.path,
-                                    method: ep.method,
-                                    fids,
-                                    findings,
-                                  },
-                            )
-                          }
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (fids.length)
+                              setSelectedCell(
+                                isSelected
+                                  ? null
+                                  : {
+                                      endpoint_id: ep.endpoint_id,
+                                      cat,
+                                      path: ep.path,
+                                      method: ep.method,
+                                      fids,
+                                      findings,
+                                    },
+                              );
+                          }}
                         >
                           {fids.length > 0 ? fids.length : ""}
                         </span>

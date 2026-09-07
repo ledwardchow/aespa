@@ -18,6 +18,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Traffic purpose and coverage links**: Requests now show the sending agent, OWASP category, test label, and reason. The traffic user remains the authenticated account or session used for the request. Traffic generated for an OWASP coverage item is linked to that item, and clicking a coverage matrix cell opens the Traffic Log filtered to its requests.
+
 - **Streaming A.L.I.C.E. replies**: Site and API chats now show text while Anthropic, OpenAI-compatible, Google, and AWS Bedrock models are generating it. Tool calls still wait for complete arguments, and reconnecting after a long response restores the current reply even when older stream events have expired.
 - **Application campaign validation cases**: Campaigns now trace each approved backend SAST finding to a specific frontend page or action and browser request before live testing begins. Frontend analysis follows custom request wrappers, imported helpers, state-held route values, async event callbacks, and server-template form actions across common JavaScript, TypeScript, React, Vue, Angular, Axios, HTML, Thymeleaf, and Spring MVC patterns. Traces inspect all relevant interface facts and can cross a frontend request, same-application server route, proxy call, and downstream service route without confusing browser and server requests. Equivalent paths are combined, paths stay attached to the site that owns them, and multi-step findings must begin at their stated first endpoint. Backend ownership without a proven frontend path stays unresolved, so unresolved, ambiguous, stale, or wrong-target paths do not enter the scan queue. Re-running context matching clears generated leads, mappings, validation cases, and review decisions, then rebuilds them from the frozen source snapshots. Campaign pages show the resolved path, readiness blockers, live request binding, and validation outcome for each case.
 - **GPT-6 Astra support**: OpenAI connections can now use GPT-6 Astra for scans and agent workflows. Astra requests use the Responses API, including tool calls, and the model form shows its supported reasoning levels and context window.
@@ -31,6 +33,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Keyboard navigation in Settings**: Settings tabs now support keyboard navigation.
 
 ### Fixes
+
+- **Aligned Traffic Log headers**: Request and response title bars now have the same height, keeping both message panels aligned.
 
 - **Campaign progress stays current after a resumed scan**: Campaign pages continue refreshing after an interrupted child scan and remove the old interruption message when matching resumes.
 

@@ -6,6 +6,11 @@ export type Route = {
   tab?: string;
   findingRef?: string;
   leadRef?: string;
+  trafficCoverage?: {
+    cellIds: number[];
+    category?: string;
+    testClass?: string;
+  };
 };
 
 function cleanReference(value: string | null) {
@@ -20,6 +25,17 @@ export function parseRoute(hash = "#/"): Route {
   const query = new URLSearchParams(queryString);
   const findingRef = cleanReference(query.get("finding"));
   const leadRef = cleanReference(query.get("lead"));
+  const cellIds = (query.get("coverage_cells") || "")
+    .split(",")
+    .map(Number)
+    .filter((value) => Number.isInteger(value) && value > 0);
+  const trafficCoverage = cellIds.length
+    ? {
+        cellIds,
+        category: cleanReference(query.get("coverage_category")),
+        testClass: cleanReference(query.get("test_class")),
+      }
+    : undefined;
   let m;
   if ((m = routeHash.match(/^#\/sites\/new$/))) return { name: "site-new" };
   if ((m = routeHash.match(/^#\/sites\/(\d+)\/edit$/))) return { name: "site-edit", id: +m[1] };
@@ -36,7 +52,7 @@ export function parseRoute(hash = "#/"): Route {
   if ((m = routeHash.match(/^#\/apis\/(\d+)$/))) return { name: "api-detail", id: +m[1] };
   if (routeHash === "#/apis") return { name: "api-list" };
   if ((m = routeHash.match(/^#\/api-runs\/(\d+)\/([a-z]+)$/)))
-    return { name: "api-run-detail", id: +m[1], tab: m[2], findingRef };
+    return { name: "api-run-detail", id: +m[1], tab: m[2], findingRef, trafficCoverage };
   if ((m = routeHash.match(/^#\/api-runs\/(\d+)$/)))
     return { name: "api-run-detail", id: +m[1], findingRef };
   if (routeHash === "#/sast-runs/new") return { name: "sast-run-new" };
@@ -48,7 +64,14 @@ export function parseRoute(hash = "#/"): Route {
   if ((m = routeHash.match(/^#\/runs\/(\d+)\/alice-popout$/)))
     return { name: "alice-popout", id: +m[1] };
   if ((m = routeHash.match(/^#\/runs\/(\d+)\/([a-z]+)$/)))
-    return { name: "run-detail", id: +m[1], tab: m[2], findingRef, leadRef };
+    return {
+      name: "run-detail",
+      id: +m[1],
+      tab: m[2],
+      findingRef,
+      leadRef,
+      trafficCoverage,
+    };
   if ((m = routeHash.match(/^#\/runs\/(\d+)$/)))
     return { name: "run-detail", id: +m[1], findingRef, leadRef };
   if (routeHash === "#/applications/new") return { name: "app-new" };

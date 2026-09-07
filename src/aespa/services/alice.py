@@ -166,7 +166,6 @@ async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
     traffic_svc.setup_playwright_logging(
         ctx,
         None if api_run_id is not None else run_id,
-        username="alice",
         api_run_id=api_run_id,
     )
     page = await ctx.new_page()
@@ -419,9 +418,7 @@ async def _check_goal_completion(
         from aespa.services import scanner, validator
 
         active_specialists = sum(
-            1
-            for task in scanner._specialist_tasks.get(run_id, [])
-            if not task.done()
+            1 for task in scanner._specialist_tasks.get(run_id, []) if not task.done()
         )
         if active_specialists:
             missing.append(f"Wait for {active_specialists} active specialist(s).")
@@ -453,7 +450,9 @@ async def _check_goal_completion(
     if not isinstance(verifier_missing, list):
         verifier_missing = []
     if reviewed_status != status:
-        reason = str(verdict.get("reason") or "The completion evidence is insufficient.")
+        reason = str(
+            verdict.get("reason") or "The completion evidence is insufficient."
+        )
         return False, reviewed_status, [reason, *map(str, verifier_missing)]
 
     if status == "blocked":
@@ -461,14 +460,20 @@ async def _check_goal_completion(
         normalized_blocker = " ".join(blocker.casefold().split())
         previous_blocker = str(checkpoint.get("blocker_candidate") or "")
         confirmations = int(checkpoint.get("blocker_confirmations") or 0)
-        confirmations = confirmations + 1 if previous_blocker == normalized_blocker else 1
+        confirmations = (
+            confirmations + 1 if previous_blocker == normalized_blocker else 1
+        )
         checkpoint["blocker_candidate"] = normalized_blocker
         checkpoint["blocker_confirmations"] = confirmations
         if confirmations < 3:
-            return False, "blocked", [
-                "Confirm the same external blocker in another work cycle "
-                f"({confirmations}/3 confirmations)."
-            ]
+            return (
+                False,
+                "blocked",
+                [
+                    "Confirm the same external blocker in another work cycle "
+                    f"({confirmations}/3 confirmations)."
+                ],
+            )
     return True, reviewed_status, []
 
 
@@ -774,19 +779,28 @@ async def _execute_alice_tool(
         timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
+            run_id=_traffic_run_id,
+            api_run_id=api_run_id,
+            username=(selected or {}).get("username"),
             cookies=req_cookies,
             headers=req_headers,
             timeout=timeout,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(
-                _traffic_run_id, username="alice", api_run_id=api_run_id
-            ),
         ) as hx:
             try:
                 if isinstance(hx, traffic_svc.LoggingAsyncClient):
                     hx.page_id = tool_input.get("page_id")
                     hx.session_label = use_session_label
+                    hx.provenance = {
+                        "agent_id": "alice",
+                        "purpose": traffic_svc.request_purpose(
+                            tool_input, "Probe target", agent_name="ALICE"
+                        ),
+                        "owasp_category": tool_input.get("owasp_category"),
+                        "test_class": tool_input.get("test_class"),
+                        "obligation_id": tool_input.get("obligation_id"),
+                    }
                 kwargs: dict = {}
                 if body is not None:
                     if isinstance(body, dict):
@@ -1272,14 +1286,14 @@ async def _execute_alice_tool(
         timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
+            run_id=_traffic_run_id,
+            api_run_id=api_run_id,
             cookies={},
             headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
             timeout=timeout,
             follow_redirects=False,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(
-                _traffic_run_id, username="alice", api_run_id=api_run_id
-            ),
+            provenance={"agent_id": "alice"},
         ) as hx:
             for cand in candidates[:20]:
                 body = {
@@ -1287,6 +1301,12 @@ async def _execute_alice_tool(
                     password_field: cand.get("password", ""),
                 }
                 try:
+                    if isinstance(hx, traffic_svc.LoggingAsyncClient):
+                        hx.provenance["purpose"] = traffic_svc.request_purpose(
+                            tool_input,
+                            f"Check credentials for {cand.get('username') or 'candidate'}",
+                            agent_name="ALICE",
+                        )
                     if "application/json" in req_headers.get("Content-Type", ""):
                         resp = await hx.request(
                             method, cred_url, json=body, headers=req_headers
@@ -1389,14 +1409,19 @@ async def _execute_alice_tool(
         timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
+            run_id=_traffic_run_id,
+            api_run_id=api_run_id,
             cookies={},
             headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
             timeout=timeout,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(
-                _traffic_run_id, username="alice", api_run_id=api_run_id
-            ),
+            provenance={
+                "agent_id": "alice",
+                "purpose": traffic_svc.request_purpose(
+                    tool_input, "Register a test account", agent_name="ALICE"
+                ),
+            },
         ) as hx:
             try:
                 _reg_kwargs = {"headers": req_headers}
@@ -1631,7 +1656,18 @@ async def _execute_alice_tool(
 
         with Session(get_engine()) as _s:
             scanner_policy = get_scanner_policy(_s)
-        traffic_svc.set_browser_context_tag(ctx, browser_page_id, use_session_label)
+        traffic_svc.set_browser_context_tag(
+            ctx,
+            browser_page_id,
+            use_session_label,
+            username=(selected or {}).get("username"),
+            purpose=traffic_svc.request_purpose(
+                tool_input, "Browser probe", agent_name="ALICE"
+            ),
+            owasp_category=tool_input.get("owasp_category"),
+            test_class=tool_input.get("test_class"),
+            obligation_id=tool_input.get("obligation_id"),
+        )
         try:
             result = await _run_thinking_browser_action(
                 page,
@@ -2071,9 +2107,7 @@ async def run_alice_turn_stream(
             base_url=base_url,
         )
     if goal:
-        system_message += GOAL_MODE_INSTRUCTIONS.format(
-            objective=goal["objective"]
-        )
+        system_message += GOAL_MODE_INSTRUCTIONS.format(objective=goal["objective"])
 
     # Convert conversation history to Anthropic-format messages.
     # History items from the chat UI have sender/text; convert to role/content.
@@ -2330,16 +2364,18 @@ async def run_alice_turn_stream(
                 if tool_name == "done":
                     if goal:
                         goal_checkpoint = dict(goal.get("checkpoint") or {})
-                        accepted, goal_status, missing_work = (
-                            await _check_goal_completion(
-                                llm_cfg,
-                                objective=goal["objective"],
-                                proposal=tool_input,
-                                evidence=goal_evidence,
-                                run_id=run_id,
-                                is_api=False,
-                                checkpoint=goal_checkpoint,
-                            )
+                        (
+                            accepted,
+                            goal_status,
+                            missing_work,
+                        ) = await _check_goal_completion(
+                            llm_cfg,
+                            objective=goal["objective"],
+                            proposal=tool_input,
+                            evidence=goal_evidence,
+                            run_id=run_id,
+                            is_api=False,
+                            checkpoint=goal_checkpoint,
                         )
                         if not accepted:
                             feedback = {
@@ -3369,9 +3405,7 @@ async def run_api_alice_turn_stream(
             user_directive=user_instruction,
         )
     if goal:
-        system_message += GOAL_MODE_INSTRUCTIONS.format(
-            objective=goal["objective"]
-        )
+        system_message += GOAL_MODE_INSTRUCTIONS.format(objective=goal["objective"])
 
     # Build login-credential block so ALICE knows how to authenticate.
     creds_text = ""
@@ -3651,16 +3685,18 @@ async def run_api_alice_turn_stream(
                 if tool_name == "done":
                     if goal:
                         goal_checkpoint = dict(goal.get("checkpoint") or {})
-                        accepted, goal_status, missing_work = (
-                            await _check_goal_completion(
-                                llm_cfg,
-                                objective=goal["objective"],
-                                proposal=tool_input,
-                                evidence=goal_evidence,
-                                run_id=api_run_id,
-                                is_api=True,
-                                checkpoint=goal_checkpoint,
-                            )
+                        (
+                            accepted,
+                            goal_status,
+                            missing_work,
+                        ) = await _check_goal_completion(
+                            llm_cfg,
+                            objective=goal["objective"],
+                            proposal=tool_input,
+                            evidence=goal_evidence,
+                            run_id=api_run_id,
+                            is_api=True,
+                            checkpoint=goal_checkpoint,
                         )
                         if not accepted:
                             feedback = {

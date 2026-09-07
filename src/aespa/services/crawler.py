@@ -1023,7 +1023,9 @@ async def _crawl_as_credential(
         protect_playwright_context(browser, ctx)
         if global_http_header:
             await ctx.set_extra_http_headers(global_http_header)
-        traffic_svc.setup_playwright_logging(ctx, run_id, username=username)
+        traffic_svc.setup_playwright_logging(
+            ctx, run_id, username=username, purpose="Crawler"
+        )
         page = await ctx.new_page()
         observed_api_calls: list[dict] = []
         observed_script_bodies: list[dict] = []
@@ -4783,7 +4785,7 @@ async def _reconcile_direct_access(
                 if global_http_header:
                     await ctx.set_extra_http_headers(global_http_header)
                 traffic_svc.setup_playwright_logging(
-                    ctx, run_id, username=cred.username
+                    ctx, run_id, username=cred.username, purpose="Crawler"
                 )
                 page = await ctx.new_page()
                 try:

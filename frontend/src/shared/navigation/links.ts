@@ -4,7 +4,13 @@ const prefixes = { web: "runs", api: "api-runs", sast: "sast-runs" } as const;
 export function runHref(
   identity: RunIdentity,
   tab?: string,
-  references: { finding?: string; lead?: string } = {},
+  references: {
+    finding?: string;
+    lead?: string;
+    coverage_cells?: string;
+    coverage_category?: string;
+    test_class?: string;
+  } = {},
 ): string {
   runIdentityKey(identity);
   const query = new URLSearchParams();
