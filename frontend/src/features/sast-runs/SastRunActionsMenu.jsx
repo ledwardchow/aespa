@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-export function SastRunActionsMenu({ runId, onDelete }) {
+export function SastRunActionsMenu({ runId, onDelete, onExportMarkdown }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -35,13 +35,23 @@ export function SastRunActionsMenu({ runId, onDelete }) {
       </button>
       {open && (
         <div className="sast-actions-popover" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onExportMarkdown?.();
+            }}
+          >
+            Export Markdown
+          </button>
           <a
-            href={`/api/sast-runs/${runId}/export`}
+            href={`/api/sast-runs/${runId}/sarif`}
             download
             role="menuitem"
             onClick={() => setOpen(false)}
           >
-            Export run
+            Export SARIF
           </a>
           <button
             type="button"

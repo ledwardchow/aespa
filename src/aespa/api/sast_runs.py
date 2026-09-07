@@ -41,7 +41,7 @@ from aespa.models import (
 from aespa.schemas import SastRunSummary, SastRunUpdate, ScanLeadOut
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
-from aespa.services import run_cleanup, sast_export
+from aespa.services import run_cleanup, sast_export, sast_sarif
 from aespa.services.references import ensure_finding_reference, ensure_lead_reference
 
 _UTC = timezone.utc
@@ -306,6 +306,30 @@ def export_sast_run(
         headers={
             "Content-Disposition": f'attachment; filename="{safe}.aespa-sast.json"'
         },
+    )
+
+
+@router.get("/api/sast-runs/{run_id}/sarif")
+def export_sast_sarif(
+    run_id: int,
+    reportable_only: bool = False,
+    session: Session = Depends(get_session),
+) -> JSONResponse:
+    """Download SAST scan results in OASIS SARIF 2.1.0 format."""
+    run = _get_run_or_404(session, run_id)
+    try:
+        sarif_doc = sast_sarif.generate_sast_sarif(
+            session, run_id, reportable_only=reportable_only
+        )
+    except sast_sarif.SastSarifError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    name = run.name or f"sast-run-{run_id}"
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+    return JSONResponse(
+        content=sarif_doc,
+        media_type="application/sarif+json",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.sarif"'},
     )
 
 
