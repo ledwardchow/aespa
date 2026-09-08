@@ -624,6 +624,40 @@ def test_dynamic_finding_can_be_saved_without_page_assignment():
         engine.dispose()
 
 
+def test_finding_from_llm_preserves_explicit_url_and_matching_evidence():
+    health_url = "https://target.local/api/health"
+    accounts_url = "https://target.local/api/accounts"
+
+    finding = scanner._finding_from_llm(
+        run_id=1,
+        page_id=42,
+        page_url=accounts_url,
+        raw={
+            "owasp_category": "A01",
+            "title": "Account details exposed without authorization",
+            "affected_url": accounts_url,
+            "evidence": "The accounts response disclosed another customer's records.",
+            "cvss_score": 8.1,
+        },
+        result_by_url={
+            health_url: {
+                "request_evidence": f"GET {health_url}",
+                "response_evidence": "HTTP/1.1 200 OK\n\nhealthy",
+            },
+            accounts_url: {
+                "request_evidence": f"GET {accounts_url}",
+                "response_evidence": "HTTP/1.1 200 OK\n\naccount records",
+            },
+        },
+    )
+
+    assert finding.page_id == 42
+    assert finding.affected_url == accounts_url
+    assert finding.request_evidence == f"GET {accounts_url}"
+    assert "account records" in finding.response_evidence
+    assert health_url not in finding.evidence
+
+
 def test_finding_from_llm_preserves_explicit_severity_when_cvss_is_omitted():
     finding = scanner._finding_from_llm(
         run_id=1,
