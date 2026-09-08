@@ -67,11 +67,12 @@ def test_adversarial_validator_config_update_round_trip(client: TestClient):
         "auto_validate_inline": False,
         "require_concrete_disproof": True,
     }
-    second = client.put(
-        "/api/settings/adversarial-validator-config", json=replacement
-    )
+    second = client.put("/api/settings/adversarial-validator-config", json=replacement)
     assert second.status_code == 200
-    assert client.get("/api/settings/adversarial-validator-config").json()["max_steps"] == 5
+    assert (
+        client.get("/api/settings/adversarial-validator-config").json()["max_steps"]
+        == 5
+    )
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
@@ -165,6 +166,7 @@ def test_validator_done_tool_verdict_enum():
     verdict_enum = done_tool["input_schema"]["properties"]["verdict"]["enum"]
     assert "confirmed" in verdict_enum
     assert "false_positive" in verdict_enum
+    assert "unconfirmed" in verdict_enum
     # must NOT contain old scanner done values
     assert "summary" not in done_tool["input_schema"]["properties"]
 
@@ -330,8 +332,54 @@ def test_validator_prompt_includes_linked_sast_attack_path(monkeypatch):
     assert "not runtime proof" in prompt
 
 
-def test_validator_done_payload_is_recorded_as_the_verdict(monkeypatch):
+def test_validator_prompt_lists_sessions_without_secrets(monkeypatch):
+    captured = {}
+
     async def fake_loop(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(validator, "_static_attack_path_for_finding", lambda _: {})
+    monkeypatch.setattr(validator.llm_svc, "thinking_agentic_loop", fake_loop)
+
+    asyncio.run(
+        validator._run_adversarial_validator_loop(
+            run_id=1,
+            finding=SimpleNamespace(
+                id=9,
+                title="SQL injection",
+                owasp_category="A03",
+                severity="high",
+                affected_url="https://target.test/admin/customers",
+                description="The search parameter reaches a SQL query.",
+                evidence="A quote produced SQLSTATE[42000].",
+            ),
+            validator_cfg=SimpleNamespace(max_steps=5, require_concrete_disproof=False),
+            llm_cfg=object(),
+            cred_sessions={
+                1: {
+                    "username": "admin",
+                    "label": "Administrator",
+                    "cookies": {"session": "cookie-secret"},
+                    "extra_headers": {"Authorization": "Bearer token-secret"},
+                }
+            },
+            scanner_policy=SimpleNamespace(),
+        )
+    )
+
+    prompt = captured["initial_user_message"]
+    assert "Available authenticated sessions" in prompt
+    assert "`admin` (Administrator)" in prompt
+    assert "`use_session`" in prompt
+    assert "cookie-secret" not in prompt
+
+
+def test_validator_done_payload_is_recorded_as_the_verdict(monkeypatch):
+    loop_calls = 0
+
+    async def fake_loop(**kwargs):
+        nonlocal loop_calls
+        loop_calls += 1
         accepted, feedback = kwargs["done_check"](
             {
                 "verdict": "confirmed",
@@ -370,6 +418,196 @@ def test_validator_done_payload_is_recorded_as_the_verdict(monkeypatch):
         "confirmed",
         "The disproof probes failed and the issue reproduced.",
         "high",
+    )
+    assert loop_calls == 1
+
+
+def test_validator_reserves_verdict_turn_after_probe_budget(monkeypatch):
+    calls = []
+    request_calls = 0
+
+    async def fake_http_request(*args, **kwargs):
+        nonlocal request_calls
+        request_calls += 1
+        return {
+            "status": 500,
+            "body": "SQLSTATE[42000] PDO->query()",
+            "headers": {},
+        }
+
+    async def fake_loop(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            await kwargs["tool_executor"](
+                "http_request",
+                {
+                    "method": "GET",
+                    "url": "https://target.test/admin/customers?search=normal",
+                    "use_session": "admin",
+                },
+                1,
+            )
+            decisive = await kwargs["tool_executor"](
+                "http_request",
+                {
+                    "method": "GET",
+                    "url": "https://target.test/admin/customers?search=%27",
+                    "use_session": "admin",
+                },
+                2,
+            )
+            await kwargs["on_checkpoint"](
+                [
+                    {"role": "user", "content": "finding"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "probe-2",
+                                "name": "http_request",
+                                "input": {},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "probe-2",
+                                "content": str(decisive),
+                            }
+                        ],
+                    },
+                ],
+                2,
+            )
+            return
+
+        assert [tool["name"] for tool in kwargs["tools"]] == ["done"]
+        assert "SQLSTATE[42000]" in str(kwargs["resume_messages"])
+        assert not any(
+            left.get("role") == right.get("role") == "user"
+            for left, right in zip(
+                kwargs["resume_messages"], kwargs["resume_messages"][1:]
+            )
+        )
+        rejected = await kwargs["tool_executor"](
+            "http_request",
+            {"method": "GET", "url": "https://target.test/extra-probe"},
+            3,
+        )
+        assert "error" in rejected
+        assert kwargs["stop_check"]() is False
+        accepted, feedback = kwargs["done_check"](
+            {
+                "verdict": "confirmed",
+                "reasoning": (
+                    "The authenticated quote probe produced a payload-dependent "
+                    "database syntax error from PDO->query()."
+                ),
+                "confidence": "high",
+            },
+            3,
+        )
+        assert accepted is True
+        assert feedback == ""
+
+    monkeypatch.setattr(validator, "_static_attack_path_for_finding", lambda _: {})
+    monkeypatch.setattr(validator, "_validator_http_request", fake_http_request)
+    monkeypatch.setattr(validator.llm_svc, "thinking_agentic_loop", fake_loop)
+    monkeypatch.setattr(validator.events_svc, "emit", lambda *args, **kwargs: None)
+
+    result = asyncio.run(
+        validator._run_adversarial_validator_loop(
+            run_id=1,
+            finding=SimpleNamespace(
+                id=9,
+                public_reference="TEST-001",
+                reference="TEST-001",
+                page_id=None,
+                title="SQL injection",
+                owasp_category="A03",
+                severity="high",
+                affected_url="https://target.test/admin/customers",
+                description="The search parameter reaches a SQL query.",
+                evidence="A quote produced SQLSTATE[42000].",
+            ),
+            validator_cfg=SimpleNamespace(max_steps=2, require_concrete_disproof=True),
+            llm_cfg=object(),
+            cred_sessions={
+                1: {
+                    "username": "admin",
+                    "cookies": {},
+                    "extra_headers": {"Authorization": "Bearer secret"},
+                }
+            },
+            scanner_policy=SimpleNamespace(),
+        )
+    )
+
+    assert len(calls) == 2
+    assert request_calls == 2
+    assert result[:3] == (
+        "confirmed",
+        (
+            "The authenticated quote probe produced a payload-dependent "
+            "database syntax error from PDO->query()."
+        ),
+        "high",
+    )
+
+
+def test_validator_final_turn_can_return_unconfirmed(monkeypatch):
+    call_count = 0
+
+    async def fake_loop(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            await kwargs["tool_executor"]("context_tool", {"action": "get_finding"}, 1)
+            await kwargs["on_checkpoint"](
+                [{"role": "user", "content": "insufficient evidence"}],
+                1,
+            )
+            return
+        kwargs["done_check"](
+            {
+                "verdict": "unconfirmed",
+                "reasoning": "The required authenticated session was unavailable.",
+                "confidence": "low",
+            },
+            2,
+        )
+
+    monkeypatch.setattr(validator, "_static_attack_path_for_finding", lambda _: {})
+    monkeypatch.setattr(validator.llm_svc, "thinking_agentic_loop", fake_loop)
+    monkeypatch.setattr(validator.events_svc, "emit", lambda *args, **kwargs: None)
+
+    result = asyncio.run(
+        validator._run_adversarial_validator_loop(
+            run_id=1,
+            finding=SimpleNamespace(
+                id=9,
+                title="SQL injection",
+                owasp_category="A03",
+                severity="high",
+                affected_url="https://target.test/admin/customers",
+                description="The search parameter may reach a SQL query.",
+                evidence="The endpoint requires authentication.",
+            ),
+            validator_cfg=SimpleNamespace(max_steps=1, require_concrete_disproof=True),
+            llm_cfg=object(),
+            cred_sessions={},
+            scanner_policy=SimpleNamespace(),
+        )
+    )
+
+    assert result[:3] == (
+        "unconfirmed",
+        "The required authenticated session was unavailable.",
+        "low",
     )
 
 

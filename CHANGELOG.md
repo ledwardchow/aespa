@@ -34,6 +34,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Validators finish after their probe budget**: Finding validation now lists reusable authenticated sessions without exposing credentials, avoids wasting steps rediscovering logins, and reserves a final verdict-only turn after the investigative budget is exhausted. SQL injection validation also recognizes authenticated, payload-dependent database errors as strong confirmation evidence.
+
 - **Accurate URLs on reported findings**: End-of-scan analysis now keeps each finding attached to the endpoint and evidence that produced it instead of assigning findings from a multi-endpoint scan to the first probed URL.
 
 - **Visible Test Lead completion requests**: The activity log now shows every time the Test Lead calls `done`, including its summary and calls rejected by the completion check.

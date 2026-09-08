@@ -639,8 +639,8 @@ async def _run_adversarial_validator_loop(
     """Run the adversarial agentic validator loop for a single finding.
 
     Returns (verdict, reasoning, confidence, done_input) where verdict is
-    "confirmed" or "false_positive" and done_input is the raw done() tool input
-    (carrying any poc_request/poc_expect/poc_auth).
+    "confirmed", "false_positive", or "unconfirmed" and done_input is the raw
+    done() tool input (carrying any poc_request/poc_expect/poc_auth).
     """
     # Build the user message for the validator.
     disproof_hints = llm_svc._disproof_hints_for_finding(finding.owasp_category or "")
@@ -654,6 +654,37 @@ async def _run_adversarial_validator_loop(
         f"**Description**\n{finding.description or 'No description.'}\n\n"
         f"**Scanner evidence**\n{finding.evidence or 'No evidence provided.'}"
     )
+    session_lines: list[str] = []
+    seen_session_names: set[str] = set()
+    for session in cred_sessions.values():
+        session_name = str(session.get("username") or "").strip()
+        if not session_name or session_name in seen_session_names:
+            continue
+        seen_session_names.add(session_name)
+        label = str(session.get("label") or "").strip()
+        auth_types: list[str] = []
+        if session.get("cookies"):
+            auth_types.append("cookies")
+        if session.get("extra_headers"):
+            auth_types.append("request headers")
+        auth_summary = ", ".join(auth_types) or "stored authentication"
+        label_suffix = f" ({label})" if label and label != session_name else ""
+        session_lines.append(f"- `{session_name}`{label_suffix}: {auth_summary}")
+    if session_lines:
+        initial_message += (
+            "\n\n**Available authenticated sessions**\n"
+            + "\n".join(session_lines)
+            + "\nSelect one by passing its exact backticked name as `use_session`. "
+            "Do not guess credentials or register another account when a suitable "
+            "listed session exists."
+        )
+    else:
+        initial_message += (
+            "\n\n**Available authenticated sessions**\n"
+            "None. Do not spend the validation budget guessing credentials. If "
+            "authentication is required and the existing evidence cannot decide the "
+            "finding, return `unconfirmed` with that proof gap."
+        )
     if static_attack_path:
         from aespa.services.scan_leads import format_attack_path_for_prompt
 
@@ -687,6 +718,7 @@ async def _run_adversarial_validator_loop(
     # Mutable verdict holder — set by the done() tool call.
     verdict_holder: list[tuple[str, str, str, dict]] = []
     step_counter: list[int] = [0]
+    conversation_checkpoint: list[dict] = []
 
     def _record_verdict(tool_input: dict) -> tuple[str, str, str, dict]:
         verdict = tool_input.get("verdict") or "unconfirmed"
@@ -775,6 +807,9 @@ async def _run_adversarial_validator_loop(
     def _stop_check() -> bool:
         return len(verdict_holder) > 0 or step_counter[0] >= validator_cfg.max_steps
 
+    async def _capture_checkpoint(messages: list[dict], _step_count: int) -> None:
+        conversation_checkpoint[:] = list(messages)
+
     await llm_svc.thinking_agentic_loop(
         config=llm_cfg,
         system_message=llm_svc._ADVERSARIAL_VALIDATOR_SYSTEM,
@@ -783,10 +818,74 @@ async def _run_adversarial_validator_loop(
         stop_check=_stop_check,
         done_check=_done_check,
         tools=llm_svc.VALIDATOR_AGENT_TOOLS,
+        on_checkpoint=_capture_checkpoint,
     )
 
     if verdict_holder:
         return verdict_holder[0]
+    if step_counter[0] >= validator_cfg.max_steps and conversation_checkpoint:
+        finalization_rejected_tools = [0]
+
+        async def _finalization_tool_executor(
+            tool_name: str, _tool_input: dict, _step: int
+        ) -> dict:
+            finalization_rejected_tools[0] += 1
+            return {
+                "error": (
+                    f"Tool {tool_name!r} is unavailable because the investigative "
+                    "budget is exhausted. Call done with the evidence already collected."
+                )
+            }
+
+        final_directive = {
+            "type": "text",
+            "text": (
+                "The investigative tool budget is exhausted; the validation was not "
+                "stopped by the user. Do not run another probe. Review the evidence "
+                "already collected and call done now. Use confirmed only when the "
+                "evidence proves the finding, false_positive only when it establishes "
+                "a specific benign explanation, or unconfirmed when a material proof "
+                "gap remains."
+            ),
+        }
+        final_messages = list(conversation_checkpoint)
+        if final_messages and final_messages[-1].get("role") == "user":
+            final_user_message = dict(final_messages[-1])
+            final_content = final_user_message.get("content")
+            if isinstance(final_content, list):
+                final_user_message["content"] = [*final_content, final_directive]
+            else:
+                final_user_message["content"] = [
+                    {"type": "text", "text": str(final_content or "")},
+                    final_directive,
+                ]
+            final_messages[-1] = final_user_message
+        else:
+            final_messages.append({"role": "user", "content": [final_directive]})
+        await llm_svc.thinking_agentic_loop(
+            config=llm_cfg,
+            system_message=llm_svc._ADVERSARIAL_VALIDATOR_SYSTEM,
+            initial_user_message=initial_message,
+            tool_executor=_finalization_tool_executor,
+            stop_check=lambda: (
+                bool(verdict_holder) or finalization_rejected_tools[0] >= 2
+            ),
+            done_check=_done_check,
+            tools=[
+                tool
+                for tool in llm_svc.VALIDATOR_AGENT_TOOLS
+                if tool.get("name") == "done"
+            ],
+            resume_messages=final_messages,
+            resume_step_count=step_counter[0],
+            max_consecutive_text_turns=3,
+            text_only_repair_message=(
+                "No investigative tools remain. Call done with confirmed, "
+                "false_positive, or unconfirmed based only on the collected evidence."
+            ),
+        )
+        if verdict_holder:
+            return verdict_holder[0]
     # Step budget exhausted without a verdict.  A validator that did not reach
     # an explicit conclusion has not proved exploitability; keep the finding
     # uncertain so a retry can be requested instead of silently confirming it.
