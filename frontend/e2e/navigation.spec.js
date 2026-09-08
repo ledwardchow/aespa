@@ -140,6 +140,65 @@ test("Agent Settings keeps inner tabs flush with its content column", async ({ p
   await page.screenshot({ path: path.join(tmpdir(), "aespa-agent-settings-desktop.png") });
 });
 
+test("validator outcomes stay beside their finding titles", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  const agentLog = [
+    {
+      agent_id: "validator-1809",
+      role: "Validator",
+      status: "done",
+      current_task: "Registration permits one-character passwords",
+      outcome: "Confirmed",
+      created_at: "2026-09-08T00:00:00Z",
+    },
+    {
+      agent_id: "validator-1810",
+      role: "Validator",
+      status: "done",
+      current_task: "Profile API exposes password hash and TOTP field",
+      outcome: "Unconfirmed",
+      created_at: "2026-09-08T00:00:01Z",
+    },
+  ];
+  await page.route("**/api/test-runs/1/agent-log", (route) => route.fulfill({ json: agentLog }));
+  await page.goto("/#/runs/1/activity");
+  await expect(page).toHaveURL(/#\/runs\/1\/activity$/);
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  const validator = page.locator(".agent-row", { hasText: "Validator" });
+  for (const label of ["Confirmed", "Unconfirmed"]) {
+    const outcome = validator.getByText(label, { exact: true });
+    const row = outcome.locator("..");
+    await expect(row).toBeVisible();
+    const taskBox = await row.locator(".agent-current-task").boundingBox();
+    const outcomeBox = await outcome.boundingBox();
+    const overlap =
+      Math.min(taskBox.y + taskBox.height, outcomeBox.y + outcomeBox.height) -
+      Math.max(taskBox.y, outcomeBox.y);
+    expect(overlap).toBeGreaterThan(0);
+  }
+
+  await validator.click();
+  await expect(validator.locator(".agent-thread-row")).toHaveCount(0);
+  await validator.click();
+  await expect(validator.locator(".agent-thread-row")).toHaveCount(2);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-validator-outcome-desktop.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(page.getByText("Confirmed", { exact: true })).toBeVisible();
+  const mobileUnconfirmed = page.getByText("Unconfirmed", { exact: true });
+  await expect(mobileUnconfirmed).toBeVisible();
+  await mobileUnconfirmed.scrollIntoViewIfNeeded();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-validator-outcome-mobile.png") });
+});
+
 test("Python Sandbox explains when the Docker service is unavailable", async ({ page }) => {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));

@@ -803,12 +803,24 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
             version = conn.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
+            handoff_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(specialist_handoff)"))
+            }
+            handoff_foreign_keys = {
+                (row[3], row[2], row[4])
+                for row in conn.execute(
+                    text("PRAGMA foreign_key_list(specialist_handoff)")
+                )
+            }
 
         assert "alembic_version" in tables
         assert "site" in tables
         assert "test_run" in tables
+        assert "page_id" in handoff_columns
+        assert ("page_id", "crawled_page", "id") in handoff_foreign_keys
         assert was_pre_alembic is False
-        assert version == "2b6e8d1f4a90"
+        assert version == "5a8c1d3e7f20"
     finally:
         engine.dispose()
 
@@ -1112,7 +1124,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "2b6e8d1f4a90"
+        assert version == "5a8c1d3e7f20"
     finally:
         engine.dispose()
 
@@ -1149,7 +1161,7 @@ def test_current_db_with_applications_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "2b6e8d1f4a90"
+        assert version == "5a8c1d3e7f20"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

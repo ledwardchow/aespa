@@ -2140,6 +2140,15 @@ class SpecialistHandoff(SQLModel, table=True):
     attack_class: str = Field(index=True)
     target_url: str
     canonical_url: str = Field(index=True)
+    page_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("crawled_page.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
     parameter: Optional[str] = Field(default=None)
     session_label: Optional[str] = Field(default=None)
     priority: int = Field(default=7)

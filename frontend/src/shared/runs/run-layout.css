@@ -396,9 +396,9 @@
   display: flex;
   align-items: center;
   box-sizing: border-box;
-  height: 40px;
-  min-height: 40px;
-  padding: 6px 12px;
+  height: 28px;
+  min-height: 28px;
+  padding: 2px 12px;
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
@@ -409,6 +409,11 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+.traffic-pane-label .btn {
+  height: 22px;
+  padding: 0 6px;
   flex-shrink: 0;
 }
 .traffic-raw {

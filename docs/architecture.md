@@ -866,7 +866,7 @@ Reporting agent    (post-scan LLM pre-screen pass over new findings)
 
 The Test Lead calls `agent_dispatch` when a promising lead needs deeper confirmation or impact testing. The scanner can also create a handoff automatically from a small set of strong request and response signals. An issue that is already fully proven is written directly without a specialist.
 
-Each handoff is stored in `SpecialistHandoff` and owns a vulnerability class, canonical route, optional parameter, and session. While that handoff is queued or running, the Test Lead cannot probe or write the same scope. This keeps it working through other coverage gaps. Completed outcomes are attached to the next Test Lead tool result. If both agents support the same finding, the specialist evidence is merged into the existing finding.
+Each handoff is stored in `SpecialistHandoff` and owns a vulnerability class, canonical route, canonical page ID for web scans, optional parameter, and session. The exact target URL is retained separately as request evidence. Traffic, coverage, specialist dispatch, and findings use the same page resolver so query payloads remain attached to the crawled route instead of creating separate site-map pages. While that handoff is queued or running, the Test Lead cannot probe or write the same scope. This keeps it working through other coverage gaps. Completed outcomes are attached to the next Test Lead tool result. If both agents support the same finding, the specialist evidence is merged into the existing finding.
 
 **Dispatch flow:**
 
