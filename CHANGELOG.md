@@ -34,6 +34,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Accurate URLs on reported findings**: End-of-scan analysis now keeps each finding attached to the endpoint and evidence that produced it instead of assigning findings from a multi-endpoint scan to the first probed URL.
+
 - **Visible Test Lead completion requests**: The activity log now shows every time the Test Lead calls `done`, including its summary and calls rejected by the completion check.
 
 - **Scan traffic stays attached to its page**: Requests, OWASP coverage, specialist handoffs, findings, and validation now share one page association. Query-string test payloads remain recorded as exact request evidence without creating separate site-map pages or leaving specialist traffic unlinked.

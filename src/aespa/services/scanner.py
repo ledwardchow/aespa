@@ -3836,7 +3836,7 @@ def _finding_from_llm(
 ) -> ScanFinding:
     probe_urls = list(result_by_url.keys())
     llm_url = (raw.get("affected_url") or "").strip()
-    if llm_url and llm_url != page_url:
+    if llm_url:
         affected_url = llm_url
     elif probe_urls:
         desc = (
