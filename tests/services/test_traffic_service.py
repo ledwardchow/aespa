@@ -241,6 +241,44 @@ async def test_agent_traffic_keeps_purpose_and_exact_coverage_cell(monkeypatch):
     assert result[0]["owasp_category"] == "A01"
 
 
+def test_assign_web_traffic_page_backfills_missing_page(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        page = CrawledPage(
+            test_run_id=42,
+            url="https://target.local/api/customers",
+            status="crawled",
+            in_scope=True,
+        )
+        entry = TrafficEntry(
+            test_run_id=42,
+            source="httpx",
+            method="GET",
+            url="https://target.local/api/customers?search=%27",
+            request_headers="{}",
+            response_headers="{}",
+        )
+        session.add(page)
+        session.add(entry)
+        session.commit()
+        session.refresh(page)
+        session.refresh(entry)
+        page_id = page.id
+        traffic_id = entry.id
+
+    assert traffic.assign_web_traffic_page(traffic_id, 42, page_id) is True
+
+    with Session(engine) as session:
+        assert session.get(TrafficEntry, traffic_id).page_id == page_id
+
+
 def test_api_traffic_resolves_template_to_exact_coverage_cell(monkeypatch):
     engine = create_engine(
         "sqlite:///:memory:",

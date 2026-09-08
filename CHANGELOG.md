@@ -34,7 +34,11 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
-- **Aligned Traffic Log headers**: Request and response title bars now have the same height, keeping both message panels aligned.
+- **Scan traffic stays attached to its page**: Requests, OWASP coverage, specialist handoffs, findings, and validation now share one page association. Query-string test payloads remain recorded as exact request evidence without creating separate site-map pages or leaving specialist traffic unlinked.
+
+- **Validator results stay on one line**: Confirmed and unconfirmed results now appear beside the finding title in the Validator activity list.
+
+- **Aligned Traffic Log headers**: Request and response title bars now share a compact height, keeping both message panels aligned.
 
 - **Campaign progress stays current after a resumed scan**: Campaign pages continue refreshing after an interrupted child scan and remove the old interruption message when matching resumes.
 

@@ -580,6 +580,31 @@ def count_traffic(run_id: int, *, api_run_id: Optional[int] = None) -> int:
         return s.exec(q).one()
 
 
+def assign_web_traffic_page(traffic_id: int | None, run_id: int, page_id: int) -> bool:
+    """Attach a captured web request to its resolved canonical page."""
+    if traffic_id is None:
+        return False
+
+    from aespa.models import CrawledPage, TrafficEntry
+
+    with Session(get_engine()) as session:
+        entry = session.get(TrafficEntry, traffic_id)
+        page = session.get(CrawledPage, page_id)
+        if (
+            entry is None
+            or entry.test_run_id != run_id
+            or entry.api_test_run_id is not None
+            or page is None
+            or page.test_run_id != run_id
+        ):
+            return False
+        if entry.page_id is None:
+            entry.page_id = page_id
+            session.add(entry)
+            session.commit()
+        return entry.page_id == page_id
+
+
 # ── Per-api-run traffic callbacks ────────────────────────────────────────────
 
 # api_scanner.py registers a callable here when a scan starts so it can mark

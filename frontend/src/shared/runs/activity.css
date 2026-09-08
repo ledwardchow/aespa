@@ -631,6 +631,10 @@
 .agent-thread-row--expandable:hover {
   background: rgba(255, 255, 255, 0.04);
 }
+.agent-thread-outcome {
+  grid-column: auto;
+  white-space: nowrap;
+}
 .agent-thread-id {
   font-weight: 700;
   color: var(--text);

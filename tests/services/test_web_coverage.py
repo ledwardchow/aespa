@@ -332,6 +332,32 @@ def test_post_probe_fn_flips_in_progress(db_engine, db_session, run):
     assert cell.status == "in_progress"
 
 
+def test_post_probe_fn_returns_canonical_page_for_query_variant(
+    db_engine, db_session, run
+):
+    page = _make_page(
+        db_session,
+        run,
+        "http://example.com/api/customers?page=1&per_page=15",
+        ["A03"],
+    )
+    seed_web_workprogram(run.id)
+
+    resolved = _make_web_post_probe_fn(run.id)(
+        "http://example.com/api/customers?page=1&per_page=5&search=%27",
+        "GET",
+        "A03",
+        "sqli",
+        500,
+    )
+
+    assert resolved == page.id
+    pages = db_session.exec(
+        select(CrawledPage).where(CrawledPage.test_run_id == run.id)
+    ).all()
+    assert [item.id for item in pages] == [page.id]
+
+
 def test_a03_probe_tracks_specific_test_class(db_engine, db_session, run):
     page = _make_page(db_session, run, "http://example.com/search", ["A03"])
     page.takes_input = True

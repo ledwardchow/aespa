@@ -4091,15 +4091,18 @@ def _dynamic_finding_page_id(
     pages_snapshot: list[dict[str, Any]],
     first_page_id: int | None,
 ) -> int | None:
-    url_to_page: dict[str, int] = {p["url"]: p["id"] for p in pages_snapshot}
-    if affected_url in url_to_page:
-        return url_to_page[affected_url]
-    for page_url, page_id in url_to_page.items():
-        if affected_url.startswith(page_url) or page_url.startswith(affected_url):
-            return page_id
-
     dynamic_page_url = _dynamic_page_url_for_finding(affected_url, base_url)
     if dynamic_page_url:
+        from aespa.services.web_workprogram import resolve_web_page_id
+
+        page_id = resolve_web_page_id(
+            session,
+            run_id=run_id,
+            url=dynamic_page_url,
+            create=False,
+        )
+        if page_id is not None:
+            return page_id
         return _find_or_create_dynamic_page(
             session,
             run_id=run_id,
@@ -5148,6 +5151,25 @@ async def _run_specialist_agent(
                 return f"[SCOPE BLOCK] {_scope_err}"
             method = str(tool_input.get("method") or "GET").upper()
             url = str(tool_input.get("url") or target_url)
+            try:
+                request_page_id = (
+                    int(tool_input.get("page_id"))
+                    if tool_input.get("page_id") is not None
+                    else target_page_id
+                )
+            except (TypeError, ValueError):
+                request_page_id = target_page_id
+            if not is_api_run:
+                from aespa.services.web_workprogram import resolve_web_page_id
+
+                with Session(get_engine()) as _page_session:
+                    request_page_id = resolve_web_page_id(
+                        _page_session,
+                        run_id=run_id,
+                        url=url,
+                        page_id=request_page_id,
+                        create=False,
+                    )
             headers = dict(tool_input.get("headers") or {})
             body = tool_input.get("body")
             use_session_label = (
@@ -5198,7 +5220,7 @@ async def _run_specialist_agent(
                 },
             ) as _hx:
                 if isinstance(_hx, traffic_svc.LoggingAsyncClient):
-                    _hx.page_id = target_page_id
+                    _hx.page_id = request_page_id
                     _hx.session_label = use_session_label
                 try:
                     kwargs: dict = {}
@@ -5212,6 +5234,30 @@ async def _run_specialist_agent(
                         _hx, method, url, site_id=site_id, run_id=run_id, **kwargs
                     )
                     resp_body = resp.text[:BODY_READ_LIMIT]
+                    if (
+                        not is_api_run
+                        and request_page_id is None
+                        and resp.status_code != 404
+                    ):
+                        with Session(get_engine()) as _page_session:
+                            request_page_id = resolve_web_page_id(
+                                _page_session,
+                                run_id=run_id,
+                                url=url,
+                                create=True,
+                            )
+                            _page_session.commit()
+                        if request_page_id is not None:
+                            traffic_svc.assign_web_traffic_page(
+                                _hx.last_traffic_id,
+                                run_id,
+                                request_page_id,
+                            )
+                            if handoff_id is not None:
+                                handoff_svc.update_handoff(
+                                    handoff_id,
+                                    page_id=request_page_id,
+                                )
                     if _session_resolution_note:
                         resp_body = f"{_session_resolution_note}\n\n{resp_body}"
                     _sp_canary_fp = _ssrf_canary.get(run_id)
@@ -5575,6 +5621,17 @@ def _schedule_specialist_agent(
         )
     except (TypeError, ValueError):
         target_page_id = None
+    if not is_api_run:
+        from aespa.services.web_workprogram import resolve_web_page_id
+
+        with Session(get_engine()) as _page_session:
+            target_page_id = resolve_web_page_id(
+                _page_session,
+                run_id=run_id,
+                url=target_url,
+                page_id=target_page_id,
+                create=False,
+            )
     target_session_label = str(dispatch.get("use_session") or "").strip() or None
 
     rejection = _specialist_dispatch_rejection(
@@ -5604,6 +5661,7 @@ def _schedule_specialist_agent(
         run_kind="api" if is_api_run else "web",
         attack_class=attack_class,
         target_url=target_url,
+        page_id=target_page_id,
         parameter=parameter,
         session_label=target_session_label,
         priority=priority,
@@ -5632,7 +5690,7 @@ def _schedule_specialist_agent(
         "max_steps": max_steps,
         "site_id": site_id,
         "is_api_run": is_api_run,
-        "target_page_id": target_page_id,
+        "target_page_id": handoff.page_id,
         "target_session_label": target_session_label,
         "handoff_id": handoff.id,
     }
@@ -11255,6 +11313,16 @@ async def _do_agentic_thinking_loop(
         _scope_err = _active_scope_check(hr_url)
         if _scope_err:
             return f"[SCOPE BLOCK] {_scope_err}"
+        if not is_api_run and hr_page_id is None:
+            from aespa.services.web_workprogram import resolve_web_page_id
+
+            with Session(get_engine()) as _page_session:
+                hr_page_id = resolve_web_page_id(
+                    _page_session,
+                    run_id=run_id,
+                    url=hr_url,
+                    create=False,
+                )
         hr_headers = tool_input.get("headers") or {}
         hr_body = tool_input.get("body")
         hr_use_session = (
@@ -11651,7 +11719,7 @@ async def _do_agentic_thinking_loop(
                     if is_api_run:
                         post_probe_fn(hr_url, hr_method, _hr_owasp)
                     else:
-                        post_probe_fn(
+                        resolved_page_id = post_probe_fn(
                             hr_url,
                             hr_method,
                             _hr_owasp,
@@ -11659,6 +11727,16 @@ async def _do_agentic_thinking_loop(
                             hr_resp_status,
                             hr_page_id,
                         )
+                        if resolved_page_id is not None:
+                            if hr_page_id is None and isinstance(
+                                hx, traffic_svc.LoggingAsyncClient
+                            ):
+                                traffic_svc.assign_web_traffic_page(
+                                    hx.last_traffic_id,
+                                    run_id,
+                                    resolved_page_id,
+                                )
+                            hr_page_id = resolved_page_id
                 except Exception as _pp_exc:
                     log.debug("post_probe_fn error: %s", _pp_exc)
         _auto_dispatch_note = ""

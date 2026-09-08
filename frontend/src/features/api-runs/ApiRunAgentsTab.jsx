@@ -345,7 +345,9 @@ export function ApiRunAgentsTab({ runId, scanRunning }) {
                           {vaTask.length > 90 ? vaTask.slice(0, 89) + "…" : vaTask}
                         </span>
                         {vaOutcome && !vaActive && (
-                          <span className="agent-history-outcome">{vaOutcome}</span>
+                          <span className="agent-history-outcome agent-thread-outcome">
+                            {vaOutcome}
+                          </span>
                         )}
                       </div>
                     );
