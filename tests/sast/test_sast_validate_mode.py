@@ -245,10 +245,13 @@ def test_quick_resume_refreshes_leads_and_blocks_done(isolated_db_engine, monkey
         title="Lead added after checkpoint",
     )
     captured = {}
+    events = []
 
     async def fake_agentic_loop(_config, **kwargs):
         captured["system_message"] = kwargs["system_message"]
-        allowed, feedback = kwargs["done_check"]({}, 5)
+        allowed, feedback = kwargs["done_check"](
+            {"summary": "I think the scan is complete."}, 5
+        )
         assert allowed is False
         assert "still open" in feedback
 
@@ -258,7 +261,9 @@ def test_quick_resume_refreshes_leads_and_blocks_done(isolated_db_engine, monkey
             session.add(row)
             session.commit()
 
-        allowed, feedback = kwargs["done_check"]({}, 6)
+        allowed, feedback = kwargs["done_check"](
+            {"summary": "All imported leads are resolved."}, 6
+        )
         assert allowed is True
         return "done"
 
@@ -267,7 +272,8 @@ def test_quick_resume_refreshes_leads_and_blocks_done(isolated_db_engine, monkey
         fake_agentic_loop,
     )
     monkeypatch.setattr(
-        "aespa.services.scanner.events_svc.emit", lambda *args, **kwargs: None
+        "aespa.services.scanner.events_svc.emit",
+        lambda event_run_id, event: events.append((event_run_id, event)),
     )
 
     asyncio.run(
@@ -304,6 +310,21 @@ def test_quick_resume_refreshes_leads_and_blocks_done(isolated_db_engine, monkey
 
     assert "resumed Quick run" in captured["system_message"]
     assert "Lead added after checkpoint" in captured["system_message"]
+    done_events = [
+        event
+        for event_run_id, event in events
+        if event_run_id == run.id
+        and event.get("type") == "agent_status"
+        and event.get("current_task", "").endswith("Called done")
+    ]
+    assert [event["current_task"] for event in done_events] == [
+        "Step 5: Called done",
+        "Step 6: Called done",
+    ]
+    assert [event["outcome"] for event in done_events] == [
+        "I think the scan is complete.",
+        "All imported leads are resolved.",
+    ]
 
 
 def test_lead_detail_returns_full_owned_data_and_rejects_foreign_leads(

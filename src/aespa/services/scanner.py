@@ -9462,6 +9462,19 @@ async def _do_agentic_thinking_loop(
         )
 
     def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
+        summary = str(tool_input.get("summary") or "").strip()
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "active",
+                "current_task": f"Step {step}: Called done",
+                "outcome": summary[:2000] or None,
+                "_persist": True,
+            },
+        )
         if coverage_mode in {"track", "standard", "sast_validate"}:
             from aespa.services.scan_leads import get_all_leads_for_run
 
