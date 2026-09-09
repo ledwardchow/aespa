@@ -15,11 +15,45 @@ from aespa.models import (
 )
 from aespa.services.correlation import propose_crawl_discovered_paths
 from aespa.services.frontend_path_resolver import (
+    _bounded_rewrite_path,
     resolve_approved_path,
     resolve_frontend_path,
     revise_path_with_llm,
 )
 from aespa.services.route_tracing import attack_path_for_trace, trace_lead_paths
+
+
+def test_frontend_rewrite_payload_keeps_identity_and_bounds_nested_path():
+    bounded, omitted = _bounded_rewrite_path(
+        {
+            "schema_version": 3,
+            "perspective": "frontend",
+            "entry": "/checkout",
+            "frontend_surface": {"ui_route": {"path": "/checkout"}},
+            "live_frontend_context": {
+                "resolution_status": "resolved",
+                "evidence_ids": ["page:1", "action:2", "traffic:3"]
+                + [f"page:{index}" for index in range(2_000)]
+                + [42, "x" * 1_000],
+                "request": {"body": "y" * 30_000},
+            },
+            "noise": "x" * 30_000,
+        }
+    )
+
+    assert bounded["schema_version"] == 3
+    assert bounded["perspective"] == "frontend"
+    assert bounded["entry"] == "/checkout"
+    assert bounded["live_frontend_context"]["evidence_ids"][:3] == [
+        "page:1",
+        "action:2",
+        "traffic:3",
+    ]
+    assert bounded["live_frontend_context"]["evidence_ids_omitted"] > 0
+    assert bounded["live_frontend_context"]["request"]["_truncated"] is True
+    assert bounded["_truncated"] is True
+    assert omitted > 0
+    assert len(json.dumps(bounded, separators=(",", ":"))) < 12_000
 
 
 def _seed_trace_graph(engine):

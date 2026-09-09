@@ -4,10 +4,13 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from anthropic.types import TextBlock, ThinkingBlock, ToolUseBlock
+from pydantic import ValidationError
 from sqlmodel import Session, select
 
 from aespa.models import LLMConfig, LLMUsageMonth
 from aespa.services import llm
+from aespa.services.resolved_llm_config import ResolvedLLMConfig
 
 
 def test_title_normalization_cannot_introduce_unauthenticated_claim(monkeypatch):
@@ -136,6 +139,217 @@ def test_agentic_context_compaction_uses_model_token_budget():
     assert stats["before_tokens"] > stats["after_tokens"]
     assert stats["after_tokens"] <= stats["context_budget_tokens"]
     assert compacted[0]["role"] == "user"
+
+
+def _completed_pairs(count: int, *, input_size: int = 0, result_size: int = 1000):
+    messages = [{"role": "user", "content": "initial brief"}]
+    for index in range(count):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"call-{index}",
+                            "name": "http_request",
+                            "input": {
+                                "url": f"https://target.local/{index}",
+                                "large": "i" * input_size,
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": f"call-{index}",
+                            "content": "response " + "r" * result_size,
+                        }
+                    ],
+                },
+            ]
+        )
+    return messages
+
+
+def test_agentic_context_compaction_handles_seven_messages_after_growth():
+    messages = _completed_pairs(3, result_size=5_000)
+    compacted, stats = llm.compact_agentic_messages(messages, max_context_chars=5_000)
+
+    assert stats and stats["compaction_applied"] == 1
+    assert stats["after_chars"] < stats["before_chars"]
+    assert len(compacted) < len(messages) or stats["truncated_tool_results"] > 0
+
+
+def test_agentic_context_compaction_normalizes_anthropic_sdk_blocks():
+    messages = [
+        {"role": "user", "content": "initial brief"},
+        {
+            "role": "assistant",
+            "content": [
+                TextBlock(type="text", text="I will inspect the endpoint."),
+                ThinkingBlock(
+                    type="thinking", thinking="private plan", signature="sig"
+                ),
+                ToolUseBlock(
+                    type="tool_use",
+                    id="call-sdk",
+                    name="http_request",
+                    input={"url": "https://target.local"},
+                ),
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-sdk",
+                    "content": "response " + "r" * 5_000,
+                }
+            ],
+        },
+    ]
+    compacted, stats = llm.compact_agentic_messages(messages, max_context_chars=2_000)
+
+    assert stats
+    assert stats["protocol_valid"] is True
+    assert all(isinstance(block, dict) for block in compacted[1]["content"])
+    assert compacted[1]["content"][1]["signature"] == "sig"
+
+
+def test_agentic_context_compaction_collapses_repeated_journals():
+    messages = _completed_pairs(40, result_size=800)
+    compacted, first_stats = llm.compact_agentic_messages(
+        messages, max_context_chars=10_000
+    )
+    compacted, second_stats = llm.compact_agentic_messages(
+        compacted, max_context_chars=5_000
+    )
+
+    journal = str(compacted[0]["content"])
+    assert first_stats and second_stats
+    assert journal.count("CONTEXT JOURNAL") == 1
+    assert second_stats["journal_chars"] <= llm.CONTEXT_JOURNAL_CHAR_LIMIT
+
+
+def test_agentic_context_compaction_evicts_large_recent_tool_inputs():
+    messages = _completed_pairs(4, input_size=25_000, result_size=400)
+    compacted, stats = llm.compact_agentic_messages(
+        messages,
+        max_context_tokens=1_200,
+        max_output_tokens=0,
+        system_message="system",
+        tools=[],
+    )
+
+    assert stats and stats["removed_messages"] > 0
+    assert "i" * 1_000 not in json.dumps(compacted)
+    assert stats["protocol_valid"] == 1
+
+
+def test_agentic_context_compaction_progressively_shrinks_results():
+    messages = _completed_pairs(3, result_size=40_000)
+    compacted, stats = llm.compact_agentic_messages(
+        messages,
+        max_context_tokens=1_500,
+        max_output_tokens=0,
+        system_message="system",
+        tools=[],
+    )
+
+    assert stats and stats["fit_passes"] >= 1
+    assert stats["truncated_tool_results"] >= 1
+    assert stats["after_tokens"] < stats["before_tokens"]
+
+
+def test_agentic_context_compaction_preserves_protocol_valid_suffix():
+    messages = _completed_pairs(12, result_size=2_000)
+    compacted, stats = llm.compact_agentic_messages(messages, max_context_chars=8_000)
+
+    assert stats and stats["protocol_valid"] == 1
+    uses = {
+        block["id"]
+        for message in compacted
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    }
+    results = {
+        block["tool_use_id"]
+        for message in compacted
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    }
+    assert uses == results
+
+
+def test_agentic_context_compaction_excludes_secrets_from_journal():
+    messages = _completed_pairs(8, result_size=2_000)
+    messages[11]["content"][0]["input"].update(
+        {"secret": "super-secret", "url": "https://target.local/?token=abc123"}
+    )
+    messages[12]["content"][0]["content"] += " password=hunter2"
+    compacted, _ = llm.compact_agentic_messages(messages, max_context_chars=5_000)
+
+    journal = str(compacted[0]["content"])
+    assert "super-secret" not in journal
+    assert "abc123" not in journal
+    assert "hunter2" not in journal
+    assert "[REDACTED]" in journal
+
+
+def test_compaction_redacts_quoted_json_authorization_headers():
+    redacted = llm._redact_compaction_text(
+        '{"Authorization": "Bearer abc123", "password": "hunter2", "token": "xyz"}'
+    )
+
+    assert "abc123" not in redacted
+    assert "hunter2" not in redacted
+    assert "xyz" not in redacted
+    assert redacted.count("[REDACTED]") == 3
+
+
+def test_agentic_context_compaction_rejects_malformed_tool_ordering():
+    valid = _completed_pairs(2)
+    malformed = [valid[0], valid[2], valid[1], valid[3], valid[4]]
+    assert llm._protocol_valid_suffix(malformed, 1) is False
+
+    compacted, stats = llm.compact_agentic_messages(malformed, max_context_chars=100)
+
+    assert stats
+    assert stats["protocol_valid"] is True
+    tool_ids = [
+        block.get("id")
+        for message in compacted
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+    result_ids = [
+        block.get("tool_use_id")
+        for message in compacted
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert tool_ids == result_ids == []
+
+
+def test_compaction_raises_when_fixed_prompt_is_irreducible():
+    config = LLMConfig(
+        provider="openai_compatible",
+        model="local",
+        max_tokens=100,
+        max_context_tokens=1_024,
+    )
+    with pytest.raises(llm.LLMContextLimitError):
+        llm.compact_messages_for_config(
+            config,
+            "system " + "s" * 20_000,
+            [{"role": "user", "content": "brief"}],
+            tools=[],
+        )
 
 
 def test_limiter_oversized_estimate_does_not_hang():
@@ -1205,9 +1419,22 @@ def test_token_estimate_uses_local_encoder_and_counts_tool_schemas(monkeypatch):
         tools=[{"name": "http_request", "input_schema": {"type": "object"}}],
         model="gpt-5.6-sol",
     )
+    with_thinking = llm._estimate_tools_call_tokens(
+        "system",
+        [
+            {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "private plan"}],
+            }
+        ],
+        model="gpt-5.6-sol",
+    )
 
     assert plain == 2
     assert with_tools > plain
+    assert with_thinking > llm._estimate_tools_call_tokens(
+        "system", [], model="gpt-5.6-sol"
+    )
 
 
 def test_usage_reconciliation_accumulates_multiple_provider_events():
@@ -4305,3 +4532,304 @@ def test_google_usage_treats_none_counters_as_zero(monkeypatch):
         (("gemini-test", 120, 0), {"cache_read_tokens": 0}),
         (("gemini-test", 0, 0), {"cache_read_tokens": 0}),
     ]
+
+
+def test_tools_token_estimate_keeps_reasoning_results_and_diagnostics(monkeypatch):
+    class FakeEncoder:
+        def encode(self, text, disallowed_special=()):
+            return list(range(len(text.split())))
+
+    monkeypatch.setattr(llm, "_token_encoder", lambda model=None: FakeEncoder())
+    base_messages = [{"role": "user", "content": "request"}]
+    rich_messages = [
+        {"role": "user", "content": "request"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "plan the next request",
+                    "signature": "thinking-signature",
+                },
+                {
+                    "type": "bedrock_reasoning",
+                    "reasoning_content": {
+                        "reasoningText": {
+                            "text": "check the response carefully",
+                            "signature": "bedrock-signature",
+                        }
+                    },
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call-123",
+                    "name": "http_request",
+                    "input": {"method": "GET", "url": "https://target.local"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-123",
+                    "content": {"status": 200, "headers": {"x-trace": "trace-1"}},
+                },
+                {
+                    "type": "provider_diagnostic",
+                    "provider": "bedrock",
+                    "request_id": "req-123",
+                    "details": {"retry_count": 1},
+                },
+            ],
+        },
+    ]
+
+    base = llm._estimate_tools_call_tokens("system", base_messages, provider="bedrock")
+    rich = llm._estimate_tools_call_tokens("system", rich_messages, provider="bedrock")
+
+    assert rich > base
+    assert rich - base > 10
+
+
+def test_tools_token_estimate_does_not_count_image_base64_as_text(monkeypatch):
+    class FakeEncoder:
+        def encode(self, text, disallowed_special=()):
+            return list(range(len(text.split())))
+
+    monkeypatch.setattr(llm, "_token_encoder", lambda model=None: FakeEncoder())
+    without_image = llm._estimate_tools_call_tokens(
+        "system", [{"role": "user", "content": "request"}], provider="openai"
+    )
+    with_image = llm._estimate_tools_call_tokens(
+        "system",
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "media_type": "image/png",
+                            "data": "A" * 200_000,
+                        },
+                    }
+                ],
+            }
+        ],
+        provider="openai",
+    )
+
+    assert with_image - without_image < 1_000
+
+
+@pytest.mark.parametrize("config_type", [LLMConfig, ResolvedLLMConfig])
+def test_request_output_copy_does_not_mutate_saved_config(config_type):
+    saved = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=4_000,
+        max_context_tokens=8_000,
+    )
+    config = (
+        saved if config_type is LLMConfig else ResolvedLLMConfig.model_validate(saved)
+    )
+
+    request_config = llm._copy_config_with_max_tokens(config, 1_500)
+
+    assert request_config.max_tokens == 1_500
+    assert config.max_tokens == 4_000
+    if config_type is ResolvedLLMConfig:
+        with pytest.raises(ValidationError):
+            config.max_tokens = 1_500
+
+
+def test_agentic_loop_adapts_output_limit_on_request_only(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=4_000,
+        max_context_tokens=5_000,
+    )
+    captured: list[object] = []
+    emitted: list[dict] = []
+
+    monkeypatch.setattr(
+        llm,
+        "compact_agentic_messages",
+        lambda messages, **kwargs: (messages, None),
+    )
+    monkeypatch.setattr(
+        llm, "_estimate_tools_call_tokens", lambda *args, **kwargs: 2_800
+    )
+
+    async def fake_call_with_tools(config_arg, *_args, **_kwargs):
+        captured.append(config_arg)
+        block = {
+            "type": "tool_use",
+            "id": "call-done",
+            "name": "done",
+            "input": {"summary": "Complete."},
+        }
+        return [block], "tool_use", [block]
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *_args: None,
+            tools=[],
+            emit_fn=emitted.append,
+        )
+    )
+
+    assert summary == "Complete."
+    assert len(captured) == 1
+    assert captured[0].max_tokens == 1_176
+    assert config.max_tokens == 4_000
+    request_event = next(event for event in emitted if event["phase"] == "llm_request")
+    assert request_event["data"]["configured_max_output_tokens"] == 4_000
+    assert request_event["data"]["effective_max_output_tokens"] == 1_176
+
+
+def test_plain_completion_fits_user_prompt_and_preserves_system(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=3_000,
+        max_context_tokens=4_000,
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_call(config_arg, prompt, screenshot):
+        captured.update(config=config_arg, prompt=prompt, screenshot=screenshot)
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    system = "You are the system policy."
+    prompt = "user evidence " * 8_000
+
+    assert (
+        asyncio.run(llm.plain_completion(config, prompt, system_prompt=system)) == "ok"
+    )
+
+    fitted = captured["prompt"]
+    assert isinstance(fitted, str)
+    assert fitted.startswith(system + "\n\n")
+    assert llm.estimate_tokens(fitted, provider="openai", model=config.model) <= 1_952
+    assert captured["config"].max_tokens < config.max_tokens
+    assert config.max_tokens == 3_000
+
+
+def test_plain_completion_rejects_irreducible_system_prompt(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=2_000,
+        max_context_tokens=4_000,
+    )
+    called = False
+
+    async def fake_call(*_args):
+        nonlocal called
+        called = True
+        return "unexpected"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    with pytest.raises(llm.LLMContextLimitError, match="system prompt"):
+        asyncio.run(
+            llm.plain_completion(
+                config,
+                "brief",
+                system_prompt="system policy " * 8_000,
+            )
+        )
+    assert called is False
+
+
+def test_small_output_profile_uses_configured_minimum_for_context_budget():
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=200,
+        max_context_tokens=1_500,
+    )
+
+    budget = llm._context_budget_for_request(config, input_tokens=200)
+
+    assert budget["available_output_tokens"] == 276
+    assert budget["effective_max_tokens"] == 200
+
+
+def test_small_output_profile_plain_completion_remains_valid(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=200,
+        max_context_tokens=1_500,
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_call(config_arg, prompt, screenshot):
+        captured.update(config=config_arg, prompt=prompt, screenshot=screenshot)
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    assert (
+        asyncio.run(
+            llm.plain_completion(
+                config,
+                "user evidence " * 2_000,
+                system_prompt="system policy",
+            )
+        )
+        == "ok"
+    )
+    assert captured["prompt"].startswith("system policy\n\n")
+    assert captured["config"].max_tokens == 200
+    assert config.max_tokens == 200
+
+
+def test_small_output_profile_agentic_loop_remains_valid(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=200,
+        max_context_tokens=1_500,
+    )
+    captured: list[object] = []
+    monkeypatch.setattr(
+        llm,
+        "compact_agentic_messages",
+        lambda messages, **kwargs: (messages, None),
+    )
+    monkeypatch.setattr(llm, "_estimate_tools_call_tokens", lambda *args, **kwargs: 200)
+
+    async def fake_call_with_tools(config_arg, *_args, **_kwargs):
+        captured.append(config_arg)
+        block = {
+            "type": "tool_use",
+            "id": "call-done",
+            "name": "done",
+            "input": {"summary": "Complete."},
+        }
+        return [block], "tool_use", [block]
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *_args: None,
+            tools=[],
+        )
+    )
+
+    assert summary == "Complete."
+    assert captured[0].max_tokens == 200
+    assert config.max_tokens == 200

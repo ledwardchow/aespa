@@ -78,6 +78,7 @@ test("new profiles choose a predictable first model without mutating the provide
     provider_id: 1,
     model: "a",
     name: "Example/a",
+    max_tokens: 16384,
   });
   expect(provider.models).toEqual(["z", "a"]);
 });

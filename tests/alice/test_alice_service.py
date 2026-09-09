@@ -15,7 +15,65 @@ from aespa.main import create_app
 from aespa.models import CrawledPage, LLMConfig, Site
 from aespa.models import TestRun as RunModel
 from aespa.services import alice_tasks as at
-from aespa.services.alice import run_alice_turn, run_alice_turn_stream
+from aespa.services.alice import (
+    _bounded_goal_evidence,
+    _bounded_goal_proposal,
+    _redact_goal_evidence_text,
+    run_alice_turn,
+    run_alice_turn_stream,
+)
+
+
+def test_goal_verifier_payload_keeps_newest_evidence_with_omission_counts():
+    evidence = [
+        {
+            "step": index,
+            "tool": "http_request",
+            "input": {"body": "x" * 10_000},
+            "result": "result-" + ("y" * 10_000),
+        }
+        for index in range(40)
+    ]
+    bounded = _bounded_goal_evidence(evidence)
+    proposal = _bounded_goal_proposal(
+        {
+            "status": "completed",
+            "summary": "s" * 5_000,
+            "completed_criteria": ["criterion"] * 30,
+            "metadata": {
+                "nested": {"payload": "z" * 5_000},
+                "array": [{"value": "q" * 5_000} for _ in range(30)],
+            },
+        }
+    )
+
+    assert bounded["entries"][0]["step"] == 10
+    assert bounded["entries"][-1]["step"] == 39
+    assert bounded["omitted_entries"] == 10
+    assert bounded["omitted_chars"] > 0
+    assert proposal["completed_criteria_omitted"] == 10
+    assert proposal["summary_omitted_chars"] == 3_000
+    assert proposal["metadata"]["nested"]["payload_omitted_chars"] == 4_600
+    assert proposal["metadata"]["array_omitted_items"] == 10
+
+
+def test_goal_evidence_redacts_quoted_authorization_bearer():
+    redacted = _redact_goal_evidence_text(
+        '{"Authorization": "Bearer quoted-token", "note": "ok"}'
+    )
+
+    assert "quoted-token" not in redacted
+    assert "[REDACTED_BEARER]" in redacted
+
+
+def test_goal_evidence_redacts_plain_and_quoted_authorization_basic():
+    redacted = _redact_goal_evidence_text(
+        'Authorization: Basic plain-secret\n{"Authorization": "Basic quoted-secret"}'
+    )
+
+    assert "plain-secret" not in redacted
+    assert "quoted-secret" not in redacted
+    assert redacted.count("[REDACTED_BASIC]") == 2
 
 
 @pytest.fixture(name="test_data")
@@ -230,8 +288,16 @@ async def test_goal_mode_rejects_partial_done_then_accepts_verified_completion(
     lines = []
     with (
         patch("aespa.services.llm._call_with_tools", side_effect=mock_call),
-        patch("aespa.services.alice._execute_alice_tool", new=AsyncMock(return_value="site map evidence")),
-        patch("aespa.services.llm.plain_completion", new=AsyncMock(return_value='{"verdict":"completed","reason":"verified","missing_work":[]}')),
+        patch(
+            "aespa.services.alice._execute_alice_tool",
+            new=AsyncMock(return_value="site map evidence"),
+        ),
+        patch(
+            "aespa.services.llm.plain_completion",
+            new=AsyncMock(
+                return_value='{"verdict":"completed","reason":"verified","missing_work":[]}'
+            ),
+        ),
         patch("aespa.services.validator.is_validating", return_value=False),
     ):
         async for line in run_alice_turn_stream(
@@ -239,7 +305,9 @@ async def test_goal_mode_rejects_partial_done_then_accepts_verified_completion(
         ):
             lines.append(line)
 
-    events = [json.loads(line[6:].strip()) for line in lines if line.startswith("data: ")]
+    events = [
+        json.loads(line[6:].strip()) for line in lines if line.startswith("data: ")
+    ]
     assert calls == 3
     assert any(event["type"] == "goal_progress" for event in events)
     assert any(event["type"] == "goal_completed" for event in events)
@@ -305,8 +373,7 @@ async def test_active_goal_accepts_steering(test_data):
     at._registry[("site", test_data["run"].id)] = task
     try:
         assert (
-            await at.steer_goal(test_data["run"].id, "Focus on the reset token")
-            is True
+            await at.steer_goal(test_data["run"].id, "Focus on the reset token") is True
         )
         assert task.steering.get_nowait() == "Focus on the reset token"
         assert task.events[-1]["type"] == "goal_steered"
@@ -1370,10 +1437,10 @@ def test_stream_events_sends_snapshot_when_cursor_was_trimmed():
     task.done = True
     at._registry[("site", 43)] = task
     try:
+
         async def _drain():
             return [
-                line
-                async for line in at.stream_events(43, cursor=0, run_type="site")
+                line async for line in at.stream_events(43, cursor=0, run_type="site")
             ]
 
         got = [json.loads(line[6:]) for line in asyncio.run(_drain())]

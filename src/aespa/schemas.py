@@ -698,7 +698,7 @@ class LLMConfigIn(BaseModel):
     name: Optional[str] = Field(default=None, max_length=120)
     provider_id: int
     model: str = Field(min_length=1)
-    max_tokens: int = Field(default=70000, ge=1, le=256000)
+    max_tokens: int = Field(default=16384, ge=1, le=256000)
     # ``None`` asks the server to use the detected model context window.
     max_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
     # A capability value discovered by the model form but not yet persisted on
@@ -1213,7 +1213,7 @@ class LLMExportProfileItem(BaseModel):
     name: str
     provider_name: str
     model: str
-    max_tokens: int = 70000
+    max_tokens: int = 16384
     max_context_tokens: int | None = None
     temperature: Optional[float] = None
     reasoning_effort: str | None = None

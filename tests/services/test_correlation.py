@@ -32,11 +32,55 @@ from aespa.models import (
     Site,
 )
 from aespa.services.correlation import (
+    AmbiguousCall,
+    _ambiguous_payload,
+    _bounded_path_for_prompt,
+    _match_batches,
     apply_review_decisions,
     copy_approved_mappings_for_target,
     correlate_campaign,
     correlate_campaign_with_llm,
 )
+
+
+def test_llm_correlation_payloads_keep_ids_and_report_omissions():
+    call = ComponentFact(
+        id=11,
+        component_id=1,
+        fact_type="http_call",
+        method="POST",
+        path="/orders",
+        detail_json=json.dumps({"evidence": "x" * 5_000}),
+    )
+    route = ComponentFact(
+        id=22,
+        component_id=2,
+        fact_type="route",
+        method="POST",
+        path="/orders",
+        detail_json=json.dumps({"evidence": "y" * 5_000}),
+    )
+    payload = _ambiguous_payload(AmbiguousCall(call, 2, (route,)))
+    rendered = json.dumps(payload, separators=(",", ":"))
+
+    assert payload["target_component_id"] == 2
+    assert payload["call"]["id"] == 11
+    assert payload["candidate_routes"][0]["id"] == 22
+    assert "omitted_chars" in rendered
+    assert len(rendered) < 3_000
+
+    batches = _match_batches(
+        [AmbiguousCall(call, 2, tuple(route for _ in range(20))) for _ in range(10)]
+    )
+    assert sum(len(batch) for batch in batches) == 10
+
+    bounded_path, omitted = _bounded_path_for_prompt(
+        {"perspective": "frontend", "entry": "/checkout", "hops": ["x" * 30_000]}
+    )
+    assert bounded_path["perspective"] == "frontend"
+    assert bounded_path["entry"] == "/checkout"
+    assert bounded_path["_truncated"] is True
+    assert omitted > 0
 
 
 def _seed_two_component_campaign(engine, *, public_route: bool = True) -> dict:

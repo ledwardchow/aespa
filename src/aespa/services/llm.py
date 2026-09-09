@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import itertools
 import json
@@ -60,9 +61,9 @@ from aespa.services.prompts.validator import (
 log = logging.getLogger("aespa.llm")
 traffic_log = logging.getLogger("aespa.llm.traffic")
 
-_tool_text_delta_var: ContextVar[
-    Callable[[str], Awaitable[None]] | None
-] = ContextVar("llm_tool_text_delta", default=None)
+_tool_text_delta_var: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar(
+    "llm_tool_text_delta", default=None
+)
 
 REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
 
@@ -1681,8 +1682,10 @@ async def plain_completion(
     config: LLMConfig, prompt: str, *, system_prompt: str | None = None
 ) -> str:
     """Send a plain text prompt and return the raw response text."""
-    combined = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-    return await _call(config, combined, None)
+    request_config, combined, _budget = _fit_plain_prompt_to_context(
+        config, prompt, system_prompt
+    )
+    return await _call(request_config, combined, None)
 
 
 async def stream_chat_completion(
@@ -3117,9 +3120,7 @@ def _consume_bedrock_converse_stream(
                 if "text" in delta:
                     text_delta = str(delta.get("text") or "")
                     block = content.setdefault(index, {"text": ""})
-                    block["text"] = str(block.get("text") or "") + str(
-                        text_delta
-                    )
+                    block["text"] = str(block.get("text") or "") + str(text_delta)
                     if text_delta and on_text_delta is not None:
                         on_text_delta(text_delta)
                 tool_delta = delta.get("toolUse")
@@ -3711,17 +3712,15 @@ def _chunk_probe_results(
 
     token_budget = 0
     if config is not None and getattr(config, "max_context_tokens", 0):
-        safety = max(1024, min(8192, int(config.max_context_tokens) // 20))
+        context_limit = int(config.max_context_tokens)
+        safety = max(1024, min(8192, context_limit // 20))
         empty_prompt = build_reporting_analyse_prompt(url, [])
         overhead = estimate_tokens(
             empty_prompt, model=config.model, provider=config.provider
         )
         token_budget = max(
-            1024,
-            int(config.max_context_tokens)
-            - int(config.max_tokens or 0)
-            - safety
-            - overhead,
+            1,
+            context_limit - int(config.max_tokens or 0) - safety - overhead,
         )
 
     for result in results:
@@ -3744,9 +3743,7 @@ def _chunk_probe_results(
             or (
                 token_budget
                 and next_token_count
-                > int(config.max_context_tokens)
-                - int(config.max_tokens or 0)
-                - max(1024, min(8192, int(config.max_context_tokens) // 20))
+                > context_limit - int(config.max_tokens or 0) - safety
             )
         ):
             batches.append(current_batch)
@@ -4363,6 +4360,213 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 
 TOOL_RESULT_CHAR_LIMIT = 8_000
 CONTEXT_TOOL_RESULT_CHAR_LIMIT = 12_000
+CONTEXT_JOURNAL_CHAR_LIMIT = 16_000
+_COMPACTION_SUFFIX_COUNTS = (32, 16, 8, 4, 2, 0)
+# A tool call needs room for a JSON action and its arguments. Keep this much
+# output space even when the configured context window is nearly full.
+MIN_AGENT_OUTPUT_TOKENS = 1_024
+
+
+def _redact_compaction_text(value: str) -> str:
+    """Remove credentials from text copied into the short-lived journal."""
+    text = str(value or "")
+    # Keep the key and redact only its value.  The patterns intentionally cover
+    # both JSON-ish input and the ``key=value`` strings used in journal lines.
+    text = re.sub(
+        r"(?i)([\"']?(?:authorization|proxy-authorization)[\"']?\s*[:=]\s*[\"']?(?:bearer|basic)\s+)[^\"'\s,;}]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|cookie|session(?:[_-]?id)?|credential)[\"']?\s*[:=]\s*[\"']?)[^\"'\s,;}]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)([?&](?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|key)=)[^&#\s]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    # Common fixed-format credentials should not be copied even when they have
+    # no descriptive key nearby.
+    text = re.sub(r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED]", text)
+    return text
+
+
+def _canonical_content_block(block: Any) -> dict[str, Any] | Any:
+    """Convert provider SDK blocks to the dict form used in checkpoints."""
+    if isinstance(block, dict):
+        return block
+    dumped: Any = None
+    model_dump = getattr(block, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(exclude_none=False)
+        except TypeError:
+            dumped = model_dump()
+        except Exception:
+            dumped = None
+    if not isinstance(dumped, dict):
+        to_dict = getattr(block, "to_dict", None)
+        if callable(to_dict):
+            try:
+                dumped = to_dict()
+            except Exception:
+                dumped = None
+    if not isinstance(dumped, dict):
+        dumped = {}
+        for key in (
+            "type",
+            "id",
+            "name",
+            "input",
+            "text",
+            "thinking",
+            "signature",
+            "data",
+            "citations",
+        ):
+            value = getattr(block, key, None)
+            if value is not None:
+                dumped[key] = value
+    return dumped or block
+
+
+def _content_blocks(message: dict) -> list[Any]:
+    content = message.get("content")
+    if isinstance(content, list):
+        return [_canonical_content_block(block) for block in content]
+    return []
+
+
+def _journal_from_first_message(message: dict) -> tuple[dict, list[str]]:
+    """Return a first message without old journals and their useful lines."""
+    first = dict(message)
+    old_lines: list[str] = []
+
+    def clean_text(value: str) -> str:
+        nonlocal old_lines
+        matches = re.findall(
+            r"\[CONTEXT JOURNAL:[^\n]*\n?(.*?)(?=\n\[CONTEXT JOURNAL:|\Z)",
+            value,
+            flags=re.DOTALL,
+        )
+        for match in matches:
+            old_lines.extend(
+                _redact_compaction_text(line.strip())
+                for line in match.splitlines()
+                if line.strip()
+            )
+        return re.sub(
+            r"\s*\[CONTEXT JOURNAL:[^\n]*\n?.*?(?=\n\[CONTEXT JOURNAL:|\Z)",
+            "",
+            value,
+            flags=re.DOTALL,
+        ).strip()
+
+    content = first.get("content")
+    if isinstance(content, str):
+        first["content"] = clean_text(content)
+    elif isinstance(content, list):
+        cleaned: list[Any] = []
+        for block in content:
+            block = _canonical_content_block(block)
+            if isinstance(block, dict) and block.get("type") == "text":
+                block = dict(block)
+                block["text"] = clean_text(str(block.get("text") or ""))
+                if block["text"]:
+                    cleaned.append(block)
+            else:
+                cleaned.append(block)
+        first["content"] = cleaned
+    return first, old_lines
+
+
+def _tool_block_ids(message: dict, block_type: str) -> list[str]:
+    content = _content_blocks(message)
+    key = "id" if block_type == "tool_use" else "tool_use_id"
+    return [
+        str(block.get(key))
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == block_type
+        and block.get(key)
+    ]
+
+
+def _protocol_valid_suffix(messages: list[dict], start: int) -> bool:
+    """Check tool calls are assistant turns followed by matching user results."""
+    transcript = messages[start:]
+    for index, message in enumerate(transcript):
+        role = message.get("role")
+        blocks = _content_blocks(message)
+        use_ids = {
+            tool_id for tool_id in _tool_block_ids(message, "tool_use") if tool_id
+        }
+        result_ids = {
+            tool_id for tool_id in _tool_block_ids(message, "tool_result") if tool_id
+        }
+        if use_ids and role != "assistant":
+            return False
+        if result_ids and role != "user":
+            return False
+        if not use_ids and not result_ids:
+            continue
+        if use_ids:
+            if index + 1 >= len(transcript):
+                return False
+            next_message = transcript[index + 1]
+            if next_message.get("role") != "user":
+                return False
+            next_result_ids = set(_tool_block_ids(next_message, "tool_result"))
+            if use_ids != next_result_ids:
+                return False
+        if result_ids:
+            if index == 0 or transcript[index - 1].get("role") != "assistant":
+                return False
+            previous_use_ids = set(_tool_block_ids(transcript[index - 1], "tool_use"))
+            if previous_use_ids != result_ids:
+                return False
+        # A malformed block type in a content list should not make an otherwise
+        # valid exchange appear complete. This also keeps model SDK objects
+        # from being silently ignored by the protocol check.
+        if any(
+            isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}
+            for block in blocks
+        ) and not (use_ids or result_ids):
+            return False
+    return True
+
+
+def _suffix_start(messages: list[dict], suffix_count: int) -> int:
+    """Choose the earliest valid boundary within the requested recent suffix."""
+    if suffix_count <= 0:
+        return len(messages)
+    threshold = max(1, len(messages) - suffix_count)
+    valid = [
+        start
+        for start in range(1, len(messages) + 1)
+        if _protocol_valid_suffix(messages, start)
+    ]
+    if not valid:
+        return len(messages)
+    retained = [start for start in valid if start >= threshold]
+    if retained:
+        return min(retained)
+    # A threshold can land on the user-side half of a tool exchange. Include
+    # the preceding assistant call rather than dropping a completed pair.
+    return max(valid)
+
+
+def _fit_text_to_chars(text: str, budget: int) -> str:
+    if budget <= 0 or len(text) <= budget:
+        return text
+    marker = "\n[… evidence excerpt trimmed …]\n"
+    if budget <= len(marker):
+        return marker[:budget]
+    available = budget - len(marker)
+    left = available // 2
+    return text[:left] + marker + text[-(available - left) :]
 
 
 def compact_agentic_messages(
@@ -4376,30 +4580,28 @@ def compact_agentic_messages(
     model: str | None = None,
     provider: str = "openai",
     recent_messages: int = 32,
-) -> tuple[list[dict], dict[str, int] | None]:
+) -> tuple[list[dict], dict[str, Any] | None]:
     """Compact completed tool exchanges while preserving protocol-valid pairs.
 
     The first user brief is retained. Older assistant/tool-result pairs become a
     short mechanical journal, and a recent suffix remains verbatim. Raw secrets
     and full response bodies are deliberately excluded from the journal.
     """
+    if not messages:
+        return messages, None
     before_chars = len(json.dumps(messages, default=str))
-    before_tokens = (
-        _estimate_tools_call_tokens(
-            system_message,
-            messages,
-            tools=tools,
-            model=model,
-            provider=provider,
-        )
-        if max_context_tokens > 0
-        else 0
+    before_tokens = _estimate_tools_call_tokens(
+        system_message,
+        messages,
+        tools=tools,
+        model=model,
+        provider=provider,
     )
     safety_tokens = (
         max(1024, min(8192, max_context_tokens // 20)) if max_context_tokens else 0
     )
     input_budget = (
-        max(1024, max_context_tokens - max_output_tokens - safety_tokens)
+        max(1, max_context_tokens - max_output_tokens - safety_tokens)
         if max_context_tokens
         else 0
     )
@@ -4408,23 +4610,19 @@ def compact_agentic_messages(
         if max_context_tokens
         else before_chars > max_context_chars
     )
-    if not over_limit or len(messages) < 8:
+    if not over_limit:
         return messages, None
 
-    def _build(suffix_count: int, journal_limit: int) -> tuple[list[dict], int]:
-        suffix_start = max(1, len(messages) - max(4, suffix_count))
-        while (
-            suffix_start < len(messages)
-            and messages[suffix_start].get("role") != "assistant"
-        ):
-            suffix_start += 1
-        if suffix_start >= len(messages) - 1:
-            return messages, 0
+    first, old_journal_lines = _journal_from_first_message(messages[0])
+
+    def _build(
+        suffix_count: int, journal_limit: int
+    ) -> tuple[list[dict], dict[str, int]]:
+        suffix_start = _suffix_start(messages, suffix_count)
         removed = messages[1:suffix_start]
-        journal_lines: list[str] = []
+        journal_lines: list[str] = list(old_journal_lines)
         for message in removed:
-            content = message.get("content")
-            blocks = content if isinstance(content, list) else []
+            blocks = _content_blocks(message)
             for block in blocks:
                 if not isinstance(block, dict):
                     continue
@@ -4444,52 +4642,88 @@ def compact_agentic_messages(
                     ):
                         value = tool_input.get(key)
                         if value not in (None, ""):
-                            details.append(f"{key}={str(value)[:240]}")
+                            details.append(
+                                f"{key}={_redact_compaction_text(str(value)[:240])}"
+                            )
                     journal_lines.append("- " + " ".join(details))
                 elif block.get("type") == "tool_result":
-                    result = str(block.get("content") or "").replace("\n", " ").strip()
+                    result = (
+                        _redact_compaction_text(str(block.get("content") or ""))
+                        .replace("\n", " ")
+                        .strip()
+                    )
                     if result:
                         journal_lines.append(f"  result: {result[:360]}")
-        journal = (
-            f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
-            "Use context tools for full durable evidence.]\n"
-            + "\n".join(journal_lines[-journal_limit:])
-        )[:16_000]
-        first = dict(messages[0])
-        first_content = first.get("content")
-        if isinstance(first_content, list):
-            first["content"] = list(first_content) + [{"type": "text", "text": journal}]
-        else:
-            first["content"] = f"{first_content or ''}\n\n{journal}"
-        return [first, *messages[suffix_start:]], len(removed)
+        built_first = dict(first)
+        journal = ""
+        if journal_lines:
+            journal_text = "\n".join(journal_lines[-journal_limit:])
+            journal = (
+                f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
+                "Use context tools for full durable evidence.]\n" + journal_text
+            )
+            journal = _fit_text_to_chars(journal, CONTEXT_JOURNAL_CHAR_LIMIT)
+            first_content = built_first.get("content")
+            if isinstance(first_content, list):
+                built_first["content"] = list(first_content) + [
+                    {"type": "text", "text": journal}
+                ]
+            else:
+                built_first["content"] = f"{first_content or ''}\n\n{journal}"
+        return [
+            built_first,
+            *(copy.deepcopy(message) for message in messages[suffix_start:]),
+        ], {
+            "removed_messages": len(removed),
+            "suffix_messages": len(messages) - suffix_start,
+            "journal_entries": len(journal_lines[-journal_limit:]),
+            "journal_chars": len(journal),
+            "suffix_start": suffix_start,
+        }
 
-    compacted, removed_count = _build(recent_messages, 80)
+    compacted, build_stats = _build(recent_messages, 80)
+    removed_count = build_stats["removed_messages"]
     truncated_tool_results = 0
-    if max_context_tokens:
-        for suffix_count, journal_limit in ((16, 60), (8, 40), (4, 20)):
-            estimated = _estimate_tools_call_tokens(
-                system_message, compacted, tools=tools, model=model, provider=provider
-            )
-            if estimated <= input_budget:
-                break
-            compacted, removed_count = _build(suffix_count, journal_limit)
-        if (
+    fit_passes = 0
+    suffix_counts = list(dict.fromkeys((recent_messages, *_COMPACTION_SUFFIX_COUNTS)))
+
+    def _estimate(candidate: list[dict]) -> int:
+        return (
             _estimate_tools_call_tokens(
-                system_message, compacted, tools=tools, model=model, provider=provider
+                system_message, candidate, tools=tools, model=model, provider=provider
             )
-            > input_budget
+            if max_context_tokens
+            else len(json.dumps(candidate, default=str))
+        )
+
+    # Prefer keeping the most recent completed exchanges. If they are still too
+    # large, trim their results in progressively smaller passes, then evict old
+    # pairs by moving the suffix boundary back to 8, 4, 2, and finally 0.
+    selected_fit = False
+    for suffix_count in suffix_counts:
+        journal_limit = max(8, min(80, suffix_count * 2 or 8))
+        candidate, candidate_stats = _build(suffix_count, journal_limit)
+        for result_budget in (
+            max(128, input_budget // 8),
+            max(64, input_budget // 16),
+            64,
         ):
-            compacted = [dict(message) for message in compacted]
-            for index in range(1, len(compacted)):
-                message = compacted[index]
+            estimated = _estimate(candidate)
+            if not max_context_tokens and estimated <= max_context_chars:
+                selected_fit = True
+                break
+            if max_context_tokens and estimated <= input_budget:
+                selected_fit = True
+                break
+            changed = False
+            for index in range(1, len(candidate)):
+                message = candidate[index]
                 content = message.get("content")
                 if not isinstance(content, list):
                     continue
                 blocks = [
-                    dict(block) if isinstance(block, dict) else block
-                    for block in content
+                    copy.deepcopy(_canonical_content_block(block)) for block in content
                 ]
-                changed = False
                 for block in blocks:
                     if (
                         not isinstance(block, dict)
@@ -4497,42 +4731,40 @@ def compact_agentic_messages(
                     ):
                         continue
                     result = block.get("content")
-                    if not isinstance(result, str) or len(result) < 256:
+                    if not isinstance(result, str) or len(result) < 64:
                         continue
-                    block["content"] = _fit_text_to_tokens(
-                        result,
-                        max(128, input_budget // 8),
-                        model=model,
-                    )
-                    changed = True
-                    truncated_tool_results += 1
-                if changed:
+                    if max_context_tokens:
+                        fitted = _fit_text_to_tokens(result, result_budget, model=model)
+                    else:
+                        fitted = _fit_text_to_chars(
+                            result, max(32, max_context_chars // 8)
+                        )
+                    if fitted != result:
+                        block["content"] = fitted
+                        changed = True
+                        truncated_tool_results += 1
+                if blocks != content:
                     message["content"] = blocks
-                if (
-                    _estimate_tools_call_tokens(
-                        system_message,
-                        compacted,
-                        tools=tools,
-                        model=model,
-                        provider=provider,
-                    )
-                    <= input_budget
-                ):
-                    break
-    if removed_count == 0:
-        return messages, None
+            fit_passes += 1
+            if not changed:
+                break
+        compacted, build_stats = candidate, candidate_stats
+        removed_count = build_stats["removed_messages"]
+        if selected_fit:
+            break
+
+    after_estimate = _estimate(compacted)
     after_chars = len(json.dumps(compacted, default=str))
-    after_tokens = (
-        _estimate_tools_call_tokens(
-            system_message,
-            compacted,
-            tools=tools,
-            model=model,
-            provider=provider,
-        )
-        if max_context_tokens
-        else 0
+    after_tokens = _estimate_tools_call_tokens(
+        system_message,
+        compacted,
+        tools=tools,
+        model=model,
+        provider=provider,
     )
+    changed = compacted != messages
+    if not changed or (after_tokens >= before_tokens and after_chars >= before_chars):
+        return messages, None
     return compacted, {
         "before_chars": before_chars,
         "after_chars": after_chars,
@@ -4542,6 +4774,15 @@ def compact_agentic_messages(
         "removed_messages": removed_count,
         "truncated_tool_results": truncated_tool_results,
         "remaining_messages": len(compacted),
+        "suffix_messages": build_stats["suffix_messages"],
+        "journal_entries": build_stats["journal_entries"],
+        "journal_chars": build_stats["journal_chars"],
+        "fit_passes": fit_passes,
+        "estimated_fit": selected_fit,
+        "protocol_valid": _protocol_valid_suffix(compacted, 1),
+        "compaction_applied": True,
+        "changed": True,
+        "after_estimate": after_estimate,
     }
 
 
@@ -4550,7 +4791,7 @@ def compact_messages_for_config(
     system_message: str,
     messages: list[dict],
     tools: list[dict] | None = None,
-) -> tuple[list[dict], dict[str, int] | None]:
+) -> tuple[list[dict], dict[str, Any] | None]:
     """Apply the configured model context budget to a live transcript."""
     compacted, stats = compact_agentic_messages(
         messages,
@@ -4567,7 +4808,7 @@ def compact_messages_for_config(
     if context_limit:
         safety = max(1024, min(8192, context_limit // 20))
         budget = max(
-            1024, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety
+            1, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety
         )
         estimated = _estimate_tools_call_tokens(
             system_message,
@@ -4667,35 +4908,236 @@ def _estimate_tools_call_tokens(
     covers role/message separators.
     """
     parts: list[str] = [system_message or ""]
+    image_count = 0
+
+    def _image_without_payload(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    f"<{key}:{len(item)} bytes>"
+                    if key in {"data", "bytes"}
+                    and isinstance(item, (str, bytes, bytearray))
+                    else (
+                        f"<base64 image:{len(item)} bytes>"
+                        if key == "url"
+                        and isinstance(item, str)
+                        and item.startswith("data:")
+                        else _image_without_payload(item)
+                    )
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [_image_without_payload(item) for item in value]
+        return value
+
     for m in messages:
         content = m.get("content")
         if isinstance(content, str):
             parts.append(content)
         elif isinstance(content, list):
-            for block in content:
+            for block in _content_blocks(m):
                 if isinstance(block, str):
                     parts.append(block)
                 elif isinstance(block, dict):
-                    # text / tool_result content / tool_use input — stringify cheaply.
-                    parts.append(
-                        str(
-                            block.get("text")
-                            or block.get("content")
-                            or block.get("input")
-                            or ""
+                    block_type = str(block.get("type") or "")
+                    if block_type in {"image", "image_url"} or "image_url" in block:
+                        image_count += 1
+                        # Image bytes are not text tokens. Count the modality
+                        # with the same provider-specific allowance used by
+                        # estimate_tokens(), while retaining its small wrapper.
+                        parts.append(
+                            json.dumps(
+                                {
+                                    "type": block_type,
+                                    **_image_without_payload(block),
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            )
                         )
-                    )
+                    else:
+                        # Count the complete canonical block. In particular,
+                        # this preserves tool IDs/names, structured results,
+                        # OpenAI reasoning details, Bedrock signatures, and
+                        # provider diagnostics that the old value-only estimate
+                        # discarded.
+                        parts.append(
+                            json.dumps(
+                                block,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            )
+                        )
         elif content is not None:
-            parts.append(str(content))
+            parts.append(
+                json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+                if isinstance(content, (dict, list))
+                else str(content)
+            )
     if tools:
         parts.append(
             json.dumps(tools, sort_keys=True, separators=(",", ":"), default=str)
         )
     estimated = estimate_tokens("\n".join(parts), provider=provider, model=model)
+    if image_count:
+        estimated += image_count * estimate_tokens(
+            "",
+            screenshot_b64="image",
+            provider=provider,
+            model=model,
+        )
     # Provider wire formats add a few tokens per message and a wrapper around
     # the tool list. Keep this explicit rather than hiding another character
     # heuristic inside the tokenizer count.
     return estimated + 8 + (4 * len(messages)) + (8 if tools else 0)
+
+
+def _copy_config_with_max_tokens(config: Any, max_tokens: int) -> Any:
+    """Return a request-only config copy without changing saved settings."""
+    return config.model_copy(update={"max_tokens": int(max_tokens)})
+
+
+def _context_budget_for_request(
+    config: Any, input_tokens: int, *, context_limit: int | None = None
+) -> dict[str, int]:
+    """Calculate the output allowance for one request.
+
+    ``max_tokens`` is a saved profile setting, but a long individual turn may
+    leave less room in the model window. The effective value is request-local.
+    """
+    configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
+    minimum_output_tokens = min(configured, MIN_AGENT_OUTPUT_TOKENS)
+    context_limit = max(
+        0,
+        int(
+            context_limit
+            if context_limit is not None
+            else (getattr(config, "max_context_tokens", 0) or 0)
+        ),
+    )
+    if not context_limit:
+        return {
+            "context_limit_tokens": 0,
+            "input_tokens": max(0, int(input_tokens)),
+            "safety_tokens": 0,
+            "available_output_tokens": configured,
+            "configured_max_output_tokens": configured,
+            "effective_max_output_tokens": configured,
+            "configured_max_tokens": configured,
+            "effective_max_tokens": configured,
+        }
+
+    safety = max(1024, min(8192, context_limit // 20))
+    available = context_limit - max(0, int(input_tokens)) - safety
+    if available < minimum_output_tokens:
+        raise LLMContextLimitError(
+            "The configured context window cannot fit this request with the "
+            f"minimum {minimum_output_tokens:,}-token agent response "
+            f"({input_tokens:,} input tokens estimated; "
+            f"{max(0, available):,} output tokens available)."
+        )
+    return {
+        "context_limit_tokens": context_limit,
+        "input_tokens": max(0, int(input_tokens)),
+        "safety_tokens": safety,
+        "available_output_tokens": available,
+        "configured_max_output_tokens": configured,
+        "effective_max_output_tokens": min(configured, available),
+        "configured_max_tokens": configured,
+        "effective_max_tokens": min(configured, available),
+    }
+
+
+def _fit_plain_prompt_to_context(
+    config: Any,
+    prompt: str,
+    system_prompt: str | None,
+) -> tuple[Any, str, dict[str, int]]:
+    """Fit a plain request while keeping the system prompt intact."""
+    system = system_prompt or ""
+    combined = f"{system}\n\n{prompt}" if system else prompt
+    context_limit = max(0, int(getattr(config, "max_context_tokens", 0) or 0))
+    if not context_limit:
+        configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
+        return (
+            config,
+            combined,
+            {
+                "context_limit_tokens": 0,
+                "input_tokens": estimate_tokens(
+                    combined,
+                    provider=getattr(config.provider, "value", config.provider),
+                    model=config.model,
+                ),
+                "configured_max_output_tokens": configured,
+                "effective_max_output_tokens": configured,
+                "configured_max_tokens": configured,
+                "effective_max_tokens": configured,
+            },
+        )
+
+    configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
+    minimum_output_tokens = min(configured, MIN_AGENT_OUTPUT_TOKENS)
+    initial_input = estimate_tokens(
+        combined,
+        provider=getattr(config.provider, "value", config.provider),
+        model=config.model,
+    )
+    try:
+        budget = _context_budget_for_request(config, initial_input)
+        if budget["effective_max_output_tokens"] == configured:
+            return config, combined, budget
+    except LLMContextLimitError:
+        pass
+
+    safety = max(1024, min(8192, context_limit // 20))
+    input_limit = context_limit - safety - minimum_output_tokens
+    fixed = f"{system}\n\n" if system else ""
+    fixed_tokens = estimate_tokens(
+        fixed,
+        provider=getattr(config.provider, "value", config.provider),
+        model=config.model,
+    )
+    if fixed_tokens > input_limit:
+        raise LLMContextLimitError(
+            "The configured context window cannot fit the system prompt with "
+            f"the minimum {minimum_output_tokens:,}-token response "
+            f"({fixed_tokens:,} system tokens estimated; "
+            f"{max(0, input_limit):,} input tokens available)."
+        )
+
+    user_limit = input_limit - fixed_tokens
+    provider = getattr(config.provider, "value", config.provider)
+    fitted_prompt = _fit_text_to_tokens(prompt, user_limit, model=config.model)
+    fitted = f"{fixed}{fitted_prompt}" if fixed else fitted_prompt
+    fitted_input = estimate_tokens(fitted, provider=provider, model=config.model)
+    if fitted_input > input_limit:
+        # Very small budgets cannot hold the normal excerpt marker. Preserve the
+        # system text and use a deterministic prefix in that case.
+        lo, hi = 0, len(prompt)
+        best = ""
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate_prompt = prompt[:mid]
+            candidate = f"{fixed}{candidate_prompt}" if fixed else candidate_prompt
+            if (
+                estimate_tokens(candidate, provider=provider, model=config.model)
+                <= input_limit
+            ):
+                best = candidate_prompt
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        fitted = f"{fixed}{best}" if fixed else best
+        fitted_input = estimate_tokens(fitted, provider=provider, model=config.model)
+    budget = _context_budget_for_request(config, fitted_input)
+    request_config = _copy_config_with_max_tokens(
+        config, budget["effective_max_output_tokens"]
+    )
+    return request_config, fitted, budget
 
 
 async def _call_with_tools_rate_limited(
@@ -4819,9 +5261,7 @@ async def stream_tools_call(
     async def _run() -> tuple[list[dict], str, Any]:
         token = _tool_text_delta_var.set(_on_text)
         try:
-            return await _call_with_tools(
-                config, system_message, messages, tools=tools
-            )
+            return await _call_with_tools(config, system_message, messages, tools=tools)
         finally:
             _tool_text_delta_var.reset(token)
 
@@ -5583,9 +6023,7 @@ async def _call_with_tools_impl(
                     function = getattr(tool_delta, "function", None)
                     if function is not None:
                         part["name"] += getattr(function, "name", None) or ""
-                        part["arguments"] += (
-                            getattr(function, "arguments", None) or ""
-                        )
+                        part["arguments"] += getattr(function, "arguments", None) or ""
             blocks: list[dict[str, Any]] = []
             reasoning_text = "".join(reasoning_parts)
             if reasoning_text:
@@ -5777,7 +6215,9 @@ async def _call_with_tools_impl(
                 config=generate_config,
             )
             async for chunk in g_stream:
-                usage_metadata = getattr(chunk, "usage_metadata", None) or usage_metadata
+                usage_metadata = (
+                    getattr(chunk, "usage_metadata", None) or usage_metadata
+                )
                 candidates = getattr(chunk, "candidates", None) or []
                 parts = candidates[0].content.parts if candidates else []
                 for part in parts:
@@ -6083,24 +6523,24 @@ async def thinking_agentic_loop(
             context_limit = int(
                 max_context_tokens or getattr(config, "max_context_tokens", 0) or 0
             )
-            if context_limit:
-                safety = max(1024, min(8192, context_limit // 20))
-                budget = max(
-                    1024,
-                    context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety,
+            estimated = _estimate_tools_call_tokens(
+                system_message,
+                messages,
+                tools=tools if tools is not None else THINKING_AGENT_TOOLS,
+                model=config.model,
+                provider=str(getattr(config.provider, "value", config.provider)),
+            )
+            budget = _context_budget_for_request(
+                config, estimated, context_limit=context_limit
+            )
+            effective_config = (
+                _copy_config_with_max_tokens(
+                    config, budget["effective_max_output_tokens"]
                 )
-                estimated = _estimate_tools_call_tokens(
-                    system_message,
-                    messages,
-                    tools=tools if tools is not None else THINKING_AGENT_TOOLS,
-                    model=config.model,
-                    provider=str(getattr(config.provider, "value", config.provider)),
-                )
-                if estimated > budget:
-                    raise LLMContextLimitError(
-                        f"The configured context window cannot fit the fixed prompt and current turn "
-                        f"({estimated:,} input tokens estimated; {budget:,} available)."
-                    )
+                if budget["effective_max_output_tokens"]
+                != budget["configured_max_output_tokens"]
+                else config
+            )
 
             if emit_fn:
                 try:
@@ -6115,6 +6555,19 @@ async def thinking_agentic_loop(
                             "data": {
                                 "step": tool_call_count + 1,
                                 "mode": "agentic",
+                                "context_limit_tokens": budget["context_limit_tokens"],
+                                "input_tokens": budget["input_tokens"],
+                                "safety_tokens": budget["safety_tokens"],
+                                "configured_max_output_tokens": budget[
+                                    "configured_max_output_tokens"
+                                ],
+                                "effective_max_output_tokens": budget[
+                                    "effective_max_output_tokens"
+                                ],
+                                "configured_max_tokens": budget[
+                                    "configured_max_tokens"
+                                ],
+                                "effective_max_tokens": budget["effective_max_tokens"],
                             },
                         }
                     )
@@ -6136,6 +6589,23 @@ async def thinking_agentic_loop(
                                 "data": {
                                     "step": tool_call_count + 1,
                                     "message_count": len(messages),
+                                    "context_limit_tokens": budget[
+                                        "context_limit_tokens"
+                                    ],
+                                    "input_tokens": budget["input_tokens"],
+                                    "safety_tokens": budget["safety_tokens"],
+                                    "configured_max_output_tokens": budget[
+                                        "configured_max_output_tokens"
+                                    ],
+                                    "effective_max_output_tokens": budget[
+                                        "effective_max_output_tokens"
+                                    ],
+                                    "configured_max_tokens": budget[
+                                        "configured_max_tokens"
+                                    ],
+                                    "effective_max_tokens": budget[
+                                        "effective_max_tokens"
+                                    ],
                                 },
                             }
                         )
@@ -6144,7 +6614,9 @@ async def thinking_agentic_loop(
                 _step_no = tool_call_count + 1
                 _t_llm = time.monotonic()
                 _llm_fut = asyncio.ensure_future(
-                    _call_with_tools(config, system_message, messages, tools=tools)
+                    _call_with_tools(
+                        effective_config, system_message, messages, tools=tools
+                    )
                 )
                 while True:
                     _done, _ = await asyncio.wait({_llm_fut}, timeout=30)
@@ -6248,6 +6720,13 @@ async def thinking_agentic_loop(
                 "message_count": len(messages),
                 "context_chars": len(json.dumps(messages, default=str)),
                 "provider_diagnostics": provider_diagnostics,
+                "context_limit_tokens": budget["context_limit_tokens"],
+                "input_tokens": budget["input_tokens"],
+                "safety_tokens": budget["safety_tokens"],
+                "configured_max_output_tokens": budget["configured_max_output_tokens"],
+                "effective_max_output_tokens": budget["effective_max_output_tokens"],
+                "configured_max_tokens": budget["configured_max_tokens"],
+                "effective_max_tokens": budget["effective_max_tokens"],
             }
             if not tool_use_blocks:
                 response_data["no_tool_retry"] = no_tool_attempt
@@ -6284,12 +6763,16 @@ async def thinking_agentic_loop(
             # Append the assistant turn to the growing conversation. Preserve a
             # non-empty marker when a provider returns no usable blocks so the
             # checkpoint itself remains valid for every messages API on resume.
-            assistant_content = raw_content or [
-                {
-                    "type": "text",
-                    "text": "[The model returned no usable content blocks.]",
-                }
-            ]
+            assistant_content = (
+                [_canonical_content_block(block) for block in raw_content]
+                if isinstance(raw_content, list) and raw_content
+                else [
+                    {
+                        "type": "text",
+                        "text": "[The model returned no usable content blocks.]",
+                    }
+                ]
+            )
             messages.append({"role": "assistant", "content": assistant_content})
 
             # Save the model turn before any requested tool runs. A process can

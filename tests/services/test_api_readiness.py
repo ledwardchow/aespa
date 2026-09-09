@@ -8,6 +8,36 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel
 
+
+def test_readiness_prompt_summaries_bound_metadata():
+    from aespa.models import ApiCollection, ApiEndpoint
+    from aespa.services import api_readiness
+
+    endpoint = ApiEndpoint(
+        collection_id=1,
+        method="GET",
+        path="/" + "p" * 5_000,
+        summary="s" * 5_000,
+        security_json=json.dumps({"scheme": "x" * 5_000}),
+        tags_json=json.dumps(["tag-" + "x" * 5_000]),
+    )
+    summary = api_readiness._ep_summary(endpoint)
+    prompt = api_readiness._build_prompt(
+        ApiCollection(name="c" * 5_000, base_url="https://example.test/" + "b" * 5_000),
+        [summary],
+        [],
+        {"BearerAuth": {"description": "x" * 5_000}},
+        1,
+        security_omitted=4_000,
+    )
+
+    assert len(prompt) < 12_000
+    assert "omitted_chars" in prompt
+    assert len(summary["path"]) < 600
+    assert "API Collection: " + "c" * 300 in prompt
+    assert "Base URL: https://example.test/" in prompt
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 

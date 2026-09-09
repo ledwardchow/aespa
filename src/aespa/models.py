@@ -478,7 +478,7 @@ class LLMConfig(SQLModel, table=True):
     # Denormalized from the provider (see LLMProviderConfig.project_id).
     project_id: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")
-    max_tokens: int = Field(default=70000)
+    max_tokens: int = Field(default=16384)
     # Total model context window, including the requested output allowance.
     max_context_tokens: int = Field(
         default=200000,
@@ -2026,9 +2026,7 @@ class CampaignValidationCase(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     campaign_id: int = Field(foreign_key="assessment_campaign.id", index=True)
     mapping_id: int = Field(foreign_key="lead_target_mapping.id", index=True)
-    target_member_id: int = Field(
-        foreign_key="campaign_target_member.id", index=True
-    )
+    target_member_id: int = Field(foreign_key="campaign_target_member.id", index=True)
     origin_lead_id: int = Field(foreign_key="scan_lead.id", index=True)
     assertion_key: str = Field(default="default", index=True)
     static_path_json: str = Field(default="{}")

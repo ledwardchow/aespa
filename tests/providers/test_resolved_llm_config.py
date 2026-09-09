@@ -8,9 +8,20 @@ import pytest
 from sqlmodel import Session
 
 from aespa.models import LLMConfig, LLMProviderConfig
-from aespa.schemas import LLMConfigIn
+from aespa.schemas import LLMConfigIn, LLMExportProfileItem
 from aespa.services import settings
 from aespa.services.resolved_llm_config import ResolvedLLMConfig
+
+
+def test_new_profile_defaults_use_bounded_output_limit():
+    assert LLMConfig().max_tokens == 16_384
+    assert LLMConfigIn(provider_id=1, model="test-model").max_tokens == 16_384
+    assert (
+        LLMExportProfileItem(
+            name="Profile", provider_name="Provider", model="test-model"
+        ).max_tokens
+        == 16_384
+    )
 
 
 def test_resolving_and_serializing_does_not_change_saved_profile(db_session: Session):

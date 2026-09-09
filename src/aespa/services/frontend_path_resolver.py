@@ -17,6 +17,10 @@ Do not add selectors, URLs, routes, request fields, identifiers, or evidence IDs
 that are not present in the supplied evidence. If the evidence is insufficient,
 leave the relevant field unchanged or add a proof gap."""
 
+_MAX_REWRITE_PATH_CHARS = 12_000
+_MAX_REWRITE_TEXT_CHARS = 600
+_MAX_REWRITE_EVIDENCE_ID_CHARS = 256
+
 
 def _route(value: str | None) -> str:
     if not value:
@@ -44,9 +48,12 @@ def _request_method_path(value: dict) -> tuple[str, str]:
     frontend = value.get("frontend_entrypoint")
     if isinstance(frontend, dict):
         role = str(frontend.get("request_role") or "").strip().casefold()
-        if role in {"browser_request", "browser", "frontend"} or frontend.get(
-            "frontend"
-        ) or frontend.get("ui_route") or frontend.get("trigger"):
+        if (
+            role in {"browser_request", "browser", "frontend"}
+            or frontend.get("frontend")
+            or frontend.get("ui_route")
+            or frontend.get("trigger")
+        ):
             return (
                 str(frontend.get("method") or "").upper(),
                 _route(str(frontend.get("path") or frontend.get("url") or "")),
@@ -106,10 +113,7 @@ def _route_matches(observed: str, approved: str) -> bool:
     if len(approved_parts) != len(observed_parts):
         return False
     return all(
-        (
-            approved_part.startswith("{")
-            and approved_part.endswith("}")
-        )
+        (approved_part.startswith("{") and approved_part.endswith("}"))
         or approved_part.startswith(":")
         or approved_part == observed_part
         for approved_part, observed_part in zip(approved_parts, observed_parts)
@@ -133,7 +137,11 @@ def candidate_pages(approved_path: dict, live_context: dict) -> list[dict]:
     """Return pages compatible with the UI route/state in a static path."""
     expected = _surface_value(approved_path, "ui_route")
     expected_route = _route(
-        str(expected.get("path") or expected.get("route") or _approved_entry(approved_path))
+        str(
+            expected.get("path")
+            or expected.get("route")
+            or _approved_entry(approved_path)
+        )
     )
     state_key = str(expected.get("state_key") or "").strip().casefold()
     pages = [item for item in live_context.get("pages", []) if isinstance(item, dict)]
@@ -142,9 +150,13 @@ def candidate_pages(approved_path: dict, live_context: dict) -> list[dict]:
         route = _route(str(page.get("route") or page.get("url") or ""))
         if expected_route and not _route_matches(route, expected_route):
             continue
-        if state_key and state_key not in str(
-            page.get("state_key") or page.get("state_label") or ""
-        ).casefold():
+        if (
+            state_key
+            and state_key
+            not in str(
+                page.get("state_key") or page.get("state_label") or ""
+            ).casefold()
+        ):
             continue
         result.append(page)
     return result
@@ -160,22 +172,37 @@ def candidate_actions(
     legacy = approved_path.get("frontend_entrypoint")
     if not expected and isinstance(legacy, dict):
         expected = legacy
-    expected_detail = expected.get("detail") if isinstance(expected.get("detail"), dict) else {}
-    label = str(
-        expected.get("label") or expected.get("action") or expected_detail.get("label") or ""
-    ).strip().casefold()
-    kind = str(
-        expected.get("action_kind")
-        or expected.get("trigger")
-        or expected_detail.get("action_kind")
-        or expected_detail.get("trigger")
-        or ""
-    ).strip().casefold()
+    expected_detail = (
+        expected.get("detail") if isinstance(expected.get("detail"), dict) else {}
+    )
+    label = (
+        str(
+            expected.get("label")
+            or expected.get("action")
+            or expected_detail.get("label")
+            or ""
+        )
+        .strip()
+        .casefold()
+    )
+    kind = (
+        str(
+            expected.get("action_kind")
+            or expected.get("trigger")
+            or expected_detail.get("action_kind")
+            or expected_detail.get("trigger")
+            or ""
+        )
+        .strip()
+        .casefold()
+    )
     interaction_id = str(expected.get("interaction_id") or "").strip()
     if not label and not kind and not interaction_id and _is_v3(approved_path):
         return []
     page_ids = {page.get("id") for page in pages or []}
-    actions = [item for item in live_context.get("actions", []) if isinstance(item, dict)]
+    actions = [
+        item for item in live_context.get("actions", []) if isinstance(item, dict)
+    ]
     result = []
     for action in actions:
         if page_ids and action.get("page_id") not in page_ids:
@@ -186,7 +213,10 @@ def candidate_actions(
             continue
         if kind and kind != observed_kind:
             continue
-        if interaction_id and str(action.get("interaction_id") or "").strip() != interaction_id:
+        if (
+            interaction_id
+            and str(action.get("interaction_id") or "").strip() != interaction_id
+        ):
             continue
         result.append(action)
     return result
@@ -207,7 +237,9 @@ def candidate_requests(
         method, request_path = _request_method_path(approved_path)
     if not method and not request_path:
         return []
-    expected_detail = expected.get("detail") if isinstance(expected.get("detail"), dict) else {}
+    expected_detail = (
+        expected.get("detail") if isinstance(expected.get("detail"), dict) else {}
+    )
     fields = (
         expected.get("body_fields")
         or expected.get("query_fields")
@@ -216,11 +248,19 @@ def candidate_requests(
     )
     if not isinstance(fields, list):
         transition = approved_path.get("request_transition")
-        fields = transition.get("mutation_points", []) if isinstance(transition, dict) else []
+        fields = (
+            transition.get("mutation_points", [])
+            if isinstance(transition, dict)
+            else []
+        )
     if not fields:
         assertion = approved_path.get("validation_assertion")
-        fields = assertion.get("mutation_points", []) if isinstance(assertion, dict) else []
-    expected_fields = {str(value).strip() for value in fields or [] if str(value).strip()}
+        fields = (
+            assertion.get("mutation_points", []) if isinstance(assertion, dict) else []
+        )
+    expected_fields = {
+        str(value).strip() for value in fields or [] if str(value).strip()
+    }
     page_ids = {page.get("id") for page in pages or []}
     action_ids = {action.get("id") for action in actions or []}
     interaction_ids = {
@@ -228,7 +268,9 @@ def candidate_requests(
         for action in actions or []
         if str(action.get("interaction_id") or "").strip()
     }
-    requests = [item for item in live_context.get("requests", []) if isinstance(item, dict)]
+    requests = [
+        item for item in live_context.get("requests", []) if isinstance(item, dict)
+    ]
     result = []
     for request in requests:
         observed_method = str(request.get("method") or "").upper()
@@ -239,7 +281,10 @@ def candidate_requests(
             continue
         if page_ids and request.get("page_id") not in page_ids:
             continue
-        if expected_session and str(request.get("session_label") or "").strip() != expected_session:
+        if (
+            expected_session
+            and str(request.get("session_label") or "").strip() != expected_session
+        ):
             continue
         request_interaction = str(request.get("interaction_id") or "").strip()
         if interaction_ids and request_interaction not in interaction_ids:
@@ -272,10 +317,14 @@ def rank_live_bindings(
     """Build and rank page/action/browser-request bindings deterministically."""
     expected_action = _surface_value(approved_path, "ui_action")
     has_action_claim = bool(expected_action)
-    if not has_action_claim and isinstance(approved_path.get("frontend_entrypoint"), dict):
+    if not has_action_claim and isinstance(
+        approved_path.get("frontend_entrypoint"), dict
+    ):
         entrypoint = approved_path["frontend_entrypoint"]
         has_action_claim = bool(
-            entrypoint.get("action") or entrypoint.get("trigger") or entrypoint.get("interaction_id")
+            entrypoint.get("action")
+            or entrypoint.get("trigger")
+            or entrypoint.get("interaction_id")
         )
     page_by_id = {page.get("id"): page for page in pages}
     action_candidates = {action.get("id"): action for action in actions}
@@ -293,7 +342,11 @@ def rank_live_bindings(
             )
         ]
         if has_action_claim:
-            page_actions = [action for action in page_actions if action.get("id") in action_candidates]
+            page_actions = [
+                action
+                for action in page_actions
+                if action.get("id") in action_candidates
+            ]
             if not page_actions:
                 continue
         elif not page_actions:
@@ -338,14 +391,23 @@ def resolve_frontend_path(approved_path: dict, live_context: dict) -> dict:
     if _is_v3(path):
         browser = _surface_value(path, "browser_request")
         if not browser.get("method") and not browser.get("path"):
-            return {"status": "missing_frontend_hop", "candidate_count": 0, "candidates": []}
+            return {
+                "status": "missing_frontend_hop",
+                "candidate_count": 0,
+                "candidates": [],
+            }
     elif not isinstance(path.get("request_transition"), dict) or not (
-        path["request_transition"].get("method") or path["request_transition"].get("path")
+        path["request_transition"].get("method")
+        or path["request_transition"].get("path")
     ):
         entrypoint = path.get("frontend_entrypoint")
         role = entrypoint.get("request_role") if isinstance(entrypoint, dict) else None
         if role not in {"browser_request", "browser", "frontend"}:
-            return {"status": "legacy_unresolved", "candidate_count": 0, "candidates": []}
+            return {
+                "status": "legacy_unresolved",
+                "candidate_count": 0,
+                "candidates": [],
+            }
     pages = candidate_pages(path, live_context)
     if _is_v3(path) and _surface_value(path, "ui_route") and not pages:
         return {"status": "wrong_target", "candidate_count": 0, "candidates": []}
@@ -353,7 +415,10 @@ def resolve_frontend_path(approved_path: dict, live_context: dict) -> dict:
     requests = candidate_requests(path, live_context, pages, actions)
     ranked = rank_live_bindings(path, pages, actions, requests)
     if not ranked:
-        if path.get("schema_version") == 3 and path.get("static_trace", {}).get("status") == "complete":
+        if (
+            path.get("schema_version") == 3
+            and path.get("static_trace", {}).get("status") == "complete"
+        ):
             return {
                 "status": "static_complete",
                 "candidate_count": 0,
@@ -506,7 +571,12 @@ def resolve_approved_path(approved_path: dict, live_context: dict) -> dict:
             "evidence_ids": live["evidence_ids"],
         }
     ]
-    if resolution_status in {"unavailable", "crawl_failed", "ambiguous", "static_complete"}:
+    if resolution_status in {
+        "unavailable",
+        "crawl_failed",
+        "ambiguous",
+        "static_complete",
+    }:
         final["dynamic_test"] = (
             "Use the approved frontend route/action path as guidance; verify the "
             "entry point and request before testing because crawl evidence is unavailable."
@@ -546,6 +616,149 @@ def _path_tokens(value: object) -> set[str]:
         )
         if token
     }
+
+
+def _bounded_rewrite_path(path: dict) -> tuple[dict, int]:
+    """Keep rewrite identity and evidence IDs without copying arbitrary JSON."""
+    rendered = json.dumps(path, ensure_ascii=False, separators=(",", ":"))
+    if len(rendered) <= _MAX_REWRITE_PATH_CHARS:
+        return path, 0
+
+    def _bounded_value(value: object, limit: int = _MAX_REWRITE_TEXT_CHARS) -> object:
+        if isinstance(value, str):
+            return value[:limit]
+        value_text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        if len(value_text) <= limit:
+            return value
+        return {
+            "_truncated": True,
+            "preview": value_text[:limit],
+            "omitted_chars": len(value_text) - limit,
+        }
+
+    compact: dict = {}
+    for key in (
+        "schema_version",
+        "perspective",
+        "entry",
+        "dynamic_test",
+        "frontend_entrypoint",
+        "request_transition",
+        "frontend_surface",
+    ):
+        value = path.get(key)
+        if value is None:
+            continue
+        compact[key] = _bounded_value(value)
+    live = path.get("live_frontend_context")
+    if isinstance(live, dict):
+        live_compact = {}
+        for key in (
+            "resolution_status",
+            "crawl_status",
+            "candidate_count",
+            "route",
+            "url",
+            "request",
+            "action",
+            "trigger",
+            "evidence_ids",
+        ):
+            if key not in live:
+                continue
+            value = live[key]
+            if key == "evidence_ids":
+                valid_ids = (
+                    [
+                        item
+                        for item in value
+                        if isinstance(item, str)
+                        and item
+                        and len(item) <= _MAX_REWRITE_EVIDENCE_ID_CHARS
+                    ]
+                    if isinstance(value, list)
+                    else []
+                )
+                live_compact[key] = []
+                live_compact["evidence_ids_omitted"] = max(
+                    0,
+                    (len(value) if isinstance(value, list) else 1) - len(valid_ids),
+                )
+                continue
+            live_compact[key] = _bounded_value(value)
+        compact["live_frontend_context"] = live_compact
+    compact["_truncated"] = True
+
+    def _render() -> str:
+        compact["omitted_chars"] = max(
+            0,
+            len(rendered)
+            - len(json.dumps(compact, ensure_ascii=False, separators=(",", ":"))),
+        )
+        return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+
+    live_compact = compact.get("live_frontend_context")
+    valid_ids = (
+        [
+            item
+            for item in (live.get("evidence_ids") or [])
+            if isinstance(item, str)
+            and item
+            and len(item) <= _MAX_REWRITE_EVIDENCE_ID_CHARS
+        ]
+        if isinstance(live, dict)
+        else []
+    )
+    if isinstance(live, dict) and "evidence_ids" in live:
+        raw_ids = live["evidence_ids"]
+        omitted_id_count = max(
+            0,
+            (len(raw_ids) if isinstance(raw_ids, list) else 1) - len(valid_ids),
+        )
+    else:
+        omitted_id_count = 0
+    if isinstance(live_compact, dict) and valid_ids:
+        for item in valid_ids:
+            live_compact["evidence_ids"].append(item)
+            if len(_render()) > _MAX_REWRITE_PATH_CHARS:
+                live_compact["evidence_ids"].pop()
+                live_compact["evidence_ids_omitted"] += len(valid_ids) - len(
+                    live_compact["evidence_ids"]
+                )
+                break
+
+    # Keep the identity and evidence allow-list if unusually large metadata
+    # still exceeds the cap after field-level bounding.
+    if len(_render()) > _MAX_REWRITE_PATH_CHARS:
+        minimal = {
+            key: _bounded_value(path[key], 300)
+            for key in ("schema_version", "perspective", "entry", "dynamic_test")
+            if key in path
+        }
+        if "live_frontend_context" in compact:
+            minimal["live_frontend_context"] = {
+                key: _bounded_value(live[key], 300)
+                for key in ("resolution_status", "crawl_status", "route", "url")
+                if isinstance(live, dict) and key in live
+            }
+            minimal["live_frontend_context"]["evidence_ids"] = []
+            minimal["live_frontend_context"]["evidence_ids_omitted"] = (
+                len(valid_ids) + omitted_id_count
+            )
+        minimal["_truncated"] = True
+        compact = minimal
+        live_compact = compact.get("live_frontend_context")
+        if isinstance(live_compact, dict):
+            for item in valid_ids:
+                live_compact["evidence_ids"].append(item)
+                if len(_render()) > _MAX_REWRITE_PATH_CHARS:
+                    live_compact["evidence_ids"].pop()
+                    live_compact["evidence_ids_omitted"] += len(valid_ids) - len(
+                        live_compact["evidence_ids"]
+                    )
+                    break
+    _render()
+    return compact, max(0, len(rendered) - _MAX_REWRITE_PATH_CHARS)
 
 
 def _validate_rewrite(
@@ -635,11 +848,17 @@ async def revise_path_with_llm(
         not in {"matched", "resolved"}
     ):
         return final_path, None
+    bounded_approved, approved_omitted = _bounded_rewrite_path(approved_path)
+    bounded_final, final_omitted = _bounded_rewrite_path(final_path)
     prompt = (
         "Approved path and deterministic crawl resolution follow as JSON. "
         "Revise only the frontend test wording and cite the supplied evidence IDs.\n\n"
         + json.dumps(
-            {"approved_path": approved_path, "resolved_path": final_path},
+            {
+                "approved_path": bounded_approved,
+                "resolved_path": bounded_final,
+                "omitted_chars": approved_omitted + final_omitted,
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         )
