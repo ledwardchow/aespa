@@ -826,6 +826,92 @@ def test_session_request_headers_replace_primary_with_selected_identity():
     assert "primary-secret" not in str(headers)
 
 
+def test_anonymous_session_removes_client_default_auth_on_wire():
+    observed_headers = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal observed_headers
+        observed_headers = request.headers
+        return httpx.Response(200, json={"ok": True})
+
+    async def exercise() -> None:
+        anonymous = {"kind": "anonymous", "cookies": {}, "extra_headers": {}}
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            headers={
+                "Authorization": "Bearer primary-secret",
+                "X-Session-Key": "primary-key",
+                "User-Agent": "aespa",
+            },
+            cookies={"session": "primary-cookie"},
+            transport=transport,
+        ) as client:
+            request_headers = scanner._session_request_headers(
+                client.headers,
+                anonymous,
+                default_session={
+                    "extra_headers": {
+                        "Authorization": "Bearer primary-secret",
+                        "X-Session-Key": "primary-key",
+                    }
+                },
+            )
+            with scanner._client_session_cookies(client, anonymous):
+                await client.get(
+                    "https://target.local/private", headers=request_headers
+                )
+            assert client.headers["Authorization"] == "Bearer primary-secret"
+            assert client.cookies["session"] == "primary-cookie"
+
+    asyncio.run(exercise())
+
+    assert observed_headers is not None
+    assert "authorization" not in observed_headers
+    assert "x-session-key" not in observed_headers
+    assert "cookie" not in observed_headers
+
+
+def test_unauthenticated_finding_requires_wire_level_no_auth_evidence():
+    finding = {
+        "title": "Unauthenticated access to account data",
+        "affected_url": "https://target.local/api/accounts",
+        "evidence": "The endpoint returned HTTP 200.",
+    }
+
+    authenticated_result = {
+        finding["affected_url"]: {
+            "sent_authenticated": True,
+            "request_evidence": "Authorization: present\nCookies: none",
+        }
+    }
+    assert scanner._unauthenticated_finding_rejection(finding, authenticated_result)
+
+    anonymous_result = {
+        finding["affected_url"]: {
+            "sent_authenticated": False,
+            "request_evidence": "Authorization: none\nCookies: none",
+        }
+    }
+    assert scanner._unauthenticated_finding_rejection(finding, anonymous_result) is None
+
+    denied_anonymous_result = {
+        finding["affected_url"]: {
+            "sent_authenticated": False,
+            "status": 401,
+            "request_evidence": "Authorization: none\nCookies: none",
+        }
+    }
+    assert scanner._unauthenticated_finding_rejection(
+        finding, denied_anonymous_result
+    )
+
+
+def test_finding_title_dedup_ignores_reporting_prefixes():
+    assert scanner._canonical_finding_title(
+        "[A01] [CRITICAL] Unauthenticated Access to Account Data"
+    ) == scanner._canonical_finding_title("Unauthenticated Access to Account Data")
+
+
 def test_resolve_requested_scan_session_forces_anonymous_on_missing_label():
     use_session, selected, note = scanner._resolve_requested_scan_session(
         {"configured_primary": {"extra_headers": {"Authorization": "******"}}},

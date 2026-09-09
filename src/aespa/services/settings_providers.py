@@ -169,6 +169,21 @@ def _apply_llm_provider(
     provider.max_rpm = payload.max_rpm
     provider.updated_at = _utcnow()
     session.add(provider)
+    session.flush()
+
+    # Profiles in automatic mode follow refreshed provider metadata. Preserve
+    # the last useful automatic value when discovery still has no context size.
+    for cfg in session.exec(
+        select(LLMConfig).where(LLMConfig.provider_id == provider.id)
+    ).all():
+        if cfg.context_limit_source == "manual":
+            continue
+        detected, source = detect_context_window(provider, cfg.model)
+        if source != "fallback":
+            cfg.max_context_tokens = detected
+            cfg.context_limit_source = source
+            cfg.updated_at = _utcnow()
+            session.add(cfg)
     session.commit()
     session.refresh(provider)
     return _provider_out(provider)

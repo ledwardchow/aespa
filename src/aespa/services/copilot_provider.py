@@ -480,17 +480,26 @@ async def discover_model_options(proxy_url: str | None = None) -> list[dict[str,
     for model in models:
         model_id = getattr(model, "id", None) or getattr(model, "name", "")
         if model_id:
-            discovered.append(
-                {
-                    "id": model_id,
-                    "supported_reasoning_efforts": getattr(
-                        model, "supported_reasoning_efforts", None
-                    ),
-                    "default_reasoning_effort": getattr(
-                        model, "default_reasoning_effort", None
-                    ),
-                }
-            )
+            option = {
+                "id": model_id,
+                "supported_reasoning_efforts": getattr(
+                    model, "supported_reasoning_efforts", None
+                ),
+                "default_reasoning_effort": getattr(
+                    model, "default_reasoning_effort", None
+                ),
+            }
+            for key in (
+                "context_window_tokens",
+                "context_length",
+                "context_window",
+                "max_input_tokens",
+                "input_token_limit",
+            ):
+                value = getattr(model, key, None)
+                if value is not None:
+                    option[key] = value
+            discovered.append(option)
     if not any(item["id"] == "auto" for item in discovered):
         discovered.insert(0, {"id": "auto"})
     return discovered

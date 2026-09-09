@@ -10,6 +10,40 @@ from aespa.models import LLMConfig, LLMUsageMonth
 from aespa.services import llm
 
 
+def test_title_normalization_cannot_introduce_unauthenticated_claim(monkeypatch):
+    async def fake_call(*_args, **_kwargs):
+        return json.dumps(
+            [
+                {
+                    "index": 0,
+                    "title": "[A02] [HIGH] Unauthenticated Sensitive Data Disclosure",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    original = {
+        "title": "Payment card details exposed to authenticated users",
+        "owasp_category": "A02",
+        "severity": "high",
+    }
+    normalized = asyncio.run(
+        llm.normalize_finding_titles(
+            SimpleNamespace(),
+            [
+                {
+                    "title": "Unauthenticated Sensitive Data Disclosure",
+                    "owasp_category": "A02",
+                    "severity": "high",
+                }
+            ],
+            [original],
+        )
+    )
+
+    assert normalized[0]["title"] == original["title"]
+
+
 def test_agentic_context_compaction_preserves_recent_tool_pairs():
     messages = [{"role": "user", "content": "initial brief"}]
     for index in range(50):

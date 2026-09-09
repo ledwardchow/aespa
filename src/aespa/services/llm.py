@@ -3660,9 +3660,18 @@ async def analyse_probes(
 
 
 def _format_probe_result(result: dict) -> str:
+    sent_authenticated = result.get("sent_authenticated")
+    auth_state = (
+        "yes"
+        if sent_authenticated is True
+        else "no"
+        if sent_authenticated is False
+        else "unknown; inspect request evidence"
+    )
     return (
         f"--- Probe: {result.get('desc', result.get('url', '?'))} ---\n"
         f"Sent as user: {result.get('as_user') or '(primary session)'}\n"
+        f"Credentials observed on wire: {auth_state}\n"
         f"URL: {result.get('url')}\n"
         f"Status: {result.get('status')}\n"
         f"Request evidence:\n{str(result.get('request_evidence') or '')[:2000]}\n\n"
@@ -4133,6 +4142,28 @@ async def normalize_finding_titles(
             idx = entry.get("index")
             title = (entry.get("title") or "").strip()
             if isinstance(idx, int) and 0 <= idx < len(result) and title:
+                title = re.sub(
+                    r"^\[(?:A\d{2}(?::[^\]]+)?|API\d+)\]\s*",
+                    "",
+                    title,
+                    flags=re.IGNORECASE,
+                )
+                title = re.sub(
+                    r"^\[(?:critical|high|medium|low|info)\]\s*",
+                    "",
+                    title,
+                    flags=re.IGNORECASE,
+                )
+                original_title = str(result[idx].get("title") or "")
+                auth_claim = re.compile(
+                    r"\bunauthenticated\b|\bwithout\s+(?:any\s+)?authentication\b|"
+                    r"\bmissing\s+authentication\b|\bno\s+authentication\s+(?:is\s+)?required\b",
+                    re.IGNORECASE,
+                )
+                if bool(auth_claim.search(original_title)) != bool(
+                    auth_claim.search(title)
+                ):
+                    continue
                 result[idx] = {**result[idx], "title": title}
         return result
     except Exception as exc:

@@ -14,6 +14,10 @@ export function llmProfileToForm(cfg, providers = []) {
       max_tokens: cfg.max_tokens,
       max_context_tokens: cfg.max_context_tokens || 128000,
       max_context_auto: cfg.context_limit_source !== "manual",
+      detected_context_tokens:
+        cfg.context_limit_source !== "manual" && cfg.context_limit_source !== "fallback"
+          ? cfg.max_context_tokens
+          : null,
       temperature: hasTemp ? cfg.temperature : 0.2,
       use_temperature: hasTemp,
       use_vision: cfg.use_vision ?? false,
@@ -39,6 +43,9 @@ export function llmPayload(form) {
     model: form.model.trim(),
     max_tokens: Number(form.max_tokens),
     max_context_tokens: form.max_context_auto ? null : Number(form.max_context_tokens),
+    detected_context_tokens: form.max_context_auto
+      ? Number(form.detected_context_tokens) || null
+      : null,
     temperature: form.use_temperature ? Number(form.temperature) : null,
     use_vision: form.use_vision,
     force_tool_choice: form.force_tool_choice,

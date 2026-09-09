@@ -153,6 +153,12 @@ def _native_capability(raw: Any) -> dict[str, Any] | None:
         raw.get(supported_key) if supported_key else reasoning.get("supported_efforts")
     )
     if raw_supported is None and not reasoning:
+        if context_window is not None:
+            return {
+                "context_window_tokens": context_window,
+                "source": "native",
+                "confidence": "provider",
+            }
         return None
     efforts = normalize_efforts(raw_supported) if raw_supported is not None else None
     default = (
@@ -398,29 +404,37 @@ async def enrich_model_options(
     *,
     catalog_fetcher: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Return per-model metadata, using OpenRouter only when native metadata is absent."""
+    """Return per-model metadata, filling missing native fields from OpenRouter."""
     native_capabilities = native_capabilities or {}
     result: dict[str, dict[str, Any]] = {}
-    missing: list[str] = []
+    incomplete: list[str] = []
     for model in models:
         native = _native_capability(native_capabilities.get(model))
         if native is not None:
             native.setdefault("strategy", "native_metadata")
             result[model] = native
-        else:
-            missing.append(model)
-    if not missing:
+        if native is None or "context_window_tokens" not in native:
+            incomplete.append(model)
+    if not incomplete:
         return result
     try:
         catalog = await (catalog_fetcher or fetch_openrouter_catalog)()
     except Exception as exc:
         log.debug("OpenRouter capability fallback unavailable: %s", exc)
         return result
-    for model in missing:
+    for model in incomplete:
         matched = fuzzy_match_model(model, catalog)
         if matched is not None:
-            matched["strategy"] = "openrouter_fuzzy_fallback"
-            result[model] = matched
+            existing = result.get(model)
+            if existing is None:
+                matched["strategy"] = "openrouter_fuzzy_fallback"
+                result[model] = matched
+            else:
+                for key, value in matched.items():
+                    existing.setdefault(key, value)
+                if "context_window_tokens" in matched:
+                    existing["context_window_source"] = "openrouter"
+                    existing["strategy"] = "native_metadata_with_openrouter_context"
     return result
 
 

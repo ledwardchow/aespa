@@ -37,6 +37,7 @@ export const DEFAULT_LLM_FORM = {
   max_tokens: 70000,
   max_context_tokens: 128000,
   max_context_auto: true,
+  detected_context_tokens: null,
   temperature: 0.2,
   use_temperature: false,
   use_vision: false,

@@ -511,8 +511,15 @@ async def discover_model_options_for_format(
                 "reasoning",
             )
         )
-        if capability is not None and not has_native_fields:
-            native[model] = capability
+        if capability is not None:
+            if not has_native_fields:
+                native[model] = capability
+            elif isinstance(existing, dict):
+                merged = dict(existing)
+                for key in ("context_window_tokens", "context_window_source"):
+                    if key in capability:
+                        merged.setdefault(key, capability[key])
+                native[model] = merged
     capabilities = await enrich_model_options(api_format, discovered, native)
     return {"models": discovered, "capabilities": capabilities}
 

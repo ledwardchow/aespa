@@ -213,7 +213,7 @@ def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
 
 @contextlib.contextmanager
 def _client_session_cookies(hx: httpx.AsyncClient, selected_session: dict | None):
-    """Make the shared client's cookie jar reflect *exactly* the selected session.
+    """Make the shared client's auth state reflect *exactly* the selected session.
 
     The agentic loop reuses one httpx client whose jar holds the primary
     authenticated session. httpx MERGES per-request ``cookies=`` into that jar
@@ -222,21 +222,25 @@ def _client_session_cookies(hx: httpx.AsyncClient, selected_session: dict | None
     an intended unauthenticated probe into an authenticated one (false-positive
     "unauthenticated access" findings).
 
-    When an explicit session is selected, swap the jar to that session's cookies
-    (anonymous → none) for the duration of the request, then restore the prior
-    jar so other requests/handlers still default to the primary session (which
-    re-auth keeps fresh in-place). When no session is selected, leave the jar
-    untouched.
+    HTTPX merges both per-request cookies and headers with the client's defaults.
+    Merely omitting Authorization from a per-request header mapping therefore does
+    not remove the primary credential.  When an explicit session is selected,
+    temporarily clear both client-level stores.  Callers pass the selected
+    session's sanitized headers on the request itself and this context installs
+    exactly its cookies.  The primary defaults are restored afterwards.
     """
     if selected_session is None:
         yield
         return
-    saved = hx.cookies
+    saved_cookies = hx.cookies
+    saved_headers = hx.headers
     hx.cookies = httpx.Cookies(selected_session.get("cookies") or {})
+    hx.headers = httpx.Headers()
     try:
         yield
     finally:
-        hx.cookies = saved
+        hx.cookies = saved_cookies
+        hx.headers = saved_headers
 
 
 def _cookies_sent(
@@ -3925,6 +3929,87 @@ def _finding_from_llm(
     )
 
 
+_UNAUTHENTICATED_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bunauthenticated\b", re.IGNORECASE),
+    re.compile(
+        r"\bwithout\s+(?:any\s+)?(?:authentication|credentials?|login|session|token)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bno\s+(?:authentication|credentials?|login|session|token)\s+(?:is\s+)?required\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bmissing\s+authentication\b", re.IGNORECASE),
+)
+
+
+def _finding_claims_unauthenticated(raw: dict) -> bool:
+    claim_text = "\n".join(
+        _as_text(raw.get(field))
+        for field in ("title", "description", "evidence", "impact", "likelihood")
+    )
+    return any(
+        pattern.search(claim_text) for pattern in _UNAUTHENTICATED_CLAIM_PATTERNS
+    )
+
+
+def _unauthenticated_finding_rejection(
+    raw: dict,
+    result_by_url: dict[str, dict],
+) -> str | None:
+    """Require wire-level no-credential proof for missing-auth claims.
+
+    Natural-language probe notes are intent, not evidence.  A model can omit
+    ``use_session='anonymous'`` while describing a request as anonymous, and a
+    transport regression can attach credentials despite the requested label.
+    Only the final request observed on the wire is authoritative.
+    """
+    if not _finding_claims_unauthenticated(raw):
+        return None
+
+    affected = str(raw.get("affected_url") or "").strip()
+    matched = result_by_url.get(affected, {})
+    sent_authenticated = matched.get("sent_authenticated")
+    status = matched.get("status")
+    if sent_authenticated is False and status in {401, 403, 419, 440}:
+        return (
+            "Unauthenticated-access finding rejected: the credential-free request "
+            f"was denied with HTTP {status}."
+        )
+    if sent_authenticated is False:
+        return None
+    if sent_authenticated is True:
+        return (
+            "Unauthenticated-access finding rejected: the supporting request "
+            "sent authentication credentials. Re-run the endpoint with "
+            "use_session='anonymous' and cite that request's wire evidence."
+        )
+
+    request_evidence = "\n".join(
+        value
+        for value in (
+            str(matched.get("request_evidence") or ""),
+            str(raw.get("request_evidence") or ""),
+        )
+        if value
+    ).lower()
+    proves_no_authorization = bool(
+        re.search(
+            r"\bauthorization\s*:\s*(?:none|absent|not present)\b", request_evidence
+        )
+    )
+    proves_no_cookies = bool(
+        re.search(r"\bcookies?\s*:\s*(?:none|absent|not present)\b", request_evidence)
+    )
+    if proves_no_authorization and proves_no_cookies:
+        return None
+    return (
+        "Unauthenticated-access finding rejected: supporting wire evidence must "
+        "explicitly show both 'Authorization: none' and 'Cookies: none'. Re-run "
+        "the endpoint with use_session='anonymous'."
+    )
+
+
 def _save_deterministic_findings(
     run_id: int, findings: list[ScanFinding], *, is_api_run: bool = False
 ) -> int:
@@ -4149,20 +4234,40 @@ def _find_dynamic_duplicate(
         .where(_finding_run_filter(run_id, is_api_run))
         .where(ScanFinding.affected_url == affected_url)
     ).all()
-    normalized_title = title.strip().lower()
+    normalized_title = _canonical_finding_title(title)
     normalized_owasp = owasp_category.strip().lower()
     return next(
         (
             finding
             for finding in existing
-            if finding.title.strip().lower() == normalized_title
+            if _canonical_finding_title(finding.title) == normalized_title
             or (
                 finding.owasp_category.strip().lower() == normalized_owasp
-                and finding.title.strip().lower() == normalized_title
+                and _canonical_finding_title(finding.title) == normalized_title
             )
         ),
         None,
     )
+
+
+def _canonical_finding_title(title: str) -> str:
+    """Normalize cosmetic report prefixes before exact-title deduplication."""
+    normalized = str(title or "").strip()
+    normalized = re.sub(
+        r"^\[(?:A\d{2}(?::[^\]]+)?|API\d+)\]\s*",
+        "",
+        normalized,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"^\[(?:critical|high|medium|low|info)\]\s*",
+        "",
+        normalized,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return " ".join(normalized.lower().split())
 
 
 def _finding_exists(
@@ -5036,6 +5141,11 @@ async def _run_specialist_agent(
                 "finding_source": "specialist_agent",
                 "_handoff_id": handoff_id,
             }
+            finding_rejection = _unauthenticated_finding_rejection(
+                raw, {affected: result_dict}
+            )
+            if finding_rejection:
+                return finding_rejection
             async with _make_scanner_client(
                 cookies=cookies,
                 headers={"User-Agent": _UA, **extra_headers},
@@ -5821,6 +5931,11 @@ async def _persist_dynamic_finding(
                     affected = (raw.get("affected_url") or affected).strip() or affected
         except Exception as exc:
             log.warning("normalize_finding_titles failed (dynamic finding): %s", exc)
+
+    rejection = _unauthenticated_finding_rejection(raw, result_by_url)
+    if rejection:
+        log.warning("Dynamic finding rejected for run_id=%s: %s", run_id, rejection)
+        return None
 
     lock = _persist_write_locks.setdefault(run_id, asyncio.Lock())
     async with lock:
@@ -7693,6 +7808,20 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "request_evidence": str(action.get("request_evidence") or ""),
                         "response_evidence": str(action.get("response_evidence") or ""),
                     }
+                    finding_rejection = _unauthenticated_finding_rejection(
+                        action, {str(affected): result}
+                    )
+                    if finding_rejection:
+                        history.append(
+                            _thinking_tool_result_record(
+                                step,
+                                "finding_write",
+                                action,
+                                finding_rejection,
+                                note,
+                            )
+                        )
+                        continue
                     saved = await _persist_dynamic_finding(
                         run_id=run_id,
                         llm_cfg=llm_cfg,
@@ -8656,6 +8785,10 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "desc": note,
                         "url": url,
                         "status": resp_status,
+                        "sent_authenticated": bool(
+                            sent_headers.get("authorization")
+                            or sent_headers.get("cookie")
+                        ),
                         "duration_ms": duration_ms,
                         "headers": resp_headers,
                         "body": resp_body,
@@ -8907,10 +9040,37 @@ async def _do_thinking_scan(run_id: int) -> None:
                 result_by_url = {r["url"]: r for r in all_results}
                 saved_count = 0
                 duplicate_count = 0
+                rejected_count = 0
                 saved_finding_ids: list[int] = []
 
                 for raw in raw_findings:
                     affected = (raw.get("affected_url") or base_url).strip()
+                    evidence_result_by_url = result_by_url
+                    if _finding_claims_unauthenticated(raw):
+                        anonymous_match = next(
+                            (
+                                result
+                                for result in reversed(all_results)
+                                if result.get("url") == affected
+                                and result.get("sent_authenticated") is False
+                            ),
+                            None,
+                        )
+                        evidence_result_by_url = {
+                            affected: anonymous_match
+                            or result_by_url.get(affected, {})
+                        }
+                    finding_rejection = _unauthenticated_finding_rejection(
+                        raw, evidence_result_by_url
+                    )
+                    if finding_rejection:
+                        rejected_count += 1
+                        log.warning(
+                            "Reporting finding rejected for run_id=%s: %s",
+                            run_id,
+                            finding_rejection,
+                        )
+                        continue
                     page_id = _dynamic_finding_page_id(
                         s,
                         run_id=run_id,
@@ -8933,7 +9093,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                         page_id=page_id,
                         page_url=affected,
                         raw=raw,
-                        result_by_url=result_by_url,
+                        result_by_url=evidence_result_by_url,
                     )
                     s.add(finding)
                     s.flush()
@@ -8950,6 +9110,11 @@ async def _do_thinking_scan(run_id: int) -> None:
             message = f"Analysis complete — {saved_count} finding(s) recorded."
             if duplicate_count:
                 message += f" {duplicate_count} duplicate finding(s) skipped."
+            if rejected_count:
+                message += (
+                    f" {rejected_count} unsupported unauthenticated-access "
+                    "finding(s) rejected."
+                )
             events_svc.emit(
                 run_id,
                 {
@@ -9980,6 +10145,11 @@ async def _do_agentic_thinking_loop(
                 "request_evidence": str(tool_input.get("request_evidence") or ""),
                 "response_evidence": str(tool_input.get("response_evidence") or ""),
             }
+            finding_rejection = _unauthenticated_finding_rejection(
+                tool_input, {affected: fw_result}
+            )
+            if finding_rejection:
+                return finding_rejection
             saved = await _persist_dynamic_finding(
                 run_id=run_id,
                 llm_cfg=llm_cfg,
@@ -11619,6 +11789,9 @@ async def _do_agentic_thinking_loop(
             "desc": note,
             "url": hr_url,
             "status": hr_resp_status,
+            "sent_authenticated": bool(
+                hr_sent_headers.get("authorization") or hr_sent_headers.get("cookie")
+            ),
             "duration_ms": hr_duration_ms,
             "headers": hr_resp_headers,
             "body": hr_resp_body,

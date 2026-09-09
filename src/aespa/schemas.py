@@ -701,6 +701,9 @@ class LLMConfigIn(BaseModel):
     max_tokens: int = Field(default=70000, ge=1, le=256000)
     # ``None`` asks the server to use the detected model context window.
     max_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
+    # A capability value discovered by the model form but not yet persisted on
+    # the provider. It remains an automatic limit rather than a manual override.
+    detected_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
     temperature: Optional[float] = Field(default=None)
     reasoning_effort: str | None = Field(default=None, max_length=32)
     use_vision: bool = False
@@ -708,10 +711,8 @@ class LLMConfigIn(BaseModel):
 
     @model_validator(mode="after")
     def _validate_context_window(self) -> "LLMConfigIn":
-        if (
-            self.max_context_tokens is not None
-            and self.max_context_tokens <= self.max_tokens + 1024
-        ):
+        context_tokens = self.max_context_tokens or self.detected_context_tokens
+        if context_tokens is not None and context_tokens <= self.max_tokens + 1024:
             raise ValueError(
                 "max_context_tokens must leave at least 1024 tokens for input"
             )

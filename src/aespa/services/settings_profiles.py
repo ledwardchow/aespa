@@ -293,6 +293,12 @@ def _apply_llm_config(
         cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
             provider, payload.model
         )
+        if (
+            cfg.context_limit_source == "fallback"
+            and payload.detected_context_tokens is not None
+        ):
+            cfg.max_context_tokens = payload.detected_context_tokens
+            cfg.context_limit_source = "discovered"
     else:
         cfg.max_context_tokens = payload.max_context_tokens
         cfg.context_limit_source = "manual"

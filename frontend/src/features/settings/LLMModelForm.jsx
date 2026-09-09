@@ -47,8 +47,13 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
   );
   const storedCapabilities = selectedProvider?.model_capabilities || {};
   const hasStoredCapability = Object.prototype.hasOwnProperty.call(storedCapabilities, form.model);
+  const storedCapability = hasStoredCapability ? storedCapabilities[form.model] || {} : {};
+  const storedContext = Number(
+    storedCapability.context_window_tokens || storedCapability.context_length || 0,
+  );
+  const hasStoredContext = storedContext >= 1024;
   useEffect(() => {
-    if (!selectedProvider || !form.model || hasStoredCapability) {
+    if (!selectedProvider || !form.model || hasStoredContext) {
       setDiscoveredCapabilities({});
       setLoadingCapabilities(false);
       return undefined;
@@ -76,17 +81,23 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
     return () => {
       cancelled = true;
     };
-  }, [selectedProvider, models, form.model, hasStoredCapability]);
-  const capability = hasStoredCapability
-    ? storedCapabilities[form.model] || {}
-    : discoveredCapabilities[form.model] || {};
+  }, [selectedProvider, models, form.model, hasStoredContext]);
+  const capability = {
+    ...(discoveredCapabilities[form.model] || {}),
+    ...storedCapability,
+  };
   const levels = Array.isArray(capability.supported_efforts) ? capability.supported_efforts : [];
-  const detectedContext = Number(
-    capability.context_window_tokens || capability.context_length || 0,
+  const discoveredCapability = discoveredCapabilities[form.model] || {};
+  const discoveredContext = Number(
+    discoveredCapability.context_window_tokens || discoveredCapability.context_length || 0,
   );
+  const detectedContext = hasStoredContext ? storedContext : discoveredContext;
   useEffect(() => {
     if (form.max_context_auto && detectedContext >= 1024) {
-      upd({ max_context_tokens: detectedContext });
+      upd({
+        max_context_tokens: detectedContext,
+        detected_context_tokens: detectedContext,
+      });
     }
   }, [detectedContext, form.max_context_auto]);
   return (
