@@ -18,6 +18,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Smaller default model response limit**: New model profiles now use a 16,384-token response limit, leaving more room for prompts, tools, and scan history within the model context window. Existing saved profiles keep their configured limit.
+
 - **Traffic purpose and coverage links**: Requests now show the sending agent, OWASP category, test label, and reason. The traffic user remains the authenticated account or session used for the request. Traffic generated for an OWASP coverage item is linked to that item, and clicking a coverage matrix cell opens the Traffic Log filtered to its requests.
 
 - **Streaming A.L.I.C.E. replies**: Site and API chats now show text while Anthropic, OpenAI-compatible, Google, and AWS Bedrock models are generating it. Tool calls still wait for complete arguments, and reconnecting after a long response restores the current reply even when older stream events have expired.
@@ -33,6 +35,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Keyboard navigation in Settings**: Settings tabs now support keyboard navigation.
 
 ### Fixes
+
+- **Long scans stay within model context limits**: Scanner conversations now keep one bounded history journal, compact short and resumed conversations correctly, account for reasoning and structured tool data, and reduce the output allowance for individual requests when necessary. Large supporting prompts are also bounded before they are sent, while fixed instructions and recent evidence are retained.
 
 - **Automatic model context limits use discovered capacity**: Models set to Auto now retain context-window values found while editing the model, combine context metadata with independently discovered reasoning capabilities, and follow refreshed provider metadata. Missing metadata still uses the conservative fallback without turning the model into a manual configuration.
 

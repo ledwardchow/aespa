@@ -72,6 +72,10 @@ _UTC = timezone.utc
 _MIN_CONNECTION_SCORE = 0.5
 # Only a well-evidenced connection can seed a new cross-repository lead.
 _MIN_CROSS_LEAD_CONNECTION_SCORE = 0.7
+_LLM_MATCH_BATCH_CHARS = 50_000
+_LLM_FACT_DETAIL_CHARS = 800
+_LLM_PATH_CHARS = 12_000
+_LLM_FACT_VALUES = 100
 
 
 def _make_connection(
@@ -732,8 +736,7 @@ def _nearest_preceding_route(
     exact_routes = [
         route
         for route in routes
-        if route.fact_type == "route"
-        and route.evidence_location == owner_location
+        if route.fact_type == "route" and route.evidence_location == owner_location
     ]
     if exact_routes:
         return any(route.id == source.id for route in exact_routes)
@@ -1630,27 +1633,103 @@ def _ambiguous_calls(
 
 
 def _ambiguous_payload(item: AmbiguousCall) -> dict:
+    def _bounded_text(value: object, limit: int = 400) -> str:
+        text = str(value or "")
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}… [omitted {len(text) - limit} chars]"
+
     def _fact_payload(fact: ComponentFact) -> dict:
         try:
             detail = json.loads(fact.detail_json or "{}")
         except (TypeError, ValueError):
             detail = {}
+        detail_text = json.dumps(detail, ensure_ascii=False, separators=(",", ":"))
+        detail_omitted = max(0, len(detail_text) - _LLM_FACT_DETAIL_CHARS)
+        if detail_omitted:
+            detail = {
+                "_truncated": True,
+                "preview": detail_text[:_LLM_FACT_DETAIL_CHARS],
+                "omitted_chars": detail_omitted,
+            }
         return {
             "id": fact.id,
             "component_id": fact.component_id,
-            "fact_type": fact.fact_type,
-            "method": fact.method,
-            "path": fact.path,
-            "host": fact.host,
-            "name": fact.name,
-            "evidence_location": fact.evidence_location,
+            "fact_type": _bounded_text(fact.fact_type),
+            "method": _bounded_text(fact.method),
+            "path": _bounded_text(fact.path),
+            "host": _bounded_text(fact.host),
+            "name": _bounded_text(fact.name),
+            "evidence_location": _bounded_text(fact.evidence_location),
             "detail": detail,
         }
 
     return {
+        "target_component_id": item.target_component_id,
         "call": _fact_payload(item.call),
         "candidate_routes": [_fact_payload(route) for route in item.candidate_routes],
     }
+
+
+def _match_batches(ambiguous: list[AmbiguousCall]) -> list[list[AmbiguousCall]]:
+    """Split matcher input by serialized size while retaining every candidate ID."""
+    batches: list[list[AmbiguousCall]] = []
+    current: list[AmbiguousCall] = []
+    current_chars = 2
+    for item in ambiguous:
+        item_chars = len(
+            json.dumps(
+                _ambiguous_payload(item), ensure_ascii=False, separators=(",", ":")
+            )
+        )
+        if current and current_chars + item_chars + 1 > _LLM_MATCH_BATCH_CHARS:
+            batches.append(current)
+            current = []
+            current_chars = 2
+        current.append(item)
+        current_chars += item_chars + (1 if len(current) > 1 else 0)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _bounded_path_for_prompt(
+    path: dict, limit: int = _LLM_PATH_CHARS
+) -> tuple[dict, int]:
+    """Keep path identity and frontend fields when a stored path is oversized."""
+    rendered = json.dumps(path, ensure_ascii=False, separators=(",", ":"))
+    if len(rendered) <= limit:
+        return path, 0
+    keep = (
+        "schema_version",
+        "perspective",
+        "entry",
+        "frontend_entrypoint",
+        "request_transition",
+        "frontend_surface",
+        "hops",
+    )
+    compact: dict = {}
+    for key in keep:
+        if key not in path:
+            continue
+        value_text = json.dumps(path[key], ensure_ascii=False, separators=(",", ":"))
+        compact[key] = (
+            path[key]
+            if len(value_text) <= 1_200
+            else {
+                "_truncated": True,
+                "preview": value_text[:1_200],
+                "omitted_chars": len(value_text) - 1_200,
+            }
+        )
+    compact["_truncated"] = True
+    compact["omitted_chars"] = max(
+        0,
+        len(rendered)
+        - len(json.dumps(compact, ensure_ascii=False, separators=(",", ":"))),
+    )
+    return compact, max(0, len(rendered) - limit)
 
 
 async def match_ambiguous_connections(
@@ -1667,12 +1746,12 @@ async def match_ambiguous_connections(
     from aespa.services.prompts.component_mapper import CONNECTION_MATCHER_SYSTEM_PROMPT
 
     proposals: list[ConnectionProposal] = []
-    total_batches = (len(ambiguous) + 49) // 50
-    for offset in range(0, len(ambiguous), 50):
+    batches = _match_batches(ambiguous)
+    total_batches = len(batches)
+    for offset, batch in enumerate(batches):
         if stop_check and stop_check():
             raise asyncio.CancelledError
-        batch_idx = (offset // 50) + 1
-        batch = ambiguous[offset : offset + 50]
+        batch_idx = offset + 1
         if campaign_id:
             events_svc.emit(
                 campaign_id,
@@ -1703,7 +1782,12 @@ async def match_ambiguous_connections(
         prompt = (
             "Resolve only pairs from this JSON input. Return a JSON array with "
             "call_id, route_id, confidence, rationale, and evidence. Do not "
-            "invent IDs.\n\n" + json.dumps([_ambiguous_payload(item) for item in batch])
+            "invent IDs.\n\n"
+            + json.dumps(
+                [_ambiguous_payload(item) for item in batch],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         )
         raw = await llm_svc.plain_completion(
             llm_config,
@@ -2263,6 +2347,20 @@ async def _rewrite_pre_crawl_frontend_paths(
         origin = path.get("origin_attack_path")
         if not isinstance(origin, dict):
             origin = {}
+        bounded_path, path_omitted = _bounded_path_for_prompt(path)
+        bounded_values = [
+            str(value)[:400]
+            for value in sorted(allowed_values.values())[:_LLM_FACT_VALUES]
+        ]
+        values_omitted = max(0, len(allowed_values) - len(bounded_values))
+        sorted_values = sorted(allowed_values.values())
+        values_omitted_chars = sum(
+            max(0, len(str(value)) - 400) for value in sorted_values
+        ) + sum(len(str(value)) for value in sorted_values[_LLM_FACT_VALUES:])
+        # Fact IDs are the allow-list used to validate the model's rewrite;
+        # retain every one even when descriptive values are capped.
+        bounded_ids = sorted(fact_ids)
+        ids_omitted = 0
         prompt = (
             "Rewrite only the frontend wording for this approved pre-crawl "
             "security path. Return one JSON object with optional keys "
@@ -2273,14 +2371,24 @@ async def _rewrite_pre_crawl_frontend_paths(
             + json.dumps(
                 {
                     "lead": {
-                        "title": origin.get("title", ""),
-                        "description": origin.get("description", ""),
+                        "title": str(origin.get("title", ""))[:2_000],
+                        "title_omitted_chars": max(
+                            0, len(str(origin.get("title", ""))) - 2_000
+                        ),
+                        "description": str(origin.get("description", ""))[:2_000],
+                        "description_omitted_chars": max(
+                            0, len(str(origin.get("description", ""))) - 2_000
+                        ),
                     },
-                    "path": path,
+                    "path": bounded_path,
                     "facts": {
-                        "ids": sorted(fact_ids),
-                        "values": sorted(allowed_values.values()),
+                        "ids": bounded_ids,
+                        "ids_omitted": ids_omitted,
+                        "values": bounded_values,
+                        "values_omitted": values_omitted,
+                        "values_omitted_chars": values_omitted_chars,
                     },
+                    "path_omitted_chars": path_omitted,
                 },
                 separators=(",", ":"),
             )

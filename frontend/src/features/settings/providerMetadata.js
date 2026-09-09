@@ -34,7 +34,7 @@ export const DEFAULT_LLM_FORM = {
   name: "",
   provider_id: "",
   model: "",
-  max_tokens: 70000,
+  max_tokens: 16384,
   max_context_tokens: 128000,
   max_context_auto: true,
   detected_context_tokens: null,

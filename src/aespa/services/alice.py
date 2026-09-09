@@ -435,9 +435,12 @@ async def _check_goal_completion(
         "(an array). Use completed only when the stated outcome is supported and no "
         "required work remains. Use blocked only for a specific external condition "
         "that prevents useful progress.\n\n"
-        f"OBJECTIVE:\n{objective}\n\n"
-        f"PROPOSAL:\n{json.dumps(proposal, default=str)}\n\n"
-        f"TOOL EVIDENCE:\n{json.dumps(evidence[-30:], default=str)}"
+        f"OBJECTIVE:\n{str(objective)[:2_000]}\n"
+        f"[objective_omitted_chars={max(0, len(str(objective)) - 2_000)}]\n\n"
+        "PROPOSAL:\n"
+        f"{json.dumps(_bounded_goal_proposal(proposal), default=str, separators=(',', ':'))}\n\n"
+        "TOOL EVIDENCE:\n"
+        f"{json.dumps(_bounded_goal_evidence(evidence), default=str, separators=(',', ':'))}"
     )
     try:
         raw = await llm_svc.plain_completion(llm_cfg, verifier_prompt)
@@ -590,11 +593,160 @@ def _redact_goal_evidence_text(value: str) -> str:
     from aespa.services.scanner import _redact_sensitive_text
 
     redacted = _redact_sensitive_text(str(value or ""))
+    redacted = re.sub(
+        r'(?i)(["\']?authorization["\']?\s*[:=]\s*["\']?bearer\s+)[^\s,"\'}]+',
+        r"\1[REDACTED_BEARER]",
+        redacted,
+    )
+    redacted = re.sub(
+        r'(?i)(["\']?authorization["\']?\s*[:=]\s*["\']?basic\s+)[^\s,"\'}]+',
+        r"\1[REDACTED_BASIC]",
+        redacted,
+    )
     return re.sub(
         r'(?i)(["\']?(?:password|secret|access_token|refresh_token|api[_-]?key|cookie)["\']?\s*[:=]\s*["\']?)[^\s,"\'}]+',
         r"\1[REDACTED]",
         redacted,
     )
+
+
+def _bounded_goal_evidence(evidence: list[dict]) -> dict:
+    """Keep the newest goal receipts within a small verifier prompt budget."""
+    max_entries = 30
+    max_entry_chars = 2_000
+    selected = evidence[-max_entries:]
+    entries: list[dict] = []
+    omitted_entries = max(0, len(evidence) - len(selected))
+    omitted_chars = 0
+    for item in reversed(selected):
+        if not isinstance(item, dict):
+            item = {"value": str(item)}
+        safe_input = _redact_history_value(item.get("input"))
+        input_text = json.dumps(safe_input, default=str, separators=(",", ":"))
+        safe_result = _redact_goal_evidence_text(str(item.get("result") or ""))
+        entry = {
+            "step": item.get("step"),
+            "tool": str(item.get("tool") or "")[:200],
+            "input": safe_input,
+            "result": safe_result,
+        }
+        rendered = json.dumps(entry, default=str, separators=(",", ":"))
+        if len(rendered) > max_entry_chars:
+            omitted = len(rendered) - max_entry_chars
+            omitted_chars += omitted
+            entry["input"] = {
+                "_truncated": True,
+                "preview": input_text[:600],
+                "omitted_chars": max(0, len(input_text) - 600),
+            }
+            entry["result"] = safe_result[:1_000]
+            entry["omitted_chars"] = omitted
+        entries.append(entry)
+    entries.reverse()
+    return {
+        "entries": entries,
+        "omitted_entries": omitted_entries,
+        "omitted_chars": omitted_chars,
+    }
+
+
+def _bounded_goal_proposal_value(
+    value: object, *, depth: int = 0
+) -> tuple[object, int, int]:
+    """Recursively bound nested proposal data and return omission counts."""
+    limit = 400
+    if depth >= 4:
+        rendered = json.dumps(value, default=str, separators=(",", ":"))
+        return (
+            {
+                "_truncated": True,
+                "preview": rendered[:limit],
+                "omitted_chars": max(0, len(rendered) - limit),
+            },
+            1,
+            max(0, len(rendered) - limit),
+        )
+    if isinstance(value, str):
+        return value[:limit], 0, max(0, len(value) - limit)
+    if isinstance(value, dict):
+        bounded: dict = {}
+        omitted_items = max(0, len(value) - 20)
+        omitted_chars = 0
+        for key, child in list(value.items())[:20]:
+            safe_key = str(key)[:200]
+            omitted_chars += max(0, len(str(key)) - len(safe_key))
+            child_value, child_items, child_chars = _bounded_goal_proposal_value(
+                child, depth=depth + 1
+            )
+            bounded[safe_key] = child_value
+            omitted_items += child_items
+            if child_items:
+                bounded[f"{safe_key}_omitted_items"] = child_items
+            if child_chars:
+                bounded[f"{safe_key}_omitted_chars"] = child_chars
+            omitted_chars += child_chars
+        if omitted_items:
+            bounded["_omitted_items"] = omitted_items
+        if omitted_chars:
+            bounded["_omitted_chars"] = omitted_chars
+        return bounded, omitted_items, omitted_chars
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+        bounded_items: list = []
+        omitted_items = max(0, len(items) - 20)
+        omitted_chars = 0
+        for child in items[:20]:
+            child_value, child_items, child_chars = _bounded_goal_proposal_value(
+                child, depth=depth + 1
+            )
+            bounded_items.append(child_value)
+            omitted_items += child_items
+            omitted_chars += child_chars
+        return bounded_items, omitted_items, omitted_chars
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, 0, 0
+    rendered = str(value)
+    return rendered[:limit], 0, max(0, len(rendered) - limit)
+
+
+def _bounded_goal_proposal(proposal: dict) -> dict:
+    """Limit model-controlled completion fields while retaining their shape."""
+    bounded: dict = {}
+    items = list(proposal.items())[:20]
+    for key, value in items:
+        safe_key = str(key)[:200]
+        if isinstance(value, list):
+            values = []
+            omitted_items = max(0, len(value) - 20)
+            omitted_chars = 0
+            for item in value[:20]:
+                bounded_item, child_items, child_chars = _bounded_goal_proposal_value(
+                    item
+                )
+                values.append(bounded_item)
+                omitted_items += child_items
+                omitted_chars += child_chars
+            bounded[safe_key] = values
+            if omitted_items:
+                bounded[f"{safe_key}_omitted"] = omitted_items
+            if omitted_chars:
+                bounded[f"{safe_key}_omitted_chars"] = omitted_chars
+        elif isinstance(value, str):
+            bounded[safe_key] = value[:2_000]
+            if len(value) > 2_000:
+                bounded[f"{safe_key}_omitted_chars"] = len(value) - 2_000
+        else:
+            bounded_value, omitted_items, omitted_chars = _bounded_goal_proposal_value(
+                value
+            )
+            bounded[safe_key] = bounded_value
+            if omitted_items:
+                bounded[f"{safe_key}_omitted"] = omitted_items
+            if omitted_chars:
+                bounded[f"{safe_key}_omitted_chars"] = omitted_chars
+    if len(proposal) > len(items):
+        bounded["_omitted_keys"] = len(proposal) - len(items)
+    return bounded
 
 
 def _append_alice_history(

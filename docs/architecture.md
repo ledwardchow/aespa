@@ -231,7 +231,7 @@ Defines execution parameters linked to a provider:
 | `is_active` | `false` | Global active switch (only one profile active globally) |
 | `provider_id` | — | Foreign key linking to the `LLMProviderConfig` connection |
 | `model` | `claude-opus-4-5` | Specific model identifier to run |
-| `max_tokens` | `70000` | Maximum output tokens per LLM call |
+| `max_tokens` | `16384` | Maximum output tokens per LLM call |
 | `max_context_tokens` | `200000` | Total model context window, including prompts, tools, conversation history, and the output allowance. Auto mode stores the latest provider-discovered value, follows later provider metadata refreshes, and uses a conservative fallback only when discovery has no context limit. |
 | `temperature` | — | Unset by default (falls through to provider/model default) |
 | `use_vision` | `false` | Include Playwright screenshots in prompts |
@@ -1001,6 +1001,14 @@ Different agent roles receive different tool sets:
 The LLM service dynamically selects a subset of OWASP Web Security Testing Guide (WSTG) technique descriptions relevant to the target's attack surface and injects them into the Test Lead's system prompt. This gives the scanner domain-specific testing guidance without overloading the context with irrelevant techniques.
 
 Vision support (when `enable_vision=true`) attaches base64-encoded Playwright screenshots to prompts, giving the LLM visual context about what a page looks like.
+
+### Context limits and compaction
+
+Before each tool-using agent turn, AESPA estimates the complete request, including the system prompt, tool definitions, messages, reasoning blocks, structured tool data, and image allowances. It reserves a safety margin and an output allowance inside the model's configured context window.
+
+When the request is too large, completed older tool exchanges are replaced with one bounded context journal. Existing journals from earlier checkpoints are merged into that journal instead of being appended indefinitely. AESPA keeps recent complete tool-call and tool-result pairs when they fit, but can remove all completed exchanges when necessary. The initial scan brief and any exchange that is still incomplete remain intact. Full findings, traffic, coverage, and other scan evidence stay in the database and can be retrieved again through context tools.
+
+If the compacted request fits only with a smaller response allowance, AESPA creates a request-only model configuration with a reduced `max_tokens` value. Saved model settings are not changed. Plain completion calls apply the same context budget and trim variable user content while preserving their system instructions. AESPA raises a context-limit error only when the fixed request and minimum response allowance cannot fit.
 
 ### Prompt caching
 
