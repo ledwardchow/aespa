@@ -1049,7 +1049,10 @@ async def _execute_alice_tool(
 
     # ── write_finding ─────────────────────────────────────────────────────────
     if tool_name == "write_finding":
-        from aespa.services.scanner import _persist_dynamic_finding
+        from aespa.services.scanner import (
+            _persist_dynamic_finding,
+            _unauthenticated_finding_rejection,
+        )
 
         finding_raw = dict(tool_input)
         finding_raw["finding_source"] = "alice"
@@ -1089,6 +1092,11 @@ async def _execute_alice_tool(
             "request_evidence": str(finding_raw.get("request_evidence") or ""),
             "response_evidence": str(finding_raw.get("response_evidence") or ""),
         }
+        finding_rejection = _unauthenticated_finding_rejection(
+            finding_raw, {str(affected): fw_result}
+        )
+        if finding_rejection:
+            return finding_rejection
 
         try:
             saved = await _persist_dynamic_finding(

@@ -232,7 +232,7 @@ Defines execution parameters linked to a provider:
 | `provider_id` | — | Foreign key linking to the `LLMProviderConfig` connection |
 | `model` | `claude-opus-4-5` | Specific model identifier to run |
 | `max_tokens` | `70000` | Maximum output tokens per LLM call |
-| `max_context_tokens` | `200000` | Total model context window, including prompts, tools, conversation history, and the output allowance |
+| `max_context_tokens` | `200000` | Total model context window, including prompts, tools, conversation history, and the output allowance. Auto mode stores the latest provider-discovered value, follows later provider metadata refreshes, and uses a conservative fallback only when discovery has no context limit. |
 | `temperature` | — | Unset by default (falls through to provider/model default) |
 | `use_vision` | `false` | Include Playwright screenshots in prompts |
 | `force_tool_choice` | `false` | Force tool selection through the provider wire format where supported. Codex app-server does not expose a per-turn tool-choice field, so AESPA repairs prose-only Codex scan turns inside its adapter. |
@@ -792,6 +792,10 @@ off by default; guided login remains visible when it requires user interaction.
 
 The scanner follows same-scope redirects one hop at a time. It does not retry a
 blocked request with payload mutations just to obtain a successful status.
+Explicit named-session requests isolate both the shared client's cookie jar and
+default credential headers for the duration of the request. In particular,
+`use_session="anonymous"` cannot inherit the primary session's Authorization,
+Cookie, or custom credential headers through HTTPX's default-header merge.
 
 ### Context tools (read-only reconnaissance)
 
@@ -1075,6 +1079,12 @@ Findings are deduplicated as they are written, on the dynamic finding-write path
 ### Validation
 
 Each finding starts with `validation_status = unvalidated`. The adversarial validator agent (`validator.py`) re-runs the probe with a mandate to disprove the finding. See §8 for full detail.
+
+Dynamic and reporting-generated findings that claim unauthenticated access,
+missing authentication, or access without credentials pass an additional
+deterministic evidence gate before persistence. The supporting request must show
+that neither an Authorization header nor cookies were present on the wire; probe
+labels and natural-language notes are not accepted as proof of the actor.
 
 All findings carry a `finding_source` field that records their origin:
 

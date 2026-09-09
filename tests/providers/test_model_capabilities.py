@@ -100,6 +100,35 @@ def test_native_context_window_is_preserved_without_reasoning_metadata():
     assert result["gpt-context-model"]["context_window_tokens"] == 131072
 
 
+def test_native_reasoning_metadata_is_enriched_with_openrouter_context():
+    async def catalog():
+        return [
+            {
+                "id": "vendor/reasoning-model",
+                "context_length": 1_000_000,
+                "reasoning": {"supported_efforts": ["low", "high"]},
+            }
+        ]
+
+    result = asyncio.run(
+        enrich_model_options(
+            "github_copilot",
+            ["vendor/reasoning-model"],
+            {
+                "vendor/reasoning-model": {
+                    "supported_reasoning_efforts": ["low", "medium"]
+                }
+            },
+            catalog_fetcher=catalog,
+        )
+    )
+
+    capability = result["vendor/reasoning-model"]
+    assert capability["supported_efforts"] == ["low", "medium"]
+    assert capability["context_window_tokens"] == 1_000_000
+    assert capability["context_window_source"] == "openrouter"
+
+
 def test_unknown_capability_is_safe_default_only():
     result = asyncio.run(
         enrich_model_options(

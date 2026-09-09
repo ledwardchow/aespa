@@ -372,6 +372,75 @@ def _make_profile(client: TestClient, provider_id: int, **overrides):
     return client.post("/api/settings/llm/model-configs", json=payload)
 
 
+def test_auto_context_uses_freshly_discovered_form_value(client: TestClient):
+    provider_r = _make_provider(
+        client,
+        models=["reasoning-model"],
+        model_capabilities={
+            "reasoning-model": {"supported_efforts": ["low", "medium"]}
+        },
+    )
+    provider = provider_r.json()
+
+    profile_r = _make_profile(
+        client,
+        provider["id"],
+        model="reasoning-model",
+        max_context_tokens=None,
+        detected_context_tokens=1_000_000,
+    )
+
+    assert profile_r.status_code == 200
+    profile = profile_r.json()
+    assert profile["max_context_tokens"] == 1_000_000
+    assert profile["context_limit_source"] == "discovered"
+
+
+def test_provider_refresh_updates_auto_context_but_not_manual_context(
+    client: TestClient,
+):
+    provider_payload = {
+        "name": "Context Provider",
+        "api_format": "openai_compatible",
+        "base_url": "http://localhost:1234/v1",
+        "models": ["context-model"],
+        "model_capabilities": {"context-model": {"context_window_tokens": 100_000}},
+        "api_key": None,
+    }
+    provider = client.post("/api/settings/llm/providers", json=provider_payload).json()
+    automatic = _make_profile(
+        client,
+        provider["id"],
+        name="Automatic",
+        model="context-model",
+        max_context_tokens=None,
+    ).json()
+    manual = _make_profile(
+        client,
+        provider["id"],
+        name="Manual",
+        model="context-model",
+        max_context_tokens=150_000,
+    ).json()
+
+    provider_payload["model_capabilities"]["context-model"]["context_window_tokens"] = (
+        200_000
+    )
+    response = client.put(
+        f"/api/settings/llm/providers/{provider['id']}", json=provider_payload
+    )
+
+    assert response.status_code == 200
+    profiles = {
+        item["id"]: item
+        for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    assert profiles[automatic["id"]]["max_context_tokens"] == 200_000
+    assert profiles[automatic["id"]]["context_limit_source"] == "provider"
+    assert profiles[manual["id"]]["max_context_tokens"] == 150_000
+    assert profiles[manual["id"]]["context_limit_source"] == "manual"
+
+
 def test_factory_droid_provider_uses_cli_credentials(client: TestClient):
     response = _make_provider(
         client,

@@ -1600,13 +1600,22 @@ async def discover_model_options() -> list[dict[str, Any]]:
                 or row.get("hidden", False)
             ):
                 continue
-            models.append(
-                {
-                    "id": str(row["id"]),
-                    "supportedReasoningEfforts": row.get("supportedReasoningEfforts"),
-                    "defaultReasoningEffort": row.get("defaultReasoningEffort"),
-                }
-            )
+            option = {
+                "id": str(row["id"]),
+                "supportedReasoningEfforts": row.get("supportedReasoningEfforts"),
+                "defaultReasoningEffort": row.get("defaultReasoningEffort"),
+            }
+            for key in (
+                "context_window_tokens",
+                "context_length",
+                "contextWindow",
+                "context_window",
+                "max_input_tokens",
+                "inputTokenLimit",
+            ):
+                if row.get(key) is not None:
+                    option[key] = row[key]
+            models.append(option)
         next_cursor = result.get("nextCursor") or result.get("next_cursor")
         if not next_cursor or next_cursor == cursor:
             break

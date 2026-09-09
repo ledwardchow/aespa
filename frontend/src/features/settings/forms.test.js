@@ -54,6 +54,21 @@ test("model edits preserve explicit temperature zero and manual context size", (
   expect(llmPayload({ ...form, use_temperature: false, max_context_auto: true })).toMatchObject({
     temperature: null,
     max_context_tokens: null,
+    detected_context_tokens: null,
+  });
+});
+
+test("auto context preserves a freshly discovered limit without making it manual", () => {
+  const payload = llmPayload({
+    ...llmProfileToForm(null, [{ id: 1, name: "Provider", models: ["model"] }]),
+    name: "Provider/model",
+    max_context_tokens: 1000000,
+    detected_context_tokens: 1000000,
+  });
+
+  expect(payload).toMatchObject({
+    max_context_tokens: null,
+    detected_context_tokens: 1000000,
   });
 });
 
