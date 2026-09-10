@@ -730,7 +730,7 @@ def test_discovery_candidates_are_persisted_before_validation(
     sast_scanner._candidates.pop(run_id, None)
 
 
-def test_full_sast_task_executes_three_real_phase_loops(
+def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
     tmp_path, monkeypatch, isolated_db_engine
 ):
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
@@ -842,7 +842,9 @@ def test_full_sast_task_executes_three_real_phase_loops(
 
     asyncio.run(sast_scanner._sast_scan_task(run_id))
 
-    assert calls.count("discovery") == 4
+    # Four discovery workers plus the semantic closure worker. The fixture's
+    # generic fallback branch records both as source-review calls.
+    assert calls.count("discovery") == 5
     assert calls.count("validation") == 1
     assert calls[-1] == "attack_path"
     with Session(isolated_db_engine) as session:

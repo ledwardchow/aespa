@@ -222,16 +222,19 @@ def _binding_for_mapping(live_context: dict | None, mapping_id: int) -> dict:
                     return _normalise_binding(value)
     if live_context.get("mapping_id") in (mapping_id, str(mapping_id)):
         return _normalise_binding(live_context)
-    return _normalise_binding(live_context) if "status" in live_context else {
-        "status": READINESS_PENDING
-    }
+    return (
+        _normalise_binding(live_context)
+        if "status" in live_context
+        else {"status": READINESS_PENDING}
+    )
 
 
 def _static_status(path: dict, *, web: bool) -> tuple[str, list[str]]:
     if not path:
-        return READINESS_MISSING_FRONTEND_HOP if web else READINESS_MISSING_BACKEND_HOP, [
-            "static_path_missing"
-        ]
+        return (
+            READINESS_MISSING_FRONTEND_HOP if web else READINESS_MISSING_BACKEND_HOP,
+            ["static_path_missing"],
+        )
     trace = path.get("static_trace", {})
     trace_status = trace.get("status") if isinstance(trace, dict) else None
     if trace_status not in (None, "complete"):
@@ -239,7 +242,11 @@ def _static_status(path: dict, *, web: bool) -> tuple[str, list[str]]:
     if web:
         surface = path.get("frontend_surface", {})
         request = surface.get("browser_request") if isinstance(surface, dict) else None
-        if not isinstance(surface, dict) or not isinstance(request, dict) or not request:
+        if (
+            not isinstance(surface, dict)
+            or not isinstance(request, dict)
+            or not request
+        ):
             return READINESS_MISSING_FRONTEND_HOP, ["browser_request_missing"]
         if not path.get("vulnerability_anchor") and not path.get("source_finding"):
             return READINESS_MISSING_BACKEND_HOP, ["vulnerability_anchor_missing"]
@@ -334,8 +341,7 @@ def create_pending_cases(campaign_id: int, target_member_id: int) -> ResolutionS
     with Session(get_engine()) as session:
         _target, mappings = _approved_mappings(session, campaign_id, target_member_id)
         cases = [
-            upsert_validation_case(session, mapping, _target)
-            for mapping in mappings
+            upsert_validation_case(session, mapping, _target) for mapping in mappings
         ]
         session.commit()
         counts, ids, warnings = _summary(cases)
@@ -381,7 +387,8 @@ def resolve_cases_for_web_target(
                 if isinstance(live_context, dict):
                     supplied = _binding_for_mapping(live_context, mapping.id)
                     if any(
-                        key in live_context for key in ("bindings", "resolutions", "cases")
+                        key in live_context
+                        for key in ("bindings", "resolutions", "cases")
                     ):
                         # Backward-compatible support for orchestrators that have
                         # already resolved a binding.
@@ -414,8 +421,12 @@ def resolve_cases_for_web_target(
                     },
                     "evidence_ids": [
                         f"page:{page['id']}" if page.get("id") is not None else None,
-                        f"action:{action['id']}" if action.get("id") is not None else None,
-                        f"traffic:{request['id']}" if request.get("id") is not None else None,
+                        f"action:{action['id']}"
+                        if action.get("id") is not None
+                        else None,
+                        f"traffic:{request['id']}"
+                        if request.get("id") is not None
+                        else None,
                     ],
                 }
                 binding["evidence_ids"] = [
@@ -456,12 +467,16 @@ def _endpoint_path(path: dict) -> tuple[str | None, str | None]:
     surface = path.get("frontend_surface", {})
     request = surface.get("browser_request", {}) if isinstance(surface, dict) else {}
     hops = path.get("service_hops", [])
-    candidates = [
-        item
-        for item in hops
-        if isinstance(item, dict)
-        and item.get("request_role") in {"server_ingress", "server_egress", None}
-    ] if isinstance(hops, list) else []
+    candidates = (
+        [
+            item
+            for item in hops
+            if isinstance(item, dict)
+            and item.get("request_role") in {"server_ingress", "server_egress", None}
+        ]
+        if isinstance(hops, list)
+        else []
+    )
     candidates.append(request)
     transition = path.get("request_transition")
     if isinstance(transition, dict):
@@ -605,7 +620,11 @@ def compile_runnable_cases(
         if target_member is None or target_member.campaign_id != campaign_id:
             raise ValueError("Target member does not belong to campaign")
         run_type = "web" if target_member.target_type == "site" else "api"
-        run_id = target_member.test_run_id if run_type == "web" else target_member.api_test_run_id
+        run_id = (
+            target_member.test_run_id
+            if run_type == "web"
+            else target_member.api_test_run_id
+        )
         if run_id is None:
             raise ValueError("Target child run does not exist")
         cases = session.exec(

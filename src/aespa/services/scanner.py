@@ -9057,8 +9057,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                             None,
                         )
                         evidence_result_by_url = {
-                            affected: anonymous_match
-                            or result_by_url.get(affected, {})
+                            affected: anonymous_match or result_by_url.get(affected, {})
                         }
                     finding_rejection = _unauthenticated_finding_rejection(
                         raw, evidence_result_by_url

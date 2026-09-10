@@ -84,6 +84,19 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
         allow_subdomains=cfg.allow_subdomains,
         require_approval_for_destructive=cfg.require_approval_for_destructive,
         strict_locator_enforcement=getattr(cfg, "strict_locator_enforcement", True),
+        sast_rate_limit_findings=getattr(cfg, "sast_rate_limit_findings", True),
+        sast_race_condition_findings=getattr(cfg, "sast_race_condition_findings", True),
+        sast_audit_logging_findings=getattr(cfg, "sast_audit_logging_findings", False),
+        sast_defense_in_depth_findings=getattr(
+            cfg, "sast_defense_in_depth_findings", False
+        ),
+        sast_dependency_findings=getattr(cfg, "sast_dependency_findings", True),
+        sast_min_severity=getattr(cfg, "sast_min_severity", "low"),
+        sast_min_confidence=getattr(cfg, "sast_min_confidence", 0.35),
+        sast_baseline_budget=getattr(cfg, "sast_baseline_budget", 80),
+        sast_threat_budget=getattr(cfg, "sast_threat_budget", 60),
+        sast_closure_budget=getattr(cfg, "sast_closure_budget", 40),
+        sast_validator_budget=getattr(cfg, "sast_validator_budget", 50),
         updated_at=cfg.updated_at,
     )
 
@@ -165,6 +178,17 @@ def upsert_scanner_policy(
     cfg.allow_subdomains = payload.allow_subdomains
     cfg.require_approval_for_destructive = payload.require_approval_for_destructive
     cfg.strict_locator_enforcement = payload.strict_locator_enforcement
+    cfg.sast_rate_limit_findings = payload.sast_rate_limit_findings
+    cfg.sast_race_condition_findings = payload.sast_race_condition_findings
+    cfg.sast_audit_logging_findings = payload.sast_audit_logging_findings
+    cfg.sast_defense_in_depth_findings = payload.sast_defense_in_depth_findings
+    cfg.sast_dependency_findings = payload.sast_dependency_findings
+    cfg.sast_min_severity = payload.sast_min_severity
+    cfg.sast_min_confidence = payload.sast_min_confidence
+    cfg.sast_baseline_budget = payload.sast_baseline_budget
+    cfg.sast_threat_budget = payload.sast_threat_budget
+    cfg.sast_closure_budget = payload.sast_closure_budget
+    cfg.sast_validator_budget = payload.sast_validator_budget
     cfg.updated_at = _utcnow()
 
     session.add(cfg)
@@ -528,7 +552,9 @@ def upsert_reporting_debug_config(
 def get_benchmark_lab_config(session: Session) -> BenchmarkLabConfigOut:
     cfg = session.get(BenchmarkLabConfig, _SINGLETON_ID)
     if cfg is None:
-        return BenchmarkLabConfigOut(**BenchmarkLabConfigIn().model_dump(), updated_at=_utcnow())
+        return BenchmarkLabConfigOut(
+            **BenchmarkLabConfigIn().model_dump(), updated_at=_utcnow()
+        )
     return BenchmarkLabConfigOut(
         panel_enabled=cfg.panel_enabled,
         default_match_mode=cfg.default_match_mode,

@@ -5851,9 +5851,7 @@ async def _dismiss_blocking_modal(
 
             if container is None:
                 try:
-                    loc = page.locator(
-                        "[class*='modal' i], [class*='overlay' i]"
-                    ).first
+                    loc = page.locator("[class*='modal' i], [class*='overlay' i]").first
                     if await loc.count() > 0 and await loc.is_visible():
                         container = loc
                 except Exception:

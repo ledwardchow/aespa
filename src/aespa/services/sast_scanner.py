@@ -40,7 +40,9 @@ from aespa.models import (
     ApiDocument,
     ApiEndpoint,
     PhaseCheckpoint,
+    SastCoverageObligation,
     SastEvidenceReceipt,
+    SastObligationLead,
     SastRun,
     SastWorker,
     ScanLead,
@@ -241,6 +243,7 @@ async def _run_checkpointed_agent(
     resume: bool,
     done_check=None,
     termination_check=None,
+    max_tool_calls: int | None = None,
 ) -> str:
     """Run one SAST agent with durable turn checkpoints and bounded retries."""
     from aespa.services import llm as llm_svc
@@ -251,9 +254,11 @@ async def _run_checkpointed_agent(
     for attempt in range(len(_SAST_NETWORK_RETRY_DELAYS) + 1):
         messages = saved.get("messages")
         step_count = int(saved.get("step_count") or 0)
+        observed_step_count = step_count
 
         async def _on_checkpoint(new_messages: list[dict], new_step_count: int) -> None:
-            nonlocal saved
+            nonlocal saved, observed_step_count
+            observed_step_count = new_step_count
             saved = {
                 "messages": new_messages,
                 "step_count": new_step_count,
@@ -262,6 +267,12 @@ async def _run_checkpointed_agent(
             _save_checkpoint(sast_run_id, phase, key, saved)
 
         try:
+
+            def _bounded_termination_check():
+                if max_tool_calls is not None and observed_step_count >= max_tool_calls:
+                    return f"phase tool-call budget of {max_tool_calls} reached"
+                return termination_check() if termination_check else None
+
             return await llm_svc.thinking_agentic_loop(
                 config,
                 system_message=system_message,
@@ -274,7 +285,7 @@ async def _run_checkpointed_agent(
                 resume_step_count=step_count,
                 on_checkpoint=_on_checkpoint,
                 done_check=done_check,
-                termination_check=termination_check,
+                termination_check=_bounded_termination_check,
             )
         except llm_svc.LLMQuotaPauseError:
             raise
@@ -859,6 +870,8 @@ def _make_tool_executor(
     assigned_worker_id: int | None = None,
     semantic_planning: dict[str, Any] | None = None,
     semantic_obligation_keys: set[str] | None = None,
+    discovery_strategy: str = "threat_directed",
+    min_confidence: float = CONFIDENCE_THRESHOLD,
 ):
     """Return an async tool_executor closure for the SAST agentic loop.
 
@@ -1044,10 +1057,18 @@ def _make_tool_executor(
             candidate = {
                 "candidate_id": cid,
                 "source_work_item_id": work_item_id if work_item_id >= 0 else None,
+                "semantic_obligation_keys": [
+                    str(key)
+                    for key in _normalize_tool_list(tool_input.get("obligation_keys"))
+                    if str(key) in assigned_semantic
+                ],
                 "fingerprint": fingerprint,
                 "title": title,
                 "category": category,
                 "severity": str(tool_input.get("severity", "medium")),
+                "classification": str(tool_input.get("classification", "exploitable")),
+                "root_causes": _normalize_tool_list(tool_input.get("root_causes")),
+                "discovery_strategy": discovery_strategy,
                 "location": location,
                 "description": str(tool_input.get("description", "")),
                 "evidence": str(tool_input.get("evidence", "")),
@@ -1108,7 +1129,7 @@ def _make_tool_executor(
             match["filter_reasoning"] = reasoning
             _sync_candidates_to_db(sast_run_id, collection_id)
             _persist_candidate_state(sast_run_id)
-            kept = confidence >= CONFIDENCE_THRESHOLD
+            kept = confidence >= min_confidence
             events_svc.emit(
                 sast_run_id,
                 {
@@ -1161,7 +1182,45 @@ def _reconcile_candidate_ledger(sast_run_id: int) -> dict[str, int]:
     """
 
     candidates = _candidates.get(sast_run_id, [])
+    for candidate in list(candidates):
+        roots = [
+            str(root).strip()
+            for root in candidate.get("root_causes", [])
+            if str(root).strip()
+        ]
+        if len(roots) <= 1 or candidate.get("split_materialized"):
+            continue
+        candidate["root_causes"] = [roots[0]]
+        candidate["split_materialized"] = True
+        for root_cause in roots[1:]:
+            split = dict(candidate)
+            split["candidate_id"] = (
+                max(
+                    (int(item.get("candidate_id", -1)) for item in candidates),
+                    default=-1,
+                )
+                + 1
+            )
+            split["root_causes"] = [root_cause]
+            split["split_from_candidate_id"] = candidate.get("candidate_id")
+            split["description"] = (
+                f"{candidate.get('description', '')}\n\nDistinct root cause: {root_cause}".strip()
+            )
+            split["fingerprint"] = lead_fingerprint(
+                category=str(split.get("category") or ""),
+                title=f"{split.get('title')} — {root_cause[:80]}",
+                location=str(split.get("location") or ""),
+            )
+            split["title"] = f"{split.get('title')} — {root_cause[:80]}"
+            split["reconciliation_key"] = semantic_svc.fingerprint(
+                split.get("category"), split.get("location"), root_cause
+            )
+            candidates.append(split)
     reconciled, stats = semantic_svc.reconcile_candidates(candidates)
+    stats["split"] = sum(
+        bool(candidate.get("split_from_candidate_id") is not None)
+        for candidate in candidates
+    )
     clusters = {
         item.get("reconciliation_key"): item
         for item in reconciled
@@ -1214,6 +1273,7 @@ def _make_review_executor(
     phase: str,
     collection_id: int | None = None,
     assigned_candidate_id: int | None = None,
+    min_confidence: float = CONFIDENCE_THRESHOLD,
 ):
     async def tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         if sast_run_id in _sast_stop_requested:
@@ -1285,7 +1345,7 @@ def _make_review_executor(
                     ),
                     "proof_gaps": _normalize_tool_list(tool_input.get("proof_gaps")),
                     "reportable": verdict == "confirmed"
-                    and confidence >= CONFIDENCE_THRESHOLD,
+                    and confidence >= min_confidence,
                 }
             )
             # A verdict completes the validator's research for this candidate.
@@ -1313,6 +1373,54 @@ def _make_review_executor(
         return f"Unknown tool: {tool_name!r}"
 
     return tool_executor
+
+
+def _apply_sast_policy(candidate: dict[str, Any], policy: Any) -> None:
+    """Apply user-selected reporting classes after independent validation."""
+
+    severity_rank = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    reasons: list[str] = []
+    if severity_rank.get(
+        str(candidate.get("severity") or "low"), 1
+    ) < severity_rank.get(policy.sast_min_severity, 1):
+        reasons.append(f"severity is below policy minimum {policy.sast_min_severity}")
+    if float(candidate.get("confidence") or 0) < policy.sast_min_confidence:
+        reasons.append(
+            f"confidence is below policy minimum {policy.sast_min_confidence:.2f}"
+        )
+    classification = str(candidate.get("classification") or "exploitable").casefold()
+    if (
+        classification in {"defense_in_depth", "defence_in_depth"}
+        and not policy.sast_defense_in_depth_findings
+    ):
+        reasons.append("defense-in-depth findings are disabled")
+    text = " ".join(
+        str(candidate.get(key) or "") for key in ("title", "category", "description")
+    ).casefold()
+    controls = (
+        ("rate", policy.sast_rate_limit_findings, ("rate limit", "brute force")),
+        (
+            "race",
+            policy.sast_race_condition_findings,
+            ("race condition", "concurrency", "toctou"),
+        ),
+        (
+            "audit",
+            policy.sast_audit_logging_findings,
+            ("audit log", "monitoring", "detection"),
+        ),
+        (
+            "dependency",
+            policy.sast_dependency_findings,
+            ("dependency", "cve-", "vulnerable package"),
+        ),
+    )
+    for label, enabled, terms in controls:
+        if not enabled and any(term in text for term in terms):
+            reasons.append(f"{label} findings are disabled")
+    if reasons:
+        candidate["reportable"] = False
+        candidate["policy_exclusion_reasons"] = reasons
 
 
 def _normalize_tool_list(value: object) -> list:
@@ -1454,14 +1562,58 @@ def _sync_candidate_to_db(
     candidate["reference"] = lead.reference
     candidate["lead_id"] = lead.id
     source_work_item_id = candidate.get("source_work_item_id")
-    if lead.id is not None and source_work_item_id:
+    if lead.id is not None:
         with Session(get_engine()) as session:
             persisted_lead = session.get(ScanLead, lead.id)
             if persisted_lead is not None:
-                persisted_lead.source_work_item_id = int(source_work_item_id)
+                if source_work_item_id:
+                    persisted_lead.source_work_item_id = int(source_work_item_id)
+                persisted_lead.classification = str(
+                    candidate.get("classification") or "exploitable"
+                )
+                persisted_lead.discovery_strategy = str(
+                    candidate.get("discovery_strategy") or ""
+                )
+                persisted_lead.provenance_json = json.dumps(
+                    candidate.get("provenance") or []
+                )
                 session.add(persisted_lead)
                 session.commit()
-        workprogram_svc.attach_lead(int(source_work_item_id), lead.id)
+        if source_work_item_id:
+            workprogram_svc.attach_lead(int(source_work_item_id), lead.id)
+    if lead.id is not None and candidate.get("semantic_obligation_keys"):
+        with Session(get_engine()) as session:
+            obligations = list(
+                session.exec(
+                    select(SastCoverageObligation)
+                    .where(SastCoverageObligation.sast_run_id == sast_run_id)
+                    .where(
+                        SastCoverageObligation.obligation_key.in_(
+                            candidate["semantic_obligation_keys"]
+                        )
+                    )
+                )
+            )
+            existing = {
+                (row.obligation_id, row.lead_id, row.relationship)
+                for row in session.exec(
+                    select(SastObligationLead).where(
+                        SastObligationLead.sast_run_id == sast_run_id
+                    )
+                )
+            }
+            for obligation in obligations:
+                key = (obligation.id, lead.id, "primary")
+                if key not in existing:
+                    session.add(
+                        SastObligationLead(
+                            sast_run_id=sast_run_id,
+                            obligation_id=obligation.id,
+                            lead_id=lead.id,
+                            relationship="primary",
+                        )
+                    )
+            session.commit()
 
 
 # ── SAST scan task ─────────────────────────────────────────────────────────────
@@ -1519,12 +1671,16 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
     from aespa.services.prompts.sast import (
         SAST_ATTACK_PATH_PROMPT,
         SAST_ATTACK_PATH_TOOLS,
+        SAST_CLOSURE_PROMPT,
+        SAST_REPOSITORY_MODEL_PROMPT,
+        SAST_THREAT_MODEL_PROMPT,
         SAST_TOOLS,
         SAST_VALIDATION_PROMPT,
         SAST_VALIDATION_TOOLS,
         sast_worker_prompt,
     )
     from aespa.services.settings import get_llm_config_for_role
+    from aespa.services.settings_integrations import get_scanner_policy
 
     _sast_stop_requested.discard(sast_run_id)
     _sast_pause_requested.discard(sast_run_id)
@@ -1586,6 +1742,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 )
                 or llm_cfg_obj
             )
+            scanner_policy = get_scanner_policy(s)
             endpoints = (
                 list(
                     s.exec(
@@ -1658,6 +1815,32 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             "Normalizing repository components, operations, controls, and dependencies.",
         )
         semantic_model = semantic_svc.build_repository_model(root)
+        llm_ready_for_semantic = bool(
+            llm_cfg_obj.api_key
+            or llm_cfg_obj.base_url
+            or str(llm_cfg_obj.provider)
+            in {
+                "codex",
+                "github_copilot",
+                "factory_droid",
+                "google_antigravity",
+                "bedrock",
+                "bedrock_mantle",
+                "azure_openai",
+                "azure_foundry",
+            }
+        )
+        try:
+            if not llm_ready_for_semantic:
+                raise RuntimeError("configured provider has no available credentials")
+            semantic_model = await semantic_svc.reconcile_repository_model_with_llm(
+                llm_svc, llm_cfg_obj, semantic_model, SAST_REPOSITORY_MODEL_PROMPT
+            )
+        except Exception as exc:
+            semantic_model["reconciliation"] = {
+                "status": "failed",
+                "warning": str(exc)[:500],
+            }
         _set_phase(
             sast_run_id,
             "repository_model",
@@ -1672,6 +1855,21 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             "Deriving source-backed actors, assets, boundaries, and threat scenarios.",
         )
         semantic_threat_model = semantic_svc.build_threat_model(semantic_model)
+        try:
+            if not llm_ready_for_semantic:
+                raise RuntimeError("configured provider has no available credentials")
+            semantic_threat_model = await semantic_svc.enrich_threat_model_with_llm(
+                llm_svc,
+                llm_cfg_obj,
+                semantic_model,
+                semantic_threat_model,
+                SAST_THREAT_MODEL_PROMPT,
+            )
+        except Exception as exc:
+            semantic_threat_model["llm_status"] = "failed"
+            semantic_threat_model.setdefault("open_questions", []).append(
+                f"Threat-model reconciliation failed: {str(exc)[:300]}"
+            )
         _set_phase(
             sast_run_id,
             "threat_model",
@@ -1690,6 +1888,14 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         )
         semantic_planning["legacy_work_program_projection"] = (
             workprogram_svc.semantic_obligation_summary(semantic_planning)
+        )
+        semantic_planning["dependency_analysis"] = (
+            semantic_svc.deterministic_dependency_analysis(semantic_model)
+        )
+        semantic_planning["relational_projection"] = (
+            semantic_svc.persist_semantic_state(
+                sast_run_id, semantic_model, semantic_threat_model, semantic_planning
+            )
         )
         _set_phase(
             sast_run_id,
@@ -1774,11 +1980,13 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                             "validation",
                             collection_id=run.collection_id,
                             assigned_candidate_id=candidate_id,
+                            min_confidence=scanner_policy.sast_min_confidence,
                         ),
                         emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
                         stop_check=_stop_check,
                         tools=SAST_VALIDATION_TOOLS,
                         resume=resume,
+                        max_tool_calls=scanner_policy.sast_validator_budget,
                     )
                     _raise_if_stopped()
                 except asyncio.CancelledError:
@@ -2078,12 +2286,22 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                                 assigned_worker_id=worker.id,
                                 semantic_planning=semantic_planning,
                                 semantic_obligation_keys=semantic_keys,
+                                discovery_strategy=str(
+                                    semantic_payload.get("strategy")
+                                    or "threat_directed"
+                                ),
+                                min_confidence=scanner_policy.sast_min_confidence,
                             ),
                             emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
                             stop_check=_stop_check,
                             tools=SAST_TOOLS,
                             resume=resume,
                             done_check=_worker_done,
+                            max_tool_calls=(
+                                scanner_policy.sast_baseline_budget
+                                if worker.id == baseline_worker_id
+                                else scanner_policy.sast_threat_budget
+                            ),
                         )
                     except (
                         llm_svc.LLMQuotaPauseError,
@@ -2162,13 +2380,55 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     return summary
 
             worker_summaries = await asyncio.gather(
-                *(
-                    _run_discovery_worker(worker)
-                    for worker in discovery_workers
-                )
+                *(_run_discovery_worker(worker) for worker in discovery_workers)
             )
             discovery_summary = "\n".join(worker_summaries)
             _raise_if_stopped()
+
+            if not scanner_policy.disable_deterministic_checks:
+                deterministic_candidates = (
+                    semantic_svc.deterministic_security_candidates(root)
+                )
+                if scanner_policy.sast_dependency_findings:
+                    deterministic_candidates.extend(
+                        semantic_svc.dependency_match_candidates(
+                            semantic_planning.get("dependency_analysis", {})
+                        )
+                    )
+                for candidate in deterministic_candidates:
+                    fingerprint = lead_fingerprint(
+                        category=candidate["category"],
+                        title=candidate["title"],
+                        location=candidate["location"],
+                    )
+                    if any(
+                        item.get("fingerprint") == fingerprint
+                        for item in _candidates[sast_run_id]
+                    ):
+                        continue
+                    candidate["candidate_id"] = (
+                        max(
+                            (
+                                int(item.get("candidate_id", -1))
+                                for item in _candidates[sast_run_id]
+                            ),
+                            default=-1,
+                        )
+                        + 1
+                    )
+                    candidate["fingerprint"] = fingerprint
+                    candidate["reconciliation_key"] = semantic_svc.fingerprint(
+                        candidate["category"],
+                        candidate["location"],
+                        candidate["location"],
+                        " ".join(
+                            sorted(semantic_svc._tokens(candidate["description"]))
+                        ),
+                    )
+                    candidate["source_work_item_id"] = None
+                    candidate["semantic_obligation_keys"] = []
+                    _candidates[sast_run_id].append(candidate)
+                _sync_candidates_to_db(sast_run_id, run.collection_id)
 
         candidates = _candidates.get(sast_run_id, [])
         candidate_count = len(candidates)
@@ -2275,10 +2535,6 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             },
         )
 
-        # Closure is deterministic in the initial semantic implementation. It
-        # records the proof obligations that still need source/LLM review and
-        # therefore prevents a complete-looking regex work program from
-        # overstating semantic coverage.
         current_phase = "closure"
         _set_phase(
             sast_run_id,
@@ -2286,12 +2542,120 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             "running",
             "Checking threat scenarios, model warnings, and adjacent concerns for closure.",
         )
+        unresolved_closure_keys = {
+            str(item.get("obligation_key"))
+            for item in semantic_planning.get("obligations", [])
+            if item.get("status") in {"pending", "in_review", "blocked", "unreviewed"}
+        }
+        adjacent_for_closure = [
+            concern
+            for candidate in candidates
+            for concern in candidate.get("adjacent_concerns", [])
+            if isinstance(concern, dict) and concern.get("status") != "resolved"
+        ]
+        candidates_before_closure = len(candidates)
+        if unresolved_closure_keys or adjacent_for_closure:
+            closure_payload = {
+                "repository_warnings": semantic_model.get("warnings", []),
+                "threat_scenarios": semantic_threat_model.get("scenarios", []),
+                "obligations": [
+                    item
+                    for item in semantic_planning.get("obligations", [])
+                    if item.get("obligation_key") in unresolved_closure_keys
+                ],
+                "adjacent_concerns": adjacent_for_closure,
+                "candidate_summary": [
+                    {
+                        "candidate_id": item.get("candidate_id"),
+                        "title": item.get("title"),
+                        "location": item.get("location"),
+                        "validation_status": item.get("validation_status"),
+                    }
+                    for item in candidates
+                ],
+            }
+            try:
+                await _run_checkpointed_agent(
+                    sast_run_id=sast_run_id,
+                    phase="closure",
+                    worker_key="semantic-closure",
+                    config=llm_cfg_obj,
+                    system_message=SAST_CLOSURE_PROMPT,
+                    initial_user_message=(
+                        "Review the bounded closure queue below. Use source tools to verify it. "
+                        "Call record_semantic_disposition for every obligation. If source evidence "
+                        "supports a new distinct vulnerability, call write_lead then filter_lead; "
+                        "it will be independently validated. Do not call get_work_program.\n\n"
+                        + json.dumps(closure_payload, ensure_ascii=False)
+                    ),
+                    tool_executor=_make_tool_executor(
+                        sast_run_id,
+                        root,
+                        run.collection_id,
+                        coverage,
+                        assigned_worker_id=None,
+                        semantic_planning=semantic_planning,
+                        semantic_obligation_keys=unresolved_closure_keys,
+                        discovery_strategy="closure",
+                        min_confidence=scanner_policy.sast_min_confidence,
+                    ),
+                    emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
+                    stop_check=_stop_check,
+                    tools=SAST_TOOLS,
+                    resume=resume,
+                    max_tool_calls=scanner_policy.sast_closure_budget,
+                )
+            except (llm_svc.LLMQuotaPauseError, SastPauseRequested, SastNetworkPause):
+                raise
+            except Exception as exc:
+                semantic_planning.setdefault("closure_warnings", []).append(
+                    str(exc)[:500]
+                )
+
+        if len(candidates) > candidates_before_closure:
+            closure_reconciliation = _reconcile_candidate_ledger(sast_run_id)
+            for candidate in candidates:
+                if candidate.get(
+                    "validation_status"
+                ) == "pending" and not candidate.get("reconciled_duplicate"):
+                    candidate.setdefault("discovery_strategy", "closure")
+                    _schedule_candidate_validation(candidate)
+            if validation_tasks:
+                await asyncio.gather(*validation_tasks)
+        else:
+            closure_reconciliation = {
+                "input": len(candidates),
+                "unique": len(candidates),
+                "merged": 0,
+                "split": 0,
+            }
+
+        resolved_model_warning_keys = {
+            question
+            for item in semantic_planning.get("obligations", [])
+            if item.get("obligation_type") == "model_completeness"
+            and item.get("status") in {"assessed_safe", "candidate", "not_applicable"}
+            for question in item.get("open_questions", [])
+        }
+        for warning in semantic_model.get("warnings", []):
+            if warning.get("key") in resolved_model_warning_keys:
+                warning["status"] = "resolved"
         semantic_closure = semantic_svc.closure_assurance(
             semantic_model,
             semantic_threat_model,
             semantic_planning,
             candidates,
         )
+        semantic_closure["closure_candidates_created"] = max(
+            0, len(candidates) - candidates_before_closure
+        )
+        semantic_closure["reconciliation"] = closure_reconciliation
+        semantic_svc.persist_semantic_state(
+            sast_run_id, semantic_model, semantic_threat_model, semantic_planning
+        )
+        for candidate in candidates:
+            _apply_sast_policy(candidate, scanner_policy)
+        _sync_candidates_to_db(sast_run_id, run.collection_id)
         _set_phase(
             sast_run_id,
             "closure",
@@ -2409,6 +2773,19 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "running",
                 "Building the final candidate and coverage report.",
             )
+        with Session(get_engine()) as telemetry_session:
+            telemetry_run = telemetry_session.get(SastRun, sast_run_id)
+            try:
+                telemetry_phase_state = (
+                    json.loads(telemetry_run.phase_state_json or "{}")
+                    if telemetry_run
+                    else {}
+                )
+            except (TypeError, ValueError):
+                telemetry_phase_state = {}
+        efficiency_telemetry = semantic_svc.persist_scan_telemetry(
+            sast_run_id, telemetry_phase_state, semantic_planning, candidates
+        )
         report = {
             "candidates": candidate_count,
             "reportable": leads_count,
@@ -2424,6 +2801,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             "completion_status": completion_status,
             "completion_reasons": completion_reasons,
             "work_program": work_program_summary,
+            "efficiency_telemetry": efficiency_telemetry,
             "semantic": {
                 "repository_model": semantic_model,
                 "threat_model": semantic_threat_model,

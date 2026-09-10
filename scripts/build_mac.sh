@@ -49,6 +49,7 @@ echo "==> Building app bundle with PyInstaller"
     --icon "$ICNS" \
     --osx-bundle-identifier com.aespa.app \
     --add-data "src/aespa/web:aespa/web" \
+    --add-data "src/aespa/services/data:aespa/services/data" \
     --add-data "alembic.ini:." \
     --add-data "alembic:alembic" \
     --add-data "THIRD_PARTY_LICENSES.txt:." \

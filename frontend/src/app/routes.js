@@ -254,6 +254,14 @@ export const routes = {
     ),
     props: (route) => ({ key: route.id, evaluationId: route.id, initialTab: route.tab }),
   },
+  "benchmark-comparison-detail": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkComparisonDetail.jsx"),
+      "BenchmarkComparisonDetail",
+    ),
+    props: (route) => ({ key: route.id, comparisonId: route.id }),
+  },
   "alice-popout": {
     section: "alice-popout",
     Component: lazyNamed(

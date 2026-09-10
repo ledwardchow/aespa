@@ -816,6 +816,17 @@ class ScannerPolicyBase(BaseModel):
     allow_subdomains: bool = True
     require_approval_for_destructive: bool = True
     strict_locator_enforcement: bool = True
+    sast_rate_limit_findings: bool = True
+    sast_race_condition_findings: bool = True
+    sast_audit_logging_findings: bool = False
+    sast_defense_in_depth_findings: bool = False
+    sast_dependency_findings: bool = True
+    sast_min_severity: Literal["low", "medium", "high", "critical"] = "low"
+    sast_min_confidence: float = Field(default=0.35, ge=0, le=1)
+    sast_baseline_budget: int = Field(default=80, ge=1, le=1000)
+    sast_threat_budget: int = Field(default=60, ge=1, le=1000)
+    sast_closure_budget: int = Field(default=40, ge=1, le=1000)
+    sast_validator_budget: int = Field(default=50, ge=1, le=1000)
 
     @field_validator("methods_by_mode", mode="before")
     @classmethod
@@ -1161,7 +1172,9 @@ class ReportingDebugConfigOut(ReportingDebugConfigBase):
 
 class BenchmarkLabConfigBase(BaseModel):
     panel_enabled: bool = False
-    default_match_mode: Literal["deterministic", "assisted", "human_reviewed"] = "assisted"
+    default_match_mode: Literal["deterministic", "assisted", "human_reviewed"] = (
+        "assisted"
+    )
     default_repetitions: int = Field(default=1, ge=1, le=100)
 
 
@@ -1297,6 +1310,36 @@ class BenchmarkEvaluationOut(BaseModel):
     semantic_coverage: dict = Field(default_factory=dict)
     partial_coverage_reasons: list = Field(default_factory=list)
     matches: list[BenchmarkMatchOut] = Field(default_factory=list)
+
+
+class BenchmarkComparisonIn(BaseModel):
+    name: str = Field(min_length=1, max_length=500)
+    dataset_id: int = Field(gt=0)
+    evaluation_ids: list[int] = Field(min_length=2, max_length=100)
+    thresholds: dict = Field(default_factory=dict)
+    include_contaminated: bool = False
+
+    @field_validator("evaluation_ids")
+    @classmethod
+    def _unique_evaluations(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("evaluation_ids must be unique")
+        return value
+
+
+class BenchmarkComparisonOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    dataset_id: int
+    evaluation_ids: list[int] = Field(default_factory=list)
+    thresholds_json: str
+    metrics_json: str
+    status: str
+    include_contaminated: bool
+    created_at: datetime
+    updated_at: datetime
 
 
 # ── Browser debug config schemas ─────────────────────────────────────────────

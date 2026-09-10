@@ -8,7 +8,7 @@ from PyInstaller.utils.hooks import collect_all
 
 REPO_ROOT = Path(SPECPATH).resolve().parent
 
-datas = [('src/aespa/web', 'aespa/web'), ('alembic.ini', '.'), ('alembic', 'alembic'), ('THIRD_PARTY_LICENSES.txt', '.'), ('LICENSE.txt', '.')]
+datas = [('src/aespa/web', 'aespa/web'), ('src/aespa/services/data', 'aespa/services/data'), ('alembic.ini', '.'), ('alembic', 'alembic'), ('THIRD_PARTY_LICENSES.txt', '.'), ('LICENSE.txt', '.')]
 datas = [(str(REPO_ROOT / source), destination) for source, destination in datas]
 binaries = []
 hiddenimports = []
