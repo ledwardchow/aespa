@@ -243,6 +243,11 @@ SAST_TOOLS: list[dict] = [
                     "type": "integer",
                     "description": "Assigned work item that produced this candidate.",
                 },
+                "obligation_keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Semantic obligation keys supported by this candidate; one candidate may support several obligations.",
+                },
                 "title": {
                     "type": "string",
                     "description": "Short title, e.g. 'SQL injection in user search handler'.",
@@ -256,6 +261,20 @@ SAST_TOOLS: list[dict] = [
                 "severity": {
                     "type": "string",
                     "enum": ["high", "medium", "low"],
+                },
+                "classification": {
+                    "type": "string",
+                    "enum": [
+                        "exploitable",
+                        "conditional",
+                        "defense_in_depth",
+                        "compliance_hardening",
+                    ],
+                },
+                "root_causes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Independently remediable root causes. Multiple entries are split before validation.",
                 },
                 "location": {
                     "type": "string",

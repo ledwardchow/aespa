@@ -1261,10 +1261,17 @@ Events are emitted at key points during crawling and scanning:
 
 A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Scan** button that uploads a source ZIP and starts a standalone scan.
 
-| Panel | Content |
+| View | Content |
 |---|---|
-| **Status / Log** | Agent activity log, scan controls, `TokenUsageBar` telemetry |
-| **Leads** | Original `ScanLead` rows with severity, confidence score, location, and evidence; exportable to markdown |
+| **Coverage** | Direct source-read receipts, legacy work-program totals, and semantic completion assurance |
+| **Model** | Normalized repository facts, components, evidence anchors, confidence, and completeness warnings; facts can be filtered without rendering the full bounded graph at once |
+| **Threats** | Threat-model summary, assets, boundaries, capabilities, objectives, assumptions, open questions, and expandable threat scenarios |
+| **Obligations** | Semantic coverage obligations, dispositions, evidence, discovery summary, reconciliation totals, and closure gaps or recovered candidates |
+| **Efficiency** | Per-phase elapsed time, source reads, facts, obligation progress, candidate outcomes, and disclosed caps |
+| **Candidates** | Original `ScanLead` rows with severity, confidence score, location, validation evidence, and handoff actions; exportable to Markdown |
+| **Activity** | Agent activity log and `TokenUsageBar` telemetry |
+
+The phase rail exposes all ten SAST phases from scope through report and scrolls horizontally when the window cannot fit them. Semantic views use completed report state when available and fall back to in-progress phase data while a scan is running. Older runs show an explicit unavailable state rather than fabricating semantic results.
 
 ---
 
@@ -1612,23 +1619,32 @@ start_sast_scan(sast_run_id)
           a cross-process workspace lease while the directory is live. A
           startup sweep (`db._cleanup_orphaned_sast_extractions`) skips leased
           workspaces and reconciles only dirs leaked by a previous hard crash.
-       3. Build a deterministic source atlas: classify files, identify entry
-          points, inputs, controls, and sensitive sinks, then split them into
-          bounded partitions.
-       4. Run one injection, access-control, and logic worker per partition,
-          plus bounded sink-first workers. Every source and sink item requires
-          an explicit disposition. A worker cannot finish with open items.
-       5. Independent validation loop — a separate adversarial prompt/model role
+       3. Build a normalized repository graph using Python AST, ECMAScript
+          structure, manifest, component-fact, and pattern adapters. An LLM
+          reconciliation pass is used only to resolve source-backed model gaps.
+       4. Run a dedicated threat-analysis pass. Persist actors, assets,
+          boundaries, scenarios, and semantic coverage obligations before any
+          vulnerability discovery worker receives them.
+       5. Run an isolated baseline worker, threat-directed workers,
+          deterministic source/dependency analyzers, and sink-first workers.
+          Every assigned source item and semantic obligation requires a disposition.
+       6. Reconcile candidates by root cause and trace before validation,
+          preserving multiple locations and splitting independently remediable causes.
+       7. Independent validation loop — a separate adversarial prompt/model role
           re-reads evidence, records controls/counterevidence/proof gaps, and
           returns confirmed/dismissed/inconclusive verdicts.
-       6. Attack-path loop — for confirmed candidates, record ordered external
+       8. Semantic closure loop — account for unresolved high-priority scenarios,
+          model warnings, and adjacent validator concerns. New closure candidates
+          return through reconciliation and independent validation.
+       9. Attack-path loop — for confirmed candidates, record ordered external
           reachability, impact, severity reasoning, and a dynamic-test objective.
-       7. Upsert every candidate by stable fingerprint; only independently
-          confirmed candidates above the confidence threshold are reportable.
-       8. Apply the completion gate. Failed workers, open work items, a missing
+      10. Apply scan-policy classification, severity, confidence, and phase-budget
+          controls; then upsert candidates by stable fingerprint.
+      11. Apply the completion gate. Failed workers, open work items, a missing
           entry-point or sink inventory, or a truncated atlas make coverage
           partial even when no candidates were found.
-       9. Persist the final report, work program, and exact evidence receipts;
+      12. Persist the graph, threat model, obligations, candidate relationships,
+          phase telemetry, report, and exact evidence receipts;
           cleanup the temporary directory.
 ```
 
@@ -1644,10 +1660,12 @@ start_sast_scan(sast_run_id)
 | `record_disposition` | Close one assigned item with a result, reason, trace, controls, and evidence |
 
 The normalized work program is stored in `SastSourceFile`, `SastSurfaceItem`,
-`SastPartition`, `SastWorker`, `SastWorkItem`, and `SastEvidenceReceipt`. This
-state is authoritative for completion and resume. `coverage_json` remains as a
-file-level compatibility view, where `reviewed` now means the file was opened
-with `read_file`.
+`SastSurfaceEdge`, `SastPartition`, `SastWorker`, `SastWorkItem`,
+`SastThreatModel`, `SastThreatScenario`, `SastCoverageObligation`,
+`SastObligationLead`, `SastDiscoveryTelemetry`, and `SastEvidenceReceipt`.
+Checkpoint JSON remains the resume projection; relational rows are the auditable
+and portable representation. `coverage_json` is a file-level compatibility view,
+where `reviewed` means the file was opened with `read_file`.
 
 ### Lead lifecycle
 
@@ -1674,7 +1692,8 @@ Final sync upserts candidates by stable fingerprint, preventing rerun duplicates
 | `title` / `description` | Human-readable vulnerability description |
 | `category` | OWASP category slug (e.g. `"API1"` or `"A03"`) |
 | `severity` | `critical` · `high` · `medium` · `low` |
-| `confidence` | 0.0–1.0; only leads ≥ 0.7 (`CONFIDENCE_THRESHOLD`) are persisted |
+| `confidence` | 0.0–1.0; the SAST policy controls the reportable minimum |
+| `classification` / `discovery_strategy` | Exploitability class and baseline, threat, sink, deterministic, dependency, or closure provenance |
 | `location` | Source file path and line reference |
 | `evidence` | Code snippet or supporting text |
 | `fingerprint` | Stable category/title/location hash used to upsert reruns |
@@ -1713,6 +1732,25 @@ Temporary provider connection failures are retried with bounded backoff. If the 
 The cross-process workspace lease is checked before startup recovery changes a SAST run, so starting a second AESPA process does not mark a live scan as interrupted. A genuine interruption writes a `restart_recovery` entry to the phase log. Agent Activity persists queue, start, and terminal events for each discovery worker and candidate validator. Runs created before these events were added rebuild the available discovery-worker history from `SastWorker` rows and completed validator activity from phase checkpoints.
 
 ---
+
+### Benchmark Lab isolation and comparisons
+
+Benchmark Lab is an evaluator over completed ordinary `SastRun` rows; it never
+starts or alters a scan. Ground truth is stored only in `BenchmarkDataset` and is
+not included in scanner APIs, prompts, checkpoints, evidence receipts, SAST
+exports, or lead handoffs. Evaluation performs answer-key/source digest and
+evidence-access checks before scoring. Deterministic mode uses explainable
+location/category/root-cause similarity. Assisted mode gives the evaluator model
+only canonical ground truth, completed lead output, and deterministic proposals;
+it has no repository tools. Human-reviewed mode leaves every proposal unreviewed
+until an operator records an audited override.
+
+`BenchmarkComparison` groups two or more completed evaluations of the same
+dataset without executing new scans. Contaminated evaluations are excluded by
+default. The comparison stores median/range metrics, per-item detection
+frequency, and pass/fail results for configured minimum or maximum thresholds.
+The navigation and APIs remain hidden from the sidebar until the persisted
+Testing Features toggle is enabled; hiding it does not delete evaluator data.
 
 ## 18. Applications & Multi-Repository Campaigns
 

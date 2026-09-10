@@ -71,6 +71,71 @@ export function ScannerPolicyFields({ form, upd, disabled = false }) {
           of applicable coverage cells. Default: 60%.
         </div>
       </div>
+      <div className="form-section-title">Static analysis</div>
+      {[
+        ["sast_rate_limit_findings", "Rate limiting and brute-force resistance"],
+        ["sast_race_condition_findings", "Race conditions and concurrency invariants"],
+        ["sast_audit_logging_findings", "Audit logging and detection gaps"],
+        ["sast_defense_in_depth_findings", "Defense-in-depth weaknesses"],
+        ["sast_dependency_findings", "Vulnerable dependencies"],
+      ].map(([field, label]) => (
+        <label className="toggle-row" key={field}>
+          <input
+            type="checkbox"
+            disabled={disabled}
+            checked={form[field]}
+            onChange={(event) => upd({ [field]: event.target.checked })}
+          />
+          <span>{label}</span>
+        </label>
+      ))}
+      <div className="form-grid two-col">
+        <div className="field">
+          <label>Minimum severity</label>
+          <select
+            disabled={disabled}
+            value={form.sast_min_severity}
+            onChange={(event) => upd({ sast_min_severity: event.target.value })}
+          >
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="critical">Critical</option>
+          </select>
+        </div>
+        <div className="field">
+          <label>Minimum confidence</label>
+          <input
+            type="number"
+            disabled={disabled}
+            min="0"
+            max="1"
+            step="0.05"
+            value={form.sast_min_confidence}
+            onChange={(event) => upd({ sast_min_confidence: event.target.value })}
+          />
+        </div>
+      </div>
+      <div className="form-grid two-col">
+        {[
+          ["sast_baseline_budget", "Baseline tool-call budget"],
+          ["sast_threat_budget", "Threat worker budget"],
+          ["sast_closure_budget", "Closure budget"],
+          ["sast_validator_budget", "Validator budget"],
+        ].map(([field, label]) => (
+          <div className="field" key={field}>
+            <label>{label}</label>
+            <input
+              type="number"
+              disabled={disabled}
+              min="1"
+              max="1000"
+              value={form[field]}
+              onChange={(event) => upd({ [field]: event.target.value })}
+            />
+          </div>
+        ))}
+      </div>
       <label className="toggle-row">
         <input
           type="checkbox"

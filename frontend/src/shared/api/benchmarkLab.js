@@ -23,3 +23,9 @@ export const getBenchmarkEvaluationExport = (id) =>
   req(`/api/benchmark-lab/evaluations/${id}/export`);
 export const getBenchmarkEvaluationExportUrl = (id, format = "json") =>
   `/api/benchmark-lab/evaluations/${id}/export?format=${encodeURIComponent(format)}`;
+export const listBenchmarkComparisons = () => req("/api/benchmark-lab/comparisons");
+export const createBenchmarkComparison = (body) =>
+  req("/api/benchmark-lab/comparisons", { method: "POST", body });
+export const getBenchmarkComparison = (id) => req(`/api/benchmark-lab/comparisons/${id}`);
+export const recalculateBenchmarkComparison = (id) =>
+  req(`/api/benchmark-lab/comparisons/${id}/recalculate`, { method: "POST" });

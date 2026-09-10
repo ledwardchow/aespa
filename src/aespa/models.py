@@ -546,6 +546,17 @@ class ScannerPolicy(SQLModel, table=True):
     allow_subdomains: bool = Field(default=True)
     require_approval_for_destructive: bool = Field(default=True)
     strict_locator_enforcement: bool = Field(default=True)
+    sast_rate_limit_findings: bool = Field(default=True)
+    sast_race_condition_findings: bool = Field(default=True)
+    sast_audit_logging_findings: bool = Field(default=False)
+    sast_defense_in_depth_findings: bool = Field(default=False)
+    sast_dependency_findings: bool = Field(default=True)
+    sast_min_severity: str = Field(default="low")
+    sast_min_confidence: float = Field(default=0.35)
+    sast_baseline_budget: int = Field(default=80)
+    sast_threat_budget: int = Field(default=60)
+    sast_closure_budget: int = Field(default=40)
+    sast_validator_budget: int = Field(default=50)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -1526,6 +1537,9 @@ class SastSurfaceItem(SQLModel, table=True):
     production_reachable: bool = Field(default=True, index=True)
     details_json: str = Field(default="{}")
     provenance: str = Field(default="deterministic", index=True)
+    confidence: float = Field(default=0.5)
+    review_status: str = Field(default="unreviewed", index=True)
+    component_key: str = Field(default="", index=True)
     fingerprint: str = Field(index=True)
     created_at: datetime = Field(default_factory=_utcnow)
 
@@ -1671,6 +1685,207 @@ class SastEvidenceReceipt(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class SastSurfaceEdge(SQLModel, table=True):
+    """A source-backed relationship between normalized repository facts."""
+
+    __tablename__ = "sast_surface_edge"
+    __table_args__ = (
+        UniqueConstraint("sast_run_id", "fingerprint", name="uq_sast_surface_edge"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    source_surface_id: int = Field(foreign_key="sast_surface_item.id", index=True)
+    target_surface_id: int = Field(foreign_key="sast_surface_item.id", index=True)
+    edge_kind: str = Field(index=True)
+    confidence: float = Field(default=0.5)
+    provenance: str = Field(default="deterministic", index=True)
+    evidence_json: str = Field(default="[]")
+    fingerprint: str = Field(index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastThreatModel(SQLModel, table=True):
+    """Versioned threat analysis for one immutable SAST source snapshot."""
+
+    __tablename__ = "sast_threat_model"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            unique=True,
+            index=True,
+        )
+    )
+    summary: str = Field(default="")
+    assets_json: str = Field(default="[]")
+    trust_boundaries_json: str = Field(default="[]")
+    attacker_capabilities_json: str = Field(default="[]")
+    security_objectives_json: str = Field(default="[]")
+    assumptions_json: str = Field(default="[]")
+    open_questions_json: str = Field(default="[]")
+    model_version: int = Field(default=1)
+    source_snapshot_digest: str = Field(default="")
+    prompt_version: str = Field(default="sast-threat-v1")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastThreatScenario(SQLModel, table=True):
+    """One auditable security scenario; scenarios are not findings."""
+
+    __tablename__ = "sast_threat_scenario"
+    __table_args__ = (
+        UniqueConstraint("sast_run_id", "scenario_key", name="uq_sast_threat_scenario"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    scenario_key: str = Field(index=True)
+    title: str = Field(default="")
+    actor: str = Field(default="")
+    controlled_input_or_state_json: str = Field(default="[]")
+    entry_surface_ids_json: str = Field(default="[]")
+    boundary_surface_ids_json: str = Field(default="[]")
+    asset_surface_ids_json: str = Field(default="[]")
+    expected_control_surface_ids_json: str = Field(default="[]")
+    sensitive_operation_surface_ids_json: str = Field(default="[]")
+    security_objective: str = Field(default="")
+    capability_gain: str = Field(default="")
+    impact: str = Field(default="")
+    prerequisites_json: str = Field(default="[]")
+    evidence_json: str = Field(default="[]")
+    priority: str = Field(default="medium", index=True)
+    confidence: float = Field(default=0.5)
+    status: str = Field(default="planned", index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastCoverageObligation(SQLModel, table=True):
+    """Semantic security question that must receive an explicit disposition."""
+
+    __tablename__ = "sast_coverage_obligation"
+    __table_args__ = (
+        UniqueConstraint(
+            "sast_run_id", "obligation_key", name="uq_sast_coverage_obligation"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    obligation_key: str = Field(index=True)
+    obligation_type: str = Field(index=True)
+    title: str = Field(default="")
+    security_question: str = Field(default="")
+    priority: str = Field(default="medium", index=True)
+    source_scenario_id: Optional[int] = Field(
+        default=None, foreign_key="sast_threat_scenario.id", index=True
+    )
+    primary_surface_ids_json: str = Field(default="[]")
+    related_surface_ids_json: str = Field(default="[]")
+    required_evidence_json: str = Field(default="[]")
+    assigned_worker_id: Optional[int] = Field(
+        default=None, foreign_key="sast_worker.id", index=True
+    )
+    status: str = Field(default="pending", index=True)
+    disposition: str = Field(default="")
+    reasoning: str = Field(default="")
+    evidence_json: str = Field(default="[]")
+    controls_json: str = Field(default="[]")
+    open_questions_json: str = Field(default="[]")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastObligationLead(SQLModel, table=True):
+    """Many-to-many provenance between semantic obligations and candidates."""
+
+    __tablename__ = "sast_obligation_lead"
+    __table_args__ = (
+        UniqueConstraint(
+            "obligation_id", "lead_id", "relationship", name="uq_sast_obligation_lead"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    obligation_id: int = Field(foreign_key="sast_coverage_obligation.id", index=True)
+    lead_id: int = Field(foreign_key="scan_lead.id", index=True)
+    relationship: str = Field(default="primary", index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastDiscoveryTelemetry(SQLModel, table=True):
+    """Bounded phase and strategy efficiency counters."""
+
+    __tablename__ = "sast_discovery_telemetry"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    phase: str = Field(index=True)
+    strategy: str = Field(default="", index=True)
+    elapsed_ms: int = Field(default=0)
+    llm_calls: int = Field(default=0)
+    retries: int = Field(default=0)
+    input_tokens: int = Field(default=0)
+    output_tokens: int = Field(default=0)
+    cache_read_tokens: int = Field(default=0)
+    cache_write_tokens: int = Field(default=0)
+    files_read: int = Field(default=0)
+    unique_spans_read: int = Field(default=0)
+    facts_created: int = Field(default=0)
+    obligations_created: int = Field(default=0)
+    obligations_resolved: int = Field(default=0)
+    candidates_emitted: int = Field(default=0)
+    candidates_merged: int = Field(default=0)
+    candidates_split: int = Field(default=0)
+    candidates_confirmed: int = Field(default=0)
+    candidates_dismissed: int = Field(default=0)
+    adjacent_concerns: int = Field(default=0)
+    duplicate_validations_avoided: int = Field(default=0)
+    caps_json: str = Field(default="[]")
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 class ScanLead(SQLModel, table=True):
     """An unproven investigation lead (from a SAST scan). Distinct from ScanFinding."""
 
@@ -1684,6 +1899,9 @@ class ScanLead(SQLModel, table=True):
     producer_run_id: int = Field(index=True)  # SastRun.id that created it
     source_work_item_id: Optional[int] = Field(default=None, index=True)
     source: str = Field(default="sast", index=True)
+    classification: str = Field(default="exploitable", index=True)
+    discovery_strategy: str = Field(default="", index=True)
+    provenance_json: str = Field(default="[]")
     category: str = Field(default="")  # OWASP A0x / API0x (best-effort)
     severity: str = Field(default="medium")  # high | medium | low
     confidence: float = Field(default=0.0)  # 0..1 from the triage filter
@@ -1831,6 +2049,37 @@ class BenchmarkMatch(SQLModel, table=True):
     review_history_json: str = Field(default="[]")
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class BenchmarkComparison(SQLModel, table=True):
+    """A trend/regression view over evaluations of one dataset."""
+
+    __tablename__ = "benchmark_comparison"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    dataset_id: int = Field(foreign_key="benchmark_dataset.id", index=True)
+    thresholds_json: str = Field(default="{}")
+    metrics_json: str = Field(default="{}")
+    status: str = Field(default="created", index=True)
+    include_contaminated: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class BenchmarkComparisonEvaluation(SQLModel, table=True):
+    __tablename__ = "benchmark_comparison_evaluation"
+    __table_args__ = (
+        UniqueConstraint(
+            "comparison_id", "evaluation_id", name="uq_benchmark_comparison_evaluation"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    comparison_id: int = Field(foreign_key="benchmark_comparison.id", index=True)
+    evaluation_id: int = Field(foreign_key="benchmark_evaluation.id", index=True)
+    ordinal: int = Field(default=0)
+    created_at: datetime = Field(default_factory=_utcnow)
 
 
 # ── Applications & multi-repository campaigns ───────────────────────────────

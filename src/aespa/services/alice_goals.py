@@ -119,9 +119,13 @@ def update_goal(
             elif status in TERMINAL_STATUSES:
                 row.completed_at = now
         if checkpoint is not None:
-            row.checkpoint_json = json.dumps(checkpoint, separators=(",", ":"), default=str)
+            row.checkpoint_json = json.dumps(
+                checkpoint, separators=(",", ":"), default=str
+            )
         if completion is not None:
-            row.completion_json = json.dumps(completion, separators=(",", ":"), default=str)
+            row.completion_json = json.dumps(
+                completion, separators=(",", ":"), default=str
+            )
         if blocker is not None:
             row.blocker = blocker
         if pause_reason is not None:

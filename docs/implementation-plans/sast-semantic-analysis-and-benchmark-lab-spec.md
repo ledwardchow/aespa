@@ -1,6 +1,6 @@
 # SAST Semantic Analysis and Benchmark Lab — Implementation Specification
 
-**Status:** Proposed for review  
+**Status:** Implemented in 0.7.20260910.4; blind-corpus results remain a release gate
 **Date:** 2026-09-10  
 **Scope:** Improve AESPA SAST recall, precision, coverage assurance, and efficiency through a source-backed repository model, threat analysis, semantic work planning, complementary discovery, candidate reconciliation, and semantic closure. Add an optional Benchmark Lab that evaluates ordinary completed SAST runs against externally stored ground truth without creating a second scan engine.
 
@@ -900,12 +900,13 @@ The program is complete when:
 12. Blind evaluation results include recall, precision, duplicates, coverage assurance, efficiency, provenance, and contamination status.
 13. Cross-language blind-corpus evaluation demonstrates improved recall without an unacceptable precision, duplicate-rate, or cost regression.
 
-## 23. Review decisions still required
+## 23. Resolved implementation decisions
 
-1. Whether the first parser adapter release should support a small set of major language families or ship only the adapter interface plus LLM reconciliation.
-2. Whether benchmark ground truth should be stored in the main AESPA database or a separate evaluator database. A separate database provides a clearer isolation boundary and mirrors Reporting Lab storage, but requires explicit backup/export behavior.
-3. Whether Benchmark Lab should expose deterministic matching only in the first slice or include assisted matching immediately.
-4. Whether deleting a referenced SAST run should be blocked or detach evaluations onto immutable snapshots.
-5. Which finding classifications and negative-control families are enabled by default in ordinary SAST policy.
-6. Initial phase budgets and the conditions under which closure may request additional budget.
+1. The first adapter release supports Python AST, ECMAScript/TypeScript structure, and common dependency manifests behind a common contract, with compact pattern facts and LLM reconciliation as fallbacks.
+2. Ground truth remains in dedicated evaluator tables in the main database. Scanner code has no dependency on those tables, source tools remain jailed to the extraction root, and ordinary SAST exports exclude evaluator data.
+3. Deterministic, assisted, and human-reviewed matching ship together. Assisted matching has no source tools and falls back visibly to deterministic proposals if adjudication fails.
+4. Database foreign keys reject deletion of SAST runs referenced by evaluations.
+5. Exploitable and conditional findings, rate limiting, races, and dependencies are enabled by default. Audit-only and defense-in-depth reporting are opt-in.
+6. Default tool-call budgets are 80 baseline, 60 threat-directed, 40 closure, and 50 validator calls. Closure receives a single bounded pass and cannot expand its own budget.
 
+Acceptance criterion 13 is empirical rather than an implementation checkbox. Benchmark Lab now records repetitions, per-item detection frequency, precision, duplicate rate, cost, and regression thresholds so a blind corpus can determine whether that release gate passes.

@@ -52,6 +52,7 @@ if (Test-Path "dist\AESPA") { Remove-Item -Recurse -Force "dist\AESPA" }
     --distpath "dist\AESPA" `
     --icon $Ico `
     --add-data "src\aespa\web;aespa\web" `
+    --add-data "src\aespa\services\data;aespa\services\data" `
     --add-data "alembic.ini;." `
     --add-data "alembic;alembic" `
     --add-data "THIRD_PARTY_LICENSES.txt;." `

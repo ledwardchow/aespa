@@ -783,8 +783,7 @@ def _reports_dynamic_tool_failure(
         if str(tool.get("name") or "").strip()
     }
     mentions_named_tool = any(
-        re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalized)
-        for name in tool_names
+        re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalized) for name in tool_names
     )
     if not mentions_named_tool or "tool" not in normalized:
         return False

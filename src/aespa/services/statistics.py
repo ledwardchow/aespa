@@ -231,9 +231,7 @@ def _official_codex_rates(model: str) -> dict[str, Any] | None:
         "credit_price_usd_per_million": None,
         "credit_unit": None,
         "price_source": f"{OPENAI_MODEL_DOCS_URL}/{priced_model}",
-        "price_confidence": "exact"
-        if requested_model == priced_model
-        else "alias",
+        "price_confidence": "exact" if requested_model == priced_model else "alias",
         "manual_override": False,
     }
 

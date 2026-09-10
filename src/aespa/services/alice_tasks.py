@@ -107,13 +107,19 @@ async def start(
         current = alice_goals.get_goal(run_kind, run_id, tab_id)
         if not argument:
             if current is None:
-                control_message = "No goal is set for this chat. Use /goal <objective> to start one."
+                control_message = (
+                    "No goal is set for this chat. Use /goal <objective> to start one."
+                )
             else:
                 current_out = alice_goals.goal_out(current) or {}
                 checkpoint = current_out.get("checkpoint") or {}
                 control_message = (
                     f"Goal: {current.objective}\n\nStatus: {current.status}."
-                    + (f"\n\nCheckpoint: {json.dumps(checkpoint)}" if checkpoint else "")
+                    + (
+                        f"\n\nCheckpoint: {json.dumps(checkpoint)}"
+                        if checkpoint
+                        else ""
+                    )
                 )
         elif action == "pause":
             if current is None:

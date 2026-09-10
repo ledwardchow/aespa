@@ -36,6 +36,17 @@ export const defaultPolicyForm = () => ({
   allow_subdomains: true,
   require_approval_for_destructive: true,
   strict_locator_enforcement: true,
+  sast_rate_limit_findings: true,
+  sast_race_condition_findings: true,
+  sast_audit_logging_findings: false,
+  sast_defense_in_depth_findings: false,
+  sast_dependency_findings: true,
+  sast_min_severity: "low",
+  sast_min_confidence: 0.35,
+  sast_baseline_budget: 80,
+  sast_threat_budget: 60,
+  sast_closure_budget: 40,
+  sast_validator_budget: 50,
 });
 export const policyToForm = (p) => {
   const f = defaultPolicyForm();
@@ -71,6 +82,17 @@ export const policyToForm = (p) => {
     allow_subdomains: p.allow_subdomains ?? true,
     require_approval_for_destructive: p.require_approval_for_destructive ?? true,
     strict_locator_enforcement: p.strict_locator_enforcement ?? true,
+    sast_rate_limit_findings: p.sast_rate_limit_findings ?? true,
+    sast_race_condition_findings: p.sast_race_condition_findings ?? true,
+    sast_audit_logging_findings: p.sast_audit_logging_findings ?? false,
+    sast_defense_in_depth_findings: p.sast_defense_in_depth_findings ?? false,
+    sast_dependency_findings: p.sast_dependency_findings ?? true,
+    sast_min_severity: p.sast_min_severity || "low",
+    sast_min_confidence: p.sast_min_confidence ?? 0.35,
+    sast_baseline_budget: p.sast_baseline_budget ?? 80,
+    sast_threat_budget: p.sast_threat_budget ?? 60,
+    sast_closure_budget: p.sast_closure_budget ?? 40,
+    sast_validator_budget: p.sast_validator_budget ?? 50,
   };
 };
 export const policyPayload = (form) => ({
@@ -98,4 +120,15 @@ export const policyPayload = (form) => ({
   allow_subdomains: !!form.allow_subdomains,
   require_approval_for_destructive: !!form.require_approval_for_destructive,
   strict_locator_enforcement: !!form.strict_locator_enforcement,
+  sast_rate_limit_findings: !!form.sast_rate_limit_findings,
+  sast_race_condition_findings: !!form.sast_race_condition_findings,
+  sast_audit_logging_findings: !!form.sast_audit_logging_findings,
+  sast_defense_in_depth_findings: !!form.sast_defense_in_depth_findings,
+  sast_dependency_findings: !!form.sast_dependency_findings,
+  sast_min_severity: form.sast_min_severity,
+  sast_min_confidence: Number(form.sast_min_confidence),
+  sast_baseline_budget: Number(form.sast_baseline_budget),
+  sast_threat_budget: Number(form.sast_threat_budget),
+  sast_closure_budget: Number(form.sast_closure_budget),
+  sast_validator_budget: Number(form.sast_validator_budget),
 });

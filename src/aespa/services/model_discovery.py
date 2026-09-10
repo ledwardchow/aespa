@@ -88,9 +88,7 @@ async def discover_bedrock_mantle_model_options(
     return [
         item
         for item in (data or [])
-        if isinstance(item, dict)
-        and isinstance(item.get("id"), str)
-        and item.get("id")
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id")
     ]
 
 

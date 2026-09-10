@@ -725,7 +725,9 @@ class InteractiveConsoleHandler(logging.Handler):
                 "created_at": datetime.fromtimestamp(record.created).strftime(
                     "%Y-%m-%d %H:%M:%S"
                 ),
-                "run_label": f"{run_kind} run {run_id}" if run_id is not None else "no run",
+                "run_label": f"{run_kind} run {run_id}"
+                if run_id is not None
+                else "no run",
                 "operation": str(record.aespa_llm_operation),
                 "kind": str(record.aespa_llm_kind),
                 "context": str(record.aespa_llm_context),

@@ -4,6 +4,7 @@ from aespa.services.sast_semantic import (
     build_repository_model,
     build_threat_model,
     closure_assurance,
+    deterministic_dependency_analysis,
     plan_semantic_obligations,
     reconcile_candidates,
     record_obligation_disposition,
@@ -82,7 +83,31 @@ def test_semantic_obligation_requires_an_evidence_backed_disposition():
     assert planning["obligations"][0]["status"] == "assessed_safe"
     assert planning["obligations"][0]["evidence"] == ["services/orders.py:41"]
 
-    closure = closure_assurance(
-        {"warnings": []}, {"scenarios": []}, planning, []
-    )
+    closure = closure_assurance({"warnings": []}, {"scenarios": []}, planning, [])
     assert closure["status"] == "full"
+
+
+def test_dependency_analysis_matches_only_resolved_affected_versions(tmp_path):
+    (tmp_path / "requirements.txt").write_text("example-lib==1.2.3\n", encoding="utf-8")
+    model = build_repository_model(tmp_path)
+    analysis = deterministic_dependency_analysis(
+        model,
+        {
+            "updated_at": "2026-09-10T00:00:00Z",
+            "advisories": [
+                {
+                    "id": "ADV-1",
+                    "package": "example-lib",
+                    "affected": "<1.3.0",
+                    "severity": "high",
+                },
+                {
+                    "id": "ADV-2",
+                    "package": "example-lib",
+                    "affected": ">=2.0.0",
+                    "severity": "high",
+                },
+            ],
+        },
+    )
+    assert [match["advisory_id"] for match in analysis["matches"]] == ["ADV-1"]

@@ -4,6 +4,12 @@ import { SastRunActionsMenu } from "./SastRunActionsMenu.jsx";
 import { ActivityView } from "./ActivityView.jsx";
 import { CoverageView } from "./CoverageView.jsx";
 import { CandidatesView } from "./CandidatesView.jsx";
+import {
+  EfficiencyView,
+  ObligationsView,
+  RepositoryModelView,
+  ThreatModelView,
+} from "./SemanticAnalysisView.jsx";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -17,13 +23,23 @@ import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 
 const PHASES = [
   { key: "scope", label: "Scope", short: "Archive and inventory", view: "coverage" },
+  { key: "repository_model", label: "Model", short: "Repository facts", view: "model" },
+  { key: "threat_model", label: "Threats", short: "Assets and boundaries", view: "threats" },
+  { key: "planning", label: "Planning", short: "Security obligations", view: "obligations" },
   { key: "discovery", label: "Discovery", short: "Source-to-sink candidates", view: "candidates" },
+  {
+    key: "reconciliation",
+    label: "Reconcile",
+    short: "Merge and split candidates",
+    view: "obligations",
+  },
   {
     key: "validation",
     label: "Validation",
     short: "Controls and counterevidence",
     view: "candidates",
   },
+  { key: "closure", label: "Closure", short: "Resolve semantic gaps", view: "obligations" },
   {
     key: "attack_path",
     label: "Attack paths",
@@ -34,10 +50,27 @@ const PHASES = [
 ];
 
 const TAB_ALIASES = { overview: "coverage", progress: "coverage", leads: "candidates" };
+const TAB_PHASES = {
+  model: "repository_model",
+  threats: "threat_model",
+  obligations: "closure",
+  efficiency: "report",
+  candidates: "discovery",
+};
 
 function normaliseTab(tab) {
   const candidate = TAB_ALIASES[tab] || tab;
-  return ["coverage", "candidates", "activity"].includes(candidate) ? candidate : "coverage";
+  return [
+    "coverage",
+    "model",
+    "threats",
+    "obligations",
+    "efficiency",
+    "candidates",
+    "activity",
+  ].includes(candidate)
+    ? candidate
+    : "coverage";
 }
 
 function jsonValue(value, fallback) {
@@ -47,6 +80,10 @@ function jsonValue(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function phaseIcon(status) {
@@ -153,11 +190,14 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       ),
     [analysis.phases],
   );
+  const runningPhase = PHASES.find((phase) => statuses[phase.key] === "running")?.key;
   const currentPhase =
-    PHASES.find((phase) => statuses[phase.key] === "running")?.key ||
-    PHASES.find((phase) => statuses[phase.key] === "pending")?.key ||
+    runningPhase ||
+    (!scanRunning && statuses.report === "complete"
+      ? "report"
+      : PHASES.find((phase) => statuses[phase.key] === "pending")?.key) ||
     "report";
-  const displayedPhase = activePhase || currentPhase;
+  const displayedPhase = activePhase || TAB_PHASES[tab] || currentPhase;
   const selectedLead = useMemo(
     () => leads.find((lead) => lead.id === selectedLeadId) || leads[0] || null,
     [leads, selectedLeadId],
@@ -175,7 +215,15 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     (workerSummary.total || 0) - (workerSummary.complete || 0) - failedWorkers,
     0,
   );
+  const semantic = analysis.report?.semantic || {};
+  const repositoryModel =
+    semantic.repository_model || analysis.phases?.repository_model?.data || {};
+  const threatModel = semantic.threat_model || analysis.phases?.threat_model?.data || {};
+  const planning = semantic.planning || analysis.phases?.planning?.data || {};
+  const closure = semantic.closure || analysis.phases?.closure?.data || {};
+  const efficiencyTelemetry = analysis.report?.efficiency_telemetry || [];
   const goTab = (nextTab) => {
+    setActivePhase(null);
     nav(runHref({ runKind: "sast", runId }, nextTab));
   };
   const onStart = async () => {
@@ -349,7 +397,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               className={`sast-phase-step ${displayedPhase === phase.key ? "active" : ""} status-${statuses[phase.key]}`}
               onClick={() => {
                 setActivePhase(phase.key);
-                goTab(phase.view);
+                nav(runHref({ runKind: "sast", runId }, phase.view));
               }}
               role="tab"
               aria-selected={displayedPhase === phase.key}
@@ -374,6 +422,13 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         <div className="sast-view-tabs" role="tablist" aria-label="SAST run views">
           {[
             { key: "coverage", label: "Coverage" },
+            { key: "model", label: "Model" },
+            { key: "threats", label: `Threats ${asArray(threatModel.scenarios).length}` },
+            {
+              key: "obligations",
+              label: `Obligations ${asArray(planning.obligations).length}`,
+            },
+            { key: "efficiency", label: "Efficiency" },
             { key: "candidates", label: `Candidates ${leads.length}` },
             { key: "activity", label: "Activity" },
           ].map((item) => (
@@ -472,6 +527,14 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           )}
           {tab === "coverage" && (
             <CoverageView coverage={analysis.coverage} workProgram={analysis.work_program} />
+          )}
+          {tab === "model" && <RepositoryModelView model={repositoryModel} />}
+          {tab === "threats" && <ThreatModelView threatModel={threatModel} />}
+          {tab === "obligations" && (
+            <ObligationsView planning={planning} closure={closure} report={analysis.report} />
+          )}
+          {tab === "efficiency" && (
+            <EfficiencyView telemetry={efficiencyTelemetry} report={analysis.report} />
           )}
           {tab === "activity" && (
             <ActivityView
