@@ -36,11 +36,12 @@ export const getSastLeads = (id) => req(`/api/sast-runs/${id}/leads`);
 
 export const getSastTokenUsage = (id) => req(`/api/sast-runs/${id}/token-usage`);
 
-export const createStandaloneSastRun = (file, name, llm_profile_id) => {
+export const createStandaloneSastRun = (file, name, llm_profile_id, analysis_mode) => {
   const fd = new FormData();
   fd.append("file", file);
   if (name) fd.append("name", name);
   if (llm_profile_id) fd.append("llm_profile_id", llm_profile_id);
+  if (analysis_mode) fd.append("analysis_mode", analysis_mode);
   return req(`/api/sast-runs`, { method: "POST", body: fd });
 };
 
@@ -49,5 +50,4 @@ export const getSastSarifUrl = (id, reportableOnly = false) =>
 
 export const getSastSarif = (id, reportableOnly = false) =>
   req(getSastSarifUrl(id, reportableOnly));
-
 

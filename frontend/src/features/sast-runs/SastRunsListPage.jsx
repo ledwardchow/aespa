@@ -187,7 +187,7 @@ export function SastRunsListPage() {
                 />
                 <col
                   style={{
-                    width: "12%",
+                    width: "10%",
                   }}
                 />
                 <col
@@ -195,6 +195,7 @@ export function SastRunsListPage() {
                     width: "10%",
                   }}
                 />
+                <col style={{ width: "10%" }} />
                 <col
                   style={{
                     width: "24%",
@@ -215,6 +216,12 @@ export function SastRunsListPage() {
                     onClick={() => toggleSort("status")}
                   >
                     Status {sortArrow("status")}
+                  </th>
+                  <th
+                    style={{ cursor: "pointer", userSelect: "none" }}
+                    onClick={() => toggleSort("analysis_mode")}
+                  >
+                    Mode {sortArrow("analysis_mode")}
                   </th>
                   <th
                     style={{ cursor: "pointer", userSelect: "none" }}
@@ -275,6 +282,7 @@ export function SastRunsListPage() {
                     <td>
                       <StatusBadge status={r.status} />
                     </td>
+                    <td>{r.analysis_mode === "light" ? "Light" : "Deep"}</td>
                     <td>{r.leads_count}</td>
                     <td>
                       {r.started_at ? (

@@ -1878,6 +1878,26 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             atlas_summary = workprogram_svc.build_source_atlas(sast_run_id, root)
         else:
             atlas_summary = workprogram_svc.work_program_summary(sast_run_id)
+
+        try:
+            saved_phases = json.loads(run.phase_state_json or "{}") if resume else {}
+        except (TypeError, ValueError):
+            saved_phases = {}
+
+        def _phase_was_complete(phase: str) -> bool:
+            entry = saved_phases.get(phase, {})
+            return (
+                isinstance(entry, dict)
+                and entry.get("status") == "complete"
+                and not (phase == "discovery" and work_program_built)
+            )
+
+        def _completed_phase_data(phase: str) -> dict[str, Any] | None:
+            if not _phase_was_complete(phase):
+                return None
+            data = saved_phases.get(phase, {}).get("data")
+            return data if isinstance(data, dict) and data else None
+
         _persist_coverage(sast_run_id, coverage)
         _set_phase(
             sast_run_id,
@@ -1892,143 +1912,168 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             },
         )
 
-        # Semantic checkpoints are deterministic and intentionally independent
-        # of the LLM transcript. Rebuilding them on resume is safe because the
-        # extraction root is recreated from the immutable archive.
-        _set_phase(
-            sast_run_id,
-            "repository_model",
-            "running",
-            "Normalizing repository components, operations, controls, and dependencies.",
-        )
-        semantic_model = semantic_svc.build_repository_model(root)
+        # Completed semantic phases carry the data needed by later phases, so a
+        # resumed scan can reuse them. Incomplete phases are rebuilt against the
+        # freshly extracted immutable archive.
+        current_phase = "repository_model"
+        semantic_model = _completed_phase_data("repository_model")
         llm_ready_for_semantic = _llm_is_available_for_semantic_phases(llm_cfg_obj)
-        try:
-            if not llm_ready_for_semantic:
-                raise RuntimeError("configured provider has no available credentials")
-            semantic_model = await semantic_svc.reconcile_repository_model_with_llm(
-                llm_svc, llm_cfg_obj, semantic_model, SAST_REPOSITORY_MODEL_PROMPT
+        if semantic_model is None:
+            _set_phase(
+                sast_run_id,
+                "repository_model",
+                "running",
+                "Normalizing repository components, operations, controls, and dependencies.",
             )
-        except Exception as exc:
-            semantic_model["reconciliation"] = {
-                "status": "failed",
-                "warning": str(exc)[:500],
-            }
-        _set_phase(
-            sast_run_id,
-            "repository_model",
-            "complete",
-            "Repository model ready.",
-            semantic_model,
-        )
-        _set_phase(
-            sast_run_id,
-            "threat_model",
-            "running",
-            "Deriving source-backed actors, assets, boundaries, and threat scenarios.",
-        )
-        semantic_threat_model = semantic_svc.build_threat_model(semantic_model)
-        try:
-            if not llm_ready_for_semantic:
-                raise RuntimeError("configured provider has no available credentials")
-            saved_hybrid = (
-                _load_checkpoint(sast_run_id, "threat_model", "hybrid-state")
-                if resume
-                else {}
+            semantic_model = semantic_svc.build_repository_model(root)
+            try:
+                if not llm_ready_for_semantic:
+                    raise RuntimeError(
+                        "configured provider has no available credentials"
+                    )
+                semantic_model = await semantic_svc.reconcile_repository_model_with_llm(
+                    llm_svc, llm_cfg_obj, semantic_model, SAST_REPOSITORY_MODEL_PROMPT
+                )
+            except Exception as exc:
+                semantic_model["reconciliation"] = {
+                    "status": "failed",
+                    "warning": str(exc)[:500],
+                }
+            _set_phase(
+                sast_run_id,
+                "repository_model",
+                "complete",
+                "Repository model ready.",
+                semantic_model,
             )
-            if isinstance(saved_hybrid.get("model"), dict):
-                semantic_model = saved_hybrid["model"]
-            if isinstance(saved_hybrid.get("threat_model"), dict):
-                semantic_threat_model = saved_hybrid["threat_model"]
-            ranked_files = [
-                item
-                for item in semantic_model.get("inventory", {}).get("files", [])
-                if item.get("readable") and item.get("classification") != "deprioritized"
-            ][:120]
 
-            def _threat_done(_tool_input: dict, _calls: int):
-                if not semantic_threat_model.get("finalized"):
-                    return False, "Call finalize_threat_model before finishing."
-                return True, ""
+        current_phase = "threat_model"
+        semantic_threat_model = _completed_phase_data("threat_model")
+        if semantic_threat_model is None:
+            _set_phase(
+                sast_run_id,
+                "threat_model",
+                "running",
+                "Deriving source-backed actors, assets, boundaries, and threat scenarios.",
+            )
+            semantic_threat_model = semantic_svc.build_threat_model(semantic_model)
+            try:
+                if not llm_ready_for_semantic:
+                    raise RuntimeError(
+                        "configured provider has no available credentials"
+                    )
+                saved_hybrid = (
+                    _load_checkpoint(sast_run_id, "threat_model", "hybrid-state")
+                    if resume
+                    else {}
+                )
+                if isinstance(saved_hybrid.get("model"), dict):
+                    semantic_model = saved_hybrid["model"]
+                if isinstance(saved_hybrid.get("threat_model"), dict):
+                    semantic_threat_model = saved_hybrid["threat_model"]
+                ranked_files = [
+                    item
+                    for item in semantic_model.get("inventory", {}).get("files", [])
+                    if item.get("readable")
+                    and item.get("classification") != "deprioritized"
+                ][:120]
 
-            await _run_checkpointed_agent(
-                sast_run_id=sast_run_id,
-                phase="threat_model",
-                worker_key="hybrid-threat-analyst",
-                config=llm_cfg_obj,
-                system_message=SAST_THREAT_MODEL_PROMPT,
-                initial_user_message=(
-                    "Inspect representative source files and build the application threat model. "
-                    "Deterministic facts are navigation hints, not a complete model. Keep assets "
-                    "separate from stores. Record important assets, actors, identities, boundaries, "
-                    "operations, controls, and scenarios with tool calls. Do not record secret values.\n\n"
-                    "Ranked source inventory:\n"
-                    + json.dumps(ranked_files, ensure_ascii=False)
-                    + "\n\nDeterministic repository hints:\n"
-                    + json.dumps(semantic_model.get("nodes", [])[:500], ensure_ascii=False)
-                ),
-                tool_executor=_make_threat_model_executor(
+                def _threat_done(_tool_input: dict, _calls: int):
+                    if not semantic_threat_model.get("finalized"):
+                        return False, "Call finalize_threat_model before finishing."
+                    return True, ""
+
+                await _run_checkpointed_agent(
+                    sast_run_id=sast_run_id,
+                    phase="threat_model",
+                    worker_key="hybrid-threat-analyst",
+                    config=llm_cfg_obj,
+                    system_message=SAST_THREAT_MODEL_PROMPT,
+                    initial_user_message=(
+                        "Inspect representative source files and build the application threat model. "
+                        "Deterministic facts are navigation hints, not a complete model. Keep assets "
+                        "separate from stores. Record important assets, actors, identities, boundaries, "
+                        "operations, controls, and scenarios with tool calls. Do not record secret values.\n\n"
+                        "Ranked source inventory:\n"
+                        + json.dumps(ranked_files, ensure_ascii=False)
+                        + "\n\nDeterministic repository hints:\n"
+                        + json.dumps(
+                            semantic_model.get("nodes", [])[:500], ensure_ascii=False
+                        )
+                    ),
+                    tool_executor=_make_threat_model_executor(
+                        sast_run_id,
+                        root,
+                        coverage,
+                        semantic_model,
+                        semantic_threat_model,
+                    ),
+                    emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
+                    stop_check=lambda: (
+                        sast_run_id in _sast_stop_requested
+                        or sast_run_id in _sast_pause_requested
+                    ),
+                    tools=SAST_THREAT_MODEL_TOOLS,
+                    resume=resume,
+                    done_check=_threat_done,
+                    max_tool_calls=100,
+                )
+            except (
+                SastNetworkPause,
+                llm_svc.LLMQuotaPauseError,
+                asyncio.CancelledError,
+            ):
+                raise
+            except Exception as exc:
+                semantic_threat_model["llm_status"] = "failed"
+                semantic_threat_model["quality"] = {
+                    "status": "reduced",
+                    "reasons": [f"Agent-led threat review failed: {str(exc)[:300]}"],
+                }
+                semantic_threat_model.setdefault("open_questions", []).append(
+                    f"Threat-model reconciliation failed: {str(exc)[:300]}"
+                )
+            _set_phase(
+                sast_run_id,
+                "threat_model",
+                "complete",
+                semantic_threat_model.get("summary", "Threat model ready."),
+                semantic_threat_model,
+            )
+
+        current_phase = "planning"
+        semantic_planning = _completed_phase_data("planning")
+        if semantic_planning is None:
+            _set_phase(
+                sast_run_id,
+                "planning",
+                "running",
+                "Creating required security checks and analysis batches.",
+            )
+            semantic_planning = semantic_svc.plan_semantic_obligations(
+                semantic_model, semantic_threat_model
+            )
+            semantic_planning["legacy_work_program_projection"] = (
+                workprogram_svc.semantic_obligation_summary(semantic_planning)
+            )
+            semantic_planning["dependency_analysis"] = (
+                semantic_svc.deterministic_dependency_analysis(semantic_model)
+            )
+            semantic_planning["relational_projection"] = (
+                semantic_svc.persist_semantic_state(
                     sast_run_id,
-                    root,
-                    coverage,
                     semantic_model,
                     semantic_threat_model,
-                ),
-                emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
-                stop_check=lambda: (
-                    sast_run_id in _sast_stop_requested
-                    or sast_run_id in _sast_pause_requested
-                ),
-                tools=SAST_THREAT_MODEL_TOOLS,
-                resume=resume,
-                done_check=_threat_done,
-                max_tool_calls=100,
+                    semantic_planning,
+                )
             )
-        except (SastNetworkPause, llm_svc.LLMQuotaPauseError, asyncio.CancelledError):
-            raise
-        except Exception as exc:
-            semantic_threat_model["llm_status"] = "failed"
-            semantic_threat_model["quality"] = {
-                "status": "reduced",
-                "reasons": [f"Agent-led threat review failed: {str(exc)[:300]}"],
-            }
-            semantic_threat_model.setdefault("open_questions", []).append(
-                f"Threat-model reconciliation failed: {str(exc)[:300]}"
+            _set_phase(
+                sast_run_id,
+                "planning",
+                "complete",
+                "Semantic coverage plan ready.",
+                semantic_planning,
             )
-        _set_phase(
-            sast_run_id,
-            "threat_model",
-            "complete",
-            semantic_threat_model.get("summary", "Threat model ready."),
-            semantic_threat_model,
-        )
-        _set_phase(
-            sast_run_id,
-            "planning",
-            "running",
-            "Creating required security checks and analysis batches.",
-        )
-        semantic_planning = semantic_svc.plan_semantic_obligations(
-            semantic_model, semantic_threat_model
-        )
-        semantic_planning["legacy_work_program_projection"] = (
-            workprogram_svc.semantic_obligation_summary(semantic_planning)
-        )
-        semantic_planning["dependency_analysis"] = (
-            semantic_svc.deterministic_dependency_analysis(semantic_model)
-        )
-        semantic_planning["relational_projection"] = (
-            semantic_svc.persist_semantic_state(
-                sast_run_id, semantic_model, semantic_threat_model, semantic_planning
-            )
-        )
-        _set_phase(
-            sast_run_id,
-            "planning",
-            "complete",
-            "Semantic coverage plan ready.",
-            semantic_planning,
-        )
 
         initial_message = _build_initial_message(coll, endpoints, archive_name)
 
@@ -2245,10 +2290,6 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             _restore_candidate_state(sast_run_id) if resume else []
         )
 
-        try:
-            saved_phases = json.loads(run.phase_state_json or "{}") if resume else {}
-        except (TypeError, ValueError):
-            saved_phases = {}
         if resume:
             saved_planning = (
                 saved_phases.get("planning", {}).get("data", {})
@@ -2272,14 +2313,6 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     ):
                         if key in previous:
                             obligation[key] = previous[key]
-
-        def _phase_was_complete(phase: str) -> bool:
-            entry = saved_phases.get(phase, {})
-            return (
-                isinstance(entry, dict)
-                and entry.get("status") == "complete"
-                and not (phase == "discovery" and work_program_built)
-            )
 
         current_phase = "discovery"
         discovery_summary = "Discovery was already complete before resume."
@@ -2580,6 +2613,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             {"candidates": candidate_count},
         )
         reconciliation_stats = _reconcile_candidate_ledger(sast_run_id)
+        _sync_candidates_to_db(sast_run_id, run.collection_id)
+        _persist_candidate_state(sast_run_id)
         _set_phase(
             sast_run_id,
             "reconciliation",
@@ -3142,6 +3177,12 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
 # ── Public lifecycle API ───────────────────────────────────────────────────────
 
 
+def _is_light_run(sast_run_id: int) -> bool:
+    with Session(get_engine()) as session:
+        run = session.get(SastRun, sast_run_id)
+        return run is not None and run.analysis_mode == "light"
+
+
 def create_sast_run(
     *,
     collection_id: int | None = None,
@@ -3151,6 +3192,7 @@ def create_sast_run(
     source_filename: str | None = None,
     llm_config_id: int | None = None,
     llm_profile_id: int | None = None,
+    analysis_mode: str = "deep",
     triggered_by_run_type: str | None = None,
     triggered_by_run_id: int | None = None,
 ) -> SastRun:
@@ -3159,6 +3201,8 @@ def create_sast_run(
     New runs use ``source_archive_path`` + ``source_filename``. Collection and
     document linkage remains supported for legacy/import compatibility.
     """
+    if analysis_mode not in {"light", "deep"}:
+        raise ValueError("analysis_mode must be either 'light' or 'deep'")
     run = SastRun(
         collection_id=collection_id,
         name=name,
@@ -3167,6 +3211,7 @@ def create_sast_run(
         source_filename=source_filename,
         llm_config_id=llm_config_id,
         llm_profile_id=llm_profile_id,
+        analysis_mode=analysis_mode,
         triggered_by_run_type=triggered_by_run_type,
         triggered_by_run_id=triggered_by_run_id,
         status="pending",
@@ -3182,6 +3227,11 @@ def create_sast_run(
 
 async def start_sast_scan(sast_run_id: int, *, resume: bool = False) -> None:
     """Start a background SAST scan task for an existing SastRun."""
+    if _is_light_run(sast_run_id):
+        from aespa.services import sast_scanner_light
+
+        await sast_scanner_light.start_sast_scan(sast_run_id, resume=resume)
+        return
     if sast_run_id in _sast_tasks:
         log.info("start_sast_scan: already running for sast_run_id=%s", sast_run_id)
         return
@@ -3266,6 +3316,11 @@ async def run_sast_scan(sast_run_id: int) -> None:
 
     Safe to call when already running. Task failures are logged and swallowed.
     """
+    if _is_light_run(sast_run_id):
+        from aespa.services import sast_scanner_light
+
+        await sast_scanner_light.run_sast_scan(sast_run_id)
+        return
     with Session(get_engine()) as s:
         run = s.get(SastRun, sast_run_id)
         resume = run is not None and run.status == "paused"
@@ -3282,6 +3337,10 @@ async def run_sast_scan(sast_run_id: int) -> None:
 
 async def stop_sast_scan(sast_run_id: int) -> bool:
     """Cancel an in-progress SAST scan."""
+    if _is_light_run(sast_run_id):
+        from aespa.services import sast_scanner_light
+
+        return await sast_scanner_light.stop_sast_scan(sast_run_id)
     task = _sast_tasks.get(sast_run_id)
     if task is not None:
         _sast_stop_requested.add(sast_run_id)
@@ -3309,6 +3368,10 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
 
 async def pause_sast_scan(sast_run_id: int) -> bool:
     """Request a cooperative pause at the next completed agent step."""
+    if _is_light_run(sast_run_id):
+        from aespa.services import sast_scanner_light
+
+        return await sast_scanner_light.pause_sast_scan(sast_run_id)
     task = _sast_tasks.get(sast_run_id)
     if task is None or task.done():
         return False
@@ -3330,6 +3393,10 @@ async def pause_sast_scan(sast_run_id: int) -> bool:
 
 
 async def pause_sast_scan_and_wait(sast_run_id: int, timeout: float = 30.0) -> bool:
+    if _is_light_run(sast_run_id):
+        from aespa.services import sast_scanner_light
+
+        return await sast_scanner_light.pause_sast_scan_and_wait(sast_run_id, timeout)
     task = _sast_tasks.get(sast_run_id)
     if task is None or task.done():
         return False
@@ -3341,6 +3408,10 @@ async def pause_sast_scan_and_wait(sast_run_id: int, timeout: float = 30.0) -> b
 
 async def stop_sast_scan_and_wait(sast_run_id: int, timeout: float = 5.0) -> bool:
     """Cancel a SAST scan and wait briefly for its cleanup handlers."""
+    if _is_light_run(sast_run_id):
+        from aespa.services import sast_scanner_light
+
+        return await sast_scanner_light.stop_sast_scan_and_wait(sast_run_id, timeout)
     task = _sast_tasks.get(sast_run_id)
     if task is None or task.done():
         return False
@@ -3351,10 +3422,18 @@ async def stop_sast_scan_and_wait(sast_run_id: int, timeout: float = 5.0) -> boo
 
 
 def is_sast_scan_running(sast_run_id: int) -> bool:
+    if _is_light_run(sast_run_id):
+        from aespa.services import sast_scanner_light
+
+        return sast_scanner_light.is_sast_scan_running(sast_run_id)
     return sast_run_id in _sast_tasks and not _sast_tasks[sast_run_id].done()
 
 
 def get_sast_status(sast_run_id: int) -> dict:
+    if _is_light_run(sast_run_id):
+        from aespa.services import sast_scanner_light
+
+        return sast_scanner_light.get_sast_status(sast_run_id)
     running = is_sast_scan_running(sast_run_id)
     with Session(get_engine()) as s:
         run = s.get(SastRun, sast_run_id)

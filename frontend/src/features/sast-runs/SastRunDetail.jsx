@@ -21,7 +21,7 @@ import { downloadTextFile } from "../../shared/lib/download.js";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 
-const PHASES = [
+const DEEP_PHASES = [
   { key: "scope", label: "Scope", short: "Archive and inventory", view: "coverage" },
   { key: "repository_model", label: "Model", short: "Repository facts", view: "model" },
   { key: "threat_model", label: "Threats", short: "Assets and boundaries", view: "threats" },
@@ -48,6 +48,10 @@ const PHASES = [
   },
   { key: "report", label: "Report", short: "Findings and coverage", view: "coverage" },
 ];
+
+const LIGHT_PHASES = DEEP_PHASES.filter((phase) =>
+  ["scope", "discovery", "validation", "attack_path", "report"].includes(phase.key),
+);
 
 const TAB_ALIASES = { overview: "coverage", progress: "coverage", leads: "candidates" };
 const TAB_PHASES = {
@@ -183,19 +187,21 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [logs.length, tab, scanRunning]);
 
+  const phases = run?.analysis_mode === "light" ? LIGHT_PHASES : DEEP_PHASES;
+
   const statuses = useMemo(
     () =>
       Object.fromEntries(
-        PHASES.map((phase) => [phase.key, analysis.phases?.[phase.key]?.status || "pending"]),
+        phases.map((phase) => [phase.key, analysis.phases?.[phase.key]?.status || "pending"]),
       ),
-    [analysis.phases],
+    [analysis.phases, phases],
   );
-  const runningPhase = PHASES.find((phase) => statuses[phase.key] === "running")?.key;
+  const runningPhase = phases.find((phase) => statuses[phase.key] === "running")?.key;
   const currentPhase =
     runningPhase ||
     (!scanRunning && statuses.report === "complete"
       ? "report"
-      : PHASES.find((phase) => statuses[phase.key] === "pending")?.key) ||
+      : phases.find((phase) => statuses[phase.key] === "pending")?.key) ||
     "report";
   const displayedPhase = activePhase || TAB_PHASES[tab] || currentPhase;
   const selectedLead = useMemo(
@@ -350,6 +356,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             <Crumb href="#/sast-runs">SAST</Crumb>
             <Sep />
             <span className="sast-header-name">{run.name}</span>
+            <span className="badge neutral">{run.analysis_mode === "light" ? "Light" : "Deep"}</span>
             <StatusBadge status={scanRunning ? "scanning" : run.status} />
           </span>
         }
@@ -392,7 +399,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       />
       <div className="sast-run-shell">
         <div className="sast-phase-rail" role="tablist" aria-label="SAST scan phases">
-          {PHASES.map((phase, index) => (
+          {phases.map((phase, index) => (
             <button
               key={phase.key}
               className={`sast-phase-step ${displayedPhase === phase.key ? "active" : ""} status-${statuses[phase.key]}`}
@@ -423,13 +430,20 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         <div className="sast-view-tabs" role="tablist" aria-label="SAST run views">
           {[
             { key: "coverage", label: "Coverage" },
-            { key: "model", label: "Model" },
-            { key: "threats", label: `Threats ${asArray(threatModel.scenarios).length}` },
-            {
-              key: "obligations",
-              label: `Security checks ${asArray(planning.obligations).length}`,
-            },
-            { key: "efficiency", label: "Efficiency" },
+            ...(run.analysis_mode !== "light"
+              ? [
+                  { key: "model", label: "Model" },
+                  {
+                    key: "threats",
+                    label: `Threats ${asArray(threatModel.scenarios).length}`,
+                  },
+                  {
+                    key: "obligations",
+                    label: `Security checks ${asArray(planning.obligations).length}`,
+                  },
+                  { key: "efficiency", label: "Efficiency" },
+                ]
+              : []),
             { key: "candidates", label: `Candidates ${leads.length}` },
             { key: "activity", label: "Activity" },
           ].map((item) => (
@@ -449,7 +463,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           {notice && <div className="alert info sast-inline-notice">{notice}</div>}
           <div className="sast-phase-banner">
             <div>
-              <strong>{PHASES.find((item) => item.key === displayedPhase)?.label}</strong>
+              <strong>{phases.find((item) => item.key === displayedPhase)?.label}</strong>
               <span>{phaseEntry.message || "This phase has not started."}</span>
             </div>
             <span className="sast-phase-banner-status">{statuses[displayedPhase]}</span>

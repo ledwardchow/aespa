@@ -10,6 +10,7 @@ export function SastRunForm() {
   const [file, setFile] = useState(null);
   const [name, setName] = useState("");
   const [llmProfileId, setLlmProfileId] = useState("");
+  const [analysisMode, setAnalysisMode] = useState("light");
   const [profiles, setProfiles] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -35,6 +36,7 @@ export function SastRunForm() {
         file,
         name.trim() || null,
         llmProfileId ? +llmProfileId : null,
+        analysisMode,
       );
       await sastRunsApi.startSastScan(run.id);
       nav(`#/sast-runs/${run.id}/progress`);
@@ -98,6 +100,24 @@ export function SastRunForm() {
               onChange={(e) => setName(e.target.value)}
               placeholder={file ? `e.g. SAST – ${file.name}` : "e.g. SAST – source.zip"}
             />
+          </div>
+
+          <div className="field">
+            <label htmlFor="sast-analysis-mode">Analysis mode</label>
+            <select
+              id="sast-analysis-mode"
+              className="select"
+              value={analysisMode}
+              onChange={(e) => setAnalysisMode(e.target.value)}
+            >
+              <option value="light">Light - lower-cost source analysis</option>
+              <option value="deep">Deep - full threat-directed analysis</option>
+            </select>
+            <div className="subtle" style={{ marginTop: 6, fontSize: 13 }}>
+              {analysisMode === "light"
+                ? "Uses the original SAST workflow with source inventory, discovery, validation, and attack-path analysis."
+                : "Adds repository modeling, threat scenarios, coverage planning, candidate reconciliation, and semantic closure."}
+            </div>
           </div>
 
           <div className="field">

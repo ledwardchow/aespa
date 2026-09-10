@@ -31,6 +31,28 @@ def test_semantic_phases_accept_session_authenticated_providers(provider):
     assert sast_scanner._llm_is_available_for_semantic_phases(config)
 
 
+def test_light_run_uses_original_scanner_engine(isolated_db_engine, monkeypatch):
+    from aespa.services import sast_scanner_light
+
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="light review", analysis_mode="light")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    calls = []
+
+    async def fake_start(sast_run_id: int, *, resume: bool = False):
+        calls.append((sast_run_id, resume))
+
+    monkeypatch.setattr(sast_scanner_light, "start_sast_scan", fake_start)
+
+    asyncio.run(sast_scanner.start_sast_scan(run_id, resume=True))
+
+    assert calls == [(run_id, True)]
+
+
 def _run_with_web_target(engine) -> tuple[int, int]:
     with Session(engine) as session:
         sast_run = SastRun(
@@ -267,6 +289,94 @@ def test_resume_start_keeps_existing_leads_and_phase_state(
     assert json.loads(saved_run.phase_state_json)["discovery"]["status"] == "complete"
     assert lead.validation_status == "confirmed"
     assert lead.reportable is True
+
+
+def test_resume_skips_completed_repository_threat_and_planning_phases(
+    isolated_db_engine, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.py", "print('hello')\n")
+
+    saved_repository = {"inventory": {"files": []}, "nodes": [], "edges": []}
+    saved_threats = {"summary": "Saved threat model", "scenarios": []}
+    saved_planning = {
+        "obligations": [],
+        "workers": [],
+        "dependency_analysis": {},
+    }
+    phase_state = sast_scanner._empty_phase_state()
+    for phase, data in (
+        ("repository_model", saved_repository),
+        ("threat_model", saved_threats),
+        ("planning", saved_planning),
+    ):
+        phase_state[phase] = {
+            "status": "complete",
+            "message": f"{phase} complete",
+            "data": data,
+        }
+
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="resume-test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="paused deep review",
+            status="paused",
+            source_archive_path=str(archive),
+            source_filename="source.zip",
+            llm_config_id=config.id,
+            phase_state_json=json.dumps(phase_state),
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    def unexpected_semantic_rebuild(*_args, **_kwargs):
+        raise AssertionError("completed semantic phase was rebuilt")
+
+    async def unexpected_repository_reconciliation(*_args, **_kwargs):
+        raise AssertionError("completed repository phase was rerun")
+
+    agent_phases = []
+
+    async def stop_during_discovery(**kwargs):
+        agent_phases.append(kwargs["phase"])
+        raise sast_scanner.SastPauseRequested("stop regression test")
+
+    from aespa.services import llm, sast_semantic
+
+    monkeypatch.setattr(
+        sast_semantic, "build_repository_model", unexpected_semantic_rebuild
+    )
+    monkeypatch.setattr(
+        sast_semantic,
+        "reconcile_repository_model_with_llm",
+        unexpected_repository_reconciliation,
+    )
+    monkeypatch.setattr(
+        sast_semantic, "build_threat_model", unexpected_semantic_rebuild
+    )
+    monkeypatch.setattr(
+        sast_semantic, "plan_semantic_obligations", unexpected_semantic_rebuild
+    )
+    monkeypatch.setattr(sast_scanner, "_run_checkpointed_agent", stop_during_discovery)
+    monkeypatch.setattr(llm, "set_run_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm, "clear_run_context", lambda: None)
+
+    asyncio.run(sast_scanner._sast_scan_task(run_id, resume=True))
+
+    assert agent_phases
+    assert set(agent_phases) == {"discovery"}
+    with Session(isolated_db_engine) as session:
+        saved_run = session.get(SastRun, run_id)
+    resumed_phases = json.loads(saved_run.phase_state_json)
+    assert resumed_phases["threat_model"]["status"] == "complete"
+    assert resumed_phases["threat_model"]["data"] == saved_threats
 
 
 def test_provider_network_failure_pauses_sast_run(
@@ -951,12 +1061,51 @@ def test_sast_validation_starts_after_discovery_reconciliation(
     calls: list[str] = []
     validator_started: list[int] = []
     discovery_observed_validator: list[bool] = []
+    visible_candidates_at_validation: list[int] = []
+    reconciliation_finished = False
+    reconciled_candidate_syncs: list[int] = []
+
+    original_sync_candidates_to_db = sast_scanner._sync_candidates_to_db
+    original_reconcile_candidate_ledger = sast_scanner._reconcile_candidate_ledger
+
+    def track_candidate_sync(*args, **kwargs):
+        result = original_sync_candidates_to_db(*args, **kwargs)
+        if reconciliation_finished:
+            reconciled_candidate_syncs.append(result[0])
+        return result
+
+    def track_reconciliation(*args, **kwargs):
+        nonlocal reconciliation_finished
+        result = original_reconcile_candidate_ledger(*args, **kwargs)
+        reconciliation_finished = True
+        return result
+
+    monkeypatch.setattr(
+        sast_scanner, "_sync_candidates_to_db", track_candidate_sync
+    )
+    monkeypatch.setattr(
+        sast_scanner, "_reconcile_candidate_ledger", track_reconciliation
+    )
 
     async def fake_loop(_config, **kwargs):
         prompt = kwargs["system_message"]
         execute = kwargs["tool_executor"]
         if "independent adversarial validator" in prompt:
-            candidate_id = 0 if "candidate #0" in kwargs["initial_user_message"] else 1
+            assert reconciled_candidate_syncs
+            assigned = json.loads(
+                kwargs["initial_user_message"].split("Assigned candidate:\n", 1)[1]
+            )
+            candidate_id = assigned["candidate_id"]
+            with Session(isolated_db_engine) as session:
+                visible_candidates_at_validation.append(
+                    len(
+                        session.exec(
+                            select(ScanLead).where(
+                                ScanLead.producer_run_id == run_id
+                            )
+                        ).all()
+                    )
+                )
             calls.append("validation")
             validator_started.append(candidate_id)
             await asyncio.sleep(0)
@@ -975,7 +1124,7 @@ def test_sast_validation_starts_after_discovery_reconciliation(
             )
         elif "attack-path analyst" in prompt:
             calls.append("attack_path")
-            for candidate_id in (0, 1):
+            for candidate_id in (0, 1, 2):
                 await execute(
                     "record_attack_path",
                     {
@@ -1018,6 +1167,11 @@ def test_sast_validation_starts_after_discovery_reconciliation(
                         "description": "Request id reaches db.execute.",
                         "evidence": "db.execute(value)",
                         "suggested_endpoint": "GET /item?id=",
+                        "root_causes": (
+                            ["Unsafe query construction", "Missing input validation"]
+                            if candidate_id == 0
+                            else []
+                        ),
                     },
                     1,
                 )
@@ -1044,9 +1198,11 @@ def test_sast_validation_starts_after_discovery_reconciliation(
     asyncio.run(sast_scanner._sast_scan_task(run_id))
 
     assert discovery_observed_validator == [False]
-    assert sorted(validator_started) == [0, 1]
+    assert sorted(validator_started) == [0, 1, 2]
+    assert reconciled_candidate_syncs[0] == 3
+    assert visible_candidates_at_validation == [3, 3, 3]
     assert calls[0] == "discovery"
-    assert calls.count("validation") == 2
+    assert calls.count("validation") == 3
     assert calls[-1] == "attack_path"
     with Session(isolated_db_engine) as session:
         saved_run = session.get(SastRun, run_id)
@@ -1057,8 +1213,9 @@ def test_sast_validation_starts_after_discovery_reconciliation(
             .order_by(ScanLead.id)
         ).all()
     assert saved_run.status == "completed"
-    assert saved_run.leads_count == 2
+    assert saved_run.leads_count == 3
     assert [lead.validation_status for lead in saved_leads] == [
+        "confirmed",
         "confirmed",
         "confirmed",
     ]

@@ -14,6 +14,35 @@ def _upgrade_to(engine, revision: str) -> None:
     command.upgrade(db._get_alembic_config(engine), revision)
 
 
+def test_sast_analysis_mode_migration_marks_existing_runs_light():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "7c8d9e0f1a23")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO sast_run "
+                    "(id, name, status, leads_count, completion_status, created_at, updated_at) "
+                    "VALUES (999, 'Existing SAST run', 'completed', 0, 'full', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            mode = conn.execute(
+                text("SELECT analysis_mode FROM sast_run WHERE id = 999")
+            ).scalar_one()
+        assert mode == "light"
+    finally:
+        engine.dispose()
+
+
 def test_new_sqlite_database_enables_full_auto_vacuum(tmp_path):
     database_path = tmp_path / "new.db"
     engine = db._build_engine(
@@ -841,7 +870,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "page_id" in handoff_columns
         assert ("page_id", "crawled_page", "id") in handoff_foreign_keys
         assert was_pre_alembic is False
-        assert version == "7c8d9e0f1a23"
+        assert version == "2a4c6e8f0b13"
     finally:
         engine.dispose()
 
@@ -1145,7 +1174,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "7c8d9e0f1a23"
+        assert version == "2a4c6e8f0b13"
     finally:
         engine.dispose()
 
@@ -1182,7 +1211,7 @@ def test_current_db_with_applications_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "7c8d9e0f1a23"
+        assert version == "2a4c6e8f0b13"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
