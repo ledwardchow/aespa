@@ -94,6 +94,14 @@ export function parseRoute(hash = "#/"): Route {
   if (routeHash === "#/external-integrations") return { name: "external-integrations" };
   if (routeHash === "#/debug") return { name: "debug" };
   if (routeHash === "#/reporting-debug") return { name: "reporting-debug" };
+  if (routeHash === "#/benchmark-lab") return { name: "benchmark-lab" };
+  if (routeHash === "#/benchmark-lab/evaluations/new") return { name: "benchmark-evaluation-new" };
+  if ((m = routeHash.match(/^#\/benchmark-lab\/evaluations\/(\d+)\/([a-z-]+)$/)))
+    return { name: "benchmark-evaluation-detail", id: +m[1], tab: m[2] };
+  if ((m = routeHash.match(/^#\/benchmark-lab\/evaluations\/(\d+)$/)))
+    return { name: "benchmark-evaluation-detail", id: +m[1] };
+  if ((m = routeHash.match(/^#\/benchmark-lab\/comparisons\/(\d+)$/)))
+    return { name: "benchmark-comparison-detail", id: +m[1] };
 
   return { name: "not-found" };
 }

@@ -35,6 +35,14 @@ test.each([
   ["#/external-integrations", { name: "external-integrations" }],
   ["#/debug", { name: "debug" }],
   ["#/reporting-debug", { name: "reporting-debug" }],
+  ["#/benchmark-lab", { name: "benchmark-lab" }],
+  ["#/benchmark-lab/evaluations/new", { name: "benchmark-evaluation-new" }],
+  ["#/benchmark-lab/evaluations/12", { name: "benchmark-evaluation-detail", id: 12 }],
+  [
+    "#/benchmark-lab/evaluations/12/coverage",
+    { name: "benchmark-evaluation-detail", id: 12, tab: "coverage" },
+  ],
+  ["#/benchmark-lab/comparisons/4", { name: "benchmark-comparison-detail", id: 4 }],
   ["#/does-not-exist", { name: "not-found" }],
 ])("%s resolves without changing existing identifiers", (hash, expected) => {
   expect(parseRoute(hash)).toMatchObject(expected);

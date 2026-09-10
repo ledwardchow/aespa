@@ -21,6 +21,7 @@ export function useAppPreferences() {
     }
   });
   const [reportingDebugCfg, setReportingDebugCfg] = useState(null);
+  const [benchmarkLabCfg, setBenchmarkLabCfg] = useState(null);
   useEffect(() => {
     settingsApi
       .getVersion()
@@ -33,6 +34,10 @@ export function useAppPreferences() {
       .getReportingDebugConfig()
       .then(setReportingDebugCfg)
       .catch(() => {});
+    settingsApi
+      .getBenchmarkLabConfig()
+      .then(setBenchmarkLabCfg)
+      .catch(() => {});
   }, []);
 
   return {
@@ -44,5 +49,7 @@ export function useAppPreferences() {
     setShowApplications,
     reportingDebugCfg,
     setReportingDebugCfg,
+    benchmarkLabCfg,
+    setBenchmarkLabCfg,
   };
 }

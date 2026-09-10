@@ -11,7 +11,14 @@ import {
   IconApplications,
 } from "../shared/ui/Icons.jsx";
 export function Sidebar({ section, collapsed, onToggle, preferences }) {
-  const { appVersion, username, showUsername, showApplications, reportingDebugCfg } = preferences;
+  const {
+    appVersion,
+    username,
+    showUsername,
+    showApplications,
+    reportingDebugCfg,
+    benchmarkLabCfg,
+  } = preferences;
   const onSites = section === "sites";
   const onApis = section === "apis";
   const onApplications = section === "applications";
@@ -22,6 +29,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
   const onSast = section === "sast";
   const onDebug = section === "debug";
   const onReportingDebug = section === "reporting-debug";
+  const onBenchmarkLab = section === "benchmark-lab";
   const onStats = section === "stats";
 
   return (
@@ -208,7 +216,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           </span>
           {!collapsed && " System Settings"}
         </a>
-        {reportingDebugCfg?.panel_enabled && (
+        {(reportingDebugCfg?.panel_enabled || benchmarkLabCfg?.panel_enabled) && (
           <>
             {!collapsed && (
               <div
@@ -220,16 +228,30 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
                 Testing Features
               </div>
             )}
-            <a
-              href="#/reporting-debug"
-              className={"nav-item" + (onReportingDebug ? " active" : "")}
-              title="Reporting Lab"
-            >
-              <span className="nav-icon">
-                <IconBug />
-              </span>
-              {!collapsed && " Reporting Lab"}
-            </a>
+            {reportingDebugCfg?.panel_enabled && (
+              <a
+                href="#/reporting-debug"
+                className={"nav-item" + (onReportingDebug ? " active" : "")}
+                title="Reporting Lab"
+              >
+                <span className="nav-icon">
+                  <IconBug />
+                </span>
+                {!collapsed && " Reporting Lab"}
+              </a>
+            )}
+            {benchmarkLabCfg?.panel_enabled && (
+              <a
+                href="#/benchmark-lab"
+                className={"nav-item" + (onBenchmarkLab ? " active" : "")}
+                title="Benchmark Lab"
+              >
+                <span className="nav-icon">
+                  <IconChart />
+                </span>
+                {!collapsed && " Benchmark Lab"}
+              </a>
+            )}
           </>
         )}
       </nav>

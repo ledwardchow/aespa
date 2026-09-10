@@ -50,6 +50,7 @@ from aespa.sast_workspace import (
     try_acquire_sast_workspace_lease,
 )
 from aespa.services import events as events_svc
+from aespa.services import sast_semantic as semantic_svc
 from aespa.services import sast_workprogram as workprogram_svc
 from aespa.services.scan_leads import (
     CONFIDENCE_THRESHOLD,
@@ -83,7 +84,18 @@ _MAX_ARCHIVE_UNCOMPRESSED_BYTES = 250 * 1024 * 1024
 _MAX_ARCHIVE_ENTRY_BYTES = 50 * 1024 * 1024
 _MAX_COMPRESSION_RATIO = 1_000
 _MAX_INSPECT_FILE_BYTES = 10 * 1024 * 1024
-_PHASES = ("scope", "discovery", "validation", "attack_path", "report")
+_PHASES = (
+    "scope",
+    "repository_model",
+    "threat_model",
+    "planning",
+    "discovery",
+    "reconciliation",
+    "validation",
+    "closure",
+    "attack_path",
+    "report",
+)
 _SAST_VALIDATOR_MAX_CONCURRENT = 4
 _SAST_NETWORK_RETRY_DELAYS = (1.0, 2.0, 4.0)
 
@@ -845,6 +857,8 @@ def _make_tool_executor(
     on_candidate_ready: Callable[[dict], None] | None = None,
     initial_candidates: list[dict] | None = None,
     assigned_worker_id: int | None = None,
+    semantic_planning: dict[str, Any] | None = None,
+    semantic_obligation_keys: set[str] | None = None,
 ):
     """Return an async tool_executor closure for the SAST agentic loop.
 
@@ -865,6 +879,7 @@ def _make_tool_executor(
         if assigned_worker_id is not None
         else set()
     )
+    assigned_semantic = set(semantic_obligation_keys or set())
 
     async def tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         if sast_run_id in _sast_stop_requested:
@@ -906,6 +921,28 @@ def _make_tool_executor(
             )
             return message if ok else f"Error: {message}"
 
+        if tool_name == "record_semantic_disposition":
+            obligation_key = str(tool_input.get("obligation_key", ""))
+            if semantic_planning is None or obligation_key not in assigned_semantic:
+                return "Error: semantic obligation is not assigned to this worker."
+            ok, message = semantic_svc.record_obligation_disposition(
+                semantic_planning,
+                obligation_key,
+                status=str(tool_input.get("status", "")),
+                reasoning=str(tool_input.get("reasoning", "")),
+                evidence=_normalize_tool_list(tool_input.get("evidence")),
+                controls=_normalize_tool_list(tool_input.get("controls")),
+            )
+            if ok:
+                _set_phase(
+                    sast_run_id,
+                    "planning",
+                    "complete",
+                    "Semantic coverage plan is being resolved by discovery workers.",
+                    semantic_planning,
+                )
+            return message if ok else f"Error: {message}"
+
         if tool_name == "write_lead":
             work_item_id = int(tool_input.get("work_item_id", -1))
             if assigned_worker_id is not None and work_item_id not in assigned_items:
@@ -936,11 +973,22 @@ def _make_tool_executor(
                 title=title,
                 location=location,
             )
+            source_trace = tool_input.get("source_trace") or {}
+            sink_trace = tool_input.get("sink_trace") or {}
+            reconciliation_key = semantic_svc.fingerprint(
+                category,
+                source_trace.get("path") or location,
+                sink_trace.get("path") or location,
+                " ".join(
+                    sorted(semantic_svc._tokens(tool_input.get("description", "")))
+                ),
+            )
             existing = next(
                 (
                     item
                     for item in _candidates[sast_run_id]
                     if item.get("fingerprint") == fingerprint
+                    or item.get("reconciliation_key") == reconciliation_key
                     or (
                         item.get("title") == title
                         and item.get("category") == category
@@ -950,8 +998,34 @@ def _make_tool_executor(
                 None,
             )
             if existing is not None:
+                existing["evidence"] = "\n\n".join(
+                    dict.fromkeys(
+                        filter(
+                            None,
+                            [existing.get("evidence"), tool_input.get("evidence")],
+                        )
+                    )
+                )[:12000]
+                existing["locations"] = list(
+                    dict.fromkeys(
+                        existing.get("locations", []) + ([location] if location else [])
+                    )
+                )[:20]
+                existing["provenance"] = list(
+                    dict.fromkeys(
+                        existing.get("provenance", [])
+                        + ([assigned_worker_id] if assigned_worker_id else [])
+                    )
+                )
+                existing["proof_gaps"] = list(
+                    dict.fromkeys(
+                        existing.get("proof_gaps", [])
+                        + _normalize_tool_list(tool_input.get("proof_gaps"))
+                    )
+                )[:20]
                 if work_item_id >= 0 and existing.get("lead_id"):
                     workprogram_svc.attach_lead(work_item_id, int(existing["lead_id"]))
+                _persist_candidate_state(sast_run_id)
                 reference = existing.get("reference") or f"#{existing['candidate_id']}"
                 return (
                     f"Lead {reference} was already recorded. Reuse it instead of "
@@ -978,10 +1052,13 @@ def _make_tool_executor(
                 "description": str(tool_input.get("description", "")),
                 "evidence": str(tool_input.get("evidence", "")),
                 "suggested_endpoint": str(tool_input.get("suggested_endpoint", "")),
-                "source_trace": tool_input.get("source_trace") or {},
+                "source_trace": source_trace,
                 "controls": tool_input.get("controls") or [],
-                "sink_trace": tool_input.get("sink_trace") or {},
+                "sink_trace": sink_trace,
                 "proof_gaps": tool_input.get("proof_gaps") or [],
+                "reconciliation_key": reconciliation_key,
+                "provenance": [assigned_worker_id] if assigned_worker_id else [],
+                "locations": [location] if location else [],
                 "confidence": None,  # set by filter_lead
                 "validation_status": "pending",
                 "validation_reasoning": "",
@@ -1074,6 +1151,62 @@ def _candidate_for_id(sast_run_id: int, candidate_id: int) -> dict | None:
     )
 
 
+def _reconcile_candidate_ledger(sast_run_id: int) -> dict[str, int]:
+    """Annotate candidates with semantic clusters while preserving IDs.
+
+    Validator checkpoints and legacy exports refer to candidate IDs, so the
+    reconciliation receipt deliberately keeps those IDs stable. Duplicate
+    suppression occurs at creation; this pass retains every contributing
+    location/provenance for reporting and closure.
+    """
+
+    candidates = _candidates.get(sast_run_id, [])
+    reconciled, stats = semantic_svc.reconcile_candidates(candidates)
+    clusters = {
+        item.get("reconciliation_key"): item
+        for item in reconciled
+        if item.get("reconciliation_key")
+    }
+    canonical_by_key: dict[str, dict] = {}
+    for candidate in candidates:
+        trace = candidate.get("source_trace") or {}
+        sink = candidate.get("sink_trace") or {}
+        key = semantic_svc.fingerprint(
+            candidate.get("category"),
+            trace.get("path") or candidate.get("location"),
+            sink.get("path") or candidate.get("location"),
+            " ".join(sorted(semantic_svc._tokens(candidate.get("description")))),
+        )
+        cluster = clusters.get(key)
+        candidate["reconciliation_key"] = key
+        if cluster is not None:
+            candidate["provenance"] = cluster.get("provenance", [])
+            candidate["locations"] = cluster.get("locations", [])
+            candidate["merged_candidate_ids"] = cluster.get("merged_candidate_ids", [])
+        canonical = canonical_by_key.get(key)
+        if canonical is None:
+            canonical_by_key[key] = candidate
+        else:
+            candidate.update(
+                {
+                    "reconciled_duplicate": True,
+                    "reconciled_into_candidate_id": canonical.get("candidate_id"),
+                    "validation_status": "dismissed",
+                    "validation_reasoning": (
+                        "Merged into an equivalent root-cause hypothesis before validation."
+                    ),
+                    "reportable": False,
+                }
+            )
+            canonical["evidence"] = "\n\n".join(
+                dict.fromkeys(
+                    filter(None, [canonical.get("evidence"), candidate.get("evidence")])
+                )
+            )[:12000]
+    _persist_candidate_state(sast_run_id)
+    return {key: int(value) for key, value in stats.items()}
+
+
 def _make_review_executor(
     sast_run_id: int,
     root: Path,
@@ -1095,7 +1228,12 @@ def _make_review_executor(
         if (
             assigned_candidate_id is not None
             and tool_name
-            in {"get_candidate", "validate_candidate", "record_attack_path"}
+            in {
+                "get_candidate",
+                "validate_candidate",
+                "record_attack_path",
+                "record_adjacent_concern",
+            }
             and candidate_id != assigned_candidate_id
         ):
             assigned = _candidate_for_id(sast_run_id, assigned_candidate_id)
@@ -1113,8 +1251,26 @@ def _make_review_executor(
         if candidate is None and tool_name in {
             "validate_candidate",
             "record_attack_path",
+            "record_adjacent_concern",
         }:
             return f"Error: no lead {candidate.get('reference') if candidate else f'#{candidate_id}'} found."
+        if tool_name == "record_adjacent_concern":
+            concern = {
+                "title": str(tool_input.get("title", "Adjacent concern"))[:500],
+                "description": str(tool_input.get("description", ""))[:4000],
+                "location": str(tool_input.get("location", ""))[:240],
+                "proof_gap": str(tool_input.get("proof_gap", ""))[:1000],
+                "candidate_id": candidate_id,
+                "status": "pending_closure",
+            }
+            concerns = candidate.setdefault("adjacent_concerns", [])
+            if concern not in concerns:
+                concerns.append(concern)
+            _persist_candidate_state(sast_run_id)
+            return (
+                f"Adjacent concern queued for lead "
+                f"{candidate.get('reference') or f'#{candidate_id}'}; it is not a finding."
+            )
         if tool_name == "validate_candidate":
             verdict = str(tool_input.get("verdict", "inconclusive"))
             confidence = min(1.0, max(0.0, float(tool_input.get("confidence", 0))))
@@ -1492,6 +1648,57 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             },
         )
 
+        # Semantic checkpoints are deterministic and intentionally independent
+        # of the LLM transcript. Rebuilding them on resume is safe because the
+        # extraction root is recreated from the immutable archive.
+        _set_phase(
+            sast_run_id,
+            "repository_model",
+            "running",
+            "Normalizing repository components, operations, controls, and dependencies.",
+        )
+        semantic_model = semantic_svc.build_repository_model(root)
+        _set_phase(
+            sast_run_id,
+            "repository_model",
+            "complete",
+            "Repository model ready.",
+            semantic_model,
+        )
+        _set_phase(
+            sast_run_id,
+            "threat_model",
+            "running",
+            "Deriving source-backed actors, assets, boundaries, and threat scenarios.",
+        )
+        semantic_threat_model = semantic_svc.build_threat_model(semantic_model)
+        _set_phase(
+            sast_run_id,
+            "threat_model",
+            "complete",
+            semantic_threat_model.get("summary", "Threat model ready."),
+            semantic_threat_model,
+        )
+        _set_phase(
+            sast_run_id,
+            "planning",
+            "running",
+            "Creating semantic coverage obligations and bounded worker packets.",
+        )
+        semantic_planning = semantic_svc.plan_semantic_obligations(
+            semantic_model, semantic_threat_model
+        )
+        semantic_planning["legacy_work_program_projection"] = (
+            workprogram_svc.semantic_obligation_summary(semantic_planning)
+        )
+        _set_phase(
+            sast_run_id,
+            "planning",
+            "complete",
+            "Semantic coverage plan ready.",
+            semantic_planning,
+        )
+
         initial_message = _build_initial_message(coll, endpoints, archive_name)
 
         # ── Configure LLM context tracking ────────────────────────────────────
@@ -1686,7 +1893,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     sast_run_id,
                     "validation",
                     "running",
-                    "Validating candidates as discovery completes.",
+                    "Validating reconciled candidates.",
                     {"candidates": 1, "completed": 0},
                 )
                 events_svc.emit(
@@ -1716,6 +1923,29 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             saved_phases = json.loads(run.phase_state_json or "{}") if resume else {}
         except (TypeError, ValueError):
             saved_phases = {}
+        if resume:
+            saved_planning = (
+                saved_phases.get("planning", {}).get("data", {})
+                if isinstance(saved_phases, dict)
+                else {}
+            )
+            saved_obligations = {
+                item.get("obligation_key"): item
+                for item in saved_planning.get("obligations", [])
+                if isinstance(item, dict) and item.get("obligation_key")
+            }
+            for obligation in semantic_planning.get("obligations", []):
+                previous = saved_obligations.get(obligation.get("obligation_key"))
+                if previous is not None:
+                    for key in (
+                        "status",
+                        "disposition",
+                        "reasoning",
+                        "evidence",
+                        "controls",
+                    ):
+                        if key in previous:
+                            obligation[key] = previous[key]
 
         def _phase_was_complete(phase: str) -> bool:
             entry = saved_phases.get(phase, {})
@@ -1737,6 +1967,25 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             )
 
             worker_semaphore = asyncio.Semaphore(4)
+            discovery_workers = workprogram_svc.worker_rows(sast_run_id)
+            semantic_assignments: dict[int, set[str]] = {
+                int(worker.id): set()
+                for worker in discovery_workers
+                if worker.id is not None
+            }
+            assignment_ids = list(semantic_assignments)
+            baseline_worker_id = assignment_ids[0] if len(assignment_ids) > 1 else None
+            threat_worker_ids = [
+                worker_id
+                for worker_id in assignment_ids
+                if worker_id != baseline_worker_id
+            ] or assignment_ids
+            if threat_worker_ids:
+                for index, packet in enumerate(semantic_planning.get("workers", [])):
+                    worker_id = threat_worker_ids[index % len(threat_worker_ids)]
+                    semantic_assignments[worker_id].update(
+                        str(key) for key in packet.get("obligation_keys", [])
+                    )
 
             async def _run_discovery_worker(worker: SastWorker) -> str:
                 if worker.id is None:
@@ -1755,6 +2004,20 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 async with worker_semaphore:
                     workprogram_svc.set_worker_status(worker.id, "running")
                     payload = workprogram_svc.worker_payload(worker.id)
+                    semantic_keys = semantic_assignments.get(worker.id, set())
+                    semantic_payload = semantic_svc.obligation_payload(
+                        semantic_planning, semantic_keys
+                    )
+                    if worker.id == baseline_worker_id:
+                        semantic_payload = {
+                            "strategy": "independent_baseline",
+                            "obligations": [],
+                            "instructions": (
+                                "Perform an open-ended security review without access to "
+                                "the generated threat scenarios. Follow concrete source "
+                                "evidence and the assigned source work program."
+                            ),
+                        }
                     assigned_count = len(payload.get("work_items") or [])
                     _emit_agent_activity(
                         sast_run_id,
@@ -1775,6 +2038,18 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                                 "Resolve these assigned work items before done: "
                                 + ", ".join(str(item) for item in unresolved[:50]),
                             )
+                        unresolved_semantic = [
+                            item.get("obligation_key", "")
+                            for item in semantic_payload.get("obligations", [])
+                            if item.get("status")
+                            in {"pending", "in_review", "unreviewed"}
+                        ]
+                        if unresolved_semantic:
+                            return (
+                                False,
+                                "Resolve these semantic obligations before done: "
+                                + ", ".join(unresolved_semantic[:50]),
+                            )
                         return True, ""
 
                     try:
@@ -1788,14 +2063,21 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                                 initial_message
                                 + "\n\nAssigned work program:\n"
                                 + json.dumps(payload, ensure_ascii=False)
+                                + "\n\nAssigned semantic threat obligations:\n"
+                                + json.dumps(semantic_payload, ensure_ascii=False)
                             ),
                             tool_executor=_make_tool_executor(
                                 sast_run_id,
                                 root,
                                 run.collection_id,
                                 coverage,
-                                on_candidate_ready=_schedule_candidate_validation,
+                                # Validation starts after the global reconciliation
+                                # pass so duplicate hypotheses do not consume
+                                # independent validator calls.
+                                on_candidate_ready=None,
                                 assigned_worker_id=worker.id,
+                                semantic_planning=semantic_planning,
+                                semantic_obligation_keys=semantic_keys,
                             ),
                             emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
                             stop_check=_stop_check,
@@ -1844,14 +2126,24 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                         )
                         return f"{worker.worker_key} failed: {exc}"
                     unresolved = workprogram_svc.unresolved_for_worker(worker.id)
-                    final_status = "complete" if not unresolved else "blocked"
+                    unresolved_semantic = [
+                        item
+                        for item in semantic_payload.get("obligations", [])
+                        if item.get("status")
+                        in {"pending", "in_review", "unreviewed", "blocked"}
+                    ]
+                    final_status = (
+                        "complete"
+                        if not unresolved and not unresolved_semantic
+                        else "blocked"
+                    )
                     workprogram_svc.set_worker_status(
                         worker.id,
                         final_status,
                         summary=summary,
                         error=(
-                            f"{len(unresolved)} assigned item(s) unresolved."
-                            if unresolved
+                            f"{len(unresolved)} source and {len(unresolved_semantic)} semantic item(s) unresolved."
+                            if unresolved or unresolved_semantic
                             else ""
                         ),
                     )
@@ -1862,8 +2154,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                         status=final_status,
                         current_task=f"Analysis finished for {worker.worker_key}",
                         outcome=(
-                            f"{len(unresolved)} assigned item(s) unresolved"
-                            if unresolved
+                            f"{len(unresolved)} source and {len(unresolved_semantic)} semantic item(s) unresolved"
+                            if unresolved or unresolved_semantic
                             else summary
                         ),
                     )
@@ -1872,7 +2164,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             worker_summaries = await asyncio.gather(
                 *(
                     _run_discovery_worker(worker)
-                    for worker in workprogram_svc.worker_rows(sast_run_id)
+                    for worker in discovery_workers
                 )
             )
             discovery_summary = "\n".join(worker_summaries)
@@ -1902,6 +2194,22 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 },
             )
 
+        _set_phase(
+            sast_run_id,
+            "reconciliation",
+            "running",
+            "Reconciling candidate hypotheses and preserving contributing evidence.",
+            {"candidates": candidate_count},
+        )
+        reconciliation_stats = _reconcile_candidate_ledger(sast_run_id)
+        _set_phase(
+            sast_run_id,
+            "reconciliation",
+            "complete",
+            "Candidate reconciliation complete.",
+            reconciliation_stats,
+        )
+
         # ── Complete independent adversarial validation ───────────────────────
         current_phase = "validation"
         if not root.is_dir():
@@ -1913,6 +2221,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 if (
                     candidate.get("validation_status") == "pending"
                     and candidate.get("confidence") is not None
+                    and not candidate.get("reconciled_duplicate")
                 ):
                     _schedule_candidate_validation(candidate)
 
@@ -1964,6 +2273,31 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "outcome": f"{validated_count} reportable candidate(s)",
                 "_persist": True,
             },
+        )
+
+        # Closure is deterministic in the initial semantic implementation. It
+        # records the proof obligations that still need source/LLM review and
+        # therefore prevents a complete-looking regex work program from
+        # overstating semantic coverage.
+        current_phase = "closure"
+        _set_phase(
+            sast_run_id,
+            "closure",
+            "running",
+            "Checking threat scenarios, model warnings, and adjacent concerns for closure.",
+        )
+        semantic_closure = semantic_svc.closure_assurance(
+            semantic_model,
+            semantic_threat_model,
+            semantic_planning,
+            candidates,
+        )
+        _set_phase(
+            sast_run_id,
+            "closure",
+            "complete",
+            f"Semantic closure is {semantic_closure['status']}.",
+            semantic_closure,
         )
 
         # ── Independent reachability / attack-path analysis ──────────────────
@@ -2060,6 +2394,14 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
 
         # ── Report ────────────────────────────────────────────────────────────
         current_phase = "report"
+        completion_status = (
+            "partial"
+            if completion_status != "full" or semantic_closure["status"] != "full"
+            else "full"
+        )
+        completion_reasons = list(
+            dict.fromkeys(completion_reasons + semantic_closure["reasons"])
+        )
         if not _phase_was_complete("report"):
             _set_phase(
                 sast_run_id,
@@ -2082,6 +2424,13 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             "completion_status": completion_status,
             "completion_reasons": completion_reasons,
             "work_program": work_program_summary,
+            "semantic": {
+                "repository_model": semantic_model,
+                "threat_model": semantic_threat_model,
+                "planning": semantic_planning,
+                "reconciliation": reconciliation_stats,
+                "closure": semantic_closure,
+            },
         }
         if not _phase_was_complete("report"):
             with Session(get_engine()) as s:

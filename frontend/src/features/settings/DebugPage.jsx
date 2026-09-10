@@ -22,6 +22,8 @@ export function DebugPage({
   username,
   reportingDebugCfg,
   setReportingDebugCfg,
+  benchmarkLabCfg,
+  setBenchmarkLabCfg,
 }) {
   const [tab, setTab] = useState("features");
   const [browserCfg, setBrowserCfg] = useState(null);
@@ -31,6 +33,9 @@ export function DebugPage({
   const [repSaving, setRepSaving] = useState(false);
   const [repSaved, setRepSaved] = useState(false);
   const [repError, setRepError] = useState(null);
+  const [benchmarkSaving, setBenchmarkSaving] = useState(false);
+  const [benchmarkSaved, setBenchmarkSaved] = useState(false);
+  const [benchmarkError, setBenchmarkError] = useState(null);
   const [cfAud, setCfAud] = useState("");
   const [cfSaving, setCfSaving] = useState(false);
   const [cfSaved, setCfSaved] = useState(false);
@@ -42,6 +47,13 @@ export function DebugPage({
         setBrowserCfg(await settingsApi.getBrowserDebugConfig());
       } catch (e) {
         setBrowserError(e.message);
+      }
+    })();
+    (async () => {
+      try {
+        setBenchmarkLabCfg(await settingsApi.getBenchmarkLabConfig());
+      } catch (e) {
+        setBenchmarkError(e.message);
       }
     })();
     (async () => {
@@ -58,7 +70,26 @@ export function DebugPage({
         setCfError(e.message);
       }
     })();
-  }, [setReportingDebugCfg]);
+  }, [setBenchmarkLabCfg, setReportingDebugCfg]);
+  const toggleBenchmarkLab = async (patch) => {
+    const base = benchmarkLabCfg || {
+      panel_enabled: false,
+      default_match_mode: "assisted",
+      default_repetitions: 1,
+    };
+    setBenchmarkSaving(true);
+    setBenchmarkSaved(false);
+    setBenchmarkError(null);
+    try {
+      const updated = await settingsApi.upsertBenchmarkLabConfig({ ...base, ...patch });
+      setBenchmarkLabCfg(updated);
+      setBenchmarkSaved(true);
+    } catch (e) {
+      setBenchmarkError(e.message);
+    } finally {
+      setBenchmarkSaving(false);
+    }
+  };
   const saveCloudflareAud = async (e) => {
     e.preventDefault();
     setCfSaved(false);
@@ -255,6 +286,31 @@ export function DebugPage({
                   marginTop: 8,
                 }}
               >
+                <IconCheck /> Saved
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "features" && (
+          <div className="card" style={{ marginTop: 16, maxWidth: 680 }}>
+            <div className="form-section-title">Benchmark Lab</div>
+            <div className="field-hint" style={{ marginBottom: 12 }}>
+              Evaluate completed SAST scans against separately stored ground truth. Ground truth is
+              never exposed to scanner agents or ordinary SAST analysis APIs.
+            </div>
+            {benchmarkError && <div className="alert error">{benchmarkError}</div>}
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={benchmarkLabCfg?.panel_enabled ?? false}
+                disabled={benchmarkSaving}
+                onChange={(e) => toggleBenchmarkLab({ panel_enabled: e.target.checked })}
+              />
+              <span>Show Benchmark Lab in the sidebar</span>
+            </label>
+            {benchmarkSaved && (
+              <div className="save-confirm" style={{ marginTop: 8 }}>
                 <IconCheck /> Saved
               </div>
             )}

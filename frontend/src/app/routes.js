@@ -218,6 +218,8 @@ export const routes = {
       username: preferences.username,
       reportingDebugCfg: preferences.reportingDebugCfg,
       setReportingDebugCfg: preferences.setReportingDebugCfg,
+      benchmarkLabCfg: preferences.benchmarkLabCfg,
+      setBenchmarkLabCfg: preferences.setBenchmarkLabCfg,
     }),
   },
   "reporting-debug": {
@@ -227,6 +229,30 @@ export const routes = {
       "ReportingDebugPage",
     ),
     props: () => ({}),
+  },
+  "benchmark-lab": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkLabPage.jsx"),
+      "BenchmarkLabPage",
+    ),
+    props: () => ({}),
+  },
+  "benchmark-evaluation-new": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkEvaluationForm.jsx"),
+      "BenchmarkEvaluationForm",
+    ),
+    props: () => ({ key: "new" }),
+  },
+  "benchmark-evaluation-detail": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkEvaluationDetail.jsx"),
+      "BenchmarkEvaluationDetail",
+    ),
+    props: (route) => ({ key: route.id, evaluationId: route.id, initialTab: route.tab }),
   },
   "alice-popout": {
     section: "alice-popout",

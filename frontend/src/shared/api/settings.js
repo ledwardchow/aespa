@@ -129,6 +129,11 @@ export const getReportingDebugConfig = () => req("/api/settings/reporting-debug"
 export const upsertReportingDebugConfig = (b) =>
   req("/api/settings/reporting-debug", { method: "PUT", body: b });
 
+export const getBenchmarkLabConfig = () => req("/api/settings/benchmark-lab");
+
+export const upsertBenchmarkLabConfig = (b) =>
+  req("/api/settings/benchmark-lab", { method: "PUT", body: b });
+
 export const getBrowserDebugConfig = () => req("/api/settings/browser-debug");
 
 export const upsertBrowserDebugConfig = (b) =>

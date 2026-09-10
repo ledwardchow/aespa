@@ -1,5 +1,6 @@
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
+import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
@@ -17,6 +18,8 @@ export function SastRunsListPage() {
   const importInputRef = useRef(null);
   const [sortField, setSortField] = useState("started_at");
   const [sortDir, setSortDir] = useState("desc");
+  const [evaluations, setEvaluations] = useState([]);
+  const [benchmarkEnabled, setBenchmarkEnabled] = useState(false);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -35,6 +38,17 @@ export function SastRunsListPage() {
       .listLLMProfiles()
       .then((p) => setProfiles(p || []))
       .catch((e) => setError(e.message));
+  }, []);
+  useEffect(() => {
+    settingsApi
+      .getBenchmarkLabConfig()
+      .then(async (config) => {
+        setBenchmarkEnabled(Boolean(config?.panel_enabled));
+        if (!config?.panel_enabled) return;
+        const items = await benchmarkApi.listBenchmarkEvaluations();
+        setEvaluations(Array.isArray(items) ? items : items?.evaluations || items?.items || []);
+      })
+      .catch(() => {});
   }, []);
 
   const onImport = async (event) => {
@@ -243,6 +257,17 @@ export function SastRunsListPage() {
                               }
                             ).name
                           }
+                        </div>
+                      )}
+                      {benchmarkEnabled &&
+                        evaluations.some((evaluation) => evaluation.sast_run_id === r.id) && (
+                        <div style={{ marginTop: 5 }}>
+                          <a
+                            className="badge neutral"
+                            href={`#/benchmark-lab/evaluations/${evaluations.find((evaluation) => evaluation.sast_run_id === r.id).id}`}
+                          >
+                            Evaluated
+                          </a>
                         </div>
                       )}
                     </td>
