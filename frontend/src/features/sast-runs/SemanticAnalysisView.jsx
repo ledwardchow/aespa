@@ -23,11 +23,43 @@ function countBy(items, field) {
   return counts;
 }
 
-function EmptySemanticState({ label }) {
+function semanticEmptyState(label, status) {
+  if (status === "running" || status === "scanning") {
+    return {
+      label: `${label} is not ready yet.`,
+      message: "This analysis will appear as the scan progresses.",
+    };
+  }
+  if (status === "pending") {
+    return {
+      label: `${label} has not been generated yet.`,
+      message: "Start the SAST scan to generate this analysis.",
+    };
+  }
+  if (status === "paused") {
+    return {
+      label: `${label} is waiting for the scan to continue.`,
+      message: "Resume the scan to continue generating this analysis.",
+    };
+  }
+  if (status === "failed" || status === "cancelled") {
+    return {
+      label: `${label} was not generated.`,
+      message: "The scan ended before this analysis was ready.",
+    };
+  }
+  return {
+    label: `${label} is not available for this run.`,
+    message: "Run the scan again with the current SAST workflow to generate this analysis.",
+  };
+}
+
+function EmptySemanticState({ label, status }) {
+  const emptyState = semanticEmptyState(label, status);
   return (
     <div className="sast-semantic-empty">
-      <strong>{label} is not available for this run.</strong>
-      <span>Run the scan again with the current SAST workflow to generate this analysis.</span>
+      <strong>{emptyState.label}</strong>
+      <span>{emptyState.message}</span>
     </div>
   );
 }
@@ -64,10 +96,18 @@ function ChipList({ title, values }) {
   );
 }
 
-export function RepositoryModelView({ model }) {
+export function RepositoryModelView({ model, status }) {
   const normalized = asObject(model);
   const nodes = asArray(normalized.nodes);
-  const warnings = asArray(normalized.warnings);
+  const warnings = [...asArray(normalized.warnings)];
+  const reconciliation = asObject(normalized.reconciliation);
+  if (reconciliation.status === "failed") {
+    warnings.push({
+      key: "model_reconciliation",
+      status: "unresolved",
+      message: reconciliation.warning || "Model reconciliation failed.",
+    });
+  }
   const [query, setQuery] = useState("");
   const visibleNodes = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -81,7 +121,8 @@ export function RepositoryModelView({ model }) {
       )
       .slice(0, 250);
   }, [nodes, query]);
-  if (!nodes.length && !warnings.length) return <EmptySemanticState label="Repository model" />;
+  if (!nodes.length && !warnings.length)
+    return <EmptySemanticState label="Repository model" status={status} />;
   const kinds = countBy(nodes, "kind");
   const unresolved = warnings.filter((warning) => warning.status !== "resolved").length;
   return (
@@ -174,10 +215,12 @@ export function RepositoryModelView({ model }) {
   );
 }
 
-export function ThreatModelView({ threatModel }) {
+export function ThreatModelView({ threatModel, status }) {
   const model = asObject(threatModel);
   const scenarios = asArray(model.scenarios);
-  if (!model.summary && !scenarios.length) return <EmptySemanticState label="Threat model" />;
+  const quality = asObject(model.quality);
+  if (!model.summary && !scenarios.length)
+    return <EmptySemanticState label="Threat model" status={status} />;
   const statuses = countBy(scenarios, "status");
   return (
     <div className="sast-semantic-layout">
@@ -190,11 +233,21 @@ export function ThreatModelView({ threatModel }) {
             ["High priority", scenarios.filter((item) => item.priority === "high").length],
             ["Resolved", statuses.resolved || 0],
             ["Open questions", asArray(model.open_questions).length],
+            ["Source files reviewed", model.files_reviewed || 0],
+            ["Model coverage", titleCase(quality.status || "unknown")],
           ]}
         />
+        {asArray(quality.reasons).length ? (
+          <div className="sast-semantic-warning">
+            {asArray(quality.reasons).map((reason) => (
+              <p key={reason}>{reason}</p>
+            ))}
+          </div>
+        ) : null}
       </section>
       <div className="sast-semantic-two-column">
         <ChipList title="Assets" values={model.assets} />
+        <ChipList title="Data stores" values={model.stores} />
         <ChipList title="Trust boundaries" values={model.trust_boundaries} />
         <ChipList title="Attacker capabilities" values={model.attacker_capabilities} />
         <ChipList title="Security objectives" values={model.security_objectives} />
@@ -239,12 +292,12 @@ export function ThreatModelView({ threatModel }) {
   );
 }
 
-export function ObligationsView({ planning, closure, report }) {
+export function ObligationsView({ planning, closure, report, status }) {
   const plan = asObject(planning);
   const obligations = asArray(plan.obligations);
   const closureState = asObject(closure);
   if (!obligations.length && !closureState.status)
-    return <EmptySemanticState label="Semantic obligations" />;
+    return <EmptySemanticState label="Security check analysis" status={status} />;
   const statuses = countBy(obligations, "status");
   const unresolved = obligations.filter((item) =>
     ["pending", "in_review", "blocked", "unreviewed"].includes(item.status),
@@ -253,7 +306,7 @@ export function ObligationsView({ planning, closure, report }) {
     <div className="sast-semantic-layout">
       <MetricCards
         values={[
-          ["Obligations", obligations.length, `${Object.keys(statuses).length} states`],
+          ["Security checks", obligations.length, `${Object.keys(statuses).length} states`],
           ["Unresolved", unresolved.length],
           [
             "Closure",
@@ -272,7 +325,7 @@ export function ObligationsView({ planning, closure, report }) {
             <div className="sast-panel-title">Discovery and closure</div>
             <div className="sast-panel-sub">
               {report?.candidates || 0} candidates · {report?.reportable || 0} reportable ·{" "}
-              {unresolved.length} unresolved obligations
+              {unresolved.length} unresolved security checks
             </div>
           </div>
           <span
@@ -298,7 +351,7 @@ export function ObligationsView({ planning, closure, report }) {
         )}
       </section>
       <section className="sast-panel">
-        <div className="sast-panel-title">Coverage obligations</div>
+        <div className="sast-panel-title">Required security checks</div>
         <div className="sast-semantic-card-list">
           {obligations.map((item) => (
             <details key={item.obligation_key}>
@@ -333,9 +386,48 @@ export function ObligationsView({ planning, closure, report }) {
   );
 }
 
-export function EfficiencyView({ telemetry, report }) {
+function efficiencyEmptyState(status) {
+  if (status === "running" || status === "scanning") {
+    return {
+      label: "Efficiency telemetry is being collected.",
+      message: "This analysis will appear after the scan finishes and the final report is ready.",
+    };
+  }
+  if (status === "pending") {
+    return {
+      label: "Efficiency telemetry has not been collected yet.",
+      message: "Start the SAST scan to generate this analysis.",
+    };
+  }
+  if (status === "paused") {
+    return {
+      label: "Efficiency telemetry is waiting for the scan to finish.",
+      message: "Resume the scan to continue collecting this analysis.",
+    };
+  }
+  if (status === "failed" || status === "cancelled") {
+    return {
+      label: "Efficiency telemetry was not generated.",
+      message: "The scan ended before the final report was ready.",
+    };
+  }
+  return {
+    label: "Efficiency telemetry is not available for this run.",
+    message: "Run the scan again with the current SAST workflow to generate this analysis.",
+  };
+}
+
+export function EfficiencyView({ telemetry, report, status }) {
   const rows = asArray(telemetry);
-  if (!rows.length) return <EmptySemanticState label="Efficiency telemetry" />;
+  if (!rows.length) {
+    const emptyState = efficiencyEmptyState(status);
+    return (
+      <div className="sast-semantic-empty">
+        <strong>{emptyState.label}</strong>
+        <span>{emptyState.message}</span>
+      </div>
+    );
+  }
   const totals = rows.reduce(
     (result, row) => {
       result.elapsed_ms += Number(row.elapsed_ms || 0);
@@ -371,7 +463,7 @@ export function EfficiencyView({ telemetry, report }) {
                 <th>Time</th>
                 <th>Reads</th>
                 <th>Facts</th>
-                <th>Obligations</th>
+                <th>Security checks</th>
                 <th>Candidates</th>
                 <th>Caps</th>
               </tr>

@@ -1005,6 +1005,114 @@ def test_direct_sast_run_deletion_detaches_campaign_member(
         assert s.get(SastRun, sast_run_id) is None
 
 
+def test_direct_sast_run_deletion_clears_campaign_fk_references(fk_engine):
+    from aespa.services import run_cleanup
+
+    with Session(fk_engine) as s:
+        ctx = _seed_application(s)
+        campaign = _create_draft_campaign(s, ctx)
+        campaign_id = campaign.id
+        source_member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign_id
+            )
+        ).one()
+        target_member = s.exec(
+            select(CampaignTargetMember).where(
+                CampaignTargetMember.campaign_id == campaign_id
+            )
+        ).one()
+
+        sast_run = SastRun(name="child", status="completed")
+        s.add(sast_run)
+        s.flush()
+        source_member.sast_run_id = sast_run.id
+        s.add(source_member)
+
+        source_fact = ComponentFact(
+            sast_run_id=sast_run.id,
+            component_id=ctx["component_id"],
+            fact_type="http_call",
+            path="/orders",
+            evidence_location="client.py:1",
+            fingerprint="client-call",
+        )
+        target_fact = ComponentFact(
+            sast_run_id=sast_run.id,
+            component_id=ctx["component_id"],
+            fact_type="route",
+            path="/orders",
+            evidence_location="routes.py:1",
+            fingerprint="server-route",
+        )
+        s.add(source_fact)
+        s.add(target_fact)
+        s.flush()
+        s.add(
+            ComponentConnection(
+                campaign_id=campaign_id,
+                source_component_id=ctx["component_id"],
+                source_fact_id=source_fact.id,
+                target_component_id=ctx["component_id"],
+                target_fact_id=target_fact.id,
+            )
+        )
+
+        source_lead = ScanLead(
+            producer_run_id=sast_run.id,
+            producer_run_type="sast",
+            title="SQL injection",
+        )
+        campaign_lead = ScanLead(
+            producer_run_id=campaign_id,
+            producer_run_type="campaign",
+            title="Cross-repository SQL injection",
+        )
+        s.add(source_lead)
+        s.add(campaign_lead)
+        s.flush()
+        mapping = LeadTargetMapping(
+            campaign_id=campaign_id,
+            lead_id=source_lead.id,
+            target_id=ctx["target_id"],
+            target_type="site",
+        )
+        s.add(mapping)
+        s.flush()
+        s.add(
+            CampaignValidationCase(
+                campaign_id=campaign_id,
+                mapping_id=mapping.id,
+                target_member_id=target_member.id,
+                origin_lead_id=source_lead.id,
+            )
+        )
+        s.add(
+            ScanLeadComponentProvenance(
+                scan_lead_id=campaign_lead.id,
+                component_id=ctx["component_id"],
+                fact_id=source_fact.id,
+            )
+        )
+        s.commit()
+        sast_run_id = sast_run.id
+        campaign_lead_id = campaign_lead.id
+
+    with Session(fk_engine) as s:
+        run_cleanup.cascade_delete_sast_run(s, sast_run_id)
+        s.commit()
+
+    with Session(fk_engine) as s:
+        assert s.get(SastRun, sast_run_id) is None
+        assert s.exec(select(ComponentFact)).first() is None
+        assert s.exec(select(ComponentConnection)).first() is None
+        assert s.exec(select(LeadTargetMapping)).first() is None
+        assert s.exec(select(CampaignValidationCase)).first() is None
+        provenance = s.exec(select(ScanLeadComponentProvenance)).one()
+        assert provenance.scan_lead_id == campaign_lead_id
+        assert provenance.fact_id is None
+
+
 def test_direct_web_run_deletion_detaches_campaign_member(
     isolated_db_engine,
 ):

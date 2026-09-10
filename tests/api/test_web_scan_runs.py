@@ -323,6 +323,7 @@ def test_delete_web_run_cascades_all_owned_rows_and_preserves_api_collision(
 
         web_finding = models.ScanFinding(
             test_run_id=web_id,
+            page_id=page.id,
             owasp_category="A01",
             severity="high",
             title="Web finding",
@@ -342,6 +343,7 @@ def test_delete_web_run_cascades_all_owned_rows_and_preserves_api_collision(
 
         web_traffic = models.TrafficEntry(
             test_run_id=web_id,
+            page_id=page.id,
             source="test",
             method="GET",
             url="https://target.local/",
@@ -412,6 +414,7 @@ def test_delete_web_run_cascades_all_owned_rows_and_preserves_api_collision(
         session.add(
             models.TargetIntelItem(
                 test_run_id=web_id,
+                page_id=page.id,
                 kind="endpoint",
                 key="/accounts",
                 value="https://target.local/accounts",

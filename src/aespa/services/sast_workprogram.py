@@ -17,10 +17,16 @@ from sqlmodel import Session, select
 
 from aespa.db import get_engine
 from aespa.models import (
+    SastCoverageObligation,
+    SastDiscoveryTelemetry,
     SastEvidenceReceipt,
+    SastObligationLead,
     SastPartition,
     SastSourceFile,
+    SastSurfaceEdge,
     SastSurfaceItem,
+    SastThreatModel,
+    SastThreatScenario,
     SastWorker,
     SastWorkItem,
 )
@@ -424,6 +430,12 @@ def reset_work_program(sast_run_id: int) -> None:
     """Remove work-program rows for a fresh scan without touching leads/logs."""
     with Session(get_engine()) as session:
         for model in (
+            SastObligationLead,
+            SastCoverageObligation,
+            SastThreatScenario,
+            SastThreatModel,
+            SastSurfaceEdge,
+            SastDiscoveryTelemetry,
             SastEvidenceReceipt,
             SastWorkItem,
             SastWorker,
@@ -934,7 +946,7 @@ def completion_decision(sast_run_id: int) -> tuple[str, list[str], dict[str, Any
     if sum(summary["surface"].values()) >= _MAX_SURFACE_ITEMS:
         reasons.append("The deterministic source atlas reached its item limit.")
     if summary["work_items"]["total"] == 0:
-        reasons.append("No auditable source or sink obligations were created.")
+        reasons.append("No source or sink security checks were created.")
     if summary["work_items"]["unresolved"]:
         reasons.append(
             f"{summary['work_items']['unresolved']} work item(s) remain unresolved."
@@ -953,10 +965,11 @@ def completion_decision(sast_run_id: int) -> tuple[str, list[str], dict[str, Any
 
 
 def semantic_obligation_summary(planning: dict[str, Any]) -> dict[str, Any]:
-    """Project JSON semantic obligations into the legacy work-program view.
+    """Project JSON security checks into the legacy work-program view.
 
-    Semantic obligations are currently stored in ``phase_state_json`` rather
-    than a new table. This compact projection lets analysis/report consumers
+    These checks are stored under the legacy ``obligations`` field in
+    ``phase_state_json`` rather than a new table. This compact projection lets
+    analysis/report consumers
     display the new planning contract beside legacy ``SastWorkItem`` rows while
     remaining tolerant of older runs and future relational storage.
     """

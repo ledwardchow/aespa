@@ -20,7 +20,11 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
-- **Semantic, threat-directed SAST coverage**: SAST scans now combine parser-backed repository facts, manifest and dependency inventory, model reconciliation, and a dedicated threat-analysis pass before discovery. An isolated baseline, threat-directed and sink-first workers, and deterministic analyzers contribute to one candidate ledger. Semantic scenarios and obligations are persisted, distinct root causes can split into separate candidates, duplicates merge before validation, and an active closure reviewer can recover candidates that then receive the same independent validation. Scanner policy now controls finding classes, minimum severity and confidence, and phase budgets. SAST run pages show the complete phase lifecycle, repository facts and mapping warnings, threat scenarios, semantic obligations and closure outcomes, and phase-level efficiency telemetry; reports and portable exports retain the same analysis.
+- **Automatic SQLite space recovery**: New databases now enable full auto-vacuum on first launch, allowing unused pages to be returned to disk after data is deleted.
+
+- **Simpler SAST scan list**: Each scan can now be deleted directly from the SAST landing page. The unused Linked Scan column has been removed.
+
+- **Threat-directed SAST coverage**: SAST scans now combine a language-neutral source inventory, parser and pattern hints, manifest and dependency inventory, and a source-reading threat analyst before discovery. The analyst can add evidence-backed assets, stores, actors, identities, trust boundaries, and threat scenarios without depending on a language-specific detector. SQL schemas and common database clients across PHP, .NET, Java, JavaScript, Python, Go, and Ruby provide deterministic navigation hints, while evidence checks and completeness rules prevent unsupported model facts or full coverage when the threat review is incomplete. Codex sessions can run these model-assisted phases without a separate API key, and repository pages show reconciliation failures when a provider is unavailable. An isolated baseline, threat-directed and sink-first workers, and deterministic analyzers contribute to one candidate ledger. Threat scenarios and required security checks are persisted, repeated scenarios or security questions in one model response are combined, distinct root causes can split into separate candidates, duplicates merge before validation, and an active closure reviewer can recover candidates that then receive the same independent validation. Scanner policy now controls finding classes, minimum severity and confidence, and phase budgets. SAST run pages show the complete phase lifecycle, repository facts and mapping warnings, protected assets separately from data stores, threat-model coverage, threat scenarios, required security checks and closure outcomes, and phase-level efficiency telemetry. Analysis tabs explain when their data is pending, still being generated, paused, or incomplete; reports and portable exports retain the same analysis.
 
 - **Smaller default model response limit**: New model profiles now use a 16,384-token response limit, leaving more room for prompts, tools, and scan history within the model context window. Existing saved profiles keep their configured limit.
 
@@ -39,6 +43,12 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Keyboard navigation in Settings**: Settings tabs now support keyboard navigation.
 
 ### Fixes
+
+- **Complete SAST model usage counters**: SAST usage now includes repository modeling and threat analysis. Scan activity also shows estimated input tokens for requests that are still waiting for a model response, kept separate from completed, billed usage.
+
+- **Web runs with page-linked traffic can be deleted**: Run cleanup now removes requests and other page-linked scan data before deleting crawled pages, avoiding a foreign-key error on completed scans.
+
+- **SAST runs can be retried and deleted after analysis**: Cleanup now removes threat, obligation, repository relationship, worker, campaign mapping, and validation records in foreign-key-safe order. Retrying or deleting a run no longer fails after semantic analysis or campaign matching has saved related data.
 
 - **Long scans stay within model context limits**: Scanner conversations now keep one bounded history journal, compact short and resumed conversations correctly, account for reasoning and structured tool data, and reduce the output allowance for individual requests when necessary. Large supporting prompts are also bounded before they are sent, while fixed instructions and recent evidence are retained.
 
