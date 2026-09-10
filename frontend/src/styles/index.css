@@ -17,3 +17,4 @@
 @import "../features/web-runs/attack-surface.css";
 @import "../features/sast-runs/sast.css";
 @import "../features/applications/applications.css";
+@import "../features/benchmark-lab/benchmarkLab.css";

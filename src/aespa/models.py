@@ -724,6 +724,18 @@ class ReportingDebugConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class BenchmarkLabConfig(SQLModel, table=True):
+    """Singleton configuration for the optional, post-run Benchmark Lab."""
+
+    __tablename__ = "benchmark_lab_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    panel_enabled: bool = Field(default=False)
+    default_match_mode: str = Field(default="assisted")
+    default_repetitions: int = Field(default=1)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class BrowserDebugConfig(SQLModel, table=True):
     """Singleton row (id always = 1) for Playwright browser debug settings."""
 
@@ -1720,6 +1732,105 @@ class ScanLead(SQLModel, table=True):
     @property
     def reference(self) -> str:
         return self.public_reference or ""
+
+
+class BenchmarkDataset(SQLModel, table=True):
+    """Ground truth kept separately from ordinary SAST scan artifacts."""
+
+    __tablename__ = "benchmark_dataset"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    schema_version: int = Field(default=1)
+    source_digest: Optional[str] = Field(default=None, index=True)
+    ground_truth_json: str = Field(default="{}")
+    ground_truth_digest: str = Field(default="", index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class BenchmarkEvaluation(SQLModel, table=True):
+    """A post-run evaluation; it never participates in SAST execution."""
+
+    __tablename__ = "benchmark_evaluation"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="RESTRICT"),
+            nullable=False,
+            index=True,
+        )
+    )
+    dataset_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("benchmark_dataset.id", ondelete="RESTRICT"),
+            nullable=False,
+            index=True,
+        )
+    )
+    status: str = Field(default="created", index=True)
+    match_mode: str = Field(default="assisted")
+    matching_version: str = Field(default="deterministic-v1")
+    policy_json: str = Field(default="{}")
+    run_provenance_json: str = Field(default="{}")
+    blindness_status: str = Field(default="warning", index=True)
+    blindness_checks_json: str = Field(default="{}")
+    metrics_json: str = Field(default="{}")
+    error_message: Optional[str] = Field(default=None)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class BenchmarkMatch(SQLModel, table=True):
+    """One expected-item/lead relationship, including unmatched sides."""
+
+    __tablename__ = "benchmark_match"
+    __table_args__ = (
+        UniqueConstraint(
+            "evaluation_id",
+            "ground_truth_external_id",
+            name="uq_benchmark_match_ground_truth",
+        ),
+        UniqueConstraint(
+            "evaluation_id",
+            "scan_lead_id",
+            name="uq_benchmark_match_scan_lead",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    evaluation_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("benchmark_evaluation.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    ground_truth_external_id: Optional[str] = Field(default=None, index=True)
+    scan_lead_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("scan_lead.id", ondelete="RESTRICT"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    disposition: str = Field(default="unreviewed", index=True)
+    confidence: float = Field(default=0.0)
+    rationale: str = Field(default="")
+    human_reviewed: bool = Field(default=False)
+    review_note: str = Field(default="")
+    review_history_json: str = Field(default="[]")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
 
 
 # ── Applications & multi-repository campaigns ───────────────────────────────

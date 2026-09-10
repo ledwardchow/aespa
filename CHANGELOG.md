@@ -6,6 +6,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
+- **Optional Benchmark Lab for SAST**: Enable Benchmark Lab under System Settings → Feature Visibility to compare an ordinary completed SAST run with separately stored ground truth imported from canonical JSON or numbered vulnerability Markdown. The lab records deterministic match suggestions, manual adjudication, recall and precision metrics, semantic coverage, efficiency, audit provenance, contamination checks, and JSON, CSV, or Markdown exports without exposing answer keys to scanner agents.
+
 - **SARIF export for SAST scans**: SAST results can now be exported in standard OASIS SARIF 2.1.0 format for direct integration with GitHub Code Scanning, GitLab SAST, SonarQube, and VS Code SARIF viewers. The export provides file locations, highlighted snippets, step-by-step source-to-sink taint flows (`codeFlows`), and confidence scores via SARIF's native `rank` property. Candidates discovered during the run are included, with unconfirmed or inconclusive candidates annotated with standard SARIF `suppressions` records. Verification metadata—including validator reasoning, confidence scores, counterevidence, proof gaps, and dynamic attack path guidance—is preserved in both formatted Markdown messages and machine-readable result property bags. In the SAST run ellipsis menu, Export Markdown and Export SARIF options are now available.
 
 - **A.L.I.C.E. goal mode**: Start a site or API chat with `/goal <objective>` to keep A.L.I.C.E. working until the outcome is verified or a specific blocker prevents further progress. Goals save checkpoints, survive browser navigation, and pause across restarts and provider limits. You can guide a running goal or use the pause, resume, edit, and clear controls.
@@ -17,6 +19,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **GitHub Copilot account sign-in and selection**: Copilot providers can now start device-code sign-in from AESPA and select a locally authenticated Copilot CLI account. Credentials stay in Copilot CLI's credential store and are never sent to the browser.
 
 ### Updates
+
+- **Threat-directed SAST coverage**: SAST scans now build a framework-neutral repository model and source-backed threat scenarios before discovery. An independent baseline worker remains isolated from generated scenarios, focused workers must resolve assigned semantic obligations, equivalent candidates are reconciled before validation, and unresolved threat questions or model-completeness warnings produce explicit partial-coverage reasons.
 
 - **Smaller default model response limit**: New model profiles now use a 16,384-token response limit, leaving more room for prompts, tools, and scan history within the model context window. Existing saved profiles keep their configured limit.
 

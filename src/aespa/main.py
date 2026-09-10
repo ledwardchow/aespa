@@ -16,6 +16,7 @@ from aespa.api.alice import router as alice_router
 from aespa.api.api_collections import router as api_collections_router
 from aespa.api.api_test_runs import router as api_test_runs_router
 from aespa.api.applications import router as applications_router
+from aespa.api.benchmark_lab import router as benchmark_lab_router
 from aespa.api.events import router as events_router
 from aespa.api.reporting_debug import router as reporting_debug_router
 from aespa.api.sast_runs import router as sast_runs_router
@@ -137,6 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(alice_router)
     app.include_router(statistics_router)
     app.include_router(applications_router)
+    app.include_router(benchmark_lab_router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

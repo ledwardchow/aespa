@@ -862,7 +862,7 @@ def test_full_sast_task_executes_three_real_phase_loops(
     assert json.loads(saved_run.coverage_json)["summary"]["files_reviewed"] == 1
 
 
-def test_sast_validation_starts_before_discovery_finishes(
+def test_sast_validation_starts_after_discovery_reconciliation(
     tmp_path, monkeypatch, isolated_db_engine
 ):
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
@@ -984,7 +984,7 @@ def test_sast_validation_starts_before_discovery_finishes(
 
     asyncio.run(sast_scanner._sast_scan_task(run_id))
 
-    assert discovery_observed_validator == [True]
+    assert discovery_observed_validator == [False]
     assert sorted(validator_started) == [0, 1]
     assert calls[0] == "discovery"
     assert calls.count("validation") == 2

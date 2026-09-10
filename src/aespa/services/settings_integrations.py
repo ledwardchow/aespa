@@ -8,6 +8,7 @@ from sqlmodel import Session
 
 from aespa.models import (
     AdversarialValidatorConfig,
+    BenchmarkLabConfig,
     BrowserDebugConfig,
     BurpRestApiConfig,
     CloudflareAccessConfig,
@@ -22,6 +23,8 @@ from aespa.models import (
     UpstreamProxyConfig,
 )
 from aespa.schemas import (
+    BenchmarkLabConfigIn,
+    BenchmarkLabConfigOut,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
     BurpRestApiConfigIn,
@@ -520,6 +523,34 @@ def upsert_reporting_debug_config(
     session.commit()
     session.refresh(cfg)
     return get_reporting_debug_config(session)
+
+
+def get_benchmark_lab_config(session: Session) -> BenchmarkLabConfigOut:
+    cfg = session.get(BenchmarkLabConfig, _SINGLETON_ID)
+    if cfg is None:
+        return BenchmarkLabConfigOut(**BenchmarkLabConfigIn().model_dump(), updated_at=_utcnow())
+    return BenchmarkLabConfigOut(
+        panel_enabled=cfg.panel_enabled,
+        default_match_mode=cfg.default_match_mode,
+        default_repetitions=cfg.default_repetitions,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_benchmark_lab_config(
+    session: Session, payload: BenchmarkLabConfigIn
+) -> BenchmarkLabConfigOut:
+    cfg = session.get(BenchmarkLabConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = BenchmarkLabConfig(id=_SINGLETON_ID)
+    cfg.panel_enabled = payload.panel_enabled
+    cfg.default_match_mode = payload.default_match_mode
+    cfg.default_repetitions = payload.default_repetitions
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_benchmark_lab_config(session)
 
 
 def get_browser_debug_config(session: Session) -> BrowserDebugConfigOut:

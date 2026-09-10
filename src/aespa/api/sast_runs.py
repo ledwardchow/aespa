@@ -29,6 +29,7 @@ from aespa.models import (
     AgentLog,
     ApiCollection,
     ApiTestRun,
+    BenchmarkEvaluation,
     PhaseCheckpoint,
     SastRun,
     SastWorker,
@@ -412,6 +413,15 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
     from aespa.services.sast_workprogram import completion_decision
 
     completion_status, completion_reasons, work_program = completion_decision(run_id)
+    report = _json_object(run.report_json, {})
+    # New semantic runs persist the authoritative assurance decision in the
+    # report. Keep the legacy work-program calculation for older runs that have
+    # no semantic report yet.
+    if report.get("completion_status") in {"full", "partial"}:
+        completion_status = report["completion_status"]
+        completion_reasons = list(
+            report.get("completion_reasons") or completion_reasons
+        )
 
     return {
         "phases": _json_object(run.phase_state_json, _empty_phase_state()),
@@ -419,7 +429,7 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
             run.coverage_json,
             {"files": [], "summary": {"files_total": 0, "files_reviewed": 0}},
         ),
-        "report": _json_object(run.report_json, {}),
+        "report": report,
         "work_program": work_program,
         "assurance": {
             "status": completion_status,
@@ -431,6 +441,16 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
 @router.delete("/api/sast-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
+    if (
+        session.exec(
+            select(BenchmarkEvaluation).where(BenchmarkEvaluation.sast_run_id == run_id)
+        ).first()
+        is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Delete benchmark evaluations before deleting this SAST run",
+        )
     from aespa.services import campaigns as campaigns_svc
     from aespa.services import sast_scanner
 
