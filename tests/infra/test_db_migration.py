@@ -6,11 +6,32 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa import db, db_legacy
+from aespa.config import Settings
 from alembic import command
 
 
 def _upgrade_to(engine, revision: str) -> None:
     command.upgrade(db._get_alembic_config(engine), revision)
+
+
+def test_new_sqlite_database_enables_full_auto_vacuum(tmp_path):
+    database_path = tmp_path / "new.db"
+    engine = db._build_engine(
+        Settings(database_url=f"sqlite:///{database_path}")
+    )
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("CREATE TABLE sample (id INTEGER PRIMARY KEY)")
+            assert conn.exec_driver_sql("PRAGMA auto_vacuum").scalar() == 1
+    finally:
+        engine.dispose()
+
+    reopened = create_engine(f"sqlite:///{database_path}")
+    try:
+        with reopened.connect() as conn:
+            assert conn.exec_driver_sql("PRAGMA auto_vacuum").scalar() == 1
+    finally:
+        reopened.dispose()
 
 
 def test_ensure_column_adds_missing_column():

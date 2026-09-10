@@ -20,6 +20,7 @@ export function SastRunsListPage() {
   const [sortDir, setSortDir] = useState("desc");
   const [evaluations, setEvaluations] = useState([]);
   const [benchmarkEnabled, setBenchmarkEnabled] = useState(false);
+  const [deletingRunId, setDeletingRunId] = useState(null);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -77,6 +78,20 @@ export function SastRunsListPage() {
     }
   };
 
+  const onDelete = async (run) => {
+    if (!confirm(`Delete "${run.name}" and all its leads?`)) return;
+    setDeletingRunId(run.id);
+    setError(null);
+    try {
+      await sastRunsApi.deleteSastRun(run.id);
+      await loadRuns();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDeletingRunId(null);
+    }
+  };
+
   const sortArrow = (field) => {
     if (sortField !== field) return null;
     return (
@@ -95,9 +110,6 @@ export function SastRunsListPage() {
       if (sortField === "leads_count") {
         valA = a.leads_count || 0;
         valB = b.leads_count || 0;
-      } else if (sortField === "linked_scan") {
-        valA = a.triggered_by_run_id ? `API #${a.triggered_by_run_id}` : a.source_filename || "";
-        valB = b.triggered_by_run_id ? `API #${b.triggered_by_run_id}` : b.source_filename || "";
       } else if (sortField === "started_at") {
         valA = a.started_at ? new Date(a.started_at).getTime() : 0;
         valB = b.started_at ? new Date(b.started_at).getTime() : 0;
@@ -170,7 +182,7 @@ export function SastRunsListPage() {
               <colgroup>
                 <col
                   style={{
-                    width: "24%",
+                    width: "32%",
                   }}
                 />
                 <col
@@ -185,12 +197,7 @@ export function SastRunsListPage() {
                 />
                 <col
                   style={{
-                    width: "18%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "18%",
+                    width: "24%",
                   }}
                 />
                 <col />
@@ -214,12 +221,6 @@ export function SastRunsListPage() {
                     onClick={() => toggleSort("leads_count")}
                   >
                     Leads {sortArrow("leads_count")}
-                  </th>
-                  <th
-                    style={{ cursor: "pointer", userSelect: "none" }}
-                    onClick={() => toggleSort("linked_scan")}
-                  >
-                    Linked scan {sortArrow("linked_scan")}
                   </th>
                   <th
                     style={{ cursor: "pointer", userSelect: "none" }}
@@ -261,29 +262,20 @@ export function SastRunsListPage() {
                       )}
                       {benchmarkEnabled &&
                         evaluations.some((evaluation) => evaluation.sast_run_id === r.id) && (
-                        <div style={{ marginTop: 5 }}>
-                          <a
-                            className="badge neutral"
-                            href={`#/benchmark-lab/evaluations/${evaluations.find((evaluation) => evaluation.sast_run_id === r.id).id}`}
-                          >
-                            Evaluated
-                          </a>
-                        </div>
-                      )}
+                          <div style={{ marginTop: 5 }}>
+                            <a
+                              className="badge neutral"
+                              href={`#/benchmark-lab/evaluations/${evaluations.find((evaluation) => evaluation.sast_run_id === r.id).id}`}
+                            >
+                              Evaluated
+                            </a>
+                          </div>
+                        )}
                     </td>
                     <td>
                       <StatusBadge status={r.status} />
                     </td>
                     <td>{r.leads_count}</td>
-                    <td>
-                      {r.triggered_by_run_id ? (
-                        <a href={`#/api-runs/${r.triggered_by_run_id}/status`}>
-                          API run #{r.triggered_by_run_id}
-                        </a>
-                      ) : (
-                        <span className="subtle">{r.source_filename || "standalone"}</span>
-                      )}
-                    </td>
                     <td>
                       {r.started_at ? (
                         new Date(r.started_at).toLocaleString()
@@ -292,9 +284,19 @@ export function SastRunsListPage() {
                       )}
                     </td>
                     <td>
-                      <a className="btn ghost sm" href={`#/sast-runs/${r.id}/progress`}>
-                        View →
-                      </a>
+                      <div className="row" style={{ justifyContent: "flex-end" }}>
+                        <a className="btn ghost sm" href={`#/sast-runs/${r.id}/progress`}>
+                          View →
+                        </a>
+                        <button
+                          type="button"
+                          className="btn danger-outline sm"
+                          disabled={deletingRunId === r.id}
+                          onClick={() => onDelete(r)}
+                        >
+                          {deletingRunId === r.id ? "Deleting…" : "Delete"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

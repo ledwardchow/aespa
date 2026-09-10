@@ -4424,6 +4424,54 @@ def test_token_usage_tracking_for_sast_and_api():
     assert web_usage["total_output"] == 80
 
 
+def test_pending_tool_call_reports_estimated_input_usage(monkeypatch):
+    run_id = 888892
+    key = ("sast", run_id)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    events = []
+
+    async def fake_call(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return [], "end_turn", []
+
+    async def exercise():
+        monkeypatch.setattr(llm, "_call_with_tools_rate_limited", fake_call)
+        monkeypatch.setattr(llm, "_estimate_tools_call_tokens", lambda *_a, **_k: 321)
+        llm.set_run_context(run_id, emit_fn=events.append, run_kind="sast")
+        task = asyncio.create_task(
+            llm._call_with_tools(
+                LLMConfig(provider="openai_codex", model="gpt-test"),
+                "system",
+                [{"role": "user", "content": "inspect the source"}],
+                tools=[],
+            )
+        )
+        await entered.wait()
+        pending = llm.get_run_token_usage(run_id, run_kind="sast")
+        release.set()
+        await task
+        finished = llm.get_run_token_usage(run_id, run_kind="sast")
+        return pending, finished
+
+    try:
+        pending, finished = asyncio.run(exercise())
+    finally:
+        llm.clear_run_context()
+        llm._run_token_usage.pop(key, None)
+        llm._pending_run_calls.pop(key, None)
+        llm._run_token_seeded.discard(key)
+
+    assert pending["pending_requests"] == 1
+    assert pending["pending_input_tokens"] == 321
+    assert pending["total_input"] == 0
+    assert finished["pending_requests"] == 0
+    assert finished["pending_input_tokens"] == 0
+    assert events[0]["totals"]["pending_input_tokens"] == 321
+    assert events[-1]["totals"]["pending_input_tokens"] == 0
+
+
 def test_copilot_usage_callback_keeps_run_context_after_sdk_context_switch():
     run_id = 888889
     events = []

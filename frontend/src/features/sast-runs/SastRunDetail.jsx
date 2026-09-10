@@ -25,7 +25,7 @@ const PHASES = [
   { key: "scope", label: "Scope", short: "Archive and inventory", view: "coverage" },
   { key: "repository_model", label: "Model", short: "Repository facts", view: "model" },
   { key: "threat_model", label: "Threats", short: "Assets and boundaries", view: "threats" },
-  { key: "planning", label: "Planning", short: "Security obligations", view: "obligations" },
+  { key: "planning", label: "Planning", short: "Required security checks", view: "obligations" },
   { key: "discovery", label: "Discovery", short: "Source-to-sink candidates", view: "candidates" },
   {
     key: "reconciliation",
@@ -39,7 +39,7 @@ const PHASES = [
     short: "Controls and counterevidence",
     view: "candidates",
   },
-  { key: "closure", label: "Closure", short: "Resolve semantic gaps", view: "obligations" },
+  { key: "closure", label: "Closure", short: "Resolve security gaps", view: "obligations" },
   {
     key: "attack_path",
     label: "Attack paths",
@@ -222,6 +222,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const planning = semantic.planning || analysis.phases?.planning?.data || {};
   const closure = semantic.closure || analysis.phases?.closure?.data || {};
   const efficiencyTelemetry = analysis.report?.efficiency_telemetry || [];
+  const semanticStatus = scanRunning ? "running" : run?.status;
   const goTab = (nextTab) => {
     setActivePhase(null);
     nav(runHref({ runKind: "sast", runId }, nextTab));
@@ -426,7 +427,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             { key: "threats", label: `Threats ${asArray(threatModel.scenarios).length}` },
             {
               key: "obligations",
-              label: `Obligations ${asArray(planning.obligations).length}`,
+              label: `Security checks ${asArray(planning.obligations).length}`,
             },
             { key: "efficiency", label: "Efficiency" },
             { key: "candidates", label: `Candidates ${leads.length}` },
@@ -516,7 +517,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                 <strong>Coverage assurance:</strong>{" "}
                 {analysis.assurance?.reasons?.length
                   ? analysis.assurance.reasons.join(" ")
-                  : "Every generated source and sink obligation was closed."}
+                  : "Every generated source and sink security check was completed."}
               </span>
               <span
                 className={`sast-state sast-state-${analysis.assurance?.status === "full" ? "confirmed" : "inconclusive"}`}
@@ -528,13 +529,26 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           {tab === "coverage" && (
             <CoverageView coverage={analysis.coverage} workProgram={analysis.work_program} />
           )}
-          {tab === "model" && <RepositoryModelView model={repositoryModel} />}
-          {tab === "threats" && <ThreatModelView threatModel={threatModel} />}
+          {tab === "model" && (
+            <RepositoryModelView model={repositoryModel} status={semanticStatus} />
+          )}
+          {tab === "threats" && (
+            <ThreatModelView threatModel={threatModel} status={semanticStatus} />
+          )}
           {tab === "obligations" && (
-            <ObligationsView planning={planning} closure={closure} report={analysis.report} />
+            <ObligationsView
+              planning={planning}
+              closure={closure}
+              report={analysis.report}
+              status={semanticStatus}
+            />
           )}
           {tab === "efficiency" && (
-            <EfficiencyView telemetry={efficiencyTelemetry} report={analysis.report} />
+            <EfficiencyView
+              telemetry={efficiencyTelemetry}
+              report={analysis.report}
+              status={semanticStatus}
+            />
           )}
           {tab === "activity" && (
             <ActivityView

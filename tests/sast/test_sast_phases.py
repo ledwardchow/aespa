@@ -4,6 +4,7 @@ import asyncio
 import json
 import zipfile
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlmodel import Session, select
@@ -21,6 +22,13 @@ from aespa.models import (
 from aespa.models import TestRun as WebTestRun
 from aespa.services import sast_scanner
 from aespa.services.scan_leads import create_lead
+
+
+@pytest.mark.parametrize("provider", ["openai_codex", "github_copilot", "factory_droid"])
+def test_semantic_phases_accept_session_authenticated_providers(provider):
+    config = SimpleNamespace(provider=provider, api_key=None, base_url=None)
+
+    assert sast_scanner._llm_is_available_for_semantic_phases(config)
 
 
 def _run_with_web_target(engine) -> tuple[int, int]:
@@ -307,6 +315,55 @@ def test_provider_network_failure_pauses_sast_run(
     assert saved.status == "paused"
     assert pause.reason == "network"
     assert "resumed safely" in pause.message
+
+
+def test_sast_usage_context_starts_before_repository_model(
+    isolated_db_engine, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.py", "print('ok')\n")
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="usage context",
+            status="scanning",
+            source_archive_path=str(archive),
+            source_filename="source.zip",
+            llm_config_id=config.id,
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    context_started = False
+
+    def set_context(actual_run_id, _emit_fn, *, run_kind):
+        nonlocal context_started
+        assert actual_run_id == run_id
+        assert run_kind == "sast"
+        context_started = True
+
+    def inspect_repository_model(_root):
+        assert context_started is True
+        raise RuntimeError("stop after checking usage context")
+
+    from aespa.services import llm
+
+    monkeypatch.setattr(llm, "set_run_context", set_context)
+    monkeypatch.setattr(llm, "clear_run_context", lambda: None)
+    monkeypatch.setattr(
+        sast_scanner.semantic_svc, "build_repository_model", inspect_repository_model
+    )
+
+    asyncio.run(sast_scanner._sast_scan_task(run_id))
+
+    assert context_started is True
 
 
 @pytest.mark.parametrize(

@@ -44,6 +44,13 @@ _SOURCE_SUFFIXES = {
     ".rb",
     ".php",
     ".cs",
+    ".sql",
+    ".xml",
+    ".yml",
+    ".yaml",
+    ".properties",
+    ".conf",
+    ".config",
 }
 
 _FRONTEND_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".vue", ".html", ".htm"}
@@ -617,12 +624,29 @@ _QUEUE_PATTERNS = [
 ]
 
 _DATASTORE_PATTERNS = [
-    re.compile(r"\bredis\.Redis\(", re.IGNORECASE),
-    re.compile(r"\bpsycopg2\.connect\(", re.IGNORECASE),
-    re.compile(r"\bpymongo\.MongoClient\(", re.IGNORECASE),
-    re.compile(r"\bcreate_engine\(", re.IGNORECASE),
-    re.compile(r"\b(DATABASE_URL|MONGO_URI|REDIS_URL)\b"),
+    (re.compile(r"\bredis\.Redis\(", re.IGNORECASE), "Redis"),
+    (re.compile(r"\bpsycopg2\.connect\(", re.IGNORECASE), "PostgreSQL"),
+    (re.compile(r"\bpymongo\.MongoClient\(", re.IGNORECASE), "MongoDB"),
+    (re.compile(r"\bcreate_engine\(", re.IGNORECASE), "SQL database"),
+    (re.compile(r"\b(DATABASE_URL|MONGO_URI|REDIS_URL)\b"), "Configured datastore"),
+    (re.compile(r"\bnew\s+PDO\s*\(", re.IGNORECASE), "PDO database"),
+    (re.compile(r"[\"'](?:mysql|pgsql|sqlite|sqlsrv):", re.IGNORECASE), "SQL database"),
+    (re.compile(r"\bDbContext\b|\bUseSql(?:Server|ite|Npgsql|MySql)\s*\(", re.IGNORECASE), "Entity Framework database"),
+    (re.compile(r"\b(?:EntityManager|JdbcTemplate|DataSource)\b", re.IGNORECASE), "Java database"),
+    (re.compile(r"\b(?:PrismaClient|Sequelize|TypeOrmModule|mongoose\.connect)\b", re.IGNORECASE), "JavaScript datastore"),
+    (re.compile(r"\b(?:sql\.Open|gorm\.Open)\s*\(", re.IGNORECASE), "Go SQL database"),
+    (re.compile(r"\bActiveRecord::Base\b|\bestablish_connection\b", re.IGNORECASE), "Ruby database"),
 ]
+
+_SQL_TABLE_PATTERN = re.compile(
+    r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"[]?(?P<table>[A-Za-z_][\w$]*)",
+    re.IGNORECASE,
+)
+_SENSITIVE_DATA_NAMES = re.compile(
+    r"(?:user|account|customer|card|balance|transaction|payment|token|session|"
+    r"password|secret|credential|role|permission|profile|email|address|audit)",
+    re.IGNORECASE,
+)
 
 
 def _fingerprint(*parts: str) -> str:
@@ -1111,7 +1135,7 @@ def extract_component_facts(root: Path) -> list[dict]:
                     )
                     break
 
-            for pattern in _DATASTORE_PATTERNS:
+            for pattern, datastore_name in _DATASTORE_PATTERNS:
                 m = pattern.search(line)
                 if m:
                     _add(
@@ -1120,12 +1144,46 @@ def extract_component_facts(root: Path) -> list[dict]:
                             "method": None,
                             "path": None,
                             "host": None,
-                            "name": m.group(0).rstrip("("),
-                            "detail": {},
+                            "name": datastore_name,
+                            "detail": {"marker": m.group(0)[:120]},
                             "evidence_location": location,
                         }
                     )
                     break
+
+            if path.suffix.lower() == ".sql":
+                table_match = _SQL_TABLE_PATTERN.search(line)
+                if table_match:
+                    table_name = table_match.group("table")
+                    _add(
+                        {
+                            "fact_type": "datastore",
+                            "method": None,
+                            "path": None,
+                            "host": None,
+                            "name": "SQL database",
+                            "detail": {"schema_file": rel},
+                            "evidence_location": location,
+                        }
+                    )
+                    _add(
+                        {
+                            "fact_type": "asset",
+                            "method": None,
+                            "path": None,
+                            "host": None,
+                            "name": f"{table_name} data",
+                            "detail": {
+                                "table": table_name,
+                                "asset_type": (
+                                    "sensitive_data"
+                                    if _SENSITIVE_DATA_NAMES.search(table_name)
+                                    else "application_data"
+                                ),
+                            },
+                            "evidence_location": location,
+                        }
+                    )
 
     return facts[:_MAX_FACTS]
 

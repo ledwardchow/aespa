@@ -175,6 +175,10 @@ def _usage_base_url(config: LLMConfig) -> str | None:
 # Per-run usage accumulator. Copilot entries also carry AI-credit/request data.
 _run_token_usage: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
 
+# Requests currently waiting for a provider response. These estimates are kept
+# separate from billed usage and disappear when the call finishes or fails.
+_pending_run_calls: dict[tuple[str, int], dict[int, dict[str, Any]]] = {}
+
 # Tracks which (run_kind, run_id) tuples have already been seeded from DB this process lifetime.
 _run_token_seeded: set[tuple[str, int]] = set()
 
@@ -691,7 +695,10 @@ def _cost_total(bucket: dict[str, dict[str, Any]], key: str) -> float | None:
     return sum(values) if values else None
 
 
-def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _usage_totals(
+    bucket: dict[str, dict[str, Any]],
+    pending_calls: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     def latest_quota(key: str) -> dict[str, Any] | None:
         quotas = [value[key] for value in bucket.values() if value.get(key)]
         return max(
@@ -700,6 +707,7 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
             default=None,
         )
 
+    pending = pending_calls or {}
     return {
         "total_input": sum(v.get("input", 0) for v in bucket.values()),
         "total_output": sum(v.get("output", 0) for v in bucket.values()),
@@ -713,6 +721,11 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
             v.get("premium_requests", 0) for v in bucket.values()
         ),
         "total_requests": sum(v.get("requests", 0) for v in bucket.values()),
+        "pending_requests": len(pending),
+        "pending_input_tokens": sum(
+            max(0, int(call.get("input_tokens", 0) or 0))
+            for call in pending.values()
+        ),
         "estimated_token_cost_usd": _cost_total(bucket, "estimated_token_cost_usd"),
         "estimated_credit_cost_usd": _cost_total(bucket, "estimated_credit_cost_usd"),
         "estimated_total_cost_usd": _cost_total(bucket, "estimated_total_cost_usd"),
@@ -723,6 +736,53 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "codex_quota": latest_quota("codex_quota"),
         "by_model": {m: dict(v) for m, v in bucket.items()},
     }
+
+
+def _emit_pending_usage_update(
+    context: _UsageContext, key: tuple[str, int]
+) -> None:
+    if context.emit_fn is None:
+        return
+    try:
+        context.emit_fn(
+            {
+                "type": "token_usage_update",
+                "totals": _usage_totals(
+                    _run_token_usage.get(key, {}), _pending_run_calls.get(key)
+                ),
+            }
+        )
+    except Exception:
+        pass
+
+
+def _begin_pending_usage(
+    config: LLMConfig, call_id: int, input_tokens: int
+) -> tuple[_UsageContext, tuple[str, int], int] | None:
+    context = _capture_usage_context()
+    if context.run_id is None:
+        return None
+    key = (context.run_kind, context.run_id)
+    _pending_run_calls.setdefault(key, {})[call_id] = {
+        "model": config.model,
+        "input_tokens": max(0, int(input_tokens)),
+    }
+    _emit_pending_usage_update(context, key)
+    return context, key, call_id
+
+
+def _end_pending_usage(
+    token: tuple[_UsageContext, tuple[str, int], int] | None,
+) -> None:
+    if token is None:
+        return
+    context, key, call_id = token
+    calls = _pending_run_calls.get(key)
+    if calls is not None:
+        calls.pop(call_id, None)
+        if not calls:
+            _pending_run_calls.pop(key, None)
+    _emit_pending_usage_update(context, key)
 
 
 def _record_usage(
@@ -848,7 +908,7 @@ def _record_usage(
                     "ai_credits": ai_credits,
                     "factory_credits": factory_credits,
                     "premium_requests": premium_requests,
-                    "totals": _usage_totals(bucket),
+                    "totals": _usage_totals(bucket, _pending_run_calls.get(key)),
                 }
             )
         except Exception:
@@ -884,7 +944,7 @@ def get_run_token_usage(run_id: int, run_kind: str = "web") -> dict:
         bucket = _load_bucket_from_db(run_id, run_kind)
     elif _reprice_bucket(bucket):
         _persist_bucket_to_db(run_id, bucket, run_kind)
-    return _usage_totals(bucket)
+    return _usage_totals(bucket, _pending_run_calls.get(key))
 
 
 def set_llm_proxy(url: str | None) -> None:
@@ -1655,6 +1715,16 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         operation=operation,
         call_id=call_id,
     )
+    pending_token = _begin_pending_usage(
+        config,
+        call_id,
+        estimate_tokens(
+            prompt,
+            screenshot_b64,
+            getattr(config.provider, "value", config.provider),
+            model=config.model,
+        ),
+    )
     try:
         response = await _call_impl(config, prompt, screenshot_b64)
     except Exception as exc:
@@ -1667,6 +1737,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             call_id=call_id,
         )
         raise
+    finally:
+        _end_pending_usage(pending_token)
     _log_llm_traffic(
         "RESPONSE",
         config,
@@ -5214,6 +5286,17 @@ async def _call_with_tools(
         operation=operation,
         call_id=call_id,
     )
+    pending_token = _begin_pending_usage(
+        config,
+        call_id,
+        _estimate_tools_call_tokens(
+            system_message,
+            messages,
+            tools=active_tools,
+            model=config.model,
+            provider=str(getattr(config.provider, "value", config.provider)),
+        ),
+    )
     try:
         result = await _call_with_tools_rate_limited(
             config, system_message, messages, tools=tools
@@ -5228,6 +5311,8 @@ async def _call_with_tools(
             call_id=call_id,
         )
         raise
+    finally:
+        _end_pending_usage(pending_token)
     blocks, stop_reason, raw_content = result
     _log_llm_traffic(
         "RESPONSE",

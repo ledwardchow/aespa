@@ -21,6 +21,9 @@ export function fmtUsd(n) {
 
 export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
   const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
+  const pendingInputTokens = Number(tokenUsage?.pending_input_tokens || 0);
+  const pendingRequests = Number(tokenUsage?.pending_requests || 0);
+  const hasPendingUsage = pendingRequests > 0 || pendingInputTokens > 0;
   const providers = new Set(Object.values(tokenUsage?.by_model || {}).map((v) => v.provider));
   const hasCopilot = providers.has("github_copilot");
   const hasDroid = providers.has("factory_droid");
@@ -32,7 +35,8 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
     (tokenUsage.total_ai_credits > 0 ||
       tokenUsage.total_factory_credits > 0 ||
       tokenUsage.total_premium_requests > 0);
-  const hasUsage = hasTokens || hasProviderUsage;
+  const hasCompletedUsage = hasTokens || hasProviderUsage;
+  const hasUsage = hasCompletedUsage || hasPendingUsage;
   const hasEstimatedCost =
     tokenUsage?.estimated_cost_available && tokenUsage.estimated_total_cost_usd != null;
   const usageLabel =
@@ -51,8 +55,8 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
     <>
       <div
         className="activity-token-bar"
-        onClick={hasUsage ? () => setTokenExpanded?.((p) => !p) : undefined}
-        style={{ cursor: hasUsage ? "pointer" : "default" }}
+        onClick={hasCompletedUsage ? () => setTokenExpanded?.((p) => !p) : undefined}
+        style={{ cursor: hasCompletedUsage ? "pointer" : "default" }}
       >
         {hasUsage ? (
           <>
@@ -103,6 +107,17 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
                 </span>
               </>
             ) : null}
+            {hasPendingUsage ? (
+              <>
+                {hasCompletedUsage ? <span className="token-bar-sep">·</span> : null}
+                <span
+                  className="token-bar-in"
+                  title="Estimated input tokens in requests waiting for an LLM response"
+                >
+                  ≈{fmtTok(pendingInputTokens)} input pending
+                </span>
+              </>
+            ) : null}
             {tokenUsage.total_cache_read > 0 || tokenUsage.total_cache_write > 0 ? (
               <>
                 <span className="token-bar-sep">·</span>
@@ -129,15 +144,17 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
                 </span>
               </>
             ) : null}
-            <span className="activity-expand-chevron" style={{ marginLeft: 4 }}>
-              {tokenExpanded ? "▲" : "▼"}
-            </span>
+            {hasCompletedUsage ? (
+              <span className="activity-expand-chevron" style={{ marginLeft: 4 }}>
+                {tokenExpanded ? "▲" : "▼"}
+              </span>
+            ) : null}
           </>
         ) : (
           <span className="token-bar-empty">No usage data yet</span>
         )}
       </div>
-      {tokenExpanded && hasUsage && (
+      {tokenExpanded && hasCompletedUsage && (
         <div className="token-breakdown">
           {quota && Number.isFinite(Number(quota.remaining_percentage)) ? (
             <div className="token-breakdown-row">

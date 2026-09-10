@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, text
+from sqlalchemy import delete, or_, text
 from sqlmodel import Session, select
 
 from aespa.models import (
@@ -50,7 +50,19 @@ from aespa.models import (
     ProbeExecution,
     RunIdentity,
     RunPause,
+    SastCoverageObligation,
+    SastDiscoveryTelemetry,
+    SastEvidenceReceipt,
+    SastObligationLead,
+    SastPartition,
     SastRun,
+    SastSourceFile,
+    SastSurfaceEdge,
+    SastSurfaceItem,
+    SastThreatModel,
+    SastThreatScenario,
+    SastWorker,
+    SastWorkItem,
     ScanCheckpoint,
     ScanFinding,
     ScanLead,
@@ -235,6 +247,11 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         .where(TrafficEntry.api_test_run_id == None)  # noqa: E711
     ).all():
         session.delete(entry)
+
+    # SQLAlchemy has no ORM relationships between these models, so one flush
+    # can issue the CrawledPage deletes before TrafficEntry or another page
+    # dependant. Persist the dependant deletes before marking pages for removal.
+    session.flush()
     for page in pages:
         session.delete(page)
 
@@ -398,12 +415,90 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         member.updated_at = datetime.now(timezone.utc)
         session.add(member)
 
-    for lead in session.exec(
+    original_leads = session.exec(
         select(ScanLead)
         .where(ScanLead.producer_run_id == run_id)
         .where(ScanLead.producer_run_type == "sast")
         .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-    ).all():
+    ).all()
+    lead_ids = [lead.id for lead in original_leads if lead.id is not None]
+    facts = session.exec(
+        select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
+    ).all()
+    fact_ids = [fact.id for fact in facts if fact.id is not None]
+
+    # Campaign correlation rows can outlive their source member and hold
+    # restrictive foreign keys to this run's leads and component facts. Clear
+    # those references before the source rows are marked for deletion.
+    mapping_ids: list[int] = []
+    if lead_ids:
+        mappings = session.exec(
+            select(LeadTargetMapping).where(LeadTargetMapping.lead_id.in_(lead_ids))
+        ).all()
+        mapping_ids = [mapping.id for mapping in mappings if mapping.id is not None]
+        case_filters = [
+            CampaignValidationCase.origin_lead_id.in_(lead_ids),
+            CampaignValidationCase.copied_lead_id.in_(lead_ids),
+        ]
+        if mapping_ids:
+            case_filters.append(CampaignValidationCase.mapping_id.in_(mapping_ids))
+        for case in session.exec(
+            select(CampaignValidationCase).where(or_(*case_filters))
+        ).all():
+            session.delete(case)
+        for mapping in mappings:
+            session.delete(mapping)
+
+    if lead_ids or fact_ids:
+        provenance_filters = []
+        if lead_ids:
+            provenance_filters.append(
+                ScanLeadComponentProvenance.scan_lead_id.in_(lead_ids)
+            )
+        if fact_ids:
+            provenance_filters.append(ScanLeadComponentProvenance.fact_id.in_(fact_ids))
+        for provenance in session.exec(
+            select(ScanLeadComponentProvenance).where(or_(*provenance_filters))
+        ).all():
+            if provenance.scan_lead_id in lead_ids:
+                session.delete(provenance)
+            else:
+                provenance.fact_id = None
+                session.add(provenance)
+
+    if fact_ids:
+        for connection in session.exec(
+            select(ComponentConnection).where(
+                or_(
+                    ComponentConnection.source_fact_id.in_(fact_ids),
+                    ComponentConnection.target_fact_id.in_(fact_ids),
+                )
+            )
+        ).all():
+            session.delete(connection)
+
+    session.flush()
+
+    # Semantic rows contain references to one another without database cascade
+    # rules. Remove dependants first so SQLite can delete the run with foreign
+    # key enforcement enabled.
+    for model in (
+        SastObligationLead,
+        SastCoverageObligation,
+        SastThreatScenario,
+        SastThreatModel,
+        SastSurfaceEdge,
+        SastDiscoveryTelemetry,
+        SastEvidenceReceipt,
+        SastWorkItem,
+        SastWorker,
+        SastPartition,
+        SastSurfaceItem,
+        SastSourceFile,
+    ):
+        session.execute(delete(model).where(model.sast_run_id == run_id))
+
+    for lead in original_leads:
         session.delete(lead)
     for slog in session.exec(
         select(ScanLog)
@@ -423,9 +518,7 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         .where(PhaseCheckpoint.run_id == run_id)
     ).all():
         session.delete(checkpoint)
-    for fact in session.exec(
-        select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
-    ).all():
+    for fact in facts:
         session.delete(fact)
     run = session.get(SastRun, run_id)
     if run is not None:

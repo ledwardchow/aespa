@@ -40,6 +40,10 @@ def _build_engine(settings: Settings) -> Engine:
                 # the identity migration temporarily disables it while it
                 # rebuilds legacy tables.
                 cursor.execute("PRAGMA foreign_keys=ON")
+                # This takes effect without a VACUUM while a new database has
+                # no tables. Existing databases keep their current setting so
+                # startup never triggers an unexpected full-file rebuild.
+                cursor.execute("PRAGMA auto_vacuum=FULL")
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA synchronous=NORMAL")
                 cursor.execute("PRAGMA busy_timeout=30000")

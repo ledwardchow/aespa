@@ -259,3 +259,44 @@ test("back and forward restore the selected run tab", async ({ page }) => {
   await page.goBack();
   await expect(page.locator(".web-run-tab-bar .active")).toContainText("Findings");
 });
+
+test("a running SAST scan explains that semantic analysis is still being generated", async ({
+  page,
+}) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.route("**/api/sast-runs/1/scan/status", (route) =>
+    route.fulfill({ json: { running: true, status: "running", resumable: false } }),
+  );
+
+  await page.goto("/#/sast-runs/1/efficiency");
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.getByRole("tab", { name: "Efficiency", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.getByText("Efficiency telemetry is being collected.")).toBeVisible();
+  await expect(
+    page.getByText(
+      "This analysis will appear after the scan finishes and the final report is ready.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByText(/Run the scan again with the current SAST workflow/)).toHaveCount(0);
+
+  await page.getByRole("tab", { name: /^Threats/ }).click();
+  await expect(page.getByText("Threat model is not ready yet.")).toBeVisible();
+  await expect(page.getByText("This analysis will appear as the scan progresses.")).toBeVisible();
+  await expect(page.getByText(/Run the scan again with the current SAST workflow/)).toHaveCount(0);
+
+  await page.getByRole("tab", { name: /^Security checks/ }).click();
+  await expect(page.getByText("Security check analysis is not ready yet.")).toBeVisible();
+  await expect(page.getByText("This analysis will appear as the scan progresses.")).toBeVisible();
+  await expect(page.getByText(/Run the scan again with the current SAST workflow/)).toHaveCount(0);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-analysis-running.png") });
+});

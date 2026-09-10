@@ -23,6 +23,50 @@ _MAX_NODES = 2_000
 _MAX_SCENARIOS = 300
 _MAX_OBLIGATIONS = 600
 _TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
+_MODEL_FACT_KINDS = {
+    "asset",
+    "store",
+    "actor",
+    "identity",
+    "boundary",
+    "operation",
+    "control",
+    "sink",
+    "dependency",
+    "deployment",
+    "input",
+    "output",
+}
+_LOW_VALUE_PATH_PARTS = {
+    ".git",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "coverage",
+    "__pycache__",
+}
+_ARCHITECTURE_NAME_RE = re.compile(
+    r"(?:route|controller|handler|middleware|auth|model|schema|migration|database|"
+    r"repository|service|config|docker|compose|terraform|main|app|server)",
+    re.IGNORECASE,
+)
+_PERSISTENCE_HINT_RE = re.compile(
+    r"(?:create\s+table|insert\s+into|new\s+pdo|database_url|dbcontext|"
+    r"entitymanager|jdbctemplate|prismaclient|sequelize|mongoose\.connect|"
+    r"create_engine|psycopg2\.connect|sql\.open|gorm\.open|active_record)",
+    re.IGNORECASE,
+)
+_SECRET_LITERAL_RE = re.compile(
+    r"(?i)\b(password|passwd|token|secret|api[_-]?key|authorization)\b"
+    r"\s*[:=]\s*([^\s,;]+)"
+)
+_CONNECTION_SECRET_RE = re.compile(r"(?i)(://[^:/\s]+:)[^@/\s]+(@)")
+_SECRET_VALUE_RE = re.compile(
+    r"(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\bBearer\s+[A-Za-z0-9._~+/=-]{16,}|"
+    r"\b(?:password|passwd|api[_-]?key|secret|token)\s*[:=]\s*[\"'][^\"']{4,}[\"'])",
+    re.IGNORECASE,
+)
 
 
 def fingerprint(*parts: object) -> str:
@@ -40,6 +84,12 @@ def _tokens(value: object) -> set[str]:
     return set(_TOKEN_RE.findall(str(value or "").casefold()))
 
 
+def _redact_secret_literals(value: object) -> str:
+    text = str(value or "")
+    text = _SECRET_LITERAL_RE.sub(lambda match: f"{match.group(1)}=[redacted]", text)
+    return _CONNECTION_SECRET_RE.sub(r"\1[redacted]\2", text)
+
+
 def _fact_kind(fact_type: str) -> str:
     return {
         "route": "operation",
@@ -49,12 +99,78 @@ def _fact_kind(fact_type: str) -> str:
         "rpc_server": "operation",
         "auth_boundary": "control",
         "datastore": "store",
+        "asset": "asset",
+        "actor": "actor",
+        "identity": "identity",
+        "trust_boundary": "boundary",
         "queue": "operation",
         "framework": "dependency",
         "dependency": "dependency",
         "callable": "operation",
         "sensitive_operation": "sink",
     }.get(fact_type, "unknown")
+
+
+def _source_inventory(root: Path) -> dict[str, Any]:
+    """Inventory readable repository files and rank useful architecture evidence."""
+
+    files: list[dict[str, Any]] = []
+    persistence_hints: list[str] = []
+    for path in sorted(root.rglob("*"))[:10_000]:
+        if not path.is_file() or path.is_symlink():
+            continue
+        relative = path.relative_to(root).as_posix()
+        parts = {part.casefold() for part in path.parts}
+        try:
+            size = path.stat().st_size
+            if size > 2 * 1024 * 1024:
+                readable = False
+                text = ""
+            else:
+                raw = path.read_bytes()
+                readable = b"\x00" not in raw[:4096]
+                text = raw.decode("utf-8", errors="replace") if readable else ""
+        except OSError:
+            continue
+        score = 0
+        if _ARCHITECTURE_NAME_RE.search(relative):
+            score += 5
+        if path.suffix.casefold() in {
+            ".sql",
+            ".xml",
+            ".yml",
+            ".yaml",
+            ".properties",
+            ".json",
+            ".toml",
+            ".config",
+        }:
+            score += 3
+        if parts & _LOW_VALUE_PATH_PARTS:
+            score -= 10
+        if readable and _PERSISTENCE_HINT_RE.search(text):
+            score += 5
+            persistence_hints.append(relative)
+        files.append(
+            {
+                "path": relative,
+                "size": size,
+                "readable": readable,
+                "rank": score,
+                "classification": (
+                    "deprioritized" if parts & _LOW_VALUE_PATH_PARTS else "production_or_unknown"
+                ),
+            }
+        )
+    files.sort(key=lambda item: (-int(item["rank"]), str(item["path"])))
+    readable_files = sum(bool(item["readable"]) for item in files)
+    return {
+        "files": files[:2_000],
+        "files_total": len(files),
+        "readable_files": readable_files,
+        "persistence_hint_paths": sorted(set(persistence_hints))[:100],
+        "truncated": len(files) > 2_000,
+    }
 
 
 def _node_from_fact(fact: dict[str, Any]) -> dict[str, Any]:
@@ -95,6 +211,7 @@ def build_repository_model(
     """Build a bounded normalized repository model from existing fact adapters."""
 
     parser_result = extract_parser_facts(root)
+    inventory = _source_inventory(root)
     if facts is None:
         try:
             facts = extract_component_facts(root)
@@ -130,7 +247,12 @@ def build_repository_model(
         pass
     operations = [node for node in nodes if node["kind"] == "operation"]
     stores = [node for node in nodes if node["kind"] == "store"]
+    assets = [node for node in nodes if node["kind"] == "asset"]
     controls = [node for node in nodes if node["kind"] == "control"]
+    identities = [node for node in nodes if node["kind"] == "identity"]
+    actors = [node for node in nodes if node["kind"] == "actor"]
+    inputs = [node for node in nodes if node["kind"] == "input"]
+    sinks = [node for node in nodes if node["kind"] == "sink"]
     dependencies = [node for node in nodes if node["kind"] == "dependency"]
     if production_files and not operations:
         warnings.append(
@@ -150,12 +272,59 @@ def build_repository_model(
                 "status": "unresolved",
             }
         )
+    if inventory["persistence_hint_paths"] and not stores:
+        warnings.append(
+            {
+                "key": "persistence_without_store",
+                "severity": "high",
+                "message": "Persistence code or schema files were found but no datastore was mapped.",
+                "status": "unresolved",
+                "evidence": inventory["persistence_hint_paths"][:20],
+            }
+        )
+    if inventory["persistence_hint_paths"] and not assets:
+        warnings.append(
+            {
+                "key": "persistence_without_assets",
+                "severity": "high",
+                "message": "Persistent application state was found but no protected assets were mapped.",
+                "status": "unresolved",
+                "evidence": inventory["persistence_hint_paths"][:20],
+            }
+        )
     if dependencies and not controls:
         warnings.append(
             {
                 "key": "dependency_without_controls",
                 "severity": "low",
                 "message": "Dependencies were detected but no authentication or authorization boundary was mapped.",
+                "status": "unresolved",
+            }
+        )
+    if controls and not actors and not identities:
+        warnings.append(
+            {
+                "key": "authentication_without_identity",
+                "severity": "high",
+                "message": "Authentication or authorization code was found but no actors or identities were mapped.",
+                "status": "unresolved",
+            }
+        )
+    if operations and not inputs:
+        warnings.append(
+            {
+                "key": "operations_without_inputs",
+                "severity": "high",
+                "message": "Reachable operations were found but no untrusted inputs were mapped.",
+                "status": "unresolved",
+            }
+        )
+    if sinks and not operations:
+        warnings.append(
+            {
+                "key": "sinks_without_operations",
+                "severity": "high",
+                "message": "Sensitive operations were found without a mapped reachable operation.",
                 "status": "unresolved",
             }
         )
@@ -170,8 +339,9 @@ def build_repository_model(
             }
         )
     return {
-        "model_version": 1,
+        "model_version": 2,
         "source_root": "immutable-sast-snapshot",
+        "inventory": inventory,
         "nodes": nodes,
         "edges": _derive_edges(nodes),
         "warnings": warnings,
@@ -179,7 +349,12 @@ def build_repository_model(
             "nodes": len(nodes),
             "operations": len(operations),
             "stores": len(stores),
+            "assets": len(assets),
             "controls": len(controls),
+            "actors": len(actors),
+            "identities": len(identities),
+            "inputs": len(inputs),
+            "sinks": len(sinks),
             "dependencies": len(dependencies),
             "production_files": production_files,
             "truncated": len(nodes_by_id) > _MAX_NODES,
@@ -503,6 +678,9 @@ def persist_semantic_state(
             threat_model.get("open_questions") or []
         )
         threat_row.model_version = int(threat_model.get("model_version") or 1)
+        threat_row.prompt_version = str(
+            threat_model.get("prompt_version") or "sast-threat-v1"
+        )[:120]
         threat_row.updated_at = now
         session.add(threat_row)
         existing_scenarios = {
@@ -553,6 +731,7 @@ def persist_semantic_state(
                 setattr(row, attr, value)
             session.add(row)
             session.flush()
+            existing_scenarios[scenario_key] = row
             scenario_ids[row.scenario_key] = int(row.id)
         existing_obligations = {
             row.obligation_key: row
@@ -562,6 +741,7 @@ def persist_semantic_state(
                 )
             )
         }
+        persisted_obligation_keys: set[str] = set()
         for obligation in planning.get("obligations", []):
             obligation_key = str(obligation.get("obligation_key"))
             row = existing_obligations.get(obligation_key) or SastCoverageObligation(
@@ -598,12 +778,14 @@ def persist_semantic_state(
             }.items():
                 setattr(row, attr, value)
             session.add(row)
+            existing_obligations[obligation_key] = row
+            persisted_obligation_keys.add(obligation_key)
         session.commit()
         return {
             "nodes": len(by_fingerprint),
             "edges": len(model.get("edges", [])),
             "scenarios": len(scenario_ids),
-            "obligations": len(planning.get("obligations", [])),
+            "obligations": len(persisted_obligation_keys),
         }
 
 
@@ -759,6 +941,9 @@ def build_threat_model(
     nodes = model.get("nodes") if isinstance(model.get("nodes"), list) else []
     operations = [node for node in nodes if node.get("kind") == "operation"]
     stores = [node for node in nodes if node.get("kind") == "store"]
+    assets = [node for node in nodes if node.get("kind") == "asset"]
+    actors = [node for node in nodes if node.get("kind") == "actor"]
+    boundaries = [node for node in nodes if node.get("kind") == "boundary"]
     controls = [node for node in nodes if node.get("kind") == "control"]
     scenarios: list[dict[str, Any]] = []
     for operation in operations[:_MAX_SCENARIOS]:
@@ -779,7 +964,7 @@ def build_threat_model(
                 "actor": actor,
                 "controlled_input_or_state": [operation["id"]],
                 "boundary_surface_ids": [node["id"] for node in controls[:8]],
-                "asset_surface_ids": [node["id"] for node in stores[:8]],
+                "asset_surface_ids": [node["id"] for node in assets[:8]],
                 "expected_control_surface_ids": [node["id"] for node in controls[:8]],
                 "sensitive_operation_surface_ids": [operation["id"]],
                 "security_objective": security_objective,
@@ -790,7 +975,7 @@ def build_threat_model(
                     "attacker-controlled request or message",
                 ],
                 "evidence": operation.get("evidence", [])[:4],
-                "priority": "high" if stores else "medium",
+                "priority": "high" if assets or stores else "medium",
                 "confidence": operation.get("confidence", 0.5),
                 "status": "planned",
             }
@@ -818,13 +1003,21 @@ def build_threat_model(
                 }
             )
     return {
-        "model_version": 1,
+        "model_version": 2,
         "summary": f"{len(scenarios)} source-backed threat scenario(s) derived from the repository model.",
-        "actors": sorted({scenario["actor"] for scenario in scenarios}),
-        "assets": [node for node in stores[:40]],
+        "actors": actors[:40] or sorted({scenario["actor"] for scenario in scenarios}),
+        "assets": assets[:80],
+        "stores": stores[:40],
+        "trust_boundaries": boundaries[:40],
+        "security_objectives": [],
+        "attacker_capabilities": [],
         "assumptions": [user_context[:500]] if user_context.strip() else [],
         "open_questions": [warning["message"] for warning in model.get("warnings", [])],
         "scenarios": scenarios[:_MAX_SCENARIOS],
+        "quality": {
+            "status": "reduced",
+            "reasons": ["The agent-led threat review has not completed."],
+        },
     }
 
 
@@ -918,7 +1111,7 @@ def _packetize_obligations(
 def obligation_payload(
     planning: dict[str, Any], obligation_keys: set[str] | list[str]
 ) -> dict[str, Any]:
-    """Return the bounded semantic obligations assigned to one worker."""
+    """Return the bounded security checks assigned to one worker."""
 
     keys = set(obligation_keys)
     obligations = [
@@ -959,7 +1152,7 @@ def record_obligation_disposition(
         None,
     )
     if obligation is None:
-        return False, "semantic obligation was not found"
+        return False, "security check was not found"
     if not reasoning.strip():
         return False, "reasoning is required"
     obligation.update(
@@ -971,7 +1164,7 @@ def record_obligation_disposition(
             "controls": list(controls or [])[:20],
         }
     )
-    return True, f"Semantic obligation {obligation_key} recorded as {status}."
+    return True, f"Security check {obligation_key} recorded as {status}."
 
 
 def reconcile_candidates(
@@ -1091,8 +1284,14 @@ def closure_assurance(
         if warning.get("status") not in {"resolved", "accepted_low_risk"}
     ]
     reasons: list[str] = []
+    threat_quality = threat_model.get("quality")
+    if isinstance(threat_quality, dict) and threat_quality.get("status") != "full":
+        quality_reasons = threat_quality.get("reasons") or [
+            "The threat model did not complete its agent-led source review."
+        ]
+        reasons.extend(str(reason) for reason in quality_reasons[:10])
     if unresolved:
-        reasons.append(f"{len(unresolved)} semantic obligation(s) remain unresolved.")
+        reasons.append(f"{len(unresolved)} security check(s) remain unresolved.")
     if warnings:
         reasons.append(
             f"{len(warnings)} repository-model completeness warning(s) remain unresolved."
@@ -1136,6 +1335,265 @@ def _json_object(raw: str) -> dict[str, Any] | None:
     except ValueError:
         return None
     return value if isinstance(value, dict) else None
+
+
+def validate_evidence_reference(
+    root: Path, reference: object, reviewed_paths: set[str]
+) -> tuple[bool, str]:
+    """Validate one agent evidence reference against a file it directly opened."""
+
+    match = re.fullmatch(r"(.+):(\d+)", str(reference or "").strip())
+    if not match:
+        return False, "evidence must use path:line format"
+    relative, raw_line = match.groups()
+    normalized = Path(relative).as_posix()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized not in reviewed_paths:
+        return False, f"{normalized} must be opened with read_file before it can be cited"
+    target = (root / normalized).resolve()
+    if target != root and not target.is_relative_to(root):
+        return False, "evidence path escapes the source snapshot"
+    try:
+        line_count = len(target.read_text("utf-8", errors="replace").splitlines())
+    except OSError:
+        return False, "evidence file cannot be read"
+    line = int(raw_line)
+    if line < 1 or line > max(1, line_count):
+        return False, f"evidence line {line} does not exist in {normalized}"
+    return True, f"{normalized}:{line}"
+
+
+def record_agent_model_fact(
+    root: Path,
+    model: dict[str, Any],
+    proposal: dict[str, Any],
+    reviewed_paths: set[str],
+) -> tuple[bool, str, str | None]:
+    """Accept one bounded, source-backed semantic fact from the threat analyst."""
+
+    kind = str(proposal.get("kind") or "").casefold()
+    if kind not in _MODEL_FACT_KINDS:
+        return False, f"unsupported fact kind: {kind}", None
+    name = _redact_secret_literals(proposal.get("name")).strip()[:240]
+    description = _redact_secret_literals(proposal.get("description")).strip()[:1000]
+    if not name or not description:
+        return False, "name and description are required", None
+    if _SECRET_VALUE_RE.search(f"{name}\n{description}"):
+        return False, "fact text appears to contain a literal secret; describe its purpose instead", None
+    evidence: list[str] = []
+    for reference in proposal.get("evidence", [])[:8]:
+        valid, normalized = validate_evidence_reference(root, reference, reviewed_paths)
+        if not valid:
+            return False, normalized, None
+        evidence.append(normalized)
+    if not evidence:
+        return False, "at least one valid evidence reference is required", None
+    node_id = fingerprint("agent_fact", kind, name, sorted(evidence))
+    known = {str(node.get("id")) for node in model.get("nodes", [])}
+    if node_id in known:
+        return True, f"Fact already recorded as {node_id}.", node_id
+    if len(model.setdefault("nodes", [])) >= _MAX_NODES:
+        return False, "repository-model fact limit reached", None
+    node = {
+        "id": node_id,
+        "fingerprint": node_id,
+        "kind": kind,
+        "type": str(proposal.get("type") or kind)[:120],
+        "name": name,
+        "description": description,
+        "component_key": evidence[0].rsplit(":", 1)[0],
+        "confidence": min(0.9, max(0.0, float(proposal.get("confidence") or 0.7))),
+        "provenance": "agent_review",
+        "evidence": evidence,
+        "details": {
+            "related_surface_ids": [
+                str(value)
+                for value in proposal.get("related_surface_ids", [])[:20]
+                if str(value) in known
+            ]
+        },
+    }
+    model["nodes"].append(node)
+    stat_key = {"identity": "identities", "boundary": "boundaries"}.get(
+        kind, f"{kind}s"
+    )
+    model.setdefault("stats", {})[stat_key] = sum(
+        item.get("kind") == kind for item in model["nodes"]
+    )
+    return True, f"Recorded {kind} {name} as {node_id}.", node_id
+
+
+def record_agent_threat_scenario(
+    model: dict[str, Any], threat_model: dict[str, Any], proposal: dict[str, Any]
+) -> tuple[bool, str]:
+    """Accept one scenario whose semantic references exist in the merged model."""
+
+    title = str(proposal.get("title") or "").strip()[:300]
+    if not title:
+        return False, "title is required"
+    known_ids = {str(node.get("id")) for node in model.get("nodes", [])}
+    reference_fields = (
+        "controlled_input_or_state",
+        "entry_surface_ids",
+        "boundary_surface_ids",
+        "asset_surface_ids",
+        "expected_control_surface_ids",
+        "sensitive_operation_surface_ids",
+    )
+    referenced: set[str] = set()
+    scenario = dict(proposal)
+    for key in reference_fields:
+        values = [str(value) for value in proposal.get(key, [])[:30]]
+        if any(value not in known_ids for value in values):
+            return False, f"{key} contains an unknown surface ID"
+        scenario[key] = values
+        referenced.update(values)
+    if not referenced:
+        return False, "scenario must reference at least one recorded fact"
+    scenario_key = fingerprint("agent_threat", title, sorted(referenced))
+    if any(
+        item.get("scenario_key") == scenario_key
+        for item in threat_model.setdefault("scenarios", [])
+    ):
+        return True, f"Scenario already recorded as {scenario_key}."
+    if len(threat_model["scenarios"]) >= _MAX_SCENARIOS:
+        return False, "threat-scenario limit reached"
+    scenario.update(
+        {
+            "scenario_key": scenario_key,
+            "title": title,
+            "actor": str(proposal.get("actor") or "external caller")[:300],
+            "security_objective": str(proposal.get("security_objective") or "")[:1000],
+            "capability_gain": str(proposal.get("capability_gain") or "")[:1000],
+            "impact": str(proposal.get("impact") or "")[:1000],
+            "prerequisites": [str(value)[:500] for value in proposal.get("prerequisites", [])[:20]],
+            "evidence": sorted(
+                {
+                    evidence
+                    for node in model.get("nodes", [])
+                    if str(node.get("id")) in referenced
+                    for evidence in node.get("evidence", [])
+                }
+            )[:8],
+            "priority": str(proposal.get("priority") or "medium")[:20],
+            "confidence": min(0.9, max(0.0, float(proposal.get("confidence") or 0.7))),
+            "status": "planned",
+            "provenance": "agent_review",
+        }
+    )
+    threat_model["scenarios"].append(scenario)
+    return True, f"Recorded scenario {scenario_key}."
+
+
+def finalize_agent_threat_model(
+    model: dict[str, Any],
+    threat_model: dict[str, Any],
+    proposal: dict[str, Any],
+    *,
+    files_reviewed: int,
+) -> tuple[bool, str]:
+    """Finalize hybrid model state and run deterministic completeness checks."""
+
+    nodes = model.get("nodes", [])
+    assets = [node for node in nodes if node.get("kind") == "asset"][:100]
+    stores = [node for node in nodes if node.get("kind") == "store"][:100]
+    boundaries = [node for node in nodes if node.get("kind") == "boundary"][:100]
+    actors = [node for node in nodes if node.get("kind") == "actor"][:100]
+    identities = [node for node in nodes if node.get("kind") == "identity"][:100]
+    inputs = [node for node in nodes if node.get("kind") == "input"][:100]
+    persistence_found = bool(
+        model.get("inventory", {}).get("persistence_hint_paths")
+    )
+    if persistence_found and not assets:
+        return False, "persistent state was detected, so at least one protected asset must be recorded"
+    ranked_review_candidates = [
+        item
+        for item in model.get("inventory", {}).get("files", [])
+        if item.get("readable")
+        and item.get("classification") != "deprioritized"
+        and int(item.get("rank") or 0) > 0
+    ]
+    minimum_reviewed = min(5, max(1, (len(ranked_review_candidates) + 4) // 5))
+    if files_reviewed < minimum_reviewed:
+        return (
+            False,
+            f"open at least {minimum_reviewed} representative source file(s); {files_reviewed} reviewed",
+        )
+    for warning in model.get("warnings", []):
+        if warning.get("key") == "persistence_without_store" and stores:
+            warning["status"] = "resolved"
+        if warning.get("key") == "persistence_without_assets" and assets:
+            warning["status"] = "resolved"
+        if warning.get("key") == "no_reachable_operations" and any(
+            node.get("kind") == "operation" for node in nodes
+        ):
+            warning["status"] = "resolved"
+        if warning.get("key") == "authentication_without_identity" and (
+            actors or identities
+        ):
+            warning["status"] = "resolved"
+        if warning.get("key") == "operations_without_inputs" and inputs:
+            warning["status"] = "resolved"
+        if warning.get("key") == "sinks_without_operations" and any(
+            node.get("kind") == "operation" for node in nodes
+        ):
+            warning["status"] = "resolved"
+    open_warnings = [
+        warning
+        for warning in model.get("warnings", [])
+        if warning.get("status") != "resolved"
+        and warning.get("severity") in {"high", "critical"}
+    ]
+    threat_model.update(
+        {
+            "model_version": 2,
+            "prompt_version": "sast-threat-v2-hybrid",
+            "summary": str(
+                proposal.get("summary") or threat_model.get("summary") or ""
+            )[:4000],
+            "assets": assets,
+            "stores": stores,
+            "trust_boundaries": boundaries,
+            "actors": actors
+            or sorted(
+                {
+                    str(item.get("actor"))
+                    for item in threat_model.get("scenarios", [])
+                    if item.get("actor")
+                }
+            ),
+            "attacker_capabilities": [
+                str(value)[:1000]
+                for value in proposal.get("attacker_capabilities", [])[:100]
+            ],
+            "security_objectives": [
+                str(value)[:1000]
+                for value in proposal.get("security_objectives", [])[:100]
+            ],
+            "assumptions": [
+                str(value)[:1000] for value in proposal.get("assumptions", [])[:100]
+            ],
+            "open_questions": list(
+                dict.fromkeys(
+                    [
+                        str(value)[:1000]
+                        for value in proposal.get("open_questions", [])[:100]
+                    ]
+                    + [str(warning.get("message") or "") for warning in open_warnings]
+                )
+            )[:100],
+            "llm_status": "complete",
+            "files_reviewed": files_reviewed,
+            "quality": {
+                "status": "partial" if open_warnings else "full",
+                "reasons": [str(item.get("message") or "") for item in open_warnings],
+            },
+            "finalized": True,
+        }
+    )
+    model["edges"] = _derive_edges(nodes)
+    return True, "Threat model finalized."
 
 
 async def reconcile_repository_model_with_llm(
@@ -1257,9 +1715,12 @@ async def enrich_threat_model_with_llm(
     existing = {
         scenario.get("scenario_key") for scenario in threat_model.get("scenarios", [])
     }
-    threat_model["scenarios"].extend(
-        s for s in accepted if s.get("scenario_key") not in existing
-    )
+    for scenario in accepted:
+        scenario_key = scenario.get("scenario_key")
+        if scenario_key in existing:
+            continue
+        threat_model["scenarios"].append(scenario)
+        existing.add(scenario_key)
     for key in (
         "trust_boundaries",
         "attacker_capabilities",

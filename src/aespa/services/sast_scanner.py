@@ -100,6 +100,17 @@ _PHASES = (
 )
 _SAST_VALIDATOR_MAX_CONCURRENT = 4
 _SAST_NETWORK_RETRY_DELAYS = (1.0, 2.0, 4.0)
+_SESSION_AUTHENTICATED_LLM_PROVIDERS = {
+    "codex",
+    "openai_codex",
+    "github_copilot",
+    "factory_droid",
+    "google_antigravity",
+    "bedrock",
+    "bedrock_mantle",
+    "azure_openai",
+    "azure_foundry",
+}
 
 
 class SastPauseRequested(RuntimeError):
@@ -108,6 +119,15 @@ class SastPauseRequested(RuntimeError):
 
 class SastNetworkPause(RuntimeError):
     """Transient provider connectivity remained unavailable after retries."""
+
+
+def _llm_is_available_for_semantic_phases(config: Any) -> bool:
+    """Return whether semantic model calls have an available auth path."""
+    return bool(
+        config.api_key
+        or config.base_url
+        or str(config.provider) in _SESSION_AUTHENTICATED_LLM_PROVIDERS
+    )
 
 
 def _checkpoint_key(worker_key: str) -> str:
@@ -937,7 +957,7 @@ def _make_tool_executor(
         if tool_name == "record_semantic_disposition":
             obligation_key = str(tool_input.get("obligation_key", ""))
             if semantic_planning is None or obligation_key not in assigned_semantic:
-                return "Error: semantic obligation is not assigned to this worker."
+                return "Error: security check is not assigned to this worker."
             ok, message = semantic_svc.record_obligation_disposition(
                 semantic_planning,
                 obligation_key,
@@ -1157,6 +1177,64 @@ def _make_tool_executor(
             return str(tool_input.get("summary", ""))
 
         return f"Unknown tool: {tool_name!r}"
+
+    return tool_executor
+
+
+def _make_threat_model_executor(
+    sast_run_id: int,
+    root: Path,
+    coverage: dict[str, dict],
+    semantic_model: dict[str, Any],
+    threat_model: dict[str, Any],
+):
+    """Build the constrained source and recording tools for threat analysis."""
+
+    async def tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
+        if sast_run_id in _sast_stop_requested:
+            return "Scan stopped by user."
+        read_result = _run_read_tool(
+            sast_run_id,
+            root,
+            coverage,
+            "threat_model",
+            tool_name,
+            tool_input,
+        )
+        if read_result is not None:
+            _persist_coverage(sast_run_id, coverage)
+            return read_result
+
+        reviewed_paths = {
+            path
+            for path, item in coverage.items()
+            if "threat_model" in item.get("phases", [])
+        }
+        if tool_name == "record_model_fact":
+            ok, message, _node_id = semantic_svc.record_agent_model_fact(
+                root, semantic_model, tool_input, reviewed_paths
+            )
+        elif tool_name == "record_threat_scenario":
+            ok, message = semantic_svc.record_agent_threat_scenario(
+                semantic_model, threat_model, tool_input
+            )
+        elif tool_name == "finalize_threat_model":
+            ok, message = semantic_svc.finalize_agent_threat_model(
+                semantic_model,
+                threat_model,
+                tool_input,
+                files_reviewed=len(reviewed_paths),
+            )
+        else:
+            return f"Error: unknown threat-model tool {tool_name!r}."
+        if ok:
+            _save_checkpoint(
+                sast_run_id,
+                "threat_model",
+                "hybrid-state",
+                {"model": semantic_model, "threat_model": threat_model},
+            )
+        return message if ok else f"Error: {message}"
 
     return tool_executor
 
@@ -1674,6 +1752,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         SAST_CLOSURE_PROMPT,
         SAST_REPOSITORY_MODEL_PROMPT,
         SAST_THREAT_MODEL_PROMPT,
+        SAST_THREAT_MODEL_TOOLS,
         SAST_TOOLS,
         SAST_VALIDATION_PROMPT,
         SAST_VALIDATION_TOOLS,
@@ -1761,6 +1840,14 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     s.expunge(obj)
                     detached.add(id(obj))
 
+        # Start usage tracking before the repository and threat-model phases.
+        # Both phases can call the configured SAST model and belong to this run.
+        llm_svc.set_run_context(
+            sast_run_id,
+            lambda evt: events_svc.emit(sast_run_id, evt),
+            run_kind="sast",
+        )
+
         # ── Extract archive ────────────────────────────────────────────────────
         # Use a deterministic path under <data_dir>/sast_extract/<id>/ so a
         # startup sweep can reconcile any dirs leaked by a crashed scan
@@ -1815,21 +1902,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             "Normalizing repository components, operations, controls, and dependencies.",
         )
         semantic_model = semantic_svc.build_repository_model(root)
-        llm_ready_for_semantic = bool(
-            llm_cfg_obj.api_key
-            or llm_cfg_obj.base_url
-            or str(llm_cfg_obj.provider)
-            in {
-                "codex",
-                "github_copilot",
-                "factory_droid",
-                "google_antigravity",
-                "bedrock",
-                "bedrock_mantle",
-                "azure_openai",
-                "azure_foundry",
-            }
-        )
+        llm_ready_for_semantic = _llm_is_available_for_semantic_phases(llm_cfg_obj)
         try:
             if not llm_ready_for_semantic:
                 raise RuntimeError("configured provider has no available credentials")
@@ -1858,15 +1931,67 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         try:
             if not llm_ready_for_semantic:
                 raise RuntimeError("configured provider has no available credentials")
-            semantic_threat_model = await semantic_svc.enrich_threat_model_with_llm(
-                llm_svc,
-                llm_cfg_obj,
-                semantic_model,
-                semantic_threat_model,
-                SAST_THREAT_MODEL_PROMPT,
+            saved_hybrid = (
+                _load_checkpoint(sast_run_id, "threat_model", "hybrid-state")
+                if resume
+                else {}
             )
+            if isinstance(saved_hybrid.get("model"), dict):
+                semantic_model = saved_hybrid["model"]
+            if isinstance(saved_hybrid.get("threat_model"), dict):
+                semantic_threat_model = saved_hybrid["threat_model"]
+            ranked_files = [
+                item
+                for item in semantic_model.get("inventory", {}).get("files", [])
+                if item.get("readable") and item.get("classification") != "deprioritized"
+            ][:120]
+
+            def _threat_done(_tool_input: dict, _calls: int):
+                if not semantic_threat_model.get("finalized"):
+                    return False, "Call finalize_threat_model before finishing."
+                return True, ""
+
+            await _run_checkpointed_agent(
+                sast_run_id=sast_run_id,
+                phase="threat_model",
+                worker_key="hybrid-threat-analyst",
+                config=llm_cfg_obj,
+                system_message=SAST_THREAT_MODEL_PROMPT,
+                initial_user_message=(
+                    "Inspect representative source files and build the application threat model. "
+                    "Deterministic facts are navigation hints, not a complete model. Keep assets "
+                    "separate from stores. Record important assets, actors, identities, boundaries, "
+                    "operations, controls, and scenarios with tool calls. Do not record secret values.\n\n"
+                    "Ranked source inventory:\n"
+                    + json.dumps(ranked_files, ensure_ascii=False)
+                    + "\n\nDeterministic repository hints:\n"
+                    + json.dumps(semantic_model.get("nodes", [])[:500], ensure_ascii=False)
+                ),
+                tool_executor=_make_threat_model_executor(
+                    sast_run_id,
+                    root,
+                    coverage,
+                    semantic_model,
+                    semantic_threat_model,
+                ),
+                emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
+                stop_check=lambda: (
+                    sast_run_id in _sast_stop_requested
+                    or sast_run_id in _sast_pause_requested
+                ),
+                tools=SAST_THREAT_MODEL_TOOLS,
+                resume=resume,
+                done_check=_threat_done,
+                max_tool_calls=100,
+            )
+        except (SastNetworkPause, llm_svc.LLMQuotaPauseError, asyncio.CancelledError):
+            raise
         except Exception as exc:
             semantic_threat_model["llm_status"] = "failed"
+            semantic_threat_model["quality"] = {
+                "status": "reduced",
+                "reasons": [f"Agent-led threat review failed: {str(exc)[:300]}"],
+            }
             semantic_threat_model.setdefault("open_questions", []).append(
                 f"Threat-model reconciliation failed: {str(exc)[:300]}"
             )
@@ -1881,7 +2006,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             sast_run_id,
             "planning",
             "running",
-            "Creating semantic coverage obligations and bounded worker packets.",
+            "Creating required security checks and analysis batches.",
         )
         semantic_planning = semantic_svc.plan_semantic_obligations(
             semantic_model, semantic_threat_model
@@ -1906,13 +2031,6 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         )
 
         initial_message = _build_initial_message(coll, endpoints, archive_name)
-
-        # ── Configure LLM context tracking ────────────────────────────────────
-        llm_svc.set_run_context(
-            sast_run_id,
-            lambda evt: events_svc.emit(sast_run_id, evt),
-            run_kind="sast",
-        )
 
         events_svc.emit(
             sast_run_id,
@@ -2255,7 +2373,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                         if unresolved_semantic:
                             return (
                                 False,
-                                "Resolve these semantic obligations before done: "
+                                "Resolve these security checks before finishing: "
                                 + ", ".join(unresolved_semantic[:50]),
                             )
                         return True, ""
@@ -2271,7 +2389,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                                 initial_message
                                 + "\n\nAssigned work program:\n"
                                 + json.dumps(payload, ensure_ascii=False)
-                                + "\n\nAssigned semantic threat obligations:\n"
+                                + "\n\nAssigned threat-based security checks:\n"
                                 + json.dumps(semantic_payload, ensure_ascii=False)
                             ),
                             tool_executor=_make_tool_executor(
@@ -2583,7 +2701,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     system_message=SAST_CLOSURE_PROMPT,
                     initial_user_message=(
                         "Review the bounded closure queue below. Use source tools to verify it. "
-                        "Call record_semantic_disposition for every obligation. If source evidence "
+                        "Call record_semantic_disposition for every security check. If source evidence "
                         "supports a new distinct vulnerability, call write_lead then filter_lead; "
                         "it will be independently validated. Do not call get_work_program.\n\n"
                         + json.dumps(closure_payload, ensure_ascii=False)
