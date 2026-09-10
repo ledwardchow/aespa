@@ -1450,6 +1450,9 @@ class SastRun(SQLModel, table=True):
     )  # absolute path to stored zip
     source_filename: Optional[str] = Field(default=None)  # original upload filename
     name: str
+    # Light uses the original bounded SAST workflow. Deep adds repository
+    # modeling, threat planning, reconciliation, and semantic closure.
+    analysis_mode: str = Field(default="deep", index=True)
     status: str = Field(
         default="pending"
     )  # pending|scanning|paused|completed|failed|cancelled

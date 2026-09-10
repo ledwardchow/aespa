@@ -266,6 +266,10 @@ def import_sast_run(session: Session, bundle: Any) -> SastRun:
     run_data["document_id"] = None
     run_data["triggered_by_run_type"] = None
     run_data["triggered_by_run_id"] = None
+    analysis_mode = run_data.get("analysis_mode", "deep")
+    if analysis_mode not in {"light", "deep"}:
+        raise SastExportError("sast_run.analysis_mode must be light or deep")
+    run_data["analysis_mode"] = analysis_mode
     # Provider connection IDs belong to the source installation. A local
     # profile can still be selected later from the run settings screen.
     run_data["llm_config_id"] = None

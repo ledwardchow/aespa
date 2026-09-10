@@ -1605,9 +1605,11 @@ documentation.
 
 **Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
 
-The SAST scanner is a standalone agentic static-analysis pass over an uploaded source archive that produces high-confidence vulnerability **leads**. It is created from the SAST screen with `POST /api/sast-runs` (multipart); `collection_id` is NULL and the archive is stored on the run (`source_archive_path` / `source_filename`). A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
+The SAST scanner is a standalone agentic static-analysis pass over an uploaded source archive that produces high-confidence vulnerability **leads**. It is created from the SAST screen with `POST /api/sast-runs` (multipart); `collection_id` is NULL and the archive is stored on the run (`source_archive_path` / `source_filename`). Users choose `analysis_mode=light` for the original lower-cost workflow or `analysis_mode=deep` for the current semantic workflow. The mode is saved on the run and used for starts, resumes, and reruns. Existing runs are migrated as Light. New API callers that omit the field use Deep. A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
 
 ### Architecture overview
+
+Light runs inventory the archive, build the original source work program, run discovery workers, independently validate candidates, and trace attack paths. Deep runs add the repository model, threat model, semantic coverage plan, reconciliation, and closure phases shown below.
 
 ```
 start_sast_scan(sast_run_id)

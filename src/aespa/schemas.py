@@ -384,6 +384,7 @@ class SastRunSummary(BaseModel):
     document_id: int | None
     source_filename: str | None
     name: str
+    analysis_mode: Literal["light", "deep"] = "deep"
     status: str
     triggered_by_run_type: str | None
     triggered_by_run_id: int | None

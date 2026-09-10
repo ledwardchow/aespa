@@ -211,6 +211,7 @@ def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
 async def create_standalone_sast_run(
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
+    analysis_mode: str = Form(default="deep"),
     llm_config_id: int | None = Form(default=None),
     llm_profile_id: int | None = Form(default=None),
     session: Session = Depends(get_session),
@@ -221,6 +222,11 @@ async def create_standalone_sast_run(
     or API test runs, which explicitly import copies of the resulting leads.
     """
     original_name = Path(file.filename or "source.zip").name or "source.zip"
+    if analysis_mode not in {"light", "deep"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Analysis mode must be either 'light' or 'deep'.",
+        )
     base = Path(get_settings().data_dir) / "sast_uploads"
     base.mkdir(parents=True, exist_ok=True)
     ext = Path(original_name).suffix or ".zip"
@@ -272,6 +278,7 @@ async def create_standalone_sast_run(
         name=name or f"SAST – {original_name}",
         source_archive_path=str(stored_path),
         source_filename=original_name,
+        analysis_mode=analysis_mode,
         llm_config_id=llm_config_id,
         llm_profile_id=llm_profile_id,
     )
@@ -409,7 +416,10 @@ def _json_object(value: str | None, default: dict) -> dict:
 def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> dict:
     """Return authoritative phase, coverage, and report state for the UI."""
     run = _get_run_or_404(session, run_id)
-    from aespa.services.sast_scanner import _empty_phase_state
+    if run.analysis_mode == "light":
+        from aespa.services.sast_scanner_light import _empty_phase_state
+    else:
+        from aespa.services.sast_scanner import _empty_phase_state
     from aespa.services.sast_workprogram import completion_decision
 
     completion_status, completion_reasons, work_program = completion_decision(run_id)
@@ -424,6 +434,7 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
         )
 
     return {
+        "analysis_mode": run.analysis_mode,
         "phases": _json_object(run.phase_state_json, _empty_phase_state()),
         "coverage": _json_object(
             run.coverage_json,
