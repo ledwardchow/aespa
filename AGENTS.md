@@ -21,7 +21,7 @@ uv sync                              # install deps
 uv run playwright install chromium   # one-time, required for web crawl/scan
 uv run aespa                         # run the server -> http://127.0.0.1:8000
 
-uv run pytest                        # full test suite, in-memory SQLite, no network
+uv run pytest                        # full suite, in-memory SQLite; requires local ports
 uv run pytest tests/test_scanner_service.py            # one file
 uv run pytest tests/test_scanner_service.py::test_name # one test
 uv run pytest -k "validator and not api"               # by keyword
@@ -40,7 +40,7 @@ The frontend is a Vite + React application located in `frontend/`.
 
 When making UI changes:
 
-1. Make UI edits in the Vite JSX files within `frontend/src/`, such as `frontend/src/App.jsx` or files under `frontend/src/pages/`.
+1. Make UI edits in the Vite JSX files within `frontend/src/`, such as `frontend/src/app/App.jsx` or files under `frontend/src/features/`.
 2. Do not edit files directly in `src/aespa/web/`; these are generated build artifacts.
 3. After completing UI changes, run `npm run build` inside `frontend/`. This rebuild places compiled assets in `src/aespa/web/` so they are served by `uv run aespa`.
 
@@ -67,6 +67,11 @@ Frontend refactoring notes:
 
 ## Sandbox Execution Notes
 
+- Plan test permissions before running commands. The full backend suite includes tests that bind and connect to local ports in `tests/test_desktop_server.py` and `tests/test_main_startup.py`. These need loopback access even though tests make no external network or live LLM calls.
+- When the sandbox restricts local ports, request the required access on the first invocation of the full suite or either of those test files. With `exec_command`, use `sandbox_permissions="require_escalated"` and explain that the tests open local loopback ports. Do not run them in the restricted sandbox first just to confirm the known failure.
+- Apply the same rule to `npm run test:e2e`, direct Playwright browser tests, and Vite dev/preview servers. The browser test configuration starts a server on `127.0.0.1:5179`; both the server and browser test process need the appropriate access. An already-running server does not establish that a sandboxed test process can reach it.
+- If access is unavailable or denied, run the remaining backend tests with `uv run pytest --ignore=tests/test_desktop_server.py --ignore=tests/test_main_startup.py` and report the omitted tests as unverified. Do not silently skip them or describe that result as a full-suite pass. Do not retry the same blocked command without a permission change.
+- Tests that only use in-process FastAPI `TestClient`, and frontend lint, type checks, unit tests, and builds, do not need loopback access by default. Keep those commands sandboxed unless there is a separate known requirement.
 - When inspecting Python virtual environments or installed packages under sandbox mode, `uv run` may attempt network fetches and `python` binaries managed by `pyenv` may trigger `dyld` file sandbox blocks on `~/.pyenv/versions/`. Prefer inspecting `.venv` package source files directly via `view_file`, `grep_search`, or lightweight string/JSON scripts (e.g. Node/Python tools without `pyenv` dynamic library linkage) before requesting sandbox bypass.
 
 ## Architecture
@@ -132,9 +137,9 @@ Tables shared across both run kinds, such as `agent_log`, `scan_log`, `scanner_s
 
 ## Desktop Launchers & PyInstaller Builds
 
-When adding new runtime dependencies, backend frameworks, data assets, or modifying desktop launchers (`src/aespa/desktop.py`, `src/aespa/desktop_win.py`) and PyInstaller scripts (`build_mac.sh`, `build_win.ps1`, `AESPA.spec`):
+When adding new runtime dependencies, backend frameworks, data assets, or modifying desktop launchers (`src/aespa/desktop.py`, `src/aespa/desktop_win.py`) and PyInstaller scripts (`scripts/build_mac.sh`, `scripts/build_win.ps1`, `scripts/AESPA.spec`):
 
-1. **Dynamic Runtime Assets & Migration Configs**: Any runtime configuration files, database migration directories (e.g. `alembic.ini`, `alembic/`), static assets, templates, or non-Python files read by the app must be explicitly bundled in PyInstaller scripts (`build_mac.sh`, `build_win.ps1`, `AESPA.spec`) via `--add-data`. All backend path resolvers (e.g. `_get_alembic_config` in `src/aespa/db.py`) must check `sys.frozen` / `sys._MEIPASS` when frozen before falling back to repo-relative paths (`Path(__file__).resolve().parents[...]`).
+1. **Dynamic Runtime Assets & Migration Configs**: Any runtime configuration files, database migration directories (e.g. `alembic.ini`, `alembic/`), static assets, templates, or non-Python files read by the app must be explicitly bundled in PyInstaller scripts (`scripts/build_mac.sh`, `scripts/build_win.ps1`, `scripts/AESPA.spec`) via `--add-data`. All backend path resolvers (e.g. `_get_alembic_config` in `src/aespa/db.py`) must check `sys.frozen` / `sys._MEIPASS` when frozen before falling back to repo-relative paths (`Path(__file__).resolve().parents[...]`).
 2. **Framework & Dynamic Import Collection**: Any third-party package loaded via dynamic string imports, reflection, plugin systems, or ASGI/WSGI servers (e.g. `alembic`, `uvicorn`, `playwright`, `webview`) must be explicitly bundled using `--collect-all <package>` or `--collect-submodules <package>`. In desktop launcher scripts (`desktop.py`, `desktop_win.py`), avoid string-based target resolution (e.g. `"aespa.main:app"`) and pass explicit module/object references (e.g. `uvicorn.Config(app, ...)`).
 3. **Fail-Fast Thread & Port Verification**: Background server threads (`_serve()`) must trap startup exceptions into a shared variable, and port polling functions (`_wait_port()`) must re-raise thread errors immediately or raise `TimeoutError` on deadline. Never allow `_wait_port()` to return cleanly when backend startup fails, as launching webviews on dead ports causes silent white screens.
 
@@ -156,6 +161,24 @@ Examples:
 
 ## Changelog Writing
 
+Automatically add or update entries under `## Unreleased` in `CHANGELOG.md` when implementing changes. Do not wait for a separate request to write release notes.
+
+Group entries under these headings, in this order:
+
+- `### New features`: New capabilities or workflows users can access.
+- `### Updates`: Improvements to existing features or changes to their behaviour.
+- `### Fixes`: Corrections to broken or incorrect behaviour.
+- `### Housekeeping`: Refactoring, dependency updates, build and release maintenance, tests, and documentation.
+
+Omit empty categories. Place each change in the category that best describes it. Split entries that combine unrelated changes or changes belonging to different categories, and avoid repeating the same change across categories.
+
+Describe the final release behaviour compared with the last released version. Do not use the changelog as a record of each development step within a pull request or unreleased release.
+
+- Before adding an entry, check whether the same feature or change is already described under `## Unreleased`.
+- When fixing or refining a feature introduced or updated in the same unreleased pull request, update its existing entry only if the final user-visible behaviour needs clarification. Do not append separate fix entries for bugs introduced during that work.
+- Use `### Fixes` for bugs that affected a previously released version. If a fix concerns only an unreleased feature or update, fold any useful detail into that feature or update entry and remove redundant entries for the same work.
+- Keep separate entries for unrelated changes, even when they share a pull request.
+
 When updating `CHANGELOG.md`, write for users rather than implementation specialists:
 
 - Use clear, professional release-note language consistent with the surrounding changelog entries.
@@ -164,4 +187,4 @@ When updating `CHANGELOG.md`, write for users rather than implementation special
 - Keep technical detail only when it helps users understand behaviour, compatibility, configuration, or risk.
 - Avoid casual phrasing, promotional language, and repetitive sentence patterns that make the entry sound machine-generated.
 - Do not include source file paths or internal function and class names unless they are genuinely useful to the intended reader.
-- Preserve existing changelog text unless the user explicitly asks for it to be revised.
+- Preserve released changelog text and unrelated unreleased entries unless the user explicitly asks for them to be revised. You may revise or consolidate entries for the current unreleased work as described above.

@@ -302,7 +302,7 @@ class ApiCredentialCreate(BaseModel):
 
 # ── API Test Run schemas ──────────────────────────────────────────────────────
 
-CoverageModeLiteral = Literal["track", "enforce", "sast_validate"]
+CoverageModeLiteral = Literal["track", "standard", "enforce", "sast_validate"]
 
 
 class ApiTestRunCreate(BaseModel):
@@ -384,6 +384,7 @@ class SastRunSummary(BaseModel):
     document_id: int | None
     source_filename: str | None
     name: str
+    analysis_mode: Literal["light", "deep"] = "deep"
     status: str
     triggered_by_run_type: str | None
     triggered_by_run_id: int | None
@@ -506,6 +507,7 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "claude-3-5-sonnet-20241022",
     ],
     "openai": [
+        "gpt-6-astra",
         "gpt-5.6-luna",
         "gpt-5.6-terra",
         "gpt-5.6-sol",
@@ -697,9 +699,12 @@ class LLMConfigIn(BaseModel):
     name: Optional[str] = Field(default=None, max_length=120)
     provider_id: int
     model: str = Field(min_length=1)
-    max_tokens: int = Field(default=70000, ge=1, le=256000)
+    max_tokens: int = Field(default=16384, ge=1, le=256000)
     # ``None`` asks the server to use the detected model context window.
     max_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
+    # A capability value discovered by the model form but not yet persisted on
+    # the provider. It remains an automatic limit rather than a manual override.
+    detected_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
     temperature: Optional[float] = Field(default=None)
     reasoning_effort: str | None = Field(default=None, max_length=32)
     use_vision: bool = False
@@ -707,10 +712,8 @@ class LLMConfigIn(BaseModel):
 
     @model_validator(mode="after")
     def _validate_context_window(self) -> "LLMConfigIn":
-        if (
-            self.max_context_tokens is not None
-            and self.max_context_tokens <= self.max_tokens + 1024
-        ):
+        context_tokens = self.max_context_tokens or self.detected_context_tokens
+        if context_tokens is not None and context_tokens <= self.max_tokens + 1024:
             raise ValueError(
                 "max_context_tokens must leave at least 1024 tokens for input"
             )
@@ -793,6 +796,7 @@ class ScannerPolicyBase(BaseModel):
     disable_deterministic_checks: bool = False
     max_consecutive_text_turns: int = Field(default=0, ge=0, le=50)
     enforce_full_coverage_obligations: bool = False
+    standard_coverage_percent: int = Field(default=60, ge=1, le=100)
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)
@@ -813,6 +817,17 @@ class ScannerPolicyBase(BaseModel):
     allow_subdomains: bool = True
     require_approval_for_destructive: bool = True
     strict_locator_enforcement: bool = True
+    sast_rate_limit_findings: bool = True
+    sast_race_condition_findings: bool = True
+    sast_audit_logging_findings: bool = False
+    sast_defense_in_depth_findings: bool = False
+    sast_dependency_findings: bool = True
+    sast_min_severity: Literal["low", "medium", "high", "critical"] = "low"
+    sast_min_confidence: float = Field(default=0.35, ge=0, le=1)
+    sast_baseline_budget: int = Field(default=80, ge=1, le=1000)
+    sast_threat_budget: int = Field(default=60, ge=1, le=1000)
+    sast_closure_budget: int = Field(default=40, ge=1, le=1000)
+    sast_validator_budget: int = Field(default=50, ge=1, le=1000)
 
     @field_validator("methods_by_mode", mode="before")
     @classmethod
@@ -874,6 +889,49 @@ class ScannerPolicyOut(ScannerPolicyBase):
 class RunScannerPolicyOut(ScannerPolicyBase):
     source: Literal["run_snapshot", "global_default"]
     updated_at: datetime | None = None
+
+
+class CodeExecutionConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    enabled: bool = False
+    backend: Literal["docker"] = "docker"
+    image_ref: str = Field(
+        default="ledwardchow/aespa-python-executor:0.1", min_length=1, max_length=300
+    )
+    allowed_roles: list[Literal["alice", "specialist", "test_lead"]] = Field(
+        default_factory=lambda: ["alice", "specialist", "test_lead"]
+    )
+    timeout_s: int = Field(default=30, ge=1, le=60)
+    memory_mb: int = Field(default=256, ge=64, le=1024)
+    cpu_cores: float = Field(default=0.5, ge=0.25, le=2.0)
+    pids_limit: int = Field(default=32, ge=8, le=64)
+    workspace_mb: int = Field(default=16, ge=4, le=64)
+    output_limit_bytes: int = Field(default=65536, ge=8192, le=262144)
+    artifact_limit_bytes: int = Field(default=10485760, ge=0, le=50 * 1024 * 1024)
+    max_requests_per_execution: int = Field(default=20, ge=0, le=100)
+    max_concurrent_requests: int = Field(default=5, ge=1, le=10)
+    max_concurrent_executions: int = Field(default=2, ge=1, le=8)
+    retain_redacted_source: bool = True
+
+
+class CodeExecutionConfigIn(CodeExecutionConfigBase):
+    pass
+
+
+class CodeExecutionConfigOut(CodeExecutionConfigBase):
+    updated_at: datetime
+
+
+class CodeExecutionRuntimeStatus(BaseModel):
+    enabled: bool
+    available: bool
+    backend: str
+    image_ref: str
+    docker_installed: bool = False
+    docker_available: bool = False
+    image_present: bool = False
+    message: str
 
 
 class CrawlerConfigBase(BaseModel):
@@ -1110,6 +1168,181 @@ class ReportingDebugConfigOut(ReportingDebugConfigBase):
     updated_at: datetime
 
 
+# ── Benchmark Lab schemas ───────────────────────────────────────────────────
+
+
+class BenchmarkLabConfigBase(BaseModel):
+    panel_enabled: bool = False
+    default_match_mode: Literal["deterministic", "assisted", "human_reviewed"] = (
+        "assisted"
+    )
+    default_repetitions: int = Field(default=1, ge=1, le=100)
+
+
+class BenchmarkLabConfigIn(BenchmarkLabConfigBase):
+    pass
+
+
+class BenchmarkLabConfigOut(BenchmarkLabConfigBase):
+    updated_at: datetime
+
+
+class BenchmarkLocation(BaseModel):
+    path: str = Field(min_length=1, max_length=1000)
+    line: int | None = Field(default=None, ge=1)
+
+
+class BenchmarkGroundTruthItem(BaseModel):
+    external_id: str = Field(min_length=1, max_length=200)
+    title: str = Field(default="", max_length=1000)
+    description: str = Field(default="", max_length=10000)
+    category: str = Field(default="", max_length=200)
+    severity: str = Field(default="medium", max_length=32)
+    locations: list[BenchmarkLocation] = Field(default_factory=list, max_length=100)
+    root_cause: str = Field(default="", max_length=10000)
+    affected_operation: str = Field(default="", max_length=2000)
+    expected_evidence: list[str] = Field(default_factory=list, max_length=100)
+    classification: str = Field(default="exploitable", max_length=100)
+
+
+class BenchmarkGroundTruth(BaseModel):
+    schema_version: int = Field(default=1, ge=1)
+    name: str = Field(default="", max_length=500)
+    source_digest: str | None = Field(default=None, max_length=200)
+    items: list[BenchmarkGroundTruthItem] = Field(max_length=10000)
+
+    @model_validator(mode="after")
+    def _unique_external_ids(self) -> "BenchmarkGroundTruth":
+        ids = [item.external_id for item in self.items]
+        if len(ids) != len(set(ids)):
+            raise ValueError("ground-truth external_id values must be unique")
+        return self
+
+
+class BenchmarkDatasetIn(BaseModel):
+    name: str = Field(min_length=1, max_length=500)
+    schema_version: int = Field(default=1, ge=1)
+    source_digest: str | None = Field(default=None, max_length=200)
+    ground_truth: BenchmarkGroundTruth | None = None
+    ground_truth_json: dict | str | None = None
+
+    @model_validator(mode="after")
+    def _require_ground_truth(self) -> "BenchmarkDatasetIn":
+        if self.ground_truth is None and self.ground_truth_json is None:
+            raise ValueError("ground_truth is required")
+        return self
+
+
+class BenchmarkDatasetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    schema_version: int
+    source_digest: str | None
+    ground_truth_digest: str
+    item_count: int = 0
+    ground_truth: BenchmarkGroundTruth | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BenchmarkEvaluationIn(BaseModel):
+    name: str = Field(min_length=1, max_length=500)
+    sast_run_id: int = Field(gt=0)
+    dataset_id: int = Field(gt=0)
+    match_mode: Literal["deterministic", "assisted", "human_reviewed"] = "assisted"
+    policy: dict = Field(default_factory=dict)
+    notes: str = Field(default="", max_length=10000)
+
+
+class BenchmarkMatchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    evaluation_id: int
+    ground_truth_external_id: str | None
+    scan_lead_id: int | None
+    disposition: str
+    confidence: float
+    rationale: str
+    human_reviewed: bool
+    review_note: str
+    review_history_json: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BenchmarkMatchReviewIn(BaseModel):
+    disposition: Literal[
+        "full",
+        "partial",
+        "missed",
+        "additional_valid",
+        "false_positive",
+        "duplicate",
+        "unreviewed",
+    ]
+    review_note: str = Field(default="", max_length=10000)
+    rationale: str | None = Field(default=None, max_length=10000)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class BenchmarkEvaluationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    sast_run_id: int
+    dataset_id: int
+    status: str
+    match_mode: str
+    matching_version: str
+    policy_json: str
+    run_provenance_json: str
+    blindness_status: str
+    blindness_checks_json: str
+    metrics_json: str
+    error_message: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    semantic_coverage: dict = Field(default_factory=dict)
+    partial_coverage_reasons: list = Field(default_factory=list)
+    matches: list[BenchmarkMatchOut] = Field(default_factory=list)
+
+
+class BenchmarkComparisonIn(BaseModel):
+    name: str = Field(min_length=1, max_length=500)
+    dataset_id: int = Field(gt=0)
+    evaluation_ids: list[int] = Field(min_length=2, max_length=100)
+    thresholds: dict = Field(default_factory=dict)
+    include_contaminated: bool = False
+
+    @field_validator("evaluation_ids")
+    @classmethod
+    def _unique_evaluations(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("evaluation_ids must be unique")
+        return value
+
+
+class BenchmarkComparisonOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    dataset_id: int
+    evaluation_ids: list[int] = Field(default_factory=list)
+    thresholds_json: str
+    metrics_json: str
+    status: str
+    include_contaminated: bool
+    created_at: datetime
+    updated_at: datetime
+
+
 # ── Browser debug config schemas ─────────────────────────────────────────────
 
 
@@ -1126,6 +1359,8 @@ class BrowserDebugConfigIn(BrowserDebugConfigBase):
 
 class BrowserDebugConfigOut(BrowserDebugConfigBase):
     updated_at: datetime
+    graphical_display_available: bool = True
+    graphical_display_message: str | None = None
 
 
 # ── Cloudflare Access config schemas ─────────────────────────────────────────
@@ -1165,7 +1400,7 @@ class LLMExportProfileItem(BaseModel):
     name: str
     provider_name: str
     model: str
-    max_tokens: int = 70000
+    max_tokens: int = 16384
     max_context_tokens: int | None = None
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
@@ -1523,6 +1758,10 @@ class TrafficEntryOut(BaseModel):
     page_id: int | None = None
     session_label: str | None = None
     interaction_id: str | None = None
+    purpose: str | None = None
+    owasp_category: str | None = None
+    coverage_cell_id: int | None = None
+    test_class: str | None = None
 
 
 class ScanFindingOut(BaseModel):
@@ -1951,6 +2190,85 @@ class LeadTargetMappingReviewResult(BaseModel):
 class LeadTargetMappingEditRequest(BaseModel):
     expected_updated_at: datetime | None = None
     path: dict = Field(default_factory=dict)
+
+
+class FrontendSurfaceOut(BaseModel):
+    """Browser-visible page, action, and request for a validation case."""
+
+    ui_route: dict = Field(default_factory=dict)
+    ui_action: dict = Field(default_factory=dict)
+    browser_request: dict = Field(default_factory=dict)
+
+
+class ServiceHopOut(BaseModel):
+    """One server-side route or handler in an ordered static path."""
+
+    fact_id: int | None = None
+    component_id: int | None = None
+    component_name: str | None = None
+    kind: str = ""
+    method: str | None = None
+    path: str | None = None
+    request_role: str | None = None
+    evidence_location: str | None = None
+    detail: dict = Field(default_factory=dict)
+
+
+class LiveBindingOut(BaseModel):
+    """Crawl evidence bound to a browser request."""
+
+    status: str = "pending"
+    candidate_count: int = 0
+    page_id: int | None = None
+    action_id: int | None = None
+    traffic_id: int | None = None
+    endpoint_id: int | None = None
+    interaction_id: str | None = None
+    session_label: str | None = None
+    observed_request: dict = Field(default_factory=dict)
+    evidence_ids: list[str] = Field(default_factory=list)
+    candidates: list[dict] = Field(default_factory=list)
+
+
+class ValidationAssertionOut(BaseModel):
+    """The claim and outcomes used by a focused validation."""
+
+    claim: str = ""
+    mutation_points: list = Field(default_factory=list)
+    secure_outcome: str = ""
+    vulnerable_outcome: str = ""
+    prerequisites: list = Field(default_factory=list)
+
+
+class CampaignValidationCaseOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    mapping_id: int
+    target_member_id: int
+    origin_lead_id: int
+    source_lead: dict = Field(default_factory=dict)
+    assertion_key: str
+    frontend_surface: FrontendSurfaceOut = Field(default_factory=FrontendSurfaceOut)
+    service_hops: list[ServiceHopOut] = Field(default_factory=list)
+    live_binding: LiveBindingOut = Field(default_factory=LiveBindingOut)
+    validation_assertion: ValidationAssertionOut = Field(
+        default_factory=ValidationAssertionOut
+    )
+    static_path: dict = Field(default_factory=dict)
+    readiness_status: str
+    blocker_codes: list[str] = Field(default_factory=list)
+    copied_lead_id: int | None = None
+    copied_lead_reference: str | None = None
+    finding_id: int | None = None
+    finding_reference: str | None = None
+    execution_status: str
+    outcome_reason: str | None = None
+    baseline_evidence: dict = Field(default_factory=dict)
+    mutated_evidence: dict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
 
 
 class CampaignSupplementalValidationRequest(BaseModel):

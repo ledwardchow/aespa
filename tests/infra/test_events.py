@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 
 def test_event_bus_separates_colliding_run_ids():
@@ -23,3 +24,27 @@ def test_event_bus_separates_colliding_run_ids():
     finally:
         events._queues.pop(web_key, None)
         events._queues.pop(sast_key, None)
+
+
+def test_agent_status_is_mirrored_to_console_activity(caplog, monkeypatch):
+    from aespa.services import events
+
+    monkeypatch.setattr(events, "_persist_agent_status_event", lambda *_args: None)
+    caplog.set_level(logging.INFO, logger="aespa.agent.activity")
+
+    with events.run_kind_scope("api"):
+        events.emit(
+            17,
+            {
+                "type": "agent_status",
+                "agent_id": "validator-4",
+                "role": "Validator",
+                "status": "complete",
+                "current_task": "Review finding",
+                "outcome": "Confirmed",
+            },
+        )
+
+    assert caplog.messages == [
+        "api run 17  COMPLETE    Validator (validator-4)  Review finding -> Confirmed"
+    ]

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from sqlmodel import Session, select
 
 from aespa.models import ComponentConnection, ComponentFact, ScanLead
+from aespa.services.campaign_mapping_quality import choose_canonical_trace_paths
+from aespa.services.component_facts import request_role_for_fact
 from aespa.services.scan_leads import decode_attack_path
 
 
@@ -45,12 +47,15 @@ def _is_root(fact: ComponentFact) -> bool:
 
 
 def _is_frontend_call(fact: ComponentFact) -> bool:
-    if fact.fact_type != "http_call":
-        return False
-    detail = _decode_detail(fact)
-    return bool(
-        detail.get("frontend") or detail.get("ui_route") or detail.get("trigger")
-    )
+    return _request_role(fact) == "browser_request"
+
+
+def _request_role(fact: ComponentFact) -> str | None:
+    """Read a request role while keeping old deterministic facts usable."""
+    try:
+        return request_role_for_fact(fact.fact_type, _decode_detail(fact))
+    except ValueError:
+        return None
 
 
 def _decode_detail(fact: ComponentFact) -> dict:
@@ -71,12 +76,52 @@ def _has_valid_frontend_sequence(
         return False
     if facts[-1].fact_type != "lead_anchor":
         return False
+
+    # Keep these markers separate from the edge grammar below.  A wrapper such
+    # as FACE can contain both a browser request and a server-side request in
+    # one component, so fact types alone cannot prove that the chain crossed
+    # the browser boundary in the right order.
+    saw_browser_request = False
+    saw_server_ingress = False
+    saw_server_egress = False
+    saw_downstream_route = False
     for source, target, edge in zip(facts[:-1], facts[1:], edges, strict=True):
         kind = _edge_kind(edge)
         if "same source file" in str(getattr(edge, "rationale", "") or "").casefold():
             # Co-location is useful as a hint, but it is not proof that one
             # browser action calls one specific request or sink.
             return False
+        source_role = _request_role(source)
+        target_role = _request_role(target)
+        if target.fact_type == "http_call" and target_role == "browser_request":
+            # A browser request is the only valid transition out of the UI
+            # portion of a path.  A server egress must never be relabelled as
+            # the frontend request just because its URL looks familiar.
+            if source.fact_type not in {"ui_route", "ui_action", "handler"}:
+                return False
+            saw_browser_request = True
+        elif target.fact_type == "route" and target_role == "server_ingress":
+            if source.fact_type == "http_call" and source_role == "browser_request":
+                saw_server_ingress = True
+            elif source.fact_type == "http_call" and source_role == "server_egress":
+                # Egress calls must enter a different component's route.  A
+                # same-component hop is an internal request and does not prove
+                # the downstream service boundary required for this trace.
+                if (
+                    source.component_id is None
+                    or target.component_id is None
+                    or source.component_id == target.component_id
+                ):
+                    return False
+                if not saw_browser_request:
+                    return False
+                saw_downstream_route = True
+        elif target.fact_type == "http_call" and target_role == "server_egress":
+            if source.fact_type not in {"route", "handler"}:
+                return False
+            if not saw_browser_request or not saw_server_ingress:
+                return False
+            saw_server_egress = True
         allowed = (
             (
                 kind == "contains"
@@ -86,26 +131,46 @@ def _has_valid_frontend_sequence(
             or (
                 kind == "triggers"
                 and source.fact_type in {"ui_route", "ui_action"}
-                and target.fact_type == "http_call"
+                and (
+                    target.fact_type == "handler"
+                    or (
+                        target.fact_type == "http_call"
+                        and target_role == "browser_request"
+                    )
+                )
             )
             or (
                 kind == "calls"
                 and source.fact_type == "http_call"
                 and target.fact_type == "route"
+                and source_role in {"browser_request", "server_egress"}
+                and target_role == "server_ingress"
             )
             or (
                 kind == "dispatches"
                 and source.fact_type in {"route", "handler"}
-                and target.fact_type in {"route", "handler", "http_call"}
+                and target.fact_type in {"handler", "http_call"}
+                and (
+                    target.fact_type != "http_call"
+                    or target_role in {"browser_request", "server_egress"}
+                )
             )
             or (
                 kind == "reaches"
-                and source.fact_type in {"route", "handler"}
+                and source.fact_type in {"route", "handler", "http_call"}
+                and (
+                    source.fact_type != "http_call" or source_role == "browser_request"
+                )
                 and target.fact_type == "lead_anchor"
             )
         )
         if not allowed:
             return False
+    # A server egress is meaningful only when the path continues into its
+    # downstream route.  This prevents a path ending at an internal outbound
+    # call from being marked complete.
+    if saw_server_egress and not saw_downstream_route:
+        return False
     return True
 
 
@@ -282,7 +347,7 @@ def trace_lead_paths(
             path.key,
         )
     )
-    return results[:max_paths]
+    return choose_canonical_trace_paths(results)[:max_paths]
 
 
 def attack_path_for_trace(
@@ -294,10 +359,19 @@ def attack_path_for_trace(
     """Convert a trace into the schema consumed by dynamic scan prompts."""
     first = path.facts[0] if path.facts else None
     request = next(
-        (fact for fact in path.facts if fact.fact_type == "http_call"),
+        (
+            fact
+            for fact in path.facts
+            if fact.fact_type == "http_call"
+            and _request_role(fact) == "browser_request"
+        ),
         None,
     )
     details = _decode_detail(first) if first else {}
+    action_fact = next(
+        (fact for fact in path.facts if fact.fact_type == "ui_action"), None
+    )
+    action_details = _decode_detail(action_fact) if action_fact else {}
     request_details = _decode_detail(request) if request else {}
     nodes = [
         " ".join(
@@ -310,11 +384,70 @@ def attack_path_for_trace(
         )
         for fact in path.facts
     ]
+
+    def fact_node(fact: ComponentFact) -> dict:
+        detail = _decode_detail(fact)
+        return {
+            "fact_id": fact.id,
+            "component_id": fact.component_id,
+            "component_name": detail.get("component_name")
+            or (f"component:{fact.component_id}" if fact.component_id else None),
+            "kind": fact.fact_type,
+            "method": fact.method,
+            "path": fact.path,
+            "evidence_location": fact.evidence_location,
+            "request_role": _request_role(fact),
+            "detail": {
+                key: detail[key]
+                for key in (
+                    "label",
+                    "action_kind",
+                    "body_fields",
+                    "query_fields",
+                    "trigger",
+                    "handler",
+                )
+                if key in detail
+            },
+        }
+
+    browser_surface = next(
+        (fact for fact in path.facts if fact.fact_type == "ui_route"), None
+    )
+    ui_action = next(
+        (fact for fact in path.facts if fact.fact_type == "ui_action"), None
+    )
+    service_hops = [
+        fact_node(fact)
+        for fact in path.facts
+        if fact.fact_type not in {"ui_route", "ui_action", "lead_anchor"}
+    ]
+    static_edges = [
+        {
+            "connection_id": edge.id,
+            "edge_kind": _edge_kind(edge),
+            "source_fact_id": edge.source_fact_id,
+            "target_fact_id": edge.target_fact_id,
+            "confidence": edge.confidence,
+            "evidence": edge.rationale or None,
+        }
+        for edge in path.edges
+    ]
     proof_gaps = list(path.proof_gaps)
+
+    def lead_json(name: str, default):
+        try:
+            value = json.loads(getattr(lead, name, "") or "")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return default
+        return value
+
     entry = {
-        "route": first.path if first and first.fact_type == "ui_route" else None,
-        "action": details.get("label") or details.get("action"),
-        "trigger": details.get("trigger") or details.get("action_kind"),
+        "route": next(
+            (fact.path for fact in path.facts if fact.fact_type == "ui_route"), None
+        ),
+        "action": action_details.get("label") or action_details.get("action"),
+        "trigger": action_details.get("trigger") or action_details.get("action_kind"),
         "source_location": first.evidence_location if first else "",
     }
     dynamic_test = (
@@ -354,9 +487,55 @@ def attack_path_for_trace(
         "proof_gaps": proof_gaps,
         "dynamic_test": dynamic_test,
     }
-    return {
-        "schema_version": 2,
+    v3 = {
+        "schema_version": 3,
         "perspective": "frontend",
+        "source_finding": {
+            "lead_id": lead.id,
+            "reference": lead.reference,
+            "location": lead.location,
+            "evidence": lead.evidence,
+            "source_trace": lead_json("source_trace_json", {}),
+            "control_trace": lead_json("control_trace_json", []),
+            "sink_trace": lead_json("sink_trace_json", {}),
+            "counterevidence": lead_json("counterevidence_json", []),
+            "proof_gaps": lead_json("proof_gaps_json", []),
+        },
+        "frontend_surface": {
+            "ui_route": fact_node(browser_surface) if browser_surface else None,
+            "ui_action": fact_node(ui_action) if ui_action else None,
+            "browser_request": fact_node(request) if request else None,
+        },
+        "service_hops": service_hops,
+        "vulnerability_anchor": {
+            "lead_id": lead.id,
+            "location": lead.location,
+            "category": lead.category,
+            "title": lead.title,
+        },
+        "static_trace": {
+            "status": "complete" if path.complete else "incomplete",
+            "confidence": path.confidence,
+            "proof_gaps": proof_gaps,
+            "facts": [fact_node(fact) for fact in path.facts],
+            "edges": static_edges,
+        },
+        "live_binding": {
+            "status": "pending",
+            "candidate_count": 0,
+            "evidence_ids": [],
+        },
+        "validation_assertion": {
+            "claim": lead.description,
+            "mutation_points": request_details.get("body_fields", [])
+            or request_details.get("query_fields", []),
+            "secure_outcome": "The application rejects the invalid input and does not produce the vulnerable consequence.",
+            "vulnerable_outcome": "The application accepts the invalid input and produces the consequence described by the source finding.",
+            "prerequisites": details.get("prerequisites", []),
+        },
+    }
+    return {
+        **v3,
         "path_status": "complete" if path.complete else "incomplete",
         "confidence": path.confidence,
         "live_frontend_context": {

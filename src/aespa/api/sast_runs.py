@@ -29,6 +29,7 @@ from aespa.models import (
     AgentLog,
     ApiCollection,
     ApiTestRun,
+    BenchmarkEvaluation,
     PhaseCheckpoint,
     SastRun,
     SastWorker,
@@ -41,7 +42,7 @@ from aespa.models import (
 from aespa.schemas import SastRunSummary, SastRunUpdate, ScanLeadOut
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
-from aespa.services import run_cleanup, sast_export
+from aespa.services import run_cleanup, sast_export, sast_sarif
 from aespa.services.references import ensure_finding_reference, ensure_lead_reference
 
 _UTC = timezone.utc
@@ -109,6 +110,7 @@ def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
         .where(SastWorker.sast_run_id == run_id)
         .order_by(SastWorker.id)
     ).all()
+    worker_by_agent_id = {f"sast-worker-{worker.id}": worker for worker in workers}
     for worker in workers:
         agent_id = f"sast-worker-{worker.id}"
         statuses = recorded_statuses.get(agent_id, set())
@@ -188,6 +190,70 @@ def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
             }
         )
 
+    # Runs completed before the dedicated panes were added still have durable
+    # phase rows. Use the latest phase event as a compact lifecycle snapshot so
+    # their agent roster does not appear untouched after an upgrade.
+    phase_agents = {
+        "repository_model": ("sast-repository-modeller", "Repository Modeller"),
+        "threat_model": ("sast-threat-modeller", "Threat Modeller"),
+        "closure": ("sast-closure-analyst", "Closure Analyst"),
+        "attack_path": ("sast-attack-path", "Attack Path Analyst"),
+    }
+    recorded_agent_ids = {entry["agent_id"] for entry in entries}
+    phase_rows = session.exec(
+        select(ScanLog)
+        .where(ScanLog.test_run_id == run_id)
+        .where(ScanLog.run_kind == "sast")
+        .order_by(ScanLog.id)
+    ).all()
+    latest_phase_rows = {
+        row.phase: row for row in phase_rows if row.phase in phase_agents
+    }
+    for phase, (agent_id, role) in phase_agents.items():
+        row = latest_phase_rows.get(phase)
+        if row is None or agent_id in recorded_agent_ids:
+            continue
+        entries.append(
+            {
+                "id": f"{agent_id}-phase-{row.id}",
+                "agent_id": agent_id,
+                "role": role,
+                "status": "active" if row.status == "running" else row.status,
+                "current_task": row.message,
+                "outcome": "Recovered from the saved phase history",
+                "created_at": row.created_at,
+            }
+        )
+
+    fixed_names = {
+        "sast-repository-modeller": "Repository Modeller",
+        "sast-threat-modeller": "Threat Modeller",
+        "sast-scanner": "SAST Analyst",
+        "sast-validator": "Candidate Validators",
+        "sast-closure-analyst": "Closure Analyst",
+        "sast-attack-path": "Attack Path Analyst",
+    }
+    for entry in entries:
+        agent_id = entry["agent_id"]
+        worker = worker_by_agent_id.get(agent_id)
+        if worker is not None:
+            entry["parent_id"] = f"sast-{worker.class_group}-workers"
+            entry["display_name"] = worker.worker_key
+            entry["worker_key"] = worker.worker_key
+            entry["class_group"] = worker.class_group
+            continue
+        if agent_id.startswith("sast-validator-"):
+            candidate_id = agent_id.removeprefix("sast-validator-")
+            entry["parent_id"] = "sast-validators"
+            entry["display_name"] = f"Candidate {candidate_id}"
+            entry["worker_key"] = f"validator:{candidate_id}"
+            entry["class_group"] = "validator"
+            continue
+        entry["parent_id"] = None
+        entry["display_name"] = fixed_names.get(agent_id, entry["role"])
+        entry["worker_key"] = None
+        entry["class_group"] = None
+
     status_order = {"spawned": 0, "active": 1}
     entries.sort(
         key=lambda entry: (
@@ -210,6 +276,7 @@ def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
 async def create_standalone_sast_run(
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
+    analysis_mode: str = Form(default="deep"),
     llm_config_id: int | None = Form(default=None),
     llm_profile_id: int | None = Form(default=None),
     session: Session = Depends(get_session),
@@ -220,6 +287,11 @@ async def create_standalone_sast_run(
     or API test runs, which explicitly import copies of the resulting leads.
     """
     original_name = Path(file.filename or "source.zip").name or "source.zip"
+    if analysis_mode not in {"light", "deep"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Analysis mode must be either 'light' or 'deep'.",
+        )
     base = Path(get_settings().data_dir) / "sast_uploads"
     base.mkdir(parents=True, exist_ok=True)
     ext = Path(original_name).suffix or ".zip"
@@ -271,6 +343,7 @@ async def create_standalone_sast_run(
         name=name or f"SAST – {original_name}",
         source_archive_path=str(stored_path),
         source_filename=original_name,
+        analysis_mode=analysis_mode,
         llm_config_id=llm_config_id,
         llm_profile_id=llm_profile_id,
     )
@@ -306,6 +379,30 @@ def export_sast_run(
         headers={
             "Content-Disposition": f'attachment; filename="{safe}.aespa-sast.json"'
         },
+    )
+
+
+@router.get("/api/sast-runs/{run_id}/sarif")
+def export_sast_sarif(
+    run_id: int,
+    reportable_only: bool = False,
+    session: Session = Depends(get_session),
+) -> JSONResponse:
+    """Download SAST scan results in OASIS SARIF 2.1.0 format."""
+    run = _get_run_or_404(session, run_id)
+    try:
+        sarif_doc = sast_sarif.generate_sast_sarif(
+            session, run_id, reportable_only=reportable_only
+        )
+    except sast_sarif.SastSarifError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    name = run.name or f"sast-run-{run_id}"
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+    return JSONResponse(
+        content=sarif_doc,
+        media_type="application/sarif+json",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.sarif"'},
     )
 
 
@@ -384,18 +481,31 @@ def _json_object(value: str | None, default: dict) -> dict:
 def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> dict:
     """Return authoritative phase, coverage, and report state for the UI."""
     run = _get_run_or_404(session, run_id)
-    from aespa.services.sast_scanner import _empty_phase_state
+    if run.analysis_mode == "light":
+        from aespa.services.sast_scanner_light import _empty_phase_state
+    else:
+        from aespa.services.sast_scanner import _empty_phase_state
     from aespa.services.sast_workprogram import completion_decision
 
     completion_status, completion_reasons, work_program = completion_decision(run_id)
+    report = _json_object(run.report_json, {})
+    # New semantic runs persist the authoritative assurance decision in the
+    # report. Keep the legacy work-program calculation for older runs that have
+    # no semantic report yet.
+    if report.get("completion_status") in {"full", "partial"}:
+        completion_status = report["completion_status"]
+        completion_reasons = list(
+            report.get("completion_reasons") or completion_reasons
+        )
 
     return {
+        "analysis_mode": run.analysis_mode,
         "phases": _json_object(run.phase_state_json, _empty_phase_state()),
         "coverage": _json_object(
             run.coverage_json,
             {"files": [], "summary": {"files_total": 0, "files_reviewed": 0}},
         ),
-        "report": _json_object(run.report_json, {}),
+        "report": report,
         "work_program": work_program,
         "assurance": {
             "status": completion_status,
@@ -407,6 +517,16 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
 @router.delete("/api/sast-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
+    if (
+        session.exec(
+            select(BenchmarkEvaluation).where(BenchmarkEvaluation.sast_run_id == run_id)
+        ).first()
+        is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Delete benchmark evaluations before deleting this SAST run",
+        )
     from aespa.services import campaigns as campaigns_svc
     from aespa.services import sast_scanner
 

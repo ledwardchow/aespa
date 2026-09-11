@@ -823,6 +823,9 @@ def update_lead(
     investigated_by_run_id: int | None = None,
     linked_finding_id: int | None = None,
     link_coverage: bool = True,
+    outcome_reason: str | None = None,
+    baseline_evidence: object | None = None,
+    mutated_evidence: object | None = None,
 ) -> ScanLead | None:
     """Record the outcome of a dynamic investigation on a lead.
 
@@ -948,6 +951,22 @@ def update_lead(
         except Exception as exc:
             log.debug("update_lead: coverage link failed: %s", exc)
 
+    # Campaign validation cases own the more precise execution result. This
+    # hook is harmless for ordinary SAST leads because no case will match.
+    try:
+        from aespa.services.campaign_validation_cases import (
+            sync_case_outcome_from_lead,
+        )
+
+        sync_case_outcome_from_lead(
+            lead.id,
+            outcome_reason=outcome_reason,
+            baseline_evidence=baseline_evidence,
+            mutated_evidence=mutated_evidence,
+        )
+    except Exception as exc:
+        log.debug("update_lead: validation-case sync failed: %s", exc)
+
     return lead
 
 
@@ -969,11 +988,11 @@ def format_leads_for_scan_context(
 ) -> str:
     """Return the lead context appropriate for a dynamic scan mode.
 
-    Quick scans must resolve every imported lead, so they receive the complete
-    compact index and fetch full lead details as they work. Full scans retain
-    the detailed, capped context used by the general coverage workflow.
+    Quick and Standard scans must resolve every imported lead, so they receive
+    the complete compact index and fetch full lead details as they work. Full
+    scans retain the detailed, capped context used by the general coverage workflow.
     """
-    if coverage_mode in {"track", "sast_validate"}:
+    if coverage_mode in {"track", "standard", "sast_validate"}:
         return format_lead_index_for_validation(target_run_type, target_run_id)
     return format_leads_for_run(target_run_type, target_run_id)
 

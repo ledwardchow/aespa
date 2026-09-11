@@ -133,6 +133,39 @@ def test_standalone_sast_upload_creates_collectionless_run(env, tmp_path, monkey
     assert run.collection_id is None
     assert run.source_archive_path  # archive was stored
     assert run.status == "pending"
+    assert run.analysis_mode == "deep"
+
+
+def test_standalone_sast_upload_saves_light_analysis_mode(env, tmp_path, monkeypatch):
+    client, engine = env
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+
+    response = client.post(
+        "/api/sast-runs",
+        files={"file": ("mysrc.zip", _zip_bytes(), "application/zip")},
+        data={"analysis_mode": "light"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["analysis_mode"] == "light"
+    with Session(engine) as session:
+        run = session.get(SastRun, response.json()["id"])
+        assert run.analysis_mode == "light"
+
+
+def test_standalone_sast_upload_rejects_unknown_analysis_mode(
+    env, tmp_path, monkeypatch
+):
+    client, _ = env
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+
+    response = client.post(
+        "/api/sast-runs",
+        files={"file": ("mysrc.zip", _zip_bytes(), "application/zip")},
+        data={"analysis_mode": "medium"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_standalone_sast_upload_rejects_non_zip(env, tmp_path, monkeypatch):
@@ -161,6 +194,7 @@ def test_sast_run_export_import_round_trip_preserves_run_state_and_archive(
             source_archive_path=str(archive_path),
             status="completed",
             leads_count=1,
+            analysis_mode="light",
             phase_state_json=json.dumps(
                 {"scope": {"status": "complete", "message": "1 file reviewed"}}
             ),
@@ -263,12 +297,14 @@ def test_sast_run_export_import_round_trip_preserves_run_state_and_archive(
     assert imported_id != original_id
     assert imported.json()["name"] == "Complete source review"
     assert imported.json()["status"] == "completed"
+    assert imported.json()["analysis_mode"] == "light"
 
     with Session(engine) as session:
         restored = session.get(SastRun, imported_id)
         assert restored is not None
         assert restored.collection_id is None
         assert restored.document_id is None
+        assert restored.analysis_mode == "light"
         assert restored.phase_state_json == bundle["sast_run"]["phase_state_json"]
         assert restored.coverage_json == bundle["sast_run"]["coverage_json"]
         assert restored.report_json == bundle["sast_run"]["report_json"]

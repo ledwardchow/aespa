@@ -1,0 +1,413 @@
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { expect, test } from "@playwright/test";
+import { installFixtures } from "./fixtures.js";
+
+const screens = [
+  ["#/", "Fixture site"],
+  ["#/sites/1", "Fixture site"],
+  ["#/sites/new", "New Site"],
+  ["#/settings", "LLM Profiles"],
+  ["#/scan-policy", "Agent Settings"],
+  ["#/external-integrations", "External Integrations"],
+  ["#/apis", "Fixture API"],
+  ["#/apis/1", "Fixture API"],
+  ["#/apis/new", "New API"],
+  ["#/sast-runs", "Fixture SAST"],
+  ["#/sast-runs/1/coverage", "Fixture SAST"],
+  ["#/sast-runs/1/candidates", "Fixture SAST"],
+  ["#/sast-runs/1/activity", "Fixture SAST"],
+  ["#/applications", "Fixture application"],
+  ["#/applications/1", "Fixture application"],
+  ["#/applications/1/campaigns/1/runs", "Fixture campaign"],
+  ["#/api-runs/1/findings", "Fixture run"],
+  ["#/api-runs/1/status", "Fixture run"],
+  ["#/runs/1/findings", "Fixture run"],
+  ["#/runs/1/activity", "Fixture run"],
+  ["#/api-runs/1/leads", "Fixture run"],
+  ["#/api-runs/1/sessions", "Fixture run"],
+  ["#/api-runs/1/traffic", "Fixture run"],
+  ["#/api-runs/1/endpoints", "Fixture run"],
+  ["#/api-runs/1/workprogram", "Fixture run"],
+  ["#/runs/1/sitemap", "Fixture run"],
+  ["#/runs/1/attack", "Fixture run"],
+  ["#/runs/1/traffic", "Fixture run"],
+  ["#/runs/1/sessions", "Fixture run"],
+  ["#/runs/1/leads", "Fixture run"],
+  ["#/applications/1/campaigns/1/components", "Fixture campaign"],
+  ["#/applications/1/campaigns/1/connections", "Fixture campaign"],
+  ["#/applications/1/campaigns/1/review", "Fixture campaign"],
+  ["#/applications/1/campaigns/1/findings", "Fixture campaign"],
+  ["#/applications/1/campaigns/1/activity", "Fixture campaign"],
+];
+for (const [route, text] of screens) {
+  test(`${route} renders without runtime errors`, async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    await installFixtures(page);
+    await page.goto(`/${route}`);
+    await expect(page).toHaveTitle("AESPA");
+    await expect(page.getByText(text, { exact: false }).first()).toBeVisible();
+    await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    await expect(page.getByText("This page could not be loaded")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+}
+
+test("settings tabs, edit cancellation, and sidebar history work", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/settings");
+  await page.getByRole("tab", { name: "Providers", exact: true }).click();
+  await expect(page.getByText("Fixture provider", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(page.getByText("Edit LLM Provider", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByText("LLM Providers", { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Sites", exact: true }).click();
+  await expect(page.getByText("Fixture site", { exact: true }).first()).toBeVisible();
+  await page.goBack();
+  await expect(page.getByText("LLM Profiles", { exact: true })).toBeVisible();
+});
+
+test("System Settings groups feature visibility and debug controls into tabs", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/debug");
+
+  const featureTab = page.getByRole("tab", { name: "Feature Visibility", exact: true });
+  const debugTab = page.getByRole("tab", { name: "Debug Settings", exact: true });
+  await expect(featureTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByText("Browser", { exact: true })).toBeVisible();
+  await expect(page.getByText("Reporting Lab", { exact: true })).toBeVisible();
+  await expect(page.getByText("Applications", { exact: true })).toBeVisible();
+  await expect(page.getByText("Sitemap Graph", { exact: true })).toHaveCount(0);
+
+  await debugTab.click();
+  await expect(debugTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByText("Sitemap Graph", { exact: true })).toBeVisible();
+  await expect(page.getByText("Cloudflare Access", { exact: true })).toBeVisible();
+  await expect(page.getByText("Browser", { exact: true })).toHaveCount(0);
+});
+
+test("headless Linux disables browser windows and guided login", async ({ page }) => {
+  const message =
+    "No graphical display is available. Guided login and visible browser mode are disabled. Set DISPLAY or WAYLAND_DISPLAY, then restart AESPA.";
+  await installFixtures(page);
+  await page.route("**/api/settings/browser-debug", (route) =>
+    route.fulfill({
+      json: {
+        browser_engine: "playwright_chromium",
+        browser_visible: false,
+        graphical_display_available: false,
+        graphical_display_message: message,
+      },
+    }),
+  );
+
+  await page.goto("/#/debug");
+  await expect(page.getByRole("checkbox", { name: "Make browser visible to user" })).toBeDisabled();
+  await expect(page.getByText(message, { exact: true })).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-headless-browser-settings.png") });
+
+  await page.goto("/#/sites/new");
+  await page.getByRole("checkbox", { name: "This site requires authentication" }).check();
+  await page.getByRole("button", { name: "Add credential" }).click();
+  const authMode = page.locator(".field", { hasText: "Auth Mode" }).locator("select");
+  await expect(authMode.locator('option[value="guided"]')).toBeDisabled();
+  await expect(page.getByText(message, { exact: true })).toBeVisible();
+  await authMode.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-headless-guided-login.png") });
+});
+
+test("Agent Settings keeps inner tabs flush with its content column", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/scan-policy");
+  const outer = page.getByRole("tablist", { name: "Agent settings", exact: true });
+  await expect(outer).toBeVisible();
+  const inner = page.locator(".coverage-sub-tab-bar");
+  await expect(inner).toBeVisible();
+  const a = await outer.boundingBox(),
+    b = await inner.boundingBox();
+  expect(Math.abs(a.x - b.x)).toBeLessThan(1);
+  expect(Math.abs(a.x + a.width - (b.x + b.width))).toBeLessThan(1);
+  await page.getByRole("tab", { name: "Crawler", exact: true }).click();
+  await expect(inner).toHaveCount(0);
+  await page.getByRole("tab", { name: "Global", exact: true }).click();
+  await expect(inner).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save policy", exact: true })).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-agent-settings-desktop.png") });
+});
+
+test("validator outcomes stay beside their finding titles", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  const agentLog = [
+    {
+      agent_id: "validator-1809",
+      role: "Validator",
+      status: "done",
+      current_task: "Registration permits one-character passwords",
+      outcome: "Confirmed",
+      created_at: "2026-09-08T00:00:00Z",
+    },
+    {
+      agent_id: "validator-1810",
+      role: "Validator",
+      status: "done",
+      current_task: "Profile API exposes password hash and TOTP field",
+      outcome: "Unconfirmed",
+      created_at: "2026-09-08T00:00:01Z",
+    },
+  ];
+  await page.route("**/api/test-runs/1/agent-log", (route) => route.fulfill({ json: agentLog }));
+  await page.goto("/#/runs/1/activity");
+  await expect(page).toHaveURL(/#\/runs\/1\/activity$/);
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  const validator = page.locator(".agent-row", { hasText: "Validator" });
+  for (const label of ["Confirmed", "Unconfirmed"]) {
+    const outcome = validator.getByText(label, { exact: true });
+    const row = outcome.locator("..");
+    await expect(row).toBeVisible();
+    const taskBox = await row.locator(".agent-current-task").boundingBox();
+    const outcomeBox = await outcome.boundingBox();
+    const overlap =
+      Math.min(taskBox.y + taskBox.height, outcomeBox.y + outcomeBox.height) -
+      Math.max(taskBox.y, outcomeBox.y);
+    expect(overlap).toBeGreaterThan(0);
+  }
+
+  await validator.click();
+  await expect(validator.locator(".agent-thread-row")).toHaveCount(0);
+  await validator.click();
+  await expect(validator.locator(".agent-thread-row")).toHaveCount(2);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-validator-outcome-desktop.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(page.getByText("Confirmed", { exact: true })).toBeVisible();
+  const mobileUnconfirmed = page.getByText("Unconfirmed", { exact: true });
+  await expect(mobileUnconfirmed).toBeVisible();
+  await mobileUnconfirmed.scrollIntoViewIfNeeded();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-validator-outcome-mobile.png") });
+});
+
+test("Python Sandbox explains when the Docker service is unavailable", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.goto("/#/scan-policy");
+  await page.getByRole("tab", { name: "Python Sandbox", exact: true }).click();
+
+  await expect(page.getByText("Runtime unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Docker is installed, but its service is not running/)).toBeVisible();
+  await expect(page.getByText(/Build it with:/)).toHaveCount(0);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-docker-service-unavailable.png") });
+});
+
+test("empty sites and a narrow viewport remain usable", async ({ page }) => {
+  await installFixtures(page, { empty: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/#/");
+  await expect(page.getByText("No sites configured")).toBeVisible();
+  await expect(page.locator(".sidebar--collapsed")).toBeVisible();
+  await page.getByRole("link", { name: "LLM Settings", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Providers", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "Providers", exact: true }).click();
+  await expect(page.getByRole("button", { name: "New provider", exact: true })).toBeEnabled();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-settings-mobile.png") });
+});
+
+test("a failed request shows a useful error instead of an empty page", async ({ page }) => {
+  await installFixtures(page);
+  await page.route("**/api/sites", (route) =>
+    route.fulfill({ status: 502, contentType: "text/html", body: "<html>Proxy error</html>" }),
+  );
+  await page.goto("/#/");
+  await expect(page.locator(".alert.error")).toContainText("502");
+});
+
+test("back and forward restore the selected run tab", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/sast-runs/1/coverage");
+  await page.getByRole("tab", { name: /^Candidates/ }).click();
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.goBack();
+  await expect(page.getByRole("tab", { name: /^Candidates/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await page.goForward();
+  await expect(page.getByRole("tab", { name: "Activity", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await page.goto("/#/runs/1/findings");
+  await page.getByRole("button", { name: "Traffic Log", exact: true }).click();
+  await page.goBack();
+  await expect(page.locator(".web-run-tab-bar .active")).toContainText("Findings");
+});
+
+test("SAST summary cards only appear on the Coverage tab", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.goto("/#/sast-runs/1/coverage");
+
+  const summary = page.locator(".sast-run-summary-grid");
+  const viewTabs = page.getByRole("tablist", { name: "SAST run views" });
+  await expect(page).toHaveURL(/#\/sast-runs\/1\/coverage$/);
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.getByText("Fixture SAST", { exact: true })).toBeVisible();
+  await expect(summary).toBeVisible();
+  await expect(summary.locator(":scope > div")).toHaveCount(7);
+
+  for (const tabName of [
+    "Model",
+    /^Threats/,
+    /^Security checks/,
+    "Execution Summary",
+    /^Candidates/,
+    "Activity",
+  ]) {
+    await viewTabs.getByRole("tab", { name: tabName }).click();
+    await expect(summary).toHaveCount(0);
+  }
+
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-no-summary.png") });
+  await viewTabs.getByRole("tab", { name: "Coverage", exact: true }).click();
+  await expect(summary).toBeVisible();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-coverage-summary.png") });
+});
+
+test("light SAST phases fill the available progress row", async ({ page }) => {
+  await installFixtures(page);
+  await page.route("**/api/sast-runs/1", (route) =>
+    route.fulfill({
+      json: {
+        id: 1,
+        name: "Fixture SAST",
+        status: "pending",
+        phase: "scope",
+        analysis_mode: "light",
+        llm_profile_id: 1,
+        leads_count: 0,
+        source_filename: "fixture.zip",
+      },
+    }),
+  );
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto("/#/sast-runs/1/coverage");
+
+  const rail = page.getByRole("tablist", { name: "SAST scan phases" });
+  const phases = rail.getByRole("tab");
+  await expect(phases).toHaveCount(5);
+  await expect
+    .poll(async () => {
+      const railBox = await rail.boundingBox();
+      const lastBox = await phases.last().boundingBox();
+      if (!railBox || !lastBox) return Infinity;
+      return Math.abs(railBox.x + railBox.width - (lastBox.x + lastBox.width));
+    })
+    .toBeLessThan(1);
+
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-light-phase-width.png") });
+});
+
+test("a running SAST scan explains that semantic analysis is still being generated", async ({
+  page,
+}) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.route("**/api/sast-runs/1/scan/status", (route) =>
+    route.fulfill({ json: { running: true, status: "running", resumable: false } }),
+  );
+
+  await page.goto("/#/sast-runs/1/efficiency");
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.getByRole("tab", { name: "Execution Summary", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.getByText("Efficiency telemetry is being collected.")).toBeVisible();
+  await expect(
+    page.getByText(
+      "This analysis will appear after the scan finishes and the final report is ready.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByText(/Run the scan again with the current SAST workflow/)).toHaveCount(0);
+
+  await page.getByRole("tab", { name: /^Threats/ }).click();
+  await expect(page.getByText("Threat model is not ready yet.")).toBeVisible();
+  await expect(page.getByText("This analysis will appear as the scan progresses.")).toBeVisible();
+  await expect(page.getByText(/Run the scan again with the current SAST workflow/)).toHaveCount(0);
+
+  await page.getByRole("tab", { name: /^Security checks/ }).click();
+  await expect(page.getByText("Security check analysis is not ready yet.")).toBeVisible();
+  await expect(page.getByText("This analysis will appear as the scan progresses.")).toBeVisible();
+  await expect(page.getByText(/Run the scan again with the current SAST workflow/)).toHaveCount(0);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-analysis-running.png") });
+});
+
+test("the SAST agent list scrolls without an enclosing activity box", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  const workers = Array.from({ length: 28 }, (_, index) => ({
+    id: index + 1,
+    agent_id: `sast-worker-${index + 1}`,
+    role: "SAST Injection Worker",
+    status: "complete",
+    current_task: `Completed assigned checks ${index + 1}`,
+    display_name: `injection-worker-${index + 1}`,
+    class_group: "injection",
+    created_at: "2026-09-11T01:00:00Z",
+  }));
+  await page.route("**/api/sast-runs/1/agent-log", (route) => route.fulfill({ json: workers }));
+  await page.setViewportSize({ width: 1100, height: 650 });
+  await page.goto("/#/sast-runs/1/activity");
+
+  const activityPanel = page.locator(".sast-activity-panel");
+  const agentList = page.locator(".sast-agents-panel");
+  await expect(page.getByRole("button", { name: "Agents" })).toBeVisible();
+  await expect(page.locator(".sast-run-content")).toHaveCSS("padding-left", "0px");
+  await expect(activityPanel).toHaveCSS("border-top-width", "0px");
+  await expect
+    .poll(() => agentList.evaluate((element) => element.scrollHeight > element.clientHeight))
+    .toBe(true);
+
+  await agentList.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect.poll(() => agentList.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await expect(page.getByText("injection-worker-28", { exact: true })).toBeVisible();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-agents-scroll.png") });
+});

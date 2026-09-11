@@ -7,6 +7,7 @@ mutations.
 
 from __future__ import annotations
 
+import pytest
 from sqlmodel import Session
 
 from aespa.models import (
@@ -178,24 +179,31 @@ def _seed_reportable_sast_lead(engine, sast_run_id: int) -> int:
 # ── SAST mutation endpoints ──────────────────────────────────────────────────
 
 
-def test_sast_profile_update_blocked_for_campaign_owned_run(client, isolated_db_engine):
+@pytest.mark.parametrize(
+    ("method", "path", "request_kwargs", "expected_status"),
+    [
+        (
+            "PATCH",
+            "/api/sast-runs/{sast_run_id}",
+            {"json": {"llm_profile_id": None}},
+            200,
+        ),
+        ("POST", "/api/sast-runs/{sast_run_id}/scan/start", {}, 200),
+        ("POST", "/api/sast-runs/{sast_run_id}/scan/stop", {}, 200),
+    ],
+    ids=["update-profile", "start-scan", "stop-scan"],
+)
+def test_campaign_owned_sast_runs_use_standard_endpoints(
+    client,
+    isolated_db_engine,
+    method,
+    path,
+    request_kwargs,
+    expected_status,
+):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.patch(
-        f"/api/sast-runs/{ctx['sast_run_id']}", json={"llm_profile_id": None}
-    )
-    assert "campaign" not in resp.json().get("detail", "").lower()
-
-
-def test_sast_scan_start_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/sast-runs/{ctx['sast_run_id']}/scan/start")
-    assert "campaign" not in resp.json().get("detail", "").lower()
-
-
-def test_sast_scan_stop_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/sast-runs/{ctx['sast_run_id']}/scan/stop")
-    assert resp.status_code != 409
+    response = client.request(method, path.format(**ctx), **request_kwargs)
+    assert response.status_code == expected_status
 
 
 def test_sast_lead_handoff_allowed_for_campaign_owned_source(
@@ -253,46 +261,40 @@ def test_clear_and_delete_api_run_leads_blocked_for_campaign_owned_run(
 # ── Web mutation endpoints ───────────────────────────────────────────────────
 
 
-def test_web_settings_update_blocked_for_campaign_owned_run(client, isolated_db_engine):
+@pytest.mark.parametrize(
+    ("method", "path", "request_kwargs", "expected_status"),
+    [
+        (
+            "PATCH",
+            "/api/test-runs/{web_run_id}",
+            {"json": {"max_depth": 3, "max_pages": 50}},
+            200,
+        ),
+        ("POST", "/api/test-runs/{web_run_id}/start", {}, 400),
+        ("POST", "/api/test-runs/{web_run_id}/restart", {}, 400),
+        ("POST", "/api/test-runs/{web_run_id}/crawl/clear", {}, 200),
+        (
+            "POST",
+            "/api/test-runs/{web_run_id}/crawl/import",
+            {"files": {"file": ("crawl.json", b"{}", "application/json")}},
+            409,
+        ),
+        ("POST", "/api/test-runs/{web_run_id}/stop", {}, 409),
+    ],
+    ids=["update-settings", "start", "restart", "clear", "import", "stop"],
+)
+def test_campaign_owned_web_runs_use_standard_endpoints(
+    client,
+    isolated_db_engine,
+    method,
+    path,
+    request_kwargs,
+    expected_status,
+):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.patch(
-        f"/api/test-runs/{ctx['web_run_id']}",
-        json={"max_depth": 3, "max_pages": 50},
-    )
-    assert resp.status_code != 409
-
-
-def test_web_start_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/start")
-    assert resp.status_code != 409
-
-
-def test_web_restart_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/restart")
-    assert resp.status_code != 409
-
-
-def test_web_crawl_clear_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/crawl/clear")
-    assert resp.status_code != 409
-
-
-def test_web_crawl_import_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(
-        f"/api/test-runs/{ctx['web_run_id']}/crawl/import",
-        files={"file": ("crawl.json", b"{}", "application/json")},
-    )
-    assert "campaign" not in resp.json().get("detail", "").lower()
-
-
-def test_web_stop_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/stop")
-    assert "campaign" not in resp.json().get("detail", "").lower()
+    response = client.request(method, path.format(**ctx), **request_kwargs)
+    assert response.status_code == expected_status
+    assert "campaign" not in response.json().get("detail", "").lower()
 
 
 def test_web_import_leads_allowed_for_campaign_owned_target(client, isolated_db_engine):
@@ -332,32 +334,22 @@ def test_clear_and_delete_web_run_leads_blocked_for_campaign_owned_run(
 # ── Thinking-scan mutation endpoints ─────────────────────────────────────────
 
 
-def test_thinking_scan_start_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/thinking-scan/start")
-    assert resp.status_code != 409
-
-
-def test_thinking_scan_stop_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/thinking-scan/stop")
-    assert resp.status_code != 409
-
-
-def test_thinking_scan_resume_blocked_for_campaign_owned_run(
-    client, isolated_db_engine
+@pytest.mark.parametrize(
+    ("path", "expected_status"),
+    [
+        ("/api/test-runs/{web_run_id}/thinking-scan/start", 200),
+        ("/api/test-runs/{web_run_id}/thinking-scan/stop", 200),
+        ("/api/test-runs/{web_run_id}/thinking-scan/resume", 404),
+        ("/api/test-runs/{web_run_id}/pages/{web_page_id}/test", 200),
+    ],
+    ids=["start", "stop", "resume-without-checkpoint", "focused-page"],
+)
+def test_campaign_owned_web_scan_controls_use_standard_endpoints(
+    client, isolated_db_engine, path, expected_status
 ):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/test-runs/{ctx['web_run_id']}/thinking-scan/resume")
-    assert resp.status_code != 409
-
-
-def test_focused_page_scan_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(
-        f"/api/test-runs/{ctx['web_run_id']}/pages/{ctx['web_page_id']}/test"
-    )
-    assert resp.status_code != 409
+    response = client.post(path.format(**ctx))
+    assert response.status_code == expected_status
 
 
 def test_finding_mutations_blocked_for_campaign_owned_run(client, isolated_db_engine):
@@ -421,16 +413,13 @@ def test_log_clearing_blocked_for_campaign_owned_run(client, isolated_db_engine)
 # ── API mutation endpoints ───────────────────────────────────────────────────
 
 
-def test_api_scan_start_blocked_for_campaign_owned_run(client, isolated_db_engine):
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_campaign_owned_api_scan_controls_use_standard_endpoints(
+    client, isolated_db_engine, action
+):
     ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/api-test-runs/{ctx['api_run_id']}/scan/start")
-    assert resp.status_code != 409
-
-
-def test_api_scan_stop_blocked_for_campaign_owned_run(client, isolated_db_engine):
-    ctx = _seed_campaign_owned_runs(isolated_db_engine)
-    resp = client.post(f"/api/api-test-runs/{ctx['api_run_id']}/scan/stop")
-    assert resp.status_code != 409
+    response = client.post(f"/api/api-test-runs/{ctx['api_run_id']}/scan/{action}")
+    assert response.status_code == 200
 
 
 # ── Read-only endpoints must still work for a campaign-owned run ────────────

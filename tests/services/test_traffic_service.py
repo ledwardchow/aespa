@@ -5,7 +5,16 @@ import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.models import CrawledPage, PageCredentialView, TrafficEntry
+from aespa.models import (
+    ApiCollection,
+    ApiEndpoint,
+    ApiEndpointTest,
+    ApiTestRun,
+    CrawledPage,
+    PageCredentialView,
+    PageOwaspTest,
+    TrafficEntry,
+)
 from aespa.models import TestRun as RunModel
 from aespa.schemas import PageCredentialViewOut
 from aespa.services import traffic
@@ -170,6 +179,245 @@ async def test_logging_async_client_success(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_agent_traffic_keeps_purpose_and_exact_coverage_cell(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        page = CrawledPage(
+            test_run_id=42,
+            url="https://target.local/accounts/7",
+            title="Account",
+        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+        cell = PageOwaspTest(
+            test_run_id=42,
+            page_id=page.id,
+            owasp_category="A01",
+        )
+        session.add(cell)
+        session.commit()
+        session.refresh(cell)
+        page_id = page.id
+        cell_id = cell.id
+
+    mock_resp = httpx.Response(
+        status_code=403,
+        text="denied",
+        request=httpx.Request("GET", "https://target.local/accounts/7"),
+    )
+    monkeypatch.setattr(httpx.AsyncClient, "send", AsyncMock(return_value=mock_resp))
+
+    async with LoggingAsyncClient(
+        run_id=42,
+        page_id=page_id,
+        provenance={
+            "purpose": traffic.request_purpose(
+                {"purpose": "Check whether another user's account is accessible"},
+                "Probe target",
+                agent_name="Specialist",
+                owasp_category="A01",
+            ),
+            "owasp_category": "A01",
+            "agent_id": "scanner",
+            "agent_step": 3,
+        },
+    ) as client:
+        await client.send(httpx.Request("GET", "https://target.local/accounts/7"))
+
+    result = traffic.get_traffic(42)
+    assert result[0]["purpose"] == (
+        "Specialist - A01: Check whether another user's account is accessible"
+    )
+    assert result[0]["username"] is None
+    assert result[0]["coverage_cell_id"] == cell_id
+    assert result[0]["owasp_category"] == "A01"
+
+
+def test_assign_web_traffic_page_backfills_missing_page(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        page = CrawledPage(
+            test_run_id=42,
+            url="https://target.local/api/customers",
+            status="crawled",
+            in_scope=True,
+        )
+        entry = TrafficEntry(
+            test_run_id=42,
+            source="httpx",
+            method="GET",
+            url="https://target.local/api/customers?search=%27",
+            request_headers="{}",
+            response_headers="{}",
+        )
+        session.add(page)
+        session.add(entry)
+        session.commit()
+        session.refresh(page)
+        session.refresh(entry)
+        page_id = page.id
+        traffic_id = entry.id
+
+    assert traffic.assign_web_traffic_page(traffic_id, 42, page_id) is True
+
+    with Session(engine) as session:
+        assert session.get(TrafficEntry, traffic_id).page_id == page_id
+
+
+def test_api_traffic_resolves_template_to_exact_coverage_cell(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        collection = ApiCollection(
+            name="Traffic association API", base_url="https://api.target.local"
+        )
+        session.add(collection)
+        session.commit()
+        session.refresh(collection)
+        endpoint = ApiEndpoint(
+            collection_id=collection.id,
+            method="GET",
+            path="/accounts/{id}",
+        )
+        run = ApiTestRun(collection_id=collection.id, name="API run")
+        session.add(endpoint)
+        session.add(run)
+        session.commit()
+        session.refresh(endpoint)
+        session.refresh(run)
+        cell = ApiEndpointTest(
+            api_test_run_id=run.id,
+            endpoint_id=endpoint.id,
+            owasp_api_category="API1",
+        )
+        session.add(cell)
+        session.commit()
+        session.refresh(cell)
+        run_id = run.id
+        cell_id = cell.id
+
+    traffic._write(
+        run_id=None,
+        api_run_id=run_id,
+        source="httpx",
+        method="GET",
+        url="https://api.target.local/accounts/42",
+        request_headers={},
+        request_body=None,
+        status=200,
+        response_headers={},
+        response_body="{}",
+        duration_ms=5,
+        purpose="Check object-level authorization",
+        owasp_category="API1",
+    )
+
+    result = traffic.get_traffic(0, api_run_id=run_id)
+    assert result[0]["coverage_cell_id"] == cell_id
+
+
+def test_request_purpose_prepends_agent_and_coverage_label():
+    assert (
+        traffic.request_purpose(
+            {
+                "hypothesis": "Try the alternate account",
+                "owasp_category": "a03",
+                "test_class": "stored_xss",
+            },
+            "Probe target",
+            agent_name="Specialist",
+        )
+        == "Specialist - A03 stored_xss: Try the alternate account"
+    )
+    assert (
+        traffic.request_purpose(
+            {"purpose": "Retry without cookies"},
+            "Probe target",
+            agent_name="Validator",
+            owasp_category="A01",
+        )
+        == "Validator - A01: Retry without cookies"
+    )
+
+
+@pytest.mark.anyio
+async def test_python_traffic_keeps_execution_and_body_provenance(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+    mock_resp = httpx.Response(
+        status_code=201,
+        headers={"Content-Type": "application/octet-stream"},
+        content=b"\x00\xffresult",
+        request=httpx.Request("POST", "https://target.local/test"),
+    )
+    monkeypatch.setattr(httpx.AsyncClient, "send", AsyncMock(return_value=mock_resp))
+
+    async with LoggingAsyncClient(
+        run_id=42,
+        source="python",
+        provenance={
+            "code_execution_id": 7,
+            "batch_id": "batch-1",
+            "batch_index": 2,
+            "agent_id": "specialist-1",
+            "agent_step": 4,
+            "owasp_category": "A03",
+            "test_class": "sqli",
+        },
+    ) as client:
+        request = httpx.Request(
+            "POST",
+            "https://target.local/test",
+            content=b"\x00\x01payload",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        await client.send(request)
+
+    with Session(engine) as session:
+        entry = session.exec(select(TrafficEntry)).one()
+        assert entry.source == "python"
+        assert entry.code_execution_id == 7
+        assert entry.batch_id == "batch-1"
+        assert entry.batch_index == 2
+        assert entry.agent_id == "specialist-1"
+        assert entry.agent_step == 4
+        assert entry.owasp_category == "A03"
+        assert entry.test_class == "sqli"
+        assert entry.request_body_encoding == "base64"
+        assert entry.request_body_size == 9
+        assert entry.request_body_sha256
+        assert entry.response_body_encoding == "base64"
+        assert entry.response_body_size == 8
+        assert entry.response_body_sha256
+
+
+@pytest.mark.anyio
 async def test_logging_async_client_failure(monkeypatch):
     engine = create_engine(
         "sqlite:///:memory:",
@@ -231,6 +479,15 @@ async def test_playwright_logging_request_failed(monkeypatch):
     mock_ctx.on = on_event
 
     setup_playwright_logging(mock_ctx, run_id=100, username="pw_user")
+    traffic.set_browser_context_tag(
+        mock_ctx,
+        None,
+        "admin_session",
+        username="authenticated_admin",
+        purpose="Specialist - A03 stored_xss: Test stored input",
+        owasp_category="A03",
+        test_class="stored_xss",
+    )
 
     # Verify that the listener is registered
     assert "requestfailed" in listeners
@@ -269,7 +526,8 @@ async def test_playwright_logging_request_failed(monkeypatch):
             "[Browser Request Failed: net::ERR_CONNECTION_REFUSED]"
             in entry.response_body
         )
-        assert entry.username == "pw_user"
+        assert entry.username == "authenticated_admin"
+        assert entry.purpose == "Specialist - A03 stored_xss: Test stored input"
 
 
 @pytest.mark.anyio
@@ -486,3 +744,46 @@ def test_maybe_record_waf_records_in_scope_traffic(monkeypatch):
         assert run_db.waf_provider == "Cloudflare"
         assert run_db.waf_confidence == "high"
         assert run_db.waf_evidence == "server: cloudflare"
+
+
+def test_write_emits_structured_testing_traffic_for_console(monkeypatch, caplog):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        run = RunModel(site_id=1, name="Run #52")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    caplog.set_level("INFO", logger="aespa.testing.traffic")
+    traffic._write(
+        run_id=run_id,
+        source="httpx",
+        method="POST",
+        url="https://target.local/login",
+        request_headers={"content-type": "application/json"},
+        request_body='{"user":"alice"}',
+        status=401,
+        response_headers={"content-type": "application/json"},
+        response_body='{"error":"denied"}',
+        duration_ms=42,
+        username="alice",
+        session_label="configured_alice",
+    )
+
+    record = next(
+        item for item in caplog.records if item.name == "aespa.testing.traffic"
+    )
+    assert record.aespa_testing_run_kind == "web"
+    assert record.aespa_testing_run_id == run_id
+    assert record.aespa_testing_method == "POST"
+    assert record.aespa_testing_status == 401
+    assert record.aespa_testing_request_body == '{"user":"alice"}'
+    assert record.aespa_testing_response_body == '{"error":"denied"}'

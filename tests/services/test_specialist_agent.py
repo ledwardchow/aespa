@@ -343,7 +343,7 @@ def test_automatic_candidate_requires_database_error_for_sqli():
 def test_handoff_reserves_scope_and_delivers_completion(isolated_db_engine):
     from sqlmodel import Session
 
-    from aespa.models import RunIdentity
+    from aespa.models import CrawledPage, RunIdentity
     from aespa.services.specialist_handoffs import (
         consume_feedback,
         create_or_get_handoff,
@@ -357,12 +357,22 @@ def test_handoff_reserves_scope_and_delivers_completion(isolated_db_engine):
         session.commit()
         session.refresh(identity)
         run_id = identity.id
+        page = CrawledPage(
+            test_run_id=run_id,
+            url="https://target.test/search",
+            status="crawled",
+            in_scope=True,
+        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
 
     handoff, created = create_or_get_handoff(
         run_id=run_id,
         run_kind="web",
         attack_class="SQL Injection",
         target_url="https://target.test/search?q=one",
+        page_id=page.id,
         parameter="q",
         session_label=None,
         priority=8,
@@ -372,6 +382,7 @@ def test_handoff_reserves_scope_and_delivers_completion(isolated_db_engine):
     )
 
     assert created is True
+    assert handoff.page_id == page.id
     assert (
         find_active_conflict(
             run_id,
@@ -425,6 +436,63 @@ def test_missing_priority_uses_configured_default_and_queues(isolated_db_engine)
         )
         assert decision["status"] == "queued"
         assert len(_specialist_pending[run_id]) == 1
+    finally:
+        _specialist_running.pop(run_id, None)
+        _specialist_pending.pop(run_id, None)
+
+
+def test_specialist_dispatch_resolves_query_url_to_canonical_page(
+    isolated_db_engine,
+):
+    from sqlmodel import Session
+
+    from aespa.models import CrawledPage, RunIdentity, SpecialistHandoff
+    from aespa.services.scanner import (
+        _schedule_specialist_agent,
+        _specialist_pending,
+    )
+
+    with Session(isolated_db_engine) as session:
+        identity = RunIdentity(kind="web")
+        session.add(identity)
+        session.commit()
+        session.refresh(identity)
+        page = CrawledPage(
+            test_run_id=identity.id,
+            url="https://target.test/search?q=baseline",
+            status="crawled",
+            in_scope=True,
+        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+        run_id = identity.id
+        page_id = page.id
+
+    config = _SpecialistConfig(max_concurrent=1)
+    _specialist_running[run_id] = 1
+    try:
+        decision = _schedule_specialist_agent(
+            run_id=run_id,
+            dispatch={
+                "attack_class": "sqli",
+                "target_url": "https://target.test/search?q=%27",
+                "rationale": "Database error",
+                "priority": 9,
+            },
+            session_vault={},
+            llm_cfg=None,
+            base_url="https://target.test",
+            scanner_policy=None,
+            specialist_config=config,
+            site_id=1,
+        )
+
+        assert decision["status"] == "queued"
+        assert _specialist_pending[run_id][0]["target_page_id"] == page_id
+        with Session(isolated_db_engine) as session:
+            handoff = session.get(SpecialistHandoff, decision["handoff_id"])
+            assert handoff.page_id == page_id
     finally:
         _specialist_running.pop(run_id, None)
         _specialist_pending.pop(run_id, None)

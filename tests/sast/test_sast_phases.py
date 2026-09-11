@@ -4,10 +4,13 @@ import asyncio
 import json
 import zipfile
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
+import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
+    AgentLog,
     LLMConfig,
     LLMProfile,
     PhaseCheckpoint,
@@ -15,11 +18,44 @@ from aespa.models import (
     SastRun,
     SastWorker,
     ScanLead,
+    ScanLog,
     Site,
 )
 from aespa.models import TestRun as WebTestRun
+from aespa.services import events as events_svc
 from aespa.services import sast_scanner
 from aespa.services.scan_leads import create_lead
+
+
+@pytest.mark.parametrize(
+    "provider", ["openai_codex", "github_copilot", "factory_droid"]
+)
+def test_semantic_phases_accept_session_authenticated_providers(provider):
+    config = SimpleNamespace(provider=provider, api_key=None, base_url=None)
+
+    assert sast_scanner._llm_is_available_for_semantic_phases(config)
+
+
+def test_light_run_uses_original_scanner_engine(isolated_db_engine, monkeypatch):
+    from aespa.services import sast_scanner_light
+
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="light review", analysis_mode="light")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    calls = []
+
+    async def fake_start(sast_run_id: int, *, resume: bool = False):
+        calls.append((sast_run_id, resume))
+
+    monkeypatch.setattr(sast_scanner_light, "start_sast_scan", fake_start)
+
+    asyncio.run(sast_scanner.start_sast_scan(run_id, resume=True))
+
+    assert calls == [(run_id, True)]
 
 
 def _run_with_web_target(engine) -> tuple[int, int]:
@@ -70,6 +106,71 @@ def test_analysis_endpoint_returns_persisted_semantic_state(client, isolated_db_
     }
 
 
+def test_agent_log_recovers_fixed_agent_state_from_phase_history(
+    client, isolated_db_engine
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        session.add(
+            ScanLog(
+                test_run_id=sast_run_id,
+                run_kind="sast",
+                phase="threat_model",
+                status="complete",
+                message="Threat model ready.",
+            )
+        )
+        session.commit()
+
+    response = client.get(f"/api/sast-runs/{sast_run_id}/agent-log")
+
+    assert response.status_code == 200
+    threat = next(
+        entry
+        for entry in response.json()
+        if entry["agent_id"] == "sast-threat-modeller"
+    )
+    assert threat["status"] == "complete"
+    assert threat["display_name"] == "Threat Modeller"
+    assert threat["current_task"] == "Threat model ready."
+
+
+@pytest.mark.parametrize("scanner_module", [sast_scanner, pytest.param(None, id="light")])
+def test_running_phase_updates_sast_analyst_status(
+    isolated_db_engine, scanner_module
+):
+    if scanner_module is None:
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="live phase status")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    with events_svc.run_kind_scope("sast"):
+        scanner_module._set_phase(
+            run_id,
+            "discovery",
+            "running",
+            "Reviewing source-to-sink paths.",
+        )
+
+    with Session(isolated_db_engine) as session:
+        analyst = session.exec(
+            select(AgentLog)
+            .where(AgentLog.test_run_id == run_id)
+            .where(AgentLog.run_kind == "sast")
+            .where(AgentLog.agent_id == "sast-scanner")
+        ).one()
+
+    assert analyst.status == "active"
+    assert analyst.current_task == "Reviewing source-to-sink paths."
+
+
 def test_agent_log_replays_persisted_worker_and_validator_activity(
     client, isolated_db_engine
 ):
@@ -109,8 +210,14 @@ def test_agent_log_replays_persisted_worker_and_validator_activity(
         "active",
         "blocked",
     ]
+    assert all(entry["parent_id"] == "sast-sink-workers" for entry in worker_entries)
+    assert all(entry["display_name"] == "sink-audit:1" for entry in worker_entries)
+    assert all(entry["class_group"] == "sink" for entry in worker_entries)
     assert any(
-        entry["agent_id"] == "sast-validator-17" and entry["status"] == "complete"
+        entry["agent_id"] == "sast-validator-17"
+        and entry["status"] == "complete"
+        and entry["parent_id"] == "sast-validators"
+        and entry["display_name"] == "Candidate 17"
         for entry in entries
     )
 
@@ -260,6 +367,94 @@ def test_resume_start_keeps_existing_leads_and_phase_state(
     assert lead.reportable is True
 
 
+def test_resume_skips_completed_repository_threat_and_planning_phases(
+    isolated_db_engine, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.py", "print('hello')\n")
+
+    saved_repository = {"inventory": {"files": []}, "nodes": [], "edges": []}
+    saved_threats = {"summary": "Saved threat model", "scenarios": []}
+    saved_planning = {
+        "obligations": [],
+        "workers": [],
+        "dependency_analysis": {},
+    }
+    phase_state = sast_scanner._empty_phase_state()
+    for phase, data in (
+        ("repository_model", saved_repository),
+        ("threat_model", saved_threats),
+        ("planning", saved_planning),
+    ):
+        phase_state[phase] = {
+            "status": "complete",
+            "message": f"{phase} complete",
+            "data": data,
+        }
+
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="resume-test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="paused deep review",
+            status="paused",
+            source_archive_path=str(archive),
+            source_filename="source.zip",
+            llm_config_id=config.id,
+            phase_state_json=json.dumps(phase_state),
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    def unexpected_semantic_rebuild(*_args, **_kwargs):
+        raise AssertionError("completed semantic phase was rebuilt")
+
+    async def unexpected_repository_reconciliation(*_args, **_kwargs):
+        raise AssertionError("completed repository phase was rerun")
+
+    agent_phases = []
+
+    async def stop_during_discovery(**kwargs):
+        agent_phases.append(kwargs["phase"])
+        raise sast_scanner.SastPauseRequested("stop regression test")
+
+    from aespa.services import llm, sast_semantic
+
+    monkeypatch.setattr(
+        sast_semantic, "build_repository_model", unexpected_semantic_rebuild
+    )
+    monkeypatch.setattr(
+        sast_semantic,
+        "reconcile_repository_model_with_llm",
+        unexpected_repository_reconciliation,
+    )
+    monkeypatch.setattr(
+        sast_semantic, "build_threat_model", unexpected_semantic_rebuild
+    )
+    monkeypatch.setattr(
+        sast_semantic, "plan_semantic_obligations", unexpected_semantic_rebuild
+    )
+    monkeypatch.setattr(sast_scanner, "_run_checkpointed_agent", stop_during_discovery)
+    monkeypatch.setattr(llm, "set_run_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm, "clear_run_context", lambda: None)
+
+    asyncio.run(sast_scanner._sast_scan_task(run_id, resume=True))
+
+    assert agent_phases
+    assert set(agent_phases) == {"discovery"}
+    with Session(isolated_db_engine) as session:
+        saved_run = session.get(SastRun, run_id)
+    resumed_phases = json.loads(saved_run.phase_state_json)
+    assert resumed_phases["threat_model"]["status"] == "complete"
+    assert resumed_phases["threat_model"]["data"] == saved_threats
+
+
 def test_provider_network_failure_pauses_sast_run(
     isolated_db_engine, tmp_path, monkeypatch
 ):
@@ -306,6 +501,124 @@ def test_provider_network_failure_pauses_sast_run(
     assert saved.status == "paused"
     assert pause.reason == "network"
     assert "resumed safely" in pause.message
+
+
+def test_sast_usage_context_starts_before_repository_model(
+    isolated_db_engine, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.py", "print('ok')\n")
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="usage context",
+            status="scanning",
+            source_archive_path=str(archive),
+            source_filename="source.zip",
+            llm_config_id=config.id,
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    context_started = False
+
+    def set_context(actual_run_id, _emit_fn, *, run_kind):
+        nonlocal context_started
+        assert actual_run_id == run_id
+        assert run_kind == "sast"
+        context_started = True
+
+    def inspect_repository_model(_root):
+        assert context_started is True
+        raise RuntimeError("stop after checking usage context")
+
+    from aespa.services import llm
+
+    monkeypatch.setattr(llm, "set_run_context", set_context)
+    monkeypatch.setattr(llm, "clear_run_context", lambda: None)
+    monkeypatch.setattr(
+        sast_scanner.semantic_svc, "build_repository_model", inspect_repository_model
+    )
+
+    asyncio.run(sast_scanner._sast_scan_task(run_id))
+
+    assert context_started is True
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason", "expected_phase"),
+    [
+        (asyncio.CancelledError(), "interrupted", "discovery"),
+        (RuntimeError("source inventory crashed"), "error", "scope"),
+    ],
+)
+def test_sast_task_crashes_pause_for_resume(
+    isolated_db_engine,
+    tmp_path,
+    monkeypatch,
+    failure,
+    expected_reason,
+    expected_phase,
+):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "crashing-source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.py", "print('ok')\n")
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="resumable crash",
+            status="scanning",
+            source_archive_path=str(archive),
+            source_filename="crashing-source.zip",
+            llm_config_id=config.id,
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    async def crash_agent(_config, **_kwargs):
+        raise failure
+
+    from aespa.services import llm
+
+    if expected_reason == "interrupted":
+        monkeypatch.setattr(llm, "thinking_agentic_loop", crash_agent)
+    else:
+
+        def crash_inventory(_root):
+            raise failure
+
+        monkeypatch.setattr(sast_scanner, "_build_source_inventory", crash_inventory)
+    monkeypatch.setattr(llm, "set_run_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm, "clear_run_context", lambda: None)
+    monkeypatch.setattr(sast_scanner, "_SAST_NETWORK_RETRY_DELAYS", ())
+
+    asyncio.run(sast_scanner._sast_scan_task(run_id))
+
+    with Session(isolated_db_engine) as session:
+        saved = session.get(SastRun, run_id)
+        pause = session.exec(
+            select(RunPause)
+            .where(RunPause.run_kind == "sast")
+            .where(RunPause.run_id == run_id)
+        ).one()
+    assert saved.status == "paused"
+    assert saved.completed_at is None
+    assert pause.reason == expected_reason
+    assert pause.resume_stage == expected_phase
+    assert "last saved step" in pause.message
 
 
 def test_sast_model_profile_can_be_changed_after_creation(client, isolated_db_engine):
@@ -559,15 +872,21 @@ def test_review_executor_persists_each_verdict_before_next_candidate(
     sast_scanner._candidates.pop(42, None)
 
 
-def test_file_inventory_records_actual_read_receipts(tmp_path):
+def test_file_inventory_records_actual_read_receipts(tmp_path, isolated_db_engine):
     root = tmp_path / "source"
     root.mkdir()
     (root / "app.py").write_text("print('hello')\n")
     (root / "notes.txt").write_text("documentation\n")
     coverage = sast_scanner._build_source_inventory(root)
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="inventory receipts")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
 
     result = sast_scanner._run_read_tool(
-        52, root, coverage, "discovery", "read_file", {"path": "app.py"}
+        run_id, root, coverage, "discovery", "read_file", {"path": "app.py"}
     )
 
     assert "hello" in result
@@ -654,7 +973,7 @@ def test_discovery_candidates_are_persisted_before_validation(
     sast_scanner._candidates.pop(run_id, None)
 
 
-def test_full_sast_task_executes_three_real_phase_loops(
+def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
     tmp_path, monkeypatch, isolated_db_engine
 ):
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
@@ -764,9 +1083,12 @@ def test_full_sast_task_executes_three_real_phase_loops(
     monkeypatch.setattr(llm, "set_run_context", lambda *args, **kwargs: None)
     monkeypatch.setattr(llm, "clear_run_context", lambda: None)
 
-    asyncio.run(sast_scanner._sast_scan_task(run_id))
+    with events_svc.run_kind_scope("sast"):
+        asyncio.run(sast_scanner._sast_scan_task(run_id))
 
-    assert calls.count("discovery") == 4
+    # Four discovery workers plus the semantic closure worker. The fixture's
+    # generic fallback branch records both as source-review calls.
+    assert calls.count("discovery") == 5
     assert calls.count("validation") == 1
     assert calls[-1] == "attack_path"
     with Session(isolated_db_engine) as session:
@@ -776,6 +1098,11 @@ def test_full_sast_task_executes_three_real_phase_loops(
             .where(ScanLead.producer_run_id == run_id)
             .where(ScanLead.imported_into_run_id == None)  # noqa: E711
         ).one()
+        agent_rows = session.exec(
+            select(AgentLog)
+            .where(AgentLog.test_run_id == run_id)
+            .where(AgentLog.run_kind == "sast")
+        ).all()
     phases = json.loads(saved_run.phase_state_json)
     assert all(phases[key]["status"] == "complete" for key in sast_scanner._PHASES)
     assert saved_run.status == "completed"
@@ -784,9 +1111,26 @@ def test_full_sast_task_executes_three_real_phase_loops(
     assert saved_lead.reportable is True
     assert json.loads(saved_lead.attack_path_json)["nodes"][-1] == "db.execute"
     assert json.loads(saved_run.coverage_json)["summary"]["files_reviewed"] == 1
+    status_by_agent = {
+        row.agent_id: row.status
+        for row in agent_rows
+        if row.agent_id
+        in {
+            "sast-repository-modeller",
+            "sast-threat-modeller",
+            "sast-closure-analyst",
+            "sast-attack-path",
+        }
+    }
+    assert status_by_agent == {
+        "sast-repository-modeller": "complete",
+        "sast-threat-modeller": "complete",
+        "sast-closure-analyst": "failed",
+        "sast-attack-path": "complete",
+    }
 
 
-def test_sast_validation_starts_before_discovery_finishes(
+def test_sast_validation_starts_after_discovery_reconciliation(
     tmp_path, monkeypatch, isolated_db_engine
 ):
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
@@ -816,12 +1160,47 @@ def test_sast_validation_starts_before_discovery_finishes(
     calls: list[str] = []
     validator_started: list[int] = []
     discovery_observed_validator: list[bool] = []
+    visible_candidates_at_validation: list[int] = []
+    reconciliation_finished = False
+    reconciled_candidate_syncs: list[int] = []
+
+    original_sync_candidates_to_db = sast_scanner._sync_candidates_to_db
+    original_reconcile_candidate_ledger = sast_scanner._reconcile_candidate_ledger
+
+    def track_candidate_sync(*args, **kwargs):
+        result = original_sync_candidates_to_db(*args, **kwargs)
+        if reconciliation_finished:
+            reconciled_candidate_syncs.append(result[0])
+        return result
+
+    def track_reconciliation(*args, **kwargs):
+        nonlocal reconciliation_finished
+        result = original_reconcile_candidate_ledger(*args, **kwargs)
+        reconciliation_finished = True
+        return result
+
+    monkeypatch.setattr(sast_scanner, "_sync_candidates_to_db", track_candidate_sync)
+    monkeypatch.setattr(
+        sast_scanner, "_reconcile_candidate_ledger", track_reconciliation
+    )
 
     async def fake_loop(_config, **kwargs):
         prompt = kwargs["system_message"]
         execute = kwargs["tool_executor"]
         if "independent adversarial validator" in prompt:
-            candidate_id = 0 if "candidate #0" in kwargs["initial_user_message"] else 1
+            assert reconciled_candidate_syncs
+            assigned = json.loads(
+                kwargs["initial_user_message"].split("Assigned candidate:\n", 1)[1]
+            )
+            candidate_id = assigned["candidate_id"]
+            with Session(isolated_db_engine) as session:
+                visible_candidates_at_validation.append(
+                    len(
+                        session.exec(
+                            select(ScanLead).where(ScanLead.producer_run_id == run_id)
+                        ).all()
+                    )
+                )
             calls.append("validation")
             validator_started.append(candidate_id)
             await asyncio.sleep(0)
@@ -840,7 +1219,7 @@ def test_sast_validation_starts_before_discovery_finishes(
             )
         elif "attack-path analyst" in prompt:
             calls.append("attack_path")
-            for candidate_id in (0, 1):
+            for candidate_id in (0, 1, 2):
                 await execute(
                     "record_attack_path",
                     {
@@ -883,6 +1262,11 @@ def test_sast_validation_starts_before_discovery_finishes(
                         "description": "Request id reaches db.execute.",
                         "evidence": "db.execute(value)",
                         "suggested_endpoint": "GET /item?id=",
+                        "root_causes": (
+                            ["Unsafe query construction", "Missing input validation"]
+                            if candidate_id == 0
+                            else []
+                        ),
                     },
                     1,
                 )
@@ -908,10 +1292,12 @@ def test_sast_validation_starts_before_discovery_finishes(
 
     asyncio.run(sast_scanner._sast_scan_task(run_id))
 
-    assert discovery_observed_validator == [True]
-    assert sorted(validator_started) == [0, 1]
+    assert discovery_observed_validator == [False]
+    assert sorted(validator_started) == [0, 1, 2]
+    assert reconciled_candidate_syncs[0] == 3
+    assert visible_candidates_at_validation == [3, 3, 3]
     assert calls[0] == "discovery"
-    assert calls.count("validation") == 2
+    assert calls.count("validation") == 3
     assert calls[-1] == "attack_path"
     with Session(isolated_db_engine) as session:
         saved_run = session.get(SastRun, run_id)
@@ -922,8 +1308,9 @@ def test_sast_validation_starts_before_discovery_finishes(
             .order_by(ScanLead.id)
         ).all()
     assert saved_run.status == "completed"
-    assert saved_run.leads_count == 2
+    assert saved_run.leads_count == 3
     assert [lead.validation_status for lead in saved_leads] == [
+        "confirmed",
         "confirmed",
         "confirmed",
     ]

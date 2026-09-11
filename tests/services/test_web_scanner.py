@@ -53,6 +53,7 @@ def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypa
             disable_deterministic_checks=True,
             max_consecutive_text_turns=3,
             enforce_full_coverage_obligations=True,
+            standard_coverage_percent=70,
         ),
         pages_snapshot=[{"url": "https://target.local/", "req_auth": False}],
         coverage_mode="enforce",
@@ -65,8 +66,41 @@ def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypa
     assert snapshot["model"]["model"] == "minimax/m3"
     assert snapshot["coverage_mode"] == "enforce"
     assert snapshot["policy"]["disable_deterministic_checks"] is True
+    assert snapshot["policy"]["standard_coverage_percent"] == 70
     assert len(snapshot["crawl_sha256"]) == 64
     assert "must-not-be-persisted" not in snapshot_raw
+
+
+def test_exercised_coverage_progress_counts_live_and_completed_probes():
+    progress = scanner._exercised_coverage_progress(
+        {
+            "not_started": 3,
+            "in_progress": 2,
+            "covered": 2,
+            "finding": 1,
+            "skipped": 2,
+        },
+        60,
+    )
+
+    assert progress == {
+        "exercised": 5,
+        "total": 8,
+        "skipped": 2,
+        "percent": 62.5,
+        "target_percent": 60,
+        "target_met": True,
+    }
+
+
+def test_exercised_coverage_progress_rejects_below_target():
+    progress = scanner._exercised_coverage_progress(
+        {"not_started": 5, "in_progress": 2, "covered": 1},
+        60,
+    )
+
+    assert progress["percent"] == 37.5
+    assert progress["target_met"] is False
 
 
 def test_select_browser_auth_token_accepts_namespaced_token_key():
@@ -590,6 +624,40 @@ def test_dynamic_finding_can_be_saved_without_page_assignment():
         engine.dispose()
 
 
+def test_finding_from_llm_preserves_explicit_url_and_matching_evidence():
+    health_url = "https://target.local/api/health"
+    accounts_url = "https://target.local/api/accounts"
+
+    finding = scanner._finding_from_llm(
+        run_id=1,
+        page_id=42,
+        page_url=accounts_url,
+        raw={
+            "owasp_category": "A01",
+            "title": "Account details exposed without authorization",
+            "affected_url": accounts_url,
+            "evidence": "The accounts response disclosed another customer's records.",
+            "cvss_score": 8.1,
+        },
+        result_by_url={
+            health_url: {
+                "request_evidence": f"GET {health_url}",
+                "response_evidence": "HTTP/1.1 200 OK\n\nhealthy",
+            },
+            accounts_url: {
+                "request_evidence": f"GET {accounts_url}",
+                "response_evidence": "HTTP/1.1 200 OK\n\naccount records",
+            },
+        },
+    )
+
+    assert finding.page_id == 42
+    assert finding.affected_url == accounts_url
+    assert finding.request_evidence == f"GET {accounts_url}"
+    assert "account records" in finding.response_evidence
+    assert health_url not in finding.evidence
+
+
 def test_finding_from_llm_preserves_explicit_severity_when_cvss_is_omitted():
     finding = scanner._finding_from_llm(
         run_id=1,
@@ -756,6 +824,92 @@ def test_session_request_headers_replace_primary_with_selected_identity():
 
     assert headers["Authorization"] == "Bearer alternate-secret"
     assert "primary-secret" not in str(headers)
+
+
+def test_anonymous_session_removes_client_default_auth_on_wire():
+    observed_headers = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal observed_headers
+        observed_headers = request.headers
+        return httpx.Response(200, json={"ok": True})
+
+    async def exercise() -> None:
+        anonymous = {"kind": "anonymous", "cookies": {}, "extra_headers": {}}
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            headers={
+                "Authorization": "Bearer primary-secret",
+                "X-Session-Key": "primary-key",
+                "User-Agent": "aespa",
+            },
+            cookies={"session": "primary-cookie"},
+            transport=transport,
+        ) as client:
+            request_headers = scanner._session_request_headers(
+                client.headers,
+                anonymous,
+                default_session={
+                    "extra_headers": {
+                        "Authorization": "Bearer primary-secret",
+                        "X-Session-Key": "primary-key",
+                    }
+                },
+            )
+            with scanner._client_session_cookies(client, anonymous):
+                await client.get(
+                    "https://target.local/private", headers=request_headers
+                )
+            assert client.headers["Authorization"] == "Bearer primary-secret"
+            assert client.cookies["session"] == "primary-cookie"
+
+    asyncio.run(exercise())
+
+    assert observed_headers is not None
+    assert "authorization" not in observed_headers
+    assert "x-session-key" not in observed_headers
+    assert "cookie" not in observed_headers
+
+
+def test_unauthenticated_finding_requires_wire_level_no_auth_evidence():
+    finding = {
+        "title": "Unauthenticated access to account data",
+        "affected_url": "https://target.local/api/accounts",
+        "evidence": "The endpoint returned HTTP 200.",
+    }
+
+    authenticated_result = {
+        finding["affected_url"]: {
+            "sent_authenticated": True,
+            "request_evidence": "Authorization: present\nCookies: none",
+        }
+    }
+    assert scanner._unauthenticated_finding_rejection(finding, authenticated_result)
+
+    anonymous_result = {
+        finding["affected_url"]: {
+            "sent_authenticated": False,
+            "request_evidence": "Authorization: none\nCookies: none",
+        }
+    }
+    assert scanner._unauthenticated_finding_rejection(finding, anonymous_result) is None
+
+    denied_anonymous_result = {
+        finding["affected_url"]: {
+            "sent_authenticated": False,
+            "status": 401,
+            "request_evidence": "Authorization: none\nCookies: none",
+        }
+    }
+    assert scanner._unauthenticated_finding_rejection(
+        finding, denied_anonymous_result
+    )
+
+
+def test_finding_title_dedup_ignores_reporting_prefixes():
+    assert scanner._canonical_finding_title(
+        "[A01] [CRITICAL] Unauthenticated Access to Account Data"
+    ) == scanner._canonical_finding_title("Unauthenticated Access to Account Data")
 
 
 def test_resolve_requested_scan_session_forces_anonymous_on_missing_label():

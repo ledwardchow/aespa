@@ -3,10 +3,41 @@ from __future__ import annotations
 import asyncio
 
 from aespa.services.model_capabilities import (
+    documented_model_capability,
     enrich_model_options,
     fuzzy_match_model,
     gemini_capability,
 )
+
+
+def test_gpt_6_astra_has_documented_reasoning_and_context_limits():
+    capability = documented_model_capability("openai", "gpt-6-astra")
+
+    assert capability is not None
+    assert capability["supported_efforts"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert capability["context_window_tokens"] == 1_050_000
+
+
+def test_gpt_5_6_family_has_documented_reasoning_and_context_limits():
+    for model in ("gpt-5.6", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"):
+        capability = documented_model_capability("openai", model)
+
+        assert capability is not None
+        assert capability["supported_efforts"] == [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ]
+        assert capability["context_window_tokens"] == 1_050_000
 
 
 def test_openrouter_fuzzy_match_requires_a_clear_winner():
@@ -67,6 +98,35 @@ def test_native_context_window_is_preserved_without_reasoning_metadata():
         )
     )
     assert result["gpt-context-model"]["context_window_tokens"] == 131072
+
+
+def test_native_reasoning_metadata_is_enriched_with_openrouter_context():
+    async def catalog():
+        return [
+            {
+                "id": "vendor/reasoning-model",
+                "context_length": 1_000_000,
+                "reasoning": {"supported_efforts": ["low", "high"]},
+            }
+        ]
+
+    result = asyncio.run(
+        enrich_model_options(
+            "github_copilot",
+            ["vendor/reasoning-model"],
+            {
+                "vendor/reasoning-model": {
+                    "supported_reasoning_efforts": ["low", "medium"]
+                }
+            },
+            catalog_fetcher=catalog,
+        )
+    )
+
+    capability = result["vendor/reasoning-model"]
+    assert capability["supported_efforts"] == ["low", "medium"]
+    assert capability["context_window_tokens"] == 1_000_000
+    assert capability["context_window_source"] == "openrouter"
 
 
 def test_unknown_capability_is_safe_default_only():

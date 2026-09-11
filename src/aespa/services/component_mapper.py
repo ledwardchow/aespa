@@ -29,7 +29,10 @@ from aespa.models import (
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import settings as settings_svc
-from aespa.services.component_facts import interface_fact_fingerprint
+from aespa.services.component_facts import (
+    interface_fact_fingerprint,
+    request_role_for_fact,
+)
 from aespa.services.prompts.component_mapper import (
     COMPONENT_MAPPER_SYSTEM_PROMPT,
     COMPONENT_MAPPER_TOOLS,
@@ -212,6 +215,8 @@ def _merge_detail(existing: dict, incoming: dict) -> dict:
             merged[key] = sorted(str(value) for value in values)[:8]
     if incoming.get("credential_kind"):
         merged["credential_kind"] = str(incoming["credential_kind"])
+    if incoming.get("request_role"):
+        merged["request_role"] = incoming["request_role"]
     return merged
 
 
@@ -419,6 +424,11 @@ def _validate_fact(
             continue
         supporting.append(f"{parsed[0]}:{parsed[1]}")
     detail = dict(raw.get("detail")) if isinstance(raw.get("detail"), dict) else {}
+    # Keep request roles in the bounded detail document.  Explicit invalid
+    # roles are rejected; missing roles remain unknown for legacy evidence.
+    request_role = request_role_for_fact(fact_type, detail)
+    if request_role is not None:
+        detail["request_role"] = request_role
     for key in (
         "handler_locations",
         "route_locations",

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
+import itertools
 import json
 import logging
 import math
 import os
 import re
+import sys
 import tempfile
 import time
 from contextvars import ContextVar
@@ -17,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 from urllib.parse import quote
 
 import httpx
@@ -56,8 +59,19 @@ from aespa.services.prompts.validator import (
 )
 
 log = logging.getLogger("aespa.llm")
+traffic_log = logging.getLogger("aespa.llm.traffic")
+
+_tool_text_delta_var: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar(
+    "llm_tool_text_delta", default=None
+)
 
 REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
+
+# Bedrock can spend several minutes reasoning before it emits the first stream
+# event.  Botocore's default read timeout is too short for those requests.  The
+# stream keeps this timeout as an idle limit once output starts.
+BEDROCK_CONNECT_TIMEOUT_S = 30
+BEDROCK_READ_TIMEOUT_S = 3600
 
 
 class LLMRefusalError(RuntimeError):
@@ -126,6 +140,8 @@ _base_url_var: ContextVar[str | None] = ContextVar("_base_url", default=None)
 _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
+_operation_var: ContextVar[str | None] = ContextVar("llm_operation", default=None)
+_traffic_call_ids = itertools.count(1)
 
 
 def _usage_provider(config: LLMConfig) -> str:
@@ -158,6 +174,10 @@ def _usage_base_url(config: LLMConfig) -> str | None:
 
 # Per-run usage accumulator. Copilot entries also carry AI-credit/request data.
 _run_token_usage: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
+
+# Requests currently waiting for a provider response. These estimates are kept
+# separate from billed usage and disappear when the call finishes or fails.
+_pending_run_calls: dict[tuple[str, int], dict[int, dict[str, Any]]] = {}
 
 # Tracks which (run_kind, run_id) tuples have already been seeded from DB this process lifetime.
 _run_token_seeded: set[tuple[str, int]] = set()
@@ -675,7 +695,10 @@ def _cost_total(bucket: dict[str, dict[str, Any]], key: str) -> float | None:
     return sum(values) if values else None
 
 
-def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _usage_totals(
+    bucket: dict[str, dict[str, Any]],
+    pending_calls: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     def latest_quota(key: str) -> dict[str, Any] | None:
         quotas = [value[key] for value in bucket.values() if value.get(key)]
         return max(
@@ -684,6 +707,7 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
             default=None,
         )
 
+    pending = pending_calls or {}
     return {
         "total_input": sum(v.get("input", 0) for v in bucket.values()),
         "total_output": sum(v.get("output", 0) for v in bucket.values()),
@@ -697,6 +721,11 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
             v.get("premium_requests", 0) for v in bucket.values()
         ),
         "total_requests": sum(v.get("requests", 0) for v in bucket.values()),
+        "pending_requests": len(pending),
+        "pending_input_tokens": sum(
+            max(0, int(call.get("input_tokens", 0) or 0))
+            for call in pending.values()
+        ),
         "estimated_token_cost_usd": _cost_total(bucket, "estimated_token_cost_usd"),
         "estimated_credit_cost_usd": _cost_total(bucket, "estimated_credit_cost_usd"),
         "estimated_total_cost_usd": _cost_total(bucket, "estimated_total_cost_usd"),
@@ -707,6 +736,53 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "codex_quota": latest_quota("codex_quota"),
         "by_model": {m: dict(v) for m, v in bucket.items()},
     }
+
+
+def _emit_pending_usage_update(
+    context: _UsageContext, key: tuple[str, int]
+) -> None:
+    if context.emit_fn is None:
+        return
+    try:
+        context.emit_fn(
+            {
+                "type": "token_usage_update",
+                "totals": _usage_totals(
+                    _run_token_usage.get(key, {}), _pending_run_calls.get(key)
+                ),
+            }
+        )
+    except Exception:
+        pass
+
+
+def _begin_pending_usage(
+    config: LLMConfig, call_id: int, input_tokens: int
+) -> tuple[_UsageContext, tuple[str, int], int] | None:
+    context = _capture_usage_context()
+    if context.run_id is None:
+        return None
+    key = (context.run_kind, context.run_id)
+    _pending_run_calls.setdefault(key, {})[call_id] = {
+        "model": config.model,
+        "input_tokens": max(0, int(input_tokens)),
+    }
+    _emit_pending_usage_update(context, key)
+    return context, key, call_id
+
+
+def _end_pending_usage(
+    token: tuple[_UsageContext, tuple[str, int], int] | None,
+) -> None:
+    if token is None:
+        return
+    context, key, call_id = token
+    calls = _pending_run_calls.get(key)
+    if calls is not None:
+        calls.pop(call_id, None)
+        if not calls:
+            _pending_run_calls.pop(key, None)
+    _emit_pending_usage_update(context, key)
 
 
 def _record_usage(
@@ -832,7 +908,7 @@ def _record_usage(
                     "ai_credits": ai_credits,
                     "factory_credits": factory_credits,
                     "premium_requests": premium_requests,
-                    "totals": _usage_totals(bucket),
+                    "totals": _usage_totals(bucket, _pending_run_calls.get(key)),
                 }
             )
         except Exception:
@@ -868,7 +944,7 @@ def get_run_token_usage(run_id: int, run_kind: str = "web") -> dict:
         bucket = _load_bucket_from_db(run_id, run_kind)
     elif _reprice_bucket(bucket):
         _persist_bucket_to_db(run_id, bucket, run_kind)
-    return _usage_totals(bucket)
+    return _usage_totals(bucket, _pending_run_calls.get(key))
 
 
 def set_llm_proxy(url: str | None) -> None:
@@ -982,6 +1058,27 @@ def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
     if proxy:
         kwargs["proxy"] = proxy
     return httpx.AsyncClient(**kwargs)
+
+
+def _bedrock_botocore_config(proxy_url: str | None):
+    """Build the Bedrock SDK transport settings used by every request path."""
+    from botocore.config import Config as BotocoreConfig
+
+    kwargs: dict[str, Any] = {
+        "connect_timeout": BEDROCK_CONNECT_TIMEOUT_S,
+        "read_timeout": BEDROCK_READ_TIMEOUT_S,
+    }
+    if proxy_url:
+        kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+    return BotocoreConfig(**kwargs)
+
+
+def _bedrock_http_timeout() -> httpx.Timeout:
+    """Use the same long read allowance for bearer-token Bedrock requests."""
+    return httpx.Timeout(
+        BEDROCK_READ_TIMEOUT_S,
+        connect=BEDROCK_CONNECT_TIMEOUT_S,
+    )
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -1366,9 +1463,30 @@ async def decide_login_action(
     )
     try:
         raw = await _call(config, prompt, screenshot_b64 if config.use_vision else None)
+    except LLMQuotaPauseError as exc:
+        return {
+            "action": "give_up",
+            "reason": f"LLM request failed: {exc}",
+            "_llm_error": True,
+            "_llm_error_type": "quota",
+            "_llm_reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
+        }
+    except Exception as exc:
+        return {
+            "action": "give_up",
+            "reason": f"LLM request failed: {exc}",
+            "_llm_error": True,
+            "_llm_error_type": "request",
+        }
+    try:
         action = _extract_action_json(raw)
     except Exception as exc:
-        return {"action": "give_up", "reason": f"LLM action parse failed: {exc}"}
+        return {
+            "action": "give_up",
+            "reason": f"LLM action parse failed: {exc}",
+            "_llm_error": True,
+            "_llm_error_type": "response_parse",
+        }
 
     name = str(action.get("action") or "").strip().lower()
     if name not in _LOGIN_ACTIONS:
@@ -1426,7 +1544,9 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         return raw_cleaned, [], dict(_EMPTY_CATS)
 
 
-async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+async def _call_impl(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
     _last_call_tokens_var.set(None)
@@ -1454,7 +1574,7 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             return await _openrouter(config, prompt, screenshot_b64)
         if config.provider == "bedrock":
             return await _bedrock(config, prompt, screenshot_b64)
-        if config.provider == "bedrock_mantle":
+        if config.provider == "bedrock_mantle" or _uses_openai_responses(config):
             return await _openai_responses(config, prompt, screenshot_b64)
         return await _openai_compat(config, prompt, screenshot_b64)
 
@@ -1498,7 +1618,7 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             resp = await _openrouter(config, prompt, screenshot_b64)
         elif config.provider == "bedrock":
             resp = await _bedrock(config, prompt, screenshot_b64)
-        elif config.provider == "bedrock_mantle":
+        elif config.provider == "bedrock_mantle" or _uses_openai_responses(config):
             resp = await _openai_responses(config, prompt, screenshot_b64)
         else:
             resp = await _openai_compat(config, prompt, screenshot_b64)
@@ -1519,15 +1639,173 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         raise
 
 
+def _traffic_context(config: LLMConfig) -> str:
+    run_id = _run_id_var.get()
+    run = f"{_run_kind_var.get()} run {run_id}" if run_id is not None else "no run"
+    return f"{config.provider}/{config.model} - {run}"
+
+
+def _infer_llm_operation() -> str:
+    """Return a stable module/function label for the code requesting the call."""
+    try:
+        frame = sys._getframe(2)
+    except ValueError:
+        return "unknown"
+    while frame and frame.f_code.co_name in {
+        "plain_completion",
+        "stream_chat_completion",
+        "_call_with_tools",
+    }:
+        frame = frame.f_back
+    if frame is None:
+        return "unknown"
+    module = str(frame.f_globals.get("__name__") or "unknown").rsplit(".", 1)[-1]
+    function = frame.f_code.co_name
+    return f"{module}.{function}"
+
+
+def _log_llm_traffic(
+    direction: str,
+    config: LLMConfig,
+    payload: Any,
+    *,
+    kind: str,
+    operation: str,
+    call_id: int,
+) -> None:
+    if not traffic_log.isEnabledFor(logging.INFO):
+        return
+    run_id = _run_id_var.get()
+    run_kind = _run_kind_var.get()
+    if isinstance(payload, str):
+        rendered = payload
+    else:
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    label = (
+        f"operation={operation} | type={kind} | call={call_id} | "
+        f"direction={direction} | {_traffic_context(config)}"
+    )
+    traffic_log.info(
+        "============ BEGIN LLM %s ============\n%s\n"
+        "============ END LLM %s ============",
+        label,
+        rendered,
+        label,
+        extra={
+            "aespa_llm_call_id": call_id,
+            "aespa_llm_operation": operation,
+            "aespa_llm_kind": kind,
+            "aespa_llm_direction": direction,
+            "aespa_llm_context": _traffic_context(config),
+            "aespa_llm_payload": rendered,
+            "aespa_llm_run_id": run_id,
+            "aespa_llm_run_kind": run_kind,
+        },
+    )
+
+
+async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    operation = _operation_var.get() or _infer_llm_operation()
+    call_id = next(_traffic_call_ids)
+    _log_llm_traffic(
+        "REQUEST",
+        config,
+        prompt,
+        kind="completion",
+        operation=operation,
+        call_id=call_id,
+    )
+    pending_token = _begin_pending_usage(
+        config,
+        call_id,
+        estimate_tokens(
+            prompt,
+            screenshot_b64,
+            getattr(config.provider, "value", config.provider),
+            model=config.model,
+        ),
+    )
+    try:
+        response = await _call_impl(config, prompt, screenshot_b64)
+    except Exception as exc:
+        _log_llm_traffic(
+            "FAILED",
+            config,
+            str(exc),
+            kind="completion",
+            operation=operation,
+            call_id=call_id,
+        )
+        raise
+    finally:
+        _end_pending_usage(pending_token)
+    _log_llm_traffic(
+        "RESPONSE",
+        config,
+        response,
+        kind="completion",
+        operation=operation,
+        call_id=call_id,
+    )
+    return response
+
+
 async def plain_completion(
     config: LLMConfig, prompt: str, *, system_prompt: str | None = None
 ) -> str:
     """Send a plain text prompt and return the raw response text."""
-    combined = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-    return await _call(config, combined, None)
+    request_config, combined, _budget = _fit_plain_prompt_to_context(
+        config, prompt, system_prompt
+    )
+    return await _call(request_config, combined, None)
 
 
 async def stream_chat_completion(
+    config: LLMConfig,
+    system_message: str,
+    messages: list[dict],
+) -> AsyncGenerator[str, None]:
+    operation = _operation_var.get() or _infer_llm_operation()
+    call_id = next(_traffic_call_ids)
+    request = {"system": system_message, "messages": messages}
+    _log_llm_traffic(
+        "REQUEST",
+        config,
+        request,
+        kind="stream",
+        operation=operation,
+        call_id=call_id,
+    )
+    chunks: list[str] = []
+    try:
+        async for chunk in _stream_chat_completion_impl(
+            config, system_message, messages
+        ):
+            chunks.append(chunk)
+            yield chunk
+    except Exception as exc:
+        _log_llm_traffic(
+            "FAILED",
+            config,
+            str(exc),
+            kind="stream",
+            operation=operation,
+            call_id=call_id,
+        )
+        raise
+    finally:
+        if chunks:
+            _log_llm_traffic(
+                "RESPONSE",
+                config,
+                "".join(chunks),
+                kind="stream",
+                operation=operation,
+                call_id=call_id,
+            )
+
+
+async def _stream_chat_completion_impl(
     config: LLMConfig,
     system_message: str,
     messages: list[dict],
@@ -1615,7 +1893,9 @@ async def stream_chat_completion(
                 "Accept": "application/json",
             }
             try:
-                async with _make_llm_http_client(timeout=120) as client:
+                async with _make_llm_http_client(
+                    timeout=_bedrock_http_timeout()
+                ) as client:
                     async with client.stream(
                         "POST", url, headers=headers, json=payload
                     ) as response:
@@ -1649,23 +1929,18 @@ async def stream_chat_completion(
 
             def _run_converse_stream():
                 import boto3
-                from botocore.config import Config as _BotocoreConfig
 
                 region = _bedrock_region(config)
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
-                _boto_cfg = (
-                    _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
-                    if _proxy_url
-                    else None
-                )
+                _boto_cfg = _bedrock_botocore_config(_proxy_url)
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=_endpoint,
                     verify=not _proxy_url,
-                    **{"config": _boto_cfg} if _boto_cfg else {},
+                    config=_boto_cfg,
                 )
                 return client.converse_stream(
                     modelId=_model,
@@ -1706,9 +1981,8 @@ async def stream_chat_completion(
                 elif item_type == "error":
                     raise RuntimeError(f"Bedrock SDK stream failed: {val}") from val
 
-    elif config.provider == "bedrock_mantle":
-        # Mantle uses the OpenAI Responses API (gpt-5.x are Responses-only).
-        client = _make_bedrock_mantle_client(config)
+    elif config.provider == "bedrock_mantle" or _uses_openai_responses(config):
+        client = _make_responses_client(config)
         r_input = [
             {"type": "message", "role": m["role"], "content": m["content"]}
             for m in messages
@@ -1717,7 +1991,7 @@ async def stream_chat_completion(
         try:
             stream = await _create_response(
                 client,
-                _mantle_response_kwargs(
+                _responses_request_kwargs(
                     config, input=r_input, instructions=system_message, stream=True
                 ),
             )
@@ -1727,8 +2001,8 @@ async def stream_chat_completion(
                     if delta:
                         yield delta
         except Exception as e:
-            log.exception("Error in Bedrock Mantle responses stream")
-            raise RuntimeError(f"Bedrock Mantle responses stream failed: {e}") from e
+            log.exception("Error in OpenAI Responses stream")
+            raise RuntimeError(f"OpenAI Responses stream failed: {e}") from e
 
     else:
         from openai import AsyncOpenAI
@@ -1966,8 +2240,26 @@ def _model_needs_reasoning_params(model: str) -> bool:
     lowered = (model or "").lower().split("/")[-1]
     return (
         lowered.startswith(("o1", "o3", "o4"))
-        or lowered.startswith("gpt-5")
+        or lowered.startswith(("gpt-5", "gpt-6"))
         or "reasoning" in lowered
+    )
+
+
+def _is_gpt_6_astra(model: str) -> bool:
+    return (model or "").lower().split("/")[-1].startswith("gpt-6-astra")
+
+
+def _is_gpt_5_6(model: str) -> bool:
+    model = (model or "").lower().split("/")[-1]
+    return model == "gpt-5.6" or model.startswith(
+        ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
+    )
+
+
+def _uses_openai_responses(config: LLMConfig) -> bool:
+    """Return whether this direct OpenAI model uses the Responses API."""
+    return config.provider == "openai" and (
+        _is_gpt_6_astra(config.model) or _is_gpt_5_6(config.model)
     )
 
 
@@ -2095,6 +2387,11 @@ async def _create_chat_completion(client: Any, kwargs: dict[str, Any]) -> Any:
             for term in ("tool_choice", "tool choice", "thinking mode", "thinking_mode")
         ):
             retry_kwargs.pop("tool_choice", None)
+            changed = True
+        if "stream_options" in retry_kwargs and (
+            "stream_options" in message or "stream options" in message
+        ):
+            retry_kwargs.pop("stream_options", None)
             changed = True
 
         if not changed:
@@ -2480,16 +2777,34 @@ def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
     return items
 
 
-def _is_mantle_reasoning_model(model: str) -> bool:
-    """True for Mantle reasoning models (gpt-5.x, o-series) that reject temperature.
+def _is_reasoning_model_without_sampling(model: str) -> bool:
+    """True for reasoning models that reject temperature.
 
     Mantle ids carry a vendor prefix (e.g. ``openai.gpt-5.5``), which the slash-based
     ``_model_needs_reasoning_params`` split doesn't catch — so match the substring too.
     """
-    return "gpt-5" in (model or "").lower() or _model_needs_reasoning_params(model)
+    return any(
+        marker in (model or "").lower() for marker in ("gpt-5", "gpt-6")
+    ) or _model_needs_reasoning_params(model)
 
 
-def _mantle_response_kwargs(
+def _make_responses_client(config: LLMConfig) -> Any:
+    if config.provider == "bedrock_mantle":
+        return _make_bedrock_mantle_client(config)
+
+    from openai import AsyncOpenAI
+
+    kwargs: dict[str, Any] = {"api_key": config.api_key or "not-needed"}
+    if config.base_url:
+        base = config.base_url.rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
+        kwargs["base_url"] = base
+    kwargs.update(_llm_client_kwargs())
+    return AsyncOpenAI(**kwargs)
+
+
+def _responses_request_kwargs(
     config: LLMConfig,
     *,
     input: Any,
@@ -2504,11 +2819,16 @@ def _mantle_response_kwargs(
     }
     if instructions is not None:
         kwargs["instructions"] = instructions
-    if config.reasoning_effort:
-        kwargs["reasoning"] = {"effort": config.reasoning_effort}
+    reasoning_effort = config.reasoning_effort
+    if _is_gpt_6_astra(config.model) and reasoning_effort in {"none", "minimal"}:
+        reasoning_effort = "low"
+    if reasoning_effort:
+        kwargs["reasoning"] = {"effort": reasoning_effort}
     # Reasoning models (gpt-5.x / o-series) reject a custom temperature; skip it
     # for them rather than pay a failed round-trip (the retry below is a backstop).
-    if config.temperature is not None and not _is_mantle_reasoning_model(config.model):
+    if config.temperature is not None and not _is_reasoning_model_without_sampling(
+        config.model
+    ):
         kwargs["temperature"] = config.temperature
     if tools is not None:
         kwargs["tools"] = tools
@@ -2570,7 +2890,7 @@ def _extract_responses_text(resp: Any) -> str:
 async def _openai_responses(
     config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
 ) -> str:
-    client = _make_bedrock_mantle_client(config)
+    client = _make_responses_client(config)
     if screenshot_b64:
         r_input: Any = [
             {
@@ -2588,7 +2908,7 @@ async def _openai_responses(
     else:
         r_input = prompt
     resp = await _create_response(
-        client, _mantle_response_kwargs(config, input=r_input)
+        client, _responses_request_kwargs(config, input=r_input)
     )
     _record_responses_usage(config, resp)
     return _extract_responses_text(resp)
@@ -2836,6 +3156,102 @@ def _bedrock_region(config: LLMConfig) -> str:
     )
 
 
+def _consume_bedrock_converse_stream(
+    response: dict[str, Any], on_text_delta: Callable[[str], None] | None = None
+) -> dict[str, Any]:
+    """Collect ConverseStream events into the shape returned by Converse."""
+    content: dict[int, dict[str, Any]] = {}
+    tool_inputs: dict[int, str] = {}
+    stop_reason = "end_turn"
+    usage: dict[str, Any] = {}
+    metrics: dict[str, Any] = {}
+    trace: dict[str, Any] | None = None
+    stream = response.get("stream")
+
+    try:
+        for event in stream or ():
+            started = event.get("contentBlockStart")
+            if isinstance(started, dict):
+                index = int(started.get("contentBlockIndex", len(content)))
+                start = started.get("start") or {}
+                if isinstance(start.get("toolUse"), dict):
+                    tool = start["toolUse"]
+                    content[index] = {
+                        "toolUse": {
+                            "toolUseId": tool.get("toolUseId"),
+                            "name": tool.get("name"),
+                            "input": {},
+                        }
+                    }
+                    tool_inputs[index] = ""
+
+            changed = event.get("contentBlockDelta")
+            if isinstance(changed, dict):
+                index = int(changed.get("contentBlockIndex", len(content)))
+                delta = changed.get("delta") or {}
+                if "text" in delta:
+                    text_delta = str(delta.get("text") or "")
+                    block = content.setdefault(index, {"text": ""})
+                    block["text"] = str(block.get("text") or "") + str(text_delta)
+                    if text_delta and on_text_delta is not None:
+                        on_text_delta(text_delta)
+                tool_delta = delta.get("toolUse")
+                if isinstance(tool_delta, dict):
+                    tool_inputs[index] = tool_inputs.get(index, "") + str(
+                        tool_delta.get("input") or ""
+                    )
+                reasoning_delta = delta.get("reasoningContent")
+                if isinstance(reasoning_delta, dict):
+                    block = content.setdefault(index, {"reasoningContent": {}})
+                    native = block.setdefault("reasoningContent", {})
+                    reasoning_text = native.setdefault("reasoningText", {})
+                    if "text" in reasoning_delta:
+                        reasoning_text["text"] = str(
+                            reasoning_text.get("text") or ""
+                        ) + str(reasoning_delta.get("text") or "")
+                    if "signature" in reasoning_delta:
+                        reasoning_text["signature"] = reasoning_delta["signature"]
+                    if "redactedContent" in reasoning_delta:
+                        native["redactedContent"] = reasoning_delta["redactedContent"]
+
+            stopped = event.get("messageStop")
+            if isinstance(stopped, dict):
+                stop_reason = str(stopped.get("stopReason") or stop_reason)
+
+            metadata = event.get("metadata")
+            if isinstance(metadata, dict):
+                usage = metadata.get("usage") or usage
+                metrics = metadata.get("metrics") or metrics
+                trace = metadata.get("trace") or trace
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+
+    for index, raw_input in tool_inputs.items():
+        tool = content[index]["toolUse"]
+        if raw_input:
+            try:
+                tool["input"] = json.loads(raw_input)
+            except json.JSONDecodeError:
+                tool["input"] = raw_input
+
+    result = {
+        "stopReason": stop_reason,
+        "output": {
+            "message": {
+                "content": [content[index] for index in sorted(content)],
+            }
+        },
+        "usage": usage,
+        "metrics": metrics,
+        "ResponseMetadata": response.get("ResponseMetadata") or {},
+    }
+    if trace is not None:
+        result["trace"] = trace
+    return result
+
+
 # SigV4 signing name for the bedrock-mantle endpoint.  AWS signs Mantle requests
 # (like the bedrock-runtime OpenAI-compatible endpoint) under the "bedrock"
 # service name — NOT "bedrock-mantle".  Confirmed by the AWS SigV4 curl example
@@ -3033,7 +3449,6 @@ async def _bedrock(
         import asyncio as _aio
 
         import boto3
-        from botocore.config import Config as _BotocoreConfig
 
         region = _bedrock_region(config)
         profile = os.getenv("AWS_PROFILE")
@@ -3046,17 +3461,13 @@ async def _bedrock(
         def _run_sync() -> dict:
             _session_kwargs = {"profile_name": profile} if profile else {}
             _session = boto3.Session(**_session_kwargs)
-            _boto_cfg = (
-                _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
-                if _proxy_url
-                else None
-            )
+            _boto_cfg = _bedrock_botocore_config(_proxy_url)
             _client = _session.client(
                 "bedrock-runtime",
                 region_name=region,
                 endpoint_url=_endpoint,
                 verify=not _proxy_url,
-                **{"config": _boto_cfg} if _boto_cfg else {},
+                config=_boto_cfg,
             )
             return _client.converse(
                 modelId=_model,
@@ -3087,7 +3498,7 @@ async def _bedrock(
         "Accept": "application/json",
     }
 
-    async with _make_llm_http_client(timeout=120) as client:
+    async with _make_llm_http_client(timeout=_bedrock_http_timeout()) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         _resp_data = resp.json()
@@ -3322,9 +3733,18 @@ async def analyse_probes(
 
 
 def _format_probe_result(result: dict) -> str:
+    sent_authenticated = result.get("sent_authenticated")
+    auth_state = (
+        "yes"
+        if sent_authenticated is True
+        else "no"
+        if sent_authenticated is False
+        else "unknown; inspect request evidence"
+    )
     return (
         f"--- Probe: {result.get('desc', result.get('url', '?'))} ---\n"
         f"Sent as user: {result.get('as_user') or '(primary session)'}\n"
+        f"Credentials observed on wire: {auth_state}\n"
         f"URL: {result.get('url')}\n"
         f"Status: {result.get('status')}\n"
         f"Request evidence:\n{str(result.get('request_evidence') or '')[:2000]}\n\n"
@@ -3364,17 +3784,15 @@ def _chunk_probe_results(
 
     token_budget = 0
     if config is not None and getattr(config, "max_context_tokens", 0):
-        safety = max(1024, min(8192, int(config.max_context_tokens) // 20))
+        context_limit = int(config.max_context_tokens)
+        safety = max(1024, min(8192, context_limit // 20))
         empty_prompt = build_reporting_analyse_prompt(url, [])
         overhead = estimate_tokens(
             empty_prompt, model=config.model, provider=config.provider
         )
         token_budget = max(
-            1024,
-            int(config.max_context_tokens)
-            - int(config.max_tokens or 0)
-            - safety
-            - overhead,
+            1,
+            context_limit - int(config.max_tokens or 0) - safety - overhead,
         )
 
     for result in results:
@@ -3397,9 +3815,7 @@ def _chunk_probe_results(
             or (
                 token_budget
                 and next_token_count
-                > int(config.max_context_tokens)
-                - int(config.max_tokens or 0)
-                - max(1024, min(8192, int(config.max_context_tokens) // 20))
+                > context_limit - int(config.max_tokens or 0) - safety
             )
         ):
             batches.append(current_batch)
@@ -3795,6 +4211,28 @@ async def normalize_finding_titles(
             idx = entry.get("index")
             title = (entry.get("title") or "").strip()
             if isinstance(idx, int) and 0 <= idx < len(result) and title:
+                title = re.sub(
+                    r"^\[(?:A\d{2}(?::[^\]]+)?|API\d+)\]\s*",
+                    "",
+                    title,
+                    flags=re.IGNORECASE,
+                )
+                title = re.sub(
+                    r"^\[(?:critical|high|medium|low|info)\]\s*",
+                    "",
+                    title,
+                    flags=re.IGNORECASE,
+                )
+                original_title = str(result[idx].get("title") or "")
+                auth_claim = re.compile(
+                    r"\bunauthenticated\b|\bwithout\s+(?:any\s+)?authentication\b|"
+                    r"\bmissing\s+authentication\b|\bno\s+authentication\s+(?:is\s+)?required\b",
+                    re.IGNORECASE,
+                )
+                if bool(auth_claim.search(original_title)) != bool(
+                    auth_claim.search(title)
+                ):
+                    continue
                 result[idx] = {**result[idx], "title": title}
         return result
     except Exception as exc:
@@ -3994,6 +4432,213 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 
 TOOL_RESULT_CHAR_LIMIT = 8_000
 CONTEXT_TOOL_RESULT_CHAR_LIMIT = 12_000
+CONTEXT_JOURNAL_CHAR_LIMIT = 16_000
+_COMPACTION_SUFFIX_COUNTS = (32, 16, 8, 4, 2, 0)
+# A tool call needs room for a JSON action and its arguments. Keep this much
+# output space even when the configured context window is nearly full.
+MIN_AGENT_OUTPUT_TOKENS = 1_024
+
+
+def _redact_compaction_text(value: str) -> str:
+    """Remove credentials from text copied into the short-lived journal."""
+    text = str(value or "")
+    # Keep the key and redact only its value.  The patterns intentionally cover
+    # both JSON-ish input and the ``key=value`` strings used in journal lines.
+    text = re.sub(
+        r"(?i)([\"']?(?:authorization|proxy-authorization)[\"']?\s*[:=]\s*[\"']?(?:bearer|basic)\s+)[^\"'\s,;}]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|cookie|session(?:[_-]?id)?|credential)[\"']?\s*[:=]\s*[\"']?)[^\"'\s,;}]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)([?&](?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|key)=)[^&#\s]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    # Common fixed-format credentials should not be copied even when they have
+    # no descriptive key nearby.
+    text = re.sub(r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED]", text)
+    return text
+
+
+def _canonical_content_block(block: Any) -> dict[str, Any] | Any:
+    """Convert provider SDK blocks to the dict form used in checkpoints."""
+    if isinstance(block, dict):
+        return block
+    dumped: Any = None
+    model_dump = getattr(block, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(exclude_none=False)
+        except TypeError:
+            dumped = model_dump()
+        except Exception:
+            dumped = None
+    if not isinstance(dumped, dict):
+        to_dict = getattr(block, "to_dict", None)
+        if callable(to_dict):
+            try:
+                dumped = to_dict()
+            except Exception:
+                dumped = None
+    if not isinstance(dumped, dict):
+        dumped = {}
+        for key in (
+            "type",
+            "id",
+            "name",
+            "input",
+            "text",
+            "thinking",
+            "signature",
+            "data",
+            "citations",
+        ):
+            value = getattr(block, key, None)
+            if value is not None:
+                dumped[key] = value
+    return dumped or block
+
+
+def _content_blocks(message: dict) -> list[Any]:
+    content = message.get("content")
+    if isinstance(content, list):
+        return [_canonical_content_block(block) for block in content]
+    return []
+
+
+def _journal_from_first_message(message: dict) -> tuple[dict, list[str]]:
+    """Return a first message without old journals and their useful lines."""
+    first = dict(message)
+    old_lines: list[str] = []
+
+    def clean_text(value: str) -> str:
+        nonlocal old_lines
+        matches = re.findall(
+            r"\[CONTEXT JOURNAL:[^\n]*\n?(.*?)(?=\n\[CONTEXT JOURNAL:|\Z)",
+            value,
+            flags=re.DOTALL,
+        )
+        for match in matches:
+            old_lines.extend(
+                _redact_compaction_text(line.strip())
+                for line in match.splitlines()
+                if line.strip()
+            )
+        return re.sub(
+            r"\s*\[CONTEXT JOURNAL:[^\n]*\n?.*?(?=\n\[CONTEXT JOURNAL:|\Z)",
+            "",
+            value,
+            flags=re.DOTALL,
+        ).strip()
+
+    content = first.get("content")
+    if isinstance(content, str):
+        first["content"] = clean_text(content)
+    elif isinstance(content, list):
+        cleaned: list[Any] = []
+        for block in content:
+            block = _canonical_content_block(block)
+            if isinstance(block, dict) and block.get("type") == "text":
+                block = dict(block)
+                block["text"] = clean_text(str(block.get("text") or ""))
+                if block["text"]:
+                    cleaned.append(block)
+            else:
+                cleaned.append(block)
+        first["content"] = cleaned
+    return first, old_lines
+
+
+def _tool_block_ids(message: dict, block_type: str) -> list[str]:
+    content = _content_blocks(message)
+    key = "id" if block_type == "tool_use" else "tool_use_id"
+    return [
+        str(block.get(key))
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == block_type
+        and block.get(key)
+    ]
+
+
+def _protocol_valid_suffix(messages: list[dict], start: int) -> bool:
+    """Check tool calls are assistant turns followed by matching user results."""
+    transcript = messages[start:]
+    for index, message in enumerate(transcript):
+        role = message.get("role")
+        blocks = _content_blocks(message)
+        use_ids = {
+            tool_id for tool_id in _tool_block_ids(message, "tool_use") if tool_id
+        }
+        result_ids = {
+            tool_id for tool_id in _tool_block_ids(message, "tool_result") if tool_id
+        }
+        if use_ids and role != "assistant":
+            return False
+        if result_ids and role != "user":
+            return False
+        if not use_ids and not result_ids:
+            continue
+        if use_ids:
+            if index + 1 >= len(transcript):
+                return False
+            next_message = transcript[index + 1]
+            if next_message.get("role") != "user":
+                return False
+            next_result_ids = set(_tool_block_ids(next_message, "tool_result"))
+            if use_ids != next_result_ids:
+                return False
+        if result_ids:
+            if index == 0 or transcript[index - 1].get("role") != "assistant":
+                return False
+            previous_use_ids = set(_tool_block_ids(transcript[index - 1], "tool_use"))
+            if previous_use_ids != result_ids:
+                return False
+        # A malformed block type in a content list should not make an otherwise
+        # valid exchange appear complete. This also keeps model SDK objects
+        # from being silently ignored by the protocol check.
+        if any(
+            isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}
+            for block in blocks
+        ) and not (use_ids or result_ids):
+            return False
+    return True
+
+
+def _suffix_start(messages: list[dict], suffix_count: int) -> int:
+    """Choose the earliest valid boundary within the requested recent suffix."""
+    if suffix_count <= 0:
+        return len(messages)
+    threshold = max(1, len(messages) - suffix_count)
+    valid = [
+        start
+        for start in range(1, len(messages) + 1)
+        if _protocol_valid_suffix(messages, start)
+    ]
+    if not valid:
+        return len(messages)
+    retained = [start for start in valid if start >= threshold]
+    if retained:
+        return min(retained)
+    # A threshold can land on the user-side half of a tool exchange. Include
+    # the preceding assistant call rather than dropping a completed pair.
+    return max(valid)
+
+
+def _fit_text_to_chars(text: str, budget: int) -> str:
+    if budget <= 0 or len(text) <= budget:
+        return text
+    marker = "\n[… evidence excerpt trimmed …]\n"
+    if budget <= len(marker):
+        return marker[:budget]
+    available = budget - len(marker)
+    left = available // 2
+    return text[:left] + marker + text[-(available - left) :]
 
 
 def compact_agentic_messages(
@@ -4007,30 +4652,28 @@ def compact_agentic_messages(
     model: str | None = None,
     provider: str = "openai",
     recent_messages: int = 32,
-) -> tuple[list[dict], dict[str, int] | None]:
+) -> tuple[list[dict], dict[str, Any] | None]:
     """Compact completed tool exchanges while preserving protocol-valid pairs.
 
     The first user brief is retained. Older assistant/tool-result pairs become a
     short mechanical journal, and a recent suffix remains verbatim. Raw secrets
     and full response bodies are deliberately excluded from the journal.
     """
+    if not messages:
+        return messages, None
     before_chars = len(json.dumps(messages, default=str))
-    before_tokens = (
-        _estimate_tools_call_tokens(
-            system_message,
-            messages,
-            tools=tools,
-            model=model,
-            provider=provider,
-        )
-        if max_context_tokens > 0
-        else 0
+    before_tokens = _estimate_tools_call_tokens(
+        system_message,
+        messages,
+        tools=tools,
+        model=model,
+        provider=provider,
     )
     safety_tokens = (
         max(1024, min(8192, max_context_tokens // 20)) if max_context_tokens else 0
     )
     input_budget = (
-        max(1024, max_context_tokens - max_output_tokens - safety_tokens)
+        max(1, max_context_tokens - max_output_tokens - safety_tokens)
         if max_context_tokens
         else 0
     )
@@ -4039,23 +4682,19 @@ def compact_agentic_messages(
         if max_context_tokens
         else before_chars > max_context_chars
     )
-    if not over_limit or len(messages) < 8:
+    if not over_limit:
         return messages, None
 
-    def _build(suffix_count: int, journal_limit: int) -> tuple[list[dict], int]:
-        suffix_start = max(1, len(messages) - max(4, suffix_count))
-        while (
-            suffix_start < len(messages)
-            and messages[suffix_start].get("role") != "assistant"
-        ):
-            suffix_start += 1
-        if suffix_start >= len(messages) - 1:
-            return messages, 0
+    first, old_journal_lines = _journal_from_first_message(messages[0])
+
+    def _build(
+        suffix_count: int, journal_limit: int
+    ) -> tuple[list[dict], dict[str, int]]:
+        suffix_start = _suffix_start(messages, suffix_count)
         removed = messages[1:suffix_start]
-        journal_lines: list[str] = []
+        journal_lines: list[str] = list(old_journal_lines)
         for message in removed:
-            content = message.get("content")
-            blocks = content if isinstance(content, list) else []
+            blocks = _content_blocks(message)
             for block in blocks:
                 if not isinstance(block, dict):
                     continue
@@ -4075,52 +4714,88 @@ def compact_agentic_messages(
                     ):
                         value = tool_input.get(key)
                         if value not in (None, ""):
-                            details.append(f"{key}={str(value)[:240]}")
+                            details.append(
+                                f"{key}={_redact_compaction_text(str(value)[:240])}"
+                            )
                     journal_lines.append("- " + " ".join(details))
                 elif block.get("type") == "tool_result":
-                    result = str(block.get("content") or "").replace("\n", " ").strip()
+                    result = (
+                        _redact_compaction_text(str(block.get("content") or ""))
+                        .replace("\n", " ")
+                        .strip()
+                    )
                     if result:
                         journal_lines.append(f"  result: {result[:360]}")
-        journal = (
-            f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
-            "Use context tools for full durable evidence.]\n"
-            + "\n".join(journal_lines[-journal_limit:])
-        )[:16_000]
-        first = dict(messages[0])
-        first_content = first.get("content")
-        if isinstance(first_content, list):
-            first["content"] = list(first_content) + [{"type": "text", "text": journal}]
-        else:
-            first["content"] = f"{first_content or ''}\n\n{journal}"
-        return [first, *messages[suffix_start:]], len(removed)
+        built_first = dict(first)
+        journal = ""
+        if journal_lines:
+            journal_text = "\n".join(journal_lines[-journal_limit:])
+            journal = (
+                f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
+                "Use context tools for full durable evidence.]\n" + journal_text
+            )
+            journal = _fit_text_to_chars(journal, CONTEXT_JOURNAL_CHAR_LIMIT)
+            first_content = built_first.get("content")
+            if isinstance(first_content, list):
+                built_first["content"] = list(first_content) + [
+                    {"type": "text", "text": journal}
+                ]
+            else:
+                built_first["content"] = f"{first_content or ''}\n\n{journal}"
+        return [
+            built_first,
+            *(copy.deepcopy(message) for message in messages[suffix_start:]),
+        ], {
+            "removed_messages": len(removed),
+            "suffix_messages": len(messages) - suffix_start,
+            "journal_entries": len(journal_lines[-journal_limit:]),
+            "journal_chars": len(journal),
+            "suffix_start": suffix_start,
+        }
 
-    compacted, removed_count = _build(recent_messages, 80)
+    compacted, build_stats = _build(recent_messages, 80)
+    removed_count = build_stats["removed_messages"]
     truncated_tool_results = 0
-    if max_context_tokens:
-        for suffix_count, journal_limit in ((16, 60), (8, 40), (4, 20)):
-            estimated = _estimate_tools_call_tokens(
-                system_message, compacted, tools=tools, model=model, provider=provider
-            )
-            if estimated <= input_budget:
-                break
-            compacted, removed_count = _build(suffix_count, journal_limit)
-        if (
+    fit_passes = 0
+    suffix_counts = list(dict.fromkeys((recent_messages, *_COMPACTION_SUFFIX_COUNTS)))
+
+    def _estimate(candidate: list[dict]) -> int:
+        return (
             _estimate_tools_call_tokens(
-                system_message, compacted, tools=tools, model=model, provider=provider
+                system_message, candidate, tools=tools, model=model, provider=provider
             )
-            > input_budget
+            if max_context_tokens
+            else len(json.dumps(candidate, default=str))
+        )
+
+    # Prefer keeping the most recent completed exchanges. If they are still too
+    # large, trim their results in progressively smaller passes, then evict old
+    # pairs by moving the suffix boundary back to 8, 4, 2, and finally 0.
+    selected_fit = False
+    for suffix_count in suffix_counts:
+        journal_limit = max(8, min(80, suffix_count * 2 or 8))
+        candidate, candidate_stats = _build(suffix_count, journal_limit)
+        for result_budget in (
+            max(128, input_budget // 8),
+            max(64, input_budget // 16),
+            64,
         ):
-            compacted = [dict(message) for message in compacted]
-            for index in range(1, len(compacted)):
-                message = compacted[index]
+            estimated = _estimate(candidate)
+            if not max_context_tokens and estimated <= max_context_chars:
+                selected_fit = True
+                break
+            if max_context_tokens and estimated <= input_budget:
+                selected_fit = True
+                break
+            changed = False
+            for index in range(1, len(candidate)):
+                message = candidate[index]
                 content = message.get("content")
                 if not isinstance(content, list):
                     continue
                 blocks = [
-                    dict(block) if isinstance(block, dict) else block
-                    for block in content
+                    copy.deepcopy(_canonical_content_block(block)) for block in content
                 ]
-                changed = False
                 for block in blocks:
                     if (
                         not isinstance(block, dict)
@@ -4128,42 +4803,40 @@ def compact_agentic_messages(
                     ):
                         continue
                     result = block.get("content")
-                    if not isinstance(result, str) or len(result) < 256:
+                    if not isinstance(result, str) or len(result) < 64:
                         continue
-                    block["content"] = _fit_text_to_tokens(
-                        result,
-                        max(128, input_budget // 8),
-                        model=model,
-                    )
-                    changed = True
-                    truncated_tool_results += 1
-                if changed:
+                    if max_context_tokens:
+                        fitted = _fit_text_to_tokens(result, result_budget, model=model)
+                    else:
+                        fitted = _fit_text_to_chars(
+                            result, max(32, max_context_chars // 8)
+                        )
+                    if fitted != result:
+                        block["content"] = fitted
+                        changed = True
+                        truncated_tool_results += 1
+                if blocks != content:
                     message["content"] = blocks
-                if (
-                    _estimate_tools_call_tokens(
-                        system_message,
-                        compacted,
-                        tools=tools,
-                        model=model,
-                        provider=provider,
-                    )
-                    <= input_budget
-                ):
-                    break
-    if removed_count == 0:
-        return messages, None
+            fit_passes += 1
+            if not changed:
+                break
+        compacted, build_stats = candidate, candidate_stats
+        removed_count = build_stats["removed_messages"]
+        if selected_fit:
+            break
+
+    after_estimate = _estimate(compacted)
     after_chars = len(json.dumps(compacted, default=str))
-    after_tokens = (
-        _estimate_tools_call_tokens(
-            system_message,
-            compacted,
-            tools=tools,
-            model=model,
-            provider=provider,
-        )
-        if max_context_tokens
-        else 0
+    after_tokens = _estimate_tools_call_tokens(
+        system_message,
+        compacted,
+        tools=tools,
+        model=model,
+        provider=provider,
     )
+    changed = compacted != messages
+    if not changed or (after_tokens >= before_tokens and after_chars >= before_chars):
+        return messages, None
     return compacted, {
         "before_chars": before_chars,
         "after_chars": after_chars,
@@ -4173,6 +4846,15 @@ def compact_agentic_messages(
         "removed_messages": removed_count,
         "truncated_tool_results": truncated_tool_results,
         "remaining_messages": len(compacted),
+        "suffix_messages": build_stats["suffix_messages"],
+        "journal_entries": build_stats["journal_entries"],
+        "journal_chars": build_stats["journal_chars"],
+        "fit_passes": fit_passes,
+        "estimated_fit": selected_fit,
+        "protocol_valid": _protocol_valid_suffix(compacted, 1),
+        "compaction_applied": True,
+        "changed": True,
+        "after_estimate": after_estimate,
     }
 
 
@@ -4181,7 +4863,7 @@ def compact_messages_for_config(
     system_message: str,
     messages: list[dict],
     tools: list[dict] | None = None,
-) -> tuple[list[dict], dict[str, int] | None]:
+) -> tuple[list[dict], dict[str, Any] | None]:
     """Apply the configured model context budget to a live transcript."""
     compacted, stats = compact_agentic_messages(
         messages,
@@ -4198,7 +4880,7 @@ def compact_messages_for_config(
     if context_limit:
         safety = max(1024, min(8192, context_limit // 20))
         budget = max(
-            1024, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety
+            1, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety
         )
         estimated = _estimate_tools_call_tokens(
             system_message,
@@ -4298,38 +4980,239 @@ def _estimate_tools_call_tokens(
     covers role/message separators.
     """
     parts: list[str] = [system_message or ""]
+    image_count = 0
+
+    def _image_without_payload(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    f"<{key}:{len(item)} bytes>"
+                    if key in {"data", "bytes"}
+                    and isinstance(item, (str, bytes, bytearray))
+                    else (
+                        f"<base64 image:{len(item)} bytes>"
+                        if key == "url"
+                        and isinstance(item, str)
+                        and item.startswith("data:")
+                        else _image_without_payload(item)
+                    )
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [_image_without_payload(item) for item in value]
+        return value
+
     for m in messages:
         content = m.get("content")
         if isinstance(content, str):
             parts.append(content)
         elif isinstance(content, list):
-            for block in content:
+            for block in _content_blocks(m):
                 if isinstance(block, str):
                     parts.append(block)
                 elif isinstance(block, dict):
-                    # text / tool_result content / tool_use input — stringify cheaply.
-                    parts.append(
-                        str(
-                            block.get("text")
-                            or block.get("content")
-                            or block.get("input")
-                            or ""
+                    block_type = str(block.get("type") or "")
+                    if block_type in {"image", "image_url"} or "image_url" in block:
+                        image_count += 1
+                        # Image bytes are not text tokens. Count the modality
+                        # with the same provider-specific allowance used by
+                        # estimate_tokens(), while retaining its small wrapper.
+                        parts.append(
+                            json.dumps(
+                                {
+                                    "type": block_type,
+                                    **_image_without_payload(block),
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            )
                         )
-                    )
+                    else:
+                        # Count the complete canonical block. In particular,
+                        # this preserves tool IDs/names, structured results,
+                        # OpenAI reasoning details, Bedrock signatures, and
+                        # provider diagnostics that the old value-only estimate
+                        # discarded.
+                        parts.append(
+                            json.dumps(
+                                block,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            )
+                        )
         elif content is not None:
-            parts.append(str(content))
+            parts.append(
+                json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+                if isinstance(content, (dict, list))
+                else str(content)
+            )
     if tools:
         parts.append(
             json.dumps(tools, sort_keys=True, separators=(",", ":"), default=str)
         )
     estimated = estimate_tokens("\n".join(parts), provider=provider, model=model)
+    if image_count:
+        estimated += image_count * estimate_tokens(
+            "",
+            screenshot_b64="image",
+            provider=provider,
+            model=model,
+        )
     # Provider wire formats add a few tokens per message and a wrapper around
     # the tool list. Keep this explicit rather than hiding another character
     # heuristic inside the tokenizer count.
     return estimated + 8 + (4 * len(messages)) + (8 if tools else 0)
 
 
-async def _call_with_tools(
+def _copy_config_with_max_tokens(config: Any, max_tokens: int) -> Any:
+    """Return a request-only config copy without changing saved settings."""
+    return config.model_copy(update={"max_tokens": int(max_tokens)})
+
+
+def _context_budget_for_request(
+    config: Any, input_tokens: int, *, context_limit: int | None = None
+) -> dict[str, int]:
+    """Calculate the output allowance for one request.
+
+    ``max_tokens`` is a saved profile setting, but a long individual turn may
+    leave less room in the model window. The effective value is request-local.
+    """
+    configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
+    minimum_output_tokens = min(configured, MIN_AGENT_OUTPUT_TOKENS)
+    context_limit = max(
+        0,
+        int(
+            context_limit
+            if context_limit is not None
+            else (getattr(config, "max_context_tokens", 0) or 0)
+        ),
+    )
+    if not context_limit:
+        return {
+            "context_limit_tokens": 0,
+            "input_tokens": max(0, int(input_tokens)),
+            "safety_tokens": 0,
+            "available_output_tokens": configured,
+            "configured_max_output_tokens": configured,
+            "effective_max_output_tokens": configured,
+            "configured_max_tokens": configured,
+            "effective_max_tokens": configured,
+        }
+
+    safety = max(1024, min(8192, context_limit // 20))
+    available = context_limit - max(0, int(input_tokens)) - safety
+    if available < minimum_output_tokens:
+        raise LLMContextLimitError(
+            "The configured context window cannot fit this request with the "
+            f"minimum {minimum_output_tokens:,}-token agent response "
+            f"({input_tokens:,} input tokens estimated; "
+            f"{max(0, available):,} output tokens available)."
+        )
+    return {
+        "context_limit_tokens": context_limit,
+        "input_tokens": max(0, int(input_tokens)),
+        "safety_tokens": safety,
+        "available_output_tokens": available,
+        "configured_max_output_tokens": configured,
+        "effective_max_output_tokens": min(configured, available),
+        "configured_max_tokens": configured,
+        "effective_max_tokens": min(configured, available),
+    }
+
+
+def _fit_plain_prompt_to_context(
+    config: Any,
+    prompt: str,
+    system_prompt: str | None,
+) -> tuple[Any, str, dict[str, int]]:
+    """Fit a plain request while keeping the system prompt intact."""
+    system = system_prompt or ""
+    combined = f"{system}\n\n{prompt}" if system else prompt
+    context_limit = max(0, int(getattr(config, "max_context_tokens", 0) or 0))
+    if not context_limit:
+        configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
+        return (
+            config,
+            combined,
+            {
+                "context_limit_tokens": 0,
+                "input_tokens": estimate_tokens(
+                    combined,
+                    provider=getattr(config.provider, "value", config.provider),
+                    model=config.model,
+                ),
+                "configured_max_output_tokens": configured,
+                "effective_max_output_tokens": configured,
+                "configured_max_tokens": configured,
+                "effective_max_tokens": configured,
+            },
+        )
+
+    configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
+    minimum_output_tokens = min(configured, MIN_AGENT_OUTPUT_TOKENS)
+    initial_input = estimate_tokens(
+        combined,
+        provider=getattr(config.provider, "value", config.provider),
+        model=config.model,
+    )
+    try:
+        budget = _context_budget_for_request(config, initial_input)
+        if budget["effective_max_output_tokens"] == configured:
+            return config, combined, budget
+    except LLMContextLimitError:
+        pass
+
+    safety = max(1024, min(8192, context_limit // 20))
+    input_limit = context_limit - safety - minimum_output_tokens
+    fixed = f"{system}\n\n" if system else ""
+    fixed_tokens = estimate_tokens(
+        fixed,
+        provider=getattr(config.provider, "value", config.provider),
+        model=config.model,
+    )
+    if fixed_tokens > input_limit:
+        raise LLMContextLimitError(
+            "The configured context window cannot fit the system prompt with "
+            f"the minimum {minimum_output_tokens:,}-token response "
+            f"({fixed_tokens:,} system tokens estimated; "
+            f"{max(0, input_limit):,} input tokens available)."
+        )
+
+    user_limit = input_limit - fixed_tokens
+    provider = getattr(config.provider, "value", config.provider)
+    fitted_prompt = _fit_text_to_tokens(prompt, user_limit, model=config.model)
+    fitted = f"{fixed}{fitted_prompt}" if fixed else fitted_prompt
+    fitted_input = estimate_tokens(fitted, provider=provider, model=config.model)
+    if fitted_input > input_limit:
+        # Very small budgets cannot hold the normal excerpt marker. Preserve the
+        # system text and use a deterministic prefix in that case.
+        lo, hi = 0, len(prompt)
+        best = ""
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate_prompt = prompt[:mid]
+            candidate = f"{fixed}{candidate_prompt}" if fixed else candidate_prompt
+            if (
+                estimate_tokens(candidate, provider=provider, model=config.model)
+                <= input_limit
+            ):
+                best = candidate_prompt
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        fitted = f"{fixed}{best}" if fixed else best
+        fitted_input = estimate_tokens(fitted, provider=provider, model=config.model)
+    budget = _context_budget_for_request(config, fitted_input)
+    request_config = _copy_config_with_max_tokens(
+        config, budget["effective_max_output_tokens"]
+    )
+    return request_config, fitted, budget
+
+
+async def _call_with_tools_rate_limited(
     config: "LLMConfig",
     system_message: str,
     messages: list[dict],
@@ -4379,6 +5262,125 @@ async def _call_with_tools(
             await limiter.block_for(_codex_cooldown_seconds(exc))
         await limiter.reconcile(estimated, 0)
         raise
+
+
+async def _call_with_tools(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> "tuple[list[dict], str, Any]":
+    operation = _operation_var.get() or _infer_llm_operation()
+    call_id = next(_traffic_call_ids)
+    active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    request = {
+        "system": system_message,
+        "messages": messages,
+        "tools": [tool.get("name", "") for tool in active_tools],
+    }
+    _log_llm_traffic(
+        "REQUEST",
+        config,
+        request,
+        kind="tools",
+        operation=operation,
+        call_id=call_id,
+    )
+    pending_token = _begin_pending_usage(
+        config,
+        call_id,
+        _estimate_tools_call_tokens(
+            system_message,
+            messages,
+            tools=active_tools,
+            model=config.model,
+            provider=str(getattr(config.provider, "value", config.provider)),
+        ),
+    )
+    try:
+        result = await _call_with_tools_rate_limited(
+            config, system_message, messages, tools=tools
+        )
+    except Exception as exc:
+        _log_llm_traffic(
+            "FAILED",
+            config,
+            str(exc),
+            kind="tools",
+            operation=operation,
+            call_id=call_id,
+        )
+        raise
+    finally:
+        _end_pending_usage(pending_token)
+    blocks, stop_reason, raw_content = result
+    _log_llm_traffic(
+        "RESPONSE",
+        config,
+        {"stop_reason": stop_reason, "content": blocks},
+        kind="tools",
+        operation=operation,
+        call_id=call_id,
+    )
+    return blocks, stop_reason, raw_content
+
+
+async def stream_tools_call(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Run a tool-capable call and yield provider text before its final result.
+
+    Providers without native tool streaming simply yield the final result. This
+    keeps ALICE compatible with every configured provider while allowing native
+    streams to update the chat as tokens arrive.
+    """
+    queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def _on_text(delta: str) -> None:
+        if delta:
+            queue.put_nowait(delta)
+
+    async def _run() -> tuple[list[dict], str, Any]:
+        token = _tool_text_delta_var.set(_on_text)
+        try:
+            return await _call_with_tools(config, system_message, messages, tools=tools)
+        finally:
+            _tool_text_delta_var.reset(token)
+
+    task = asyncio.create_task(_run())
+    try:
+        while True:
+            if task.done() and queue.empty():
+                break
+            queue_get = asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait(
+                {task, queue_get}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if queue_get in done:
+                delta = queue_get.result()
+                # Provider streams often send one token per event. Briefly
+                # coalesce ready tokens so React does not render for every one.
+                await asyncio.sleep(0.02)
+                while not queue.empty():
+                    delta += queue.get_nowait()
+                yield {"type": "text_delta", "delta": delta}
+            else:
+                queue_get.cancel()
+                try:
+                    await queue_get
+                except asyncio.CancelledError:
+                    pass
+        yield {"type": "result", "result": await task}
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 async def _call_with_tools_impl(
@@ -4463,7 +5465,7 @@ async def _call_with_tools_impl(
 
         client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
         cached_messages, cached_tools = _with_anthropic_cache(messages, _active_tools)
-        resp = await client.messages.create(
+        request_kwargs = dict(
             model=config.model,
             max_tokens=config.max_tokens,
             **_anthropic_reasoning_kwargs(config),
@@ -4482,6 +5484,14 @@ async def _call_with_tools_impl(
             tools=cached_tools,
             messages=cached_messages,
         )
+        on_text_delta = _tool_text_delta_var.get()
+        if on_text_delta is None:
+            resp = await client.messages.create(**request_kwargs)
+        else:
+            async with client.messages.stream(**request_kwargs) as stream:
+                async for text_delta in stream.text_stream:
+                    await on_text_delta(text_delta)
+                resp = await stream.get_final_message()
         blocks = [
             {
                 "type": b.type,
@@ -4701,7 +5711,7 @@ async def _call_with_tools_impl(
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
-            async with _make_llm_http_client(timeout=120) as _hx:
+            async with _make_llm_http_client(timeout=_bedrock_http_timeout()) as _hx:
                 _resp = await _hx.post(url, headers=headers, json=payload)
                 _resp.raise_for_status()
                 data = _resp.json()
@@ -4717,41 +5727,47 @@ async def _call_with_tools_impl(
             # Env-credential path (IAM role, ~/.aws/credentials, instance profile …).
             # Capture proxy URL now — ContextVar values are not inherited by threads.
             _proxy_url = _llm_proxy_var.get()
+            _on_text_delta = _tool_text_delta_var.get()
+            loop = _asyncio.get_event_loop()
 
-            def _run_converse():
+            def _forward_text_delta(delta: str) -> None:
+                if _on_text_delta is not None:
+                    future = _asyncio.run_coroutine_threadsafe(
+                        _on_text_delta(delta), loop
+                    )
+                    future.result()
+
+            def _run_converse_stream():
                 import boto3
-                from botocore.config import Config as _BotocoreConfig
 
                 region = _bedrock_region(config)
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
-                _boto_cfg = (
-                    _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
-                    if _proxy_url
-                    else None
-                )
+                _boto_cfg = _bedrock_botocore_config(_proxy_url)
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=config.base_url or None,
                     verify=not _proxy_url,
-                    **{"config": _boto_cfg} if _boto_cfg else {},
+                    config=_boto_cfg,
                 )
                 _infer_converse: dict = {"maxTokens": config.max_tokens}
                 if config.temperature is not None:
                     _infer_converse["temperature"] = config.temperature
-                return client.converse(
-                    modelId=config.model,
-                    system=system_list,
-                    messages=converse_messages,
-                    toolConfig=tool_config,
-                    inferenceConfig=_infer_converse,
-                    **_bedrock_sdk_reasoning_kwargs(config),
+                return _consume_bedrock_converse_stream(
+                    client.converse_stream(
+                        modelId=config.model,
+                        system=system_list,
+                        messages=converse_messages,
+                        toolConfig=tool_config,
+                        inferenceConfig=_infer_converse,
+                        **_bedrock_sdk_reasoning_kwargs(config),
+                    ),
+                    _forward_text_delta if _on_text_delta is not None else None,
                 )
 
-            loop = _asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, _run_converse)
+            data = await loop.run_in_executor(None, _run_converse_stream)
             response_metadata = data.get("ResponseMetadata") or {}
             bedrock_transport = {
                 "http_status": response_metadata.get("HTTPStatusCode"),
@@ -4830,10 +5846,10 @@ async def _call_with_tools_impl(
             )
         return blocks, str(stop_reason_raw), raw_content_ant
 
-    # ── Bedrock Mantle (OpenAI Responses API with function tools) ─────────────
-    if config.provider == "bedrock_mantle":
-        client = _make_bedrock_mantle_client(config)
-        r_kwargs = _mantle_response_kwargs(
+    # ── OpenAI Responses API with function tools ──────────────────────────────
+    if config.provider == "bedrock_mantle" or _uses_openai_responses(config):
+        client = _make_responses_client(config)
+        r_kwargs = _responses_request_kwargs(
             config,
             input=_ant_messages_to_responses(messages),
             instructions=system_message,
@@ -4843,7 +5859,24 @@ async def _call_with_tools_impl(
         # choice, _create_response retries once without it.
         if getattr(config, "force_tool_choice", False):
             r_kwargs["tool_choice"] = "required"
-        resp = await _create_response(client, r_kwargs)
+        on_text_delta = _tool_text_delta_var.get()
+        if on_text_delta is None:
+            resp = await _create_response(client, r_kwargs)
+        else:
+            stream_kwargs = dict(r_kwargs)
+            stream_kwargs["stream"] = True
+            response_stream = await _create_response(client, stream_kwargs)
+            resp = None
+            async for event in response_stream:
+                event_type = getattr(event, "type", None)
+                if event_type == "response.output_text.delta":
+                    delta = getattr(event, "delta", None)
+                    if delta:
+                        await on_text_delta(delta)
+                elif event_type in ("response.completed", "response.incomplete"):
+                    resp = getattr(event, "response", None)
+            if resp is None:
+                raise RuntimeError("Responses API stream ended without a response")
 
         blocks = []
         for item in getattr(resp, "output", None) or []:
@@ -5035,6 +6068,98 @@ async def _call_with_tools_impl(
             pass
         else:
             call_kwargs["tool_choice"] = "required"
+        on_text_delta = _tool_text_delta_var.get()
+        if on_text_delta is not None:
+            stream_kwargs = dict(call_kwargs)
+            stream_kwargs["stream"] = True
+            stream_kwargs["stream_options"] = {"include_usage": True}
+            stream = await _create_chat_completion(oai_client, stream_kwargs)
+            text_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            tool_parts: dict[int, dict[str, str]] = {}
+            finish = "stop"
+            stream_usage = None
+            async for chunk in stream:
+                if getattr(chunk, "usage", None) is not None:
+                    stream_usage = chunk.usage
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish = choice.finish_reason
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+                content_delta = getattr(delta, "content", None)
+                if content_delta:
+                    text_parts.append(content_delta)
+                    await on_text_delta(content_delta)
+                reasoning_delta = getattr(delta, "reasoning_content", None)
+                if reasoning_delta:
+                    reasoning_parts.append(reasoning_delta)
+                for tool_delta in getattr(delta, "tool_calls", None) or []:
+                    index = int(getattr(tool_delta, "index", 0) or 0)
+                    part = tool_parts.setdefault(
+                        index, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if getattr(tool_delta, "id", None):
+                        part["id"] += tool_delta.id
+                    function = getattr(tool_delta, "function", None)
+                    if function is not None:
+                        part["name"] += getattr(function, "name", None) or ""
+                        part["arguments"] += getattr(function, "arguments", None) or ""
+            blocks: list[dict[str, Any]] = []
+            reasoning_text = "".join(reasoning_parts)
+            if reasoning_text:
+                blocks.append({"type": "thinking", "thinking": reasoning_text})
+            visible_text = "".join(text_parts)
+            if visible_text:
+                blocks.append(
+                    {
+                        "type": "text",
+                        "id": None,
+                        "name": None,
+                        "input": None,
+                        "text": visible_text,
+                    }
+                )
+            for index in sorted(tool_parts):
+                part = tool_parts[index]
+                try:
+                    tool_input = json.loads(part["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    tool_input = {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": part["id"] or f"call_{index}",
+                        "name": part["name"],
+                        "input": tool_input,
+                        "text": None,
+                    }
+                )
+            _record_usage(
+                config.model,
+                getattr(stream_usage, "prompt_tokens", 0) if stream_usage else 0,
+                getattr(stream_usage, "completion_tokens", 0) if stream_usage else 0,
+                cache_read_tokens=(
+                    getattr(
+                        getattr(stream_usage, "prompt_tokens_details", None),
+                        "cached_tokens",
+                        0,
+                    )
+                    if stream_usage
+                    else 0
+                ),
+            )
+            stop_reason = (
+                "tool_use"
+                if finish == "tool_calls"
+                or any(block["type"] == "tool_use" for block in blocks)
+                else "end_turn"
+            )
+            return blocks, stop_reason, blocks
         resp = await _create_chat_completion(oai_client, call_kwargs)
         _oai_u = getattr(resp, "usage", None)
         _oai_cached = (
@@ -5153,20 +6278,75 @@ async def _call_with_tools_impl(
         g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
         g_tools = _ant_tools_to_gemini()
         g_contents = _ant_contents_to_gemini(messages)
+        generate_config = _gtypes.GenerateContentConfig(
+            system_instruction=system_message,
+            tools=g_tools,
+            max_output_tokens=config.max_tokens,
+            **_google_thinking_config(_gtypes, config),
+            **(
+                {"temperature": config.temperature}
+                if config.temperature is not None
+                else {}
+            ),
+        )
+        on_text_delta = _tool_text_delta_var.get()
+        if on_text_delta is not None:
+            text_parts: list[str] = []
+            streamed_functions: list[dict[str, Any]] = []
+            usage_metadata = None
+            g_stream = await g_client.aio.models.generate_content_stream(
+                model=config.model,
+                contents=g_contents,
+                config=generate_config,
+            )
+            async for chunk in g_stream:
+                usage_metadata = (
+                    getattr(chunk, "usage_metadata", None) or usage_metadata
+                )
+                candidates = getattr(chunk, "candidates", None) or []
+                parts = candidates[0].content.parts if candidates else []
+                for part in parts:
+                    if getattr(part, "text", None):
+                        text_parts.append(part.text)
+                        await on_text_delta(part.text)
+                    elif getattr(part, "function_call", None):
+                        fc = part.function_call
+                        streamed_functions.append(
+                            {
+                                "type": "tool_use",
+                                "id": fc.name,
+                                "name": fc.name,
+                                "input": dict(fc.args) if fc.args else {},
+                                "text": None,
+                                "thought_signature": getattr(
+                                    part, "thought_signature", None
+                                ),
+                            }
+                        )
+            blocks: list[dict[str, Any]] = []
+            streamed_text = "".join(text_parts)
+            if streamed_text:
+                blocks.append(
+                    {
+                        "type": "text",
+                        "id": None,
+                        "name": None,
+                        "input": None,
+                        "text": streamed_text,
+                    }
+                )
+            blocks.extend(streamed_functions)
+            stop_reason = (
+                "tool_use"
+                if any(block["type"] == "tool_use" for block in blocks)
+                else "end_turn"
+            )
+            _record_google_usage(config.model, usage_metadata)
+            return blocks, stop_reason, blocks
         g_resp = await g_client.aio.models.generate_content(
             model=config.model,
             contents=g_contents,
-            config=_gtypes.GenerateContentConfig(
-                system_instruction=system_message,
-                tools=g_tools,
-                max_output_tokens=config.max_tokens,
-                **_google_thinking_config(_gtypes, config),
-                **(
-                    {"temperature": config.temperature}
-                    if config.temperature is not None
-                    else {}
-                ),
-            ),
+            config=generate_config,
         )
         blocks = []
         for part in g_resp.candidates[0].content.parts if g_resp.candidates else []:
@@ -5360,6 +6540,7 @@ async def thinking_agentic_loop(
         except Exception:
             pass
 
+    operation_token = _operation_var.set(_infer_llm_operation())
     try:
         while True:
             if stop_check and stop_check():
@@ -5427,24 +6608,24 @@ async def thinking_agentic_loop(
             context_limit = int(
                 max_context_tokens or getattr(config, "max_context_tokens", 0) or 0
             )
-            if context_limit:
-                safety = max(1024, min(8192, context_limit // 20))
-                budget = max(
-                    1024,
-                    context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety,
+            estimated = _estimate_tools_call_tokens(
+                system_message,
+                messages,
+                tools=tools if tools is not None else THINKING_AGENT_TOOLS,
+                model=config.model,
+                provider=str(getattr(config.provider, "value", config.provider)),
+            )
+            budget = _context_budget_for_request(
+                config, estimated, context_limit=context_limit
+            )
+            effective_config = (
+                _copy_config_with_max_tokens(
+                    config, budget["effective_max_output_tokens"]
                 )
-                estimated = _estimate_tools_call_tokens(
-                    system_message,
-                    messages,
-                    tools=tools if tools is not None else THINKING_AGENT_TOOLS,
-                    model=config.model,
-                    provider=str(getattr(config.provider, "value", config.provider)),
-                )
-                if estimated > budget:
-                    raise LLMContextLimitError(
-                        f"The configured context window cannot fit the fixed prompt and current turn "
-                        f"({estimated:,} input tokens estimated; {budget:,} available)."
-                    )
+                if budget["effective_max_output_tokens"]
+                != budget["configured_max_output_tokens"]
+                else config
+            )
 
             if emit_fn:
                 try:
@@ -5459,6 +6640,19 @@ async def thinking_agentic_loop(
                             "data": {
                                 "step": tool_call_count + 1,
                                 "mode": "agentic",
+                                "context_limit_tokens": budget["context_limit_tokens"],
+                                "input_tokens": budget["input_tokens"],
+                                "safety_tokens": budget["safety_tokens"],
+                                "configured_max_output_tokens": budget[
+                                    "configured_max_output_tokens"
+                                ],
+                                "effective_max_output_tokens": budget[
+                                    "effective_max_output_tokens"
+                                ],
+                                "configured_max_tokens": budget[
+                                    "configured_max_tokens"
+                                ],
+                                "effective_max_tokens": budget["effective_max_tokens"],
                             },
                         }
                     )
@@ -5480,6 +6674,23 @@ async def thinking_agentic_loop(
                                 "data": {
                                     "step": tool_call_count + 1,
                                     "message_count": len(messages),
+                                    "context_limit_tokens": budget[
+                                        "context_limit_tokens"
+                                    ],
+                                    "input_tokens": budget["input_tokens"],
+                                    "safety_tokens": budget["safety_tokens"],
+                                    "configured_max_output_tokens": budget[
+                                        "configured_max_output_tokens"
+                                    ],
+                                    "effective_max_output_tokens": budget[
+                                        "effective_max_output_tokens"
+                                    ],
+                                    "configured_max_tokens": budget[
+                                        "configured_max_tokens"
+                                    ],
+                                    "effective_max_tokens": budget[
+                                        "effective_max_tokens"
+                                    ],
                                 },
                             }
                         )
@@ -5488,7 +6699,9 @@ async def thinking_agentic_loop(
                 _step_no = tool_call_count + 1
                 _t_llm = time.monotonic()
                 _llm_fut = asyncio.ensure_future(
-                    _call_with_tools(config, system_message, messages, tools=tools)
+                    _call_with_tools(
+                        effective_config, system_message, messages, tools=tools
+                    )
                 )
                 while True:
                     _done, _ = await asyncio.wait({_llm_fut}, timeout=30)
@@ -5592,6 +6805,13 @@ async def thinking_agentic_loop(
                 "message_count": len(messages),
                 "context_chars": len(json.dumps(messages, default=str)),
                 "provider_diagnostics": provider_diagnostics,
+                "context_limit_tokens": budget["context_limit_tokens"],
+                "input_tokens": budget["input_tokens"],
+                "safety_tokens": budget["safety_tokens"],
+                "configured_max_output_tokens": budget["configured_max_output_tokens"],
+                "effective_max_output_tokens": budget["effective_max_output_tokens"],
+                "configured_max_tokens": budget["configured_max_tokens"],
+                "effective_max_tokens": budget["effective_max_tokens"],
             }
             if not tool_use_blocks:
                 response_data["no_tool_retry"] = no_tool_attempt
@@ -5628,13 +6848,31 @@ async def thinking_agentic_loop(
             # Append the assistant turn to the growing conversation. Preserve a
             # non-empty marker when a provider returns no usable blocks so the
             # checkpoint itself remains valid for every messages API on resume.
-            assistant_content = raw_content or [
-                {
-                    "type": "text",
-                    "text": "[The model returned no usable content blocks.]",
-                }
-            ]
+            assistant_content = (
+                [_canonical_content_block(block) for block in raw_content]
+                if isinstance(raw_content, list) and raw_content
+                else [
+                    {
+                        "type": "text",
+                        "text": "[The model returned no usable content blocks.]",
+                    }
+                ]
+            )
             messages.append({"role": "assistant", "content": assistant_content})
+
+            # Save the model turn before any requested tool runs. A process can
+            # be killed while a browser, shell, or source tool is executing, in
+            # which case the normal post-tool checkpoint and finally block do
+            # not run. On resume, a trailing assistant tool call is repaired
+            # with an interrupted result so the model can reassess it safely.
+            if on_checkpoint:
+                try:
+                    await on_checkpoint(messages, tool_call_count)
+                except Exception:
+                    log.warning(
+                        "thinking_agentic_loop: pre-tool checkpoint failed",
+                        exc_info=True,
+                    )
 
             if not tool_use_blocks:
                 # OpenAI-style reasoning models occasionally narrate the next step instead
@@ -5907,6 +7145,7 @@ async def thinking_agentic_loop(
                 await on_checkpoint(messages, tool_call_count)
             except Exception:
                 pass
+        _operation_var.reset(operation_token)
 
     return final_summary
 

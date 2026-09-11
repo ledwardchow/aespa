@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import logging
@@ -72,9 +73,24 @@ def _get_alice_timeout(run_id: int) -> float:  # noqa: ARG001
 # Hard step limit to prevent runaway loops regardless of model behaviour.
 ALICE_MAX_STEPS = 300
 
+GOAL_MODE_INSTRUCTIONS = """
+
+GOAL MODE
+You are working toward this durable objective:
+{objective}
+
+Keep working until the objective's stopping condition is verified. A partial
+result, a promising lead, one successful probe, or a progress report is not a
+reason to stop. Maintain a concrete list of completed criteria and remaining
+work. Call done only to propose that the goal is completed or genuinely blocked.
+The coordinator will check the proposal and return missing work if the gate does
+not pass.
+"""
+
 # Tools available to A.L.I.C.E. — same as specialist but without agent_dispatch loops.
 _ALICE_TOOL_NAMES = {
     "http_request",
+    "execute_python",
     "browser",
     "context_tool",
     "skip_coverage",
@@ -150,7 +166,6 @@ async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
     traffic_svc.setup_playwright_logging(
         ctx,
         None if api_run_id is not None else run_id,
-        username="alice",
         api_run_id=api_run_id,
     )
     page = await ctx.new_page()
@@ -319,6 +334,152 @@ def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
     return tools
 
 
+def _goal_mode_tools(tools: list[dict]) -> list[dict]:
+    """Return goal-aware tool schemas without changing shared prompt constants."""
+    configured = copy.deepcopy(tools)
+    for tool in configured:
+        if tool.get("name") != "done":
+            continue
+        tool["description"] = (
+            "Propose ending goal mode. Partial progress is not enough. The "
+            "coordinator independently checks the objective and evidence."
+        )
+        tool["input_schema"] = {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["completed", "blocked"],
+                },
+                "summary": {"type": "string"},
+                "completed_criteria": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "remaining_work": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "blocker": {"type": "string"},
+            },
+            "required": [
+                "status",
+                "summary",
+                "completed_criteria",
+                "evidence",
+                "remaining_work",
+            ],
+        }
+        break
+    return configured
+
+
+async def _check_goal_completion(
+    llm_cfg: LLMConfig,
+    *,
+    objective: str,
+    proposal: dict,
+    evidence: list[dict],
+    run_id: int,
+    is_api: bool,
+    checkpoint: dict | None = None,
+) -> tuple[bool, str, list[str]]:
+    """Apply structural checks and a read-only LLM review to a done proposal."""
+    status = str(proposal.get("status") or "").strip().casefold()
+    summary = str(proposal.get("summary") or "").strip()
+    completed = proposal.get("completed_criteria")
+    claimed_evidence = proposal.get("evidence")
+    remaining = proposal.get("remaining_work")
+    blocker = str(proposal.get("blocker") or "").strip()
+
+    missing: list[str] = []
+    if status not in {"completed", "blocked"}:
+        missing.append("Choose completed or blocked.")
+    if not summary:
+        missing.append("Provide a summary.")
+    if not isinstance(completed, list) or not completed:
+        missing.append("List the completion criteria that were satisfied.")
+    if not isinstance(claimed_evidence, list) or not claimed_evidence:
+        missing.append("Cite evidence gathered while working on this goal.")
+    if not isinstance(remaining, list):
+        missing.append("Provide remaining_work as a list.")
+    elif status == "completed" and remaining:
+        missing.extend(str(item) for item in remaining if str(item).strip())
+    if status == "blocked" and not blocker:
+        missing.append("Describe the external blocker.")
+    if not evidence:
+        missing.append("Use at least one ALICE tool before ending the goal.")
+
+    if not is_api:
+        from aespa.services import scanner, validator
+
+        active_specialists = sum(
+            1 for task in scanner._specialist_tasks.get(run_id, []) if not task.done()
+        )
+        if active_specialists:
+            missing.append(f"Wait for {active_specialists} active specialist(s).")
+        if validator.is_validating(run_id):
+            missing.append("Wait for the active validator run.")
+
+    if missing:
+        return False, status or "continue", missing
+
+    verifier_prompt = (
+        "Review whether an ALICE security-testing goal may stop. You are read-only. "
+        "Use only the supplied objective and tool evidence. Return one JSON object "
+        "with verdict (completed, blocked, or continue), reason, and missing_work "
+        "(an array). Use completed only when the stated outcome is supported and no "
+        "required work remains. Use blocked only for a specific external condition "
+        "that prevents useful progress.\n\n"
+        f"OBJECTIVE:\n{str(objective)[:2_000]}\n"
+        f"[objective_omitted_chars={max(0, len(str(objective)) - 2_000)}]\n\n"
+        "PROPOSAL:\n"
+        f"{json.dumps(_bounded_goal_proposal(proposal), default=str, separators=(',', ':'))}\n\n"
+        "TOOL EVIDENCE:\n"
+        f"{json.dumps(_bounded_goal_evidence(evidence), default=str, separators=(',', ':'))}"
+    )
+    try:
+        raw = await llm_svc.plain_completion(llm_cfg, verifier_prompt)
+        verdict = llm_svc.extract_json_response(raw, expect=dict)
+    except Exception as exc:
+        return False, "continue", [f"Completion review failed: {exc}"]
+
+    reviewed_status = str(verdict.get("verdict") or "continue").casefold()
+    verifier_missing = verdict.get("missing_work")
+    if not isinstance(verifier_missing, list):
+        verifier_missing = []
+    if reviewed_status != status:
+        reason = str(
+            verdict.get("reason") or "The completion evidence is insufficient."
+        )
+        return False, reviewed_status, [reason, *map(str, verifier_missing)]
+
+    if status == "blocked":
+        checkpoint = checkpoint if checkpoint is not None else {}
+        normalized_blocker = " ".join(blocker.casefold().split())
+        previous_blocker = str(checkpoint.get("blocker_candidate") or "")
+        confirmations = int(checkpoint.get("blocker_confirmations") or 0)
+        confirmations = (
+            confirmations + 1 if previous_blocker == normalized_blocker else 1
+        )
+        checkpoint["blocker_candidate"] = normalized_blocker
+        checkpoint["blocker_confirmations"] = confirmations
+        if confirmations < 3:
+            return (
+                False,
+                "blocked",
+                [
+                    "Confirm the same external blocker in another work cycle "
+                    f"({confirmations}/3 confirmations)."
+                ],
+            )
+    return True, reviewed_status, []
+
+
 def _select_session(
     session_vault: dict[str, dict],
     use_session_label: str | None,
@@ -425,6 +586,167 @@ def _redact_history_value(value: Any, *, key: str = "") -> Any:
     if isinstance(value, str):
         return value[:8192]
     return value
+
+
+def _redact_goal_evidence_text(value: str) -> str:
+    """Remove common credential forms before persisting goal checkpoints."""
+    from aespa.services.scanner import _redact_sensitive_text
+
+    redacted = _redact_sensitive_text(str(value or ""))
+    redacted = re.sub(
+        r'(?i)(["\']?authorization["\']?\s*[:=]\s*["\']?bearer\s+)[^\s,"\'}]+',
+        r"\1[REDACTED_BEARER]",
+        redacted,
+    )
+    redacted = re.sub(
+        r'(?i)(["\']?authorization["\']?\s*[:=]\s*["\']?basic\s+)[^\s,"\'}]+',
+        r"\1[REDACTED_BASIC]",
+        redacted,
+    )
+    return re.sub(
+        r'(?i)(["\']?(?:password|secret|access_token|refresh_token|api[_-]?key|cookie)["\']?\s*[:=]\s*["\']?)[^\s,"\'}]+',
+        r"\1[REDACTED]",
+        redacted,
+    )
+
+
+def _bounded_goal_evidence(evidence: list[dict]) -> dict:
+    """Keep the newest goal receipts within a small verifier prompt budget."""
+    max_entries = 30
+    max_entry_chars = 2_000
+    selected = evidence[-max_entries:]
+    entries: list[dict] = []
+    omitted_entries = max(0, len(evidence) - len(selected))
+    omitted_chars = 0
+    for item in reversed(selected):
+        if not isinstance(item, dict):
+            item = {"value": str(item)}
+        safe_input = _redact_history_value(item.get("input"))
+        input_text = json.dumps(safe_input, default=str, separators=(",", ":"))
+        safe_result = _redact_goal_evidence_text(str(item.get("result") or ""))
+        entry = {
+            "step": item.get("step"),
+            "tool": str(item.get("tool") or "")[:200],
+            "input": safe_input,
+            "result": safe_result,
+        }
+        rendered = json.dumps(entry, default=str, separators=(",", ":"))
+        if len(rendered) > max_entry_chars:
+            omitted = len(rendered) - max_entry_chars
+            omitted_chars += omitted
+            entry["input"] = {
+                "_truncated": True,
+                "preview": input_text[:600],
+                "omitted_chars": max(0, len(input_text) - 600),
+            }
+            entry["result"] = safe_result[:1_000]
+            entry["omitted_chars"] = omitted
+        entries.append(entry)
+    entries.reverse()
+    return {
+        "entries": entries,
+        "omitted_entries": omitted_entries,
+        "omitted_chars": omitted_chars,
+    }
+
+
+def _bounded_goal_proposal_value(
+    value: object, *, depth: int = 0
+) -> tuple[object, int, int]:
+    """Recursively bound nested proposal data and return omission counts."""
+    limit = 400
+    if depth >= 4:
+        rendered = json.dumps(value, default=str, separators=(",", ":"))
+        return (
+            {
+                "_truncated": True,
+                "preview": rendered[:limit],
+                "omitted_chars": max(0, len(rendered) - limit),
+            },
+            1,
+            max(0, len(rendered) - limit),
+        )
+    if isinstance(value, str):
+        return value[:limit], 0, max(0, len(value) - limit)
+    if isinstance(value, dict):
+        bounded: dict = {}
+        omitted_items = max(0, len(value) - 20)
+        omitted_chars = 0
+        for key, child in list(value.items())[:20]:
+            safe_key = str(key)[:200]
+            omitted_chars += max(0, len(str(key)) - len(safe_key))
+            child_value, child_items, child_chars = _bounded_goal_proposal_value(
+                child, depth=depth + 1
+            )
+            bounded[safe_key] = child_value
+            omitted_items += child_items
+            if child_items:
+                bounded[f"{safe_key}_omitted_items"] = child_items
+            if child_chars:
+                bounded[f"{safe_key}_omitted_chars"] = child_chars
+            omitted_chars += child_chars
+        if omitted_items:
+            bounded["_omitted_items"] = omitted_items
+        if omitted_chars:
+            bounded["_omitted_chars"] = omitted_chars
+        return bounded, omitted_items, omitted_chars
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+        bounded_items: list = []
+        omitted_items = max(0, len(items) - 20)
+        omitted_chars = 0
+        for child in items[:20]:
+            child_value, child_items, child_chars = _bounded_goal_proposal_value(
+                child, depth=depth + 1
+            )
+            bounded_items.append(child_value)
+            omitted_items += child_items
+            omitted_chars += child_chars
+        return bounded_items, omitted_items, omitted_chars
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, 0, 0
+    rendered = str(value)
+    return rendered[:limit], 0, max(0, len(rendered) - limit)
+
+
+def _bounded_goal_proposal(proposal: dict) -> dict:
+    """Limit model-controlled completion fields while retaining their shape."""
+    bounded: dict = {}
+    items = list(proposal.items())[:20]
+    for key, value in items:
+        safe_key = str(key)[:200]
+        if isinstance(value, list):
+            values = []
+            omitted_items = max(0, len(value) - 20)
+            omitted_chars = 0
+            for item in value[:20]:
+                bounded_item, child_items, child_chars = _bounded_goal_proposal_value(
+                    item
+                )
+                values.append(bounded_item)
+                omitted_items += child_items
+                omitted_chars += child_chars
+            bounded[safe_key] = values
+            if omitted_items:
+                bounded[f"{safe_key}_omitted"] = omitted_items
+            if omitted_chars:
+                bounded[f"{safe_key}_omitted_chars"] = omitted_chars
+        elif isinstance(value, str):
+            bounded[safe_key] = value[:2_000]
+            if len(value) > 2_000:
+                bounded[f"{safe_key}_omitted_chars"] = len(value) - 2_000
+        else:
+            bounded_value, omitted_items, omitted_chars = _bounded_goal_proposal_value(
+                value
+            )
+            bounded[safe_key] = bounded_value
+            if omitted_items:
+                bounded[f"{safe_key}_omitted"] = omitted_items
+            if omitted_chars:
+                bounded[f"{safe_key}_omitted_chars"] = omitted_chars
+    if len(proposal) > len(items):
+        bounded["_omitted_keys"] = len(proposal) - len(items)
+    return bounded
 
 
 def _append_alice_history(
@@ -542,6 +864,32 @@ async def _execute_alice_tool(
             }
         )
 
+    # ── execute_python ───────────────────────────────────────────────────────
+    if tool_name == "execute_python":
+        from aespa.services.code_execution import execute_agent_python
+
+        execution_scope = (
+            scope_check_fn
+            if scope_check_fn
+            else (lambda url: check_scope(url, site_id, run_id))
+        )
+        with Session(get_engine()) as policy_session:
+            execution_policy = get_scanner_policy(policy_session)
+        return await execute_agent_python(
+            run_kind="api" if api_run_id is not None else "web",
+            run_id=run_id,
+            agent_id="alice",
+            agent_role="alice",
+            agent_step=step,
+            purpose=str(tool_input.get("purpose") or "User-directed custom test"),
+            code=str(tool_input.get("code") or ""),
+            session_vault=session_vault,
+            scanner_policy=execution_policy,
+            scope_check_fn=execution_scope,
+            post_probe_fn=post_probe_fn,
+            requested_timeout_s=tool_input.get("timeout_s"),
+        )
+
     # ── http_request ─────────────────────────────────────────────────────────
     if tool_name == "http_request":
         from aespa.services import traffic as traffic_svc
@@ -583,19 +931,28 @@ async def _execute_alice_tool(
         timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
+            run_id=_traffic_run_id,
+            api_run_id=api_run_id,
+            username=(selected or {}).get("username"),
             cookies=req_cookies,
             headers=req_headers,
             timeout=timeout,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(
-                _traffic_run_id, username="alice", api_run_id=api_run_id
-            ),
         ) as hx:
             try:
                 if isinstance(hx, traffic_svc.LoggingAsyncClient):
                     hx.page_id = tool_input.get("page_id")
                     hx.session_label = use_session_label
+                    hx.provenance = {
+                        "agent_id": "alice",
+                        "purpose": traffic_svc.request_purpose(
+                            tool_input, "Probe target", agent_name="ALICE"
+                        ),
+                        "owasp_category": tool_input.get("owasp_category"),
+                        "test_class": tool_input.get("test_class"),
+                        "obligation_id": tool_input.get("obligation_id"),
+                    }
                 kwargs: dict = {}
                 if body is not None:
                     if isinstance(body, dict):
@@ -844,7 +1201,10 @@ async def _execute_alice_tool(
 
     # ── write_finding ─────────────────────────────────────────────────────────
     if tool_name == "write_finding":
-        from aespa.services.scanner import _persist_dynamic_finding
+        from aespa.services.scanner import (
+            _persist_dynamic_finding,
+            _unauthenticated_finding_rejection,
+        )
 
         finding_raw = dict(tool_input)
         finding_raw["finding_source"] = "alice"
@@ -884,6 +1244,11 @@ async def _execute_alice_tool(
             "request_evidence": str(finding_raw.get("request_evidence") or ""),
             "response_evidence": str(finding_raw.get("response_evidence") or ""),
         }
+        finding_rejection = _unauthenticated_finding_rejection(
+            finding_raw, {str(affected): fw_result}
+        )
+        if finding_rejection:
+            return finding_rejection
 
         try:
             saved = await _persist_dynamic_finding(
@@ -1081,14 +1446,14 @@ async def _execute_alice_tool(
         timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
+            run_id=_traffic_run_id,
+            api_run_id=api_run_id,
             cookies={},
             headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
             timeout=timeout,
             follow_redirects=False,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(
-                _traffic_run_id, username="alice", api_run_id=api_run_id
-            ),
+            provenance={"agent_id": "alice"},
         ) as hx:
             for cand in candidates[:20]:
                 body = {
@@ -1096,6 +1461,12 @@ async def _execute_alice_tool(
                     password_field: cand.get("password", ""),
                 }
                 try:
+                    if isinstance(hx, traffic_svc.LoggingAsyncClient):
+                        hx.provenance["purpose"] = traffic_svc.request_purpose(
+                            tool_input,
+                            f"Check credentials for {cand.get('username') or 'candidate'}",
+                            agent_name="ALICE",
+                        )
                     if "application/json" in req_headers.get("Content-Type", ""):
                         resp = await hx.request(
                             method, cred_url, json=body, headers=req_headers
@@ -1198,14 +1569,19 @@ async def _execute_alice_tool(
         timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
+            run_id=_traffic_run_id,
+            api_run_id=api_run_id,
             cookies={},
             headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
             timeout=timeout,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(
-                _traffic_run_id, username="alice", api_run_id=api_run_id
-            ),
+            provenance={
+                "agent_id": "alice",
+                "purpose": traffic_svc.request_purpose(
+                    tool_input, "Register a test account", agent_name="ALICE"
+                ),
+            },
         ) as hx:
             try:
                 _reg_kwargs = {"headers": req_headers}
@@ -1440,7 +1816,18 @@ async def _execute_alice_tool(
 
         with Session(get_engine()) as _s:
             scanner_policy = get_scanner_policy(_s)
-        traffic_svc.set_browser_context_tag(ctx, browser_page_id, use_session_label)
+        traffic_svc.set_browser_context_tag(
+            ctx,
+            browser_page_id,
+            use_session_label,
+            username=(selected or {}).get("username"),
+            purpose=traffic_svc.request_purpose(
+                tool_input, "Browser probe", agent_name="ALICE"
+            ),
+            owasp_category=tool_input.get("owasp_category"),
+            test_class=tool_input.get("test_class"),
+            obligation_id=tool_input.get("obligation_id"),
+        )
         try:
             result = await _run_thinking_browser_action(
                 page,
@@ -1762,6 +2149,8 @@ async def run_alice_turn_stream(
     run_id: int,
     user_instruction: str,
     history: list[dict],
+    goal: dict | None = None,
+    steering_queue: asyncio.Queue[str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Execute an interactive penetration testing turn for A.L.I.C.E. with streaming response.
 
@@ -1877,6 +2266,8 @@ async def run_alice_turn_stream(
             user_directive=user_instruction,
             base_url=base_url,
         )
+    if goal:
+        system_message += GOAL_MODE_INSTRUCTIONS.format(objective=goal["objective"])
 
     # Convert conversation history to Anthropic-format messages.
     # History items from the chat UI have sender/text; convert to role/content.
@@ -1913,6 +2304,8 @@ async def run_alice_turn_stream(
         alice_tools = [
             tool for tool in alice_tools if tool["name"] in {"context_tool", "done"}
         ]
+    if goal:
+        alice_tools = _goal_mode_tools(alice_tools)
 
     accumulated_thought = ""
     accumulated_message = ""
@@ -1920,11 +2313,25 @@ async def run_alice_turn_stream(
     reauth_attempts = [0]
     step_count = 0
     consecutive_text_only = 0
+    goal_evidence: list[dict] = list(
+        ((goal or {}).get("checkpoint") or {}).get("evidence") or []
+    )
+    goal_terminal = False
 
     # 4. Agentic loop
     try:
         while step_count < ALICE_MAX_STEPS:
             step_count += 1
+
+            if steering_queue is not None:
+                while not steering_queue.empty():
+                    guidance = steering_queue.get_nowait()
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": f"USER STEERING FOR THE ACTIVE GOAL:\n{guidance}",
+                        }
+                    )
 
             messages, compaction = llm_svc.compact_messages_for_config(
                 llm_cfg, system_message, messages, tools=alice_tools
@@ -1939,13 +2346,26 @@ async def run_alice_turn_stream(
                 pass
 
             try:
-                (
-                    content_blocks,
-                    stop_reason,
-                    raw_content,
-                ) = await llm_svc._call_with_tools(
+                streamed_text = ""
+                streamed_payload = ""
+                stream_prefix = ""
+                async for call_event in llm_svc.stream_tools_call(
                     llm_cfg, system_message, messages, tools=alice_tools
-                )
+                ):
+                    if call_event["type"] == "text_delta":
+                        delta = call_event["delta"]
+                        if not streamed_text and accumulated_message:
+                            stream_prefix = (
+                                "" if accumulated_message.endswith("\n") else "\n\n"
+                            )
+                            if stream_prefix:
+                                streamed_payload += stream_prefix
+                                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': stream_prefix})}\n\n"
+                        streamed_text += delta
+                        streamed_payload += delta
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': delta})}\n\n"
+                    else:
+                        content_blocks, stop_reason, raw_content = call_event["result"]
             except llm_svc.LLMQuotaPauseError:
                 # Preserve the structured pause so the outer handler emits a
                 # visible warning and chat reply instead of a generic step error.
@@ -1956,6 +2376,13 @@ async def run_alice_turn_stream(
                 )
                 err = f"LLM error at step {step_count}: {exc}"
                 yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\n\n⚠️ {err}'})}\n\n"
+                if goal:
+                    from aespa.services import alice_goals
+
+                    paused_goal = alice_goals.update_goal(
+                        goal["id"], status="paused", pause_reason=err
+                    )
+                    yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
                 break
 
             # Append assistant turn to the growing conversation
@@ -1991,6 +2418,21 @@ async def run_alice_turn_stream(
                 intent == "operational"
                 and any(block.get("name") == "done" for block in tool_use_blocks)
             )
+            combined_text = "".join(
+                str(block.get("text") or "") for block in text_blocks
+            )
+            streamed_is_final = bool(streamed_text) and combined_text == streamed_text
+            if streamed_text and (
+                has_tools
+                or "<think>" in streamed_text.lower()
+                or "<thinking>" in streamed_text.lower()
+            ):
+                yield f"data: {json.dumps({'type': 'message_retract', 'message': accumulated_message})}\n\n"
+                streamed_text = ""
+                streamed_payload = ""
+                streamed_is_final = False
+            elif streamed_is_final:
+                accumulated_message += streamed_payload
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -2014,6 +2456,8 @@ async def run_alice_turn_stream(
                     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': wrapped})}\n\n"
                 else:
                     # Final tool-less turn: this text is the actual answer.
+                    if streamed_is_final:
+                        continue
                     if accumulated_message and not accumulated_message.endswith("\n"):
                         accumulated_message += "\n\n"
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
@@ -2023,7 +2467,7 @@ async def run_alice_turn_stream(
 
             # Handle no tool use (text-only turn)
             if not tool_use_blocks:
-                if intent == "operational":
+                if intent == "operational" and not goal:
                     log.info(
                         "ALICE operational turn completed with text at step %d",
                         step_count,
@@ -2031,6 +2475,17 @@ async def run_alice_turn_stream(
                     break
                 consecutive_text_only += 1
                 if consecutive_text_only >= 3:
+                    if goal:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Goal mode is still active. Continue with a useful tool "
+                                    "call, or submit a complete done proposal for review."
+                                ),
+                            }
+                        )
+                        continue
                     log.warning(
                         "ALICE: %d consecutive text-only turns; ending loop",
                         consecutive_text_only,
@@ -2067,6 +2522,67 @@ async def run_alice_turn_stream(
                 tool_use_id = block.get("id") or ""
 
                 if tool_name == "done":
+                    if goal:
+                        goal_checkpoint = dict(goal.get("checkpoint") or {})
+                        (
+                            accepted,
+                            goal_status,
+                            missing_work,
+                        ) = await _check_goal_completion(
+                            llm_cfg,
+                            objective=goal["objective"],
+                            proposal=tool_input,
+                            evidence=goal_evidence,
+                            run_id=run_id,
+                            is_api=False,
+                            checkpoint=goal_checkpoint,
+                        )
+                        if not accepted:
+                            feedback = {
+                                "accepted": False,
+                                "status": goal_status,
+                                "missing_work": missing_work,
+                                "message": "Goal completion was not accepted. Continue working.",
+                            }
+                            from aespa.services import alice_goals
+
+                            updated_goal = alice_goals.update_goal(
+                                goal["id"],
+                                checkpoint={
+                                    "last_step": step_count,
+                                    "remaining_work": missing_work,
+                                    "evidence": goal_evidence[-30:],
+                                    **{
+                                        key: goal_checkpoint[key]
+                                        for key in (
+                                            "blocker_candidate",
+                                            "blocker_confirmations",
+                                        )
+                                        if key in goal_checkpoint
+                                    },
+                                },
+                            )
+                            goal = alice_goals.goal_out(updated_goal)
+                            tool_results.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use_id,
+                                    "content": json.dumps(feedback),
+                                }
+                            )
+                            yield f"data: {json.dumps({'type': 'goal_progress', 'goal': alice_goals.goal_out(updated_goal)})}\n\n"
+                            continue
+                        from aespa.services import alice_goals
+
+                        final_goal = alice_goals.update_goal(
+                            goal["id"],
+                            status=goal_status,
+                            completion=tool_input,
+                            blocker=str(tool_input.get("blocker") or ""),
+                            checkpoint={"remaining_work": []},
+                        )
+                        goal_terminal = True
+                        yield f"data: {json.dumps({'type': f'goal_{goal_status}', 'goal': alice_goals.goal_out(final_goal)})}\n\n"
                     summary = str(tool_input.get("summary") or "Assessment complete.")
                     log.info("ALICE done at step %d: %s", step_count, summary[:200])
                     if summary:
@@ -2120,6 +2636,28 @@ async def run_alice_turn_stream(
                     omitted = len(result_str) - limit
                     result_str = result_str[:limit] + f"\n[{omitted} chars omitted]"
 
+                if goal:
+                    goal_evidence.append(
+                        {
+                            "step": step_count,
+                            "tool": tool_name,
+                            "input": _redact_history_value(tool_input),
+                            "result": _redact_goal_evidence_text(result_str)[:4000],
+                        }
+                    )
+                    from aespa.services import alice_goals
+
+                    checkpoint = {
+                        "last_step": step_count,
+                        "last_tool": tool_name,
+                        "evidence_count": len(goal_evidence),
+                        "evidence": goal_evidence[-30:],
+                    }
+                    updated_goal = alice_goals.update_goal(
+                        goal["id"], checkpoint=checkpoint
+                    )
+                    yield f"data: {json.dumps({'type': 'goal_progress', 'goal': alice_goals.goal_out(updated_goal)})}\n\n"
+
                 yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
                 try:
                     result_preview = result_str[:3000] + (
@@ -2150,6 +2688,13 @@ async def run_alice_turn_stream(
                 break
 
     except llm_svc.LLMQuotaPauseError as exc:
+        if goal:
+            from aespa.services import alice_goals
+
+            paused_goal = alice_goals.update_goal(
+                goal["id"], status="paused", pause_reason=str(exc)
+            )
+            yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
         log.info("ALICE Codex allowance exhausted: %s", exc)
         err_msg = (
             "ChatGPT/Codex is temporarily unavailable because its allowance or "
@@ -2160,6 +2705,13 @@ async def run_alice_turn_stream(
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err_msg}'})}\n\n"
         accumulated_message += err_msg
     except Exception as exc:
+        if goal:
+            from aespa.services import alice_goals
+
+            paused_goal = alice_goals.update_goal(
+                goal["id"], status="paused", pause_reason=str(exc)
+            )
+            yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
         log.exception("ALICE agentic loop failed")
         err_msg = f"I encountered an error in the agentic loop: {exc}"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
@@ -2190,6 +2742,25 @@ async def run_alice_turn_stream(
         # Close the live browser opened for any `browser` tool calls this turn.
         # Captured sessions persist in the vault/DB, so auth survives the teardown.
         await _close_alice_browser(run_id)
+
+    if goal and not goal_terminal:
+        from aespa.services import alice_goals
+
+        current = alice_goals.get_goal("web", run_id, goal["tab_id"])
+        if current and current.status == "active":
+            paused_goal = alice_goals.update_goal(
+                goal["id"],
+                status="paused",
+                pause_reason=f"Goal reached the {ALICE_MAX_STEPS}-step safety limit.",
+            )
+            pause_message = (
+                f"Goal paused after reaching the {ALICE_MAX_STEPS}-step safety limit. "
+                "Resume it to continue from the saved checkpoint."
+            )
+            if accumulated_message:
+                accumulated_message += "\n\n"
+            accumulated_message += pause_message
+            yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
 
     # 5. Emit done event
     yield f"data: {json.dumps({'type': 'done', 'thought': accumulated_thought.strip(), 'message': accumulated_message.strip()})}\n\n"
@@ -2818,6 +3389,8 @@ async def run_api_alice_turn_stream(
     api_run_id: int,
     user_instruction: str,
     history: list[dict],
+    goal: dict | None = None,
+    steering_queue: asyncio.Queue[str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Execute an interactive API security testing turn for A.L.I.C.E.
 
@@ -2991,6 +3564,8 @@ async def run_api_alice_turn_stream(
             base_url=base_url,
             user_directive=user_instruction,
         )
+    if goal:
+        system_message += GOAL_MODE_INSTRUCTIONS.format(objective=goal["objective"])
 
     # Build login-credential block so ALICE knows how to authenticate.
     creds_text = ""
@@ -3067,15 +3642,31 @@ async def run_api_alice_turn_stream(
         alice_tools = [
             tool for tool in alice_tools if tool["name"] in {"context_tool", "done"}
         ]
+    if goal:
+        alice_tools = _goal_mode_tools(alice_tools)
     accumulated_thought = ""
     accumulated_message = ""
     context_history: list[dict] = []
     step_count = 0
     consecutive_text_only = 0
+    goal_evidence: list[dict] = list(
+        ((goal or {}).get("checkpoint") or {}).get("evidence") or []
+    )
+    goal_terminal = False
 
     try:
         while step_count < ALICE_MAX_STEPS:
             step_count += 1
+
+            if steering_queue is not None:
+                while not steering_queue.empty():
+                    guidance = steering_queue.get_nowait()
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": f"USER STEERING FOR THE ACTIVE GOAL:\n{guidance}",
+                        }
+                    )
 
             messages, compaction = llm_svc.compact_messages_for_config(
                 llm_cfg, system_message, messages, tools=alice_tools
@@ -3090,13 +3681,25 @@ async def run_api_alice_turn_stream(
                 pass
 
             try:
-                (
-                    content_blocks,
-                    stop_reason,
-                    raw_content,
-                ) = await llm_svc._call_with_tools(
+                streamed_text = ""
+                streamed_payload = ""
+                async for call_event in llm_svc.stream_tools_call(
                     llm_cfg, system_message, messages, tools=alice_tools
-                )
+                ):
+                    if call_event["type"] == "text_delta":
+                        delta = call_event["delta"]
+                        if not streamed_text and accumulated_message:
+                            separator = (
+                                "" if accumulated_message.endswith("\n") else "\n\n"
+                            )
+                            if separator:
+                                streamed_payload += separator
+                                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': separator})}\n\n"
+                        streamed_text += delta
+                        streamed_payload += delta
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': delta})}\n\n"
+                    else:
+                        content_blocks, stop_reason, raw_content = call_event["result"]
             except llm_svc.LLMQuotaPauseError:
                 # Preserve the structured pause so the outer handler emits a
                 # visible warning and chat reply instead of a generic step error.
@@ -3105,6 +3708,13 @@ async def run_api_alice_turn_stream(
                 log.exception("ALICE API loop: LLM call failed at step %d", step_count)
                 err = f"LLM error at step {step_count}: {exc}"
                 yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\n\n⚠️ {err}'})}\n\n"
+                if goal:
+                    from aespa.services import alice_goals
+
+                    paused_goal = alice_goals.update_goal(
+                        goal["id"], status="paused", pause_reason=err
+                    )
+                    yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
                 break
 
             messages.append({"role": "assistant", "content": raw_content})
@@ -3135,6 +3745,21 @@ async def run_api_alice_turn_stream(
                 intent == "operational"
                 and any(block.get("name") == "done" for block in tool_use_blocks)
             )
+            combined_text = "".join(
+                str(block.get("text") or "") for block in text_blocks
+            )
+            streamed_is_final = bool(streamed_text) and combined_text == streamed_text
+            if streamed_text and (
+                has_tools
+                or "<think>" in streamed_text.lower()
+                or "<thinking>" in streamed_text.lower()
+            ):
+                yield f"data: {json.dumps({'type': 'message_retract', 'message': accumulated_message})}\n\n"
+                streamed_text = ""
+                streamed_payload = ""
+                streamed_is_final = False
+            elif streamed_is_final:
+                accumulated_message += streamed_payload
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -3155,6 +3780,8 @@ async def run_api_alice_turn_stream(
                     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': wrapped})}\n\n"
                 else:
                     # Final tool-less turn: this text is the actual answer.
+                    if streamed_is_final:
+                        continue
                     if accumulated_message and not accumulated_message.endswith("\n"):
                         accumulated_message += "\n\n"
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
@@ -3163,7 +3790,7 @@ async def run_api_alice_turn_stream(
                 await asyncio.sleep(0)
 
             if not tool_use_blocks:
-                if intent == "operational":
+                if intent == "operational" and not goal:
                     log.info(
                         "ALICE API operational turn completed with text at step %d",
                         step_count,
@@ -3171,6 +3798,17 @@ async def run_api_alice_turn_stream(
                     break
                 consecutive_text_only += 1
                 if consecutive_text_only >= 3:
+                    if goal:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Goal mode is still active. Continue with a useful tool "
+                                    "call, or submit a complete done proposal for review."
+                                ),
+                            }
+                        )
+                        continue
                     log.warning(
                         "ALICE API: %d consecutive text-only turns; ending loop",
                         consecutive_text_only,
@@ -3205,6 +3843,67 @@ async def run_api_alice_turn_stream(
                 tool_use_id = block.get("id") or ""
 
                 if tool_name == "done":
+                    if goal:
+                        goal_checkpoint = dict(goal.get("checkpoint") or {})
+                        (
+                            accepted,
+                            goal_status,
+                            missing_work,
+                        ) = await _check_goal_completion(
+                            llm_cfg,
+                            objective=goal["objective"],
+                            proposal=tool_input,
+                            evidence=goal_evidence,
+                            run_id=api_run_id,
+                            is_api=True,
+                            checkpoint=goal_checkpoint,
+                        )
+                        if not accepted:
+                            feedback = {
+                                "accepted": False,
+                                "status": goal_status,
+                                "missing_work": missing_work,
+                                "message": "Goal completion was not accepted. Continue working.",
+                            }
+                            from aespa.services import alice_goals
+
+                            updated_goal = alice_goals.update_goal(
+                                goal["id"],
+                                checkpoint={
+                                    "last_step": step_count,
+                                    "remaining_work": missing_work,
+                                    "evidence": goal_evidence[-30:],
+                                    **{
+                                        key: goal_checkpoint[key]
+                                        for key in (
+                                            "blocker_candidate",
+                                            "blocker_confirmations",
+                                        )
+                                        if key in goal_checkpoint
+                                    },
+                                },
+                            )
+                            goal = alice_goals.goal_out(updated_goal)
+                            tool_results.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use_id,
+                                    "content": json.dumps(feedback),
+                                }
+                            )
+                            yield f"data: {json.dumps({'type': 'goal_progress', 'goal': alice_goals.goal_out(updated_goal)})}\n\n"
+                            continue
+                        from aespa.services import alice_goals
+
+                        final_goal = alice_goals.update_goal(
+                            goal["id"],
+                            status=goal_status,
+                            completion=tool_input,
+                            blocker=str(tool_input.get("blocker") or ""),
+                            checkpoint={"remaining_work": []},
+                        )
+                        goal_terminal = True
+                        yield f"data: {json.dumps({'type': f'goal_{goal_status}', 'goal': alice_goals.goal_out(final_goal)})}\n\n"
                     summary = str(tool_input.get("summary") or "Assessment complete.")
                     log.info("ALICE API done at step %d: %s", step_count, summary[:200])
                     if summary:
@@ -3262,6 +3961,28 @@ async def run_api_alice_turn_stream(
                     omitted = len(result_str) - limit
                     result_str = result_str[:limit] + f"\n[{omitted} chars omitted]"
 
+                if goal:
+                    goal_evidence.append(
+                        {
+                            "step": step_count,
+                            "tool": tool_name,
+                            "input": _redact_history_value(tool_input),
+                            "result": _redact_goal_evidence_text(result_str)[:4000],
+                        }
+                    )
+                    from aespa.services import alice_goals
+
+                    checkpoint = {
+                        "last_step": step_count,
+                        "last_tool": tool_name,
+                        "evidence_count": len(goal_evidence),
+                        "evidence": goal_evidence[-30:],
+                    }
+                    updated_goal = alice_goals.update_goal(
+                        goal["id"], checkpoint=checkpoint
+                    )
+                    yield f"data: {json.dumps({'type': 'goal_progress', 'goal': alice_goals.goal_out(updated_goal)})}\n\n"
+
                 yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
                 try:
                     result_preview = result_str[:3000] + (
@@ -3292,6 +4013,13 @@ async def run_api_alice_turn_stream(
                 break
 
     except llm_svc.LLMQuotaPauseError as exc:
+        if goal:
+            from aespa.services import alice_goals
+
+            paused_goal = alice_goals.update_goal(
+                goal["id"], status="paused", pause_reason=str(exc)
+            )
+            yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
         log.info("ALICE API Codex allowance exhausted: %s", exc)
         err_msg = (
             "ChatGPT/Codex is temporarily unavailable because its allowance or "
@@ -3302,6 +4030,13 @@ async def run_api_alice_turn_stream(
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err_msg}'})}\n\n"
         accumulated_message += err_msg
     except Exception as exc:
+        if goal:
+            from aespa.services import alice_goals
+
+            paused_goal = alice_goals.update_goal(
+                goal["id"], status="paused", pause_reason=str(exc)
+            )
+            yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
         log.exception("ALICE API agentic loop failed")
         err_msg = f"I encountered an error in the agentic loop: {exc}"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
@@ -3323,6 +4058,25 @@ async def run_api_alice_turn_stream(
                 from aespa.services import antigravity_provider as provider_adapter
 
             await provider_adapter.close_conversation(messages)
+
+    if goal and not goal_terminal:
+        from aespa.services import alice_goals
+
+        current = alice_goals.get_goal("api", api_run_id, goal["tab_id"])
+        if current and current.status == "active":
+            paused_goal = alice_goals.update_goal(
+                goal["id"],
+                status="paused",
+                pause_reason=f"Goal reached the {ALICE_MAX_STEPS}-step safety limit.",
+            )
+            pause_message = (
+                f"Goal paused after reaching the {ALICE_MAX_STEPS}-step safety limit. "
+                "Resume it to continue from the saved checkpoint."
+            )
+            if accumulated_message:
+                accumulated_message += "\n\n"
+            accumulated_message += pause_message
+            yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
 
     yield f"data: {json.dumps({'type': 'done', 'thought': accumulated_thought.strip(), 'message': accumulated_message.strip()})}\n\n"
     llm_svc.clear_run_context()

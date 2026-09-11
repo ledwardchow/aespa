@@ -1,4 +1,6 @@
 import pluginReact from "eslint-plugin-react";
+import hooks from "eslint-plugin-react-hooks";
+import a11y from "eslint-plugin-jsx-a11y";
 
 export default [
   {
@@ -8,8 +10,8 @@ export default [
       sourceType: "module",
       parserOptions: {
         ecmaFeatures: {
-          jsx: true
-        }
+          jsx: true,
+        },
       },
       globals: {
         AbortController: "readonly",
@@ -22,6 +24,8 @@ export default [
         console: "readonly",
         document: "readonly",
         EventSource: "readonly",
+        Event: "readonly",
+        MouseEvent: "readonly",
         fetch: "readonly",
         FileReader: "readonly",
         FormData: "readonly",
@@ -34,15 +38,24 @@ export default [
         TextDecoder: "readonly",
         URL: "readonly",
         URLSearchParams: "readonly",
-        window: "readonly"
-      }
+        window: "readonly",
+      },
     },
+    settings: { react: { version: "detect" } },
     plugins: {
-      react: pluginReact
+      react: pluginReact,
+      "react-hooks": hooks,
+      "jsx-a11y": a11y,
     },
     rules: {
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "error",
+      "jsx-a11y/alt-text": "error",
+      "jsx-a11y/aria-props": "error",
+      "jsx-a11y/aria-proptypes": "error",
       "no-undef": "error",
-      "react/jsx-no-undef": "error"
-    }
-  }
+      "react/jsx-no-undef": "error",
+      "react/no-unknown-property": "error",
+    },
+  },
 ];

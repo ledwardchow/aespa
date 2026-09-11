@@ -1,0 +1,291 @@
+/* ── Settings: provider picker ──────────────────────────────── */
+
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.provider-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-2);
+  background: var(--panel-2);
+  cursor: pointer;
+  transition:
+    border-color 0.12s,
+    background 0.12s;
+  user-select: none;
+}
+.provider-card input[type="radio"] {
+  margin-top: 1px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+.provider-card:hover {
+  border-color: var(--accent);
+}
+.provider-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+.provider-name {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+/* ── Settings: model selector ───────────────────────────────── */
+
+.select {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  padding: 8px 11px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7691' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 32px;
+  transition: border-color 0.15s;
+}
+.select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.select option {
+  background: #1d222d;
+}
+
+.model-select-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-tab-bar {
+  margin-bottom: 14px;
+}
+
+.settings-content {
+  padding-top: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.settings-content > .alert,
+.settings-content > .subtle,
+.settings-content > .card {
+  margin-left: 28px;
+  margin-right: 28px;
+}
+
+.settings-content > .alert {
+  margin-top: 12px;
+}
+
+.settings-content > .card {
+  margin-top: 14px;
+}
+
+.settings-content .settings-tab-bar {
+  margin-left: 0;
+  margin-right: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.settings-list {
+  overflow-x: auto;
+  margin-top: 14px;
+  min-width: 0;
+}
+
+.settings-list-head,
+.settings-list-row {
+  display: grid;
+  align-items: center;
+  gap: 12px;
+  padding-left: 28px;
+  padding-right: 28px;
+}
+
+.settings-list-profiles .settings-list-head,
+.settings-list-profiles .settings-list-row {
+  grid-template-columns: minmax(130px, 1fr) minmax(150px, 1.2fr) minmax(180px, 1.4fr) 64px minmax(
+      168px,
+      auto
+    );
+}
+
+.settings-list-scanprofiles .settings-list-head,
+.settings-list-scanprofiles .settings-list-row {
+  grid-template-columns: minmax(130px, 1fr) minmax(150px, 1.2fr) minmax(120px, 1fr) 96px minmax(
+      168px,
+      auto
+    );
+}
+
+.settings-list-providers .settings-list-head,
+.settings-list-providers .settings-list-row {
+  grid-template-columns:
+    minmax(130px, 1fr) minmax(110px, 0.8fr) minmax(170px, 1.1fr) minmax(170px, 1.1fr)
+    minmax(120px, 0.9fr) minmax(120px, auto);
+}
+
+.settings-list-head {
+  padding-top: 0;
+  padding-bottom: 9px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-list-head > div.sortable {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: color 0.15s ease;
+}
+
+.settings-list-head > div.sortable:hover {
+  color: var(--fg);
+}
+
+.settings-list-row {
+  min-height: 52px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.settings-list-row:last-child {
+  border-bottom: 0;
+}
+
+.settings-list-row strong {
+  color: var(--text);
+}
+
+.settings-list-row > div {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-list-row .settings-list-actions {
+  justify-content: flex-end;
+  overflow: visible;
+}
+
+.policy-panel {
+  overflow: auto;
+  padding-bottom: 18px;
+}
+
+.policy-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.scan-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border-2);
+}
+.scan-mode-badge.mode-passive {
+  color: var(--text-2);
+  background: rgba(107, 118, 145, 0.12);
+}
+.scan-mode-badge.mode-safe_active {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-color: rgba(63, 207, 112, 0.22);
+}
+.scan-mode-badge.mode-aggressive {
+  color: var(--warn);
+  background: rgba(245, 166, 35, 0.12);
+  border-color: rgba(245, 166, 35, 0.25);
+}
+.scan-mode-badge.mode-destructive {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-color: rgba(224, 92, 92, 0.25);
+}
+
+.scan-mode-definitions {
+  display: grid;
+  gap: 8px;
+  margin-top: -2px;
+}
+
+.scan-mode-definition {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  align-items: start;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.015);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.scan-mode-definition.selected {
+  border-color: var(--border-2);
+  background: var(--panel-2);
+}
+
+/* ── Settings: two-col row ──────────────────────────────────── */
+
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* ── Settings: field helpers ────────────────────────────────── */
+
+.field-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.field-hint-inline {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.field-optional {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+}

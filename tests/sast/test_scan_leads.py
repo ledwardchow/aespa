@@ -3,10 +3,8 @@
 import json
 
 import pytest
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
-from aespa.db import set_engine
 from aespa.models import (
     ApiCollection,
     ApiEndpoint,
@@ -24,22 +22,8 @@ from aespa.services.scan_leads import (
 
 
 @pytest.fixture(name="engine")
-def engine_fixture():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-    from aespa.db import _engine as original
-
-    set_engine(engine)
-    yield engine
-    set_engine(original)
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
+def engine_fixture(db_engine):
+    return db_engine
 
 
 def _make_lead(engine, **overrides) -> int:

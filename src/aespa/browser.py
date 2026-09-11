@@ -70,25 +70,33 @@ def chromium_present() -> bool:
     return any(target.glob("chromium*"))
 
 
+def playwright_chromium_present() -> bool:
+    """Return whether Playwright can resolve an installed Chromium executable."""
+    configure_browsers_path()
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            executable = Path(playwright.chromium.executable_path)
+    except Exception:
+        return False
+    return executable.is_file()
+
+
 def download_chromium_if_missing() -> None:
     """Download Chromium into the configured dir if it isn't there. Blocking.
 
-    No-op outside a packaged app. Safe to run on a background thread.
-
-    We always invoke Playwright's installer rather than short-circuiting on a
-    glob: `playwright install` is idempotent — it skips browsers already at the
-    expected revision (no network) and downloads only what's missing. A loose
-    "any chromium-* dir exists" check breaks on Playwright upgrades, where the
-    bundled driver wants a newer build (e.g. chromium_headless_shell-1228) than
-    the stale cached one (…-1223), yet the check wrongly reports "installed".
+    Safe to run on a background thread. The resolved executable check handles
+    Playwright upgrades where an older Chromium directory may still exist.
     """
-    if not _bundled():
+    configure_browsers_path()
+    if playwright_chromium_present():
         return
 
-    target = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", browsers_dir()))
-    target.mkdir(parents=True, exist_ok=True)
-    print(f"[aespa] First run: downloading Chromium into {target} ...", flush=True)
     if getattr(sys, "frozen", False):
+        target = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", browsers_dir()))
+        target.mkdir(parents=True, exist_ok=True)
+        print(f"[aespa] First run: downloading Chromium into {target} ...", flush=True)
         # Frozen: sys.executable can't run `-m`; invoke Playwright's node driver.
         from playwright._impl._driver import compute_driver_executable, get_driver_env
 
@@ -97,6 +105,9 @@ def download_chromium_if_missing() -> None:
         cmd = [*driver, "install", "chromium"]
         subprocess.run(cmd, check=True, env=get_driver_env())
     else:
+        print(
+            "[aespa] Playwright Chromium is missing; installing it now ...", flush=True
+        )
         subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"], check=True
         )

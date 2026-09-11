@@ -1,0 +1,20 @@
+.content {
+  padding: 0 0 0 16px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-top: 16px;
+  padding-bottom: 28px;
+}
+/* The page has 16px padding; the shared tab bar assumes 28px elsewhere. */
+.content > :global(.tab-bar) {
+  margin: 0 0 0 -16px;
+  padding: 0 16px;
+}

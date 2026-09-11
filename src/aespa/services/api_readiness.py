@@ -20,6 +20,9 @@ from aespa.models import ApiCollection, ApiCredential, ApiEndpoint
 # How many endpoints to include verbatim in the LLM prompt.
 # Endpoints beyond this cap receive the overall assessment's auth/data gaps.
 _MAX_ENDPOINTS_IN_PROMPT = 60
+_MAX_CREDENTIALS_IN_PROMPT = 40
+_MAX_PROMPT_FIELD_CHARS = 300
+_MAX_JSON_FIELD_CHARS = 800
 
 
 class ReadinessError(Exception):
@@ -67,13 +70,22 @@ async def assess_readiness(session: Session, collection_id: int) -> dict:
     # Credential summary (scheme + label + auth_endpoint only — never expose values)
     cred_summary = [
         {
-            "scheme": c.scheme,
-            "name": c.name,
-            "label": c.label or c.name,
-            **(({"auth_endpoint": c.auth_endpoint}) if c.auth_endpoint else {}),
+            "scheme": _bounded_text(c.scheme),
+            "name": _bounded_text(c.name),
+            "label": _bounded_text(c.label or c.name),
+            **(
+                {"auth_endpoint": _bounded_text(c.auth_endpoint)}
+                if c.auth_endpoint
+                else {}
+            ),
         }
-        for c in credentials
+        for c in credentials[:_MAX_CREDENTIALS_IN_PROMPT]
     ]
+    credentials_omitted = max(0, len(credentials) - len(cred_summary))
+
+    security_schemes, security_omitted = _bounded_json(
+        security_schemes, _MAX_JSON_FIELD_CHARS
+    )
 
     # Endpoint summaries for the prompt
     ep_for_prompt = [_ep_summary(ep) for ep in endpoints[:_MAX_ENDPOINTS_IN_PROMPT]]
@@ -96,6 +108,8 @@ async def assess_readiness(session: Session, collection_id: int) -> dict:
         credentials=cred_summary,
         security_schemes=security_schemes,
         total_endpoints=len(endpoints),
+        credentials_omitted=credentials_omitted,
+        security_omitted=security_omitted,
     )
 
     try:
@@ -159,16 +173,38 @@ def _ep_summary(ep: ApiEndpoint) -> dict:
     tags = json.loads(ep.tags_json or "[]")
     return {
         "id": ep.id,
-        "method": ep.method,
-        "path": ep.path,
+        "method": _bounded_text(ep.method),
+        "path": _bounded_text(ep.path),
         "auth_required": ep.auth_required,
-        "security_requirements": security,
+        "security_requirements": _bounded_json(security, _MAX_JSON_FIELD_CHARS)[0],
         "has_parameters": len(params) > 0,
         "has_sample_request": bool(sample),
         "has_request_body_schema": bool(body_schema),
-        "tags": tags,
-        "summary": ep.summary,
+        "tags": _bounded_json(tags, _MAX_JSON_FIELD_CHARS)[0],
+        "summary": _bounded_text(ep.summary),
     }
+
+
+def _bounded_text(value: object, limit: int = _MAX_PROMPT_FIELD_CHARS) -> str:
+    """Keep prompt metadata readable while reporting discarded characters."""
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return f"{text[:limit]}… [omitted {omitted} chars]"
+
+
+def _bounded_json(value: object, limit: int) -> tuple[object, int]:
+    """Return valid JSON-shaped data with a deterministic size cap."""
+    rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if len(rendered) <= limit:
+        return value, 0
+    omitted = len(rendered) - limit
+    return {
+        "_truncated": True,
+        "preview": rendered[:limit],
+        "omitted_chars": omitted,
+    }, omitted
 
 
 def _build_prompt(
@@ -177,6 +213,8 @@ def _build_prompt(
     credentials: list[dict],
     security_schemes: dict,
     total_endpoints: int,
+    credentials_omitted: int = 0,
+    security_omitted: int = 0,
 ) -> str:
     shown = len(endpoints)
     extra_note = (
@@ -186,21 +224,37 @@ def _build_prompt(
     )
 
     schemes_str = (
-        json.dumps(security_schemes, indent=2) if security_schemes else "(none found)"
+        json.dumps(security_schemes, ensure_ascii=False, separators=(",", ":"))
+        if security_schemes
+        else "(none found)"
     )
-    creds_str = json.dumps(credentials, indent=2) if credentials else "(none)"
-    eps_str = json.dumps(endpoints, indent=2) if endpoints else "(none)"
+    if security_omitted:
+        schemes_str += (
+            f"\n[omitted {security_omitted} characters from security schemes]"
+        )
+    creds_str = (
+        json.dumps(credentials, ensure_ascii=False, separators=(",", ":"))
+        if credentials
+        else "(none)"
+    )
+    if credentials_omitted:
+        creds_str += f"\n[omitted {credentials_omitted} credential entries]"
+    eps_str = (
+        json.dumps(endpoints, ensure_ascii=False, separators=(",", ":"))
+        if endpoints
+        else "(none)"
+    )
 
     return f"""You are a security pentester preparing to test a REST API. Your task is to assess
 whether you have enough information and credentials to perform a thorough security test.
 
-API Collection: {collection.name}
-Base URL: {collection.base_url}
+API Collection: {_bounded_text(collection.name)}
+Base URL: {_bounded_text(collection.base_url)}
 
 Security Schemes from specification:
 {schemes_str}
 
-Available credentials ({len(credentials)} total — values redacted):
+Available credentials ({len(credentials)} shown — values redacted):
 {creds_str}
 
 Credential scheme legend:

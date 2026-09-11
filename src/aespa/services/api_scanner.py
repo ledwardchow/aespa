@@ -690,6 +690,7 @@ def get_coverage_matrix(api_run_id: int) -> dict:
                 cell_status = "not_started"
                 fids = []
             ep_cells[cat] = {
+                "cell_id": cell.id if cell else None,
                 "status": cell_status,
                 "finding_ids": fids,
                 "findings": [finding_lookup[i] for i in fids if i in finding_lookup],
@@ -1311,8 +1312,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         coll = s.get(ApiCollection, run.collection_id)
         base_url = (coll.base_url if coll else "").rstrip("/")
         coverage_mode = run.coverage_mode or "track"
-        for obj in [run, llm_cfg]:
-            s.expunge(obj)
+        s.expunge(run)
 
     scanner_proxy_url = (
         upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
@@ -1538,7 +1538,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     # A validation pass is incomplete when any imported lead is still open or
     # investigating.  Preserve that state so the UI can offer a safe retry.
     unresolved_sast = False
-    if coverage_mode in {"track", "sast_validate"}:
+    if coverage_mode in {"track", "standard", "sast_validate"}:
         from aespa.services.scan_leads import get_all_leads_for_run
 
         unresolved_sast = any(
@@ -1549,7 +1549,19 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         coverage_mode == "sast_validate"
         and _sast_validation_authentication_blocked(api_run_id)
     )
-    incomplete = unresolved_sast or authentication_blocked
+    standard_progress = None
+    if coverage_mode == "standard":
+        from aespa.services.scanner import _exercised_coverage_progress
+
+        standard_progress = _exercised_coverage_progress(
+            get_coverage_matrix(api_run_id).get("totals", {}),
+            int(getattr(scanner_policy, "standard_coverage_percent", 60)),
+        )
+    incomplete = (
+        unresolved_sast
+        or authentication_blocked
+        or bool(standard_progress and not standard_progress["target_met"])
+    )
 
     # Mark run completed (or explicitly incomplete).
     with Session(get_engine()) as s:
@@ -1566,6 +1578,10 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
                 )
             elif unresolved_sast:
                 r.terminal_reason = "unresolved_sast_leads"
+            elif standard_progress and not standard_progress["target_met"]:
+                r.terminal_reason = "coverage_target_not_reached"
+            elif standard_progress:
+                r.terminal_reason = "coverage_target_reached"
             else:
                 r.terminal_reason = "coverage_complete"
             r.completed_at = datetime.now(_UTC)
@@ -1582,7 +1598,12 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             "message": (
                 "API scan incomplete because authenticated access was unavailable."
                 if authentication_blocked
-                else f"API scan complete. {finding_count} finding(s) recorded."
+                else (
+                    "API scan incomplete because the Standard coverage target was "
+                    "not reached."
+                    if standard_progress and not standard_progress["target_met"]
+                    else f"API scan complete. {finding_count} finding(s) recorded."
+                )
             ),
         },
     )
@@ -1786,6 +1807,9 @@ async def start_sast_validation_resume(api_run_id: int) -> None:
 
 async def stop_api_scan(api_run_id: int) -> bool:
     """Stop an in-progress API scan."""
+    from aespa.services.code_execution import cancel_run_executions
+
+    cancel_run_executions("api", api_run_id)
     task = _scan_tasks.get(api_run_id)
     if task is not None:
         _stop_requested.add(api_run_id)

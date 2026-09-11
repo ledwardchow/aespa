@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -13,42 +14,33 @@ from aespa.services import tls_scan
 # ── _parse_target ─────────────────────────────────────────────────────────────
 
 
-def test_parse_target_bare_host_defaults_443():
-    assert tls_scan._parse_target("example.com", None) == ("example.com", 443)
-
-
-def test_parse_target_host_port():
-    assert tls_scan._parse_target("example.com:8443", None) == ("example.com", 8443)
-
-
-def test_parse_target_full_url():
-    assert tls_scan._parse_target("https://example.com:9443/path", None) == (
-        "example.com",
-        9443,
-    )
-
-
-def test_parse_target_explicit_port_wins_over_default():
-    assert tls_scan._parse_target("example.com", 1234) == ("example.com", 1234)
+@pytest.mark.parametrize(
+    ("target", "explicit_port", "expected"),
+    [
+        ("example.com", None, ("example.com", 443)),
+        ("example.com:8443", None, ("example.com", 8443)),
+        ("https://example.com:9443/path", None, ("example.com", 9443)),
+        ("example.com", 1234, ("example.com", 1234)),
+    ],
+)
+def test_parse_target(target, explicit_port, expected):
+    assert tls_scan._parse_target(target, explicit_port) == expected
 
 
 # ── _hostname_matches ─────────────────────────────────────────────────────────
 
 
-def test_hostname_exact_match():
-    assert tls_scan._hostname_matches("api.example.com", ["api.example.com"]) is True
-
-
-def test_hostname_wildcard_match():
-    assert tls_scan._hostname_matches("api.example.com", ["*.example.com"]) is True
-
-
-def test_hostname_wildcard_does_not_span_labels():
-    assert tls_scan._hostname_matches("a.b.example.com", ["*.example.com"]) is False
-
-
-def test_hostname_mismatch():
-    assert tls_scan._hostname_matches("evil.com", ["example.com"]) is False
+@pytest.mark.parametrize(
+    ("host", "patterns", "expected"),
+    [
+        ("api.example.com", ["api.example.com"], True),
+        ("api.example.com", ["*.example.com"], True),
+        ("a.b.example.com", ["*.example.com"], False),
+        ("evil.com", ["example.com"], False),
+    ],
+)
+def test_hostname_matches(host, patterns, expected):
+    assert tls_scan._hostname_matches(host, patterns) is expected
 
 
 # ── _describe_cert ────────────────────────────────────────────────────────────

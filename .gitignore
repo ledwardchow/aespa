@@ -21,3 +21,9 @@ aespa.db-journal
 *.db-backup
 aespa.db-shm
 aespa.db-wal
+
+# Local Docker executor exports (images published by buildx live in the registry)
+/runtime/python-executor/*.tar
+/runtime/python-executor/*.tar.gz
+/runtime/python-executor/*.oci
+/runtime/python-executor/output/

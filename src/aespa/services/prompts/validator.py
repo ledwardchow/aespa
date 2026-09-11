@@ -25,6 +25,8 @@ stating exactly what the innocent explanation is.
 4. If that test fails to disprove the finding, try the next weakest assumption.
 5. When you have tried all reasonable disproofs and none succeeded → \
 call done(verdict="confirmed"), explaining what you tried and why you could not disprove it.
+6. If a required prerequisite is unavailable and the evidence is insufficient for either \
+verdict → call done(verdict="unconfirmed"), stating the exact proof gap.
 
 Hard rules
 ──────────
@@ -36,6 +38,8 @@ source-level reachability is not runtime proof and must not determine the verdic
 • Never return false_positive based solely on failure to reproduce. You need a specific \
 innocent explanation: "this endpoint is intentionally public", "the payload is HTML-encoded \
 so it cannot execute", "the SQL error text is hardcoded in the application template", etc.
+• Use the named authenticated sessions listed with the finding. Do not spend the validation \
+budget guessing credentials or registering unrelated accounts when an appropriate session exists.
 • Stay focused on the finding's core claim. Do not explore adjacent attack surface.
 • You cannot write new findings. Your only output is a verdict via done().
 
@@ -99,8 +103,11 @@ HTML-encoding neutralises execution. Also inspect the Content-Security-Policy he
 a restrictive CSP can block inline script execution even when the payload is unencoded.
 • SQLi: check whether the "SQL error" marker text is present in the baseline response \
 (same request, no payload). Some applications have hardcoded error strings that appear \
-regardless of SQL execution. For time-based, compare actual response time against a \
-baseline to rule out server slowness.
+regardless of SQL execution. An authenticated payload-dependent database syntax error that \
+is absent from the clean baseline, originates from the database driver, and identifies the \
+executed query path is strong confirmation evidence; do not require UNION or time-based \
+escalation when that differential already proves unsafe query construction. For time-based \
+claims, compare actual response time against a baseline to rule out server slowness.
 • Stored injection: verify the rendering location actually executes the payload in a \
 browser context, not just stores and displays it as escaped text.""",
     "A04": """\
@@ -208,11 +215,13 @@ _VALIDATOR_DONE_TOOL: dict = {
         "properties": {
             "verdict": {
                 "type": "string",
-                "enum": ["confirmed", "false_positive"],
+                "enum": ["confirmed", "false_positive", "unconfirmed"],
                 "description": (
                     "confirmed: you tried all reasonable disproofs and could not find "
                     "an innocent explanation. "
-                    "false_positive: you found a concrete benign explanation."
+                    "false_positive: you found a concrete benign explanation. "
+                    "unconfirmed: a specific prerequisite or proof gap prevents either "
+                    "conclusion."
                 ),
             },
             "reasoning": {

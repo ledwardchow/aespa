@@ -6,11 +6,37 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import SQLModel
 
-from aespa.db import get_session
-from aespa.main import create_app
+
+def test_readiness_prompt_summaries_bound_metadata():
+    from aespa.models import ApiCollection, ApiEndpoint
+    from aespa.services import api_readiness
+
+    endpoint = ApiEndpoint(
+        collection_id=1,
+        method="GET",
+        path="/" + "p" * 5_000,
+        summary="s" * 5_000,
+        security_json=json.dumps({"scheme": "x" * 5_000}),
+        tags_json=json.dumps(["tag-" + "x" * 5_000]),
+    )
+    summary = api_readiness._ep_summary(endpoint)
+    prompt = api_readiness._build_prompt(
+        ApiCollection(name="c" * 5_000, base_url="https://example.test/" + "b" * 5_000),
+        [summary],
+        [],
+        {"BearerAuth": {"description": "x" * 5_000}},
+        1,
+        security_omitted=4_000,
+    )
+
+    assert len(prompt) < 12_000
+    assert "omitted_chars" in prompt
+    assert len(summary["path"]) < 600
+    assert "API Collection: " + "c" * 300 in prompt
+    assert "Base URL: https://example.test/" in prompt
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -22,28 +48,8 @@ def data_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def client(data_dir):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-
-    def _override_session():
-        with Session(engine) as session:
-            yield session
-
-    app = create_app()
-    app.dependency_overrides[get_session] = _override_session
-
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c
-
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
+def client(isolated_client, data_dir):
+    return isolated_client
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

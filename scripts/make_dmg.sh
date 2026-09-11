@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Build dist/AESPA.dmg with a "drag to Applications" install layout.
+# Run AFTER ./scripts/build_mac.sh. Signs the app, builds the dmg, notarizes + staples.
+#
+#   brew install create-dmg     # one-time
+#   ./scripts/make_dmg.sh
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+VERSION=$(grep -m1 '^version = ' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+APP="${APP:-dist/AESPA.app}"
+DMG="${DMG:-dist/AESPA-macos-v${VERSION}.dmg}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-aespa-notary}"
+
+command -v create-dmg >/dev/null || { echo "Missing create-dmg — run: brew install create-dmg"; exit 1; }
+[ -d "$APP" ] || { echo "Not found: $APP — run ./scripts/build_mac.sh first."; exit 1; }
+
+# A ticket stapled to the dmg does not get copied to the app when it is dragged
+# to Applications. Notarize and staple the app before putting it in the image so
+# both artifacts can pass Gatekeeper checks without reaching Apple's servers.
+if [ "${SKIP_NOTARIZE:-}" = "1" ]; then
+  ./scripts/sign_app.sh
+else
+  APP="$APP" NOTARY_PROFILE="$NOTARY_PROFILE" ./scripts/notarize_only_mac.sh
+fi
+
+# Reuse the same identity to sign the dmg wrapper.
+if [ -z "${SIGN_ID:-}" ]; then
+  SIGN_ID=$(security find-identity -v -p codesigning \
+    | grep -o '"Developer ID Application:[^"]*"' | sed 's/^"//;s/"$//' | head -1)
+fi
+SIGN_ARGS=()
+[ -n "$SIGN_ID" ] && SIGN_ARGS=(--codesign "$SIGN_ID")
+
+rm -f "$DMG"
+echo "==> Building $DMG"
+create-dmg \
+  --volname "AESPA" \
+  --window-pos 200 120 \
+  --window-size 600 400 \
+  --icon-size 100 \
+  --icon "AESPA.app" 150 190 \
+  --app-drop-link 450 190 \
+  --hdiutil-quiet \
+  "${SIGN_ARGS[@]}" \
+  "$DMG" "$APP"
+
+if [ "${SKIP_NOTARIZE:-}" = "1" ]; then
+  echo "==> SKIP_NOTARIZE=1 — leaving the app and dmg un-notarized."
+else
+  echo "==> Notarizing the dmg (a few minutes)"
+  OUT=$(xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1) || true
+  echo "$OUT"
+  if printf '%s\n' "$OUT" | grep -q "status: Accepted"; then
+    xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG"
+  else
+    SUBID=$(printf '%s\n' "$OUT" | awk '/id:/{print $2; exit}')
+    echo "==> Notarization not accepted. Failure log:"
+    [ -n "$SUBID" ] && xcrun notarytool log "$SUBID" --keychain-profile "$NOTARY_PROFILE"
+    exit 1
+  fi
+fi
+
+echo "==> Done: $DMG"

@@ -7,6 +7,29 @@ from aespa.models import LLMConfig, LLMPriceCatalog, LLMUsageMonth, Site, TestRu
 from aespa.services import llm, statistics
 
 
+def test_provider_usage_is_isolated_without_requesting_a_database_fixture():
+    from aespa.db import get_engine
+
+    engine = get_engine()
+    assert engine.url.database == ":memory:"
+    llm._record_usage("isolation-test-model", 10, 5, provider="unknown")
+    with Session(engine) as session:
+        row = session.query(LLMUsageMonth).one()
+        assert row.model == "isolation-test-model"
+        assert row.requests == 1
+
+
+def test_explicit_free_price_remains_zero():
+    row = LLMUsageMonth(
+        month="2026-09",
+        provider="openai",
+        model="free-model",
+        input_tokens=100,
+        input_price_usd_per_million=0,
+    )
+    assert statistics._row_dict(row)["estimated_total_cost_usd"] == 0
+
+
 def test_records_all_calls_without_run_context(isolated_db_engine, monkeypatch):
     monkeypatch.setattr(statistics, "local_month", lambda: "2026-08")
     llm._record_usage(
@@ -222,7 +245,7 @@ def test_missing_prices_count_as_zero_in_monthly_and_lifetime_costs(
     rows = {row["model"]: row for row in stats["rows"]}
     assert rows["priced-model"]["estimated_credit_cost_usd"] == 0
     assert rows["unpriced-model"]["estimated_token_cost_usd"] == 0
-    assert rows["unpriced-model"]["estimated_total_cost_usd"] == 0
+    assert rows["unpriced-model"]["estimated_total_cost_usd"] is None
     assert stats["totals"]["estimated_token_cost_usd"] == 2
     assert stats["totals"]["estimated_credit_cost_usd"] == 0
     assert stats["totals"]["estimated_total_cost_usd"] == 2

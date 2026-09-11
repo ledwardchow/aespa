@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import SQLModel, create_engine, select
 
 from aespa import db
 from aespa import models as _models  # noqa: F401
@@ -380,16 +380,8 @@ def test_migrate_creates_api_collection_table_on_old_db():
 
 # --- Merged from test_api_collections_export_import.py ---
 @pytest.fixture
-def session():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as s:
-        yield s
-    engine.dispose()
+def session(db_session):
+    return db_session
 
 
 def test_roundtrip(session, tmp_path, monkeypatch):
