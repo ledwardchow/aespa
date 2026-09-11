@@ -5,6 +5,7 @@
 #   .\scripts\build_win.ps1
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
+$RepoRoot = (Get-Location).Path
 
 $IconSrc = "src\aespa\web\icon.png"
 $Ico     = "build\AESPA.ico"
@@ -50,13 +51,13 @@ if (Test-Path "dist\AESPA") { Remove-Item -Recurse -Force "dist\AESPA" }
     --windowed `
     --name AESPA `
     --distpath "dist\AESPA" `
-    --icon $Ico `
-    --add-data "src\aespa\web;aespa\web" `
-    --add-data "src\aespa\services\data;aespa\services\data" `
-    --add-data "alembic.ini;." `
-    --add-data "alembic;alembic" `
-    --add-data "THIRD_PARTY_LICENSES.txt;." `
-    --add-data "LICENSE.txt;." `
+    --icon "$RepoRoot\$Ico" `
+    --add-data "$RepoRoot\src\aespa\web;aespa\web" `
+    --add-data "$RepoRoot\src\aespa\services\data;aespa\services\data" `
+    --add-data "$RepoRoot\alembic.ini;." `
+    --add-data "$RepoRoot\alembic;alembic" `
+    --add-data "$RepoRoot\THIRD_PARTY_LICENSES.txt;." `
+    --add-data "$RepoRoot\LICENSE.txt;." `
     --collect-all playwright `
     --collect-all webview `
     --collect-all alembic `
@@ -64,7 +65,10 @@ if (Test-Path "dist\AESPA") { Remove-Item -Recurse -Force "dist\AESPA" }
     --collect-all tiktoken `
     --collect-submodules pystray `
     --collect-submodules aespa `
-    src\aespa\desktop_win.py
+    "$RepoRoot\src\aespa\desktop_win.py"
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
+}
 
 Write-Host "==> Smoke-testing frozen WinForms runtime"
 $SmokeProcess = Start-Process `

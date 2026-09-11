@@ -2,6 +2,12 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## Unreleased
+
+### Fixes
+
+- **Desktop release builds**: macOS and Windows packaging now finds application files after the build scripts were moved into `scripts/`. Windows builds also stop at the PyInstaller error instead of continuing to a missing executable check.
+
 ## [PR #269] September 11 Update - SAST rework and fixes
 
 ### New features

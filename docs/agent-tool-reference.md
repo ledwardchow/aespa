@@ -1,159 +1,226 @@
 # Agent Tool Reference
 
-AESPA drives several LLM agents across its web, API, and SAST scan modes. Every
-agent runs the same shared agentic loop (`llm.thinking_agentic_loop`) but is handed
-a **filtered subset** of a common tool vocabulary, so the tools a given agent can
-call depend entirely on its role.
+AESPA uses several LLM agents for web, API, and source-code security testing.
+Agents share the same agentic loop, but each role receives a filtered tool set.
+Runtime filters narrow the set further for some scan modes and ALICE requests.
 
-This document lists every tool, what it does, and which agent/scan mode can call it.
+This document lists the tools exposed to each agent. It describes LLM-callable
+tools, not the internal service functions that execute them.
 
-- **Web & API tools** are defined in `THINKING_AGENT_TOOLS` (`services/prompts/test_lead.py`); each role subsets it.
-- **SAST tools** are a separate set (`SAST_TOOLS` in `services/prompts/sast.py`).
-- **Context tools** are read-only reconnaissance sub-commands invoked through the single `context_tool` tool.
+- Web and API tool schemas are defined in `THINKING_AGENT_TOOLS` in
+  `src/aespa/services/prompts/test_lead.py`.
+- Specialist and validator roles select subsets of those schemas.
+- ALICE selects a subset and adds two interactive tools of its own.
+- SAST uses separate tool sets for discovery, threat modelling, validation, and
+  attack-path analysis.
+- Context tools are subcommands called through the single `context_tool` tool.
 
----
+## Agents and scan modes
 
-## Agents & scan modes
-
-| Agent | Scan mode | Tool set (source) |
+| Agent | Scan mode | Tool set |
 |---|---|---|
-| **Test Lead** | Web dynamic scan (`scanner.py`) | Full `THINKING_AGENT_TOOLS` |
-| **API Test Lead** | API scan (`api_scanner.py`) | `get_api_test_lead_tools()` API-aware subset; strict API context routing |
-| **Specialist Agent** | Dispatched from web Test Lead / web ALICE | `SPECIALIST_AGENT_TOOLS` (+ crypto extras); API dispatch is withheld |
-| **Adversarial Validator** | Post-finding validation (`validator.py`) | `VALIDATOR_AGENT_TOOLS` |
-| **A.L.I.C.E.** | Interactive chat, web + API runs (`alice.py`) | `_ALICE_TOOL_NAMES` subset |
-| **SAST Scanner** | Standalone static analysis (`sast_scanner.py`) | `SAST_TOOLS` |
-| **Reporting Agent** | Post-scan finding pre-screen | No tools — structured-output review pass only |
+| Test Lead | Web dynamic scan | Full `THINKING_AGENT_TOOLS`, subject to coverage-mode checks |
+| API Test Lead | Automated API scan | `get_api_test_lead_tools()` and the API context allowlist |
+| SAST Validate Test Lead | Focused live validation of imported SAST leads | `get_sast_validate_tools()`; API runs omit browser and reauthentication |
+| Specialist Agent | Dispatched from the web Test Lead or web ALICE | `SPECIALIST_AGENT_TOOLS`, with JWT tools added for crypto specialists |
+| Adversarial Validator | Post-finding validation | `VALIDATOR_AGENT_TOOLS` |
+| ALICE | Interactive web or API testing | `_get_alice_tools()`, narrowed by run type, coverage mode, and request intent |
+| SAST Threat Model | Source-backed repository and threat modelling | `SAST_THREAT_MODEL_TOOLS` |
+| SAST Discovery Worker | Source and sink review | `SAST_TOOLS` |
+| SAST Candidate Validator | Independent review of one candidate | `SAST_VALIDATION_TOOLS` |
+| SAST Attack-Path Analyst | Reachability and dynamic-test planning | `SAST_ATTACK_PATH_TOOLS` |
+| Reporting Agent | Finding pre-screen after a scan | No tools; structured-output review only |
 
----
+An ALICE request about AESPA status is treated as operational. For that request,
+ALICE receives only `context_tool` and `done`. Goal mode changes the meaning of
+`done`, but does not add tools.
 
-## Tool-use tools
+## Web and API tools
 
-These are the top-level tools the LLM invokes by name.
-
-| Tool | What it does |
-|---|---|
-| `http_request` | Issue one arbitrary HTTP request (method, URL, headers, body, `use_session`, `page_id`, `owasp_category`). Traffic keeps the selected page and session provenance |
-| `browser` | Drive a real Playwright browser through ordered steps — `goto`, `fill`, `type`, `click`, `press`, `wait`, `snapshot`, and `dom_check`. `page_id` plus `replay` can restore a saved crawler state before the steps run |
-| `context_tool` | Read-only reconnaissance against collected crawl/scan data — see [Context tools](#context-tools) below |
-| `write_finding` | Record a confirmed finding (title, severity, affected URL, evidence, CVSS, OWASP category). Only with concrete prior evidence |
-| `remove_finding` | Delete a previously recorded finding by `finding_id` (written in error, confirmed duplicate, or invalidated) |
-| `update_lead` | Record the outcome of investigating a static-analysis (SAST) lead, whether or not a vulnerability was confirmed |
-| `forge_jwt` | Forge an HS256 JWT with a modified payload from a discovered signing secret; optionally store it as a reusable session |
-| `decode_jwt` | Decode a JWT's header and payload; optionally verify the HS256 signature against a known secret |
-| `credential_check` | Test a small explicit list of credentials (≤ 20) against a login endpoint; stores successful tokens as sessions |
-| `register_account` | Create one disposable account via a discovered registration endpoint and store the resulting session |
-| `reauthenticate` | Re-run the configured web login flow, including supported TOTP or email-OTP steps, and refresh the primary session |
-| `skip_coverage` | In web Enforce/Full mode, record a justified inapplicable or technically blocked coverage obligation |
-| `agent_dispatch` | Dispatch a Specialist Agent to deep-dive on a strong, specific lead (`attack_class`, `target_url`, `rationale`, `priority`). Runs concurrently |
-| `done` | End the run with a summary. For the validator, instead returns a structured `verdict` + `reasoning` (+ optional PoC) |
-
-### Context tools
-
-Invoked as `context_tool(tool=<sub-command>, args={...})`. They never hit the target.
-The loop uses an **adaptive checkpoint**: after 3 consecutive context calls the agent
-should take a real action, or continue by including `context_budget_reason` (a short
-summary, current hypothesis, and why another targeted context round will change the
-next action).
-
-| Sub-command | Returns |
-|---|---|
-| `site_map` | Filtered list of crawled pages/routes with flags (auth required, takes input, etc.) |
-| `page_detail` | Full metadata, flags, and page text for a specific page |
-| `history_search` | Excerpts from prior request/response history matching a query |
-| `finding_list` | Findings already written this session, filterable by severity/category |
-| `target_inventory` | Normalised endpoints, forms, inputs, scripts, storage keys, IDs, and pre-identified `xss_sink` items extracted from crawl intelligence |
-| `traffic_search` | Captured HTTP request/response log from crawl and scan phases; API ALICE searches API-run traffic |
-| `endpoint_detail` | Consolidated page + intel + traffic + history for one specific URL |
-| `compare_responses` | Status, length, similarity, and term deltas between two history steps |
-| `mutate_request` | Proposes HTTP probe objects from a prior step via `input_validation`, `idor`, or `business_logic` mutations |
-| `auth_matrix` | Endpoints worth testing across anonymous/user/role boundaries |
-| `extract_entities` | URLs, paths, IDs, UUIDs, emails, JWT hints, error/debug lines from text or a prior step |
-| `coverage_gaps` | Web coverage obligations that are still unresolved |
-
-**API-run sub-commands.** Automated API scans use a strict allowlist: API-specific
-inventory commands plus `history_search`, `traffic_search`, `compare_responses`,
-`mutate_request`, and `extract_entities`. Web-only or unknown names are rejected rather
-than falling through to the web handler. API ALICE uses the API-specific commands below
-plus the safe shared analysis commands listed after them.
-
-| Sub-command | Returns |
-|---|---|
-| `endpoint_list` | Parsed `ApiEndpoint` rows for the collection (method, path, params) |
-| `endpoint_detail` | Full schema, params, and intel for one endpoint |
-| `collection_info` | Collection metadata, base URL, scope hosts, auth summary |
-| `finding_list` | Findings written this API run |
-| `report_finding` | Persist a confirmed finding on an API run (the API-aware replacement for `write_finding`) |
-| `lead_list` *(ALICE)* | Open `ScanLead` copies explicitly imported into this API test run |
-
-API ALICE also gets the safe shared analysis commands: `history_search`,
-`traffic_search`, `compare_responses`, `mutate_request`, and `extract_entities`.
-These commands use API-run traffic and the current turn's request/response history;
-they do not probe the target. `coverage_matrix` and `set_coverage` remain API-specific
-commands for reviewing and updating the OWASP API work program.
-
-### SAST file tools
-
-The SAST scanner gets its own set instead of the web/API tools. All file tools are
-**path-jailed** to the archive extraction root.
+These are top-level tools called directly by the model.
 
 | Tool | What it does |
 |---|---|
-| `list_files` | Directory listing under a sub-path, up to a configurable depth |
-| `glob` | Pattern match across the file tree |
-| `read_file` | Read a file by path; optional `start_line`/`end_line`; capped at 20,000 chars |
-| `grep` | Regex or literal search across files; capped at 200 results |
-| `write_lead` | Record a candidate vulnerability lead (title, description, category, severity, confidence, location, evidence) |
-| `filter_lead` | Confirm/score a candidate; leads with confidence ≥ 0.7 become persisted `ScanLead` rows |
-| `done` | End the SAST pass with a summary |
+| `http_request` | Sends one scoped HTTP request. It supports named or anonymous sessions, authentication-response capture with `store_as`, page attribution, OWASP category and test-class attribution, and bounded repeat sequences |
+| `execute_python` | Runs a short Python script in AESPA's isolated sandbox for payload generation, response parsing, stateful workflows, or bounded request batches. The script has no direct network access and must use `aespa_runtime` for target requests |
+| `browser` | Drives a Playwright browser using ordered steps. Supported operations are `goto`, `fill`, `type`, `click`, `check`, `uncheck`, `select_option`, `press`, `wait`, `snapshot`, `inspect_element`, `recover_click`, and `dom_check`. A saved crawler state can be restored with `page_id` and `replay` |
+| `context_tool` | Reads collected scan context without sending a request to the target. See [Context tools](#context-tools) |
+| `write_finding` | Records a confirmed finding from concrete evidence. API Test Lead findings are saved against the API run by the API-aware executor |
+| `remove_finding` | Removes a finding written in error, confirmed as a duplicate, or invalidated. New calls identify it with `finding_reference`; `finding_id` is retained only for older context |
+| `update_lead` | Records the outcome of testing an imported SAST lead and can link a confirmed lead to its finding |
+| `forge_jwt` | Creates an HS256 JWT with modified claims after a signing secret has been found, with optional session storage |
+| `decode_jwt` | Decodes a JWT header and payload and can verify an HS256 signature with a known secret |
+| `credential_check` | Tests an explicit list of at most 20 credentials against a login endpoint and stores successful sessions |
+| `register_account` | Creates one disposable account through a discovered registration endpoint and stores the resulting session |
+| `reauthenticate` | Re-runs the configured web login flow, including supported TOTP and email-OTP steps, and refreshes the primary session |
+| `skip_coverage` | Resolves a web Work Program obligation as not applicable or technically blocked, with a reason and supporting evidence when blocked |
+| `agent_dispatch` | Starts a Specialist Agent for a specific lead. Supported classes include IDOR, authentication bypass, SQL injection, XSS, business logic, SSRF, path traversal, CORS, cryptography, configuration, and file upload |
+| `done` | Proposes that the current agent's work is complete. Its schema and completion checks depend on the role |
 
----
+### ALICE-only tools
+
+| Tool | What it does |
+|---|---|
+| `tls_scan` | Runs a scoped TLS posture check for supported protocol versions, weak cipher acceptance, certificate details, and hostname matching |
+| `rerun_validation` | Starts AESPA's managed validator for unconfirmed findings in a web run. The tool is present in ALICE's API tool list but returns an unsupported message for API runs |
+
+## Context tools
+
+Context commands are called as
+`context_tool(tool=<subcommand>, args={...})`. They do not probe the target.
+After three consecutive context calls, the agent must take an action or include
+`context_budget_reason` explaining why one more targeted context call is needed.
+
+### Shared and web context commands
+
+| Subcommand | What it returns |
+|---|---|
+| `run_status` | Current run, crawl, scan, phase, and finding counts |
+| `specialist_status` | Specialist handoffs and their current state |
+| `site_map` | Filtered crawled pages and routes, including state and page flags |
+| `page_detail` | Metadata, flags, text, replay information, traffic, and object references for one page |
+| `history_search` | Matching excerpts from the current agent's request and response history |
+| `finding_list` | Findings from the current run, with severity, OWASP, category, and text filters |
+| `lead_list` | Imported SAST leads and their status |
+| `lead_detail` | Full evidence, traces, controls, proof gaps, validation data, and attack path for one lead |
+| `target_inventory` | Normalised endpoints, forms, inputs, scripts, storage keys, object references, and detected sinks from crawl intelligence |
+| `search_assets` | A search-oriented view of the same web crawl inventory used by `target_inventory` |
+| `traffic_search` | Captured HTTP requests and responses from crawl and scan activity |
+| `endpoint_detail` | Consolidated page, intelligence, traffic, and history for one web URL |
+| `compare_responses` | Status, length, similarity, and term differences between two history steps |
+| `mutate_request` | Suggested HTTP probes derived from an earlier request for input validation, IDOR, or business-logic testing |
+| `auth_matrix` | Endpoints worth comparing across anonymous, user, and role boundaries |
+| `extract_entities` | URLs, paths, IDs, UUIDs, emails, JWT hints, and error or debug lines extracted from text or a history step |
+| `coverage_gaps` | Unresolved web Work Program obligations |
+
+The automated API Test Lead can use the safe shared analysis commands
+`history_search`, `traffic_search`, `compare_responses`, `mutate_request`,
+`extract_entities`, `lead_list`, and `lead_detail`. Web-only inventory commands
+such as `target_inventory` and `search_assets` are rejected for API runs.
+
+### API context commands
+
+| Subcommand | Current availability | What it returns or changes |
+|---|---|---|
+| `endpoint_list` | API Test Lead and API ALICE | Parsed API endpoints with method, path, and parameters |
+| `endpoint_detail` | API Test Lead and API ALICE | Schema, parameters, and collected intelligence for one API endpoint |
+| `collection_info` | API Test Lead and API ALICE | Collection metadata, base URL, scope hosts, and authentication summary |
+| `finding_list` | API Test Lead and API ALICE | Findings written for the API run |
+| `lead_list` | API Test Lead and API ALICE | SAST leads imported into the API run |
+| `lead_detail` | API Test Lead and API ALICE | Full detail for one imported API lead |
+| `run_status` | Initial ALICE context only | Current API run state, phase, progress, and finding count |
+| `report_finding` | Implemented by the API dispatcher, but not routed by the current API context wrapper | Records an API finding and links it to the matching coverage cell when possible |
+| `coverage_matrix` | Implemented by the API dispatcher, but not routed by the current API context wrapper | API endpoint by OWASP category coverage, optionally filtered to one endpoint |
+| `set_coverage` | Implemented by the API dispatcher, but not routed by the current API context wrapper | Marks an API coverage cell in progress, covered, skipped, or blocked without downgrading a stronger existing state |
+
+The automated API Test Lead records findings with top-level `write_finding`.
+API ALICE withholds that tool. Its prompt currently directs it to
+`report_finding`, but `_make_api_context_tool_fn()` does not route that command.
+The same mismatch affects callable `run_status`, `coverage_matrix`, and
+`set_coverage` commands. The API run status is still added to ALICE's initial
+context before the turn starts.
+
+## SAST tools
+
+All SAST file access is jailed to the extracted source archive. Each SAST phase
+gets the four read-only file tools plus tools for its assigned job.
+
+### Read-only file tools
+
+| Tool | What it does |
+|---|---|
+| `list_files` | Lists files and directories below a relative path to a chosen depth |
+| `glob` | Finds files with a glob pattern |
+| `read_file` | Reads a relative file, optionally within a line range, with output capped at 20,000 characters |
+| `grep` | Runs a regular-expression search below a relative path, optionally filtered by filename pattern, with at most 200 results |
+
+### Discovery tools
+
+These tools are in `SAST_TOOLS` with the read-only file tools.
+
+| Tool | What it does |
+|---|---|
+| `get_work_program` | Returns the source or sink checks assigned to the worker |
+| `record_disposition` | Records the evidence-backed result for one assigned work item |
+| `record_semantic_disposition` | Resolves a threat-scenario or repository-model obligation as assessed, a candidate, not applicable, or blocked |
+| `write_lead` | Records a candidate with its classification, root causes, location, source and sink traces, controls, and proof gaps |
+| `filter_lead` | Scores and reviews a written candidate. Candidates below 0.7 confidence are discarded |
+| `done` | Signals that the assigned SAST phase is complete |
+
+### Threat-model tools
+
+`SAST_THREAT_MODEL_TOOLS` contains the read-only file tools and:
+
+| Tool | What it does |
+|---|---|
+| `record_model_fact` | Records a source-backed asset, actor, identity, boundary, operation, control, sink, dependency, deployment fact, input, or output |
+| `record_threat_scenario` | Records a threat scenario tied to repository model facts |
+| `finalize_threat_model` | Finalises the threat model, security objectives, assumptions, and open questions |
+| `done` | Finishes after the threat model has been finalised |
+
+### Candidate-validation tools
+
+`SAST_VALIDATION_TOOLS` contains the read-only file tools and:
+
+| Tool | What it does |
+|---|---|
+| `get_candidate` | Returns the assigned discovery candidate and its structured evidence |
+| `record_adjacent_concern` | Queues a separate concern found during validation without confirming it as a finding |
+| `validate_candidate` | Records an independent confirmed, dismissed, or inconclusive verdict with controls, counterevidence, and proof gaps |
+| `done` | Finishes after the assigned candidate receives a verdict |
+
+### Attack-path tools
+
+`SAST_ATTACK_PATH_TOOLS` contains the read-only file tools and:
+
+| Tool | What it does |
+|---|---|
+| `get_candidate` | Returns an independently validated candidate |
+| `record_attack_path` | Saves ordered reachability, impact, severity reasoning, and a dynamic reproduction objective |
+| `done` | Finishes after the supplied candidates have attack paths |
 
 ## Tool availability matrix
 
-✓ = available · — = withheld
+`Conditional` means that availability depends on the run type, scan mode, or
+agent specialisation.
 
-| Tool | Test Lead | API Test Lead | Specialist | Validator | A.L.I.C.E. | SAST |
+| Tool | Web Test Lead | API Test Lead | SAST Validate | Specialist | Validator | ALICE |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
-| `http_request` | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| `browser` | ✓ | — | ✓ | — | ✓ | — |
-| `context_tool` | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| `write_finding` | ✓ | ✓¹ | ✓ | — | ✓¹ | — |
-| `remove_finding` | ✓ | — | — | — | ✓ | — |
-| `update_lead` | ✓ | ✓ | — | — | ✓ | — |
-| `forge_jwt` | ✓ | ✓ | crypto only² | — | ✓ | — |
-| `decode_jwt` | ✓ | ✓ | crypto only² | — | ✓ | — |
-| `credential_check` | ✓ | ✓ | — | — | ✓ | — |
-| `register_account` | ✓ | ✓ | — | — | ✓ | — |
-| `reauthenticate` | ✓ | — | — | — | ✓ (web) | — |
-| `skip_coverage` | ✓ (Enforce) | — | — | — | ✓ (web Enforce) | — |
-| `agent_dispatch` | ✓ | — | —³ | — | ✓⁶ | — |
-| `done` | ✓ | ✓ | ✓ | ✓⁴ | ✓ | ✓ |
-| `compare_responses` | — | — | — | ✓⁵ | via `context_tool` | — |
-| SAST file tools | — | — | — | — | — | ✓ |
+| `http_request` | Yes | Yes | Yes | Yes | Yes | Yes |
+| `execute_python` | Yes | Yes | Yes | Yes | No | Yes |
+| `browser` | Yes | No | Web only | Yes | No | Yes |
+| `context_tool` | Yes | Yes | Yes | Yes | Yes | Yes |
+| `write_finding` | Yes | Yes | Yes | Yes | No | Web only |
+| `remove_finding` | Yes | No | No | No | No | Web only |
+| `update_lead` | Yes | Yes | Yes | No | No | Yes |
+| `forge_jwt` | Yes | Yes | No | Crypto only | No | Yes |
+| `decode_jwt` | Yes | Yes | No | Crypto only | No | Yes |
+| `credential_check` | Yes | Yes | No | No | No | Yes |
+| `register_account` | Yes | Yes | No | No | No | Yes |
+| `reauthenticate` | Yes | No | Web only | No | No | Web only |
+| `skip_coverage` | Full mode | No | No | No | No | Web Full mode |
+| `agent_dispatch` | Yes | No | No | No | No | Web only |
+| `tls_scan` | No | No | No | No | No | Yes |
+| `rerun_validation` | No | No | No | No | No | Web only in practice |
+| `compare_responses` | Through context | Through context | Through context | Through context | Top level | Through context |
+| `done` | Yes | Yes | Yes | Yes | Verdict schema | Yes |
 
-**Notes**
-1. The automated API Test Lead uses API-aware top-level `write_finding`; API ALICE uses `context_tool(tool='report_finding')` and withholds top-level `write_finding`.
-2. Specialists get `forge_jwt` / `decode_jwt` only for the `crypto` attack class (`SPECIALIST_AGENT_TOOLS_CRYPTO`); the base specialist set is `http_request`, `browser`, `context_tool`, `write_finding`, `done`.
-3. Specialists cannot call `agent_dispatch` — this prevents recursive specialist dispatch.
-4. The validator's `done` returns a structured `verdict` (`confirmed` / `false_positive` / …) + `reasoning` + optional PoC, not a free-text summary.
-5. The validator gets `compare_responses` as a dedicated top-level tool (not just the `context_tool` sub-command) so it can diff a re-run probe against the original evidence.
-6. `agent_dispatch` is available to web ALICE only. API ALICE withholds it until the Specialist executor is fully API/run-kind aware.
-7. ALICE's `skip_coverage` tool is not offered in web Track mode, and is never offered on API runs.
+Specialists cannot dispatch other specialists. The validator's `done` returns a
+structured verdict, reasoning, and optional proof of concept. SAST tools are not
+included in this matrix because their phase-specific sets are listed above.
 
----
+## Source locations
 
-## Where each tool set is defined
-
-| Set | Location |
+| Tool set or dispatcher | Location |
 |---|---|
-| `THINKING_AGENT_TOOLS` | `services/prompts/test_lead.py` |
-| `get_api_test_lead_tools()` | `services/prompts/test_lead.py` |
-| `SPECIALIST_AGENT_TOOLS` / `SPECIALIST_AGENT_TOOLS_CRYPTO` / `get_specialist_tools()` | `services/prompts/specialist.py` |
-| `VALIDATOR_AGENT_TOOLS` | `services/prompts/validator.py` |
-| `_ALICE_TOOL_NAMES` / `_get_alice_tools()` | `services/alice.py` |
-| `SAST_TOOLS` | `services/prompts/sast.py` |
+| `THINKING_AGENT_TOOLS`, `get_api_test_lead_tools()`, `get_sast_validate_tools()`, `TLS_SCAN_TOOL` | `src/aespa/services/prompts/test_lead.py` |
+| `SPECIALIST_AGENT_TOOLS`, `SPECIALIST_AGENT_TOOLS_CRYPTO`, `get_specialist_tools()` | `src/aespa/services/prompts/specialist.py` |
+| `VALIDATOR_AGENT_TOOLS` | `src/aespa/services/prompts/validator.py` |
+| `_ALICE_TOOL_NAMES`, `_get_alice_tools()`, ALICE-only schemas, API context commands | `src/aespa/services/alice.py` |
+| Shared and web context dispatcher | `src/aespa/services/scanner.py` |
+| Automated API context allowlist | `src/aespa/services/api_scanner.py` |
+| `SAST_TOOLS`, `SAST_THREAT_MODEL_TOOLS`, `SAST_VALIDATION_TOOLS`, `SAST_ATTACK_PATH_TOOLS` | `src/aespa/services/prompts/sast.py` |
 
-See [architecture.md](architecture.md) §7–§9 (dynamic scan, multi-agent system, LLM
-integration), §15 (A.L.I.C.E.), §16 (API scanning), and §17 (SAST) for how these
-agents are wired together.
+See [architecture.md](architecture.md), sections 7 through 9 for dynamic scans
+and agents, section 15 for ALICE, section 16 for API scanning, and section 17
+for SAST.

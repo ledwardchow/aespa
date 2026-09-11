@@ -1,6 +1,9 @@
 # SAST Scan → Scan Leads: Implementation Plan
 
-> Historical plan: references below to `PentestHypothesis` describe a task-graph feature retired on 2026-07-15. `ScanLead` remains the active cross-run lead model.
+> Historical plan: this records the original design and is not current operating
+> documentation. The hypothesis/task-graph feature was retired on 2026-07-15.
+> API scans no longer create a SAST pre-phase automatically. Users run SAST
+> separately and explicitly import reportable leads into a web or API run.
 
 **Status:** Implemented
 **Date:** 2026-06-12
