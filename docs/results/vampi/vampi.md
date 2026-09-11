@@ -49,7 +49,7 @@ SAST run #2 `SAST – Vampi - with SAST` — 9 leads, all **confirmed**. Source 
 
 ### Findings Summary
 
-Run `2026-06-18 00:45` — 13 findings. Full report: [vampi-issues-2026-06-18.md](runs/vampi/vampi-issues-2026-06-18.md)
+Run `2026-06-18 00:45` - 13 findings. Full report: [vampi-issues-2026-06-18.md](vampi-issues-2026-06-18.md)
 
 **By severity:** 5 Critical · 2 High · 1 Medium · 5 Low
 
@@ -71,4 +71,3 @@ Run `2026-06-18 00:45` — 13 findings. Full report: [vampi-issues-2026-06-18.md
 
 
 ---
-

@@ -1,6 +1,6 @@
 # Sandboxed Python Execution and Brokered Traffic — Implementation Plan
 
-**Status:** Proposed  
+**Status:** Implemented
 **Date:** 2026-09-04  
 **Scope:** Add a constrained `execute_python` capability to AESPA's dynamic web and API testing agents. Generated Python runs in an ephemeral, network-disabled sandbox and can reach an authorised target only through an AESPA-owned request broker. Every brokered request is scope-checked, policy-controlled, attributed to the correct run and agent, and recorded in the existing Traffic Log.
 

@@ -1,6 +1,6 @@
 # BankOfEd Scan Results Comparison & Model Benchmark
 
-This document evaluates the security scanning performance and API cost efficiency of **GPT-5.6 Suite**, **MiniMax M3**, **Claude Sonnet 5**, and **Claude Opus 4.8** on the BankOfEd benchmark application, comparing their findings against the ground truth reference in [VULNERABILITIES.md](file:///Users/ledwardchow/GitHub/aespa/docs/results/BankOfEd/VULNERABILITIES.md).
+This document evaluates the security scanning performance and API cost efficiency of **GPT-5.6 Suite**, **MiniMax M3**, **Claude Sonnet 5**, and **Claude Opus 4.8** on the BankOfEd benchmark application, comparing their findings against the ground truth reference in [VULNERABILITIES.md](VULNERABILITIES.md).
 
 ---
 
