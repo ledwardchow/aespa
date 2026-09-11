@@ -6,7 +6,7 @@ This guide describes the screens and workflow for setting up and running API sca
 
 Navigate to **APIs** in the main navigation bar to access the API Collections screen:
 
-![API setup screen](../images/apisetup.png)
+![API setup screen](../../images/apisetup.png)
 
 This page lists all created API collections. Each collection represents a container for an API's documentation files, endpoints, credentials, and scan history.
 
@@ -20,13 +20,15 @@ Clicking a collection row opens the collection management view.
 
 ## Collection Management
 
-Inside a collection, the interface provides four tabs:
+Inside a collection, the interface provides three tabs: **Test Runs**,
+**Endpoints**, and **Credentials**. **Manage files** is a separate button in the
+page header.
 
-### 1. Manage Files
+### Manage Files
 
-The **Manage files** tab handles documentation upload and ingestion:
+The **Manage files** page handles documentation upload and ingestion:
 
-![Parsed API spec screen](../images/apispecparsed.png)
+![Parsed API spec screen](../../images/apispecparsed.png)
 
 You can upload:
 - **OpenAPI / Swagger specs**: JSON or YAML files detailing API endpoints, methods, parameters, and schemas.
@@ -37,28 +39,30 @@ You can upload:
 
 Each uploaded document is parsed automatically by an LLM parser into `ApiEndpoint` and `ApiCredential` records. If a document changes, re-uploading or clicking **Parse** updates the endpoints associated with that file.
 
-### 2. Endpoints
+### Endpoints
 
 The **Endpoints** tab lists all parsed API endpoints:
 - Filter endpoints by method (GET, POST, PUT, DELETE, etc.) or search by path.
 - Toggle individual endpoints **in scope** or **out of scope**.
 - Inspect parsed parameter schemas, request body shapes, and expected response codes.
 
-### 3. Credentials
+### Credentials
 
 The **Credentials** tab manages authentication headers and tokens for the API:
 - Add, edit, or remove authentication keys, bearer tokens, or basic auth headers.
-- Assign credentials to specific roles (e.g. `admin`, `user`, `read-only`) for authorization testing.
+- Give credentials clear labels so the scanner can compare named sessions during authorization testing.
 
-### 4. Test Runs
+### Test Runs
 
 The **Test Runs** tab lists all scan runs performed against this collection.
 
 Click **+ New test run** to start a scan:
 - Select an **LLM Profile** (or use the active default profile).
 - Select a **Coverage mode**:
-  - **Track**: Records OWASP API Top-10 coverage as endpoints are tested without forcing full coverage before completion.
-  - **Enforce**: Continues the scan until every in-scope endpoint has been tested against applicable OWASP API checks.
+  - **Quick**: Records coverage without requiring a target percentage.
+  - **Standard**: Requires the configured percentage of applicable coverage cells.
+  - **Full**: Continues until every applicable endpoint and OWASP category is covered or skipped with a reason.
+  - **SAST Validate**: Tests only imported SAST leads and does not run the normal coverage program.
 
 ---
 
@@ -66,7 +70,7 @@ Click **+ New test run** to start a scan:
 
 When a test run starts, AESPA displays the run status view:
 
-![API Scan Findings](../images/apifindings.png)
+![API Scan Findings](../../images/apifindings.png)
 
 During an API scan:
 - The **Test Lead** agent navigates the endpoint inventory and issues targeted HTTP requests.
@@ -77,7 +81,7 @@ During an API scan:
 
 The **OWASP Coverage** tab displays the live matrix of API endpoint coverage across the OWASP API Top-10 categories:
 
-![OWASP Coverage for API Scanning](../images/apiworkprogram.png)
+![OWASP Coverage for API Scanning](../../images/apiworkprogram.png)
 
 Each cell shows whether an endpoint has been tested for a specific vulnerability class (BOLA, Broken Auth, Mass Assignment, etc.) and highlights identified findings.
 

@@ -11,9 +11,7 @@ AESPA uses a three-tier configuration model:
 
 ## Configuring a Provider
 
-Click **New Provider** on the Providers tab:
-
-![LLM Provider configuration screen](images/llmproviders.png)
+Click **New Provider** on the Providers tab.
 
 Set a name for your provider and choose an API format:
 
@@ -67,9 +65,14 @@ On the **Models** tab, click **New Model** to define model settings:
 On the **Profiles** tab, click **New Profile** to create a scan profile:
 - **Default Model**: Select the baseline model used for all agents in runs using this profile.
 - **Role Overrides**: Optionally assign specific models to individual agent roles:
+  - **Crawler**: Page discovery and classification.
   - **Test Lead**: Main pentest orchestrator loop.
+  - **Mentor**: Reviews stalled Test Lead execution and suggests a next action.
   - **Specialist Agent**: Deep-dive vulnerability specialists.
   - **Adversarial Validator**: Disproof validator.
+  - **API Scanner**: API scan loop. It falls back to the Test Lead model when unset.
+  - **SAST**: Static source analysis workers.
+  - **Component Mapper**: Cross-repository interface mapping for Applications.
   - **A.L.I.C.E.**: Interactive pentest chat agent.
 
 Click **Use** on a profile to set it as the default system-wide profile.
