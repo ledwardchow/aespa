@@ -439,6 +439,14 @@ def _set_phase(
             "data": data or {},
         },
     )
+    if status == "running":
+        _emit_agent_activity(
+            sast_run_id,
+            agent_id="sast-scanner",
+            role="SAST Analyst",
+            status="active",
+            current_task=message,
+        )
 
 
 def _persist_coverage(sast_run_id: int, coverage: dict[str, dict]) -> None:
@@ -1499,19 +1507,6 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             sast_run_id,
             lambda evt: events_svc.emit(sast_run_id, evt),
             run_kind="sast",
-        )
-
-        events_svc.emit(
-            sast_run_id,
-            {
-                "type": "agent_status",
-                "agent_id": "sast-scanner",
-                "role": "SAST Analyst",
-                "status": "active",
-                "current_task": "Starting static analysis…",
-                "outcome": None,
-                "_persist": True,
-            },
         )
 
         def _stop_check() -> bool:

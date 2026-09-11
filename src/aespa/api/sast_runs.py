@@ -110,6 +110,7 @@ def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
         .where(SastWorker.sast_run_id == run_id)
         .order_by(SastWorker.id)
     ).all()
+    worker_by_agent_id = {f"sast-worker-{worker.id}": worker for worker in workers}
     for worker in workers:
         agent_id = f"sast-worker-{worker.id}"
         statuses = recorded_statuses.get(agent_id, set())
@@ -188,6 +189,70 @@ def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
                 "created_at": checkpoint.completed_at,
             }
         )
+
+    # Runs completed before the dedicated panes were added still have durable
+    # phase rows. Use the latest phase event as a compact lifecycle snapshot so
+    # their agent roster does not appear untouched after an upgrade.
+    phase_agents = {
+        "repository_model": ("sast-repository-modeller", "Repository Modeller"),
+        "threat_model": ("sast-threat-modeller", "Threat Modeller"),
+        "closure": ("sast-closure-analyst", "Closure Analyst"),
+        "attack_path": ("sast-attack-path", "Attack Path Analyst"),
+    }
+    recorded_agent_ids = {entry["agent_id"] for entry in entries}
+    phase_rows = session.exec(
+        select(ScanLog)
+        .where(ScanLog.test_run_id == run_id)
+        .where(ScanLog.run_kind == "sast")
+        .order_by(ScanLog.id)
+    ).all()
+    latest_phase_rows = {
+        row.phase: row for row in phase_rows if row.phase in phase_agents
+    }
+    for phase, (agent_id, role) in phase_agents.items():
+        row = latest_phase_rows.get(phase)
+        if row is None or agent_id in recorded_agent_ids:
+            continue
+        entries.append(
+            {
+                "id": f"{agent_id}-phase-{row.id}",
+                "agent_id": agent_id,
+                "role": role,
+                "status": "active" if row.status == "running" else row.status,
+                "current_task": row.message,
+                "outcome": "Recovered from the saved phase history",
+                "created_at": row.created_at,
+            }
+        )
+
+    fixed_names = {
+        "sast-repository-modeller": "Repository Modeller",
+        "sast-threat-modeller": "Threat Modeller",
+        "sast-scanner": "SAST Analyst",
+        "sast-validator": "Candidate Validators",
+        "sast-closure-analyst": "Closure Analyst",
+        "sast-attack-path": "Attack Path Analyst",
+    }
+    for entry in entries:
+        agent_id = entry["agent_id"]
+        worker = worker_by_agent_id.get(agent_id)
+        if worker is not None:
+            entry["parent_id"] = f"sast-{worker.class_group}-workers"
+            entry["display_name"] = worker.worker_key
+            entry["worker_key"] = worker.worker_key
+            entry["class_group"] = worker.class_group
+            continue
+        if agent_id.startswith("sast-validator-"):
+            candidate_id = agent_id.removeprefix("sast-validator-")
+            entry["parent_id"] = "sast-validators"
+            entry["display_name"] = f"Candidate {candidate_id}"
+            entry["worker_key"] = f"validator:{candidate_id}"
+            entry["class_group"] = "validator"
+            continue
+        entry["parent_id"] = None
+        entry["display_name"] = fixed_names.get(agent_id, entry["role"])
+        entry["worker_key"] = None
+        entry["class_group"] = None
 
     status_order = {"spawned": 0, "active": 1}
     entries.sort(

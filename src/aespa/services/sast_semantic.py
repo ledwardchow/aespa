@@ -637,11 +637,19 @@ def persist_semantic_state(
             session.add(row)
             session.flush()
             by_fingerprint[row.fingerprint] = row
+        persisted_edge_fingerprints: set[str] = set()
         for edge in model.get("edges", []):
             source = by_fingerprint.get(edge.get("source"))
             target = by_fingerprint.get(edge.get("target"))
             if source is None or target is None:
                 continue
+            edge_fingerprint = str(
+                edge.get("id")
+                or fingerprint(source.id, target.id, edge.get("kind"))
+            )
+            if edge_fingerprint in persisted_edge_fingerprints:
+                continue
+            persisted_edge_fingerprints.add(edge_fingerprint)
             session.add(
                 SastSurfaceEdge(
                     sast_run_id=sast_run_id,
@@ -651,10 +659,7 @@ def persist_semantic_state(
                     confidence=float(edge.get("confidence") or 0),
                     provenance=str(edge.get("provenance") or "deterministic"),
                     evidence_json=json.dumps(edge.get("evidence") or []),
-                    fingerprint=str(
-                        edge.get("id")
-                        or fingerprint(source.id, target.id, edge.get("kind"))
-                    ),
+                    fingerprint=edge_fingerprint,
                 )
             )
         threat_row = session.exec(
@@ -783,7 +788,7 @@ def persist_semantic_state(
         session.commit()
         return {
             "nodes": len(by_fingerprint),
-            "edges": len(model.get("edges", [])),
+            "edges": len(persisted_edge_fingerprints),
             "scenarios": len(scenario_ids),
             "obligations": len(persisted_obligation_keys),
         }
@@ -1640,6 +1645,14 @@ async def reconcile_repository_model_with_llm(
         model["nodes"].append(node)
         known_ids.add(node["id"])
         accepted += 1
+    known_edge_ids = {
+        str(
+            edge.get("id")
+            or fingerprint(edge.get("source"), edge.get("target"), edge.get("kind"))
+        )
+        for edge in model.get("edges", [])
+        if isinstance(edge, dict)
+    }
     for edge in proposal.get("edges", [])[:400]:
         if (
             isinstance(edge, dict)
@@ -1650,8 +1663,11 @@ async def reconcile_repository_model_with_llm(
             edge["id"] = fingerprint(
                 edge.get("source"), edge.get("target"), edge.get("kind")
             )
+            if edge["id"] in known_edge_ids:
+                continue
             edge["provenance"] = "llm_reconciliation"
             model["edges"].append(edge)
+            known_edge_ids.add(edge["id"])
     resolved = set(map(str, proposal.get("resolved_warning_keys", [])))
     for warning in model.get("warnings", []):
         if str(warning.get("key")) in resolved:

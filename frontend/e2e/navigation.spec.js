@@ -260,6 +260,77 @@ test("back and forward restore the selected run tab", async ({ page }) => {
   await expect(page.locator(".web-run-tab-bar .active")).toContainText("Findings");
 });
 
+test("SAST summary cards only appear on the Coverage tab", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.goto("/#/sast-runs/1/coverage");
+
+  const summary = page.locator(".sast-run-summary-grid");
+  const viewTabs = page.getByRole("tablist", { name: "SAST run views" });
+  await expect(page).toHaveURL(/#\/sast-runs\/1\/coverage$/);
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.getByText("Fixture SAST", { exact: true })).toBeVisible();
+  await expect(summary).toBeVisible();
+  await expect(summary.locator(":scope > div")).toHaveCount(7);
+
+  for (const tabName of [
+    "Model",
+    /^Threats/,
+    /^Security checks/,
+    "Execution Summary",
+    /^Candidates/,
+    "Activity",
+  ]) {
+    await viewTabs.getByRole("tab", { name: tabName }).click();
+    await expect(summary).toHaveCount(0);
+  }
+
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-no-summary.png") });
+  await viewTabs.getByRole("tab", { name: "Coverage", exact: true }).click();
+  await expect(summary).toBeVisible();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-coverage-summary.png") });
+});
+
+test("light SAST phases fill the available progress row", async ({ page }) => {
+  await installFixtures(page);
+  await page.route("**/api/sast-runs/1", (route) =>
+    route.fulfill({
+      json: {
+        id: 1,
+        name: "Fixture SAST",
+        status: "pending",
+        phase: "scope",
+        analysis_mode: "light",
+        llm_profile_id: 1,
+        leads_count: 0,
+        source_filename: "fixture.zip",
+      },
+    }),
+  );
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto("/#/sast-runs/1/coverage");
+
+  const rail = page.getByRole("tablist", { name: "SAST scan phases" });
+  const phases = rail.getByRole("tab");
+  await expect(phases).toHaveCount(5);
+  await expect
+    .poll(async () => {
+      const railBox = await rail.boundingBox();
+      const lastBox = await phases.last().boundingBox();
+      if (!railBox || !lastBox) return Infinity;
+      return Math.abs(railBox.x + railBox.width - (lastBox.x + lastBox.width));
+    })
+    .toBeLessThan(1);
+
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-light-phase-width.png") });
+});
+
 test("a running SAST scan explains that semantic analysis is still being generated", async ({
   page,
 }) => {
@@ -275,7 +346,7 @@ test("a running SAST scan explains that semantic analysis is still being generat
 
   await page.goto("/#/sast-runs/1/efficiency");
   await expect(page).toHaveTitle("AESPA");
-  await expect(page.getByRole("tab", { name: "Efficiency", exact: true })).toHaveAttribute(
+  await expect(page.getByRole("tab", { name: "Execution Summary", exact: true })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -299,4 +370,44 @@ test("a running SAST scan explains that semantic analysis is still being generat
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(errors).toEqual([]);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-analysis-running.png") });
+});
+
+test("the SAST agent list scrolls without an enclosing activity box", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  const workers = Array.from({ length: 28 }, (_, index) => ({
+    id: index + 1,
+    agent_id: `sast-worker-${index + 1}`,
+    role: "SAST Injection Worker",
+    status: "complete",
+    current_task: `Completed assigned checks ${index + 1}`,
+    display_name: `injection-worker-${index + 1}`,
+    class_group: "injection",
+    created_at: "2026-09-11T01:00:00Z",
+  }));
+  await page.route("**/api/sast-runs/1/agent-log", (route) => route.fulfill({ json: workers }));
+  await page.setViewportSize({ width: 1100, height: 650 });
+  await page.goto("/#/sast-runs/1/activity");
+
+  const activityPanel = page.locator(".sast-activity-panel");
+  const agentList = page.locator(".sast-agents-panel");
+  await expect(page.getByRole("button", { name: "Agents" })).toBeVisible();
+  await expect(page.locator(".sast-run-content")).toHaveCSS("padding-left", "0px");
+  await expect(activityPanel).toHaveCSS("border-top-width", "0px");
+  await expect
+    .poll(() => agentList.evaluate((element) => element.scrollHeight > element.clientHeight))
+    .toBe(true);
+
+  await agentList.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect.poll(() => agentList.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await expect(page.getByText("injection-worker-28", { exact: true })).toBeVisible();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-agents-scroll.png") });
 });

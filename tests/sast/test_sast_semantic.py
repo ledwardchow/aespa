@@ -319,6 +319,57 @@ def test_persist_semantic_state_coalesces_duplicate_keys(isolated_db_engine):
     assert len(obligations) == 1
 
 
+def test_persist_semantic_state_coalesces_duplicate_edges(isolated_db_engine):
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="duplicate semantic edges")
+        session.add(run)
+        session.commit()
+        run_id = int(run.id)
+
+    source_id = "source-node"
+    target_id = "target-node"
+    edge_id = "same-edge"
+    result = persist_semantic_state(
+        run_id,
+        {
+            "nodes": [
+                {"id": source_id, "fingerprint": source_id, "kind": "input"},
+                {"id": target_id, "fingerprint": target_id, "kind": "sink"},
+            ],
+            "edges": [
+                {
+                    "id": edge_id,
+                    "source": source_id,
+                    "target": target_id,
+                    "kind": "related",
+                },
+                {
+                    "id": edge_id,
+                    "source": source_id,
+                    "target": target_id,
+                    "kind": "related",
+                    "provenance": "llm_reconciliation",
+                },
+            ],
+        },
+        {"scenarios": []},
+        {"obligations": []},
+    )
+
+    with Session(isolated_db_engine) as session:
+        edges = list(
+            session.exec(
+                select(SastSurfaceEdge).where(
+                    SastSurfaceEdge.sast_run_id == run_id
+                )
+            )
+        )
+
+    assert result["edges"] == 1
+    assert len(edges) == 1
+    assert edges[0].fingerprint == edge_id
+
+
 def test_reconciliation_retains_locations_and_provenance():
     candidates = [
         {

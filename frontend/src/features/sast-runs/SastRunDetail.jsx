@@ -19,6 +19,7 @@ import { sastCandidatesToMarkdown, sastReportFilename } from "../../shared/leads
 import { downloadTextFile } from "../../shared/lib/download.js";
 
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { DismissibleAlert } from "../../shared/ui/DismissibleAlert.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 
 const DEEP_PHASES = [
@@ -177,7 +178,17 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       try {
         const payload = JSON.parse(event.data);
         if (payload.type === "token_usage_update") setTokenUsage(payload.totals);
-        if (payload.type === "scanner_phase" || payload.type === "agent_status") loadData();
+        if (payload.type === "agent_status") {
+          setAgentLog((previous) => [
+            ...previous,
+            {
+              ...payload,
+              id: `live-${Date.now()}-${payload.agent_id || "agent"}`,
+              created_at: new Date().toISOString(),
+            },
+          ]);
+        }
+        if (payload.type === "scanner_phase") loadData();
       } catch {}
     };
     return () => es.close();
@@ -346,7 +357,6 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         )}
       </div>
     );
-  const phaseEntry = analysis.phases?.[displayedPhase] || {};
   return (
     <>
       <PageHeader
@@ -356,7 +366,9 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             <Crumb href="#/sast-runs">SAST</Crumb>
             <Sep />
             <span className="sast-header-name">{run.name}</span>
-            <span className="badge neutral">{run.analysis_mode === "light" ? "Light" : "Deep"}</span>
+            <span className="badge neutral">
+              {run.analysis_mode === "light" ? "Light" : "Deep"}
+            </span>
             <StatusBadge status={scanRunning ? "scanning" : run.status} />
           </span>
         }
@@ -398,7 +410,12 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         }
       />
       <div className="sast-run-shell">
-        <div className="sast-phase-rail" role="tablist" aria-label="SAST scan phases">
+        <div
+          className="sast-phase-rail"
+          style={{ "--sast-phase-count": phases.length }}
+          role="tablist"
+          aria-label="SAST scan phases"
+        >
           {phases.map((phase, index) => (
             <button
               key={phase.key}
@@ -441,7 +458,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                     key: "obligations",
                     label: `Security checks ${asArray(planning.obligations).length}`,
                   },
-                  { key: "efficiency", label: "Efficiency" },
+                  { key: "efficiency", label: "Execution Summary" },
                 ]
               : []),
             { key: "candidates", label: `Candidates ${leads.length}` },
@@ -458,61 +475,71 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             </button>
           ))}
         </div>
-        <div className="sast-run-content">
-          {error && <div className="alert error">{error}</div>}
-          {notice && <div className="alert info sast-inline-notice">{notice}</div>}
-          <div className="sast-phase-banner">
-            <div>
-              <strong>{phases.find((item) => item.key === displayedPhase)?.label}</strong>
-              <span>{phaseEntry.message || "This phase has not started."}</span>
+        <div
+          className={"sast-run-content" + (tab === "activity" ? " sast-run-content--activity" : "")}
+        >
+          {error ? (
+            <DismissibleAlert variant="error" onDismiss={() => setError(null)}>
+              {error}
+            </DismissibleAlert>
+          ) : null}
+          {notice ? (
+            <DismissibleAlert
+              variant="info"
+              className="sast-inline-notice"
+              onDismiss={() => setNotice(null)}
+            >
+              {notice}
+            </DismissibleAlert>
+          ) : null}
+          {tab === "coverage" ? (
+            <div className="sast-summary-grid sast-run-summary-grid">
+              <div>
+                <span>Security checks</span>
+                <strong>
+                  {workItemSummary.resolved || 0}/{workItemSummary.total || 0}
+                </strong>
+                <small>{workItemSummary.unresolved || 0} remaining</small>
+              </div>
+              <div>
+                <span>Analysis batches</span>
+                <strong>
+                  {workerSummary.complete || 0}/{workerSummary.total || 0}
+                </strong>
+                <small>
+                  {unfinishedWorkers} unfinished
+                  {failedWorkers ? ` · ${failedWorkers} failed` : ""}
+                </small>
+              </div>
+              <div>
+                <span>Direct file reads</span>
+                <strong>
+                  {fileSummary.directly_opened || 0}/{fileSummary.total || 0}
+                </strong>
+                <small>grep excluded</small>
+              </div>
+              <div>
+                <span>Search matches</span>
+                <strong>{fileSummary.with_search_matches || 0}</strong>
+                <small>files returned</small>
+              </div>
+              <div>
+                <span>Candidates</span>
+                <strong>{leads.length}</strong>
+                <small>persisted hypotheses</small>
+              </div>
+              <div>
+                <span>Reportable</span>
+                <strong>{reportableCount}</strong>
+                <small>independently confirmed</small>
+              </div>
+              <div>
+                <span>Proof gaps</span>
+                <strong>{proofGapCount}</strong>
+                <small>unresolved evidence</small>
+              </div>
             </div>
-            <span className="sast-phase-banner-status">{statuses[displayedPhase]}</span>
-          </div>
-          <div className="sast-summary-grid sast-run-summary-grid">
-            <div>
-              <span>Security checks</span>
-              <strong>
-                {workItemSummary.resolved || 0}/{workItemSummary.total || 0}
-              </strong>
-              <small>{workItemSummary.unresolved || 0} remaining</small>
-            </div>
-            <div>
-              <span>Analysis batches</span>
-              <strong>
-                {workerSummary.complete || 0}/{workerSummary.total || 0}
-              </strong>
-              <small>
-                {unfinishedWorkers} unfinished{failedWorkers ? ` · ${failedWorkers} failed` : ""}
-              </small>
-            </div>
-            <div>
-              <span>Direct file reads</span>
-              <strong>
-                {fileSummary.directly_opened || 0}/{fileSummary.total || 0}
-              </strong>
-              <small>grep excluded</small>
-            </div>
-            <div>
-              <span>Search matches</span>
-              <strong>{fileSummary.with_search_matches || 0}</strong>
-              <small>files returned</small>
-            </div>
-            <div>
-              <span>Candidates</span>
-              <strong>{leads.length}</strong>
-              <small>persisted hypotheses</small>
-            </div>
-            <div>
-              <span>Reportable</span>
-              <strong>{reportableCount}</strong>
-              <small>independently confirmed</small>
-            </div>
-            <div>
-              <span>Proof gaps</span>
-              <strong>{proofGapCount}</strong>
-              <small>unresolved evidence</small>
-            </div>
-          </div>
+          ) : null}
           {tab === "candidates" && (
             <CandidatesView
               leads={leads}
@@ -573,6 +600,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               tokenExpanded={tokenExpanded}
               setTokenExpanded={setTokenExpanded}
               runId={runId}
+              analysisMode={run.analysis_mode}
             />
           )}
           <div ref={bottomRef} />
