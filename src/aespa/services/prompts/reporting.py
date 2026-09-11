@@ -18,6 +18,18 @@ For each result, determine whether it indicates a real vulnerability. Consider:
 - Misconfiguration (missing security headers, verbose errors, version disclosure)
 - SSRF responses (cloud metadata, internal IP responses)
 
+Authentication evidence rules:
+- Probe descriptions and notes express testing intent, not what was sent. Determine the
+  authentication state only from "Credentials observed on wire" and Request evidence.
+- Report unauthenticated access, missing authentication, or auth bypass only when the
+  request evidence explicitly shows BOTH "Authorization: none" and "Cookies: none"
+  (or "Credentials observed on wire: no").
+- If credentials were observed on the wire, a 200 response proves only authenticated
+  access. It must never be reported as unauthenticated access, even when the probe label
+  says "anonymous" or "unauthenticated".
+- If the wire authentication state is unknown, do not report a missing-authentication
+  finding. Request evidence is required.
+
 Return ONLY valid JSON — an array of findings (empty array [] if none found, no markdown fences):
 [
   {{
@@ -89,6 +101,9 @@ NEW candidate findings just discovered (normalize these):
 Rules:
 - If a new finding is the same vulnerability class as an existing one (same OWASP category \
 and root cause, possibly on a different URL), set its title to EXACTLY the existing title.
+- Preserve security qualifiers. Never add or remove claims such as "unauthenticated",
+  "without authentication", "authenticated", or "admin-only" while normalising a title.
+- Return the title alone. Do not copy the displayed [OWASP] or [SEVERITY] prefixes into it.
 - If two new findings in this batch are the same class, give them the SAME title (pick the \
 clearest one).
 - If a new finding is genuinely different, keep its title as-is.

@@ -26,18 +26,24 @@ from aespa.models import (
     ApiDocument,
     ComponentFact,
     LLMProfile,
+    SastCoverageObligation,
+    SastDiscoveryTelemetry,
     SastEvidenceReceipt,
+    SastObligationLead,
     SastPartition,
     SastRun,
     SastSourceFile,
+    SastSurfaceEdge,
     SastSurfaceItem,
+    SastThreatModel,
+    SastThreatScenario,
     SastWorker,
     SastWorkItem,
     ScanLead,
     ScanLog,
 )
 
-EXPORT_VERSION = 1
+EXPORT_VERSION = 2
 EXPORT_KIND = "sast-run"
 _MAX_ARCHIVE_BYTES = 250 * 1024 * 1024
 
@@ -148,6 +154,23 @@ def export_sast_run(session: Session, run_id: int) -> dict[str, Any]:
         ]
         for model in work_program_models
     }
+    semantic_models = (
+        SastSurfaceEdge,
+        SastThreatModel,
+        SastThreatScenario,
+        SastCoverageObligation,
+        SastObligationLead,
+        SastDiscoveryTelemetry,
+    )
+    semantic_state = {
+        model.__tablename__: [
+            _row(row)
+            for row in session.exec(
+                select(model).where(model.sast_run_id == run_id).order_by(model.id)
+            ).all()
+        ]
+        for model in semantic_models
+    }
 
     run_data = _row(run)
     # Absolute paths are installation-specific and can disclose local layout.
@@ -164,6 +187,7 @@ def export_sast_run(session: Session, run_id: int) -> dict[str, Any]:
         "agent_logs": [_row(log) for log in agent_logs],
         "component_facts": [_row(fact) for fact in component_facts],
         "work_program": work_program,
+        "semantic_state": semantic_state,
     }
 
 
@@ -211,7 +235,7 @@ def _validate_bundle(bundle: Any) -> dict[str, Any]:
     if not isinstance(bundle, dict):
         raise SastExportError("SAST export must be a JSON object")
     if (
-        bundle.get("export_version") != EXPORT_VERSION
+        bundle.get("export_version") not in {1, EXPORT_VERSION}
         or bundle.get("kind") != EXPORT_KIND
     ):
         raise SastExportError(
@@ -242,6 +266,10 @@ def import_sast_run(session: Session, bundle: Any) -> SastRun:
     run_data["document_id"] = None
     run_data["triggered_by_run_type"] = None
     run_data["triggered_by_run_id"] = None
+    analysis_mode = run_data.get("analysis_mode", "deep")
+    if analysis_mode not in {"light", "deep"}:
+        raise SastExportError("sast_run.analysis_mode must be light or deep")
+    run_data["analysis_mode"] = analysis_mode
     # Provider connection IDs belong to the source installation. A local
     # profile can still be selected later from the run settings screen.
     run_data["llm_config_id"] = None
@@ -274,6 +302,8 @@ def import_sast_run(session: Session, bundle: Any) -> SastRun:
         "worker": {},
         "work_item": {},
         "receipt": {},
+        "scenario": {},
+        "obligation": {},
         "lead": {},
     }
     pending_work_leads: dict[int, int] = {}
@@ -380,6 +410,77 @@ def import_sast_run(session: Session, bundle: Any) -> SastRun:
         if work_item is not None:
             work_item.lead_id = new_lead_id
             session.add(work_item)
+
+    semantic_state = bundle.get("semantic_state", {})
+    if not isinstance(semantic_state, dict):
+        raise SastExportError("semantic_state must be an object")
+
+    def _semantic_rows(key: str) -> list[dict[str, Any]]:
+        rows = semantic_state.get(key, [])
+        if not isinstance(rows, list):
+            raise SastExportError(f"semantic_state.{key} must be an array")
+        return rows
+
+    for item in _semantic_rows("sast_surface_edge"):
+        data = dict(item)
+        data.pop("id", None)
+        data["sast_run_id"] = new_run_id
+        data["source_surface_id"] = id_maps["surface"].get(
+            data.get("source_surface_id")
+        )
+        data["target_surface_id"] = id_maps["surface"].get(
+            data.get("target_surface_id")
+        )
+        if data["source_surface_id"] is None or data["target_surface_id"] is None:
+            continue
+        _parse_datetimes(data, "created_at")
+        session.add(SastSurfaceEdge(**data))
+    for item in _semantic_rows("sast_threat_model"):
+        data = dict(item)
+        data.pop("id", None)
+        data["sast_run_id"] = new_run_id
+        _parse_datetimes(data, "created_at", "updated_at")
+        session.add(SastThreatModel(**data))
+    for item in _semantic_rows("sast_threat_scenario"):
+        data = dict(item)
+        old_id = int(data.pop("id"))
+        data["sast_run_id"] = new_run_id
+        _parse_datetimes(data, "created_at", "updated_at")
+        row = SastThreatScenario(**data)
+        session.add(row)
+        session.flush()
+        id_maps["scenario"][old_id] = int(row.id)
+    for item in _semantic_rows("sast_coverage_obligation"):
+        data = dict(item)
+        old_id = int(data.pop("id"))
+        data["sast_run_id"] = new_run_id
+        data["source_scenario_id"] = id_maps["scenario"].get(
+            data.get("source_scenario_id")
+        )
+        data["assigned_worker_id"] = id_maps["worker"].get(
+            data.get("assigned_worker_id")
+        )
+        _parse_datetimes(data, "created_at", "updated_at")
+        row = SastCoverageObligation(**data)
+        session.add(row)
+        session.flush()
+        id_maps["obligation"][old_id] = int(row.id)
+    for item in _semantic_rows("sast_obligation_lead"):
+        data = dict(item)
+        data.pop("id", None)
+        data["sast_run_id"] = new_run_id
+        data["obligation_id"] = id_maps["obligation"].get(data.get("obligation_id"))
+        data["lead_id"] = id_maps["lead"].get(data.get("lead_id"))
+        if data["obligation_id"] is None or data["lead_id"] is None:
+            continue
+        _parse_datetimes(data, "created_at")
+        session.add(SastObligationLead(**data))
+    for item in _semantic_rows("sast_discovery_telemetry"):
+        data = dict(item)
+        data.pop("id", None)
+        data["sast_run_id"] = new_run_id
+        _parse_datetimes(data, "created_at")
+        session.add(SastDiscoveryTelemetry(**data))
 
     for item in bundle.get("scan_logs", []):
         if not isinstance(item, dict):

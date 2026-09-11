@@ -67,6 +67,62 @@ def test_extracts_path_aware_spring_security_rules(tmp_path):
     assert global_rule["detail"]["protected_paths"] == ["/api/customer/**"]
 
 
+def test_extracts_spring_method_routes_with_class_prefix(tmp_path):
+    source = tmp_path / "ClaimController.java"
+    source.write_text(
+        """
+        @Controller
+        @RequestMapping("/claims")
+        public class ClaimController {
+            @PostMapping("/{id}/paid")
+            public String markPaid(@PathVariable Long id) { return "ok"; }
+
+            @GetMapping(path = "/{id}")
+            public String view(@PathVariable Long id) { return "ok"; }
+        }
+        """
+    )
+
+    routes = [
+        fact
+        for fact in extract_component_facts(tmp_path)
+        if fact["fact_type"] == "route"
+    ]
+
+    assert {(route["method"], route["path"]) for route in routes} >= {
+        ("POST", "/claims/{id}/paid"),
+        ("GET", "/claims/{id}"),
+    }
+    paid = next(route for route in routes if route["path"] == "/claims/{id}/paid")
+    assert paid["detail"]["request_role"] == "server_ingress"
+    assert paid["evidence_location"].endswith(":5")
+
+
+def test_extracts_spring_request_mapping_methods_and_multiple_paths(tmp_path):
+    (tmp_path / "ApiController.java").write_text(
+        """
+        @RestController
+        @RequestMapping(path = "/api")
+        class ApiController {
+            @RequestMapping(value = {"/a", "/b"}, method = {RequestMethod.GET, RequestMethod.POST})
+            public String both() { return "ok"; }
+        }
+        """
+    )
+
+    routes = [
+        fact
+        for fact in extract_component_facts(tmp_path)
+        if fact["fact_type"] == "route"
+    ]
+    assert {(route["method"], route["path"]) for route in routes} >= {
+        ("GET", "/api/a"),
+        ("POST", "/api/a"),
+        ("GET", "/api/b"),
+        ("POST", "/api/b"),
+    }
+
+
 def test_interface_fingerprint_ignores_mapper_labels_and_host_explanations():
     first = interface_fact_fingerprint(
         fact_type="http_call",

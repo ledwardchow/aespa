@@ -39,6 +39,7 @@ from aespa.models import (
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
+from aespa.services import traffic as traffic_svc
 from aespa.services.references import ensure_finding_reference
 from aespa.services.settings import (
     get_adversarial_validator_config,
@@ -328,7 +329,6 @@ async def _validate_finding_inline(
     scanner_policy=None,
 ) -> None:
     """Validate a newly-created finding while a scan is still running."""
-    loaded_llm_cfg = llm_cfg is None
     with Session(get_engine()) as s:
         finding = s.get(ScanFinding, finding_id)
         run = s.get(TestRun, run_id)
@@ -360,11 +360,9 @@ async def _validate_finding_inline(
         s.add(finding)
         # Session.commit() expires every ORM row still attached to the session.
         # Detach the read-only inputs first so their fields remain available to
-        # the background validator. This also preserves provider fields resolved
-        # onto llm_cfg in memory by get_llm_config_for_role().
+        # the background validator. The resolved config is already independent
+        # of the session.
         readonly_objs = [*creds, site, run]
-        if loaded_llm_cfg:
-            readonly_objs.append(llm_cfg)
         for obj in readonly_objs:
             if obj is not None:
                 s.expunge(obj)
@@ -533,7 +531,7 @@ async def _do_validate(
         scanner_policy = get_run_scanner_policy(s, run)
         validator_cfg = get_adversarial_validator_config(s)
         creds = list(site.credentials)
-        for obj in [*creds, site, llm_cfg, run]:
+        for obj in [*creds, site, run]:
             s.expunge(obj)
 
     findings = _load_findings_for_validation(run_id, finding_ids)
@@ -641,8 +639,8 @@ async def _run_adversarial_validator_loop(
     """Run the adversarial agentic validator loop for a single finding.
 
     Returns (verdict, reasoning, confidence, done_input) where verdict is
-    "confirmed" or "false_positive" and done_input is the raw done() tool input
-    (carrying any poc_request/poc_expect/poc_auth).
+    "confirmed", "false_positive", or "unconfirmed" and done_input is the raw
+    done() tool input (carrying any poc_request/poc_expect/poc_auth).
     """
     # Build the user message for the validator.
     disproof_hints = llm_svc._disproof_hints_for_finding(finding.owasp_category or "")
@@ -656,6 +654,37 @@ async def _run_adversarial_validator_loop(
         f"**Description**\n{finding.description or 'No description.'}\n\n"
         f"**Scanner evidence**\n{finding.evidence or 'No evidence provided.'}"
     )
+    session_lines: list[str] = []
+    seen_session_names: set[str] = set()
+    for session in cred_sessions.values():
+        session_name = str(session.get("username") or "").strip()
+        if not session_name or session_name in seen_session_names:
+            continue
+        seen_session_names.add(session_name)
+        label = str(session.get("label") or "").strip()
+        auth_types: list[str] = []
+        if session.get("cookies"):
+            auth_types.append("cookies")
+        if session.get("extra_headers"):
+            auth_types.append("request headers")
+        auth_summary = ", ".join(auth_types) or "stored authentication"
+        label_suffix = f" ({label})" if label and label != session_name else ""
+        session_lines.append(f"- `{session_name}`{label_suffix}: {auth_summary}")
+    if session_lines:
+        initial_message += (
+            "\n\n**Available authenticated sessions**\n"
+            + "\n".join(session_lines)
+            + "\nSelect one by passing its exact backticked name as `use_session`. "
+            "Do not guess credentials or register another account when a suitable "
+            "listed session exists."
+        )
+    else:
+        initial_message += (
+            "\n\n**Available authenticated sessions**\n"
+            "None. Do not spend the validation budget guessing credentials. If "
+            "authentication is required and the existing evidence cannot decide the "
+            "finding, return `unconfirmed` with that proof gap."
+        )
     if static_attack_path:
         from aespa.services.scan_leads import format_attack_path_for_prompt
 
@@ -689,6 +718,7 @@ async def _run_adversarial_validator_loop(
     # Mutable verdict holder — set by the done() tool call.
     verdict_holder: list[tuple[str, str, str, dict]] = []
     step_counter: list[int] = [0]
+    conversation_checkpoint: list[dict] = []
 
     def _record_verdict(tool_input: dict) -> tuple[str, str, str, dict]:
         verdict = tool_input.get("verdict") or "unconfirmed"
@@ -727,6 +757,20 @@ async def _run_adversarial_validator_loop(
                 user_sessions_by_name,
                 scanner_policy,
                 run_id=run_id,
+                traffic_provenance={
+                    "agent_id": f"validator-{finding.id}",
+                    "agent_step": step,
+                    "purpose": traffic_svc.request_purpose(
+                        tool_input,
+                        f"Validate finding {finding.reference or finding.id}",
+                        agent_name="Validator",
+                        owasp_category=finding.owasp_category,
+                        test_class=tool_input.get("test_class"),
+                    ),
+                    "owasp_category": finding.owasp_category,
+                    "test_class": tool_input.get("test_class"),
+                    "page_id": finding.page_id,
+                },
             )
         if tool_name == "compare_responses":
             return await _validator_compare_responses(
@@ -735,6 +779,20 @@ async def _run_adversarial_validator_loop(
                 user_sessions_by_name,
                 scanner_policy,
                 run_id=run_id,
+                traffic_provenance={
+                    "agent_id": f"validator-{finding.id}",
+                    "agent_step": step,
+                    "purpose": traffic_svc.request_purpose(
+                        tool_input,
+                        f"Compare responses for {finding.reference or finding.id}",
+                        agent_name="Validator",
+                        owasp_category=finding.owasp_category,
+                        test_class=tool_input.get("test_class"),
+                    ),
+                    "owasp_category": finding.owasp_category,
+                    "test_class": tool_input.get("test_class"),
+                    "page_id": finding.page_id,
+                },
             )
         if tool_name == "context_tool":
             return await _validator_context_tool(tool_input, run_id, finding)
@@ -749,6 +807,9 @@ async def _run_adversarial_validator_loop(
     def _stop_check() -> bool:
         return len(verdict_holder) > 0 or step_counter[0] >= validator_cfg.max_steps
 
+    async def _capture_checkpoint(messages: list[dict], _step_count: int) -> None:
+        conversation_checkpoint[:] = list(messages)
+
     await llm_svc.thinking_agentic_loop(
         config=llm_cfg,
         system_message=llm_svc._ADVERSARIAL_VALIDATOR_SYSTEM,
@@ -757,10 +818,74 @@ async def _run_adversarial_validator_loop(
         stop_check=_stop_check,
         done_check=_done_check,
         tools=llm_svc.VALIDATOR_AGENT_TOOLS,
+        on_checkpoint=_capture_checkpoint,
     )
 
     if verdict_holder:
         return verdict_holder[0]
+    if step_counter[0] >= validator_cfg.max_steps and conversation_checkpoint:
+        finalization_rejected_tools = [0]
+
+        async def _finalization_tool_executor(
+            tool_name: str, _tool_input: dict, _step: int
+        ) -> dict:
+            finalization_rejected_tools[0] += 1
+            return {
+                "error": (
+                    f"Tool {tool_name!r} is unavailable because the investigative "
+                    "budget is exhausted. Call done with the evidence already collected."
+                )
+            }
+
+        final_directive = {
+            "type": "text",
+            "text": (
+                "The investigative tool budget is exhausted; the validation was not "
+                "stopped by the user. Do not run another probe. Review the evidence "
+                "already collected and call done now. Use confirmed only when the "
+                "evidence proves the finding, false_positive only when it establishes "
+                "a specific benign explanation, or unconfirmed when a material proof "
+                "gap remains."
+            ),
+        }
+        final_messages = list(conversation_checkpoint)
+        if final_messages and final_messages[-1].get("role") == "user":
+            final_user_message = dict(final_messages[-1])
+            final_content = final_user_message.get("content")
+            if isinstance(final_content, list):
+                final_user_message["content"] = [*final_content, final_directive]
+            else:
+                final_user_message["content"] = [
+                    {"type": "text", "text": str(final_content or "")},
+                    final_directive,
+                ]
+            final_messages[-1] = final_user_message
+        else:
+            final_messages.append({"role": "user", "content": [final_directive]})
+        await llm_svc.thinking_agentic_loop(
+            config=llm_cfg,
+            system_message=llm_svc._ADVERSARIAL_VALIDATOR_SYSTEM,
+            initial_user_message=initial_message,
+            tool_executor=_finalization_tool_executor,
+            stop_check=lambda: (
+                bool(verdict_holder) or finalization_rejected_tools[0] >= 2
+            ),
+            done_check=_done_check,
+            tools=[
+                tool
+                for tool in llm_svc.VALIDATOR_AGENT_TOOLS
+                if tool.get("name") == "done"
+            ],
+            resume_messages=final_messages,
+            resume_step_count=step_counter[0],
+            max_consecutive_text_turns=3,
+            text_only_repair_message=(
+                "No investigative tools remain. Call done with confirmed, "
+                "false_positive, or unconfirmed based only on the collected evidence."
+            ),
+        )
+        if verdict_holder:
+            return verdict_holder[0]
     # Step budget exhausted without a verdict.  A validator that did not reach
     # an explicit conclusion has not proved exploitability; keep the finding
     # uncertain so a retry can be requested instead of silently confirming it.
@@ -778,6 +903,7 @@ async def _validator_http_request(
     user_sessions: dict[str, dict],
     scanner_policy,
     run_id: Optional[int] = None,
+    traffic_provenance: Optional[dict] = None,
 ) -> dict:
     method = (tool_input.get("method") or "GET").upper()
     url = tool_input.get("url", "")
@@ -805,12 +931,14 @@ async def _validator_http_request(
     try:
         async with LoggingAsyncClient(
             run_id=run_id,
-            username=use_session or "validator",
+            username=(session or {}).get("username"),
             cookies=cookies,
             headers=hdrs,
             timeout=REQUEST_TIMEOUT,
             follow_redirects=getattr(scanner_policy, "follow_redirects", True),
             verify=False,
+            page_id=(traffic_provenance or {}).get("page_id"),
+            provenance=traffic_provenance,
         ) as client:
             req = client.build_request(method, url, content=content, headers=headers_in)
             t0 = time.perf_counter()
@@ -838,12 +966,35 @@ async def _validator_compare_responses(
     user_sessions: dict[str, dict],
     scanner_policy,
     run_id: Optional[int] = None,
+    traffic_provenance: Optional[dict] = None,
 ) -> dict:
     """Execute baseline and test requests then return a comparison."""
 
     async def _fetch(spec: dict) -> dict:
         return await _validator_http_request(
-            spec, primary_session, user_sessions, scanner_policy, run_id=run_id
+            spec,
+            primary_session,
+            user_sessions,
+            scanner_policy,
+            run_id=run_id,
+            traffic_provenance={
+                **(traffic_provenance or {}),
+                "purpose": (
+                    traffic_svc.request_purpose(
+                        spec,
+                        "Compare response",
+                        agent_name="Validator",
+                        owasp_category=(traffic_provenance or {}).get("owasp_category"),
+                        test_class=(traffic_provenance or {}).get("test_class"),
+                    )
+                    if any(
+                        spec.get(key)
+                        for key in ("payload_purpose", "hypothesis", "note", "purpose")
+                    )
+                    else (traffic_provenance or {}).get("purpose")
+                    or "Validator: Compare response"
+                ),
+            },
         )
 
     baseline_spec = tool_input.get("baseline", {})
@@ -1549,6 +1700,17 @@ async def _request_access_validation_actor(
             timeout=scanner_policy.request_timeout_s,
             follow_redirects=scanner_policy.follow_redirects,
             verify=False,
+            page_id=finding.page_id,
+            provenance={
+                "agent_id": f"validator-{finding.id}",
+                "purpose": traffic_svc.request_purpose(
+                    {},
+                    f"Check access to {finding.reference or finding.id} as {username}",
+                    agent_name="Validator",
+                    owasp_category=finding.owasp_category,
+                ),
+                "owasp_category": finding.owasp_category,
+            },
         ) as client:
             resp = await client.request(method, finding.affected_url)
         body = resp.text[: scanner_policy.response_body_read_limit_bytes]
@@ -2304,12 +2466,20 @@ async def _run_validation_probe(
 
         async with LoggingAsyncClient(
             run_id=run_id,
-            username=as_user or "validator",
+            username=(session or {}).get("username"),
             cookies=cookies,
             headers=hdrs,
             timeout=scanner_policy.request_timeout_s,
             follow_redirects=scanner_policy.follow_redirects,
             verify=False,
+            provenance={
+                "agent_id": "validator",
+                "purpose": traffic_svc.request_purpose(
+                    {"purpose": desc}, "Probe target", agent_name="Validator"
+                ),
+                "owasp_category": probe.get("owasp_category"),
+                "test_class": probe.get("test_class"),
+            },
         ) as client:
             req = client.build_request(
                 method,

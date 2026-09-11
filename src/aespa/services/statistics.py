@@ -231,9 +231,7 @@ def _official_codex_rates(model: str) -> dict[str, Any] | None:
         "credit_price_usd_per_million": None,
         "credit_unit": None,
         "price_source": f"{OPENAI_MODEL_DOCS_URL}/{priced_model}",
-        "price_confidence": "exact"
-        if requested_model == priced_model
-        else "alias",
+        "price_confidence": "exact" if requested_model == priced_model else "alias",
         "manual_override": False,
     }
 
@@ -382,6 +380,18 @@ def estimate_usage_cost(
 
 def _row_dict(row: LLMUsageMonth) -> dict[str, Any]:
     token_cost, credit_cost, total = _cost(row)
+    has_price = any(
+        rate is not None
+        for rate in (
+            row.input_price_usd_per_million,
+            row.output_price_usd_per_million,
+            row.cache_read_price_usd_per_million,
+            row.cache_write_price_usd_per_million,
+        )
+    ) or (
+        row.credit_price_usd_per_million is not None
+        and (row.ai_credits > 0 or row.factory_credits > 0)
+    )
     return {
         "month": row.month,
         "provider": row.provider,
@@ -410,7 +420,7 @@ def _row_dict(row: LLMUsageMonth) -> dict[str, Any]:
         },
         "estimated_token_cost_usd": token_cost,
         "estimated_credit_cost_usd": credit_cost,
-        "estimated_total_cost_usd": total,
+        "estimated_total_cost_usd": total if has_price else None,
     }
 
 

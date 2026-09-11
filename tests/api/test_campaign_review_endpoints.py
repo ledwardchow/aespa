@@ -42,7 +42,7 @@ _UTC = timezone.utc
 
 
 def test_campaign_finding_rows_merge_cross_repo_instances():
-    from aespa.api.applications import _merge_campaign_finding_rows
+    from aespa.services.campaign_results import merge_campaign_finding_rows
 
     first = CampaignFindingRow(
         finding_id=10,
@@ -73,7 +73,7 @@ def test_campaign_finding_rows_merge_cross_repo_instances():
         status="confirmed",
     )
 
-    rows = _merge_campaign_finding_rows(
+    rows = merge_campaign_finding_rows(
         [
             (first, ("cross-repository", "source-1", 2, "A01", "api_collection")),
             (second, ("cross-repository", "source-1", 2, "A01", "api_collection")),
@@ -305,13 +305,13 @@ def test_mappings_endpoint_is_bounded_query_count_regardless_of_row_count(
         query_count += 1
         return real_exec(self, *args, **kwargs)
 
-    import aespa.api.applications as applications_module  # noqa: F401
+    from aespa.services import campaign_results
 
     Session.exec = _counting_exec
     try:
         with Session(get_engine()) as s:
             query_count = 0
-            resp_rows = applications_module._enrich_mappings(
+            resp_rows = campaign_results.enrich_mappings(
                 s,
                 campaign_id,
                 s.exec(

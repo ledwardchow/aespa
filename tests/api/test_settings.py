@@ -12,7 +12,20 @@ def test_get_llm_config_initially_null(client: TestClient):
     assert r.json() is None
 
 
-def test_get_default_models(client: TestClient):
+def test_get_default_models(client: TestClient, monkeypatch):
+    calls = []
+
+    async def fake_discover_models_for_format(**kwargs):
+        calls.append(kwargs["api_format"])
+        if kwargs["api_format"] == "openai":
+            return ["discovered-openai-model"]
+        return []
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_models_for_format",
+        fake_discover_models_for_format,
+    )
+
     r = client.get("/api/settings/llm/models")
     assert r.status_code == 200
     data = r.json()
@@ -31,8 +44,92 @@ def test_get_default_models(client: TestClient):
     assert isinstance(data["github_copilot"], list)
     assert "auto" in data["github_copilot"]
     assert isinstance(data["factory_droid"], list)
-    assert isinstance(data["openai"], list)
+    assert data["openai"] == ["discovered-openai-model"]
     assert isinstance(data["bedrock"], list)
+    assert set(calls) == set(data)
+
+
+def test_code_execution_config_round_trip(client: TestClient, monkeypatch):
+    initial = client.get("/api/settings/code-execution")
+    assert initial.status_code == 200
+    assert initial.json()["enabled"] is False
+    assert initial.json()["image_ref"] == "ledwardchow/aespa-python-executor:0.1"
+    assert initial.json()["allowed_roles"] == [
+        "alice",
+        "specialist",
+        "test_lead",
+    ]
+
+    payload = {**initial.json(), "enabled": True, "allowed_roles": ["alice"]}
+    payload.pop("updated_at")
+    updated = client.put("/api/settings/code-execution", json=payload)
+    assert updated.status_code == 200
+    assert updated.json()["enabled"] is True
+    assert updated.json()["allowed_roles"] == ["alice"]
+
+    async def fake_status(config):
+        return {
+            "enabled": config.enabled,
+            "available": True,
+            "backend": config.backend,
+            "image_ref": config.image_ref,
+            "docker_installed": True,
+            "docker_available": True,
+            "image_present": True,
+            "message": "Sandbox runtime is ready.",
+        }
+
+    monkeypatch.setattr("aespa.services.code_execution.runtime_status", fake_status)
+    status = client.get("/api/settings/code-execution/status")
+    assert status.status_code == 200
+    assert status.json()["available"] is True
+
+
+def test_copilot_account_and_login_endpoints(client: TestClient, monkeypatch):
+    accounts = [{"login": "octocat", "is_default": True}]
+    challenge = {
+        "login_id": "login-1",
+        "status": "waiting",
+        "verification_url": "https://github.com/login/device",
+        "user_code": "ABCD-1234",
+        "login": None,
+        "error": None,
+    }
+
+    monkeypatch.setattr(
+        "aespa.services.copilot_provider.list_accounts", lambda: accounts
+    )
+
+    async def fake_start():
+        return challenge
+
+    def fake_status(login_id):
+        assert login_id == "login-1"
+        return {**challenge, "status": "complete", "login": "octocat"}
+
+    async def fake_cancel(login_id):
+        assert login_id == "login-1"
+        return {**challenge, "status": "cancelled"}
+
+    monkeypatch.setattr("aespa.services.copilot_provider.login_start", fake_start)
+    monkeypatch.setattr("aespa.services.copilot_provider.login_status", fake_status)
+    monkeypatch.setattr("aespa.services.copilot_provider.login_cancel", fake_cancel)
+
+    response = client.get("/api/settings/llm/copilot/accounts")
+    assert response.status_code == 200
+    assert response.json() == {"accounts": accounts}
+
+    response = client.post("/api/settings/llm/copilot/login")
+    assert response.status_code == 200
+    assert response.json() == challenge
+
+    response = client.get("/api/settings/llm/copilot/login/login-1")
+    assert response.status_code == 200
+    assert response.json()["login"] == "octocat"
+
+    response = client.post("/api/settings/llm/copilot/login/login-1/cancel")
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
 
 
 def test_discover_llm_models_endpoint(client: TestClient, monkeypatch):
@@ -126,7 +223,10 @@ def test_cloudflare_access_config_round_trip(client: TestClient):
     assert r.json()["audience"] is None
 
 
-def test_browser_debug_config_round_trip(client: TestClient):
+def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
+    monkeypatch.setattr(
+        "aespa.runtime_capabilities.graphical_display_available", lambda: True
+    )
     initial = client.get("/api/settings/browser-debug")
     assert initial.status_code == 200
     assert initial.json()["browser_engine"] == "playwright_chromium"
@@ -139,6 +239,26 @@ def test_browser_debug_config_round_trip(client: TestClient):
     assert updated.status_code == 200
     assert updated.json()["browser_engine"] == "system_chrome"
     assert updated.json()["browser_visible"] is True
+    assert updated.json()["graphical_display_available"] is True
+    assert updated.json()["graphical_display_message"] is None
+
+
+def test_browser_debug_disables_visible_mode_without_display(
+    client: TestClient, monkeypatch
+):
+    monkeypatch.setattr(
+        "aespa.runtime_capabilities.graphical_display_available", lambda: False
+    )
+
+    updated = client.put(
+        "/api/settings/browser-debug",
+        json={"browser_engine": "playwright_chromium", "browser_visible": True},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["browser_visible"] is False
+    assert updated.json()["graphical_display_available"] is False
+    assert "Guided login" in updated.json()["graphical_display_message"]
 
 
 def test_global_http_headers_round_trip(client: TestClient):
@@ -250,6 +370,75 @@ def _make_profile(client: TestClient, provider_id: int, **overrides):
     }
     payload.update(overrides)
     return client.post("/api/settings/llm/model-configs", json=payload)
+
+
+def test_auto_context_uses_freshly_discovered_form_value(client: TestClient):
+    provider_r = _make_provider(
+        client,
+        models=["reasoning-model"],
+        model_capabilities={
+            "reasoning-model": {"supported_efforts": ["low", "medium"]}
+        },
+    )
+    provider = provider_r.json()
+
+    profile_r = _make_profile(
+        client,
+        provider["id"],
+        model="reasoning-model",
+        max_context_tokens=None,
+        detected_context_tokens=1_000_000,
+    )
+
+    assert profile_r.status_code == 200
+    profile = profile_r.json()
+    assert profile["max_context_tokens"] == 1_000_000
+    assert profile["context_limit_source"] == "discovered"
+
+
+def test_provider_refresh_updates_auto_context_but_not_manual_context(
+    client: TestClient,
+):
+    provider_payload = {
+        "name": "Context Provider",
+        "api_format": "openai_compatible",
+        "base_url": "http://localhost:1234/v1",
+        "models": ["context-model"],
+        "model_capabilities": {"context-model": {"context_window_tokens": 100_000}},
+        "api_key": None,
+    }
+    provider = client.post("/api/settings/llm/providers", json=provider_payload).json()
+    automatic = _make_profile(
+        client,
+        provider["id"],
+        name="Automatic",
+        model="context-model",
+        max_context_tokens=None,
+    ).json()
+    manual = _make_profile(
+        client,
+        provider["id"],
+        name="Manual",
+        model="context-model",
+        max_context_tokens=150_000,
+    ).json()
+
+    provider_payload["model_capabilities"]["context-model"]["context_window_tokens"] = (
+        200_000
+    )
+    response = client.put(
+        f"/api/settings/llm/providers/{provider['id']}", json=provider_payload
+    )
+
+    assert response.status_code == 200
+    profiles = {
+        item["id"]: item
+        for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    assert profiles[automatic["id"]]["max_context_tokens"] == 200_000
+    assert profiles[automatic["id"]]["context_limit_source"] == "provider"
+    assert profiles[manual["id"]]["max_context_tokens"] == 150_000
+    assert profiles[manual["id"]]["context_limit_source"] == "manual"
 
 
 def test_factory_droid_provider_uses_cli_credentials(client: TestClient):
@@ -532,7 +721,7 @@ def test_write_only_api_keys_behavior(client: TestClient):
     assert burp_get.json()["api_key"] is None
 
 
-def test_run_llm_config_resolves_provider_fields_on_session_instance():
+def test_run_llm_config_resolves_provider_fields_without_changing_session_instance():
     from aespa import models as _models  # noqa: F401
     from aespa.models import LLMConfig, LLMProviderConfig, Site, TestRun
     from aespa.services import settings as settings_service
@@ -573,19 +762,23 @@ def test_run_llm_config_resolves_provider_fields_on_session_instance():
 
             cfg = settings_service.get_llm_config_for_run(session, run)
 
-            assert inspect(cfg).session is session
-            assert session.is_modified(cfg) is False
+            assert inspect(cfg, raiseerr=False) is None
+            assert inspect(profile).session is session
+            assert session.is_modified(profile) is False
             assert cfg.provider == "azure_foundry_anthropic"
             assert cfg.api_key == "provider-key"
             assert cfg.base_url == "https://example.services.ai.azure.com/anthropic/v1"
 
             settings_service.get_run_scanner_policy(session, run)
-            assert session.is_modified(cfg) is False
-            session.expunge(cfg)
+            assert session.is_modified(profile) is False
+            assert profile.api_key is None
+            assert profile.base_url is None
+            profile_id = profile.id
+            session.expire_all()
             assert cfg.api_key == "provider-key"
 
         with Session(engine) as session:
-            persisted = session.get(LLMConfig, profile.id)
+            persisted = session.get(LLMConfig, profile_id)
             assert persisted.api_key is None
             assert persisted.base_url is None
     finally:
@@ -676,6 +869,7 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert data["disable_deterministic_checks"] is False
     assert data["max_consecutive_text_turns"] == 0
     assert data["enforce_full_coverage_obligations"] is False
+    assert data["standard_coverage_percent"] == 60
     assert data["scan_mode"] == "aggressive"
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
@@ -695,6 +889,7 @@ def test_upsert_scanner_policy(client: TestClient):
             "disable_deterministic_checks": True,
             "max_consecutive_text_turns": 0,
             "enforce_full_coverage_obligations": False,
+            "standard_coverage_percent": 72,
             "max_probes_per_page": 25,
             "thinking_max_steps": 180,
             "request_timeout_s": 12.5,
@@ -710,6 +905,7 @@ def test_upsert_scanner_policy(client: TestClient):
     assert data["disable_deterministic_checks"] is True
     assert data["max_consecutive_text_turns"] == 0
     assert data["enforce_full_coverage_obligations"] is False
+    assert data["standard_coverage_percent"] == 72
     assert data["scan_mode"] == "aggressive"
     assert data["max_probes_per_page"] == 25
     assert data["thinking_max_steps"] == 180
@@ -723,6 +919,13 @@ def test_upsert_scanner_policy(client: TestClient):
 def test_upsert_scanner_policy_invalid_limit(client: TestClient):
     payload = client.get("/api/settings/scanner-policy").json()
     payload["max_probes_per_page"] = 9999
+    r = client.put("/api/settings/scanner-policy", json=payload)
+    assert r.status_code == 422
+
+
+def test_upsert_scanner_policy_rejects_invalid_standard_target(client: TestClient):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload["standard_coverage_percent"] = 101
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 422
 

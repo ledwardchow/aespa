@@ -9,10 +9,8 @@ host in desktop.py.
 
 from __future__ import annotations
 
-import socket
 import sys
 import threading
-import time
 from importlib import import_module
 
 import pystray
@@ -21,55 +19,16 @@ from PIL import Image
 
 from aespa.browser import configure_browsers_path, download_chromium_if_missing
 from aespa.config import DEFAULT_WEB_DIR
+from aespa.desktop_console import (
+    DesktopConsoleServer,
+)
+from aespa.desktop_console import (
+    main as console_client_main,
+)
+from aespa.desktop_server import start_local_server
 
 _window = None
-
-
-def _free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
-_server_error: Exception | None = None
-
-
-def _serve(port: int) -> None:
-    global _server_error
-    try:
-        import uvicorn
-
-        from aespa.main import app
-
-        uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
-        ).run()
-    except Exception as exc:
-        _server_error = exc
-        raise
-
-
-def _wait_port(port: int, timeout: float = 20.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _server_error is not None:
-            raise RuntimeError(
-                f"Backend server failed to start: {_server_error}"
-            ) from _server_error
-        try:
-            with socket.create_connection(("127.0.0.1", port), 0.25):
-                return
-        except OSError:
-            time.sleep(0.1)
-    if _server_error is not None:
-        raise RuntimeError(
-            f"Backend server failed to start: {_server_error}"
-        ) from _server_error
-    raise TimeoutError(
-        f"Backend server failed to bind to port {port} within {timeout}s"
-    )
+_console_server = None
 
 
 def _on_closing() -> bool:
@@ -87,7 +46,14 @@ def _on_quit(icon, _item) -> None:
     webview.destroy()
 
 
+def _on_console(_icon, _item) -> None:
+    _console_server.open()
+
+
 def main() -> None:
+    if "--desktop-console" in sys.argv:
+        console_client_main()
+        return
     if "--smoke-test" in sys.argv:
         import_module("webview.platforms.winforms")
         return
@@ -96,15 +62,14 @@ def main() -> None:
     # First-run Chromium download runs in the background so the UI isn't blocked.
     threading.Thread(target=download_chromium_if_missing, daemon=True).start()
 
-    port = _free_port()
-    threading.Thread(target=_serve, args=(port,), daemon=True).start()
     try:
-        _wait_port(port)
+        port = start_local_server()
     except Exception as exc:
         print(f"[AESPA Startup Error] {exc}", file=sys.stderr)
         sys.exit(1)
 
-    global _window
+    global _console_server, _window
+    _console_server = DesktopConsoleServer(host="127.0.0.1", port=port)
     _window = webview.create_window(
         "AESPA",
         f"http://127.0.0.1:{port}/",
@@ -120,6 +85,7 @@ def main() -> None:
         "AESPA",
         menu=pystray.Menu(
             pystray.MenuItem("Open AESPA", _on_open, default=True),
+            pystray.MenuItem("Open Console", _on_console),
             pystray.MenuItem("Quit AESPA", _on_quit),
         ),
     )

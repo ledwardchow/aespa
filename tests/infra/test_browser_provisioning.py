@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from aespa import browser
 
@@ -18,6 +19,65 @@ def test_chromium_present_true_in_dev(monkeypatch):
     # Unbundled dev run manages its own browsers; never show the indicator.
     monkeypatch.delenv("AESPA_BUNDLED", raising=False)
     assert browser.chromium_present() is True
+
+
+def test_playwright_chromium_present_checks_the_resolved_executable(
+    tmp_path, monkeypatch
+):
+    executable = tmp_path / "chromium"
+
+    class FakePlaywrightContext:
+        def __enter__(self):
+            return SimpleNamespace(
+                chromium=SimpleNamespace(executable_path=str(executable))
+            )
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        "playwright.sync_api.sync_playwright", lambda: FakePlaywrightContext()
+    )
+
+    assert browser.playwright_chromium_present() is False
+    executable.touch()
+    assert browser.playwright_chromium_present() is True
+
+
+def test_download_chromium_installs_missing_browser_in_dev(monkeypatch):
+    commands = []
+    monkeypatch.setattr(browser, "_bundled", lambda: False)
+    monkeypatch.setattr(browser, "playwright_chromium_present", lambda: False)
+    monkeypatch.setattr(browser.sys, "executable", "/test/python")
+    monkeypatch.setattr(
+        browser.subprocess,
+        "run",
+        lambda command, **kwargs: commands.append((command, kwargs)),
+    )
+
+    browser.download_chromium_if_missing()
+
+    assert commands == [
+        (
+            ["/test/python", "-m", "playwright", "install", "chromium"],
+            {"check": True},
+        )
+    ]
+
+
+def test_download_chromium_skips_installer_when_browser_is_present(monkeypatch):
+    monkeypatch.setattr(browser, "playwright_chromium_present", lambda: True)
+    monkeypatch.setattr(
+        browser.subprocess,
+        "run",
+        lambda *_args, **_kwargs: raise_unexpected_install(),
+    )
+
+    browser.download_chromium_if_missing()
+
+
+def raise_unexpected_install():
+    raise AssertionError("Playwright installer should not run")
 
 
 def test_launch_playwright_browser_defaults_to_playwright_chromium():

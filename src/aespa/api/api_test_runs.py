@@ -24,6 +24,7 @@ from aespa.models import (
     AgentLog,
     AliceChatMessage,
     AliceChatSession,
+    AliceGoal,
     ApiCollection,
     ApiEndpoint,
     ApiTestRun,
@@ -42,7 +43,7 @@ from aespa.schemas import (
     ScannerSessionUpdate,
     ScannerSessionValidationResult,
 )
-from aespa.services import alice_tasks, run_cleanup
+from aespa.services import alice_goals, alice_tasks, run_cleanup
 from aespa.services import findings as findings_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services.references import ensure_finding_reference
@@ -108,6 +109,14 @@ def _load_api_sessions(run_id: int, run: ApiTestRun, session: Session) -> dict:
     ).all()
 
     chats = []
+    goals = {
+        goal.session_key: alice_goals.goal_out(goal)
+        for goal in session.exec(
+            select(AliceGoal).where(
+                AliceGoal.test_run_id == run_id, AliceGoal.run_kind == "api"
+            )
+        ).all()
+    }
     for s in sess_rows:
         msg_rows = session.exec(
             select(AliceChatMessage)
@@ -126,6 +135,7 @@ def _load_api_sessions(run_id: int, run: ApiTestRun, session: Session) -> dict:
             {
                 "id": s.session_key,
                 "title": s.title,
+                "goal": goals.get(s.session_key),
                 "messages": [
                     {
                         "id": m.message_key,
@@ -163,6 +173,10 @@ class AliceRunRequest(BaseModel):
     tab_id: str = "tab-default"
     think_msg_id: str
     reply_msg_id: str
+
+
+class AliceSteerRequest(BaseModel):
+    message: str
 
 
 def _save_api_sessions(
@@ -232,6 +246,19 @@ async def stop_alice_run(run_id: int, session: Session = Depends(get_session)) -
     _get_run_or_404(session, run_id)
     stopped = await alice_tasks.stop(run_id, run_type="api")
     return {"ok": True, "stopped": stopped}
+
+
+@router.post("/{run_id}/alice/goal/steer")
+async def steer_alice_goal(
+    run_id: int,
+    req: AliceSteerRequest,
+    session: Session = Depends(get_session),
+) -> dict:
+    _get_run_or_404(session, run_id)
+    accepted = await alice_tasks.steer_goal(run_id, req.message, run_type="api")
+    if not accepted:
+        raise HTTPException(status_code=409, detail="No active ALICE goal")
+    return {"ok": True}
 
 
 @router.get("/{run_id}/alice/status")
@@ -602,6 +629,32 @@ def get_api_traffic_count(
     from aespa.services import traffic as traffic_svc
 
     return {"count": traffic_svc.count_traffic(0, api_run_id=run_id)}
+
+
+@router.get("/{run_id}/code-executions")
+def list_api_code_executions(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _get_run_or_404(session, run_id)
+    from aespa.services import code_execution
+
+    return code_execution.list_executions("api", run_id)
+
+
+@router.get("/{run_id}/code-executions/{execution_id}")
+def get_api_code_execution(
+    run_id: int,
+    execution_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import code_execution
+
+    execution = code_execution.get_execution("api", run_id, execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Code execution not found")
+    return execution
 
 
 # ── Coverage matrix ────────────────────────────────────────────────────────────

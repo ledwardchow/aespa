@@ -4,10 +4,47 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from anthropic.types import TextBlock, ThinkingBlock, ToolUseBlock
+from pydantic import ValidationError
 from sqlmodel import Session, select
 
 from aespa.models import LLMConfig, LLMUsageMonth
 from aespa.services import llm
+from aespa.services.resolved_llm_config import ResolvedLLMConfig
+
+
+def test_title_normalization_cannot_introduce_unauthenticated_claim(monkeypatch):
+    async def fake_call(*_args, **_kwargs):
+        return json.dumps(
+            [
+                {
+                    "index": 0,
+                    "title": "[A02] [HIGH] Unauthenticated Sensitive Data Disclosure",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    original = {
+        "title": "Payment card details exposed to authenticated users",
+        "owasp_category": "A02",
+        "severity": "high",
+    }
+    normalized = asyncio.run(
+        llm.normalize_finding_titles(
+            SimpleNamespace(),
+            [
+                {
+                    "title": "Unauthenticated Sensitive Data Disclosure",
+                    "owasp_category": "A02",
+                    "severity": "high",
+                }
+            ],
+            [original],
+        )
+    )
+
+    assert normalized[0]["title"] == original["title"]
 
 
 def test_agentic_context_compaction_preserves_recent_tool_pairs():
@@ -102,6 +139,217 @@ def test_agentic_context_compaction_uses_model_token_budget():
     assert stats["before_tokens"] > stats["after_tokens"]
     assert stats["after_tokens"] <= stats["context_budget_tokens"]
     assert compacted[0]["role"] == "user"
+
+
+def _completed_pairs(count: int, *, input_size: int = 0, result_size: int = 1000):
+    messages = [{"role": "user", "content": "initial brief"}]
+    for index in range(count):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"call-{index}",
+                            "name": "http_request",
+                            "input": {
+                                "url": f"https://target.local/{index}",
+                                "large": "i" * input_size,
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": f"call-{index}",
+                            "content": "response " + "r" * result_size,
+                        }
+                    ],
+                },
+            ]
+        )
+    return messages
+
+
+def test_agentic_context_compaction_handles_seven_messages_after_growth():
+    messages = _completed_pairs(3, result_size=5_000)
+    compacted, stats = llm.compact_agentic_messages(messages, max_context_chars=5_000)
+
+    assert stats and stats["compaction_applied"] == 1
+    assert stats["after_chars"] < stats["before_chars"]
+    assert len(compacted) < len(messages) or stats["truncated_tool_results"] > 0
+
+
+def test_agentic_context_compaction_normalizes_anthropic_sdk_blocks():
+    messages = [
+        {"role": "user", "content": "initial brief"},
+        {
+            "role": "assistant",
+            "content": [
+                TextBlock(type="text", text="I will inspect the endpoint."),
+                ThinkingBlock(
+                    type="thinking", thinking="private plan", signature="sig"
+                ),
+                ToolUseBlock(
+                    type="tool_use",
+                    id="call-sdk",
+                    name="http_request",
+                    input={"url": "https://target.local"},
+                ),
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-sdk",
+                    "content": "response " + "r" * 5_000,
+                }
+            ],
+        },
+    ]
+    compacted, stats = llm.compact_agentic_messages(messages, max_context_chars=2_000)
+
+    assert stats
+    assert stats["protocol_valid"] is True
+    assert all(isinstance(block, dict) for block in compacted[1]["content"])
+    assert compacted[1]["content"][1]["signature"] == "sig"
+
+
+def test_agentic_context_compaction_collapses_repeated_journals():
+    messages = _completed_pairs(40, result_size=800)
+    compacted, first_stats = llm.compact_agentic_messages(
+        messages, max_context_chars=10_000
+    )
+    compacted, second_stats = llm.compact_agentic_messages(
+        compacted, max_context_chars=5_000
+    )
+
+    journal = str(compacted[0]["content"])
+    assert first_stats and second_stats
+    assert journal.count("CONTEXT JOURNAL") == 1
+    assert second_stats["journal_chars"] <= llm.CONTEXT_JOURNAL_CHAR_LIMIT
+
+
+def test_agentic_context_compaction_evicts_large_recent_tool_inputs():
+    messages = _completed_pairs(4, input_size=25_000, result_size=400)
+    compacted, stats = llm.compact_agentic_messages(
+        messages,
+        max_context_tokens=1_200,
+        max_output_tokens=0,
+        system_message="system",
+        tools=[],
+    )
+
+    assert stats and stats["removed_messages"] > 0
+    assert "i" * 1_000 not in json.dumps(compacted)
+    assert stats["protocol_valid"] == 1
+
+
+def test_agentic_context_compaction_progressively_shrinks_results():
+    messages = _completed_pairs(3, result_size=40_000)
+    compacted, stats = llm.compact_agentic_messages(
+        messages,
+        max_context_tokens=1_500,
+        max_output_tokens=0,
+        system_message="system",
+        tools=[],
+    )
+
+    assert stats and stats["fit_passes"] >= 1
+    assert stats["truncated_tool_results"] >= 1
+    assert stats["after_tokens"] < stats["before_tokens"]
+
+
+def test_agentic_context_compaction_preserves_protocol_valid_suffix():
+    messages = _completed_pairs(12, result_size=2_000)
+    compacted, stats = llm.compact_agentic_messages(messages, max_context_chars=8_000)
+
+    assert stats and stats["protocol_valid"] == 1
+    uses = {
+        block["id"]
+        for message in compacted
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    }
+    results = {
+        block["tool_use_id"]
+        for message in compacted
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    }
+    assert uses == results
+
+
+def test_agentic_context_compaction_excludes_secrets_from_journal():
+    messages = _completed_pairs(8, result_size=2_000)
+    messages[11]["content"][0]["input"].update(
+        {"secret": "super-secret", "url": "https://target.local/?token=abc123"}
+    )
+    messages[12]["content"][0]["content"] += " password=hunter2"
+    compacted, _ = llm.compact_agentic_messages(messages, max_context_chars=5_000)
+
+    journal = str(compacted[0]["content"])
+    assert "super-secret" not in journal
+    assert "abc123" not in journal
+    assert "hunter2" not in journal
+    assert "[REDACTED]" in journal
+
+
+def test_compaction_redacts_quoted_json_authorization_headers():
+    redacted = llm._redact_compaction_text(
+        '{"Authorization": "Bearer abc123", "password": "hunter2", "token": "xyz"}'
+    )
+
+    assert "abc123" not in redacted
+    assert "hunter2" not in redacted
+    assert "xyz" not in redacted
+    assert redacted.count("[REDACTED]") == 3
+
+
+def test_agentic_context_compaction_rejects_malformed_tool_ordering():
+    valid = _completed_pairs(2)
+    malformed = [valid[0], valid[2], valid[1], valid[3], valid[4]]
+    assert llm._protocol_valid_suffix(malformed, 1) is False
+
+    compacted, stats = llm.compact_agentic_messages(malformed, max_context_chars=100)
+
+    assert stats
+    assert stats["protocol_valid"] is True
+    tool_ids = [
+        block.get("id")
+        for message in compacted
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+    result_ids = [
+        block.get("tool_use_id")
+        for message in compacted
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert tool_ids == result_ids == []
+
+
+def test_compaction_raises_when_fixed_prompt_is_irreducible():
+    config = LLMConfig(
+        provider="openai_compatible",
+        model="local",
+        max_tokens=100,
+        max_context_tokens=1_024,
+    )
+    with pytest.raises(llm.LLMContextLimitError):
+        llm.compact_messages_for_config(
+            config,
+            "system " + "s" * 20_000,
+            [{"role": "user", "content": "brief"}],
+            tools=[],
+        )
 
 
 def test_limiter_oversized_estimate_does_not_hang():
@@ -691,6 +939,44 @@ def test_agentic_loop_checkpoints_nonempty_assistant_turns(monkeypatch):
     )
 
 
+def test_agentic_loop_checkpoints_tool_request_before_execution(monkeypatch):
+    config = LLMConfig(provider="bedrock", model="anthropic.claude-opus-test")
+    checkpoints: list[list[dict]] = []
+    tool_block = {
+        "type": "tool_use",
+        "id": "tool-before-crash",
+        "name": "context_tool",
+        "input": {"tool": "site_map"},
+        "text": None,
+    }
+
+    async def fake_call_with_tools(*args, **kwargs):
+        return [tool_block], "tool_use", [tool_block]
+
+    async def checkpoint(messages, step_count=0):
+        checkpoints.append(messages.copy())
+
+    async def crashing_tool(*args):
+        assert checkpoints
+        assert checkpoints[-1][-1] == {
+            "role": "assistant",
+            "content": [tool_block],
+        }
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                config,
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=crashing_tool,
+                on_checkpoint=checkpoint,
+            )
+        )
+
+
 def test_agentic_loop_logs_native_stop_and_terminal_no_tool_failure(monkeypatch):
     config = LLMConfig(
         provider="bedrock",
@@ -1133,9 +1419,22 @@ def test_token_estimate_uses_local_encoder_and_counts_tool_schemas(monkeypatch):
         tools=[{"name": "http_request", "input_schema": {"type": "object"}}],
         model="gpt-5.6-sol",
     )
+    with_thinking = llm._estimate_tools_call_tokens(
+        "system",
+        [
+            {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "private plan"}],
+            }
+        ],
+        model="gpt-5.6-sol",
+    )
 
     assert plain == 2
     assert with_tools > plain
+    assert with_thinking > llm._estimate_tools_call_tokens(
+        "system", [], model="gpt-5.6-sol"
+    )
 
 
 def test_usage_reconciliation_accumulates_multiple_provider_events():
@@ -1909,6 +2208,111 @@ def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(
     }
 
 
+@pytest.mark.parametrize(
+    ("model", "reasoning_effort", "expected_effort"),
+    [
+        ("gpt-6-astra", "minimal", "low"),
+        ("gpt-5.6", "none", "none"),
+        ("gpt-5.6-luna", "none", "none"),
+        ("gpt-5.6-terra", "none", "none"),
+        ("gpt-5.6-sol", "none", "none"),
+    ],
+)
+def test_direct_openai_frontier_models_use_responses_api(
+    monkeypatch, model, reasoning_effort, expected_effort
+):
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(
+                output_text="ok",
+                output=[],
+                usage=SimpleNamespace(
+                    input_tokens=4,
+                    output_tokens=2,
+                    input_tokens_details=SimpleNamespace(cached_tokens=1),
+                ),
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model=model,
+        max_tokens=4096,
+        temperature=0.7,
+        reasoning_effort=reasoning_effort,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["request"] == {
+        "model": model,
+        "input": "hello",
+        "max_output_tokens": 4096,
+        "reasoning": {"effort": expected_effort},
+    }
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-6-astra", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+)
+@pytest.mark.anyio
+async def test_direct_openai_frontier_models_stream_with_responses_api(
+    monkeypatch, model
+):
+    captured: dict[str, object] = {}
+
+    class FakeStream:
+        def __aiter__(self):
+            async def events():
+                yield SimpleNamespace(type="response.output_text.delta", delta="hello ")
+                yield SimpleNamespace(type="response.output_text.delta", delta="world")
+
+            return events()
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            return FakeStream()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model=model,
+        max_tokens=4096,
+        temperature=0.4,
+        reasoning_effort="medium",
+    )
+    chunks = []
+    async for chunk in llm.stream_chat_completion(
+        config, "Be concise.", [{"role": "user", "content": "Say hello."}]
+    ):
+        chunks.append(chunk)
+
+    assert "".join(chunks) == "hello world"
+    assert captured["request"]["model"] == model
+    assert captured["request"]["stream"] is True
+    assert captured["request"]["instructions"] == "Be concise."
+    assert "temperature" not in captured["request"]
+
+
 def test_openai_caching_tokens_extraction_and_recording(monkeypatch):
     recorded_usages = []
 
@@ -2107,7 +2511,9 @@ def test_bedrock_call_uses_converse_api_key(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert {"timeout": 120}.items() <= captured["client"].items()
+    timeout = captured["client"]["timeout"]
+    assert timeout.connect == llm.BEDROCK_CONNECT_TIMEOUT_S
+    assert timeout.read == llm.BEDROCK_READ_TIMEOUT_S
     assert captured["url"] == (
         "https://bedrock-runtime.us-east-1.amazonaws.com/model/"
         "anthropic.claude-3-7-sonnet-20250219-v1%3A0/converse"
@@ -2172,6 +2578,9 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
         "region_name": "us-east-1",
         "endpoint_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
     }.items() <= captured["client"].items()
+    sdk_config = captured["client"]["config"]
+    assert sdk_config.connect_timeout == llm.BEDROCK_CONNECT_TIMEOUT_S
+    assert sdk_config.read_timeout == llm.BEDROCK_READ_TIMEOUT_S
     assert captured["converse"] == {
         "modelId": "anthropic.claude-3-7-sonnet-20250219-v1:0",
         "messages": [{"role": "user", "content": [{"text": "hello"}]}],
@@ -2242,6 +2651,9 @@ def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blan
         "region_name": "ap-southeast-2",
         "endpoint_url": None,
     }.items() <= captured["client"].items()
+    sdk_config = captured["client"]["config"]
+    assert sdk_config.connect_timeout == llm.BEDROCK_CONNECT_TIMEOUT_S
+    assert sdk_config.read_timeout == llm.BEDROCK_READ_TIMEOUT_S
     assert captured["converse"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
 
 
@@ -2690,7 +3102,9 @@ async def test_bedrock_stream_uses_converse_api_key(monkeypatch):
         chunks.append(chunk)
 
     assert "".join(chunks) == "streaming response"
-    assert {"timeout": 120}.items() <= captured["client"].items()
+    timeout = captured["client"]["timeout"]
+    assert timeout.connect == llm.BEDROCK_CONNECT_TIMEOUT_S
+    assert timeout.read == llm.BEDROCK_READ_TIMEOUT_S
     assert captured["method"] == "POST"
     assert captured["url"] == (
         "https://bedrock-runtime.us-east-1.amazonaws.com/model/"
@@ -3157,19 +3571,27 @@ def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
     monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
 
     class FakeBedrockClient:
-        def converse(self, **kwargs):
+        def converse_stream(self, **kwargs):
             return {
-                "output": {
-                    "message": {
-                        "content": [{"text": "ok"}],
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {"text": "ok"},
+                        }
                     },
-                },
-                "usage": {
-                    "inputTokens": 2000,
-                    "outputTokens": 250,
-                    "cacheReadInputTokens": 800,
-                    "cacheWriteInputTokens": 400,
-                },
+                    {"messageStop": {"stopReason": "end_turn"}},
+                    {
+                        "metadata": {
+                            "usage": {
+                                "inputTokens": 2000,
+                                "outputTokens": 250,
+                                "cacheReadInputTokens": 800,
+                                "cacheWriteInputTokens": 400,
+                            }
+                        }
+                    },
+                ]
             }
 
     class FakeSession:
@@ -3213,18 +3635,23 @@ def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
 
 def test_bedrock_empty_response_preserves_native_diagnostics(monkeypatch):
     class FakeBedrockClient:
-        def converse(self, **kwargs):  # noqa: ARG002
+        def converse_stream(self, **kwargs):  # noqa: ARG002
             return {
-                "stopReason": "guardrail_intervened",
-                "output": {"message": {"content": []}},
-                "usage": {
-                    "inputTokens": 1234,
-                    "outputTokens": 0,
-                    "cacheReadInputTokens": 1000,
-                    "cacheWriteInputTokens": 0,
-                },
-                "metrics": {"latencyMs": 42},
-                "trace": {"guardrail": "present"},
+                "stream": [
+                    {"messageStop": {"stopReason": "guardrail_intervened"}},
+                    {
+                        "metadata": {
+                            "usage": {
+                                "inputTokens": 1234,
+                                "outputTokens": 0,
+                                "cacheReadInputTokens": 1000,
+                                "cacheWriteInputTokens": 0,
+                            },
+                            "metrics": {"latencyMs": 42},
+                            "trace": {"guardrail": "present"},
+                        }
+                    },
+                ],
                 "ResponseMetadata": {
                     "RequestId": "bedrock-request-123",
                     "HTTPStatusCode": 200,
@@ -3637,6 +4064,73 @@ def test_call_with_tools_bedrock_mantle_uses_responses_api(monkeypatch):
     assert stop_reason == "tool_use"
 
 
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-6-astra", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+)
+def test_call_with_tools_direct_openai_frontier_models_use_responses_api(
+    monkeypatch, model
+):
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            call = SimpleNamespace(
+                type="function_call",
+                call_id="call_astra",
+                name="http_request",
+                arguments='{"url": "/health"}',
+            )
+            return SimpleNamespace(
+                output=[call],
+                usage=SimpleNamespace(
+                    input_tokens=5,
+                    output_tokens=3,
+                    input_tokens_details=SimpleNamespace(cached_tokens=0),
+                ),
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model=model,
+        max_tokens=4096,
+        temperature=0.2,
+        reasoning_effort="high",
+        force_tool_choice=True,
+    )
+    blocks, stop_reason, _ = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="Use tools.",
+            messages=[{"role": "user", "content": "Check health."}],
+            tools=[
+                {
+                    "name": "http_request",
+                    "description": "Send a request.",
+                    "input_schema": {"type": "object"},
+                }
+            ],
+        )
+    )
+
+    request = captured["request"]
+    assert request["model"] == model
+    assert request["reasoning"] == {"effort": "high"}
+    assert request["tool_choice"] == "required"
+    assert request["tools"][0]["type"] == "function"
+    assert "temperature" not in request
+    assert blocks[0]["id"] == "call_astra"
+    assert stop_reason == "tool_use"
+
+
 def test_anthropic_caching_in_call_with_tools(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -3722,20 +4216,28 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakeBedrockClient:
-        def converse(self, **kwargs):
+        def converse_stream(self, **kwargs):
             captured["converse_kwargs"] = kwargs
             return {
-                "output": {
-                    "message": {
-                        "content": [{"text": "ok"}],
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {"text": "ok"},
+                        }
                     },
-                },
-                "usage": {
-                    "inputTokens": 2000,
-                    "outputTokens": 250,
-                    "cacheReadInputTokens": 800,
-                    "cacheWriteInputTokens": 400,
-                },
+                    {"messageStop": {"stopReason": "end_turn"}},
+                    {
+                        "metadata": {
+                            "usage": {
+                                "inputTokens": 2000,
+                                "outputTokens": 250,
+                                "cacheReadInputTokens": 800,
+                                "cacheWriteInputTokens": 400,
+                            }
+                        }
+                    },
+                ]
             }
 
     class FakeSession:
@@ -3791,25 +4293,48 @@ def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
     }
 
     class FakeBedrockClient:
-        def converse(self, **kwargs):
+        def converse_stream(self, **kwargs):
             captured["converse_kwargs"] = kwargs
             return {
-                "stopReason": "tool_use",
-                "output": {
-                    "message": {
-                        "content": [
-                            {"reasoningContent": reasoning},
-                            {
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {
+                                "reasoningContent": {
+                                    "text": "signed internal reasoning"
+                                }
+                            },
+                        }
+                    },
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {
+                                "reasoningContent": {"signature": "bedrock-signature"}
+                            },
+                        }
+                    },
+                    {
+                        "contentBlockStart": {
+                            "contentBlockIndex": 1,
+                            "start": {
                                 "toolUse": {
                                     "toolUseId": "tool-2",
                                     "name": "context_tool",
-                                    "input": {"tool": "site_map"},
                                 }
                             },
-                        ],
+                        }
                     },
-                },
-                "usage": {},
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 1,
+                            "delta": {"toolUse": {"input": '{"tool":"site_map"}'}},
+                        }
+                    },
+                    {"messageStop": {"stopReason": "tool_use"}},
+                    {"metadata": {"usage": {}}},
+                ]
             }
 
     class FakeSession:
@@ -3897,6 +4422,54 @@ def test_token_usage_tracking_for_sast_and_api():
 
     assert web_usage["total_input"] == 200
     assert web_usage["total_output"] == 80
+
+
+def test_pending_tool_call_reports_estimated_input_usage(monkeypatch):
+    run_id = 888892
+    key = ("sast", run_id)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    events = []
+
+    async def fake_call(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return [], "end_turn", []
+
+    async def exercise():
+        monkeypatch.setattr(llm, "_call_with_tools_rate_limited", fake_call)
+        monkeypatch.setattr(llm, "_estimate_tools_call_tokens", lambda *_a, **_k: 321)
+        llm.set_run_context(run_id, emit_fn=events.append, run_kind="sast")
+        task = asyncio.create_task(
+            llm._call_with_tools(
+                LLMConfig(provider="openai_codex", model="gpt-test"),
+                "system",
+                [{"role": "user", "content": "inspect the source"}],
+                tools=[],
+            )
+        )
+        await entered.wait()
+        pending = llm.get_run_token_usage(run_id, run_kind="sast")
+        release.set()
+        await task
+        finished = llm.get_run_token_usage(run_id, run_kind="sast")
+        return pending, finished
+
+    try:
+        pending, finished = asyncio.run(exercise())
+    finally:
+        llm.clear_run_context()
+        llm._run_token_usage.pop(key, None)
+        llm._pending_run_calls.pop(key, None)
+        llm._run_token_seeded.discard(key)
+
+    assert pending["pending_requests"] == 1
+    assert pending["pending_input_tokens"] == 321
+    assert pending["total_input"] == 0
+    assert finished["pending_requests"] == 0
+    assert finished["pending_input_tokens"] == 0
+    assert events[0]["totals"]["pending_input_tokens"] == 321
+    assert events[-1]["totals"]["pending_input_tokens"] == 0
 
 
 def test_copilot_usage_callback_keeps_run_context_after_sdk_context_switch():
@@ -4007,3 +4580,304 @@ def test_google_usage_treats_none_counters_as_zero(monkeypatch):
         (("gemini-test", 120, 0), {"cache_read_tokens": 0}),
         (("gemini-test", 0, 0), {"cache_read_tokens": 0}),
     ]
+
+
+def test_tools_token_estimate_keeps_reasoning_results_and_diagnostics(monkeypatch):
+    class FakeEncoder:
+        def encode(self, text, disallowed_special=()):
+            return list(range(len(text.split())))
+
+    monkeypatch.setattr(llm, "_token_encoder", lambda model=None: FakeEncoder())
+    base_messages = [{"role": "user", "content": "request"}]
+    rich_messages = [
+        {"role": "user", "content": "request"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "plan the next request",
+                    "signature": "thinking-signature",
+                },
+                {
+                    "type": "bedrock_reasoning",
+                    "reasoning_content": {
+                        "reasoningText": {
+                            "text": "check the response carefully",
+                            "signature": "bedrock-signature",
+                        }
+                    },
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call-123",
+                    "name": "http_request",
+                    "input": {"method": "GET", "url": "https://target.local"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-123",
+                    "content": {"status": 200, "headers": {"x-trace": "trace-1"}},
+                },
+                {
+                    "type": "provider_diagnostic",
+                    "provider": "bedrock",
+                    "request_id": "req-123",
+                    "details": {"retry_count": 1},
+                },
+            ],
+        },
+    ]
+
+    base = llm._estimate_tools_call_tokens("system", base_messages, provider="bedrock")
+    rich = llm._estimate_tools_call_tokens("system", rich_messages, provider="bedrock")
+
+    assert rich > base
+    assert rich - base > 10
+
+
+def test_tools_token_estimate_does_not_count_image_base64_as_text(monkeypatch):
+    class FakeEncoder:
+        def encode(self, text, disallowed_special=()):
+            return list(range(len(text.split())))
+
+    monkeypatch.setattr(llm, "_token_encoder", lambda model=None: FakeEncoder())
+    without_image = llm._estimate_tools_call_tokens(
+        "system", [{"role": "user", "content": "request"}], provider="openai"
+    )
+    with_image = llm._estimate_tools_call_tokens(
+        "system",
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "media_type": "image/png",
+                            "data": "A" * 200_000,
+                        },
+                    }
+                ],
+            }
+        ],
+        provider="openai",
+    )
+
+    assert with_image - without_image < 1_000
+
+
+@pytest.mark.parametrize("config_type", [LLMConfig, ResolvedLLMConfig])
+def test_request_output_copy_does_not_mutate_saved_config(config_type):
+    saved = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=4_000,
+        max_context_tokens=8_000,
+    )
+    config = (
+        saved if config_type is LLMConfig else ResolvedLLMConfig.model_validate(saved)
+    )
+
+    request_config = llm._copy_config_with_max_tokens(config, 1_500)
+
+    assert request_config.max_tokens == 1_500
+    assert config.max_tokens == 4_000
+    if config_type is ResolvedLLMConfig:
+        with pytest.raises(ValidationError):
+            config.max_tokens = 1_500
+
+
+def test_agentic_loop_adapts_output_limit_on_request_only(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=4_000,
+        max_context_tokens=5_000,
+    )
+    captured: list[object] = []
+    emitted: list[dict] = []
+
+    monkeypatch.setattr(
+        llm,
+        "compact_agentic_messages",
+        lambda messages, **kwargs: (messages, None),
+    )
+    monkeypatch.setattr(
+        llm, "_estimate_tools_call_tokens", lambda *args, **kwargs: 2_800
+    )
+
+    async def fake_call_with_tools(config_arg, *_args, **_kwargs):
+        captured.append(config_arg)
+        block = {
+            "type": "tool_use",
+            "id": "call-done",
+            "name": "done",
+            "input": {"summary": "Complete."},
+        }
+        return [block], "tool_use", [block]
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *_args: None,
+            tools=[],
+            emit_fn=emitted.append,
+        )
+    )
+
+    assert summary == "Complete."
+    assert len(captured) == 1
+    assert captured[0].max_tokens == 1_176
+    assert config.max_tokens == 4_000
+    request_event = next(event for event in emitted if event["phase"] == "llm_request")
+    assert request_event["data"]["configured_max_output_tokens"] == 4_000
+    assert request_event["data"]["effective_max_output_tokens"] == 1_176
+
+
+def test_plain_completion_fits_user_prompt_and_preserves_system(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=3_000,
+        max_context_tokens=4_000,
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_call(config_arg, prompt, screenshot):
+        captured.update(config=config_arg, prompt=prompt, screenshot=screenshot)
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    system = "You are the system policy."
+    prompt = "user evidence " * 8_000
+
+    assert (
+        asyncio.run(llm.plain_completion(config, prompt, system_prompt=system)) == "ok"
+    )
+
+    fitted = captured["prompt"]
+    assert isinstance(fitted, str)
+    assert fitted.startswith(system + "\n\n")
+    assert llm.estimate_tokens(fitted, provider="openai", model=config.model) <= 1_952
+    assert captured["config"].max_tokens < config.max_tokens
+    assert config.max_tokens == 3_000
+
+
+def test_plain_completion_rejects_irreducible_system_prompt(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=2_000,
+        max_context_tokens=4_000,
+    )
+    called = False
+
+    async def fake_call(*_args):
+        nonlocal called
+        called = True
+        return "unexpected"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    with pytest.raises(llm.LLMContextLimitError, match="system prompt"):
+        asyncio.run(
+            llm.plain_completion(
+                config,
+                "brief",
+                system_prompt="system policy " * 8_000,
+            )
+        )
+    assert called is False
+
+
+def test_small_output_profile_uses_configured_minimum_for_context_budget():
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=200,
+        max_context_tokens=1_500,
+    )
+
+    budget = llm._context_budget_for_request(config, input_tokens=200)
+
+    assert budget["available_output_tokens"] == 276
+    assert budget["effective_max_tokens"] == 200
+
+
+def test_small_output_profile_plain_completion_remains_valid(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=200,
+        max_context_tokens=1_500,
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_call(config_arg, prompt, screenshot):
+        captured.update(config=config_arg, prompt=prompt, screenshot=screenshot)
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    assert (
+        asyncio.run(
+            llm.plain_completion(
+                config,
+                "user evidence " * 2_000,
+                system_prompt="system policy",
+            )
+        )
+        == "ok"
+    )
+    assert captured["prompt"].startswith("system policy\n\n")
+    assert captured["config"].max_tokens == 200
+    assert config.max_tokens == 200
+
+
+def test_small_output_profile_agentic_loop_remains_valid(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-test",
+        max_tokens=200,
+        max_context_tokens=1_500,
+    )
+    captured: list[object] = []
+    monkeypatch.setattr(
+        llm,
+        "compact_agentic_messages",
+        lambda messages, **kwargs: (messages, None),
+    )
+    monkeypatch.setattr(llm, "_estimate_tools_call_tokens", lambda *args, **kwargs: 200)
+
+    async def fake_call_with_tools(config_arg, *_args, **_kwargs):
+        captured.append(config_arg)
+        block = {
+            "type": "tool_use",
+            "id": "call-done",
+            "name": "done",
+            "input": {"summary": "Complete."},
+        }
+        return [block], "tool_use", [block]
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *_args: None,
+            tools=[],
+        )
+    )
+
+    assert summary == "Complete."
+    assert captured[0].max_tokens == 200
+    assert config.max_tokens == 200

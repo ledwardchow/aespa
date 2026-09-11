@@ -17,6 +17,7 @@ from aespa.models import (
     SastRun,
 )
 from aespa.services import component_mapper
+from aespa.services.component_facts import extract_component_facts
 
 
 def _seed_member(engine, archive: Path) -> tuple[int, int]:
@@ -220,6 +221,45 @@ def test_mapper_fact_validation_rejects_unsupported_method(tmp_path):
                 "path": "/orders",
                 "confidence": 0.8,
                 "evidence_location": "route.py:1",
+            },
+            {"route.py": [(1, 1)]},
+        )
+
+
+def test_deterministic_request_roles_separate_browser_and_server_hops(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "ui.ts").write_text("fetch('/api/quotes/motor', {method: 'POST'})\n")
+    (root / "server.py").write_text(
+        "@app.post('/api/customer/quotes/motor')\n"
+        "requests.post('/api/customer/quotes/motor')\n"
+    )
+
+    facts = extract_component_facts(root)
+    roles = {
+        (fact["fact_type"], fact["path"]): fact["detail"].get("request_role")
+        for fact in facts
+        if fact["fact_type"] in {"route", "http_call"}
+    }
+    assert roles[("http_call", "/api/quotes/motor")] == "browser_request"
+    assert roles[("http_call", "/api/customer/quotes/motor")] == "server_egress"
+    assert roles[("route", "/api/customer/quotes/motor")] == "server_ingress"
+
+
+def test_mapper_fact_validation_rejects_invalid_request_role(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "route.py").write_text("route('/orders')\n")
+    with pytest.raises(ValueError, match="request_role"):
+        component_mapper._validate_fact(
+            root,
+            {
+                "fact_type": "http_call",
+                "method": "POST",
+                "path": "/orders",
+                "confidence": 0.8,
+                "evidence_location": "route.py:1",
+                "detail": {"request_role": "unknown"},
             },
             {"route.py": [(1, 1)]},
         )

@@ -815,42 +815,20 @@ def _make_web_post_probe_fn(run_id: int):
         if not url:
             return
         with Session(get_engine()) as s:
-            pages = list(
-                s.exec(
-                    select(CrawledPage)
-                    .where(CrawledPage.test_run_id == run_id)
-                    .where(CrawledPage.in_scope == True)  # noqa: E712
-                ).all()
+            page_id = resolve_web_page_id(
+                s,
+                run_id=run_id,
+                url=url,
+                page_id=page_id,
+                create=response_status != 404,
             )
-            if page_id is not None:
-                explicit = next((p for p in pages if p.id == page_id), None)
-                page_id = explicit.id if explicit is not None else None
-            if page_id is None:
-                page_id = _match_page_for_url(url, pages)
-            if page_id is None:
-                if response_status == 404:
-                    return  # a guessed missing path is not discovered attack surface
-                # Create a placeholder page so the workprogram can track this probe.
-                page = CrawledPage(
-                    test_run_id=run_id,
-                    url=url,
-                    in_scope=True,
-                    status="crawled",
-                    scan_status="pending",
-                )
-                s.add(page)
-                s.flush()
-                page_id = page.id
-                s.commit()
-                log.info(
-                    "web_workprogram: created placeholder page id=%s url=%s run=%s",
-                    page_id,
-                    url,
-                    run_id,
-                )
+            s.commit()
+        if page_id is None:
+            return None
         update_web_coverage_cell(
             run_id, page_id, cat, "in_progress", test_class=test_class
         )
+        return page_id
 
     return _post_probe
 
@@ -879,14 +857,9 @@ def _clean_affected_url(raw: str) -> str:
 def _make_web_post_finding_fn(run_id: int):
     """Return ``(ScanFinding) → None`` that flips the matching cell to ``finding``.
 
-    Resolution chain (in order):
-    1. ``affected_url`` (after stripping list/annotation noise) matched
-       against in-scope crawled pages — exact + normalised match only.
-    2. ``finding.page_id`` if it points to an in-scope page (this is the
-       page the scanner already chose via prefix overlap, so a finding on
-       ``/api/users/42`` whose ``page_id`` is ``/api/users`` lands on the
-       right row instead of a new placeholder).
-    3. Placeholder CrawledPage created with the cleaned affected_url.
+    The shared resolver prefers an exact or canonical affected-URL match over
+    a stale page hint, then falls back to the finding's valid page_id. It
+    creates a placeholder only when neither identifies an existing page.
 
     A placeholder is only the last resort — the LLM is increasingly being
     prompted to pass a single specific URL, so this branch should be hit
@@ -906,46 +879,15 @@ def _make_web_post_finding_fn(run_id: int):
         affected_url = _clean_affected_url(getattr(finding, "affected_url", None))
 
         with Session(get_engine()) as s:
-            pages = list(
-                s.exec(
-                    select(CrawledPage)
-                    .where(CrawledPage.test_run_id == run_id)
-                    .where(CrawledPage.in_scope == True)  # noqa: E712
-                ).all()
+            page_id = resolve_web_page_id(
+                s,
+                run_id=run_id,
+                url=affected_url,
+                page_id=getattr(finding, "page_id", None),
+                create=bool(affected_url),
+                prefer_page_id=False,
             )
-            page_id: int | None = None
-            if affected_url:
-                page_id = _match_page_for_url(affected_url, pages)
-            if page_id is None:
-                # Fallback: trust the page the scanner already chose for this
-                # finding (it uses prefix-overlap resolution inside
-                # _dynamic_finding_page_id).  Only use it if the page still
-                # exists in the crawl and is in-scope.
-                hint_page_id = getattr(finding, "page_id", None)
-                if hint_page_id is not None:
-                    hint_page = next((p for p in pages if p.id == hint_page_id), None)
-                    if hint_page is not None:
-                        page_id = hint_page_id
-            if page_id is None and affected_url:
-                # Last resort: create a placeholder so no finding is silently
-                # dropped.  The URL is already cleaned of list/annotation noise.
-                page = CrawledPage(
-                    test_run_id=run_id,
-                    url=affected_url,
-                    in_scope=True,
-                    status="crawled",
-                    scan_status="pending",
-                )
-                s.add(page)
-                s.flush()
-                page_id = page.id
-                s.commit()
-                log.info(
-                    "web_workprogram: created placeholder page id=%s url=%s run=%s (finding)",
-                    page_id,
-                    affected_url,
-                    run_id,
-                )
+            s.commit()
 
         if page_id is None:
             return
@@ -993,6 +935,71 @@ def _match_page_for_url(url: str, pages: list[CrawledPage]) -> int | None:
         if _normalize_url(page_base) == normalized_base:
             return p.id
     return None
+
+
+def resolve_web_page_id(
+    session: Session,
+    *,
+    run_id: int,
+    url: str,
+    page_id: int | None = None,
+    create: bool = False,
+    scan_status: str = "pending",
+    prefer_page_id: bool = True,
+) -> int | None:
+    """Resolve the canonical page shared by web scan artifacts.
+
+    Callers retain their exact URL as request or finding evidence. This helper
+    supplies the stable CrawledPage identity used for attribution. Explicit
+    page IDs normally win so same-URL SPA states remain distinct; finding
+    callers can prefer a URL match when their page hint may be stale.
+    """
+    pages = list(
+        session.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope == True)  # noqa: E712
+        ).all()
+    )
+    explicit = (
+        next((page for page in pages if page.id == page_id), None)
+        if page_id is not None
+        else None
+    )
+    if prefer_page_id and explicit is not None:
+        return explicit.id
+
+    clean_url = (url or "").strip()
+    if not clean_url:
+        return None
+    matched = _match_page_for_url(clean_url, pages)
+    if matched is not None:
+        return matched
+    if explicit is not None:
+        return explicit.id
+    if not create:
+        return None
+
+    page = CrawledPage(
+        test_run_id=run_id,
+        url=clean_url,
+        in_scope=True,
+        status="crawled",
+        scan_status=scan_status,
+    )
+    session.add(page)
+    session.flush()
+    run = session.get(TestRun, run_id)
+    if run is not None:
+        run.pages_discovered = (run.pages_discovered or 0) + 1
+        session.add(run)
+    log.info(
+        "web_workprogram: created placeholder page id=%s url=%s run=%s",
+        page.id,
+        clean_url,
+        run_id,
+    )
+    return page.id
 
 
 # ── Enforce mode ──────────────────────────────────────────────────────────────
@@ -1712,6 +1719,7 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                     )
             if cat not in g["cells"]:
                 g["cells"][cat] = {
+                    "cell_ids": [cell.id] if cell.id is not None else [],
                     "status": status,
                     "skip_reason": skip_reason,
                     "finding_ids": all_fids,
@@ -1719,6 +1727,8 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                     "test_classes": test_classes,
                 }
             else:
+                if cell.id is not None and cell.id not in g["cells"][cat]["cell_ids"]:
+                    g["cells"][cat]["cell_ids"].append(cell.id)
                 # Promote to highest status seen across pages in this group
                 if _STATUS_RANK.get(status, 0) > _STATUS_RANK.get(
                     g["cells"][cat]["status"], 0
@@ -1768,6 +1778,7 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                     continue
                 class_fids = list(class_state.get("finding_ids") or [])
                 g["cells"][f"A03:{test_class}"] = {
+                    "cell_ids": list(a03_cell.get("cell_ids") or []),
                     "status": str(class_state.get("status") or "not_started"),
                     "skip_reason": class_state.get("skip_reason"),
                     "finding_ids": class_fids,

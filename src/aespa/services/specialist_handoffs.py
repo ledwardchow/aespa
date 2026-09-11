@@ -136,6 +136,7 @@ def create_or_get_handoff(
     run_kind: str,
     attack_class: str,
     target_url: str,
+    page_id: int | None,
     parameter: str | None,
     session_label: str | None,
     priority: int,
@@ -158,6 +159,12 @@ def create_or_get_handoff(
             .where(SpecialistHandoff.fingerprint == fingerprint)
         ).first()
         if existing is not None:
+            if existing.page_id is None and page_id is not None:
+                existing.page_id = page_id
+                existing.updated_at = datetime.now(_UTC)
+                session.add(existing)
+                session.commit()
+                session.refresh(existing)
             return existing, False
         handoff = SpecialistHandoff(
             run_kind=run_kind,
@@ -166,6 +173,7 @@ def create_or_get_handoff(
             attack_class=normalized,
             target_url=target_url,
             canonical_url=canonical_scope_url(target_url),
+            page_id=page_id,
             parameter=parameter,
             session_label=session_label,
             priority=priority,
@@ -185,6 +193,7 @@ def update_handoff(
     status: str | None = None,
     outcome: str | None = None,
     finding_id: int | None = None,
+    page_id: int | None = None,
 ) -> None:
     with Session(get_engine()) as session:
         handoff = session.get(SpecialistHandoff, handoff_id)
@@ -201,6 +210,8 @@ def update_handoff(
             handoff.outcome = outcome
         if finding_id is not None:
             handoff.finding_id = finding_id
+        if page_id is not None:
+            handoff.page_id = page_id
         handoff.updated_at = now
         session.add(handoff)
         session.commit()

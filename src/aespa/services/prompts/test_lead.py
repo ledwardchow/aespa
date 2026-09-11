@@ -737,6 +737,10 @@ _API_THINKING_AGENT_SYSTEM = (
     "  Always set owasp_category to the OWASP API Top 10 code you are testing for on this\n"
     "  specific request (e.g. API1 for a BOLA id-swap probe, API2 for an auth bypass\n"
     "  probe). This is required for coverage tracking — do not omit it.\n"
+    "- execute_python: use only when computation, custom encoding/parsing, state correlation, "
+    "or a bounded request batch would be awkward or unreliable with individual http_request "
+    "calls. Explain why ordinary tools are insufficient. It cannot access the browser DOM; "
+    "all target requests must use aespa_runtime and remain scope-checked and traffic-logged.\n"
     "- context_tool: query the API endpoint inventory without hitting the target.\n"
     "  Available sub-commands: endpoint_list, endpoint_detail, collection_info,\n"
     "  finding_list, history_search, traffic_search, compare_responses, mutate_request,\n"
@@ -791,7 +795,13 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "one injection class never proves coverage of another.\n"
     "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
     "interaction is genuinely required. For XSS, use dom_check with a unique canary "
-    "attribute or exact text to prove the payload affected the rendered DOM.\n"
+    "attribute or exact text to prove the payload affected the rendered DOM. When a click "
+    "fails or is intercepted, use inspect_element to collect obstruction evidence before "
+    "recover_click; recover_click never forces a click.\n"
+    "- execute_python: use only when computation, custom encoding/parsing, state correlation, "
+    "or a bounded request batch would be awkward or unreliable with individual http_request "
+    "calls. Explain why ordinary tools are insufficient. It cannot access the browser DOM; "
+    "all target requests must use aespa_runtime and remain scope-checked and traffic-logged.\n"
     "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
     "the target. Available sub-commands: site_map, page_detail, history_search, "
     "finding_list, lead_list, lead_detail, target_inventory, traffic_search, extract_entities, specialist_status, "
@@ -946,6 +956,39 @@ THINKING_AGENT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "execute_python",
+        "description": (
+            "Run a short Python 3 script in AESPA's isolated sandbox for custom "
+            "payload generation, response parsing, stateful workflows, or bounded "
+            "request batches. The sandbox has no direct network access. Import "
+            "aespa_runtime and use aespa_runtime.request(...) or request_batch(...); "
+            "AESPA brokers, scope-checks, and logs every request in Traffic."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "purpose": {
+                    "type": "string",
+                    "description": "Briefly explain why ordinary tools are insufficient.",
+                },
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Python source. Network and subprocess APIs are unavailable; "
+                        "use aespa_runtime for target requests."
+                    ),
+                },
+                "timeout_s": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60,
+                },
+            },
+            "required": ["purpose", "code"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "browser",
         "description": (
             "Interact with the target using a real browser. Use when JavaScript "
@@ -978,9 +1021,11 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Ordered ops: {op: goto|fill|type|click|check|uncheck|select_option|press|wait|snapshot|dom_check, ...}. "
+                        "Ordered ops: {op: goto|fill|type|click|check|uncheck|select_option|press|wait|snapshot|inspect_element|recover_click|dom_check, ...}. "
                         "Controls accept selector, testid, or role+name locators. "
                         "fill: locator+value. select_option: locator+value. press: selector+key. "
+                        "inspect_element: read-only visibility, enabled-state, bounds, style, and click-obstruction diagnostics. "
+                        "recover_click: scroll a supported locator into view, optionally press Escape with press_escape=true, then perform a normal non-forced click. "
                         "wait: state or ms. dom_check: selector plus optional attribute "
                         "and equals; it safely asserts rendered DOM without arbitrary JS."
                     ),
@@ -1106,6 +1151,26 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "dismissed: tested and not exploitable; "
                         "inconclusive: tested but could not determine exploitability."
                     ),
+                },
+                "outcome_reason": {
+                    "type": "string",
+                    "enum": [
+                        "confirmed",
+                        "secure_behavior_observed",
+                        "stale_path",
+                        "missing_runtime_prerequisite",
+                        "insufficient_consequence_evidence",
+                        "execution_failed",
+                    ],
+                    "description": "The precise result of this validation case.",
+                },
+                "baseline_evidence": {
+                    "type": "string",
+                    "description": "The request and response observed before applying the test mutation.",
+                },
+                "mutated_evidence": {
+                    "type": "string",
+                    "description": "The changed input or state and the resulting response or consequence.",
                 },
                 "note": {
                     "type": "string",
@@ -1397,6 +1462,7 @@ THINKING_AGENT_TOOLS: list[dict] = [
 _API_TEST_LEAD_TOOL_NAMES = frozenset(
     {
         "http_request",
+        "execute_python",
         "context_tool",
         "update_lead",
         "write_finding",
@@ -1413,6 +1479,7 @@ _SAST_VALIDATE_TOOL_NAMES = frozenset(
     {
         "context_tool",
         "http_request",
+        "execute_python",
         "browser",
         "reauthenticate",
         "write_finding",
@@ -1431,8 +1498,13 @@ or test hypotheses that are not part of a listed lead.
 The lead index is compact and incomplete. Before investigating each lead, call
 context_tool with tool=lead_detail and args={"lead_reference": "ABCD-001"}. Read the complete static
 evidence, source/control/sink traces, counterevidence, proof gaps, validation reasoning,
-and ordered attack path. Treat every path hop as an unproven hypothesis and verify it
-with focused live evidence, following the attack path's dynamic-test objective.
+and ordered attack path. For a compiled version 3 validation case, start from its
+resolved page, action, browser request, session, and replay evidence. Reproduce the
+baseline request before changing it. Mutate only the listed input or state relevant to
+the validation assertion, and compare the result with its stated secure and vulnerable
+outcomes. If the stored binding is stale, record that outcome instead of searching
+unrelated routes. Legacy attack paths remain hypotheses whose hops require focused live
+verification.
 
 Use the configured credentials and authenticated sessions supplied in the user message
 to reach protected functionality. Use existing session labels, HTTP use_session,
@@ -1441,7 +1513,8 @@ perform credential attacks, spraying, account registration, or JWT forging.
 
 Work through leads one at a time. A confirmed lead requires concrete live evidence and
 write_finding, followed immediately by update_lead with finding_reference. Dismiss or mark
-inconclusive when the live evidence does not prove exploitability. Resolve every
+inconclusive when the live evidence does not prove exploitability. Include the precise
+outcome reason and both baseline and mutated evidence in update_lead. Resolve every
 imported lead before calling done.
 
 An unrelated issue may be recorded only when it is directly visible in a response or
@@ -1461,8 +1534,12 @@ coverage gaps, or test hypotheses that are not part of a listed lead.
 The lead index is compact and incomplete. Before investigating each lead, call
 context_tool with tool=lead_detail and args={"lead_reference": "ABCD-001"}. Read the complete static
 evidence, source/control/sink traces, counterevidence, proof gaps, validation reasoning,
-and ordered attack path. Treat every path hop as an unproven hypothesis and verify it
-with focused live evidence, following the attack path's dynamic-test objective.
+and ordered attack path. For a compiled version 3 validation case, start from its exact
+resolved endpoint and replay evidence. Reproduce the baseline request before changing
+it. Mutate only the listed input or state relevant to the validation assertion, and
+compare the result with its stated secure and vulnerable outcomes. If the stored
+binding is stale, record that outcome instead of searching unrelated routes. Legacy
+attack paths remain hypotheses whose hops require focused live verification.
 
 Use the configured API credentials and seeded HTTP session labels to authenticate and
 reach protected functionality described by the attack path. Login credentials are not
@@ -1472,7 +1549,8 @@ spraying, account registration, or JWT forging.
 
 Work through leads one at a time. A confirmed lead requires concrete live evidence and
 write_finding, followed immediately by update_lead with finding_reference. Dismiss or mark
-inconclusive when the live evidence does not prove exploitability. Resolve every
+inconclusive when the live evidence does not prove exploitability. Include the precise
+outcome reason and both baseline and mutated evidence in update_lead. Resolve every
 imported lead before calling done.
 
 An unrelated issue may be recorded only when it is directly visible in a response

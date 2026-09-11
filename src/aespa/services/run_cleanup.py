@@ -20,20 +20,23 @@ to ``pending`` so the campaign can resume the action without a stale run id.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, text
+from sqlalchemy import delete, or_, text
 from sqlmodel import Session, select
 
 from aespa.models import (
     AgentLog,
     AliceChatMessage,
     AliceChatSession,
+    AliceGoal,
     ApiEndpointTest,
     ApiTestRun,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
+    CampaignValidationCase,
     ComponentConnection,
     ComponentFact,
     ComponentSnapshot,
@@ -47,7 +50,19 @@ from aespa.models import (
     ProbeExecution,
     RunIdentity,
     RunPause,
+    SastCoverageObligation,
+    SastDiscoveryTelemetry,
+    SastEvidenceReceipt,
+    SastObligationLead,
+    SastPartition,
     SastRun,
+    SastSourceFile,
+    SastSurfaceEdge,
+    SastSurfaceItem,
+    SastThreatModel,
+    SastThreatScenario,
+    SastWorker,
+    SastWorkItem,
     ScanCheckpoint,
     ScanFinding,
     ScanLead,
@@ -73,6 +88,46 @@ def _delete_run_identity(session: Session, run_id: int, run) -> None:
         session.delete(run)
         session.flush()
     session.execute(delete(RunIdentity).where(RunIdentity.id == run_id))
+
+
+def _detach_validation_cases_for_leads(
+    session: Session, lead_ids: list[int], *, reason: str = "child_run_deleted"
+) -> None:
+    """Leave cases reviewable when their imported child lead is removed."""
+    if not lead_ids:
+        return
+    for case in session.exec(
+        select(CampaignValidationCase).where(
+            CampaignValidationCase.copied_lead_id.in_(lead_ids)
+        )
+    ).all():
+        case.copied_lead_id = None
+        case.execution_status = "not_queued"
+        case.readiness_status = "pending"
+        try:
+            blockers = json.loads(case.blocker_codes_json or "[]")
+        except (TypeError, ValueError):
+            blockers = []
+        if reason not in blockers:
+            blockers.append(reason)
+        case.blocker_codes_json = json.dumps(blockers, separators=(",", ":"))
+        case.updated_at = datetime.now(timezone.utc)
+        session.add(case)
+
+
+def _detach_validation_cases_for_findings(
+    session: Session, finding_ids: list[int]
+) -> None:
+    if not finding_ids:
+        return
+    for case in session.exec(
+        select(CampaignValidationCase).where(
+            CampaignValidationCase.finding_id.in_(finding_ids)
+        )
+    ).all():
+        case.finding_id = None
+        case.updated_at = datetime.now(timezone.utc)
+        session.add(case)
 
 
 def cascade_delete_web_run(session: Session, run_id: int) -> None:
@@ -118,6 +173,8 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         .where(ScanLead.imported_into_run_type == "web")
         .where(ScanLead.imported_into_run_id == run_id)
     ).all():
+        if lead.id is not None:
+            _detach_validation_cases_for_leads(session, [lead.id])
         session.delete(lead)
     for lead in session.exec(
         select(ScanLead)
@@ -128,6 +185,7 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         lead.investigated_by_run_id = None
         session.add(lead)
     if finding_ids:
+        _detach_validation_cases_for_findings(session, finding_ids)
         for lead in session.exec(
             select(ScanLead).where(ScanLead.linked_finding_id.in_(finding_ids))
         ).all():
@@ -136,6 +194,12 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
 
     # Messages depend on chat sessions.  Evidence depends on probe executions,
     # which depend on obligations and may reference captured traffic.
+    for goal in session.exec(
+        select(AliceGoal)
+        .where(AliceGoal.test_run_id == run_id)
+        .where(AliceGoal.run_kind == "web")
+    ).all():
+        session.delete(goal)
     for chat in session.exec(
         select(AliceChatSession)
         .where(AliceChatSession.test_run_id == run_id)
@@ -183,6 +247,11 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         .where(TrafficEntry.api_test_run_id == None)  # noqa: E711
     ).all():
         session.delete(entry)
+
+    # SQLAlchemy has no ORM relationships between these models, so one flush
+    # can issue the CrawledPage deletes before TrafficEntry or another page
+    # dependant. Persist the dependant deletes before marking pages for removal.
+    session.flush()
     for page in pages:
         session.delete(page)
 
@@ -269,9 +338,13 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
         member.updated_at = datetime.now(timezone.utc)
         session.add(member)
 
-    for finding in session.exec(
+    api_findings = session.exec(
         select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
-    ).all():
+    ).all()
+    _detach_validation_cases_for_findings(
+        session, [finding.id for finding in api_findings if finding.id is not None]
+    )
+    for finding in api_findings:
         session.delete(finding)
     for entry in session.exec(
         select(TrafficEntry).where(TrafficEntry.api_test_run_id == run_id)
@@ -286,6 +359,8 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
         .where(ScanLead.imported_into_run_type == "api")
         .where(ScanLead.imported_into_run_id == run_id)
     ).all():
+        if lead.id is not None:
+            _detach_validation_cases_for_leads(session, [lead.id])
         session.delete(lead)
     for ss in session.exec(
         select(ScannerSession)
@@ -299,6 +374,12 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
         .where(ScanLog.run_kind == "api")
     ).all():
         session.delete(slog)
+    for goal in session.exec(
+        select(AliceGoal)
+        .where(AliceGoal.test_run_id == run_id)
+        .where(AliceGoal.run_kind == "api")
+    ).all():
+        session.delete(goal)
     for sess in session.exec(
         select(AliceChatSession)
         .where(AliceChatSession.test_run_id == run_id)
@@ -334,12 +415,90 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         member.updated_at = datetime.now(timezone.utc)
         session.add(member)
 
-    for lead in session.exec(
+    original_leads = session.exec(
         select(ScanLead)
         .where(ScanLead.producer_run_id == run_id)
         .where(ScanLead.producer_run_type == "sast")
         .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-    ).all():
+    ).all()
+    lead_ids = [lead.id for lead in original_leads if lead.id is not None]
+    facts = session.exec(
+        select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
+    ).all()
+    fact_ids = [fact.id for fact in facts if fact.id is not None]
+
+    # Campaign correlation rows can outlive their source member and hold
+    # restrictive foreign keys to this run's leads and component facts. Clear
+    # those references before the source rows are marked for deletion.
+    mapping_ids: list[int] = []
+    if lead_ids:
+        mappings = session.exec(
+            select(LeadTargetMapping).where(LeadTargetMapping.lead_id.in_(lead_ids))
+        ).all()
+        mapping_ids = [mapping.id for mapping in mappings if mapping.id is not None]
+        case_filters = [
+            CampaignValidationCase.origin_lead_id.in_(lead_ids),
+            CampaignValidationCase.copied_lead_id.in_(lead_ids),
+        ]
+        if mapping_ids:
+            case_filters.append(CampaignValidationCase.mapping_id.in_(mapping_ids))
+        for case in session.exec(
+            select(CampaignValidationCase).where(or_(*case_filters))
+        ).all():
+            session.delete(case)
+        for mapping in mappings:
+            session.delete(mapping)
+
+    if lead_ids or fact_ids:
+        provenance_filters = []
+        if lead_ids:
+            provenance_filters.append(
+                ScanLeadComponentProvenance.scan_lead_id.in_(lead_ids)
+            )
+        if fact_ids:
+            provenance_filters.append(ScanLeadComponentProvenance.fact_id.in_(fact_ids))
+        for provenance in session.exec(
+            select(ScanLeadComponentProvenance).where(or_(*provenance_filters))
+        ).all():
+            if provenance.scan_lead_id in lead_ids:
+                session.delete(provenance)
+            else:
+                provenance.fact_id = None
+                session.add(provenance)
+
+    if fact_ids:
+        for connection in session.exec(
+            select(ComponentConnection).where(
+                or_(
+                    ComponentConnection.source_fact_id.in_(fact_ids),
+                    ComponentConnection.target_fact_id.in_(fact_ids),
+                )
+            )
+        ).all():
+            session.delete(connection)
+
+    session.flush()
+
+    # Semantic rows contain references to one another without database cascade
+    # rules. Remove dependants first so SQLite can delete the run with foreign
+    # key enforcement enabled.
+    for model in (
+        SastObligationLead,
+        SastCoverageObligation,
+        SastThreatScenario,
+        SastThreatModel,
+        SastSurfaceEdge,
+        SastDiscoveryTelemetry,
+        SastEvidenceReceipt,
+        SastWorkItem,
+        SastWorker,
+        SastPartition,
+        SastSurfaceItem,
+        SastSourceFile,
+    ):
+        session.execute(delete(model).where(model.sast_run_id == run_id))
+
+    for lead in original_leads:
         session.delete(lead)
     for slog in session.exec(
         select(ScanLog)
@@ -359,9 +518,7 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         .where(PhaseCheckpoint.run_id == run_id)
     ).all():
         session.delete(checkpoint)
-    for fact in session.exec(
-        select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
-    ).all():
+    for fact in facts:
         session.delete(fact)
     run = session.get(SastRun, run_id)
     if run is not None:
@@ -417,6 +574,15 @@ def cascade_delete_campaign(session: Session, campaign_id: int) -> None:
         )
     ).all():
         session.delete(connection)
+
+    # Validation cases reference mappings, target members, source leads, and
+    # copied leads. Remove them before any of those campaign-owned rows.
+    for case in session.exec(
+        select(CampaignValidationCase).where(
+            CampaignValidationCase.campaign_id == campaign_id
+        )
+    ).all():
+        session.delete(case)
 
     for mapping in session.exec(
         select(LeadTargetMapping).where(LeadTargetMapping.campaign_id == campaign_id)

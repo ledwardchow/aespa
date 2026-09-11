@@ -9,7 +9,13 @@ import asyncio
 import contextlib
 import contextvars
 import json
+import logging
 from typing import AsyncGenerator, Iterator
+
+agent_activity_log = logging.getLogger("aespa.agent.activity")
+# This feed is enabled by the interactive console. Keep ordinary server logging
+# unchanged when AESPA runs without that console.
+agent_activity_log.setLevel(logging.WARNING)
 
 # (run_kind, run_id) → list of subscriber queues.  The kind remains part of the
 # event-bus key so each surface can keep its own stream and compatibility path.
@@ -69,7 +75,29 @@ def emit(run_id: int, event: dict) -> None:
         _persist_phase_event(run_id, event)
 
     if event.get("type") == "agent_status":
+        _log_agent_status(run_id, run_kind, event)
         _persist_agent_status_event(run_id, event)
+
+
+def _log_agent_status(run_id: int, run_kind: str, event: dict) -> None:
+    """Mirror an agent-log event into the interactive console feed."""
+    status = str(event.get("status") or "unknown").upper()
+    role = str(event.get("role") or "Agent")
+    agent_id = str(event.get("agent_id") or "unknown")
+    task = str(event.get("current_task") or "")
+    outcome = str(event.get("outcome") or "")
+    detail = task
+    if outcome:
+        detail = f"{detail} -> {outcome}" if detail else outcome
+    agent_activity_log.info(
+        "%s run %s  %-10s  %s (%s)%s",
+        run_kind,
+        run_id,
+        status,
+        role,
+        agent_id,
+        f"  {detail}" if detail else "",
+    )
 
 
 def _persist_phase_event(run_id: int, event: dict) -> None:

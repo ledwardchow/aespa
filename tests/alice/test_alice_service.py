@@ -8,43 +8,72 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
-from aespa.db import get_session, set_engine
+from aespa.db import get_session
 from aespa.main import create_app
 from aespa.models import CrawledPage, LLMConfig, Site
 from aespa.models import TestRun as RunModel
 from aespa.services import alice_tasks as at
-from aespa.services.alice import run_alice_turn, run_alice_turn_stream
+from aespa.services.alice import (
+    _bounded_goal_evidence,
+    _bounded_goal_proposal,
+    _redact_goal_evidence_text,
+    run_alice_turn,
+    run_alice_turn_stream,
+)
 
 
-@pytest.fixture(name="db_engine")
-def db_engine_fixture():
-    """Create an in-memory database engine for testing, and set it globally."""
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+def test_goal_verifier_payload_keeps_newest_evidence_with_omission_counts():
+    evidence = [
+        {
+            "step": index,
+            "tool": "http_request",
+            "input": {"body": "x" * 10_000},
+            "result": "result-" + ("y" * 10_000),
+        }
+        for index in range(40)
+    ]
+    bounded = _bounded_goal_evidence(evidence)
+    proposal = _bounded_goal_proposal(
+        {
+            "status": "completed",
+            "summary": "s" * 5_000,
+            "completed_criteria": ["criterion"] * 30,
+            "metadata": {
+                "nested": {"payload": "z" * 5_000},
+                "array": [{"value": "q" * 5_000} for _ in range(30)],
+            },
+        }
     )
 
-    from aespa.db import _engine as original_engine
-
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)
-
-    yield engine
-
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    set_engine(original_engine)
+    assert bounded["entries"][0]["step"] == 10
+    assert bounded["entries"][-1]["step"] == 39
+    assert bounded["omitted_entries"] == 10
+    assert bounded["omitted_chars"] > 0
+    assert proposal["completed_criteria_omitted"] == 10
+    assert proposal["summary_omitted_chars"] == 3_000
+    assert proposal["metadata"]["nested"]["payload_omitted_chars"] == 4_600
+    assert proposal["metadata"]["array_omitted_items"] == 10
 
 
-@pytest.fixture(name="db_session")
-def db_session_fixture(db_engine):
-    """Provide a database Session for populating test data."""
-    with Session(db_engine) as session:
-        yield session
+def test_goal_evidence_redacts_quoted_authorization_bearer():
+    redacted = _redact_goal_evidence_text(
+        '{"Authorization": "Bearer quoted-token", "note": "ok"}'
+    )
+
+    assert "quoted-token" not in redacted
+    assert "[REDACTED_BEARER]" in redacted
+
+
+def test_goal_evidence_redacts_plain_and_quoted_authorization_basic():
+    redacted = _redact_goal_evidence_text(
+        'Authorization: Basic plain-secret\n{"Authorization": "Basic quoted-secret"}'
+    )
+
+    assert "plain-secret" not in redacted
+    assert "quoted-secret" not in redacted
+    assert redacted.count("[REDACTED_BASIC]") == 2
 
 
 @pytest.fixture(name="test_data")
@@ -164,6 +193,192 @@ def test_alice_operational_question_tool_gate_preserves_explicit_testing():
     assert _classify_alice_intent("Test the crawl for XSS") == "testing"
     assert _classify_alice_intent("Probe the API for IDOR") == "testing"
     assert _classify_alice_intent("Re-run validation for all findings") == "testing"
+
+
+def test_goal_mode_done_schema_requires_completion_state():
+    from aespa.services.alice import _get_alice_tools, _goal_mode_tools
+
+    tools = _goal_mode_tools(_get_alice_tools())
+    done = next(tool for tool in tools if tool["name"] == "done")
+
+    assert done["input_schema"]["properties"]["status"]["enum"] == [
+        "completed",
+        "blocked",
+    ]
+    assert "remaining_work" in done["input_schema"]["required"]
+
+
+def test_alice_goal_lifecycle_is_persistent(db_session, test_data):
+    from aespa.services import alice_goals
+
+    run = test_data["run"]
+    goal = alice_goals.create_goal("web", run.id, "tab-goal", "Test account recovery")
+    alice_goals.update_goal(
+        goal.id,
+        checkpoint={"remaining_work": ["Test email enumeration"]},
+        increment_cycle=True,
+    )
+
+    loaded = alice_goals.goal_out(alice_goals.get_goal("web", run.id, "tab-goal"))
+    assert loaded["status"] == "active"
+    assert loaded["cycle_count"] == 1
+    assert loaded["checkpoint"]["remaining_work"] == ["Test email enumeration"]
+
+    alice_goals.reconcile_interrupted_goals()
+    paused = alice_goals.goal_out(alice_goals.get_goal("web", run.id, "tab-goal"))
+    assert paused["status"] == "paused"
+    assert "restarted" in paused["pause_reason"]
+
+
+@pytest.mark.anyio
+async def test_goal_mode_rejects_partial_done_then_accepts_verified_completion(
+    db_session, test_data
+):
+    from aespa.services import alice_goals
+
+    run = test_data["run"]
+    row = alice_goals.create_goal("web", run.id, "tab-goal", "Test account recovery")
+    goal = alice_goals.goal_out(row)
+    replies = [
+        [
+            {
+                "type": "tool_use",
+                "id": "tool-1",
+                "name": "context_tool",
+                "input": {"tool": "site_map", "args": {}},
+            }
+        ],
+        [
+            {
+                "type": "tool_use",
+                "id": "done-1",
+                "name": "done",
+                "input": {
+                    "status": "completed",
+                    "summary": "Partly checked",
+                    "completed_criteria": ["Loaded the route inventory"],
+                    "evidence": ["site_map result"],
+                    "remaining_work": ["Probe the recovery endpoint"],
+                },
+            }
+        ],
+        [
+            {
+                "type": "tool_use",
+                "id": "done-2",
+                "name": "done",
+                "input": {
+                    "status": "completed",
+                    "summary": "Recovery behavior verified",
+                    "completed_criteria": ["Tested account recovery"],
+                    "evidence": ["The recovery probe returned a uniform response"],
+                    "remaining_work": [],
+                },
+            }
+        ],
+    ]
+    calls = 0
+
+    async def mock_call(*args, **kwargs):  # noqa: ARG001
+        nonlocal calls
+        blocks = replies[calls]
+        calls += 1
+        return blocks, "tool_use", blocks
+
+    lines = []
+    with (
+        patch("aespa.services.llm._call_with_tools", side_effect=mock_call),
+        patch(
+            "aespa.services.alice._execute_alice_tool",
+            new=AsyncMock(return_value="site map evidence"),
+        ),
+        patch(
+            "aespa.services.llm.plain_completion",
+            new=AsyncMock(
+                return_value='{"verdict":"completed","reason":"verified","missing_work":[]}'
+            ),
+        ),
+        patch("aespa.services.validator.is_validating", return_value=False),
+    ):
+        async for line in run_alice_turn_stream(
+            run.id, "Test account recovery", [], goal=goal
+        ):
+            lines.append(line)
+
+    events = [
+        json.loads(line[6:].strip()) for line in lines if line.startswith("data: ")
+    ]
+    assert calls == 3
+    assert any(event["type"] == "goal_progress" for event in events)
+    assert any(event["type"] == "goal_completed" for event in events)
+    completed = alice_goals.get_goal("web", run.id, "tab-goal")
+    assert completed.status == "completed"
+
+
+@pytest.mark.anyio
+async def test_goal_mode_requires_repeated_confirmation_of_a_blocker(test_data):
+    from aespa.services.alice import _check_goal_completion
+
+    proposal = {
+        "status": "blocked",
+        "summary": "Testing needs a valid customer account.",
+        "completed_criteria": ["Confirmed the route requires authentication"],
+        "evidence": ["The endpoint returned 401 for the available session"],
+        "remaining_work": ["Test the authenticated customer flow"],
+        "blocker": "No valid customer account is available.",
+    }
+    checkpoint = {}
+
+    with patch(
+        "aespa.services.llm.plain_completion",
+        new=AsyncMock(
+            return_value=(
+                '{"verdict":"blocked","reason":"external access is required",'
+                '"missing_work":[]}'
+            )
+        ),
+    ):
+        results = [
+            await _check_goal_completion(
+                test_data["llm_cfg"],
+                objective="Test the authenticated customer flow",
+                proposal=proposal,
+                evidence=[{"tool": "http_request", "result": "401"}],
+                run_id=test_data["run"].id,
+                is_api=True,
+                checkpoint=checkpoint,
+            )
+            for _ in range(3)
+        ]
+
+    assert [accepted for accepted, _, _ in results] == [False, False, True]
+    assert checkpoint["blocker_confirmations"] == 3
+
+
+@pytest.mark.anyio
+async def test_active_goal_accepts_steering(test_data):
+    from aespa.services import alice_goals
+
+    goal = alice_goals.create_goal(
+        "web", test_data["run"].id, "tab-goal", "Test account recovery"
+    )
+    task = at.AliceTask(
+        run_id=test_data["run"].id,
+        tab_id="tab-goal",
+        think_msg_id="think",
+        reply_msg_id="reply",
+        goal_id=goal.id,
+        goal=alice_goals.goal_out(goal),
+    )
+    at._registry[("site", test_data["run"].id)] = task
+    try:
+        assert (
+            await at.steer_goal(test_data["run"].id, "Focus on the reset token") is True
+        )
+        assert task.steering.get_nowait() == "Focus on the reset token"
+        assert task.events[-1]["type"] == "goal_steered"
+    finally:
+        at._registry.pop(("site", test_data["run"].id), None)
 
 
 def test_alice_run_status_prefers_live_scan_state(db_session, test_data):
@@ -404,6 +619,82 @@ async def test_run_alice_turn_stream_yields_correct_chunks(db_session, test_data
         assert any(mock_reply in c["delta"] for c in message_chunks)
         assert len(done_chunks) == 1
         assert mock_reply in done_chunks[0]["message"]
+
+
+@pytest.mark.anyio
+async def test_run_alice_turn_forwards_native_provider_deltas_once(
+    db_session, test_data
+):
+    run = test_data["run"]
+    from aespa.services import llm as llm_service
+
+    async def mock_call_with_tools(*args, **kwargs):
+        on_delta = llm_service._tool_text_delta_var.get()
+        assert on_delta is not None
+        await on_delta("Live ")
+        await asyncio.sleep(0)
+        await on_delta("reply")
+        text_block = {"type": "text", "text": "Live reply"}
+        return [text_block], "end_turn", [text_block]
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        chunks = []
+        async for line in run_alice_turn_stream(
+            run.id, "What is the current run status?", []
+        ):
+            if line.startswith("data: "):
+                chunks.append(json.loads(line[6:].strip()))
+
+    message = "".join(
+        chunk.get("delta", "")
+        for chunk in chunks
+        if chunk.get("type") == "message_chunk"
+    )
+    assert message == "Live reply"
+    assert [chunk["type"] for chunk in chunks].index("message_chunk") < [
+        chunk["type"] for chunk in chunks
+    ].index("done")
+    assert chunks[-1]["message"] == "Live reply"
+
+
+@pytest.mark.anyio
+async def test_run_alice_turn_retracts_streamed_text_when_tools_follow(
+    db_session, test_data
+):
+    run = test_data["run"]
+    from aespa.services import llm as llm_service
+
+    calls = 0
+
+    async def mock_call_with_tools(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            on_delta = llm_service._tool_text_delta_var.get()
+            assert on_delta is not None
+            await on_delta("Checking now.")
+            text = {"type": "text", "text": "Checking now."}
+            tool = {
+                "type": "tool_use",
+                "id": "done-1",
+                "name": "done",
+                "input": {"summary": "Finished"},
+            }
+            return [text, tool], "tool_use", [text, tool]
+        raise AssertionError("ALICE should stop after done")
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        chunks = []
+        async for line in run_alice_turn_stream(run.id, "Check the target", []):
+            if line.startswith("data: "):
+                chunks.append(json.loads(line[6:].strip()))
+
+    assert any(chunk.get("type") == "message_retract" for chunk in chunks)
+    assert "Checking now." in "".join(
+        chunk.get("delta", "")
+        for chunk in chunks
+        if chunk.get("type") == "thinking_chunk"
+    )
 
 
 @pytest.mark.anyio
@@ -1137,3 +1428,24 @@ def test_stream_events_replays_exactly_from_cursor_after_trim():
         assert [e["i"] for e in got] == list(range(cursor, total))
     finally:
         at._registry.pop(("site", 42), None)
+
+
+def test_stream_events_sends_snapshot_when_cursor_was_trimmed():
+    task = _alice_task(run_id=43)
+    for i in range(at.BUFFER_LIMIT + 1):
+        at._append(task, {"type": "message_chunk", "delta": str(i % 10)})
+    task.done = True
+    at._registry[("site", 43)] = task
+    try:
+
+        async def _drain():
+            return [
+                line async for line in at.stream_events(43, cursor=0, run_type="site")
+            ]
+
+        got = [json.loads(line[6:]) for line in asyncio.run(_drain())]
+        assert len(got) == 1
+        assert got[0]["type"] == "state_snapshot"
+        assert got[0]["message"] == task.accumulated_message
+    finally:
+        at._registry.pop(("site", 43), None)

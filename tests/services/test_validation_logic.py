@@ -771,6 +771,55 @@ def test_dynamic_scan_creates_page_for_findings_without_crawl():
         engine.dispose()
 
 
+def test_dynamic_finding_reuses_canonical_page_for_query_payload():
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+            run = RunModel(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/api/customers?page=1&per_page=15",
+                status="crawled",
+                in_scope=True,
+            )
+            session.add(page)
+            session.commit()
+            session.refresh(page)
+
+            page_id = scanner._dynamic_finding_page_id(
+                session,
+                run_id=run.id,
+                affected_url=(
+                    "https://target.local/api/customers?"
+                    "page=1&per_page=5&search=%27"
+                ),
+                base_url=site.base_url,
+                pages_snapshot=[],
+                first_page_id=None,
+            )
+
+            assert page_id == page.id
+            assert len(session.exec(select(CrawledPage)).all()) == 1
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_dynamic_scan_task_does_not_write_error_message(monkeypatch):
     from aespa import models as _models  # noqa: F401
 
