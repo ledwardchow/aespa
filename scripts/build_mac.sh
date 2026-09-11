@@ -4,6 +4,7 @@
 # on first launch.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+REPO_ROOT="$(pwd)"
 
 ICON_SRC="src/aespa/web/icon.png"
 ICONSET="build/AESPA.iconset"
@@ -46,20 +47,20 @@ echo "==> Building app bundle with PyInstaller"
     --specpath build \
     --windowed \
     --name AESPA \
-    --icon "$ICNS" \
+    --icon "$REPO_ROOT/$ICNS" \
     --osx-bundle-identifier com.aespa.app \
-    --add-data "src/aespa/web:aespa/web" \
-    --add-data "src/aespa/services/data:aespa/services/data" \
-    --add-data "alembic.ini:." \
-    --add-data "alembic:alembic" \
-    --add-data "THIRD_PARTY_LICENSES.txt:." \
-    --add-data "LICENSE.txt:." \
+    --add-data "$REPO_ROOT/src/aespa/web:aespa/web" \
+    --add-data "$REPO_ROOT/src/aespa/services/data:aespa/services/data" \
+    --add-data "$REPO_ROOT/alembic.ini:." \
+    --add-data "$REPO_ROOT/alembic:alembic" \
+    --add-data "$REPO_ROOT/THIRD_PARTY_LICENSES.txt:." \
+    --add-data "$REPO_ROOT/LICENSE.txt:." \
     --collect-all playwright \
     --collect-all alembic \
     --collect-all uvicorn \
     --collect-all tiktoken \
     --collect-submodules aespa \
-    src/aespa/desktop.py
+    "$REPO_ROOT/src/aespa/desktop.py"
 
 echo "==> Done: dist/AESPA.app"
 echo "    Unsigned — first open: right-click > Open, or run:"

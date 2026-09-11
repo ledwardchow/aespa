@@ -1,67 +1,96 @@
 # Web Scanning - Screen Walkthrough
 
-This is the Sites landing page:
-![Sites page](images/sitescreen.png)
-The **Export** button on each row will let you export the whole site (including any scan data) as a single JSON file; these files will often be very large (as they will include crawled screenshots). 
+## Sites
 
-You can use the **Import site** button on the top right to re-import these on a different instance of AESPA.
+The **Sites** page lists saved web targets.
 
-## Creating a site configuration
-![create site screen](images/createsite.png)
-Enter details as necessary. 
-The **Default login page URL** will be used by default for each credential added. If your app has multiple login pages, you can override this for a specific set of credentials by entering the URL in the **Login URL (optional override)** field.
+![Sites page](../../images/sites.png)
 
-The **Auth Mode** field allows you to select one of four modes:
+Use **New site** to add a target. A site contains its base URL, optional scope
+hosts, scan guidance, and login credentials. Site export includes the site's runs
+and can be large when crawled screenshots are present.
 
-- **auto** - this will fill in the username/password on a standard form on the website.
-- **totp** - this will fill in the username/password field, and use the entered TOTP seed to fill a TOTP field as well.
-- **entra id** - uses a Microsoft-aware multi-page flow for account selection, username/password entry, consent, stay-signed-in prompts, Authenticator number matching, and TOTP code pages. When Authenticator approval is required, keep the run page open: AESPA displays the number to enter, reports success or timeout, and offers a retry after a failed approval. The TOTP seed is optional and is used when the tenant permits an authenticator-code flow.
-- **guided** - opens an interactive Chromium window for passkeys, unusual SSO providers, or any login that needs manual input. This mode only works when AESPA runs on a machine with a GUI shell. Complete the login in the browser, then return to the run page and click **I'm Done**. AESPA captures the authenticated session and continues.
+## Site and credentials
 
-Entra ID and guided authentication are interactive login modes. Keep the run page open while a crawl or pentest is starting so AESPA can show approval, retry, browser, and confirmation prompts. Once captured, the session is reused by subsequent scan phases and A.L.I.C.E.
+![Create site](../../images/sitesetup.png)
 
-## Site configuration
-![run selector screen](images/runselector.png)
-Click on **New Run** to make a new test run.
-![test run edit](images/editrun.png)
-On this screen you can enter the breadth-first search depth/max pages for the crawler to spider, and select an LLM profile.
+Each credential can use its own login URL. Authentication modes are:
 
-## Run Status screen
-When you open a test run, you will be presented with the Status screen, which displays the status of each agent. 
-![run status](images/runlanding.png)
-You can kick off a scan action by doing one or more of the following:
-- Clicking **Start Crawl**
-- Clicking **Start Pentest** (although I recommend doing a crawl first)
-- Telling the A.L.I.C.E. chat agent what you want it to do
+- **Auto**: Fills a normal username and password form.
+- **TOTP**: Fills the login form and generates a time-based one-time password.
+- **Entra ID**: Handles Microsoft's multi-page login flow, including supported
+  consent, account selection, Authenticator approval, and TOTP screens.
+- **Guided**: Opens a visible browser for passkeys, unusual SSO, or another flow
+  that needs manual input. Finish the login, return to the run page, and confirm
+  that it is complete.
 
+Keep the run page open during interactive authentication so AESPA can show
+approval, retry, and completion prompts.
 
-## Crawler
-This will spider the site using the configured URLs and credentials (similar to Burp Spider). The crawler uses one instance of a Playwright-powered Chromium browser in the background **per authentication credential configured**; therefore, each auth cred will mean ~500MB RAM usage, if you have 4 login credentials configured it will consume ~2GB RAM during the crawl. Because it uses a browser, it is aware of SPA page navigation/popup modal boxes and will cope with functionality presented on these. 
+## Test runs
 
-The crawler populates the Site Map, Intelligence, Attack Surface, and seeds the OWASP Coverage matrix with the crawled pages.
+![Site test runs](../../images/testruns.png)
+
+Create a run to choose its LLM profile, crawl depth, maximum pages, crawler mode,
+and scan mode. The dynamic coverage choices are:
+
+- **Quick**: Adaptive testing with coverage tracking.
+- **Standard**: Requires the percentage configured in Agent Settings.
+- **Full**: Resolves every applicable page and OWASP category obligation.
+- **SAST Validate**: Tests only imported SAST leads.
+
+![Create test run](../../images/editrun.png)
+
+## Status
+
+The **Status** tab contains crawl and pentest controls, token usage, ALICE, agent
+status, specialist activity, and the event log.
+
+![Run status](../../images/runlanding.png)
+
+A normal workflow is to run **Start Crawl**, review the discovered scope, and
+then run **Start Pentest**. A pentest can start without a completed crawl, but the
+Test Lead will have less context.
 
 ## Site Map
-![site map](images/sitemap.png)
-The Site Map screen shows the crawled context; all the information on this page can be retrieved by the scanner and ALICE as a tool call. 
-Clicking the **By Scope** and **By User** buttons on the top right will switch between scope view (colour page routes based on whether it is marked in scope or not) and user view (colour page routes based on what user had access to that page).
 
-You can click on each page node to view the page in the side panel, where the **Mark in/out of scope** buttons are present. The Page Categories information is used by the scanner as a hint for what to test. The OWASP Top 10:2025 is used to seed the OWASP Coverage matrix. (Note that the scanner may choose to not follow this guidance and test a page for a category marked "No".)
+![Site map](../../images/sitemap.png)
 
-## Intelligence/Attack Surface
-These sections begin with crawler data. The Attack Surface & Coverage projection also refreshes during the dynamic scan as routes and workprogram statuses change. The underlying intelligence is available through context-tool calls to both the scanner and ALICE.
+The Site Map shows discovered URLs and interactive states. Use its scope and user
+views to compare reachability. Selecting a page opens its details, including page
+flags, user access, and scope controls.
 
-Intelligence is a simple key-value store of things the crawler saw:
-![intelligence screen](images/intelligence.png)
+## Attack Surface & Coverage
 
-The attack surface groups concrete destination routes by method and normalized path, preserves the page or asset that revealed each route as provenance, displays real parameters and per-credential access observations, and overlays live OWASP workprogram coverage. Evidence signals are shown with their source and confidence; they are investigation hints rather than automatic vulnerability classifications or fixed risk scores:
-![attack surface](images/attacksurface.png)
+![Attack surface and coverage](../../images/attacksurface.png)
+
+This tab combines the route and input inventory with live OWASP coverage. Routes
+show method, normalized path, parameters, provenance, access observations, and
+evidence-backed signals. Coverage is tracked for each applicable page and OWASP
+category. Full mode continues until each obligation is covered or skipped with a
+reason.
 
 ## Sessions
-The sessions screen displays authentication tokens that are captured during the crawl, or during scans/by ALICE. All sessions are made available to the scanner and ALICE for re-use. You can remove credentials you don't want/expired by clicking on Deactivate.
-![sessions](images/sessions.png)
+
+The **Sessions** tab lists cookies and tokens captured during login, crawling,
+dynamic testing, or ALICE work. Named sessions are available to the Test Lead and
+ALICE. Deactivate a session when it should no longer be used.
 
 ## Findings
-![web findings](images/webfindings.png)
 
-## OWASP Coverage
-![OWASP Coverage](images/workprogram.png)
+![Web findings](../../images/webfindings.png)
+
+The **Findings** tab shows severity, CVSS, evidence, validation status, and
+supporting files. Supported fields can be edited from the finding details panel.
+You can retry validation, validate a group of findings, or ask ALICE to review
+duplicates and ratings.
+
+## Traffic Log and SAST Leads
+
+The **Traffic Log** contains requests and responses from the crawler, Test Lead,
+specialists, ALICE, and brokered Python execution. Entries keep their agent,
+session, page, and coverage attribution.
+
+The **SAST Leads** tab imports reportable leads from a completed standalone SAST
+run. Imported leads are copies owned by the web run. Quick and SAST Validate runs
+must resolve their open imported leads before completing.

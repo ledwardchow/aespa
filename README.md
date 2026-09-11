@@ -14,7 +14,13 @@ Testing :) It's got a cool UI and stuff.
 
 ## Features
 
-Multi-agent (test lead + specialists, adversarial validator and reporting) web app and API testing.
+Multi-agent web and API testing with a Test Lead, focused specialists,
+adversarial validation, and reporting. AESPA also includes standalone Light and
+Deep SAST, focused live validation of imported source leads, multi-repository
+Application campaigns, and account-wide LLM usage statistics.
+
+Dynamic scans support four workflows: Quick, Standard coverage, Full coverage,
+and SAST Validate.
 
 You will need to provide:
 
@@ -116,7 +122,7 @@ automatically when it is missing.
 
 ### Optional agent Python sandbox
 
-AESPA can let A.L.I.C.E. and specialist agents run short Python programs for custom payload generation, parsing, and bounded request workflows. This capability is disabled by default and requires a local Docker daemon plus the dedicated executor image:
+AESPA can let Test Leads, A.L.I.C.E., and specialist agents run short Python programs for custom payload generation, parsing, and bounded request workflows. This capability is disabled by default and requires a local Docker daemon plus the dedicated executor image:
 
 ```bash
 docker pull ledwardchow/aespa-python-executor:0.1

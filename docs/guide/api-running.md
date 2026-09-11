@@ -6,7 +6,7 @@ API scanning works on an **API collection** — a named container for the docs, 
 Go to **APIs → New API collection** and give it a name and base URL. If you already have an export from a previous AESPA setup, use **Import API** instead.
 
 ## 2. Add documentation
-Open the collection's **Manage files** tab and upload one or more of:
+Open the collection and select **Manage files**, then upload one or more of:
 - An **OpenAPI/Swagger** file (JSON or YAML)
 - A **Postman collection** export
 - A credentials/auth file (bearer token, `key: value` lines, or `curl -H`/`-b` flags)
@@ -22,10 +22,14 @@ Click **Run readiness check** to have an LLM sanity-check the collection — it 
 
 ## 4. Start a test run
 From the collection page, click **+ New test run**. Pick an LLM profile (or leave it on the global active one) and a **coverage mode**:
-- **Track** — records OWASP API Top-10 coverage per endpoint but doesn't block on it
-- **Enforce** — keeps the scan going until every in-scope endpoint has been covered
+- **Quick** - adapts to the API and records coverage without requiring a target percentage
+- **Standard** - requires the percentage configured under **Agent Settings > Test Lead**
+- **Full** - keeps working until every applicable endpoint and OWASP category is covered or skipped with a reason
+- **SAST Validate** - tests only SAST leads already imported into the API run
 
-This spins up the same Test Lead / Specialist / Validator agent loop as a web scan, just without a browser — the Test Lead works through endpoints, dispatches Specialists on promising leads, and validates findings. Watch progress on the run's **Status** screen.
+The API Test Lead works through the endpoint inventory without a browser. AESPA can
+start focused specialists automatically from strong signals, and the validator checks
+reported findings. Watch progress on the run's **Status** screen.
 
 You can also drive a run conversationally with **A.L.I.C.E.** the same way as in a web run — see [Running Web Scans](web-running.md#using-alice).
 
