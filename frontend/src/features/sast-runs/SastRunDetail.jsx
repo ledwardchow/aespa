@@ -589,6 +589,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               telemetry={efficiencyTelemetry}
               report={analysis.report}
               status={semanticStatus}
+              phaseState={analysis.phases}
             />
           )}
           {tab === "activity" && (

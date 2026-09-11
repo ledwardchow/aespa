@@ -171,6 +171,51 @@ def test_running_phase_updates_sast_analyst_status(
     assert analyst.current_task == "Reviewing source-to-sink paths."
 
 
+@pytest.mark.parametrize(
+    "scanner_module", [sast_scanner, pytest.param(None, id="light")]
+)
+def test_phase_timing_keeps_only_active_resume_intervals(
+    isolated_db_engine, scanner_module
+):
+    if scanner_module is None:
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+
+    phase_state = scanner_module._empty_phase_state()
+    phase_state["discovery"] = {
+        "status": "paused",
+        "message": "Paused",
+        "data": {},
+        "active_elapsed_ms": 1200,
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "active_intervals": [
+            {
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "ended_at": "2026-01-01T00:00:01.200000+00:00",
+            }
+        ],
+    }
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="phase timing", phase_state_json=json.dumps(phase_state))
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    scanner_module._set_phase(run_id, "discovery", "running", "Resumed")
+    scanner_module._set_phase(run_id, "discovery", "complete", "Done")
+
+    with Session(isolated_db_engine) as session:
+        saved = json.loads(session.get(SastRun, run_id).phase_state_json)
+
+    assert saved["discovery"]["active_elapsed_ms"] >= 1200
+    assert saved["discovery"]["active_elapsed_ms"] < 5000
+    assert saved["discovery"]["first_started_at"] == "2026-01-01T00:00:00+00:00"
+    assert len(saved["discovery"]["active_intervals"]) == 2
+    assert saved["discovery"]["completed_at"] >= saved["discovery"]["started_at"]
+
+
 def test_agent_log_replays_persisted_worker_and_validator_activity(
     client, isolated_db_engine
 ):

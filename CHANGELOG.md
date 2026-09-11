@@ -7,6 +7,7 @@ All pull requests merged to `main`, in reverse chronological order.
 ### Fixes
 
 - **Desktop release builds**: macOS and Windows packaging now finds application files after the build scripts were moved into `scripts/`. Windows builds also stop at the PyInstaller error instead of continuing to a missing executable check.
+- **Clearer SAST execution summaries**: Phase timing now excludes paused intervals after a scan resumes. Older saved runs are labelled as recorded time when their pause gaps cannot be recovered. The execution summary groups each phase's relevant work in one place instead of showing zero-filled columns for checks, reads, and candidates that do not apply. Its compact run timeline compares phase order and overlap, with gaps showing paused time. Phase names and durations use narrower columns so the timeline and completed work have more room.
 
 ## [PR #269] September 11 Update - SAST rework and fixes
 
