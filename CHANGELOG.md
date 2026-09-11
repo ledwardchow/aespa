@@ -2,13 +2,13 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## Unreleased
+## [PR #269] September 11 Update - SAST rework and fixes
 
 ### New features
 
 - **Light and Deep SAST modes**: Choose Light for the original lower-cost workflow or Deep for repository modelling, threat-directed coverage, candidate reconciliation, and semantic closure. Deep scans build a language-neutral source and dependency inventory, identify assets, identities, trust boundaries, and threat scenarios, then combine baseline, threat-directed, sink-first, and deterministic analysis in one candidate ledger. Evidence and completeness checks prevent unsupported repository facts and incomplete threat reviews from being reported as full coverage. SQL schemas and common database clients provide deterministic navigation hints across supported languages. Codex sessions can run model-assisted phases without a separate API key, and reconciliation failures are shown when the provider is unavailable. Closure review can recover missed candidates for independent validation. Scanner policy controls finding classes, minimum severity and confidence, and phase budgets. The selected mode and completed phases are saved when a run is paused, resumed, rerun, exported, or imported. Existing runs are migrated as Light.
 
-- **Optional Benchmark Lab for SAST**: Enable Benchmark Lab under System Settings → Feature Visibility to compare ordinary completed SAST runs with separately stored ground truth imported from canonical JSON or numbered vulnerability Markdown. Deterministic, model-assisted, and human-reviewed matching remain isolated from scan execution. Repeated-run comparisons show median and range metrics, per-item detection frequency, contamination exclusions, and configurable regression thresholds alongside manual adjudication, audit provenance, and JSON, CSV, or Markdown exports.
+- **Benchmark Lab for SAST**: Enable Benchmark Lab under System Settings → Feature Visibility to compare ordinary completed SAST runs with separately stored ground truth imported from canonical JSON or numbered vulnerability Markdown. Deterministic, model-assisted, and human-reviewed matching remain isolated from scan execution. Repeated-run comparisons show median and range metrics, per-item detection frequency, contamination exclusions, and configurable regression thresholds alongside manual adjudication, audit provenance, and JSON, CSV, or Markdown exports.
 
 - **SARIF export for SAST scans**: SAST results can now be exported in standard OASIS SARIF 2.1.0 format for direct integration with GitHub Code Scanning, GitLab SAST, SonarQube, and VS Code SARIF viewers. The export provides file locations, highlighted snippets, step-by-step source-to-sink taint flows (`codeFlows`), and confidence scores via SARIF's native `rank` property. Candidates discovered during the run are included, with unconfirmed or inconclusive candidates annotated with standard SARIF `suppressions` records. Verification metadata, including validator reasoning, confidence scores, counterevidence, proof gaps, and dynamic attack path guidance, is preserved in both formatted Markdown messages and machine-readable result property bags. In the SAST run ellipsis menu, Export Markdown and Export SARIF options are now available.
 
@@ -54,23 +54,13 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **More accurate finding evidence**: Anonymous and alternate-user probes now isolate headers and cookies from the primary session. Missing-authentication findings require explicit credential-free evidence, authenticated 200 responses cannot be turned into access-control findings during reporting, and cosmetic report prefixes no longer bypass deduplication. Findings stay attached to the endpoint, page, and evidence that produced them. Query-string payloads are recorded exactly without creating duplicate site-map pages, and related coverage, specialist handoffs, and validation share the same page association.
 
-- **Validators finish after their probe budget**: Finding validation now lists reusable authenticated sessions without exposing credentials, avoids wasting steps rediscovering logins, and reserves a final verdict-only turn after the investigative budget is exhausted. SQL injection validation also recognizes authenticated, payload-dependent database errors as strong confirmation evidence.
-
-- **Visible Test Lead completion requests**: The activity log now shows every time the Test Lead calls `done`, including its summary and calls rejected by the completion check.
-
 - **Campaign progress stays current after a resumed scan**: Campaign pages continue refreshing after an interrupted child scan and remove the old interruption message when matching resumes.
 
 - **Long Bedrock scan requests no longer time out while the model is working**: Agent scans now read Bedrock responses as a stream and allow long reasoning requests to remain idle for up to one hour. Tool calls, reasoning signatures, usage totals, and provider diagnostics are retained from the stream.
 
 - **Reliable usage statistics**: Automated tests now use an isolated database for all model calls, preventing test usage from appearing in your statistics. Models without recorded prices show an unavailable estimate instead of a zero cost.
 
-- **More reliable interface state**: API and SAST pages now recover when an update replaces a split page file. Browser back and forward restore the selected web and SAST tabs. Validator results stay beside the finding title, Traffic Log request and response headers align, and Python Sandbox settings use the same width as other Agent Settings pages. A.L.I.C.E. no longer scrolls to the latest message after you have scrolled up and resumes following messages when you return to the bottom.
-
 - **Clearer Python sandbox setup errors**: The settings page and terminal console now distinguish a missing executor image from a Docker service that is stopped or cannot be reached.
-
-- **Crawls continue past unclickable overlays**: Dialog and login control clicks now have short attempt limits and a total time budget. Stale, obscured, or repeatedly re-rendered controls no longer keep a crawl stuck on one page.
-
-- **More reliable Codex connections**: Codex processes now retain the Windows environment needed for DNS and HTTPS access. Temporary response-stream interruptions wait for Codex's announced reconnect attempt before failing, and an exhausted Spark allowance no longer blocks other Codex models that still have capacity.
 
 - **Clearer crawler login errors**: Unavailable models, exhausted allowances, and malformed model responses during login now produce error events showing the affected model and reset time when available.
 
@@ -79,8 +69,6 @@ All pull requests merged to `main`, in reverse chronological order.
 ### Housekeeping
 
 - **Build script organisation**: Build, signing, packaging, and Docker publishing scripts now live in `scripts/`. Release workflows use the new paths, and scripts resolve inputs from the repository root even when launched from another directory.
-
-- **ALICE naming**: Standardised the full name as “ALICE: LLM-Integrated Chat Engine” in documentation and agent prompts.
 
 - **Findings and settings maintenance**: Web and API findings now share editing and detail components. Regression checks cover saved changes, cancelled edits, and drafts retained across web-run tabs. Settings and saved-run data handling have been split into smaller modules, preserving existing formats and defaults.
 
