@@ -828,7 +828,9 @@ def persist_scan_telemetry(
                 continue
             elapsed_ms = 0
             try:
-                if state.get("started_at") and state.get("completed_at"):
+                if "active_elapsed_ms" in state:
+                    elapsed_ms = max(0, int(state.get("active_elapsed_ms") or 0))
+                elif state.get("started_at") and state.get("completed_at"):
                     elapsed_ms = int(
                         (
                             datetime.fromisoformat(state["completed_at"])

@@ -456,6 +456,48 @@ def _set_phase(
             if not state:
                 state = _empty_phase_state()
             entry = state.setdefault(phase, {})
+            previous_status = str(entry.get("status") or "pending")
+            try:
+                active_elapsed_ms = max(0, int(entry.get("active_elapsed_ms") or 0))
+            except (TypeError, ValueError):
+                active_elapsed_ms = 0
+            if status == "running" and previous_status != "running":
+                if previous_status != "paused":
+                    active_elapsed_ms = 0
+                    entry["first_started_at"] = now
+                    entry["active_intervals"] = []
+                elif not entry.get("first_started_at") and entry.get("started_at"):
+                    entry["first_started_at"] = entry["started_at"]
+                entry["started_at"] = now
+                entry["active_elapsed_ms"] = active_elapsed_ms
+                entry.pop("completed_at", None)
+            elif status in {"paused", "complete", "failed", "cancelled"}:
+                if previous_status == "running" and entry.get("started_at"):
+                    segment_started_at = entry["started_at"]
+                    try:
+                        active_elapsed_ms += max(
+                            0,
+                            int(
+                                (
+                                    datetime.fromisoformat(now)
+                                    - datetime.fromisoformat(entry["started_at"])
+                                ).total_seconds()
+                                * 1000
+                            ),
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                    intervals = entry.get("active_intervals")
+                    if not isinstance(intervals, list):
+                        intervals = []
+                    segment = {
+                        "started_at": segment_started_at,
+                        "ended_at": now,
+                    }
+                    if not intervals or intervals[-1] != segment:
+                        intervals.append(segment)
+                    entry["active_intervals"] = intervals
+                entry["active_elapsed_ms"] = active_elapsed_ms
             entry.update(
                 {
                     "status": status,
@@ -464,8 +506,6 @@ def _set_phase(
                     "updated_at": now,
                 }
             )
-            if status == "running" and not entry.get("started_at"):
-                entry["started_at"] = now
             if status in {"complete", "failed", "cancelled"}:
                 entry["completed_at"] = now
             run.phase_state_json = json.dumps(state, ensure_ascii=False)

@@ -417,7 +417,117 @@ function efficiencyEmptyState(status) {
   };
 }
 
-export function EfficiencyView({ telemetry, report, status }) {
+function formatDuration(milliseconds) {
+  const seconds = Math.max(0, Number(milliseconds || 0)) / 1000;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 2 : 1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60);
+  return `${minutes}m ${remainingSeconds}s`;
+}
+
+function readSummary(row) {
+  const files = Number(row.files_read || 0);
+  const spans = Number(row.unique_spans_read || 0);
+  if (!files && !spans) return null;
+  return `${files} ${files === 1 ? "file" : "files"}, ${spans} ${spans === 1 ? "span" : "spans"}`;
+}
+
+function phaseWork(row) {
+  const reads = readSummary(row);
+  switch (row.phase) {
+    case "scope":
+      return ["Archive extracted and source inventory built"];
+    case "repository_model":
+      return [
+        Number(row.facts_created || 0)
+          ? `${row.facts_created} repository facts recorded`
+          : "Repository model built",
+      ];
+    case "threat_model":
+      return [reads, "Threat model built"].filter(Boolean);
+    case "planning":
+      return [`${row.obligations_created || 0} security checks planned`];
+    case "discovery":
+      return [reads, `${row.candidates_emitted || 0} candidates found`].filter(Boolean);
+    case "reconciliation": {
+      const merged = Number(row.candidates_merged || 0);
+      const split = Number(row.candidates_split || 0);
+      return merged || split
+        ? [`${merged} merged`, `${split} split`]
+        : ["No duplicate candidates needed changes"];
+    }
+    case "validation": {
+      const confirmed = Number(row.candidates_confirmed || 0);
+      const dismissed = Number(row.candidates_dismissed || 0);
+      return [
+        reads,
+        confirmed || dismissed
+          ? `${confirmed} confirmed, ${dismissed} dismissed`
+          : "No candidates required a decision",
+      ].filter(Boolean);
+    }
+    case "closure":
+      return [
+        reads,
+        Number(row.adjacent_concerns || 0)
+          ? `${row.adjacent_concerns} adjacent concerns reviewed`
+          : "Coverage gaps reviewed",
+      ].filter(Boolean);
+    case "attack_path":
+      return [reads, "Reportable candidates checked for reachability"].filter(Boolean);
+    case "report":
+      return ["Final candidate and coverage report assembled"];
+    default:
+      return [reads || "Phase completed"];
+  }
+}
+
+function buildPhaseTimeline(rows, phaseState) {
+  const intervals = rows
+    .map((row) => {
+      const state = asObject(phaseState?.[row.phase]);
+      const start = Date.parse(state.first_started_at || state.started_at || "");
+      const end = Date.parse(state.completed_at || "");
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+      const activeIntervals = asArray(state.active_intervals)
+        .map((interval) => ({
+          start: Date.parse(interval?.started_at || ""),
+          end: Date.parse(interval?.ended_at || ""),
+        }))
+        .filter(
+          (interval) =>
+            Number.isFinite(interval.start) &&
+            Number.isFinite(interval.end) &&
+            interval.end >= interval.start,
+        );
+      return {
+        phase: row.phase,
+        start,
+        end,
+        activeIntervals: activeIntervals.length ? activeIntervals : [{ start, end }],
+      };
+    })
+    .filter(Boolean);
+  if (!intervals.length) return new Map();
+  const runStart = Math.min(...intervals.map((interval) => interval.start));
+  const runEnd = Math.max(...intervals.map((interval) => interval.end));
+  const runSpan = Math.max(1, runEnd - runStart);
+  return new Map(
+    intervals.map((interval) => {
+      const segments = interval.activeIntervals.map((segment) => {
+        const left = ((segment.start - runStart) / runSpan) * 100;
+        const exactWidth = ((segment.end - segment.start) / runSpan) * 100;
+        return {
+          left,
+          width: Math.max(1.5, Math.min(100 - left, exactWidth)),
+        };
+      });
+      return [interval.phase, { segments, elapsed: interval.end - interval.start }];
+    }),
+  );
+}
+
+export function EfficiencyView({ telemetry, report, status, phaseState = {} }) {
   const rows = asArray(telemetry);
   if (!rows.length) {
     const emptyState = efficiencyEmptyState(status);
@@ -438,34 +548,53 @@ export function EfficiencyView({ telemetry, report, status }) {
     },
     { elapsed_ms: 0, files_read: 0, unique_spans_read: 0, candidates_emitted: 0 },
   );
+  const timeline = buildPhaseTimeline(rows, phaseState);
+  const hasPauseAwareTiming = rows.every((row) => {
+    const state = asObject(phaseState?.[row.phase]);
+    return (
+      Object.prototype.hasOwnProperty.call(state, "active_elapsed_ms") &&
+      Array.isArray(state.active_intervals)
+    );
+  });
   return (
     <div className="sast-semantic-layout">
       <MetricCards
         values={[
-          ["Measured phase time", `${(totals.elapsed_ms / 1000).toFixed(1)}s`],
-          ["Phase file reads", totals.files_read],
-          ["Unique spans", totals.unique_spans_read],
           [
-            "Candidates emitted",
-            totals.candidates_emitted,
-            `${report?.reportable || 0} reportable`,
+            hasPauseAwareTiming ? "Recorded active time" : "Recorded phase time",
+            formatDuration(totals.elapsed_ms),
+            hasPauseAwareTiming
+              ? "Phases can overlap; paused time is excluded"
+              : "Saved before pause-aware timing; pauses may be included",
           ],
+          ["Files reviewed", totals.files_read, "Counted once in each phase"],
+          ["Source spans reviewed", totals.unique_spans_read, "Counted once in each phase"],
+          ["Candidates found", totals.candidates_emitted, `${report?.reportable || 0} reportable`],
         ]}
       />
       <section className="sast-panel">
-        <div className="sast-panel-title">Phase and strategy telemetry</div>
+        <div className="sast-panel-title">Phase activity</div>
         <div className="table-wrap">
-          <table className="sast-semantic-table">
+          <table className="sast-semantic-table sast-efficiency-table">
+            <colgroup>
+              <col className="sast-phase-column" />
+              <col className="sast-active-time-column" />
+              <col className="sast-run-timeline-column" />
+              <col className="sast-work-completed-column" />
+            </colgroup>
             <thead>
               <tr>
                 <th>Phase</th>
-                <th>Strategy</th>
-                <th>Time</th>
-                <th>Reads</th>
-                <th>Facts</th>
-                <th>Security checks</th>
-                <th>Candidates</th>
-                <th>Caps</th>
+                <th>{hasPauseAwareTiming ? "Active time" : "Recorded time"}</th>
+                <th>
+                  <span className="sast-timeline-heading">
+                    Run timeline
+                    <small>
+                      {hasPauseAwareTiming ? "gaps show pauses" : "pause gaps unavailable"}
+                    </small>
+                  </span>
+                </th>
+                <th>Work completed</th>
               </tr>
             </thead>
             <tbody>
@@ -474,26 +603,47 @@ export function EfficiencyView({ telemetry, report, status }) {
                 try {
                   caps = JSON.parse(row.caps_json || "[]");
                 } catch {}
+                const work = [
+                  ...phaseWork(row),
+                  ...(row.strategy ? [`Strategy: ${titleCase(row.strategy)}`] : []),
+                  ...asArray(caps).map((cap) => `Limit: ${cap}`),
+                ];
+                const timing = timeline.get(row.phase);
                 return (
                   <tr key={`${row.phase}-${row.strategy}-${index}`}>
                     <td>
                       <strong>{titleCase(row.phase)}</strong>
                     </td>
-                    <td>{titleCase(row.strategy || "—")}</td>
-                    <td>{(Number(row.elapsed_ms || 0) / 1000).toFixed(2)}s</td>
-                    <td>
-                      {row.files_read || 0} files / {row.unique_spans_read || 0} spans
+                    <td>{formatDuration(row.elapsed_ms)}</td>
+                    <td className="sast-timeline-cell">
+                      {timing ? (
+                        <div
+                          className="sast-phase-timeline"
+                          role="img"
+                          aria-label={`${titleCase(row.phase)} spanned ${formatDuration(timing.elapsed)} on the recorded run timeline`}
+                          title={`${titleCase(row.phase)}: ${formatDuration(timing.elapsed)} from start to finish`}
+                        >
+                          {timing.segments.map((segment, segmentIndex) => (
+                            <span
+                              key={segmentIndex}
+                              style={{
+                                "--timeline-left": `${segment.left}%`,
+                                "--timeline-width": `${segment.width}%`,
+                              }}
+                            />
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="sast-timeline-unavailable">Timing unavailable</span>
+                      )}
                     </td>
-                    <td>{row.facts_created || 0}</td>
                     <td>
-                      {row.obligations_created || 0} created · {row.obligations_resolved || 0}{" "}
-                      resolved
+                      <div className="sast-phase-work">
+                        {work.map((item) => (
+                          <span key={item}>{item}</span>
+                        ))}
+                      </div>
                     </td>
-                    <td>
-                      {row.candidates_emitted || 0} emitted · {row.candidates_confirmed || 0}{" "}
-                      confirmed · {row.candidates_dismissed || 0} dismissed
-                    </td>
-                    <td>{asArray(caps).join("; ") || "—"}</td>
                   </tr>
                 );
               })}

@@ -108,7 +108,7 @@ test.each([
 });
 
 test("renders per-phase efficiency telemetry", () => {
-  render(
+  const { container } = render(
     <EfficiencyView
       telemetry={[
         {
@@ -124,10 +124,68 @@ test("renders per-phase efficiency telemetry", () => {
         },
       ]}
       report={{ reportable: 1 }}
+      phaseState={{
+        discovery: {
+          started_at: "2026-09-11T00:00:01+00:00",
+          completed_at: "2026-09-11T00:00:04+00:00",
+          active_elapsed_ms: 2000,
+          active_intervals: [
+            {
+              started_at: "2026-09-11T00:00:01+00:00",
+              ended_at: "2026-09-11T00:00:02+00:00",
+            },
+            {
+              started_at: "2026-09-11T00:00:03+00:00",
+              ended_at: "2026-09-11T00:00:04+00:00",
+            },
+          ],
+        },
+      }}
     />,
   );
-  expect(screen.getByText("threat directed")).toBeTruthy();
-  expect(screen.getByText("2 emitted · 1 confirmed · 1 dismissed")).toBeTruthy();
+  expect(screen.getByText("Run timeline")).toBeTruthy();
+  expect(screen.getByText("Recorded active time")).toBeTruthy();
+  expect(screen.getByText("gaps show pauses")).toBeTruthy();
+  expect(
+    Array.from(
+      container.querySelectorAll(".sast-efficiency-table col"),
+      (column) => column.className,
+    ),
+  ).toEqual([
+    "sast-phase-column",
+    "sast-active-time-column",
+    "sast-run-timeline-column",
+    "sast-work-completed-column",
+  ]);
+  const timeline = screen.getByRole("img", {
+    name: "discovery spanned 3.00s on the recorded run timeline",
+  });
+  expect(timeline.querySelectorAll("span")).toHaveLength(2);
+  expect(screen.getByText("Strategy: threat directed")).toBeTruthy();
+  expect(screen.getByText("3 files, 4 spans")).toBeTruthy();
+  expect(screen.getByText("2 candidates found")).toBeTruthy();
+  expect(screen.queryByText("Security checks")).toBeNull();
+  expect(screen.queryByText("Limits")).toBeNull();
+});
+
+test("labels older efficiency telemetry without claiming pause-aware timing", () => {
+  render(
+    <EfficiencyView
+      telemetry={[{ phase: "planning", elapsed_ms: 60000, caps_json: "[]" }]}
+      report={{}}
+      phaseState={{
+        planning: {
+          started_at: "2026-09-11T00:00:01+00:00",
+          completed_at: "2026-09-11T00:01:01+00:00",
+        },
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Recorded phase time")).toBeTruthy();
+  expect(screen.getByText("Recorded time")).toBeTruthy();
+  expect(screen.getByText("pause gaps unavailable")).toBeTruthy();
+  expect(screen.queryByText("Recorded active time")).toBeNull();
 });
 
 test("shows repository model reconciliation failures", () => {
