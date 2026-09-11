@@ -482,6 +482,14 @@ def _set_phase(
             "data": data or {},
         },
     )
+    if status == "running":
+        _emit_agent_activity(
+            sast_run_id,
+            agent_id="sast-scanner",
+            role="SAST Analyst",
+            status="active",
+            current_task=message,
+        )
 
 
 def _persist_coverage(sast_run_id: int, coverage: dict[str, dict]) -> None:
@@ -1925,6 +1933,13 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "running",
                 "Normalizing repository components, operations, controls, and dependencies.",
             )
+            _emit_agent_activity(
+                sast_run_id,
+                agent_id="sast-repository-modeller",
+                role="Repository Modeller",
+                status="active",
+                current_task="Modelling repository components and dependencies",
+            )
             semantic_model = semantic_svc.build_repository_model(root)
             try:
                 if not llm_ready_for_semantic:
@@ -1946,6 +1961,19 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "Repository model ready.",
                 semantic_model,
             )
+            reconciliation = semantic_model.get("reconciliation", {})
+            _emit_agent_activity(
+                sast_run_id,
+                agent_id="sast-repository-modeller",
+                role="Repository Modeller",
+                status="complete",
+                current_task="Repository model complete",
+                outcome=(
+                    str(reconciliation.get("warning"))[:500]
+                    if reconciliation.get("status") == "failed"
+                    else "Repository facts and dependencies recorded"
+                ),
+            )
 
         current_phase = "threat_model"
         semantic_threat_model = _completed_phase_data("threat_model")
@@ -1955,6 +1983,13 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "threat_model",
                 "running",
                 "Deriving source-backed actors, assets, boundaries, and threat scenarios.",
+            )
+            _emit_agent_activity(
+                sast_run_id,
+                agent_id="sast-threat-modeller",
+                role="Threat Modeller",
+                status="active",
+                current_task="Reviewing assets, actors, boundaries, and threat scenarios",
             )
             semantic_threat_model = semantic_svc.build_threat_model(semantic_model)
             try:
@@ -2018,11 +2053,23 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     done_check=_threat_done,
                     max_tool_calls=100,
                 )
-            except (
-                SastNetworkPause,
-                llm_svc.LLMQuotaPauseError,
-                asyncio.CancelledError,
-            ):
+            except (SastNetworkPause, llm_svc.LLMQuotaPauseError):
+                _emit_agent_activity(
+                    sast_run_id,
+                    agent_id="sast-threat-modeller",
+                    role="Threat Modeller",
+                    status="paused",
+                    current_task="Threat modelling paused",
+                )
+                raise
+            except asyncio.CancelledError:
+                _emit_agent_activity(
+                    sast_run_id,
+                    agent_id="sast-threat-modeller",
+                    role="Threat Modeller",
+                    status="cancelled",
+                    current_task="Threat modelling stopped",
+                )
                 raise
             except Exception as exc:
                 semantic_threat_model["llm_status"] = "failed"
@@ -2039,6 +2086,16 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "complete",
                 semantic_threat_model.get("summary", "Threat model ready."),
                 semantic_threat_model,
+            )
+            _emit_agent_activity(
+                sast_run_id,
+                agent_id="sast-threat-modeller",
+                role="Threat Modeller",
+                status="complete",
+                current_task="Threat model complete",
+                outcome=semantic_threat_model.get(
+                    "summary", "Threat scenarios recorded."
+                ),
             )
 
         current_phase = "planning"
@@ -2076,19 +2133,6 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             )
 
         initial_message = _build_initial_message(coll, endpoints, archive_name)
-
-        events_svc.emit(
-            sast_run_id,
-            {
-                "type": "agent_status",
-                "agent_id": "sast-scanner",
-                "role": "SAST Analyst",
-                "status": "active",
-                "current_task": "Starting static analysis…",
-                "outcome": None,
-                "_persist": True,
-            },
-        )
 
         def _stop_check() -> bool:
             return (
@@ -2695,6 +2739,14 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             "running",
             "Checking threat scenarios, model warnings, and adjacent concerns for closure.",
         )
+        _emit_agent_activity(
+            sast_run_id,
+            agent_id="sast-closure-analyst",
+            role="Closure Analyst",
+            status="active",
+            current_task="Checking unresolved security gaps and adjacent concerns",
+        )
+        closure_agent_failed = False
         unresolved_closure_keys = {
             str(item.get("obligation_key"))
             for item in semantic_planning.get("obligations", [])
@@ -2759,10 +2811,35 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     max_tool_calls=scanner_policy.sast_closure_budget,
                 )
             except (llm_svc.LLMQuotaPauseError, SastPauseRequested, SastNetworkPause):
+                _emit_agent_activity(
+                    sast_run_id,
+                    agent_id="sast-closure-analyst",
+                    role="Closure Analyst",
+                    status="paused",
+                    current_task="Closure review paused",
+                )
+                raise
+            except asyncio.CancelledError:
+                _emit_agent_activity(
+                    sast_run_id,
+                    agent_id="sast-closure-analyst",
+                    role="Closure Analyst",
+                    status="cancelled",
+                    current_task="Closure review stopped",
+                )
                 raise
             except Exception as exc:
+                closure_agent_failed = True
                 semantic_planning.setdefault("closure_warnings", []).append(
                     str(exc)[:500]
+                )
+                _emit_agent_activity(
+                    sast_run_id,
+                    agent_id="sast-closure-analyst",
+                    role="Closure Analyst",
+                    status="failed",
+                    current_task="Closure review failed",
+                    outcome=str(exc)[:500],
                 )
 
         if len(candidates) > candidates_before_closure:
@@ -2816,6 +2893,15 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             f"Semantic closure is {semantic_closure['status']}.",
             semantic_closure,
         )
+        if not closure_agent_failed:
+            _emit_agent_activity(
+                sast_run_id,
+                agent_id="sast-closure-analyst",
+                role="Closure Analyst",
+                status="complete",
+                current_task="Closure review complete",
+                outcome=f"Coverage assurance is {semantic_closure['status']}",
+            )
 
         # ── Independent reachability / attack-path analysis ──────────────────
         current_phase = "attack_path"
@@ -2851,29 +2937,58 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     "_persist": True,
                 },
             )
-            attack_summary = await _run_checkpointed_agent(
-                sast_run_id=sast_run_id,
-                phase="attack_path",
-                worker_key="attack_path",
-                config=llm_cfg_obj,
-                system_message=SAST_ATTACK_PATH_PROMPT,
-                initial_user_message=(
-                    "Record an attack path for every validated candidate:\n"
-                    + _candidate_brief(attack_candidates)
-                ),
-                tool_executor=_make_review_executor(
+            try:
+                attack_summary = await _run_checkpointed_agent(
+                    sast_run_id=sast_run_id,
+                    phase="attack_path",
+                    worker_key="attack_path",
+                    config=llm_cfg_obj,
+                    system_message=SAST_ATTACK_PATH_PROMPT,
+                    initial_user_message=(
+                        "Record an attack path for every validated candidate:\n"
+                        + _candidate_brief(attack_candidates)
+                    ),
+                    tool_executor=_make_review_executor(
+                        sast_run_id,
+                        root,
+                        coverage,
+                        "attack_path",
+                        collection_id=run.collection_id,
+                    ),
+                    emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
+                    stop_check=_stop_check,
+                    tools=SAST_ATTACK_PATH_TOOLS,
+                    resume=resume,
+                )
+                _raise_if_stopped()
+            except (llm_svc.LLMQuotaPauseError, SastPauseRequested, SastNetworkPause):
+                _emit_agent_activity(
                     sast_run_id,
-                    root,
-                    coverage,
-                    "attack_path",
-                    collection_id=run.collection_id,
-                ),
-                emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
-                stop_check=_stop_check,
-                tools=SAST_ATTACK_PATH_TOOLS,
-                resume=resume,
-            )
-            _raise_if_stopped()
+                    agent_id="sast-attack-path",
+                    role="Attack Path Analyst",
+                    status="paused",
+                    current_task="Attack-path analysis paused",
+                )
+                raise
+            except asyncio.CancelledError:
+                _emit_agent_activity(
+                    sast_run_id,
+                    agent_id="sast-attack-path",
+                    role="Attack Path Analyst",
+                    status="cancelled",
+                    current_task="Attack-path analysis stopped",
+                )
+                raise
+            except Exception as exc:
+                _emit_agent_activity(
+                    sast_run_id,
+                    agent_id="sast-attack-path",
+                    role="Attack Path Analyst",
+                    status="failed",
+                    current_task="Attack-path analysis failed",
+                    outcome=str(exc)[:500],
+                )
+                raise
         if not _phase_was_complete("attack_path"):
             for candidate in candidates:
                 if candidate.get("reportable") and not candidate.get("attack_path"):

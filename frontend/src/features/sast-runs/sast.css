@@ -104,7 +104,7 @@
 }
 .sast-phase-rail {
   display: grid;
-  grid-template-columns: repeat(10, minmax(125px, 1fr));
+  grid-template-columns: repeat(var(--sast-phase-count, 10), minmax(125px, 1fr));
   flex: 0 0 auto;
   overflow-x: auto;
   border-bottom: 1px solid var(--border);
@@ -228,41 +228,11 @@
   flex-direction: column;
   overflow-y: auto;
 }
+.sast-run-content.sast-run-content--activity {
+  padding: 0;
+}
 .sast-inline-notice {
   margin-bottom: 10px;
-}
-.sast-phase-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  margin-bottom: 12px;
-  border: 1px solid rgba(91, 141, 239, 0.35);
-  border-radius: 6px;
-  background: rgba(91, 141, 239, 0.08);
-}
-.sast-phase-banner > div {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 7px;
-  min-width: 0;
-}
-.sast-phase-banner strong {
-  color: var(--text);
-  font-size: 12px;
-}
-.sast-phase-banner span {
-  color: var(--text-2);
-  font-size: 11px;
-}
-.sast-phase-banner-status {
-  flex-shrink: 0;
-  color: var(--accent-hover) !important;
-  font-size: 10px !important;
-  font-weight: 700;
-  text-transform: uppercase;
 }
 .sast-summary-grid {
   display: grid;
@@ -344,8 +314,7 @@
   opacity: 0.7;
 }
 .sast-panel,
-.sast-evidence-panel,
-.sast-activity-panel {
+.sast-evidence-panel {
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -882,7 +851,15 @@
   font-size: 9px;
 }
 .sast-activity-panel {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
   overflow: hidden;
+}
+.sast-agents-panel {
+  min-height: 0;
 }
 .sast-activity-toolbar {
   display: flex;
@@ -896,6 +873,12 @@
   display: flex;
   gap: 2px;
   margin-right: auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.sast-activity-tabs::-webkit-scrollbar {
+  display: none;
 }
 .sast-activity-tabs button {
   padding: 6px 8px;
@@ -1194,7 +1177,7 @@
 }
 @media (max-width: 900px) {
   .sast-phase-rail {
-    grid-template-columns: repeat(10, minmax(112px, 1fr));
+    grid-template-columns: repeat(var(--sast-phase-count, 10), minmax(112px, 1fr));
     overflow-x: auto;
   }
   .sast-phase-step {
@@ -1237,10 +1220,6 @@
   .sast-view-tabs button {
     flex: 0 0 auto;
     white-space: nowrap;
-  }
-  .sast-phase-banner {
-    align-items: flex-start;
-    flex-direction: column;
   }
   .sast-summary-grid {
     grid-template-columns: 1fr 1fr;

@@ -359,6 +359,39 @@ legend {
   border: 1px solid rgba(72, 187, 120, 0.35);
   color: #86efb0;
 }
+.alert.dismissible {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.alert-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.alert-dismiss {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin: -4px -7px -4px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: currentColor;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  opacity: 0.72;
+}
+.alert-dismiss:hover,
+.alert-dismiss:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  opacity: 1;
+  outline: none;
+}
 
 /* ── Empty state ────────────────────────────────────────────── */
 

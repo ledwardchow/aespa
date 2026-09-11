@@ -552,6 +552,19 @@
   background: rgba(255, 255, 255, 0.06);
   color: var(--muted);
 }
+.agent-badge-idle {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+}
+.agent-badge-queued,
+.agent-badge-paused {
+  background: rgba(245, 158, 11, 0.14);
+  color: #fbbf24;
+}
+.agent-badge-failed {
+  background: rgba(239, 68, 68, 0.14);
+  color: #fca5a5;
+}
 .agent-current-task {
   font-size: 11px;
   color: var(--text-2);
@@ -630,6 +643,10 @@
 }
 .agent-thread-row--expandable:hover {
   background: rgba(255, 255, 255, 0.04);
+}
+.agent-thread-block > .agent-task-history {
+  margin: 4px 0 5px 22px;
+  background: var(--bg);
 }
 .agent-thread-outcome {
   grid-column: auto;

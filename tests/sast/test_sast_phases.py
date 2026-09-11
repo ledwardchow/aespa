@@ -10,6 +10,7 @@ import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
+    AgentLog,
     LLMConfig,
     LLMProfile,
     PhaseCheckpoint,
@@ -17,14 +18,18 @@ from aespa.models import (
     SastRun,
     SastWorker,
     ScanLead,
+    ScanLog,
     Site,
 )
 from aespa.models import TestRun as WebTestRun
+from aespa.services import events as events_svc
 from aespa.services import sast_scanner
 from aespa.services.scan_leads import create_lead
 
 
-@pytest.mark.parametrize("provider", ["openai_codex", "github_copilot", "factory_droid"])
+@pytest.mark.parametrize(
+    "provider", ["openai_codex", "github_copilot", "factory_droid"]
+)
 def test_semantic_phases_accept_session_authenticated_providers(provider):
     config = SimpleNamespace(provider=provider, api_key=None, base_url=None)
 
@@ -101,6 +106,71 @@ def test_analysis_endpoint_returns_persisted_semantic_state(client, isolated_db_
     }
 
 
+def test_agent_log_recovers_fixed_agent_state_from_phase_history(
+    client, isolated_db_engine
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        session.add(
+            ScanLog(
+                test_run_id=sast_run_id,
+                run_kind="sast",
+                phase="threat_model",
+                status="complete",
+                message="Threat model ready.",
+            )
+        )
+        session.commit()
+
+    response = client.get(f"/api/sast-runs/{sast_run_id}/agent-log")
+
+    assert response.status_code == 200
+    threat = next(
+        entry
+        for entry in response.json()
+        if entry["agent_id"] == "sast-threat-modeller"
+    )
+    assert threat["status"] == "complete"
+    assert threat["display_name"] == "Threat Modeller"
+    assert threat["current_task"] == "Threat model ready."
+
+
+@pytest.mark.parametrize("scanner_module", [sast_scanner, pytest.param(None, id="light")])
+def test_running_phase_updates_sast_analyst_status(
+    isolated_db_engine, scanner_module
+):
+    if scanner_module is None:
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="live phase status")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    with events_svc.run_kind_scope("sast"):
+        scanner_module._set_phase(
+            run_id,
+            "discovery",
+            "running",
+            "Reviewing source-to-sink paths.",
+        )
+
+    with Session(isolated_db_engine) as session:
+        analyst = session.exec(
+            select(AgentLog)
+            .where(AgentLog.test_run_id == run_id)
+            .where(AgentLog.run_kind == "sast")
+            .where(AgentLog.agent_id == "sast-scanner")
+        ).one()
+
+    assert analyst.status == "active"
+    assert analyst.current_task == "Reviewing source-to-sink paths."
+
+
 def test_agent_log_replays_persisted_worker_and_validator_activity(
     client, isolated_db_engine
 ):
@@ -140,8 +210,14 @@ def test_agent_log_replays_persisted_worker_and_validator_activity(
         "active",
         "blocked",
     ]
+    assert all(entry["parent_id"] == "sast-sink-workers" for entry in worker_entries)
+    assert all(entry["display_name"] == "sink-audit:1" for entry in worker_entries)
+    assert all(entry["class_group"] == "sink" for entry in worker_entries)
     assert any(
-        entry["agent_id"] == "sast-validator-17" and entry["status"] == "complete"
+        entry["agent_id"] == "sast-validator-17"
+        and entry["status"] == "complete"
+        and entry["parent_id"] == "sast-validators"
+        and entry["display_name"] == "Candidate 17"
         for entry in entries
     )
 
@@ -1007,7 +1083,8 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
     monkeypatch.setattr(llm, "set_run_context", lambda *args, **kwargs: None)
     monkeypatch.setattr(llm, "clear_run_context", lambda: None)
 
-    asyncio.run(sast_scanner._sast_scan_task(run_id))
+    with events_svc.run_kind_scope("sast"):
+        asyncio.run(sast_scanner._sast_scan_task(run_id))
 
     # Four discovery workers plus the semantic closure worker. The fixture's
     # generic fallback branch records both as source-review calls.
@@ -1021,6 +1098,11 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
             .where(ScanLead.producer_run_id == run_id)
             .where(ScanLead.imported_into_run_id == None)  # noqa: E711
         ).one()
+        agent_rows = session.exec(
+            select(AgentLog)
+            .where(AgentLog.test_run_id == run_id)
+            .where(AgentLog.run_kind == "sast")
+        ).all()
     phases = json.loads(saved_run.phase_state_json)
     assert all(phases[key]["status"] == "complete" for key in sast_scanner._PHASES)
     assert saved_run.status == "completed"
@@ -1029,6 +1111,23 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
     assert saved_lead.reportable is True
     assert json.loads(saved_lead.attack_path_json)["nodes"][-1] == "db.execute"
     assert json.loads(saved_run.coverage_json)["summary"]["files_reviewed"] == 1
+    status_by_agent = {
+        row.agent_id: row.status
+        for row in agent_rows
+        if row.agent_id
+        in {
+            "sast-repository-modeller",
+            "sast-threat-modeller",
+            "sast-closure-analyst",
+            "sast-attack-path",
+        }
+    }
+    assert status_by_agent == {
+        "sast-repository-modeller": "complete",
+        "sast-threat-modeller": "complete",
+        "sast-closure-analyst": "failed",
+        "sast-attack-path": "complete",
+    }
 
 
 def test_sast_validation_starts_after_discovery_reconciliation(
@@ -1080,9 +1179,7 @@ def test_sast_validation_starts_after_discovery_reconciliation(
         reconciliation_finished = True
         return result
 
-    monkeypatch.setattr(
-        sast_scanner, "_sync_candidates_to_db", track_candidate_sync
-    )
+    monkeypatch.setattr(sast_scanner, "_sync_candidates_to_db", track_candidate_sync)
     monkeypatch.setattr(
         sast_scanner, "_reconcile_candidate_ledger", track_reconciliation
     )
@@ -1100,9 +1197,7 @@ def test_sast_validation_starts_after_discovery_reconciliation(
                 visible_candidates_at_validation.append(
                     len(
                         session.exec(
-                            select(ScanLead).where(
-                                ScanLead.producer_run_id == run_id
-                            )
+                            select(ScanLead).where(ScanLead.producer_run_id == run_id)
                         ).all()
                     )
                 )
