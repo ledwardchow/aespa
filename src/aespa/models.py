@@ -684,6 +684,20 @@ class SpecialistAgentConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class DeepScanConfig(SQLModel, table=True):
+    """Singleton settings used only by the optional Deep web DAST mode."""
+
+    __tablename__ = "deep_scan_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    max_concurrent_workers: int = Field(default=6)
+    max_tasks: int = Field(default=200)
+    max_steps_per_task: int = Field(default=30)
+    include_sast_leads: bool = Field(default=True)
+    include_recon_checks: bool = Field(default=True)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class AdversarialValidatorConfig(SQLModel, table=True):
     """Singleton row (id always = 1) for adversarial validator settings."""
 
@@ -2577,6 +2591,87 @@ class ScanObligation(SQLModel, table=True):
     exemption_reason: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class DeepScanTask(SQLModel, table=True):
+    """One durable attack assignment for a Deep web DAST worker."""
+
+    __tablename__ = "deep_scan_task"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "fingerprint",
+            name="uq_deep_scan_task_scope",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    fingerprint: str = Field(index=True)
+    source: str = Field(default="coverage", index=True)
+    obligation_id: Optional[int] = Field(
+        default=None, foreign_key="scan_obligation.id", index=True
+    )
+    lead_id: Optional[int] = Field(default=None, foreign_key="scan_lead.id", index=True)
+    page_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("crawled_page.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    attack_class: str = Field(index=True)
+    owasp_category: str = Field(default="", index=True)
+    target_url: str
+    http_method: str = Field(default="GET")
+    parameter: Optional[str] = Field(default=None)
+    session_label: Optional[str] = Field(default=None)
+    title: str = Field(default="")
+    hypothesis: str = Field(default="")
+    priority: int = Field(default=5, index=True)
+    risk_level: str = Field(default="safe_active")
+    status: str = Field(default="queued", index=True)
+    attempt_count: int = Field(default=0)
+    max_attempts: int = Field(default=2)
+    worker_id: Optional[str] = Field(default=None, index=True)
+    handoff_id: Optional[int] = Field(
+        default=None, foreign_key="specialist_handoff.id", index=True
+    )
+    finding_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("scan_finding.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    outcome: str = Field(default="")
+    error_message: str = Field(default="")
+    created_at: datetime = Field(default_factory=_utcnow)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class DeepScanAttempt(SQLModel, table=True):
+    """Execution history for one DeepScanTask claim."""
+
+    __tablename__ = "deep_scan_attempt"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    task_id: int = Field(foreign_key="deep_scan_task.id", index=True)
+    worker_id: str = Field(index=True)
+    attempt_number: int = Field(default=1)
+    status: str = Field(default="running", index=True)
+    traffic_ids_json: str = Field(default="[]")
+    outcome: str = Field(default="")
+    error_message: str = Field(default="")
+    started_at: datetime = Field(default_factory=_utcnow)
+    completed_at: Optional[datetime] = Field(default=None)
 
 
 class ProbeExecution(SQLModel, table=True):

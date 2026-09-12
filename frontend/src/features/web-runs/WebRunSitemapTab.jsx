@@ -45,7 +45,8 @@ export function WebRunSitemapTab(props) {
               }}
               onClick={onResumeThinkingScan}
             >
-              <IconPlay /> Resume Pentest (step {checkpointStatus.step_count})
+              <IconPlay /> Resume Pentest
+              {checkpointStatus?.step_count ? ` (step ${checkpointStatus.step_count})` : ""}
             </button>
           )}
         </div>

@@ -20,6 +20,13 @@ export function useAppPreferences() {
       return true;
     }
   });
+  const [showDeepScan, setShowDeepScan] = useState(() => {
+    try {
+      return localStorage.getItem("aespa_show_deep_scan") === "true";
+    } catch {
+      return false;
+    }
+  });
   const [reportingDebugCfg, setReportingDebugCfg] = useState(null);
   const [benchmarkLabCfg, setBenchmarkLabCfg] = useState(null);
   useEffect(() => {
@@ -47,6 +54,8 @@ export function useAppPreferences() {
     setShowUsername,
     showApplications,
     setShowApplications,
+    showDeepScan,
+    setShowDeepScan,
     reportingDebugCfg,
     setReportingDebugCfg,
     benchmarkLabCfg,

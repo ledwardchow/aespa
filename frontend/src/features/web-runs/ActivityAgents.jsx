@@ -39,15 +39,95 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
     <div className="agents-panel">
       {(() => {
         const roster = defaultAgentRoster();
-        // Container slots (specialist/burp/validator) must always render as
+        // Container slots must always render as
         // their placeholder so the multi-agent container row fires correctly.
-        const CONTAINER_IDS = new Set(["specialist", "burp", "validator"]);
+        const CONTAINER_IDS = new Set(["specialist", "deep-workers", "burp", "validator"]);
         const rosterAgents = roster.map((p) =>
           CONTAINER_IDS.has(p.id) ? p : agents.find((a) => representsAgent(a, p)) || p,
         );
         const extras = agents.filter((a) => !roster.some((p) => representsAgent(a, p)));
         const shownAgents = [...rosterAgents, ...extras].map(normalizeAgentForRun);
         const renderRow = (a) => {
+          // Deep tasks use a unique event agent ID. Keep them in one status row
+          // here and leave per-task history to the Workers tab.
+          if (a.id === "deep-workers") {
+            const workerAgents = agents
+              .filter((agent) => agent.id.startsWith("deep-worker-"))
+              .map(normalizeAgentForRun);
+            const activeWorkers = workerAgents.filter((agent) => agent.status === "active");
+            const activeCount = activeWorkers.length;
+            const completeCount = workerAgents.length - activeCount;
+            const canExpand = activeWorkers.length > 0;
+            const isExpanded = canExpand && !collapsedAgentIds.has("deep-workers");
+            const summaryTask =
+              workerAgents.length === 0
+                ? "No Deep tasks started"
+                : activeCount > 0 && completeCount > 0
+                  ? `${activeCount} running, ${completeCount} complete`
+                  : activeCount > 0
+                    ? `${activeCount} worker${activeCount !== 1 ? "s" : ""} running`
+                    : `${completeCount} task${completeCount !== 1 ? "s" : ""} complete`;
+            return (
+              <div
+                key="deep-workers"
+                className={
+                  "agent-row" +
+                  (activeCount > 0 ? " agent-row--active" : " agent-row--complete") +
+                  (canExpand ? " agent-row--expandable" : "")
+                }
+                onClick={canExpand ? () => toggleAgentId("deep-workers") : undefined}
+              >
+                <span
+                  className={"agent-dot" + (activeCount > 0 ? " agent-dot--active" : "")}
+                  aria-hidden="true"
+                ></span>
+                <span
+                  className={"agent-role-name" + (activeCount > 0 ? " agent-role-name--pulse" : "")}
+                >
+                  Deep Attack Workers
+                </span>
+                <span
+                  className={
+                    "agent-badge" +
+                    (activeCount > 0 ? " agent-badge-active" : " agent-badge-complete")
+                  }
+                >
+                  {activeCount > 0 ? "ACTIVE" : workerAgents.length > 0 ? "COMPLETE" : "IDLE"}
+                </span>
+                <span className="agent-current-task">{summaryTask}</span>
+                {canExpand && (
+                  <span className="activity-expand-chevron">{isExpanded ? "▲" : "▼"}</span>
+                )}
+                {canExpand && isExpanded && (
+                  <div className="agent-task-history">
+                    {activeWorkers.map((worker) => {
+                      const match = worker.id.match(/^deep-worker-(\d+)-task-(\d+)$/);
+                      const workerLabel = match ? `Worker ${match[1]}` : worker.id;
+                      const task =
+                        worker.currentTask ||
+                        worker.taskHistory?.slice(-1)[0]?.task ||
+                        "Initialising…";
+                      return (
+                        <div key={worker.id} className="agent-thread-row agent-thread-row--active">
+                          <span
+                            className="agent-dot agent-dot--sm agent-dot--active"
+                            aria-hidden="true"
+                          ></span>
+                          <span className="agent-thread-id">{workerLabel}</span>
+                          <span className="agent-badge agent-badge--sm agent-badge-active">
+                            ACTIVE
+                          </span>
+                          <span className="agent-current-task" title={task}>
+                            {task.length > 90 ? task.slice(0, 89) + "…" : task}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          }
           // ── Specialist container row ────────────────────────────────
           if (a.id === "specialist") {
             const specialistAgents = agents

@@ -130,6 +130,7 @@ export function WebRunHeader({
   crawlStopping,
   scanStopping,
   coverageMode,
+  showDeepScan = false,
   onCoverageMode,
   onStart,
   onStop,
@@ -201,13 +202,14 @@ export function WebRunHeader({
             <label
               className="subtle"
               style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}
-              title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: test every applicable page × category obligation. SAST Validate: validate only imported SAST leads."
+              title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: test every applicable page × category obligation. Deep: build a persistent queue from recon, coverage, and imported SAST leads, then use several attack workers. SAST Validate: validate only imported SAST leads."
             >
               Scan mode:
               <select value={coverageMode} onChange={(event) => onCoverageMode(event.target.value)}>
                 <option value="track">Quick</option>
                 <option value="standard">Standard</option>
                 <option value="enforce">Full</option>
+                {showDeepScan && <option value="deep">Deep</option>}
                 <option value="sast_validate">SAST Validate</option>
               </select>
             </label>

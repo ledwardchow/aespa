@@ -180,9 +180,10 @@ export const routes = {
   "run-detail": {
     section: "sites",
     Component: lazyNamed(() => import("../features/web-runs/TestRunDetail.jsx"), "TestRunDetail"),
-    props: (route) => ({
+    props: (route, preferences) => ({
       key: route.id,
       runId: route.id,
+      showDeepScan: preferences.showDeepScan,
       initialTab: route.tab,
       initialFindingRef: route.findingRef,
       initialLeadRef: route.leadRef,
@@ -197,7 +198,7 @@ export const routes = {
   "scan-policy": {
     section: "scan-policy",
     Component: lazyNamed(() => import("../features/settings/ScanPolicyPage.jsx"), "ScanPolicyPage"),
-    props: () => ({}),
+    props: (_route, preferences) => ({ showDeepScan: preferences.showDeepScan }),
   },
   "external-integrations": {
     section: "external-integrations",
@@ -215,6 +216,8 @@ export const routes = {
       setShowUsername: preferences.setShowUsername,
       showApplications: preferences.showApplications,
       setShowApplications: preferences.setShowApplications,
+      showDeepScan: preferences.showDeepScan,
+      setShowDeepScan: preferences.setShowDeepScan,
       username: preferences.username,
       reportingDebugCfg: preferences.reportingDebugCfg,
       setReportingDebugCfg: preferences.setReportingDebugCfg,

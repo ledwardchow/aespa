@@ -647,6 +647,53 @@ start_thinking_scan(run_id)
        └─ _do_agentic_thinking_loop(...)   ← main loop
 ```
 
+### Deep web DAST mode
+
+Deep is an optional web scan mode implemented in `services/deep_scan.py`. Quick,
+Standard, Full, and SAST Validate continue through the Test Lead flow described
+above. Deep takes a separate branch at the start of `_do_thinking_scan`.
+
+Deep builds a persistent `DeepScanTask` queue from three sources:
+
+- deterministic `ScanObligation` rows derived from the crawl and traffic;
+- extra recon checks for routes, headers, CORS, browser components, and saved
+  interactive workflows;
+- open `ScanLead` copies imported from SAST.
+
+The queue has stable fingerprints, priorities, attempt records, worker ownership,
+and finding links. A configured pool of `Deep Attack Worker` agents claims tasks
+one at a time. Each worker uses the existing specialist execution engine, so it
+keeps the same scope checks, scanner policy, browser state replay, session vault,
+traffic provenance, finding write-up, and adversarial validation. Worker traffic
+is attached to the originating coverage obligation through `ProbeExecution` and
+`CoverageEvidence` rows. HTTP, browser, and Python probes also update the matching
+`PageOwaspTest` cell while they run. Completed probes are promoted to covered at
+the end of the scan, and findings use the existing finding hook to update the
+affected page and OWASP category.
+
+Deep resume state is the queue rather than the Test Lead conversation checkpoint.
+When a user stops the scan, in-flight attempts are recorded as cancelled and their
+tasks return to `queued` without consuming the retry allowance. Completed,
+inconclusive, and finding tasks remain terminal. Resume starts the worker pool again
+and claims only the remaining queued work.
+
+Imported SAST leads remain unproven until live testing finishes. A linked finding
+marks the copied lead confirmed. A completed task without proof marks it
+inconclusive. Failed or unprocessed lead tasks leave the run incomplete.
+
+The web run Activity panel changes its secondary tabs based on the saved run mode:
+
+- ordinary DAST: Agents, Workers, Log;
+- Deep DAST: Agents, Workers, Work Queue, Log.
+
+Deep worker count, task cap, step budget, recon-task generation, and SAST-lead
+inclusion have separate settings. They do not modify the normal specialist-agent
+settings.
+
+Each saved worker step includes a readable description of the intended check,
+followed by its request or tool details and any observation. The Workers view
+restores these traces from the scan log after navigation or restart.
+
 **TLS/SSL posture (deterministic).** Unless deterministic checks are disabled, any
 `https://` target runs `_run_tls_posture_module` first through
 `_run_deterministic_site_modules` — an

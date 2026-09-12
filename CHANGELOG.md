@@ -4,6 +4,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+### New features
+
+- **Deep web scans**: Web DAST runs can use a separate Deep mode that builds a saved task queue from crawl evidence, OWASP coverage items, interactive workflows, recon checks, and imported SAST leads. Several attack workers test the queue in parallel using the existing session, browser replay, scope, traffic, reporting, validation, and per-run token accounting. Their HTTP, browser, and Python probes update the OWASP workprogram while the scan runs, and tested cells and findings are saved there when work completes. Stopping a Deep scan returns interrupted tasks to the queue without consuming their retry allowance, and the run offers Resume while completed work stays finished. Selecting a different scan mode changes that action to Start Pentest so a checkpoint is never resumed under the wrong mode. Deep has separate worker and task limits under Agent Settings using the same layout as the other agent settings. Its Activity view groups Deep attack workers into one row that expands to show only currently running workers, shows specialist and Deep worker history together under Workers, and keeps the saved Work Queue separate. Work Queue rows show the input or identity comparison assigned to each task, making otherwise similar URL checks distinguishable. Worker traces retain a readable description for every step, show the request or tool as supporting detail, and restore saved steps after navigation or restart. Deep Scan is hidden by default and can be enabled under System Settings -> Feature Visibility -> Experimental Features. Quick, Standard, Full, SAST Validate, and API scans keep their existing behaviour.
+
 ### Fixes
 
 - **Desktop release builds**: macOS and Windows packaging now finds application files after the build scripts were moved into `scripts/`. Windows builds also stop at the PyInstaller error instead of continuing to a missing executable check.
@@ -45,7 +49,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Linux display detection**: AESPA now warns when a Linux host cannot access X11 or Wayland. Guided login and visible browser mode are disabled until a graphical display is available.
 
-- **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser, Reporting Lab, and Applications options are grouped under Feature Visibility, and settings tabs support keyboard navigation.
+- **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser and lab options are grouped under Feature Visibility, while Applications scanning and DAST Deep Scan Mode are grouped under Experimental Features. Settings tabs support keyboard navigation.
 
 - **Configurable Standard scan mode**: Standard scans now continue until the Test Lead has tested the configured percentage of applicable OWASP coverage items. Set the target in the Test Lead agent settings; the default is 60%.
 

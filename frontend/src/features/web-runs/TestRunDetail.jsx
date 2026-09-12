@@ -12,7 +12,11 @@ import { nav } from "../../shared/navigation/router.js";
 import { WebRunChatProvider, useWebRunChat } from "./WebRunChat.jsx";
 import { FindingsDataProvider, useFindingsData } from "./FindingsData.jsx";
 import { useActivity } from "./useActivity.js";
-import { isCrawlerAgentActive } from "./runState.js";
+import {
+  canResumeSelectedScanMode,
+  hasResumableDeepScan,
+  isCrawlerAgentActive,
+} from "./runState.js";
 
 import { WebRunFindingsTab } from "./WebRunFindingsTab.jsx";
 import { WebRunActivityTab } from "./WebRunActivityTab.jsx";
@@ -41,6 +45,7 @@ export function TestRunDetail(props) {
 
 function TestRunContent({
   runId,
+  showDeepScan = false,
   initialTab,
   initialFindingRef,
   initialLeadRef,
@@ -119,7 +124,9 @@ function TestRunContent({
       setRun(r);
       setGraph(g);
       if (r?.scope_hosts) setScopeHosts(r.scope_hosts);
-      if (r?.coverage_mode) setCoverageMode(r.coverage_mode);
+      if (r?.coverage_mode) {
+        setCoverageMode(r.coverage_mode === "deep" && !showDeepScan ? "track" : r.coverage_mode);
+      }
       webRunsApi
         .getThinkingStatus(runId)
         .then(setThinkingStatus)
@@ -135,7 +142,7 @@ function TestRunContent({
     } catch (e) {
       setError(e.message);
     }
-  }, [runId]);
+  }, [runId, showDeepScan]);
   useEffect(() => {
     loadAll();
   }, [loadAll]);
@@ -266,6 +273,7 @@ function TestRunContent({
         status: "running",
       });
       setCheckpointStatus(null);
+      setRun((current) => (current ? { ...current, coverage_mode: coverageMode } : current));
       const s = await webRunsApi.startThinkingScan(runId, coverageMode);
       setThinkingStatus(s);
       setWpReloadKey((k) => k + 1);
@@ -277,6 +285,9 @@ function TestRunContent({
   const onResumeThinkingScan = async () => {
     try {
       setThinkingStopReq(false);
+      setRun((current) =>
+        current ? { ...current, status: "running", phase: "scanning" } : current,
+      );
       setThinkingStatus({
         status: "running",
       });
@@ -371,9 +382,10 @@ function TestRunContent({
     canStartAnyScan &&
     ["idle", "complete", "stopped", "failed", null].includes(effectiveThinkingStatus);
   const hasCheckpoint =
-    checkpointStatus?.exists === true &&
+    (checkpointStatus?.exists === true || hasResumableDeepScan(run)) &&
     canStartAnyScan &&
     !isDynamicScanActive(effectiveThinkingStatus);
+  const canResume = canResumeSelectedScanMode(hasCheckpoint, coverageMode, run?.coverage_mode);
   const interactiveLogins = useMemo(
     () =>
       (run?.credentials || []).flatMap((credential) => {
@@ -425,11 +437,12 @@ function TestRunContent({
         canStop={canStop}
         canStartScan={canStartThinking}
         canStopScan={canStopThinking}
-        canResume={hasCheckpoint}
+        canResume={canResume}
         canImportCrawl={canImportCrawl}
         crawlStopping={crawlStopRequested}
         scanStopping={thinkingStopRequested}
         coverageMode={coverageMode}
+        showDeepScan={showDeepScan}
         onCoverageMode={setCoverageMode}
         onStart={onStart}
         onStop={onStop}

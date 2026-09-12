@@ -303,6 +303,9 @@ class ApiCredentialCreate(BaseModel):
 # ── API Test Run schemas ──────────────────────────────────────────────────────
 
 CoverageModeLiteral = Literal["track", "standard", "enforce", "sast_validate"]
+WebCoverageModeLiteral = Literal[
+    "track", "standard", "enforce", "deep", "sast_validate"
+]
 
 
 class ApiTestRunCreate(BaseModel):
@@ -1082,6 +1085,27 @@ class SpecialistAgentConfigOut(SpecialistAgentConfigBase):
     updated_at: datetime
 
 
+# ── Deep web DAST config schemas ─────────────────────────────────────────────
+
+
+class DeepScanConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    max_concurrent_workers: int = Field(default=6, ge=1, le=20)
+    max_tasks: int = Field(default=200, ge=1, le=1000)
+    max_steps_per_task: int = Field(default=30, ge=1, le=200)
+    include_sast_leads: bool = True
+    include_recon_checks: bool = True
+
+
+class DeepScanConfigIn(DeepScanConfigBase):
+    pass
+
+
+class DeepScanConfigOut(DeepScanConfigBase):
+    updated_at: datetime
+
+
 # ── Adversarial Validator config schemas ──────────────────────────────────────
 
 
@@ -1484,6 +1508,7 @@ class TestRunSummary(BaseModel):
     llm_max_concurrency: int | None = None
     crawler_mode: str = "url"
     scan_mode: str = "aggressive"
+    coverage_mode: str = "track"
     scan_status: str = "idle"
     scan_total_pages: int = 0
     scan_pages_done: int = 0

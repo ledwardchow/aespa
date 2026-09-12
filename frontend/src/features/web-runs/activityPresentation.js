@@ -39,6 +39,16 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
       status: "idle",
       currentTask: "No specialist dispatched",
     },
+    ...(run?.coverage_mode === "deep"
+      ? [
+          {
+            id: "deep-workers",
+            role: "Deep Attack Workers",
+            status: "idle",
+            currentTask: "No Deep tasks started",
+          },
+        ]
+      : []),
     {
       id: "burp",
       role: "Burp",
@@ -71,6 +81,8 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
       return agent.role === "Validator" || agent.id?.startsWith("validator-");
     if (placeholder.id === "specialist")
       return agent.role === "Specialist" || agent.id?.startsWith("specialist-");
+    if (placeholder.id === "deep-workers")
+      return agent.role === "Deep Attack Worker" || agent.id?.startsWith("deep-worker-");
     if (placeholder.id === "reporting")
       return agent.role === "Reporting" || agent.id === "reporting";
     return false;
