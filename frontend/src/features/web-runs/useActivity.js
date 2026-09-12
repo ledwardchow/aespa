@@ -82,8 +82,9 @@ export function useActivity(runId) {
       webRunsApi.getThinkingStatus(runId),
       webRunsApi.getValidateStatus(runId),
       webRunsApi.getCrawlStatus(runId).catch(() => null),
+      webRunsApi.getScanLog(runId).catch(() => []),
     ])
-      .then(([entries, scanStatus, validationStatus, crawlStatus]) => {
+      .then(([entries, scanStatus, validationStatus, crawlStatus, scanEntries]) => {
         entries = entries || [];
         const scanRunning = isDynamicScanActive(scanStatus?.status);
         const validationRunning = validationStatus?.status === "running";
@@ -116,6 +117,52 @@ export function useActivity(runId) {
             outcome: e.outcome,
           });
           agentsMap.set(e.agent_id, existing);
+        }
+        for (const e of scanEntries || []) {
+          if (
+            !["specialist_step", "deep_worker_step"].includes(e.phase) ||
+            e.status !== "running" ||
+            !e.data?.agent_id
+          ) {
+            continue;
+          }
+          const data = e.data;
+          const agentId = data.agent_id;
+          const existing = agentsMap.get(agentId) || {
+            id: agentId,
+            role: e.phase === "deep_worker_step" ? "Deep Attack Worker" : "Specialist",
+            status: "idle",
+            currentTask: data.description || "Saved worker activity",
+            taskHistory: [],
+            crawlEvents: [],
+          };
+          const entryTs = e._persisted_at
+            ? parseDate(e._persisted_at).toLocaleTimeString("en-US", {
+                hour12: false,
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })
+            : "--:--:--";
+          existing.stepHistory = [
+            ...(existing.stepHistory || []),
+            {
+              ts: entryTs,
+              step: data.step,
+              description: data.description,
+              tool_name: data.tool_name,
+              context_tool: data.context_tool,
+              action_type: data.action_type,
+              method: data.method,
+              url: data.url,
+              status: data.status,
+              observation: data.observation,
+              hypothesis: data.hypothesis,
+              payload_purpose: data.payload_purpose,
+              payload_summary: data.payload_summary,
+            },
+          ].slice(-200);
+          agentsMap.set(agentId, existing);
         }
         const crawler = agentsMap.get("crawler");
         if (crawlStatus?.running) {

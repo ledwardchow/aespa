@@ -20,13 +20,13 @@ from aespa.models import (
     TestRun,
 )
 from aespa.schemas import (
-    CoverageModeLiteral,
     ScanCheckpointStatusOut,
     ScanFindingImportIn,
     ScanFindingImportResult,
     ScanFindingOut,
     ScanFindingUpdateIn,
     ValidationStatusOut,
+    WebCoverageModeLiteral,
 )
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import crawler as crawler_svc
@@ -47,7 +47,7 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
 
 
 class _StartScanBody(BaseModel):
-    coverage_mode: Optional[CoverageModeLiteral] = None
+    coverage_mode: Optional[WebCoverageModeLiteral] = None
     target_page_id: Optional[int] = None
     target_page_ids: Optional[list[int]] = None
     use_session: Optional[str] = None
@@ -161,6 +161,16 @@ def thinking_scan_status(run_id: int, session: Session = Depends(get_session)) -
     return scanner_svc.get_thinking_scan_status(run_id)
 
 
+@router.get("/api/test-runs/{run_id}/deep-queue")
+def deep_scan_queue(run_id: int, session: Session = Depends(get_session)) -> dict:
+    run = _get_run_or_404(session, run_id)
+    if run.coverage_mode != "deep":
+        raise HTTPException(status_code=409, detail="This run is not using Deep mode")
+    from aespa.services.deep_scan import get_queue
+
+    return get_queue(run_id)
+
+
 @router.get(
     "/api/test-runs/{run_id}/thinking-scan/checkpoint",
     response_model=ScanCheckpointStatusOut,
@@ -199,7 +209,7 @@ async def resume_thinking_scan(
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     status = checkpoint_svc.checkpoint_status(run_id)
-    if not status["exists"]:
+    if not status["exists"] and run.coverage_mode != "deep":
         raise HTTPException(status_code=404, detail="No checkpoint found for this run")
     if run.coverage_mode == "sast_validate":
         from aespa.services.scan_leads import get_leads_for_run

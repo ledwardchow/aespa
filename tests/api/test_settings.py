@@ -923,6 +923,28 @@ def test_upsert_scanner_policy_invalid_limit(client: TestClient):
     assert r.status_code == 422
 
 
+def test_deep_scan_settings_are_separate_from_specialists(client: TestClient):
+    defaults = client.get("/api/settings/deep-scan-config")
+    assert defaults.status_code == 200
+    assert defaults.json()["max_concurrent_workers"] == 6
+
+    payload = {
+        "max_concurrent_workers": 8,
+        "max_tasks": 250,
+        "max_steps_per_task": 40,
+        "include_sast_leads": True,
+        "include_recon_checks": False,
+    }
+    saved = client.put("/api/settings/deep-scan-config", json=payload)
+    assert saved.status_code == 200
+    assert saved.json()["max_concurrent_workers"] == 8
+    assert saved.json()["include_recon_checks"] is False
+
+    specialist = client.get("/api/settings/specialist-agent-config")
+    assert specialist.status_code == 200
+    assert specialist.json()["max_concurrent"] == 5
+
+
 def test_upsert_scanner_policy_rejects_invalid_standard_target(client: TestClient):
     payload = client.get("/api/settings/scanner-policy").json()
     payload["standard_coverage_percent"] = 101

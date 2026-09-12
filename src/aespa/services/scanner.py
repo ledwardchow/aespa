@@ -1332,11 +1332,15 @@ def _infer_step_note(tool_name: str, tool_input: dict, step: int) -> str:
     """
     explicit = tool_input.get("note")
     if explicit:
-        return str(explicit)
+        return _compact_log_value(explicit, 240)
+    for key in ("hypothesis", "payload_purpose", "purpose"):
+        description = _compact_log_value(tool_input.get(key), 240)
+        if description:
+            return description
     if tool_name == "http_request":
         method = (tool_input.get("method") or "HTTP").upper()
         url = tool_input.get("url") or ""
-        return f"{method} {url}" if url else f"{method} request"
+        return f"Send {method} request to {url}" if url else f"Send {method} request"
     if tool_name == "context_tool":
         inner = tool_input.get("tool") or "context lookup"
         args = tool_input.get("args") or {}
@@ -1346,7 +1350,7 @@ def _infer_step_note(tool_name: str, tool_input: dict, step: int) -> str:
         if inner == "remove_finding":
             fid = args.get("finding_id") or ""
             return f"Remove finding {fid}"
-        return f"Query: {inner}"
+        return f"Look up {str(inner).replace('_', ' ')}"
     if tool_name == "write_finding":
         title = tool_input.get("title") or "untitled"
         return f"Write finding: {title}"
@@ -1371,8 +1375,8 @@ def _infer_step_note(tool_name: str, tool_input: dict, step: int) -> str:
     if tool_name == "browser":
         action = tool_input.get("action") or "navigate"
         url = tool_input.get("url") or ""
-        return f"Browser {action}: {url}" if url else f"Browser {action}"
-    return tool_name
+        return f"Use browser to {action}: {url}" if url else f"Use browser to {action}"
+    return str(tool_name).replace("_", " ").capitalize()
 
 
 def _context_budget_reason(action: dict[str, Any]) -> str:
@@ -4980,6 +4984,10 @@ async def _run_specialist_agent(
     target_page_id: int | None = None,
     target_session_label: str | None = None,
     handoff_id: int | None = None,
+    agent_role: str = "Specialist",
+    event_phase: str = "specialist_step",
+    post_probe_fn=None,
+    default_owasp_category: str = "",
 ) -> None:
     """Run a focused specialist agent for a specific vulnerability lead."""
     # The specialist role may be assigned a different Model than the Test Lead
@@ -5050,11 +5058,15 @@ async def _run_specialist_agent(
                 tool_input.setdefault("use_session", target_session_label)
         note = _infer_step_note(tool_name, tool_input, step)
 
-        # Emit specialist_step as scanner_phase so it persists to scan_log
-        # (Log tab) and also as specialist_step for the Agents panel thread view.
+        # Persist worker steps to the Log tab and send the matching live event.
         step_event_data = {
             "agent_id": agent_id,
             "step": step,
+            "description": note,
+            "tool_name": tool_name,
+            "context_tool": (
+                tool_input.get("tool") if tool_name == "context_tool" else None
+            ),
             "action_type": (
                 "http_request"
                 if tool_name == "http_request"
@@ -5068,13 +5080,14 @@ async def _run_specialist_agent(
             "url": tool_input.get("url") or target_url,
             "observation": tool_input.get("observation"),
             "hypothesis": tool_input.get("hypothesis"),
+            "payload_purpose": tool_input.get("payload_purpose"),
             "payload_summary": tool_input.get("payload_summary"),
         }
         events_svc.emit(
             run_id,
             {
                 "type": "scanner_phase",
-                "phase": "specialist_step",
+                "phase": event_phase,
                 "status": "running",
                 "message": (
                     f"[{agent_id}] Step {step}: "
@@ -5090,7 +5103,7 @@ async def _run_specialist_agent(
         events_svc.emit(
             run_id,
             {
-                "type": "specialist_step",
+                "type": event_phase,
                 **step_event_data,
             },
         )
@@ -5099,7 +5112,7 @@ async def _run_specialist_agent(
             {
                 "type": "agent_status",
                 "agent_id": agent_id,
-                "role": "Specialist",
+                "role": agent_role,
                 "status": "active",
                 "current_task": f"Step {step}: {note}",
                 "outcome": None,
@@ -5201,7 +5214,7 @@ async def _run_specialist_agent(
                 run_id,
                 {
                     "type": "scanner_phase",
-                    "phase": "specialist_step",
+                    "phase": event_phase,
                     "status": "complete",
                     "message": (
                         f"[{agent_id}] Step {step}: {'recorded finding' if saved else 'skipped duplicate'} {_fw_title}"
@@ -5238,7 +5251,7 @@ async def _run_specialist_agent(
                 def execution_scope(url: str) -> str | None:
                     return check_scope(url, site_id, run_id)
 
-                execution_post_probe = _make_web_post_probe_fn(run_id)
+                execution_post_probe = post_probe_fn or _make_web_post_probe_fn(run_id)
             return await execute_agent_python(
                 run_kind="api" if is_api_run else "web",
                 run_id=run_id,
@@ -5251,6 +5264,7 @@ async def _run_specialist_agent(
                 scanner_policy=scanner_policy,
                 scope_check_fn=execution_scope,
                 post_probe_fn=execution_post_probe,
+                default_owasp_category=default_owasp_category,
                 requested_timeout_s=tool_input.get("timeout_s"),
             )
 
@@ -5322,7 +5336,7 @@ async def _run_specialist_agent(
                     "agent_id": agent_id,
                     "agent_step": step,
                     "purpose": traffic_svc.request_purpose(
-                        tool_input, "Probe target", agent_name="Specialist"
+                        tool_input, "Probe target", agent_name=agent_role
                     ),
                     "owasp_category": tool_input.get("owasp_category"),
                     "test_class": tool_input.get("test_class"),
@@ -5368,6 +5382,24 @@ async def _run_specialist_agent(
                                     handoff_id,
                                     page_id=request_page_id,
                                 )
+                    probe_category = str(
+                        tool_input.get("owasp_category") or default_owasp_category
+                    )
+                    if post_probe_fn is not None:
+                        try:
+                            if is_api_run:
+                                post_probe_fn(url, method, probe_category)
+                            else:
+                                post_probe_fn(
+                                    url,
+                                    method,
+                                    probe_category,
+                                    str(tool_input.get("test_class") or "") or None,
+                                    resp.status_code,
+                                    request_page_id,
+                                )
+                        except Exception as exc:
+                            log.debug("specialist post_probe_fn error: %s", exc)
                     if _session_resolution_note:
                         resp_body = f"{_session_resolution_note}\n\n{resp_body}"
                     _sp_canary_fp = _ssrf_canary.get(run_id)
@@ -5480,7 +5512,7 @@ async def _run_specialist_agent(
                         purpose=traffic_svc.request_purpose(
                             tool_input,
                             "Browser probe",
-                            agent_name="Specialist",
+                            agent_name=agent_role,
                         ),
                         owasp_category=tool_input.get("owasp_category"),
                         test_class=tool_input.get("test_class"),
@@ -5503,6 +5535,21 @@ async def _run_specialist_agent(
                     browser_result.get("captured_traffic"),
                     browser_session_label,
                 )
+                probe_category = str(
+                    tool_input.get("owasp_category") or default_owasp_category
+                )
+                if post_probe_fn is not None:
+                    try:
+                        post_probe_fn(
+                            str(browser_result.get("url") or target_url),
+                            "BROWSER",
+                            probe_category,
+                            str(tool_input.get("test_class") or "") or None,
+                            browser_result.get("status"),
+                            browser_page_id,
+                        )
+                    except Exception as exc:
+                        log.debug("specialist browser post_probe_fn error: %s", exc)
                 return (
                     (f"{browser_note}\n\n" if browser_note else "")
                     + f"Browser {browser_result.get('url')} → {browser_result.get('status')}\n"
@@ -5552,7 +5599,7 @@ async def _run_specialist_agent(
             {
                 "type": "agent_status",
                 "agent_id": agent_id,
-                "role": "Specialist",
+                "role": agent_role,
                 "status": "active",
                 "current_task": f"Starting {attack_class} investigation on {target_url}",
                 "outcome": None,
@@ -5597,7 +5644,7 @@ async def _run_specialist_agent(
             {
                 "type": "agent_status",
                 "agent_id": agent_id,
-                "role": "Specialist",
+                "role": agent_role,
                 "status": "complete",
                 "current_task": outcome,
                 "outcome": outcome,
@@ -5612,7 +5659,7 @@ async def _run_specialist_agent(
             {
                 "type": "agent_status",
                 "agent_id": agent_id,
-                "role": "Specialist",
+                "role": agent_role,
                 "status": "complete",
                 "current_task": "Stopped",
                 "outcome": "Stopped",
@@ -5641,7 +5688,7 @@ async def _run_specialist_agent(
             {
                 "type": "agent_status",
                 "agent_id": agent_id,
-                "role": "Specialist",
+                "role": agent_role,
                 "status": "failed",
                 "current_task": f"Error: {exc}",
                 "outcome": "Error",
@@ -6937,6 +6984,17 @@ async def _do_thinking_scan(run_id: int) -> None:
     """LLM-directed scan: the model decides each HTTP request to issue, observes
     the response, and adaptively chooses what to probe next — exactly like a human
     tester working through curl."""
+    # Deep is an opt-in queue-driven scan. Keep the established Quick, Standard,
+    # Full, and SAST Validate orchestration below unchanged.
+    with Session(get_engine()) as _mode_session:
+        _mode_run = _mode_session.get(TestRun, run_id)
+        _coverage_mode = getattr(_mode_run, "coverage_mode", "track")
+    if _coverage_mode == "deep":
+        from aespa.services.deep_scan import run_deep_scan
+
+        await run_deep_scan(run_id)
+        return
+
     # ── Load config ───────────────────────────────────────────────────────────
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
