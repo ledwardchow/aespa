@@ -691,8 +691,15 @@ class DeepScanConfig(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     max_concurrent_workers: int = Field(default=6)
+    max_concurrent_planners: int = Field(default=4)
     max_tasks: int = Field(default=200)
     max_steps_per_task: int = Field(default=30)
+    initial_variants_per_campaign: int = Field(default=2)
+    max_variants_per_campaign: int = Field(default=4)
+    max_total_variants: int = Field(default=400)
+    adaptive_follow_up: bool = Field(default=True)
+    minimum_signal_strength: int = Field(default=2)
+    reuse_captured_baselines: bool = Field(default=True)
     include_sast_leads: bool = Field(default=True)
     include_recon_checks: bool = Field(default=True)
     updated_at: datetime = Field(default_factory=_utcnow)
@@ -2168,9 +2175,7 @@ class SystemTarget(SQLModel, table=True):
 
     __tablename__ = "system_target"
     __table_args__ = (
-        UniqueConstraint(
-            "system_id", "target_type", "target_id", name="uq_app_target"
-        ),
+        UniqueConstraint("system_id", "target_type", "target_id", name="uq_app_target"),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -2711,9 +2716,7 @@ class DeepScanTaskFinding(SQLModel, table=True):
 
     __tablename__ = "deep_scan_task_finding"
     __table_args__ = (
-        UniqueConstraint(
-            "task_id", "finding_id", name="uq_deep_scan_task_finding"
-        ),
+        UniqueConstraint("task_id", "finding_id", name="uq_deep_scan_task_finding"),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -2725,6 +2728,15 @@ class DeepScanTaskFinding(SQLModel, table=True):
             nullable=False,
             index=True,
         )
+    )
+    variant_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("deep_scan_variant.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
     )
     finding_id: int = Field(
         sa_column=Column(
@@ -2745,6 +2757,11 @@ class DeepScanAttempt(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     run_id: int = Field(sa_column=_run_identity_fk())
     task_id: int = Field(foreign_key="deep_scan_task.id", index=True)
+    variant_id: Optional[int] = Field(
+        default=None,
+        foreign_key="deep_scan_variant.id",
+        index=True,
+    )
     worker_id: str = Field(index=True)
     attempt_number: int = Field(default=1)
     status: str = Field(default="running", index=True)
@@ -2753,6 +2770,112 @@ class DeepScanAttempt(SQLModel, table=True):
     error_message: str = Field(default="")
     started_at: datetime = Field(default_factory=_utcnow)
     completed_at: Optional[datetime] = Field(default=None)
+
+
+class DeepScanVariant(SQLModel, table=True):
+    """One saved execution purpose within a Deep scan campaign."""
+
+    __tablename__ = "deep_scan_variant"
+    __table_args__ = (
+        UniqueConstraint("task_id", "fingerprint", name="uq_deep_scan_variant_task"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    task_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("deep_scan_task.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    fingerprint: str = Field(index=True)
+    variant_index: int = Field(default=1)
+    kind: str = Field(default="planned", index=True)
+    strategy: str = Field(default="targeted", index=True)
+    purpose: str
+    rationale: str = Field(default="")
+    difference: str = Field(default="")
+    identity_requirements_json: str = Field(default="[]")
+    check_ids_json: str = Field(default="[]")
+    status: str = Field(default="queued", index=True)
+    priority: int = Field(default=5, index=True)
+    attempt_count: int = Field(default=0)
+    max_attempts: int = Field(default=2)
+    worker_id: Optional[str] = Field(default=None, index=True)
+    handoff_id: Optional[int] = Field(
+        default=None, foreign_key="specialist_handoff.id", index=True
+    )
+    assigned_purpose: str = Field(default="")
+    current_purpose: str = Field(default="")
+    checkpoint_json: str = Field(default="{}")
+    pivot_history_json: str = Field(default="[]")
+    finding_count: int = Field(default=0)
+    novelty_score: int = Field(default=0)
+    outcome: str = Field(default="")
+    error_message: str = Field(default="")
+    created_at: datetime = Field(default_factory=_utcnow)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class DeepScanProbeOutcome(SQLModel, table=True):
+    """Shared probe ledger used by all variants in a Deep campaign."""
+
+    __tablename__ = "deep_scan_probe_outcome"
+    __table_args__ = (
+        UniqueConstraint("run_id", "fingerprint", name="uq_deep_probe_outcome_run"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    task_id: int = Field(foreign_key="deep_scan_task.id", index=True)
+    variant_id: Optional[int] = Field(
+        default=None, foreign_key="deep_scan_variant.id", index=True
+    )
+    check_id: Optional[int] = Field(
+        default=None, foreign_key="deep_scan_check.id", index=True
+    )
+    traffic_id: Optional[int] = Field(
+        default=None, foreign_key="traffic_entry.id", index=True
+    )
+    fingerprint: str = Field(index=True)
+    technique: str = Field(default="")
+    identity_label: str = Field(default="")
+    request_summary: str = Field(default="")
+    response_status: Optional[int] = Field(default=None)
+    signal_type: str = Field(default="none", index=True)
+    signal_strength: int = Field(default=0)
+    evidence_json: str = Field(default="{}")
+    outcome: str = Field(default="observed")
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class DeepScanClaim(SQLModel, table=True):
+    """Shared claim ledger for candidate and confirmed Deep findings."""
+
+    __tablename__ = "deep_scan_claim"
+    __table_args__ = (
+        UniqueConstraint("run_id", "fingerprint", name="uq_deep_scan_claim_run"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    task_id: int = Field(foreign_key="deep_scan_task.id", index=True)
+    variant_id: Optional[int] = Field(
+        default=None, foreign_key="deep_scan_variant.id", index=True
+    )
+    fingerprint: str = Field(index=True)
+    title: str
+    status: str = Field(default="unverified", index=True)
+    finding_id: Optional[int] = Field(
+        default=None, foreign_key="scan_finding.id", index=True
+    )
+    evidence_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
 
 
 class ProbeExecution(SQLModel, table=True):

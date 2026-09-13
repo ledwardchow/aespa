@@ -10,9 +10,10 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from aespa import models
 from aespa.db import get_session
 from aespa.models import (
-    System,
     AssessmentCampaign,
+    ScanLog,
     ScannerSession,
+    System,
     TargetIntelItem,
     TestRun,
 )
@@ -81,6 +82,24 @@ def test_run_summary_exposes_safe_auth_mode_metadata(client: TestClient):
     assert credentials["code@example.com"]["has_totp_seed"] is True
     assert credentials["manual@example.com"]["auth_mode"] == "guided"
     assert "totp_seed" not in credentials["code@example.com"]
+
+
+def test_run_summary_reports_when_scan_mode_is_locked(client: TestClient, db_session):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    db_session.add(
+        ScanLog(
+            test_run_id=run["id"],
+            run_kind="web",
+            phase="scan_started",
+            status="start",
+        )
+    )
+    db_session.commit()
+
+    detail = client.get(f"/api/test-runs/{run['id']}").json()
+
+    assert detail["scan_mode_locked"] is True
 
 
 def test_create_run_defaults_to_500_pages(client: TestClient):

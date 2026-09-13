@@ -53,6 +53,27 @@ class _StartScanBody(BaseModel):
     use_session: Optional[str] = None
 
 
+def _scan_mode_group(coverage_mode: str) -> str:
+    return "deep" if coverage_mode == "deep" else "standard"
+
+
+def _reject_incompatible_scan_mode(
+    session: Session, run: TestRun, requested_mode: str
+) -> None:
+    if not scanner_svc.is_scan_mode_locked(session, run):
+        return
+    if _scan_mode_group(run.coverage_mode) == _scan_mode_group(requested_mode):
+        return
+    saved_label = "Deep" if run.coverage_mode == "deep" else "non-Deep"
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"This run already started in {saved_label} mode and cannot switch "
+            "between Deep and non-Deep scanning. Create a new run to use the other mode."
+        ),
+    )
+
+
 @router.post("/api/test-runs/{run_id}/thinking-scan/start")
 async def start_thinking_scan(
     run_id: int,
@@ -68,6 +89,7 @@ async def start_thinking_scan(
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     if body and body.coverage_mode is not None:
+        _reject_incompatible_scan_mode(session, run, body.coverage_mode)
         run.coverage_mode = body.coverage_mode
     if body:
         target_ids = body.target_page_ids or (

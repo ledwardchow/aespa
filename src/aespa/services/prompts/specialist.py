@@ -5,6 +5,9 @@ from aespa.services.prompts.test_lead import THINKING_AGENT_TOOLS, WSTG_SKILLS
 _SHARED_RULES = (
     "Write a finding only when you have concrete proof from a tool result — "
     "quote the exact response excerpt as evidence. "
+    "Treat example values in public landing pages, product previews, documentation, and "
+    "marketing mockups as illustrative content unless a protected API response or a "
+    "meaningful identity-based response difference proves they are live records. "
     "Do not speculate or write findings without direct evidence. "
     "Use execute_python only for computation, custom encoding/parsing, state correlation, or "
     "bounded brokered request batches that ordinary tools cannot express; it cannot access the "

@@ -25,6 +25,7 @@ from aespa.services import llm as llm_svc
 from aespa.services.prompts.alice import (
     ALICE_API_OPERATIONAL_SYSTEM_PROMPT,
     ALICE_API_SYSTEM_PROMPT,
+    ALICE_FINDING_MANAGEMENT_SYSTEM_PROMPT,
     ALICE_OPERATIONAL_SYSTEM_PROMPT,
     ALICE_SYSTEM_PROMPT,
 )
@@ -104,6 +105,8 @@ _ALICE_TOOL_NAMES = {
     "agent_dispatch",
     "done",
     "remove_finding",
+    "update_finding",
+    "consolidate_findings",
 }
 
 _RERUN_VALIDATION_TOOL = {
@@ -118,6 +121,81 @@ _RERUN_VALIDATION_TOOL = {
         "properties": {},
         "additionalProperties": False,
     },
+}
+
+_FINDING_EDIT_PROPERTIES = {
+    "title": {"type": "string"},
+    "severity": {
+        "type": "string",
+        "enum": ["critical", "high", "medium", "low", "info"],
+    },
+    "description": {"type": "string"},
+    "impact": {"type": "string"},
+    "likelihood": {"type": "string"},
+    "recommendation": {"type": "string"},
+    "cvss_score": {"type": "number"},
+    "cvss_vector": {"type": "string"},
+    "affected_url": {"type": "string"},
+    "owasp_category": {"type": "string"},
+    "owasp_api_category": {"type": "string"},
+    "evidence": {"type": "string"},
+    "request_evidence": {"type": "string"},
+    "response_evidence": {"type": "string"},
+}
+
+_UPDATE_FINDING_TOOL = {
+    "name": "update_finding",
+    "description": (
+        "Edit one saved finding without contacting the target. Only supplied fields change; "
+        "the finding's validation state and public reference are preserved."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "finding_reference": {
+                "type": "string",
+                "description": "Public finding reference, for example ABCD-001.",
+            },
+            **_FINDING_EDIT_PROPERTIES,
+        },
+        "required": ["finding_reference"],
+        "additionalProperties": False,
+    },
+}
+
+_CONSOLIDATE_FINDINGS_TOOL = {
+    "name": "consolidate_findings",
+    "description": (
+        "Consolidate duplicate saved findings in one transaction. The retained finding is "
+        "rewritten with supplied fields, provenance links are moved to it, and the listed "
+        "duplicates are deleted. The retained public reference and validation state remain."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "keep_finding_reference": {
+                "type": "string",
+                "description": "Public reference of the finding to retain.",
+            },
+            "remove_finding_references": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Public references of duplicate findings to remove.",
+            },
+            **_FINDING_EDIT_PROPERTIES,
+        },
+        "required": ["keep_finding_reference", "remove_finding_references"],
+        "additionalProperties": False,
+    },
+}
+
+_FINDING_MANAGEMENT_TOOL_NAMES = {
+    "context_tool",
+    "update_finding",
+    "consolidate_findings",
+    "remove_finding",
+    "done",
 }
 
 
@@ -254,8 +332,36 @@ def _is_alice_operational_question(instruction: str) -> bool:
     return not any(marker in security_request for marker in explicit_test_markers)
 
 
+def _is_alice_finding_management_request(instruction: str) -> bool:
+    """Identify requests that change findings already stored in AESPA."""
+    text = re.sub(r"\s+", " ", str(instruction or "").strip().casefold())
+    if not re.search(r"\bfindings?\b", text):
+        return False
+    mutation_markers = (
+        "rewrite",
+        "re-write",
+        "reword",
+        "edit",
+        "update",
+        "change",
+        "rename",
+        "consolidate",
+        "combine",
+        "merge",
+        "deduplicate",
+        "de-duplicate",
+        "delete",
+        "remove",
+        "mark as",
+        "set severity",
+    )
+    return any(marker in text for marker in mutation_markers)
+
+
 def _classify_alice_intent(instruction: str) -> str:
     """Classify a turn before selecting ALICE's prompt and tools."""
+    if _is_alice_finding_management_request(instruction):
+        return "finding_management"
     return "operational" if _is_alice_operational_question(instruction) else "testing"
 
 
@@ -327,11 +433,20 @@ def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
     exclude = exclude or set()
     allowed = _ALICE_TOOL_NAMES - exclude
     tools = [t for t in THINKING_AGENT_TOOLS if t["name"] in allowed]
+    if "update_finding" in allowed:
+        tools.append(_UPDATE_FINDING_TOOL)
+    if "consolidate_findings" in allowed:
+        tools.append(_CONSOLIDATE_FINDINGS_TOOL)
     if "rerun_validation" not in exclude:
         tools.append(_RERUN_VALIDATION_TOOL)
     if "tls_scan" not in exclude:
         tools.append(TLS_SCAN_TOOL)
     return tools
+
+
+def _finding_management_tools(tools: list[dict]) -> list[dict]:
+    """Limit finding edits to saved-record tools, without target access."""
+    return [tool for tool in tools if tool["name"] in _FINDING_MANAGEMENT_TOOL_NAMES]
 
 
 def _goal_mode_tools(tools: list[dict]) -> list[dict]:
@@ -1990,6 +2105,116 @@ async def _execute_alice_tool(
             log.warning("ALICE update_lead error: %s", exc)
             return f"update_lead failed: {exc}"
 
+    # ── update_finding / consolidate_findings ─────────────────────────────────
+    if tool_name in {"update_finding", "consolidate_findings"}:
+        from aespa.schemas import ScanFindingUpdateIn
+        from aespa.services import findings as findings_svc
+        from aespa.services.references import find_finding_by_reference
+
+        owner_type = "api" if api_run_id is not None else "web"
+        owner_id = api_run_id if api_run_id is not None else run_id
+        update_fields = {
+            key: value
+            for key, value in tool_input.items()
+            if key in _FINDING_EDIT_PROPERTIES
+        }
+        if not update_fields:
+            return f"{tool_name} requires at least one rewritten finding field."
+        try:
+            payload = ScanFindingUpdateIn.model_validate(update_fields)
+        except Exception as exc:
+            return f"{tool_name}: invalid finding update: {exc}"
+
+        with Session(get_engine()) as s:
+            if tool_name == "update_finding":
+                finding_reference = str(
+                    tool_input.get("finding_reference") or ""
+                ).strip()
+                finding = find_finding_by_reference(
+                    s, owner_type, owner_id, finding_reference
+                )
+                if finding is None:
+                    return (
+                        f"update_finding: finding {finding_reference!r} was not found "
+                        "for this run."
+                    )
+                findings_svc.apply_finding_update(finding, payload)
+                s.add(finding)
+                s.commit()
+                s.refresh(finding)
+                log.info(
+                    "ALICE update_finding run_id=%s finding_id=%s reference=%s",
+                    run_id,
+                    finding.id,
+                    finding.reference,
+                )
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "finding_reference": finding.reference,
+                        "title": finding.title,
+                        "updated_fields": sorted(update_fields),
+                    }
+                )
+
+            keep_reference = str(tool_input.get("keep_finding_reference") or "").strip()
+            remove_references = list(
+                dict.fromkeys(
+                    str(reference).strip()
+                    for reference in tool_input.get("remove_finding_references") or []
+                    if str(reference).strip()
+                )
+            )
+            if not keep_reference or not remove_references:
+                return (
+                    "consolidate_findings requires one retained finding reference and "
+                    "at least one duplicate reference."
+                )
+            if keep_reference in remove_references:
+                return "consolidate_findings cannot remove the retained finding."
+            keeper = find_finding_by_reference(s, owner_type, owner_id, keep_reference)
+            if keeper is None:
+                return (
+                    f"consolidate_findings: retained finding {keep_reference!r} was "
+                    "not found for this run."
+                )
+            duplicates = []
+            missing = []
+            for reference in remove_references:
+                finding = find_finding_by_reference(s, owner_type, owner_id, reference)
+                if finding is None:
+                    missing.append(reference)
+                else:
+                    duplicates.append(finding)
+            if missing:
+                return (
+                    "consolidate_findings: no changes made because these findings were "
+                    f"not found for this run: {', '.join(missing)}"
+                )
+            try:
+                removed = findings_svc.consolidate_findings(
+                    s, keeper, duplicates, payload
+                )
+            except Exception as exc:
+                s.rollback()
+                log.warning("ALICE consolidate_findings failed: %s", exc)
+                return f"consolidate_findings failed; no changes were made: {exc}"
+            log.info(
+                "ALICE consolidate_findings run_id=%s keeper=%s removed=%s",
+                run_id,
+                keeper.reference,
+                removed,
+            )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "finding_reference": keeper.reference,
+                    "title": keeper.title,
+                    "removed_finding_references": removed,
+                    "updated_fields": sorted(update_fields),
+                }
+            )
+
     # ── remove_finding ────────────────────────────────────────────────────────
     if tool_name == "remove_finding":
         from aespa.models import ScanFinding as _SF
@@ -2261,6 +2486,10 @@ async def run_alice_turn_stream(
             user_directive=user_instruction,
             base_url=base_url,
         )
+    elif intent == "finding_management":
+        system_message = ALICE_FINDING_MANAGEMENT_SYSTEM_PROMPT.format(
+            user_directive=user_instruction,
+        )
     else:
         system_message = ALICE_SYSTEM_PROMPT.format(
             user_directive=user_instruction,
@@ -2292,7 +2521,7 @@ async def run_alice_turn_stream(
     # testing context, but would unnecessarily steer a status answer back toward
     # the target.
     initial_parts = [run_status_block]
-    if intent != "operational" and leads_block:
+    if intent == "testing" and leads_block:
         initial_parts.append(leads_block)
     initial_parts.append(user_instruction)
     messages.append({"role": "user", "content": "\n\n".join(initial_parts)})
@@ -2304,6 +2533,8 @@ async def run_alice_turn_stream(
         alice_tools = [
             tool for tool in alice_tools if tool["name"] in {"context_tool", "done"}
         ]
+    elif intent == "finding_management":
+        alice_tools = _finding_management_tools(alice_tools)
     if goal:
         alice_tools = _goal_mode_tools(alice_tools)
 
@@ -3558,6 +3789,10 @@ async def run_api_alice_turn_stream(
             base_url=base_url,
             user_directive=user_instruction,
         )
+    elif intent == "finding_management":
+        system_message = ALICE_FINDING_MANAGEMENT_SYSTEM_PROMPT.format(
+            user_directive=user_instruction,
+        )
     else:
         system_message = ALICE_API_SYSTEM_PROMPT.format(
             collection_name=collection_name,
@@ -3614,7 +3849,7 @@ async def run_api_alice_turn_stream(
 
     # Build the initial user message, mirroring the scanner's pattern.
     initial_parts = [f"Target: {base_url}", run_status_block]
-    if intent != "operational":
+    if intent == "testing":
         initial_parts.extend(
             part for part in (creds_text, sessions_text, leads_block) if part
         )
@@ -3642,6 +3877,8 @@ async def run_api_alice_turn_stream(
         alice_tools = [
             tool for tool in alice_tools if tool["name"] in {"context_tool", "done"}
         ]
+    elif intent == "finding_management":
+        alice_tools = _finding_management_tools(alice_tools)
     if goal:
         alice_tools = _goal_mode_tools(alice_tools)
     accumulated_thought = ""

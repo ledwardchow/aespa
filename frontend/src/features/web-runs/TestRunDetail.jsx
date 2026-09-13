@@ -125,7 +125,7 @@ function TestRunContent({
       setGraph(g);
       if (r?.scope_hosts) setScopeHosts(r.scope_hosts);
       if (r?.coverage_mode) {
-        setCoverageMode(r.coverage_mode === "deep" && !showDeepScan ? "track" : r.coverage_mode);
+        setCoverageMode(r.coverage_mode);
       }
       webRunsApi
         .getThinkingStatus(runId)
@@ -142,7 +142,7 @@ function TestRunContent({
     } catch (e) {
       setError(e.message);
     }
-  }, [runId, showDeepScan]);
+  }, [runId]);
   useEffect(() => {
     loadAll();
   }, [loadAll]);

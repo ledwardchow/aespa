@@ -5,7 +5,7 @@ const SPECIALIST_WORKER_TYPES = [{ prefix: "specialist-", label: "Specialist" }]
 
 const readableLabel = (value) => String(value || "").replaceAll("_", " ");
 
-function stepDescription(step) {
+export function stepDescription(step) {
   const description =
     step.description || step.hypothesis || step.payload_purpose || step.observation;
   if (description) return String(description);
@@ -15,7 +15,7 @@ function stepDescription(step) {
   return `Use ${readableLabel(step.tool_name || step.action_type || "scan tool")}`;
 }
 
-function stepSupportingDetail(step) {
+export function stepSupportingDetail(step) {
   const details = [];
   if (step.method) {
     details.push(`${step.method}${step.url ? ` ${truncUrl(step.url, 100)}` : " request"}`);
@@ -69,14 +69,7 @@ export function ActivitySpecialists({
           const saSteps = sa.stepHistory || [];
           const saExpanded = saSteps.length > 0 && !collapsedAgentIds.has(sa.id);
           const workerId = sa.id.replace(sa.workerType.prefix, "");
-          const deepMatch = workerId.match(/^(\d+)-task-(\d+)$/);
-          const deepPurpose =
-            deepMatch && sa.role && sa.role !== "Deep Attack Worker" ? sa.role : null;
-          const threadLabel = deepPurpose
-            ? deepPurpose
-            : deepMatch
-              ? `${sa.workerType.label} ${deepMatch[1]} · Task #${deepMatch[2]}`
-              : `${sa.workerType.label} ${workerId.replace(/-([0-9]+)$/, " #$1")}`;
+          const threadLabel = `${sa.workerType.label} ${workerId.replace(/-([0-9]+)$/, " #$1")}`;
           return (
             <div
               key={sa.id}
@@ -94,7 +87,7 @@ export function ActivitySpecialists({
               <span
                 className={"agent-role-name" + (saActive ? " agent-role-name--pulse" : "")}
                 style={{
-                  textTransform: deepPurpose ? "none" : "capitalize",
+                  textTransform: "capitalize",
                 }}
               >
                 {threadLabel}

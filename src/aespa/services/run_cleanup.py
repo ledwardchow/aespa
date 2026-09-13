@@ -44,8 +44,11 @@ from aespa.models import (
     CrawledPage,
     DeepScanAttempt,
     DeepScanCheck,
+    DeepScanClaim,
+    DeepScanProbeOutcome,
     DeepScanTask,
     DeepScanTaskFinding,
+    DeepScanVariant,
     LeadTargetMapping,
     PageCredentialView,
     PageLink,
@@ -177,6 +180,16 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
     )
     deep_task_ids = [task.id for task in deep_tasks if task.id is not None]
     if deep_task_ids:
+        for claim in session.exec(
+            select(DeepScanClaim).where(DeepScanClaim.task_id.in_(deep_task_ids))
+        ).all():
+            session.delete(claim)
+        for outcome in session.exec(
+            select(DeepScanProbeOutcome).where(
+                DeepScanProbeOutcome.task_id.in_(deep_task_ids)
+            )
+        ).all():
+            session.delete(outcome)
         for link in session.exec(
             select(DeepScanTaskFinding).where(
                 DeepScanTaskFinding.task_id.in_(deep_task_ids)
@@ -191,6 +204,10 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
             select(DeepScanAttempt).where(DeepScanAttempt.task_id.in_(deep_task_ids))
         ).all():
             session.delete(attempt)
+        for variant in session.exec(
+            select(DeepScanVariant).where(DeepScanVariant.task_id.in_(deep_task_ids))
+        ).all():
+            session.delete(variant)
     for task in deep_tasks:
         session.delete(task)
     session.flush()

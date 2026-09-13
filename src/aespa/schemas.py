@@ -1092,10 +1092,29 @@ class DeepScanConfigBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     max_concurrent_workers: int = Field(default=6, ge=1, le=20)
+    max_concurrent_planners: int = Field(default=4, ge=1, le=20)
     max_tasks: int = Field(default=200, ge=1, le=1000)
     max_steps_per_task: int = Field(default=30, ge=1, le=200)
+    initial_variants_per_campaign: int = Field(default=2, ge=1, le=8)
+    max_variants_per_campaign: int = Field(default=4, ge=1, le=12)
+    max_total_variants: int = Field(default=400, ge=1, le=4000)
+    adaptive_follow_up: bool = True
+    minimum_signal_strength: int = Field(default=2, ge=1, le=3)
+    reuse_captured_baselines: bool = True
     include_sast_leads: bool = True
     include_recon_checks: bool = True
+
+    @model_validator(mode="after")
+    def _validate_variant_limits(self) -> "DeepScanConfigBase":
+        if self.initial_variants_per_campaign + 1 > self.max_variants_per_campaign:
+            raise ValueError(
+                "Maximum variants per tester must include the baseline and all initial variants"
+            )
+        if self.max_total_variants < self.max_variants_per_campaign:
+            raise ValueError(
+                "Maximum variants per run must be at least the per-tester maximum"
+            )
+        return self
 
 
 class DeepScanConfigIn(DeepScanConfigBase):
@@ -1509,6 +1528,7 @@ class TestRunSummary(BaseModel):
     crawler_mode: str = "url"
     scan_mode: str = "aggressive"
     coverage_mode: str = "track"
+    scan_mode_locked: bool = False
     scan_status: str = "idle"
     scan_total_pages: int = 0
     scan_pages_done: int = 0

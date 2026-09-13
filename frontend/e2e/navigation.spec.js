@@ -440,6 +440,7 @@ test("Deep work queue groups checks under an expandable operation", async ({ pag
       json: {
         total: 1,
         checks_total: 2,
+        planning: { total: 1, complete: 1, active: 0, pending: 0 },
         counts: { finding: 1 },
         tasks: [
           {
@@ -481,8 +482,10 @@ test("Deep work queue groups checks under an expandable operation", async ({ pag
 
   await page.goto("/#/runs/1/activity");
   await page.getByRole("button", { name: "Work Queue", exact: true }).click();
-  await expect(page.getByText("1 worker tasks", { exact: false })).toBeVisible();
+  await expect(page.getByText("1 testers", { exact: false })).toBeVisible();
   const task = page.locator(".deep-task-toggle");
+  await expect(task.getByText("Tester 1 · operation", { exact: true })).toBeVisible();
+  await expect(task.getByText("#42 operation", { exact: true })).toHaveCount(0);
   await expect(task).toHaveAttribute("aria-expanded", "false");
   await expect(task.getByText("2 inputs", { exact: true })).toBeVisible();
   await expect(task.getByText("1 identity comparison", { exact: true })).toBeVisible();

@@ -392,8 +392,15 @@ def get_deep_scan_config(session: Session) -> DeepScanConfigOut:
         )
     return DeepScanConfigOut(
         max_concurrent_workers=cfg.max_concurrent_workers,
+        max_concurrent_planners=cfg.max_concurrent_planners,
         max_tasks=cfg.max_tasks,
         max_steps_per_task=cfg.max_steps_per_task,
+        initial_variants_per_campaign=cfg.initial_variants_per_campaign,
+        max_variants_per_campaign=cfg.max_variants_per_campaign,
+        max_total_variants=cfg.max_total_variants,
+        adaptive_follow_up=cfg.adaptive_follow_up,
+        minimum_signal_strength=cfg.minimum_signal_strength,
+        reuse_captured_baselines=cfg.reuse_captured_baselines,
         include_sast_leads=cfg.include_sast_leads,
         include_recon_checks=cfg.include_recon_checks,
         updated_at=cfg.updated_at,

@@ -36,6 +36,11 @@ _STATUS_ORDER = {
 _A03_INPUT_TEST_CLASSES = ("sqli", "reflected_xss", "stored_xss")
 
 
+def _comparable_page_text(value: str | None) -> str:
+    """Normalise rendered text before comparing identity-specific page views."""
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
 def build_recon_summary(
     run_id: int,
     session: Session | None = None,
@@ -187,6 +192,14 @@ def _build_page_access(
         credential_ids: set[int] = set()
         usernames: set[str] = set()
         anonymous = page.req_auth is False
+        anonymous_texts: set[str] = set()
+        authenticated_texts: set[str] = set()
+        page_text = _comparable_page_text(page.page_text)
+        if page_text:
+            if anonymous:
+                anonymous_texts.add(page_text)
+            else:
+                authenticated_texts.add(page_text)
         try:
             credential_ids.update(
                 int(value) for value in json.loads(page.accessible_by or "[]")
@@ -194,10 +207,15 @@ def _build_page_access(
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
         for view in by_page_id.get(page.id or -1, []):
+            view_text = _comparable_page_text(view.page_text)
             if view.credential_id is None and view.req_auth is False:
                 anonymous = True
+                if view_text:
+                    anonymous_texts.add(view_text)
             if view.credential_id is not None:
                 credential_ids.add(view.credential_id)
+                if view_text:
+                    authenticated_texts.add(view_text)
             if view.username:
                 usernames.add(view.username)
         observed_profile_ids.update(credential_ids)
@@ -206,6 +224,8 @@ def _build_page_access(
             "anonymous": anonymous,
             "credential_ids": credential_ids,
             "usernames": usernames,
+            "anonymous_texts": anonymous_texts,
+            "authenticated_texts": authenticated_texts,
         }
 
     profiles = []
@@ -388,6 +408,25 @@ def _build_routes(
             }
         )
         authenticated = bool(credential_ids or usernames)
+        anonymous_texts = {
+            text
+            for observation in observations
+            for text in observation["anonymous_texts"]
+        }
+        authenticated_texts = {
+            text
+            for observation in observations
+            for text in observation["authenticated_texts"]
+        }
+        identity_content = (
+            "equivalent"
+            if anonymous_texts
+            and authenticated_texts
+            and anonymous_texts == authenticated_texts
+            else "different"
+            if anonymous_texts and authenticated_texts
+            else "unknown"
+        )
         classification = (
             "mixed"
             if anonymous and authenticated
@@ -441,6 +480,7 @@ def _build_routes(
                     "anonymous": anonymous,
                     "credential_ids": credential_ids,
                     "labels": labels,
+                    "identity_content": identity_content,
                 },
                 "coverage": {"total": 0, "statuses": {}, "categories": []},
             }

@@ -10,8 +10,12 @@ from sqlmodel import Session, select
 from aespa.models import (
     CrawledPage,
     DeepScanAttempt,
+    DeepScanCheck,
     DeepScanConfig,
+    DeepScanProbeOutcome,
     DeepScanTask,
+    DeepScanVariant,
+    LLMConfig,
     PageOwaspTest,
     ScanLead,
     ScanObligation,
@@ -74,6 +78,191 @@ def test_deep_task_seeding_is_idempotent_and_includes_recon(db_session):
         for check in task["checks"]
     )
     assert queue["checks_total"] >= queue["total"]
+
+
+def test_deep_baselines_reuse_matching_crawl_traffic(db_session):
+    from aespa.models import TrafficEntry
+    from aespa.services.deep_scan import _seed_baseline_variants
+
+    run = _run_with_page(db_session)
+    db_session.add(
+        TrafficEntry(
+            test_run_id=run.id,
+            method="GET",
+            url="https://target.local/api/accounts/1",
+            status=200,
+            source="crawl",
+        )
+    )
+    db_session.commit()
+    seed_deep_tasks(run.id)
+
+    _seed_baseline_variants(run.id, reuse_captured=True)
+
+    baseline = db_session.exec(
+        select(DeepScanVariant)
+        .where(DeepScanVariant.run_id == run.id)
+        .where(DeepScanVariant.kind == "baseline")
+        .where(DeepScanVariant.status == "complete")
+    ).first()
+    assert baseline is not None
+    assert db_session.exec(
+        select(DeepScanProbeOutcome).where(
+            DeepScanProbeOutcome.variant_id == baseline.id
+        )
+    ).first()
+
+
+@pytest.mark.anyio
+async def test_llm_variant_plan_is_bounded_and_deduplicated(db_session, monkeypatch):
+    from aespa.services import deep_scan
+
+    run = _run_with_page(db_session)
+    seed_deep_tasks(run.id)
+    deep_scan._seed_baseline_variants(run.id, reuse_captured=False)
+    task = db_session.exec(
+        select(DeepScanTask)
+        .where(DeepScanTask.run_id == run.id)
+        .where(DeepScanTask.task_kind == "operation")
+    ).first()
+    baseline = db_session.exec(
+        select(DeepScanVariant)
+        .where(DeepScanVariant.task_id == task.id)
+        .where(DeepScanVariant.kind == "baseline")
+    ).one()
+    baseline.status = "complete"
+    db_session.add(baseline)
+    db_session.commit()
+    check_ids = [
+        check.id
+        for check in db_session.exec(
+            select(DeepScanCheck).where(DeepScanCheck.task_id == task.id)
+        ).all()
+    ]
+
+    planner_output_limits = []
+
+    async def fake_plan(*args, **_kwargs):
+        planner_output_limits.append(args[0].max_tokens)
+        return json.dumps(
+            [
+                {
+                    "strategy": "idor",
+                    "purpose": "Compare user A and user B object access.",
+                    "rationale": "Ownership check",
+                    "difference": "Cross-user comparison",
+                    "check_ids": check_ids,
+                    "identities": ["user_a_vs_user_b"],
+                },
+                {
+                    "strategy": "idor",
+                    "purpose": "Try another wording of the same comparison.",
+                    "rationale": "Duplicate",
+                    "difference": "Still cross-user comparison",
+                    "check_ids": check_ids,
+                    "identities": ["user_a_vs_user_b"],
+                },
+                {
+                    "strategy": "workflow",
+                    "purpose": "Test replay ordering around the object request.",
+                    "rationale": "Workflow state may affect access",
+                    "difference": "Focuses on request order",
+                    "check_ids": [],
+                    "identities": [],
+                },
+            ]
+        )
+
+    monkeypatch.setattr(deep_scan.llm_svc, "plain_completion", fake_plan)
+    config = DeepScanConfig(
+        initial_variants_per_campaign=2,
+        max_variants_per_campaign=4,
+        max_total_variants=20,
+    )
+
+    saved = await deep_scan._ensure_attack_variants(
+        task.id, LLMConfig(max_tokens=16384), config
+    )
+    variants = list(
+        db_session.exec(
+            select(DeepScanVariant)
+            .where(DeepScanVariant.task_id == task.id)
+            .where(DeepScanVariant.kind != "baseline")
+        ).all()
+    )
+
+    assert saved == 2
+    assert planner_output_limits == [1536]
+    assert {variant.strategy for variant in variants} == {"idor", "workflow"}
+    assert get_queue(run.id)["planning"] == {
+        "total": get_queue(run.id)["total"],
+        "complete": 1,
+        "active": 0,
+        "pending": get_queue(run.id)["total"] - 1,
+    }
+
+
+@pytest.mark.anyio
+async def test_deep_planner_runs_independent_calls_concurrently(
+    db_session, monkeypatch
+):
+    from aespa.services import deep_scan
+
+    run = _run_with_page(db_session)
+    seed_deep_tasks(run.id)
+    task_ids = [
+        task.id
+        for task in db_session.exec(
+            select(DeepScanTask)
+            .where(DeepScanTask.run_id == run.id)
+            .order_by(DeepScanTask.id)
+            .limit(3)
+        ).all()
+    ]
+    active = 0
+    high_water = 0
+    release = asyncio.Event()
+    emitted = []
+
+    async def fake_plan(*_args, **_kwargs):
+        nonlocal active, high_water
+        active += 1
+        high_water = max(high_water, active)
+        if high_water == 2:
+            release.set()
+        await asyncio.wait_for(release.wait(), timeout=1)
+        active -= 1
+        return 1
+
+    monkeypatch.setattr(deep_scan, "_ensure_attack_variants", fake_plan)
+    monkeypatch.setattr(
+        deep_scan.events_svc,
+        "emit",
+        lambda _run_id, event: emitted.append(event),
+    )
+    config = DeepScanConfig(max_concurrent_planners=2)
+    details = {
+        task_id: (index + 1, f"Tester target {index + 1}")
+        for index, task_id in enumerate(task_ids)
+    }
+
+    try:
+        await deep_scan._plan_ready_testers(run.id, task_ids, details, object(), config)
+
+        assert high_water == 2
+        assert deep_scan._planning_active_task_ids.get(run.id, set()) == set()
+        lead_updates = [
+            event
+            for event in emitted
+            if event.get("type") == "agent_status"
+            and event.get("agent_id") == "scanner"
+        ]
+        assert any("Planning Tester" in event["current_task"] for event in lead_updates)
+        assert any("Planned" in event["current_task"] for event in lead_updates)
+    finally:
+        deep_scan._planner_semaphores.pop(run.id, None)
+        deep_scan._planning_scheduled_task_ids.pop(run.id, None)
+        deep_scan._planning_active_task_ids.pop(run.id, None)
 
 
 def test_deep_queue_reports_the_number_of_findings_from_a_task(db_session):
@@ -216,9 +405,7 @@ def test_deep_task_cap_does_not_change_other_scan_modes(db_session):
     seed_deep_tasks(run.id)
 
     assert get_queue(run.id)["total"] == 2
-    assert any(
-        task["task_kind"] == "operation" for task in get_queue(run.id)["tasks"]
-    )
+    assert any(task["task_kind"] == "operation" for task in get_queue(run.id)["tasks"])
     ordinary = TestRun(
         site_id=run.site_id,
         name="Quick run",
@@ -347,7 +534,7 @@ async def test_deep_worker_probes_update_web_workprogram(db_session, monkeypatch
         select(DeepScanTask).where(DeepScanTask.run_id == run.id)
     ).one()
 
-    assert observed_statuses == ["in_progress"]
+    assert observed_statuses == ["in_progress", "in_progress"]
     assert cell.page_id == task.page_id
     assert cell.owasp_category == task.owasp_category
     assert scanner._finding_hooks.get(run.id) is None
@@ -390,8 +577,8 @@ async def test_deep_worker_usage_is_saved_on_the_web_run(db_session, monkeypatch
         db_session.expire_all()
         usage = json.loads(db_session.get(TestRun, run.id).token_usage_json)
 
-        assert usage["deep-test-model"]["input"] == 11
-        assert usage["deep-test-model"]["output"] == 7
+        assert usage["deep-test-model"]["input"] == 22
+        assert usage["deep-test-model"]["output"] == 14
         assert llm._capture_usage_context().run_id is None
     finally:
         llm._run_token_usage.pop(usage_key, None)
@@ -462,8 +649,12 @@ async def test_stopping_deep_scan_requeues_in_flight_task(db_session, monkeypatc
             .order_by(DeepScanAttempt.id)
         ).all()
     )
-    assert [attempt.status for attempt in attempts] == ["cancelled", "inconclusive"]
-    assert [attempt.attempt_number for attempt in attempts] == [1, 2]
+    assert [attempt.status for attempt in attempts] == [
+        "cancelled",
+        "complete",
+        "inconclusive",
+    ]
+    assert [attempt.attempt_number for attempt in attempts] == [1, 2, 1]
 
 
 def test_web_run_cleanup_removes_deep_queue_with_foreign_keys(fk_engine):

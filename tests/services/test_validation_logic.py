@@ -190,6 +190,83 @@ def test_unauthenticated_access_claim_is_confirmed_against_exact_route_baseline(
         engine.dispose()
 
 
+def test_unauthenticated_access_claim_with_equivalent_public_views_is_not_auto_confirmed(
+    monkeypatch,
+):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    page_text = "Open an account today. Total Balance $42,816.50"
+    try:
+        with Session(engine) as session:
+            page = CrawledPage(
+                test_run_id=1,
+                url="https://target.local/",
+                req_auth=False,
+                page_text=page_text,
+            )
+            session.add(page)
+            session.flush()
+            session.add_all(
+                [
+                    PageCredentialView(
+                        page_id=page.id,
+                        test_run_id=1,
+                        credential_id=None,
+                        username="unauthenticated",
+                        req_auth=False,
+                        page_text=page_text,
+                    ),
+                    PageCredentialView(
+                        page_id=page.id,
+                        test_run_id=1,
+                        credential_id=7,
+                        username="alice",
+                        req_auth=False,
+                        page_text=page_text,
+                    ),
+                ]
+            )
+            session.commit()
+            page_id = page.id
+
+        async def unexpected_request(*args, **kwargs):
+            raise AssertionError("equivalent public content must not be auto-confirmed")
+
+        monkeypatch.setattr(validator, "get_engine", lambda: engine)
+        monkeypatch.setattr(
+            validator, "_request_access_validation_actor", unexpected_request
+        )
+        finding = ScanFinding(
+            id=1,
+            test_run_id=1,
+            page_id=page_id,
+            owasp_category="A01",
+            severity="high",
+            title="Unauthenticated access to account data",
+            description="The public page returned account balances.",
+            affected_url="https://target.local/",
+            evidence="",
+        )
+        policy = SimpleNamespace(
+            request_timeout_s=10,
+            follow_redirects=True,
+            response_body_read_limit_bytes=65536,
+        )
+
+        result = asyncio.run(
+            validator._deterministic_validate_finding(finding, {}, policy)
+        )
+
+        assert result is None
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_severity_threshold_skip_is_not_an_unconfirmed_verdict(monkeypatch):
     finding = ScanFinding(
         id=1,
@@ -805,8 +882,7 @@ def test_dynamic_finding_reuses_canonical_page_for_query_payload():
                 session,
                 run_id=run.id,
                 affected_url=(
-                    "https://target.local/api/customers?"
-                    "page=1&per_page=5&search=%27"
+                    "https://target.local/api/customers?page=1&per_page=5&search=%27"
                 ),
                 base_url=site.base_url,
                 pages_snapshot=[],

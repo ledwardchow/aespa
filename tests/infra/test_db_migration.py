@@ -45,9 +45,7 @@ def test_sast_analysis_mode_migration_marks_existing_runs_light():
 
 def test_new_sqlite_database_enables_full_auto_vacuum(tmp_path):
     database_path = tmp_path / "new.db"
-    engine = db._build_engine(
-        Settings(database_url=f"sqlite:///{database_path}")
-    )
+    engine = db._build_engine(Settings(database_url=f"sqlite:///{database_path}"))
     try:
         with engine.begin() as conn:
             conn.exec_driver_sql("CREATE TABLE sample (id INTEGER PRIMARY KEY)")
@@ -863,14 +861,61 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
                     text("PRAGMA foreign_key_list(specialist_handoff)")
                 )
             }
+            deep_config_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(deep_scan_config)"))
+            }
 
         assert "alembic_version" in tables
         assert "site" in tables
         assert "test_run" in tables
         assert "page_id" in handoff_columns
         assert ("page_id", "crawled_page", "id") in handoff_foreign_keys
+        assert "max_concurrent_planners" in deep_config_columns
         assert was_pre_alembic is False
-        assert version == "4c6e8a1b2d35"
+        assert version == "8f0b3d5e7a92"
+    finally:
+        engine.dispose()
+
+
+def test_deep_task_finding_timestamp_is_added_and_backfilled():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "6d8f1a2b3c40")
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            conn.execute(
+                text(
+                    "INSERT INTO deep_scan_task_finding "
+                    "(id, run_id, task_id, variant_id, finding_id) "
+                    "VALUES (1, 1, 1, NULL, 1)"
+                )
+            )
+            conn.commit()
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            columns = {
+                row[1]
+                for row in conn.execute(
+                    text("PRAGMA table_info(deep_scan_task_finding)")
+                )
+            }
+            created_at = conn.execute(
+                text("SELECT created_at FROM deep_scan_task_finding WHERE id = 1")
+            ).scalar()
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar()
+
+        assert "created_at" in columns
+        assert created_at is not None
+        assert version == "8f0b3d5e7a92"
     finally:
         engine.dispose()
 
@@ -1174,7 +1219,7 @@ def test_legacy_db_with_run_identity_but_no_systems_tables_gets_new_schema():
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "4c6e8a1b2d35"
+        assert version == "8f0b3d5e7a92"
     finally:
         engine.dispose()
 
@@ -1211,7 +1256,7 @@ def test_current_db_with_systems_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "4c6e8a1b2d35"
+        assert version == "8f0b3d5e7a92"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
