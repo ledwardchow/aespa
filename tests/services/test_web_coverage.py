@@ -39,6 +39,7 @@ from sqlmodel import select
 from aespa.models import (
     CrawledPage,
     PageOwaspTest,
+    ScanLog,
     Site,
     TestRun,
 )
@@ -852,6 +853,64 @@ def test_start_scan_accepts_standard_coverage_mode(client, db_engine, db_session
         )
 
     assert response.status_code == 200
+    db_session.expire_all()
+    assert db_session.get(TestRun, run["id"]).coverage_mode == "standard"
+
+
+def test_started_deep_scan_rejects_non_deep_mode(client, db_engine, db_session):
+    site = client.post(
+        "/api/sites", json={"name": "S", "base_url": "http://t.com"}
+    ).json()
+    run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
+    persisted = db_session.get(TestRun, run["id"])
+    persisted.coverage_mode = "deep"
+    db_session.add(persisted)
+    db_session.add(
+        ScanLog(
+            test_run_id=run["id"],
+            run_kind="web",
+            phase="scan_started",
+            status="start",
+        )
+    )
+    db_session.commit()
+
+    response = client.post(
+        f"/api/test-runs/{run['id']}/thinking-scan/start",
+        json={"coverage_mode": "track"},
+    )
+
+    assert response.status_code == 409
+    assert "cannot switch between Deep and non-Deep" in response.json()["detail"]
+    db_session.expire_all()
+    assert db_session.get(TestRun, run["id"]).coverage_mode == "deep"
+
+
+def test_started_non_deep_scan_rejects_deep_mode(client, db_engine, db_session):
+    site = client.post(
+        "/api/sites", json={"name": "S", "base_url": "http://t.com"}
+    ).json()
+    run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
+    persisted = db_session.get(TestRun, run["id"])
+    persisted.coverage_mode = "standard"
+    db_session.add(persisted)
+    db_session.add(
+        ScanLog(
+            test_run_id=run["id"],
+            run_kind="web",
+            phase="scan_started",
+            status="start",
+        )
+    )
+    db_session.commit()
+
+    response = client.post(
+        f"/api/test-runs/{run['id']}/thinking-scan/start",
+        json={"coverage_mode": "deep"},
+    )
+
+    assert response.status_code == 409
+    assert "cannot switch between Deep and non-Deep" in response.json()["detail"]
     db_session.expire_all()
     assert db_session.get(TestRun, run["id"]).coverage_mode == "standard"
 

@@ -661,31 +661,49 @@ Deep builds a persistent queue from three sources:
 - open `ScanLead` copies imported from SAST.
 
 The planner builds all candidates, then groups coverage checks by canonical HTTP
-operation. A saved workflow, a site-wide recon campaign, or one imported SAST lead
-is also one worker task. Individual vulnerability classes, inputs, coverage items,
+operation. The UI calls each grouped unit a Tester. A saved workflow, a site-wide
+recon check, or one imported SAST lead is also one tester. Individual vulnerability classes, inputs, coverage items,
 and identity comparisons are stored as child `DeepScanCheck` rows. The task limit
 is applied after grouping, with SAST and site-wide recon work placed ahead of the
 general operation inventory.
 
 The queue has stable fingerprints, priorities, attempt records, worker ownership,
-child check status, and direct finding links. A configured pool of
-`Deep Attack Worker` agents claims tasks one at a time. Each worker receives the
-whole operation or workflow campaign and reuses its request and session context
-across the bundled checks. It creates extra probes only when observed evidence
-supports them. Workers use the existing specialist execution engine, so they keep
+child check status, and direct finding links. Each tester starts with one saved
+baseline variant. Matching crawl traffic can complete that baseline without
+another request. After the baseline, the specialist model proposes a small set of
+distinct execution variants using the tester checks and shared evidence. Independent
+planner calls run concurrently under a configurable limit, and attack workers can
+start as soon as the first plan is saved. Provider RPM and TPM settings continue to
+pace the calls. The planner validates, limits, and deduplicates this JSON before saving it. A
+deterministic grouping by test type is used if the model output is unavailable or
+invalid. SAST testers always get an explicit live-validation variant.
+
+A configured pool of `Deep Attack Worker` agents claims variants one at a time.
+Each variant has an assigned purpose, identity requirements, a statement of how it
+differs from the others, and its own retry and resume checkpoint. Workers can read
+probe and confirmed-claim evidence produced by earlier variants in the tester.
+A new response signal can add one bounded confirmation variant when adaptive
+follow-up is enabled. Worker changes in direction are stored as pivot history.
+Workers use the existing specialist execution engine, so they keep
 the same scope checks, scanner policy, browser state replay, session vault, traffic
 provenance, finding write-up, and adversarial validation. Worker traffic is
 attached to the matching child coverage item through `ProbeExecution` and
 `CoverageEvidence` rows. HTTP, browser, and Python probes also update the matching
 `PageOwaspTest` cell while they run. Completed probes are promoted to covered at
-the end of the scan. A task can link to several findings, and findings use the
-existing finding hook to update the affected page and OWASP category.
+the end of the scan. A tester can link to several findings, and each link records
+the variant that produced it. Findings use the existing finding hook to update the
+affected page and OWASP category.
 
 Deep resume state is the queue rather than the Test Lead conversation checkpoint.
-When a user stops the scan, in-flight attempts are recorded as cancelled and their
-tasks return to `queued` without consuming the retry allowance. Completed,
-inconclusive, and finding tasks remain terminal. Resume starts the worker pool again
-and claims only the remaining queued work.
+When a user stops the scan, in-flight variant attempts are recorded as cancelled
+and return to `queued` without consuming the retry allowance. Their purpose,
+traffic references, and progress are retained. Completed variants remain terminal,
+and completed planning is not repeated. Resume starts the worker pool again and
+claims only the remaining queued variants.
+
+The Test Lead records queue construction, concurrent planning progress, worker
+assignment, and variant completion in the activity log. Work Queue also shows how
+many testers are planned and how many planner calls are active.
 
 Imported SAST leads remain unproven until live testing finishes. A linked finding
 marks the copied lead confirmed. A completed task without proof marks it
@@ -694,15 +712,21 @@ inconclusive. Failed or unprocessed lead tasks leave the run incomplete.
 The web run Activity panel changes its secondary tabs based on the saved run mode:
 
 - ordinary DAST: Agents, Workers, Log;
-- Deep DAST: Agents, Workers, Work Queue, Log.
+- Deep DAST: Agents, Work Queue, Log.
 
-Deep worker count, task cap, step budget, recon-task generation, and SAST-lead
-inclusion have separate settings. They do not modify the normal specialist-agent
-settings.
+Expanding a Deep Work Queue tester shows its variants, checks, and the saved live
+worker trace. A run cannot switch between Deep and non-Deep scanning after its
+first dynamic scan starts. Non-Deep modes can still be changed among Quick,
+Standard, Full, and SAST Validate.
+
+Deep worker count, task cap, step budget, initial and maximum variants, run-wide
+variant cap, adaptive follow-up threshold, baseline reuse, recon-task generation,
+and SAST-lead inclusion have separate settings. They do not modify the normal
+specialist-agent settings.
 
 Each saved worker step includes a readable description of the intended check,
-followed by its request or tool details and any observation. The Workers view
-restores these traces from the scan log after navigation or restart.
+followed by its request or tool details and any observation. The Work Queue
+restores Deep worker traces from the scan log after navigation or restart.
 
 **TLS/SSL posture (deterministic).** Unless deterministic checks are disabled, any
 `https://` target runs `_run_tls_posture_module` first through
@@ -1436,8 +1460,9 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 ```
 1. Load run/site config; verify scope of the user's instruction
 2. Emit [A.L.I.C.E. Initializing] + scope-check status chunks
-3. Convert chat history → Anthropic messages format
-4. Loop (max ALICE_MAX_STEPS = 300):
+3. Classify the turn as operational, finding management, or target testing
+4. Convert chat history → Anthropic messages format
+5. Loop (max ALICE_MAX_STEPS = 300):
      a. Emit [Step N] Calling LLM... thinking chunk
      b. Call LLM with tools (ALICE tool set — see below)
      c. Forward native provider text deltas → message_chunk SSE events
@@ -1446,7 +1471,7 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
      e. Execute tool calls → emit step status + tool result chunks
      f. If model calls done tool → break
      g. If 3 consecutive text-only turns → break (nudge model back to tools)
-5. Emit done SSE event with final accumulated thought + message
+6. Emit done SSE event with final accumulated thought + message
 ```
 
 Anthropic, OpenAI-compatible Chat Completions, OpenAI Responses, Google, and AWS
@@ -1472,6 +1497,8 @@ that remain in memory.
 | `reauthenticate` | Re-run the configured web login flow, including supported TOTP or email-OTP steps, and refresh the primary session |
 | `skip_coverage` | In web Full mode, record a justified inapplicable or technically blocked coverage obligation |
 | `write_finding` | Persist a confirmed vulnerability directly to `ScanFinding`; **skips `normalize_finding_titles`** to prevent false deduplication |
+| `update_finding` | Rewrite selected fields on one saved finding while preserving its reference and validation state |
+| `consolidate_findings` | Rewrite one retained finding and remove its duplicates in one transaction, moving coverage and scan provenance to the retained record |
 | `remove_finding` | Remove a finding from the active web or API run when it was written in error or is a confirmed duplicate |
 | `update_lead` | Record the outcome of investigating an imported SAST lead against the active run kind |
 | `forge_jwt` | Sign an HS256 JWT from a discovered secret; stores result in session vault |
@@ -1488,6 +1515,11 @@ analysis commands (`history_search`, `traffic_search`, `compare_responses`,
 `mutate_request`, and `extract_entities`). API traffic is filtered by
 `api_test_run_id`; it is never read through the web-only `TestRun` owner. API
 ALICE does not get `reauthenticate`, `skip_coverage`, or Specialist dispatch.
+
+Finding-management requests such as rewrite, merge, consolidate, update, or
+delete use a separate tool gate. These turns can read and change saved findings,
+but cannot contact the target or use credentials. Operational questions remain
+read-only.
 
 #### `write_finding` deduplication
 

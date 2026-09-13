@@ -38,3 +38,33 @@ test("only shows Deep mode when its feature preference is enabled", () => {
 
   expect(screen.getByRole("option", { name: "Deep" })).toBeTruthy();
 });
+
+test("locks a started Deep run to Deep mode", () => {
+  render(
+    <WebRunHeader
+      {...props}
+      run={{ ...props.run, coverage_mode: "deep", scan_mode_locked: true }}
+      coverageMode="deep"
+      showDeepScan={false}
+    />,
+  );
+
+  expect(screen.getByRole("combobox", { name: "Scan mode:" }).disabled).toBe(true);
+  expect(screen.getByRole("option", { name: "Deep" }).disabled).toBe(false);
+  expect(screen.getByRole("option", { name: "Quick" }).disabled).toBe(true);
+  expect(screen.getByRole("option", { name: "Standard" }).disabled).toBe(true);
+  expect(screen.getByRole("option", { name: "Full" }).disabled).toBe(true);
+});
+
+test("prevents a started non-Deep run from selecting Deep", () => {
+  render(
+    <WebRunHeader
+      {...props}
+      run={{ ...props.run, coverage_mode: "track", scan_mode_locked: true }}
+      showDeepScan
+    />,
+  );
+
+  expect(screen.getByRole("option", { name: "Deep" }).disabled).toBe(true);
+  expect(screen.getByRole("option", { name: "Standard" }).disabled).toBe(false);
+});

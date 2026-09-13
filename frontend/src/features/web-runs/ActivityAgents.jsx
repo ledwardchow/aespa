@@ -101,7 +101,9 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                 {canExpand && isExpanded && (
                   <div className="agent-task-history">
                     {activeWorkers.map((worker) => {
-                      const match = worker.id.match(/^deep-worker-(\d+)-task-(\d+)$/);
+                      const match = worker.id.match(
+                        /^deep-worker-(\d+)-task-\d+(?:-variant-\d+)?$/,
+                      );
                       const workerLabel =
                         worker.role && worker.role !== "Deep Attack Worker"
                           ? worker.role

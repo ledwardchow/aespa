@@ -927,9 +927,11 @@ def test_deep_scan_settings_are_separate_from_specialists(client: TestClient):
     defaults = client.get("/api/settings/deep-scan-config")
     assert defaults.status_code == 200
     assert defaults.json()["max_concurrent_workers"] == 6
+    assert defaults.json()["max_concurrent_planners"] == 4
 
     payload = {
         "max_concurrent_workers": 8,
+        "max_concurrent_planners": 3,
         "max_tasks": 250,
         "max_steps_per_task": 40,
         "include_sast_leads": True,
@@ -938,6 +940,7 @@ def test_deep_scan_settings_are_separate_from_specialists(client: TestClient):
     saved = client.put("/api/settings/deep-scan-config", json=payload)
     assert saved.status_code == 200
     assert saved.json()["max_concurrent_workers"] == 8
+    assert saved.json()["max_concurrent_planners"] == 3
     assert saved.json()["include_recon_checks"] is False
 
     specialist = client.get("/api/settings/specialist-agent-config")
@@ -1119,13 +1122,13 @@ def test_delete_model_used_by_scan_profile_returns_conflict(fk_engine):
     from aespa.models import (
         ApiCollection,
         ApiTestRun,
-        System,
         AssessmentCampaign,
         LLMConfig,
         LLMProfile,
         LLMProviderConfig,
         SastRun,
         Site,
+        System,
         TestRun,
     )
     from aespa.services import settings as settings_svc

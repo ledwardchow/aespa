@@ -1,12 +1,11 @@
 import { ActivityAgents } from "./ActivityAgents.jsx";
 import { ActivitySpecialists } from "./ActivitySpecialists.jsx";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ActivityLog } from "./ActivityLog.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { ActivityDeepQueue } from "./ActivityDeepQueue.jsx";
 
 const SPECIALIST_WORKERS = [{ prefix: "specialist-", label: "Specialist" }];
-const DEEP_WORKERS = [...SPECIALIST_WORKERS, { prefix: "deep-worker-", label: "Attack worker" }];
 
 export function WebRunActivityTab(props) {
   const {
@@ -24,6 +23,9 @@ export function WebRunActivityTab(props) {
   const [activitySubTab, setActivitySubTab] = useState("agents");
   const [tokenExpanded, setTokenExpanded] = useState(false);
   const isDeep = run?.coverage_mode === "deep";
+  useEffect(() => {
+    if (isDeep && activitySubTab === "workers") setActivitySubTab("deep-queue");
+  }, [activitySubTab, isDeep]);
   return (
     <>
       <div className="activity-panel">
@@ -45,23 +47,21 @@ export function WebRunActivityTab(props) {
                   Agents
                   {agents.some((a) => a.status === "active") ? " ●" : ""}
                 </button>
-                <button
-                  className={
-                    "activity-sub-tab-btn" + (activitySubTab === "workers" ? " active" : "")
-                  }
-                  onClick={() => setActivitySubTab("workers")}
-                >
-                  Workers
-                  {agents
-                    .filter(
-                      (a) =>
-                        a.id.startsWith("specialist-") ||
-                        (isDeep && a.id.startsWith("deep-worker-")),
-                    )
-                    .some((a) => a.status === "active")
-                    ? " ●"
-                    : ""}
-                </button>
+                {!isDeep && (
+                  <button
+                    className={
+                      "activity-sub-tab-btn" + (activitySubTab === "workers" ? " active" : "")
+                    }
+                    onClick={() => setActivitySubTab("workers")}
+                  >
+                    Workers
+                    {agents
+                      .filter((a) => a.id.startsWith("specialist-"))
+                      .some((a) => a.status === "active")
+                      ? " ●"
+                      : ""}
+                  </button>
+                )}
                 {isDeep && (
                   <button
                     className={
@@ -93,13 +93,10 @@ export function WebRunActivityTab(props) {
           />
         </div>
         {activitySubTab === "workers" && (
-          <ActivitySpecialists
-            agents={agents}
-            workerTypes={isDeep ? DEEP_WORKERS : SPECIALIST_WORKERS}
-          />
+          <ActivitySpecialists agents={agents} workerTypes={SPECIALIST_WORKERS} />
         )}
         {activitySubTab === "deep-queue" && (
-          <ActivityDeepQueue runId={runId} thinkingStatus={thinkingStatus} />
+          <ActivityDeepQueue runId={runId} thinkingStatus={thinkingStatus} agents={agents} />
         )}
         {activitySubTab === "agents" && (
           <ActivityAgents

@@ -144,6 +144,9 @@ export function WebRunHeader({
 }) {
   const profile = profiles.find((item) => item.id === run?.llm_profile_id);
   const hasCrawlResult = (run?.pages_discovered || 0) > 0;
+  const deepModeLocked = run?.scan_mode_locked && run?.coverage_mode === "deep";
+  const nonDeepModeLocked = run?.scan_mode_locked && run?.coverage_mode !== "deep";
+  const showDeepOption = showDeepScan || run?.coverage_mode === "deep";
   const canStartPentest = !scanStopping && canStartScan;
   const primaryAction = resolveRunPrimaryAction({
     hasCrawlResult,
@@ -205,12 +208,33 @@ export function WebRunHeader({
               title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: test every applicable page × category obligation. Deep: build a persistent queue from recon, coverage, and imported SAST leads, then use several attack workers. SAST Validate: validate only imported SAST leads."
             >
               Scan mode:
-              <select value={coverageMode} onChange={(event) => onCoverageMode(event.target.value)}>
-                <option value="track">Quick</option>
-                <option value="standard">Standard</option>
-                <option value="enforce">Full</option>
-                {showDeepScan && <option value="deep">Deep</option>}
-                <option value="sast_validate">SAST Validate</option>
+              <select
+                value={coverageMode}
+                onChange={(event) => onCoverageMode(event.target.value)}
+                disabled={deepModeLocked}
+                title={
+                  run?.scan_mode_locked
+                    ? "This run cannot switch between Deep and non-Deep scanning after its first pentest starts."
+                    : undefined
+                }
+              >
+                <option value="track" disabled={deepModeLocked}>
+                  Quick
+                </option>
+                <option value="standard" disabled={deepModeLocked}>
+                  Standard
+                </option>
+                <option value="enforce" disabled={deepModeLocked}>
+                  Full
+                </option>
+                {showDeepOption && (
+                  <option value="deep" disabled={nonDeepModeLocked}>
+                    Deep
+                  </option>
+                )}
+                <option value="sast_validate" disabled={deepModeLocked}>
+                  SAST Validate
+                </option>
               </select>
             </label>
           )}

@@ -39,6 +39,7 @@ from aespa.models import (
     Credential,
     PageCredentialView,
     ScanFinding,
+    ScanLog,
     Site,
     TargetIntelItem,
     TestRun,
@@ -85,6 +86,20 @@ from aespa.services.settings import (
 )
 
 log = logging.getLogger("aespa.scanner")
+
+
+def is_scan_mode_locked(session: Session, run: TestRun) -> bool:
+    """Return whether this run has started a dynamic scan at least once."""
+    if run.execution_snapshot_json:
+        return True
+    scan_started = session.exec(
+        select(ScanLog.id)
+        .where(ScanLog.test_run_id == run.id)
+        .where(ScanLog.run_kind == "web")
+        .where(ScanLog.phase == "scan_started")
+        .limit(1)
+    ).first()
+    return scan_started is not None
 
 
 def _exercised_coverage_progress(

@@ -4,8 +4,15 @@ import { IconCheck } from "../../shared/ui/Icons.jsx";
 
 const DEFAULTS = {
   max_concurrent_workers: 6,
+  max_concurrent_planners: 4,
   max_tasks: 200,
   max_steps_per_task: 30,
+  initial_variants_per_campaign: 2,
+  max_variants_per_campaign: 4,
+  max_total_variants: 400,
+  adaptive_follow_up: true,
+  minimum_signal_strength: 2,
+  reuse_captured_baselines: true,
   include_sast_leads: true,
   include_recon_checks: true,
 };
@@ -36,8 +43,13 @@ export function DeepScanSettings() {
       const savedConfig = await settingsApi.upsertDeepScanConfig({
         ...form,
         max_concurrent_workers: Number(form.max_concurrent_workers),
+        max_concurrent_planners: Number(form.max_concurrent_planners),
         max_tasks: Number(form.max_tasks),
         max_steps_per_task: Number(form.max_steps_per_task),
+        initial_variants_per_campaign: Number(form.initial_variants_per_campaign),
+        max_variants_per_campaign: Number(form.max_variants_per_campaign),
+        max_total_variants: Number(form.max_total_variants),
+        minimum_signal_strength: Number(form.minimum_signal_strength),
       });
       setForm({ ...DEFAULTS, ...savedConfig });
       setSaved(true);
@@ -71,11 +83,27 @@ export function DeepScanSettings() {
               onChange={(event) => update({ max_concurrent_workers: Number(event.target.value) })}
             />
             <div className="field-hint">
-              Maximum number of queued tasks tested at the same time.
+              Maximum number of execution variants tested at the same time.
             </div>
           </div>
           <div className="field">
-            <label htmlFor="deep-tasks">Maximum queued tasks</label>
+            <label htmlFor="deep-planners">Concurrent planner calls</label>
+            <input
+              id="deep-planners"
+              type="number"
+              min="1"
+              max="20"
+              value={form.max_concurrent_planners}
+              onChange={(event) =>
+                update({ max_concurrent_planners: Number(event.target.value) })
+              }
+            />
+            <div className="field-hint">
+              Plans independent testers in parallel. Provider request and token limits still apply.
+            </div>
+          </div>
+          <div className="field">
+            <label htmlFor="deep-tasks">Maximum queued testers</label>
             <input
               id="deep-tasks"
               type="number"
@@ -84,7 +112,7 @@ export function DeepScanSettings() {
               value={form.max_tasks}
               onChange={(event) => update({ max_tasks: Number(event.target.value) })}
             />
-            <div className="field-hint">Limits the saved Deep work queue for each run.</div>
+            <div className="field-hint">Limits the saved Deep tester queue for each run.</div>
           </div>
           <div className="field">
             <label htmlFor="deep-steps">Maximum steps per task</label>
@@ -98,6 +126,79 @@ export function DeepScanSettings() {
             />
             <div className="field-hint">Step budget available to each Deep attack worker.</div>
           </div>
+          <div className="form-section-title">Tester Variants</div>
+          <div className="field">
+            <label htmlFor="deep-initial-variants">Initial variants per tester</label>
+            <input
+              id="deep-initial-variants"
+              type="number"
+              min="1"
+              max="8"
+              value={form.initial_variants_per_campaign}
+              onChange={(event) =>
+                update({ initial_variants_per_campaign: Number(event.target.value) })
+              }
+            />
+            <div className="field-hint">
+              Distinct worker purposes planned after the baseline completes.
+            </div>
+          </div>
+          <div className="field">
+            <label htmlFor="deep-max-variants">Maximum variants per tester</label>
+            <input
+              id="deep-max-variants"
+              type="number"
+              min="1"
+              max="12"
+              value={form.max_variants_per_campaign}
+              onChange={(event) =>
+                update({ max_variants_per_campaign: Number(event.target.value) })
+              }
+            />
+            <div className="field-hint">Includes the baseline and any evidence-led follow-up.</div>
+          </div>
+          <div className="field">
+            <label htmlFor="deep-total-variants">Maximum variants per run</label>
+            <input
+              id="deep-total-variants"
+              type="number"
+              min="1"
+              max="4000"
+              value={form.max_total_variants}
+              onChange={(event) => update({ max_total_variants: Number(event.target.value) })}
+            />
+            <div className="field-hint">
+              Stops a large route inventory from producing an unbounded worker queue.
+            </div>
+          </div>
+          <div className="field">
+            <label htmlFor="deep-signal">Minimum signal for a follow-up</label>
+            <select
+              id="deep-signal"
+              value={form.minimum_signal_strength}
+              onChange={(event) => update({ minimum_signal_strength: Number(event.target.value) })}
+            >
+              <option value={1}>Any new response</option>
+              <option value={2}>Error or denial difference</option>
+              <option value={3}>Confirmed finding only</option>
+            </select>
+          </div>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={form.adaptive_follow_up}
+              onChange={(event) => update({ adaptive_follow_up: event.target.checked })}
+            />
+            <span>Queue a confirmation variant when a worker finds a new signal</span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={form.reuse_captured_baselines}
+              onChange={(event) => update({ reuse_captured_baselines: event.target.checked })}
+            />
+            <span>Reuse matching crawl traffic as the tester baseline</span>
+          </label>
           <div className="form-section-title">Task Sources</div>
           <label className="toggle-row">
             <input
