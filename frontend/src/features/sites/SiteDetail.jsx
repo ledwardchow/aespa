@@ -483,7 +483,10 @@ export function SiteDetail({ siteId }) {
                   {sortedRuns.map((r) => (
                     <tr key={r.id}>
                       <td>
-                        <strong>{r.name}</strong>
+                        <span className="run-name">
+                          <strong>{r.name}</strong>
+                          {r.coverage_mode === "deep" && <span className="badge deep">Deep</span>}
+                        </span>
                         {r.llm_profile_id && (
                           <div
                             style={{
