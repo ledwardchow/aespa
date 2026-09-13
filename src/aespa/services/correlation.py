@@ -1,13 +1,13 @@
 """Cross-repository correlation for multi-repository campaigns.
 
-Builds the campaign's "application map" (``ComponentConnection`` rows) from
+Builds the campaign's "system map" (``ComponentConnection`` rows) from
 the compact ``ComponentFact`` rows each source SAST run recorded, proposes
 which live target should receive each SAST lead (``LeadTargetMapping``), and
 — only when the evidence genuinely spans two components — creates a bounded
 campaign-owned cross-repository ``ScanLead``.
 
 Matching is deterministic first (hosts, HTTP method/path, auth markers, queue
-identifiers, application hints). Production correlation then uses a bounded
+identifiers, system hints). Production correlation then uses a bounded
 LLM pass over unresolved, already-extracted facts. The synchronous
 ``correlate_campaign`` function remains deterministic for unit tests.
 """
@@ -30,8 +30,6 @@ from aespa.db import get_engine
 from aespa.models import (
     ApiCollection,
     ApiEndpoint,
-    ApplicationComponent,
-    ApplicationTarget,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
@@ -44,6 +42,8 @@ from aespa.models import (
     ScanLead,
     ScanLeadComponentProvenance,
     Site,
+    SystemComponent,
+    SystemTarget,
 )
 from aespa.services import events as events_svc
 from aespa.services.campaign_mapping_quality import (
@@ -1937,8 +1937,8 @@ def _generate_cross_component_leads(
         if source_fact.fact_type != "http_call" or target_fact.fact_type != "route":
             continue
 
-        source_comp = session.get(ApplicationComponent, connection.source_component_id)
-        target_comp = session.get(ApplicationComponent, connection.target_component_id)
+        source_comp = session.get(SystemComponent, connection.source_component_id)
+        target_comp = session.get(SystemComponent, connection.target_component_id)
         source_comp_name = (
             source_comp.name if source_comp else f"#{connection.source_component_id}"
         )
@@ -2483,7 +2483,7 @@ async def _rewrite_pre_crawl_frontend_paths(
     return warnings
 
 
-def _target_host(session: Session, target: ApplicationTarget) -> str | None:
+def _target_host(session: Session, target: SystemTarget) -> str | None:
     if target.target_type == "site":
         site = session.get(Site, target.target_id)
         return _host_of(site.base_url) if site else None
@@ -2492,7 +2492,7 @@ def _target_host(session: Session, target: ApplicationTarget) -> str | None:
 
 
 def _score_lead_target(
-    session: Session, lead: ScanLead, component_id: int, target: ApplicationTarget
+    session: Session, lead: ScanLead, component_id: int, target: SystemTarget
 ) -> tuple[float, str, dict]:
     score = 0.0
     parts: list[str] = []
@@ -2540,7 +2540,7 @@ def _best_score_across_components(
     session: Session,
     lead: ScanLead,
     component_ids: set[int],
-    target: ApplicationTarget,
+    target: SystemTarget,
 ) -> tuple[float, str, dict]:
     """Score a lead against a target once per candidate component and keep
     the strongest match (a cross-repo lead has more than one contributing
@@ -2594,7 +2594,7 @@ def _propose_mappings_for_lead(
     campaign_id: int,
     lead: ScanLead,
     component_ids: set[int],
-    targets: list[ApplicationTarget],
+    targets: list[SystemTarget],
     mappings: list[LeadTargetMapping],
 ) -> None:
     try:
@@ -2727,7 +2727,7 @@ def _propose_lead_target_mappings(
     source_members: list[CampaignSourceMember],
     target_members: list[CampaignTargetMember],
 ) -> list[LeadTargetMapping]:
-    targets = [session.get(ApplicationTarget, tm.target_id) for tm in target_members]
+    targets = [session.get(SystemTarget, tm.target_id) for tm in target_members]
     targets = [t for t in targets if t is not None]
 
     # Replace stale proposals for leads that are still only "proposed" so a
@@ -2788,7 +2788,7 @@ def _propose_lead_target_mappings(
 def correlate_campaign(
     campaign_id: int, *, llm_match: LlmMatchFn | None = None
 ) -> dict:
-    """Build the application map and lead-target proposals for one campaign.
+    """Build the system map and lead-target proposals for one campaign.
 
     Deterministic only unless ``llm_match`` is supplied — tests never pass it,
     so this function never performs network I/O.
@@ -2833,7 +2833,7 @@ def correlate_campaign(
 
 
 def rebuild_connections_deterministic(campaign_id: int) -> dict:
-    """Rebuild only the application map without changing downstream review data."""
+    """Rebuild only the system map without changing downstream review data."""
     from aespa.services import component_mapper
 
     with Session(get_engine()) as session:
@@ -3758,7 +3758,7 @@ def copy_explicit_component_leads_for_target(
     to the normal review gate.
     """
     with Session(get_engine()) as session:
-        target = session.get(ApplicationTarget, target_id)
+        target = session.get(SystemTarget, target_id)
         if target is None or target.component_id is None:
             return 0
         member = session.exec(

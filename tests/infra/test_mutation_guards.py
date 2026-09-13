@@ -13,9 +13,9 @@ from sqlmodel import Session
 from aespa.models import (
     ApiCollection,
     ApiTestRun,
-    Application,
-    ApplicationComponent,
-    ApplicationTarget,
+    System,
+    SystemComponent,
+    SystemTarget,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
@@ -32,10 +32,10 @@ from aespa.models import (
 def _seed_campaign_owned_runs(engine) -> dict:
     """One campaign owning one SastRun, one TestRun, and one ApiTestRun."""
     with Session(engine) as s:
-        app = Application(name="Acme")
+        app = System(name="Acme")
         s.add(app)
         s.flush()
-        component = ApplicationComponent(application_id=app.id, name="checkout-ui")
+        component = SystemComponent(system_id=app.id, name="checkout-ui")
         s.add(component)
         s.flush()
         snapshot = ComponentSnapshot(
@@ -50,21 +50,21 @@ def _seed_campaign_owned_runs(engine) -> dict:
         site = Site(name="Portal", base_url="http://portal.test")
         s.add(site)
         s.flush()
-        site_target = ApplicationTarget(
-            application_id=app.id, target_type="site", target_id=site.id
+        site_target = SystemTarget(
+            system_id=app.id, target_type="site", target_id=site.id
         )
         s.add(site_target)
 
         collection = ApiCollection(name="Orders API", base_url="http://api.test")
         s.add(collection)
         s.flush()
-        api_target = ApplicationTarget(
-            application_id=app.id, target_type="api_collection", target_id=collection.id
+        api_target = SystemTarget(
+            system_id=app.id, target_type="api_collection", target_id=collection.id
         )
         s.add(api_target)
         s.flush()
 
-        campaign = AssessmentCampaign(application_id=app.id, name="release-1")
+        campaign = AssessmentCampaign(system_id=app.id, name="release-1")
         s.add(campaign)
         s.flush()
 

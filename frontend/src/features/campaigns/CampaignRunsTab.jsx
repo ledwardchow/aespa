@@ -1,5 +1,5 @@
 import * as apiRunsApi from "../../shared/api/apiRuns.js";
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useState, useEffect } from "react";
@@ -24,14 +24,7 @@ import {
 // state lifecycle is duplicated here — the campaign record (already loaded by
 // the shell) is the only source of truth; this only additionally resolves
 // component/target names for readability.
-export function CampaignRunsTab({
-  applicationId,
-  campaign,
-  error,
-  resumeSource,
-  resumeTarget,
-  busy,
-}) {
+export function CampaignRunsTab({ systemId, campaign, error, resumeSource, resumeTarget, busy }) {
   const [tokenUsage, setTokenUsage] = useState(null);
   const [tokenExpanded, setTokenExpanded] = useState(false);
   const [componentNames, setComponentNames] = useState({});
@@ -40,10 +33,7 @@ export function CampaignRunsTab({
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([
-      applicationsApi.listAppComponents(applicationId),
-      applicationsApi.listAppTargets(applicationId),
-    ])
+    Promise.all([systemsApi.listSystemComponents(systemId), systemsApi.listSystemTargets(systemId)])
       .then(([comps, tgts]) => {
         if (cancelled) return;
         const cMap = {};
@@ -61,12 +51,12 @@ export function CampaignRunsTab({
     return () => {
       cancelled = true;
     };
-  }, [applicationId]);
+  }, [systemId]);
 
   useEffect(() => {
     let cancelled = false;
-    applicationsApi
-      .getCampaignValidationCases(applicationId, campaign.id)
+    systemsApi
+      .getCampaignValidationCases(systemId, campaign.id)
       .then((value) => {
         if (!cancelled) setValidationCases(validationCasesFromResponse(value));
       })
@@ -78,7 +68,7 @@ export function CampaignRunsTab({
     return () => {
       cancelled = true;
     };
-  }, [applicationId, campaign.id, campaign.updated_at, campaign.status]);
+  }, [systemId, campaign.id, campaign.updated_at, campaign.status]);
 
   useEffect(() => {
     let cancelled = false;

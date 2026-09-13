@@ -1,4 +1,4 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useEffect, useCallback } from "react";
 import { nav } from "../../shared/navigation/router.js";
 
@@ -8,20 +8,20 @@ import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { fmtDate } from "../../shared/lib/dates.js";
 
 // ── CampaignsTab ─────────────────────────────────────────────────────────────
-// Every campaign run for this application, newest first.
+// Every campaign run for this system, newest first.
 
-export function CampaignsTab({ applicationId }) {
+export function CampaignsTab({ systemId }) {
   const [campaigns, setCampaigns] = useState(null);
   const [error, setError] = useState(null);
 
   const load = useCallback(async () => {
     try {
-      const list = await applicationsApi.listCampaigns(applicationId);
+      const list = await systemsApi.listCampaigns(systemId);
       setCampaigns([...list].sort((a, b) => b.id - a.id));
     } catch (e) {
       setError(e.message);
     }
-  }, [applicationId]);
+  }, [systemId]);
 
   useEffect(() => {
     load();
@@ -30,7 +30,7 @@ export function CampaignsTab({ applicationId }) {
   const onDelete = async (c) => {
     if (!confirm(`Delete campaign "${c.name}"? This removes every child scan it created.`)) return;
     try {
-      await applicationsApi.deleteCampaign(applicationId, c.id);
+      await systemsApi.deleteCampaign(systemId, c.id);
       await load();
     } catch (e) {
       setError(
@@ -50,10 +50,7 @@ export function CampaignsTab({ applicationId }) {
         <div className="form-section-title" style={{ margin: 0, border: "none", padding: 0 }}>
           Campaigns
         </div>
-        <button
-          className="btn"
-          onClick={() => nav(`#/applications/${applicationId}/campaigns/new`)}
-        >
+        <button className="btn" onClick={() => nav(`#/systems/${systemId}/campaigns/new`)}>
           <IconPlus /> New campaign
         </button>
       </div>
@@ -63,10 +60,7 @@ export function CampaignsTab({ applicationId }) {
           title="No campaigns yet"
           sub="Start a campaign to freeze one snapshot per component and a set of live targets, then coordinate SAST and DAST across all of them."
           action={
-            <button
-              className="btn"
-              onClick={() => nav(`#/applications/${applicationId}/campaigns/new`)}
-            >
+            <button className="btn" onClick={() => nav(`#/systems/${systemId}/campaigns/new`)}>
               <IconPlus /> New campaign
             </button>
           }
@@ -88,10 +82,7 @@ export function CampaignsTab({ applicationId }) {
               {campaigns.map((c) => (
                 <tr key={c.id}>
                   <td>
-                    <a
-                      href={`#/applications/${applicationId}/campaigns/${c.id}`}
-                      style={{ fontWeight: 600 }}
-                    >
+                    <a href={`#/systems/${systemId}/campaigns/${c.id}`} style={{ fontWeight: 600 }}>
                       {c.name}
                     </a>
                   </td>
@@ -104,7 +95,7 @@ export function CampaignsTab({ applicationId }) {
                     <div className="row" style={{ justifyContent: "flex-end" }}>
                       <button
                         className="btn secondary sm"
-                        onClick={() => nav(`#/applications/${applicationId}/campaigns/${c.id}`)}
+                        onClick={() => nav(`#/systems/${systemId}/campaigns/${c.id}`)}
                       >
                         Open
                       </button>

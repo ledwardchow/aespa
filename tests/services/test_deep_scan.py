@@ -14,6 +14,7 @@ from aespa.models import (
     DeepScanTask,
     PageOwaspTest,
     ScanLead,
+    ScanObligation,
     Site,
     TestRun,
 )
@@ -67,7 +68,60 @@ def test_deep_task_seeding_is_idempotent_and_includes_recon(db_session):
         "recon",
         "workflow_recon",
     }
-    assert any(task["attack_class"] == "idor" for task in queue["tasks"])
+    assert any(
+        check["attack_class"] == "idor"
+        for task in queue["tasks"]
+        for check in task["checks"]
+    )
+    assert queue["checks_total"] >= queue["total"]
+
+
+def test_deep_queue_reports_the_number_of_findings_from_a_task(db_session):
+    run = _run_with_page(db_session)
+    db_session.add(
+        DeepScanTask(
+            run_id=run.id,
+            fingerprint="finding-count",
+            attack_class="sqli",
+            target_url="https://target.local/api/accounts",
+            status="finding",
+            outcome="2 new findings",
+        )
+    )
+    db_session.commit()
+
+    task = get_queue(run.id)["tasks"][0]
+
+    assert task["finding_count"] == 2
+
+
+def test_deep_groups_vulnerability_and_parameter_checks_by_operation(db_session):
+    run = _run_with_page(db_session)
+    for technique, parameter in (("sqli", "search"), ("reflected_xss", "search")):
+        db_session.add(
+            ScanObligation(
+                run_kind="web",
+                run_id=run.id,
+                scan_mode="full",
+                owasp_catalog="web_2025",
+                owasp_category="A03",
+                vulnerability_technique=technique,
+                route_template="https://target.local/api/accounts/1",
+                http_method="GET",
+                parameter=parameter,
+            )
+        )
+    db_session.commit()
+
+    seed_deep_tasks(run.id)
+    operation_tasks = [
+        task for task in get_queue(run.id)["tasks"] if task["task_kind"] == "operation"
+    ]
+
+    assert len(operation_tasks) == 1
+    classes = {check["attack_class"] for check in operation_tasks[0]["checks"]}
+    assert {"sqli", "xss"}.issubset(classes)
+    assert operation_tasks[0]["inputs"] == ["search"]
 
 
 def test_worker_step_description_prefers_the_hypothesis_over_a_raw_request():
@@ -92,14 +146,13 @@ def test_worker_step_description_has_plain_fallbacks():
     from aespa.services.scanner import _infer_step_note
 
     assert (
-        _infer_step_note(
-            "context_tool", {"tool": "traffic_search", "args": {}}, 5
-        )
+        _infer_step_note("context_tool", {"tool": "traffic_search", "args": {}}, 5)
         == "Look up traffic search"
     )
-    assert _infer_step_note(
-        "execute_python", {"purpose": "Compare response sizes"}, 6
-    ) == "Compare response sizes"
+    assert (
+        _infer_step_note("execute_python", {"purpose": "Compare response sizes"}, 6)
+        == "Compare response sizes"
+    )
 
 
 def test_deep_mode_is_web_only():
@@ -163,6 +216,9 @@ def test_deep_task_cap_does_not_change_other_scan_modes(db_session):
     seed_deep_tasks(run.id)
 
     assert get_queue(run.id)["total"] == 2
+    assert any(
+        task["task_kind"] == "operation" for task in get_queue(run.id)["tasks"]
+    )
     ordinary = TestRun(
         site_id=run.site_id,
         name="Quick run",
@@ -208,9 +264,11 @@ async def test_deep_worker_pool_uses_configured_concurrency(db_session, monkeypa
     db_session.commit()
     active = 0
     high_water = 0
+    worker_roles = []
 
     async def fake_worker(**kwargs):
         nonlocal active, high_water
+        worker_roles.append(kwargs["agent_role"])
         active += 1
         high_water = max(high_water, active)
         await asyncio.sleep(0.01)
@@ -228,6 +286,7 @@ async def test_deep_worker_pool_uses_configured_concurrency(db_session, monkeypa
 
     queue = get_queue(run.id)
     assert high_water == 3
+    assert all(role and role != "Deep Attack Worker" for role in worker_roles)
     assert queue["total"] == 4
     assert queue["counts"]["inconclusive"] == 4
 

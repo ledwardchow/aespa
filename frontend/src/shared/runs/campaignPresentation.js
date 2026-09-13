@@ -1,4 +1,4 @@
-// Shared formatting/labels for the Applications & Campaigns feature.
+// Shared formatting/labels for the Systems & Campaigns feature.
 // Kept tiny and dependency-free — no giant shared-state module, just pure helpers.
 
 export function formatBytes(bytes) {

@@ -1,7 +1,7 @@
 """Campaign CRUD + the durable multi-repository SAST validation orchestrator.
 
 A campaign coordinates SAST runs and lead-only live-target validation for one
-``Application`` through:
+``System`` through:
 
     draft -> sast_running -> correlating -> awaiting_review -> dast_running
     -> completed | failed | stopped
@@ -30,8 +30,6 @@ from aespa.db import get_engine
 from aespa.models import (
     ApiCollection,
     ApiTestRun,
-    ApplicationComponent,
-    ApplicationTarget,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
@@ -46,14 +44,16 @@ from aespa.models import (
     ScanLead,
     ScanLeadComponentProvenance,
     Site,
+    SystemComponent,
+    SystemTarget,
     TestRun,
     TrafficEntry,
 )
 from aespa.schemas import CampaignCreate
-from aespa.services import applications as applications_svc
 from aespa.services import campaign_validation_cases as validation_cases_svc
 from aespa.services import correlation as correlation_svc
 from aespa.services import events as events_svc
+from aespa.services import systems as systems_svc
 
 log = logging.getLogger(__name__)
 
@@ -209,22 +209,22 @@ def _crawl_frontend_context(
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
 
-def list_campaigns(session: Session, application_id: int) -> list[AssessmentCampaign]:
-    applications_svc.get_application(session, application_id)
+def list_campaigns(session: Session, system_id: int) -> list[AssessmentCampaign]:
+    systems_svc.get_system(session, system_id)
     return list(
         session.exec(
             select(AssessmentCampaign)
-            .where(AssessmentCampaign.application_id == application_id)
+            .where(AssessmentCampaign.system_id == system_id)
             .order_by(AssessmentCampaign.id.desc())  # type: ignore[attr-defined]
         ).all()
     )
 
 
 def get_campaign(
-    session: Session, application_id: int, campaign_id: int
+    session: Session, system_id: int, campaign_id: int
 ) -> AssessmentCampaign:
     campaign = session.get(AssessmentCampaign, campaign_id)
-    if campaign is None or campaign.application_id != application_id:
+    if campaign is None or campaign.system_id != system_id:
         raise CampaignNotFound(f"Campaign id={campaign_id} does not exist")
     return campaign
 
@@ -277,14 +277,14 @@ def get_campaign_member_run_status(session: Session, member) -> str | None:
 
 
 def create_campaign(
-    session: Session, application_id: int, payload: CampaignCreate
+    session: Session, system_id: int, payload: CampaignCreate
 ) -> AssessmentCampaign:
     """Validate and freeze one campaign's component snapshots + live targets.
 
     Every referenced component/snapshot/target must belong to this exact
-    Application — an id from another application is rejected outright.
+    System. An id from another system is rejected outright.
     """
-    applications_svc.get_application(session, application_id)
+    systems_svc.get_system(session, system_id)
 
     seen_components: set[int] = set()
     for source in payload.source_members:
@@ -293,14 +293,14 @@ def create_campaign(
                 "Each component can only be selected once per campaign"
             )
         seen_components.add(source.component_id)
-        component = session.get(ApplicationComponent, source.component_id)
-        if component is None or component.application_id != application_id:
-            raise applications_svc.CrossApplicationReference(
-                f"Component id={source.component_id} does not belong to this application"
+        component = session.get(SystemComponent, source.component_id)
+        if component is None or component.system_id != system_id:
+            raise systems_svc.CrossSystemReference(
+                f"Component id={source.component_id} does not belong to this system"
             )
         snapshot = session.get(ComponentSnapshot, source.snapshot_id)
         if snapshot is None or snapshot.component_id != source.component_id:
-            raise applications_svc.CrossApplicationReference(
+            raise systems_svc.CrossSystemReference(
                 f"Snapshot id={source.snapshot_id} does not belong to component "
                 f"id={source.component_id}"
             )
@@ -312,10 +312,10 @@ def create_campaign(
                 "Each target can only be selected once per campaign"
             )
         seen_targets.add(target_ref.target_id)
-        target = session.get(ApplicationTarget, target_ref.target_id)
-        if target is None or target.application_id != application_id:
-            raise applications_svc.CrossApplicationReference(
-                f"Target id={target_ref.target_id} does not belong to this application"
+        target = session.get(SystemTarget, target_ref.target_id)
+        if target is None or target.system_id != system_id:
+            raise systems_svc.CrossSystemReference(
+                f"Target id={target_ref.target_id} does not belong to this system"
             )
 
     if payload.llm_config_id is not None:
@@ -331,7 +331,7 @@ def create_campaign(
 
     mapper_config = session.get(ComponentMapperConfig, 1)
     campaign = AssessmentCampaign(
-        application_id=application_id,
+        system_id=system_id,
         name=payload.name,
         status="draft",
         max_parallel_sast=payload.max_parallel_sast,
@@ -370,7 +370,7 @@ def create_campaign(
             )
         )
     for target_ref in payload.target_members:
-        target = session.get(ApplicationTarget, target_ref.target_id)
+        target = session.get(SystemTarget, target_ref.target_id)
         session.add(
             CampaignTargetMember(
                 campaign_id=campaign.id,
@@ -383,8 +383,8 @@ def create_campaign(
     return campaign
 
 
-def delete_campaign(session: Session, application_id: int, campaign_id: int) -> None:
-    campaign = get_campaign(session, application_id, campaign_id)
+def delete_campaign(session: Session, system_id: int, campaign_id: int) -> None:
+    campaign = get_campaign(session, system_id, campaign_id)
     if is_campaign_running(campaign_id) or campaign.status in _ACTIVE_STATUSES:
         raise InvalidCampaignState("Stop the campaign before deleting it")
     from aespa.services import run_cleanup
@@ -856,7 +856,7 @@ async def start_campaign(campaign_id: int) -> None:
                 if member.sast_run_id is not None:
                     continue  # already created by a previous start attempt
                 snapshot = s.get(ComponentSnapshot, member.snapshot_id)
-                component = s.get(ApplicationComponent, member.component_id)
+                component = s.get(SystemComponent, member.component_id)
                 run = SastRun(
                     name=f"{component.name} — {campaign.name}",
                     source_archive_path=snapshot.stored_path,
@@ -1311,7 +1311,7 @@ async def resume_source_member(campaign_id: int, member_id: int) -> None:
             )
         if member.sast_run_id is None:
             snapshot = s.get(ComponentSnapshot, member.snapshot_id)
-            component = s.get(ApplicationComponent, member.component_id)
+            component = s.get(SystemComponent, member.component_id)
             if snapshot is None or component is None:
                 raise InvalidCampaignState(
                     "This source member no longer has a valid component snapshot"
@@ -1739,7 +1739,7 @@ async def resume_target_member(campaign_id: int, member_id: int) -> None:
             )
         if member.status == "completed":
             raise InvalidCampaignState("This target scan is already completed")
-        target = s.get(ApplicationTarget, member.target_id)
+        target = s.get(SystemTarget, member.target_id)
         if target is None:
             raise InvalidCampaignState("This target no longer exists")
         if member.target_type == "site":
@@ -2211,7 +2211,7 @@ async def _run_dast_stage(campaign_id: int) -> bool:
         ).all()
         prepared: list[tuple[int, str, int, int | None, int | None]] = []
         for member in members:
-            target = s.get(ApplicationTarget, member.target_id)
+            target = s.get(SystemTarget, member.target_id)
             if target is None:
                 continue
             if target.target_type == "site":

@@ -9,7 +9,7 @@ from aespa.schemas import ActiveJobSummary
 
 
 def list_active_jobs(session: Session) -> list[ActiveJobSummary]:
-    from aespa.models import Application, AssessmentCampaign, Site
+    from aespa.models import AssessmentCampaign, Site, System
     from aespa.services import crawler as crawler_svc
     from aespa.services import scanner as scanner_svc
     from aespa.services import validator as validator_svc
@@ -114,7 +114,7 @@ def list_active_jobs(session: Session) -> list[ActiveJobSummary]:
         .order_by(AssessmentCampaign.created_at.desc())
     ).all()
     for campaign in campaigns:
-        application = session.get(Application, campaign.application_id)
+        system = session.get(System, campaign.system_id)
         jobs.append(
             ActiveJobSummary(
                 run_id=campaign.id,
@@ -124,11 +124,11 @@ def list_active_jobs(session: Session) -> list[ActiveJobSummary]:
                 started_at=campaign.started_at,
                 created_at=campaign.created_at,
                 run_type="campaign",
-                application_id=campaign.application_id,
-                application_name=(
-                    application.name
-                    if application
-                    else f"Application #{campaign.application_id}"
+                system_id=campaign.system_id,
+                system_name=(
+                    system.name
+                    if system
+                    else f"System #{campaign.system_id}"
                 ),
             )
         )

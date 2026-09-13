@@ -12,10 +12,11 @@ export function useAppPreferences() {
       return true;
     }
   });
-  const [showApplications, setShowApplications] = useState(() => {
+  const [showSystems, setShowSystems] = useState(() => {
     try {
-      const val = localStorage.getItem("aespa_show_applications");
-      return val === null ? true : val === "true";
+      const val = localStorage.getItem("aespa_show_systems");
+      const legacyVal = localStorage.getItem("aespa_show_applications");
+      return val === null ? (legacyVal === null ? true : legacyVal === "true") : val === "true";
     } catch {
       return true;
     }
@@ -52,8 +53,8 @@ export function useAppPreferences() {
     username,
     showUsername,
     setShowUsername,
-    showApplications,
-    setShowApplications,
+    showSystems,
+    setShowSystems,
     showDeepScan,
     setShowDeepScan,
     reportingDebugCfg,

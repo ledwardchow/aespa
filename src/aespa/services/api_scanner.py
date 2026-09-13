@@ -1789,7 +1789,7 @@ async def start_api_scan(api_run_id: int) -> None:
 
 
 async def start_sast_validation_resume(api_run_id: int) -> None:
-    """Resume an Applications API child using its existing lead work list."""
+    """Resume a System API child using its existing lead work list."""
     with Session(get_engine()) as session:
         run = session.get(ApiTestRun, api_run_id)
         if run is None:

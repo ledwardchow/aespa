@@ -1,5 +1,5 @@
 import * as apiRunsApi from "../../shared/api/apiRuns.js";
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useState, useCallback, useMemo } from "react";
@@ -45,16 +45,14 @@ function activeJobProgress(job) {
   return "—";
 }
 function activeJobScopeName(job) {
-  if (job.run_type === "campaign")
-    return job.application_name || `Application #${job.application_id}`;
+  if (job.run_type === "campaign") return job.system_name || `System #${job.system_id}`;
   if (job.run_type === "api") return job.collection_name || `API #${job.collection_id}`;
   if (job.run_type === "sast")
     return job.collection_id ? job.collection_name || `API #${job.collection_id}` : job.run_name;
   return job.site_name || `Site #${job.site_id}`;
 }
 function activeJobScopeLink(job) {
-  if (job.run_type === "campaign")
-    return `#/applications/${job.application_id}/campaigns/${job.run_id}`;
+  if (job.run_type === "campaign") return `#/systems/${job.system_id}/campaigns/${job.run_id}`;
   if (job.run_type === "api") return `#/apis/${job.collection_id}`;
   if (job.run_type === "sast")
     return job.collection_id ? `#/apis/${job.collection_id}` : `#/sast-runs/${job.run_id}/progress`;
@@ -136,7 +134,7 @@ export function ActiveJobsPage() {
     }));
     try {
       if (j.run_type === "campaign") {
-        await applicationsApi.stopCampaign(j.application_id, j.run_id);
+        await systemsApi.stopCampaign(j.system_id, j.run_id);
       } else if (j.run_type === "sast") {
         await sastRunsApi.stopSastScan(j.run_id);
       } else if (j.run_type === "api") {
@@ -304,7 +302,7 @@ export function ActiveJobsPage() {
                   const isStopping = !!stopping[key];
                   const runLink =
                     j.run_type === "campaign"
-                      ? `#/applications/${j.application_id}/campaigns/${j.run_id}`
+                      ? `#/systems/${j.system_id}/campaigns/${j.run_id}`
                       : j.run_type === "sast"
                         ? `#/sast-runs/${j.run_id}/progress`
                         : j.run_type === "api"

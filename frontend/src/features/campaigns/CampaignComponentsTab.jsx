@@ -1,4 +1,4 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useEffect } from "react";
 
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
@@ -6,10 +6,10 @@ import { shortHash } from "../../shared/runs/campaignPresentation.js";
 
 // ── CampaignComponentsTab ────────────────────────────────────────────────────
 // The frozen snapshot/target selection this campaign was created with. Names
-// are resolved against the application's current components/targets — the
-// campaign only stores ids, so this reads the parent application to label
+// are resolved against the system's current components/targets. The
+// campaign only stores ids, so this reads the parent system to label
 // them (the snapshot/target rows themselves are still the frozen ones).
-export function CampaignComponentsTab({ applicationId, campaign }) {
+export function CampaignComponentsTab({ systemId, campaign }) {
   const [components, setComponents] = useState(null);
   const [targets, setTargets] = useState(null);
   const [snapshotsByComponent, setSnapshotsByComponent] = useState({});
@@ -17,10 +17,7 @@ export function CampaignComponentsTab({ applicationId, campaign }) {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([
-      applicationsApi.listAppComponents(applicationId),
-      applicationsApi.listAppTargets(applicationId),
-    ])
+    Promise.all([systemsApi.listSystemComponents(systemId), systemsApi.listSystemTargets(systemId)])
       .then(async ([comps, tgts]) => {
         if (cancelled) return;
         setComponents(comps);
@@ -28,7 +25,7 @@ export function CampaignComponentsTab({ applicationId, campaign }) {
         const neededComponentIds = [...new Set(campaign.source_members.map((m) => m.component_id))];
         const histories = await Promise.all(
           neededComponentIds.map((id) =>
-            applicationsApi.listComponentSnapshots(applicationId, id).catch(() => []),
+            systemsApi.listComponentSnapshots(systemId, id).catch(() => []),
           ),
         );
         if (cancelled) return;
@@ -42,7 +39,7 @@ export function CampaignComponentsTab({ applicationId, campaign }) {
     return () => {
       cancelled = true;
     };
-  }, [applicationId, campaign.source_members]);
+  }, [systemId, campaign.source_members]);
 
   if (error) return <div className="alert error">{error}</div>;
   if (components === null || targets === null) return <div className="subtle">Loading…</div>;
@@ -58,8 +55,8 @@ export function CampaignComponentsTab({ applicationId, campaign }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div className="alert warning">
-        This is the frozen selection this campaign was created with. Later changes to the
-        application's snapshots or targets do not change it.
+        This is the frozen selection this campaign was created with. Later changes to the system's
+        snapshots or targets do not change it.
       </div>
       <div>
         <div className="form-section-title">Code snapshots ({campaign.source_members.length})</div>

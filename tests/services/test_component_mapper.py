@@ -8,8 +8,8 @@ import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
-    Application,
-    ApplicationComponent,
+    System,
+    SystemComponent,
     AssessmentCampaign,
     CampaignSourceMember,
     ComponentFact,
@@ -22,10 +22,10 @@ from aespa.services.component_facts import extract_component_facts
 
 def _seed_member(engine, archive: Path) -> tuple[int, int]:
     with Session(engine) as session:
-        app = Application(name="Mapper test")
+        app = System(name="Mapper test")
         session.add(app)
         session.flush()
-        component = ApplicationComponent(application_id=app.id, name="service")
+        component = SystemComponent(system_id=app.id, name="service")
         session.add(component)
         session.flush()
         snapshot = ComponentSnapshot(
@@ -39,7 +39,7 @@ def _seed_member(engine, archive: Path) -> tuple[int, int]:
         session.add(snapshot)
         session.add(run)
         session.flush()
-        campaign = AssessmentCampaign(application_id=app.id, name="mapping")
+        campaign = AssessmentCampaign(system_id=app.id, name="mapping")
         session.add(campaign)
         session.flush()
         member = CampaignSourceMember(

@@ -1,10 +1,10 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect, useCallback } from "react";
 
 // Loads everything the guided campaign wizard needs: components (with every
 // saved snapshot, not just the latest), attached targets, and LLM profiles.
-export function useCampaignWizardData(applicationId) {
+export function useCampaignWizardData(systemId) {
   const [components, setComponents] = useState(null);
   const [snapshotsByComponent, setSnapshotsByComponent] = useState({});
   const [targets, setTargets] = useState(null);
@@ -14,8 +14,8 @@ export function useCampaignWizardData(applicationId) {
   const load = useCallback(async () => {
     try {
       const [comps, tgts, profs] = await Promise.all([
-        applicationsApi.listAppComponents(applicationId),
-        applicationsApi.listAppTargets(applicationId),
+        systemsApi.listSystemComponents(systemId),
+        systemsApi.listSystemTargets(systemId),
         settingsApi.listLLMProfiles().catch(() => []),
       ]);
       setComponents(comps);
@@ -23,9 +23,7 @@ export function useCampaignWizardData(applicationId) {
       setProfiles(profs || []);
       const withSnapshots = comps.filter((c) => c.snapshot_count > 0);
       const histories = await Promise.all(
-        withSnapshots.map((c) =>
-          applicationsApi.listComponentSnapshots(applicationId, c.id).catch(() => []),
-        ),
+        withSnapshots.map((c) => systemsApi.listComponentSnapshots(systemId, c.id).catch(() => [])),
       );
       const map = {};
       withSnapshots.forEach((c, i) => {
@@ -35,7 +33,7 @@ export function useCampaignWizardData(applicationId) {
     } catch (e) {
       setError(e.message);
     }
-  }, [applicationId]);
+  }, [systemId]);
 
   useEffect(() => {
     load();

@@ -4987,7 +4987,10 @@ async def _run_specialist_agent(
     agent_role: str = "Specialist",
     event_phase: str = "specialist_step",
     post_probe_fn=None,
+    post_finding_fn=None,
     default_owasp_category: str = "",
+    system_prompt_override: str | None = None,
+    tools_override: list[dict] | None = None,
 ) -> None:
     """Run a focused specialist agent for a specific vulnerability lead."""
     # The specialist role may be assigned a different Model than the Test Lead
@@ -5180,6 +5183,8 @@ async def _run_specialist_agent(
                 )
             if saved is not None:
                 findings_written[0] += 1
+                if post_finding_fn is not None:
+                    post_finding_fn(saved, tool_input)
                 if handoff_id is not None:
                     handoff_svc.update_handoff(handoff_id, finding_id=saved.id)
                 _emit_scan_update(run_id)
@@ -5607,7 +5612,7 @@ async def _run_specialist_agent(
             },
         )
 
-        specialist_system_prompt = _specialist_system_prompt_for_run(
+        specialist_system_prompt = system_prompt_override or _specialist_system_prompt_for_run(
             attack_class, is_api_run=is_api_run
         )
 
@@ -5619,7 +5624,7 @@ async def _run_specialist_agent(
             stop_check=lambda: (
                 step_count[0] >= max_steps or run_id in _thinking_stop_requested
             ),
-            tools=_get_specialist_tools(attack_class),
+            tools=tools_override or _get_specialist_tools(attack_class),
         )
 
         outcome = (
@@ -5629,10 +5634,8 @@ async def _run_specialist_agent(
         )
         if handoff_id is not None:
             persisted_handoff = handoff_svc.get_handoff(handoff_id)
-            if persisted_handoff is not None and persisted_handoff.finding_id:
-                outcome = persisted_handoff.outcome or (
-                    f"Linked to finding #{persisted_handoff.finding_id}"
-                )
+            if persisted_handoff is not None and persisted_handoff.outcome:
+                outcome = persisted_handoff.outcome
         if handoff_id is not None:
             handoff_svc.update_handoff(
                 handoff_id,
@@ -6495,7 +6498,7 @@ async def start_thinking_scan_resume(run_id: int) -> None:
 
 
 async def start_sast_validation_resume(run_id: int) -> None:
-    """Safely continue an Applications SAST-validation child run.
+    """Safely continue a System SAST-validation child run.
 
     The existing child run and imported leads are reused.  If an agent
     checkpoint exists, the normal resume path restores it; otherwise the

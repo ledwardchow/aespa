@@ -17,8 +17,8 @@ const SYSTEM_SETTINGS_TABS = [
 export function DebugPage({
   showUsername,
   setShowUsername,
-  showApplications,
-  setShowApplications,
+  showSystems,
+  setShowSystems,
   showDeepScan,
   setShowDeepScan,
   username,
@@ -339,19 +339,19 @@ export function DebugPage({
             <label className="toggle-row">
               <input
                 type="checkbox"
-                checked={showApplications ?? false}
+                checked={showSystems ?? false}
                 onChange={(e) => {
                   const checked = e.target.checked;
-                  setShowApplications(checked);
+                  setShowSystems(checked);
                   try {
-                    localStorage.setItem("aespa_show_applications", String(checked));
+                    localStorage.setItem("aespa_show_systems", String(checked));
                   } catch {}
                 }}
               />
-              <span>Applications scanning</span>
+              <span>Systems scanning</span>
             </label>
             <div className="field-hint" style={{ marginTop: 6 }}>
-              Show multi-repository application campaign scanning under Targets in the sidebar.
+              Show multi-repository system campaign scanning under Targets in the sidebar.
             </div>
             <label className="toggle-row" style={{ marginTop: 16 }}>
               <input

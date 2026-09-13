@@ -1,4 +1,4 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useEffect, useCallback, useRef } from "react";
 
 import { usePolling } from "../../shared/hooks/usePolling.js";
@@ -10,7 +10,7 @@ const ACTIVE_STAGES = new Set(["sast_running", "correlating", "dast_running"]);
 // start/stop/retry/continue actions the header and tabs need. Kept separate
 // from any one tab's own state so every tab can share one source of truth
 // without re-fetching independently.
-export function useCampaign(applicationId, campaignId) {
+export function useCampaign(systemId, campaignId) {
   const [campaign, setCampaign] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -29,7 +29,7 @@ export function useCampaign(applicationId, campaignId) {
 
   const load = useCallback(async () => {
     try {
-      const c = await applicationsApi.getCampaign(applicationId, campaignId);
+      const c = await systemsApi.getCampaign(systemId, campaignId);
       if (mountedRef.current) {
         setCampaign(c);
         setError(null);
@@ -37,7 +37,7 @@ export function useCampaign(applicationId, campaignId) {
     } catch (e) {
       if (mountedRef.current) setError(e.message);
     }
-  }, [applicationId, campaignId]);
+  }, [systemId, campaignId]);
 
   const displayedStatus = campaignDisplayStatus(campaign);
   usePolling(load, {
@@ -57,7 +57,7 @@ export function useCampaign(applicationId, campaignId) {
         const updated = await action();
         if (
           mountedRef.current &&
-          updated?.application_id != null &&
+          updated?.system_id != null &&
           Array.isArray(updated?.source_members)
         ) {
           setCampaign(updated);
@@ -73,38 +73,36 @@ export function useCampaign(applicationId, campaignId) {
   );
 
   const start = useCallback(
-    () => runAction(() => applicationsApi.startCampaign(applicationId, campaignId)),
-    [runAction, applicationId, campaignId],
+    () => runAction(() => systemsApi.startCampaign(systemId, campaignId)),
+    [runAction, systemId, campaignId],
   );
   const stop = useCallback(
     () =>
       runAction(
-        () => applicationsApi.stopCampaign(applicationId, campaignId),
+        () => systemsApi.stopCampaign(systemId, campaignId),
         "Stop this campaign? All active child scans will be stopped.",
       ),
-    [runAction, applicationId, campaignId],
+    [runAction, systemId, campaignId],
   );
   const resume = useCallback(
-    () => runAction(() => applicationsApi.resumeCampaign(applicationId, campaignId)),
-    [runAction, applicationId, campaignId],
+    () => runAction(() => systemsApi.resumeCampaign(systemId, campaignId)),
+    [runAction, systemId, campaignId],
   );
   const resumeSource = useCallback(
-    (memberId) =>
-      runAction(() => applicationsApi.resumeCampaignSource(applicationId, campaignId, memberId)),
-    [runAction, applicationId, campaignId],
+    (memberId) => runAction(() => systemsApi.resumeCampaignSource(systemId, campaignId, memberId)),
+    [runAction, systemId, campaignId],
   );
   const resumeTarget = useCallback(
-    (memberId) =>
-      runAction(() => applicationsApi.resumeCampaignTarget(applicationId, campaignId, memberId)),
-    [runAction, applicationId, campaignId],
+    (memberId) => runAction(() => systemsApi.resumeCampaignTarget(systemId, campaignId, memberId)),
+    [runAction, systemId, campaignId],
   );
   const rebuildConnections = useCallback(
-    () => runAction(() => applicationsApi.rebuildCampaignConnections(applicationId, campaignId)),
-    [runAction, applicationId, campaignId],
+    () => runAction(() => systemsApi.rebuildCampaignConnections(systemId, campaignId)),
+    [runAction, systemId, campaignId],
   );
   const continueToLive = useCallback(
-    () => runAction(() => applicationsApi.continueCampaign(applicationId, campaignId)),
-    [runAction, applicationId, campaignId],
+    () => runAction(() => systemsApi.continueCampaign(systemId, campaignId)),
+    [runAction, systemId, campaignId],
   );
 
   return {

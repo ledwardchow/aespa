@@ -63,14 +63,14 @@ export const sast = {
   leads_count: 0,
   source_filename: "fixture.zip",
 };
-export const application = {
+export const system = {
   id: 1,
-  name: "Fixture application",
+  name: "Fixture system",
   description: "Local browser fixture",
 };
 export const campaign = {
   id: 1,
-  application_id: 1,
+  system_id: 1,
   name: "Fixture campaign",
   status: "draft",
   source_members: [],
@@ -111,10 +111,10 @@ export async function installFixtures(page, { empty = false } = {}) {
         assurance: {},
         report: {},
       },
-      "/api/applications": empty ? [] : [application],
-      "/api/applications/1": application,
-      "/api/applications/1/campaigns": empty ? [] : [campaign],
-      "/api/applications/1/campaigns/1": campaign,
+      "/api/systems": empty ? [] : [system],
+      "/api/systems/1": system,
+      "/api/systems/1/campaigns": empty ? [] : [campaign],
+      "/api/systems/1/campaigns/1": campaign,
       "/api/settings/llm/models": {},
       "/api/settings/browser-debug": {
         browser_engine: "playwright_chromium",

@@ -108,55 +108,43 @@ export const routes = {
       initialLeadRef: route.leadRef,
     }),
   },
-  "app-list": {
-    section: "applications",
-    Component: lazyNamed(
-      () => import("../features/applications/ApplicationsList.jsx"),
-      "ApplicationsList",
-    ),
+  "system-list": {
+    section: "systems",
+    Component: lazyNamed(() => import("../features/systems/SystemsList.jsx"), "SystemsList"),
     props: () => ({}),
   },
-  "app-new": {
-    section: "applications",
-    Component: lazyNamed(
-      () => import("../features/applications/ApplicationForm.jsx"),
-      "ApplicationForm",
-    ),
-    props: () => ({ key: "app-new" }),
+  "system-new": {
+    section: "systems",
+    Component: lazyNamed(() => import("../features/systems/SystemForm.jsx"), "SystemForm"),
+    props: () => ({ key: "system-new" }),
   },
-  "app-edit": {
-    section: "applications",
-    Component: lazyNamed(
-      () => import("../features/applications/ApplicationForm.jsx"),
-      "ApplicationForm",
-    ),
-    props: (route) => ({ key: route.id, applicationId: route.id }),
+  "system-edit": {
+    section: "systems",
+    Component: lazyNamed(() => import("../features/systems/SystemForm.jsx"), "SystemForm"),
+    props: (route) => ({ key: route.id, systemId: route.id }),
   },
-  "app-detail": {
-    section: "applications",
-    Component: lazyNamed(
-      () => import("../features/applications/ApplicationDetail.jsx"),
-      "ApplicationDetail",
-    ),
-    props: (route) => ({ key: route.id, applicationId: route.id, initialTab: route.tab }),
+  "system-detail": {
+    section: "systems",
+    Component: lazyNamed(() => import("../features/systems/SystemDetail.jsx"), "SystemDetail"),
+    props: (route) => ({ key: route.id, systemId: route.id, initialTab: route.tab }),
   },
   "campaign-new": {
-    section: "applications",
+    section: "systems",
     Component: lazyNamed(
       () => import("../features/campaigns/CampaignNewForm.jsx"),
       "CampaignNewForm",
     ),
-    props: (route) => ({ key: route.id, applicationId: route.id }),
+    props: (route) => ({ key: route.id, systemId: route.id }),
   },
   "campaign-detail": {
-    section: "applications",
+    section: "systems",
     Component: lazyNamed(
       () => import("../features/campaigns/CampaignDetail.jsx"),
       "CampaignDetail",
     ),
     props: (route) => ({
       key: `${route.id}-${route.campaignId}`,
-      applicationId: route.id,
+      systemId: route.id,
       campaignId: route.campaignId,
       initialTab: route.tab,
       initialFindingRef: route.findingRef,
@@ -214,8 +202,8 @@ export const routes = {
     props: (_route, preferences) => ({
       showUsername: preferences.showUsername,
       setShowUsername: preferences.setShowUsername,
-      showApplications: preferences.showApplications,
-      setShowApplications: preferences.setShowApplications,
+      showSystems: preferences.showSystems,
+      setShowSystems: preferences.setShowSystems,
       showDeepScan: preferences.showDeepScan,
       setShowDeepScan: preferences.setShowDeepScan,
       username: preferences.username,

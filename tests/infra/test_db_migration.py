@@ -870,7 +870,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "page_id" in handoff_columns
         assert ("page_id", "crawled_page", "id") in handoff_foreign_keys
         assert was_pre_alembic is False
-        assert version == "3b5d7f9a1c24"
+        assert version == "4c6e8a1b2d35"
     finally:
         engine.dispose()
 
@@ -1096,14 +1096,14 @@ def test_migrate_creates_browser_debug_config_for_legacy_db_missing_table():
         engine.dispose()
 
 
-def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema():
+def test_legacy_db_with_run_identity_but_no_systems_tables_gets_new_schema():
     """A real legacy DB (run_identity present, no alembic_version, predating
-    the Applications/Campaign feature) must still receive every new table.
+    the Systems/Campaign feature) must still receive every new table.
 
     Regression for a bug where the legacy stamp always targeted the literal
     Alembic keyword ``"head"``, which silently drifted forward as new
     migrations were added and caused this exact database shape to skip the
-    entire Applications/Campaign schema forever.
+    entire Systems/Campaign schema forever.
     """
     engine = create_engine(
         "sqlite:///:memory:",
@@ -1135,7 +1135,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
                     text("SELECT name FROM sqlite_master WHERE type='table'")
                 )
             }
-        assert "application" not in tables_before
+        assert "system" not in tables_before
         assert "assessment_campaign" not in tables_before
 
         was_pre_alembic = db.run_migrations(engine)
@@ -1155,12 +1155,12 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
                 for row in conn.execute(text("PRAGMA table_info(assessment_campaign)"))
             }
 
-        # The full Applications/Campaign schema now exists...
+        # The full Systems/Campaign schema now exists...
         assert {
-            "application",
-            "application_component",
+            "system",
+            "system_component",
             "component_snapshot",
-            "application_target",
+            "system_target",
             "component_target_hint",
             "assessment_campaign",
             "campaign_source_member",
@@ -1174,12 +1174,12 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "3b5d7f9a1c24"
+        assert version == "4c6e8a1b2d35"
     finally:
         engine.dispose()
 
 
-def test_current_db_with_applications_tables_stamps_head_without_recreating():
+def test_current_db_with_systems_tables_stamps_head_without_recreating():
     """A DB already at the current schema (e.g. built via metadata.create_all)
     but missing only the alembic_version bookkeeping row must be recognized
     as already current and not re-run migrations that would try to create
@@ -1211,7 +1211,7 @@ def test_current_db_with_applications_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "3b5d7f9a1c24"
+        assert version == "4c6e8a1b2d35"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

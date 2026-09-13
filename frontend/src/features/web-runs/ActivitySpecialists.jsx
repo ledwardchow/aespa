@@ -70,9 +70,13 @@ export function ActivitySpecialists({
           const saExpanded = saSteps.length > 0 && !collapsedAgentIds.has(sa.id);
           const workerId = sa.id.replace(sa.workerType.prefix, "");
           const deepMatch = workerId.match(/^(\d+)-task-(\d+)$/);
-          const threadLabel = deepMatch
-            ? `${sa.workerType.label} ${deepMatch[1]} · Task #${deepMatch[2]}`
-            : `${sa.workerType.label} ${workerId.replace(/-([0-9]+)$/, " #$1")}`;
+          const deepPurpose =
+            deepMatch && sa.role && sa.role !== "Deep Attack Worker" ? sa.role : null;
+          const threadLabel = deepPurpose
+            ? deepPurpose
+            : deepMatch
+              ? `${sa.workerType.label} ${deepMatch[1]} · Task #${deepMatch[2]}`
+              : `${sa.workerType.label} ${workerId.replace(/-([0-9]+)$/, " #$1")}`;
           return (
             <div
               key={sa.id}
@@ -90,7 +94,7 @@ export function ActivitySpecialists({
               <span
                 className={"agent-role-name" + (saActive ? " agent-role-name--pulse" : "")}
                 style={{
-                  textTransform: "capitalize",
+                  textTransform: deepPurpose ? "none" : "capitalize",
                 }}
               >
                 {threadLabel}

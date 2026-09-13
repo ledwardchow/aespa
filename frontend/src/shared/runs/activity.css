@@ -411,6 +411,17 @@
   color: var(--muted);
   font-size: 12px;
 }
+.deep-queue-findings-badge {
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  background: rgba(245, 158, 11, 0.1);
+  color: #f2b84b;
+}
+.deep-queue-statuses {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 5px;
+  white-space: nowrap;
+}
 .deep-queue-task {
   display: flex;
   flex-direction: column;
@@ -447,6 +458,44 @@
   margin-left: 4px;
   color: var(--text);
   font-size: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deep-task-group { border-bottom: 1px solid var(--border); }
+.agent-row.deep-task-toggle {
+  grid-template-columns: 14px 18px 130px auto 1fr auto;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.deep-task-toggle:hover { background: rgba(91, 141, 239, 0.04); }
+.deep-expand-icon {
+  color: var(--muted);
+  font-size: 18px;
+  transition: transform 120ms ease;
+}
+.deep-expand-icon.is-open { transform: rotate(90deg); }
+.deep-check-list {
+  padding: 4px 18px 12px 66px;
+  background: var(--panel-2);
+}
+.deep-check-row {
+  display: grid;
+  grid-template-columns: auto minmax(80px, auto) auto auto minmax(120px, auto) 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+.deep-check-row code { color: var(--text); }
+.deep-check-hypothesis {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

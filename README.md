@@ -17,7 +17,7 @@ Testing :) It's got a cool UI and stuff.
 Multi-agent web and API testing with a Test Lead, focused specialists,
 adversarial validation, and reporting. AESPA also includes standalone Light and
 Deep SAST, focused live validation of imported source leads, multi-repository
-Application campaigns, and account-wide LLM usage statistics.
+System campaigns, and account-wide LLM usage statistics.
 
 Dynamic scans support four workflows: Quick, Standard coverage, Full coverage,
 and SAST Validate.

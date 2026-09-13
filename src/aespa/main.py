@@ -15,7 +15,6 @@ from sqlmodel import Session
 from aespa.api.alice import router as alice_router
 from aespa.api.api_collections import router as api_collections_router
 from aespa.api.api_test_runs import router as api_test_runs_router
-from aespa.api.applications import router as applications_router
 from aespa.api.benchmark_lab import router as benchmark_lab_router
 from aespa.api.events import router as events_router
 from aespa.api.reporting_debug import router as reporting_debug_router
@@ -24,6 +23,7 @@ from aespa.api.scan import router as scan_router
 from aespa.api.settings import router as settings_router
 from aespa.api.sites import router as sites_router
 from aespa.api.statistics import router as statistics_router
+from aespa.api.systems import router as systems_router
 from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
 from aespa.config import Settings, get_settings
@@ -137,7 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(reporting_debug_router)
     app.include_router(alice_router)
     app.include_router(statistics_router)
-    app.include_router(applications_router)
+    app.include_router(systems_router)
     app.include_router(benchmark_lab_router)
 
     @app.get("/api/health")
