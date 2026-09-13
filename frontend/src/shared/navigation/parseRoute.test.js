@@ -24,9 +24,10 @@ test.each([
   ],
   ["#/sast-runs/7/progress", { name: "sast-run-detail", id: 7, tab: "progress" }],
   ["#/sast-runs/new", { name: "sast-run-new" }],
+  ["#/systems/3/campaigns/new", { name: "campaign-new", id: 3 }],
   ["#/applications/3/campaigns/new", { name: "campaign-new", id: 3 }],
   [
-    "#/applications/3/campaigns/7/findings?finding=F-9",
+    "#/systems/3/campaigns/7/findings?finding=F-9",
     { name: "campaign-detail", id: 3, campaignId: 7, tab: "findings", findingRef: "F-9" },
   ],
   ["#/stats/usage", { name: "stats" }],

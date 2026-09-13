@@ -4,8 +4,18 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+### New features
+
+- **Deep web scans**: Web DAST runs can use a separate Deep mode that builds a saved tester queue from crawl evidence, OWASP coverage items, interactive workflows, recon checks, and imported SAST leads. Checks for the same HTTP operation stay in one tester instead of producing work for every vulnerability class and input. Each tester first records or reuses a clean baseline. The configured model then plans a small set of distinct worker variants. Independent tester plans run concurrently under a configurable limit, and attack workers start as soon as plans become available. Provider request and token limits still control call pacing. The Test Lead activity records queue construction, planning progress, worker assignments, and completed variants. Work Queue shows planned and active planner counts. Imported SAST leads receive an explicit live-validation variant. Workers share saved probe and claim evidence, and new response signals can queue one bounded confirmation variant. Variant purpose, identity requirements, differences, findings, and pivots are saved so interrupted work resumes without repeating completed work. Existing databases are upgraded with all required Deep metadata. Deep settings control planner and worker concurrency, initial and maximum variants, the run-wide variant limit, adaptive follow-ups, signal threshold, and baseline reuse. Findings keep their tester and origin variant. The Activity view keeps compact worker status under Agents. Work Queue displays expandable variants, checks, and each assigned worker's live trace, replacing the separate Deep Workers tab. Tester and variant numbers start at 1 for each scan instead of exposing database-wide IDs. Finished testers are labelled Complete and show their finding count. Worker traces retain a readable description for every step and restore saved steps after navigation or restart. Once a run starts, it cannot switch between Deep and non-Deep scanning, including runs created before execution snapshots were added. Deep Scan is hidden by default and can be enabled under System Settings -> Feature Visibility -> Experimental Features. Quick, Standard, Full, SAST Validate, and API scans keep their existing behaviour.
+
+### Updates
+
+- **Systems scan mode**: Applications has been renamed to Systems across the interface, API, data model, and documentation. Existing data is migrated automatically, and old saved interface links continue to open the matching System.
+
 ### Fixes
 
+- **A.L.I.C.E. finding edits**: Requests to rewrite, merge, consolidate, update, or delete saved findings now use a finding-management turn instead of being treated as read-only questions. A.L.I.C.E. can update one finding or consolidate duplicates in one transaction while preserving the retained reference, validation state, coverage links, and scan provenance.
+- **Fewer false access-control findings on public pages**: Scans now recognise when a public page renders the same content for signed-in and signed-out visitors. Public landing-page examples and product mockups are no longer treated as protected account data, and matching generic page text cannot automatically confirm an access-control finding.
 - **Desktop release builds**: macOS and Windows packaging now finds application files after the build scripts were moved into `scripts/`. Windows builds also stop at the PyInstaller error instead of continuing to a missing executable check.
 - **Clearer SAST execution summaries**: Phase timing now excludes paused intervals after a scan resumes. Older saved runs are labelled as recorded time when their pause gaps cannot be recovered. The execution summary groups each phase's relevant work in one place instead of showing zero-filled columns for checks, reads, and candidates that do not apply. Its compact run timeline compares phase order and overlap, with gaps showing paused time. Phase names and durations use narrower columns so the timeline and completed work have more room.
 
@@ -45,7 +55,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Linux display detection**: AESPA now warns when a Linux host cannot access X11 or Wayland. Guided login and visible browser mode are disabled until a graphical display is available.
 
-- **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser, Reporting Lab, and Applications options are grouped under Feature Visibility, and settings tabs support keyboard navigation.
+- **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser and lab options are grouped under Feature Visibility, while Applications scanning and DAST Deep Scan Mode are grouped under Experimental Features. Settings tabs support keyboard navigation.
 
 - **Configurable Standard scan mode**: Standard scans now continue until the Test Lead has tested the configured percentage of applicable OWASP coverage items. Set the target in the Test Lead agent settings; the default is 60%.
 

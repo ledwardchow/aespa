@@ -17,8 +17,10 @@ const SYSTEM_SETTINGS_TABS = [
 export function DebugPage({
   showUsername,
   setShowUsername,
-  showApplications,
-  setShowApplications,
+  showSystems,
+  setShowSystems,
+  showDeepScan,
+  setShowDeepScan,
   username,
   reportingDebugCfg,
   setReportingDebugCfg,
@@ -325,30 +327,49 @@ export function DebugPage({
               maxWidth: 680,
             }}
           >
-            <div className="form-section-title">Applications</div>
+            <div className="form-section-title">Experimental Features</div>
             <div
               className="field-hint"
               style={{
                 marginBottom: 12,
               }}
             >
-              Show multi-repository application campaign scanning features under Targets in the
-              sidebar.
+              These features are still being tested. Enable them when you want to use them.
             </div>
             <label className="toggle-row">
               <input
                 type="checkbox"
-                checked={showApplications ?? false}
+                checked={showSystems ?? false}
                 onChange={(e) => {
                   const checked = e.target.checked;
-                  setShowApplications(checked);
+                  setShowSystems(checked);
                   try {
-                    localStorage.setItem("aespa_show_applications", String(checked));
+                    localStorage.setItem("aespa_show_systems", String(checked));
                   } catch {}
                 }}
               />
-              <span>Show Applications scanning feature</span>
+              <span>Systems scanning</span>
             </label>
+            <div className="field-hint" style={{ marginTop: 6 }}>
+              Show multi-repository system campaign scanning under Targets in the sidebar.
+            </div>
+            <label className="toggle-row" style={{ marginTop: 16 }}>
+              <input
+                type="checkbox"
+                checked={showDeepScan ?? false}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setShowDeepScan(checked);
+                  try {
+                    localStorage.setItem("aespa_show_deep_scan", String(checked));
+                  } catch {}
+                }}
+              />
+              <span>DAST Deep Scan Mode</span>
+            </label>
+            <div className="field-hint" style={{ marginTop: 6 }}>
+              Show Deep mode for web DAST runs and its settings under Agent Settings.
+            </div>
           </div>
         )}
 

@@ -303,6 +303,9 @@ class ApiCredentialCreate(BaseModel):
 # ── API Test Run schemas ──────────────────────────────────────────────────────
 
 CoverageModeLiteral = Literal["track", "standard", "enforce", "sast_validate"]
+WebCoverageModeLiteral = Literal[
+    "track", "standard", "enforce", "deep", "sast_validate"
+]
 
 
 class ApiTestRunCreate(BaseModel):
@@ -1082,6 +1085,46 @@ class SpecialistAgentConfigOut(SpecialistAgentConfigBase):
     updated_at: datetime
 
 
+# ── Deep web DAST config schemas ─────────────────────────────────────────────
+
+
+class DeepScanConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    max_concurrent_workers: int = Field(default=6, ge=1, le=20)
+    max_concurrent_planners: int = Field(default=4, ge=1, le=20)
+    max_tasks: int = Field(default=200, ge=1, le=1000)
+    max_steps_per_task: int = Field(default=30, ge=1, le=200)
+    initial_variants_per_campaign: int = Field(default=2, ge=1, le=8)
+    max_variants_per_campaign: int = Field(default=4, ge=1, le=12)
+    max_total_variants: int = Field(default=400, ge=1, le=4000)
+    adaptive_follow_up: bool = True
+    minimum_signal_strength: int = Field(default=2, ge=1, le=3)
+    reuse_captured_baselines: bool = True
+    include_sast_leads: bool = True
+    include_recon_checks: bool = True
+
+    @model_validator(mode="after")
+    def _validate_variant_limits(self) -> "DeepScanConfigBase":
+        if self.initial_variants_per_campaign + 1 > self.max_variants_per_campaign:
+            raise ValueError(
+                "Maximum variants per tester must include the baseline and all initial variants"
+            )
+        if self.max_total_variants < self.max_variants_per_campaign:
+            raise ValueError(
+                "Maximum variants per run must be at least the per-tester maximum"
+            )
+        return self
+
+
+class DeepScanConfigIn(DeepScanConfigBase):
+    pass
+
+
+class DeepScanConfigOut(DeepScanConfigBase):
+    updated_at: datetime
+
+
 # ── Adversarial Validator config schemas ──────────────────────────────────────
 
 
@@ -1484,6 +1527,8 @@ class TestRunSummary(BaseModel):
     llm_max_concurrency: int | None = None
     crawler_mode: str = "url"
     scan_mode: str = "aggressive"
+    coverage_mode: str = "track"
+    scan_mode_locked: bool = False
     scan_status: str = "idle"
     scan_total_pages: int = 0
     scan_pages_done: int = 0
@@ -1536,8 +1581,8 @@ class ActiveJobSummary(BaseModel):
     run_id: int
     site_id: Optional[int] = None
     site_name: Optional[str] = None
-    application_id: Optional[int] = None
-    application_name: Optional[str] = None
+    system_id: Optional[int] = None
+    system_name: Optional[str] = None
     run_name: str
     job_type: str
     status: str
@@ -1892,20 +1937,20 @@ class ScanCheckpointStatusOut(BaseModel):
     updated_at: datetime | None = None
 
 
-# ── Applications & multi-repository campaigns ────────────────────────────────
+# ── Systems & multi-repository campaigns ────────────────────────────────
 
 
-class ApplicationCreate(BaseModel):
+class SystemCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = None
 
 
-class ApplicationUpdate(BaseModel):
+class SystemUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
 
 
-class ApplicationSummary(BaseModel):
+class SystemSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -1919,26 +1964,26 @@ class ApplicationSummary(BaseModel):
     last_campaign_status: str | None = None
 
 
-class ApplicationDetail(ApplicationSummary):
+class SystemDetail(SystemSummary):
     pass
 
 
-class ApplicationComponentCreate(BaseModel):
+class SystemComponentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     role: str | None = None
     description: str | None = None
 
 
-class ApplicationComponentUpdate(BaseModel):
+class SystemComponentUpdate(BaseModel):
     role: str | None = None
     description: str | None = None
 
 
-class ApplicationComponentOut(BaseModel):
+class SystemComponentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     name: str
     role: str | None
     description: str | None
@@ -1959,20 +2004,20 @@ class ComponentSnapshotOut(BaseModel):
     created_at: datetime
 
 
-class ApplicationTargetCreate(BaseModel):
+class SystemTargetCreate(BaseModel):
     target_type: Literal["site", "api_collection"]
     target_id: int
 
 
-class ApplicationTargetUpdate(BaseModel):
+class SystemTargetUpdate(BaseModel):
     component_id: int | None = None
 
 
-class ApplicationTargetOut(BaseModel):
+class SystemTargetOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     target_type: str
     target_id: int
     component_id: int | None = None
@@ -1990,7 +2035,7 @@ class ComponentTargetHintOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     component_id: int
     target_id: int
     note: str | None
@@ -2058,7 +2103,7 @@ class CampaignSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     name: str
     status: str
     max_parallel_sast: int

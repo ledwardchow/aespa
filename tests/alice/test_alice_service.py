@@ -184,7 +184,11 @@ def test_alice_prompt_explains_aespa_operational_questions():
 
 
 def test_alice_operational_question_tool_gate_preserves_explicit_testing():
-    from aespa.services.alice import _classify_alice_intent
+    from aespa.services.alice import (
+        _classify_alice_intent,
+        _finding_management_tools,
+        _get_alice_tools,
+    )
 
     assert _classify_alice_intent("What is the progress of the crawl?") == "operational"
     assert (
@@ -193,6 +197,133 @@ def test_alice_operational_question_tool_gate_preserves_explicit_testing():
     assert _classify_alice_intent("Test the crawl for XSS") == "testing"
     assert _classify_alice_intent("Probe the API for IDOR") == "testing"
     assert _classify_alice_intent("Re-run validation for all findings") == "testing"
+    assert (
+        _classify_alice_intent(
+            'consolidate all of the "cleartext HTTP" findings into one'
+        )
+        == "finding_management"
+    )
+    assert _classify_alice_intent("rewrite finding JUQE-002") == "finding_management"
+    assert _classify_alice_intent("delete duplicate findings") == "finding_management"
+
+    management_names = {
+        tool["name"] for tool in _finding_management_tools(_get_alice_tools())
+    }
+    assert management_names == {
+        "context_tool",
+        "update_finding",
+        "consolidate_findings",
+        "remove_finding",
+        "done",
+    }
+
+
+@pytest.mark.anyio
+async def test_alice_consolidates_findings_transactionally(db_session, test_data):
+    from aespa.models import PageOwaspTest, ScanFinding
+    from aespa.services.alice import _execute_alice_tool
+
+    run = test_data["run"]
+    page = CrawledPage(
+        test_run_id=run.id,
+        url="http://target.local/account",
+        status="crawled",
+    )
+    keeper = ScanFinding(
+        test_run_id=run.id,
+        public_reference="TEST-001",
+        owasp_category="A02",
+        severity="high",
+        title="First cleartext finding",
+        description="First description",
+        affected_url="http://target.local/account",
+        evidence="first evidence",
+        validation_status="confirmed",
+    )
+    duplicate = ScanFinding(
+        test_run_id=run.id,
+        public_reference="TEST-002",
+        owasp_category="A02",
+        severity="medium",
+        title="Second cleartext finding",
+        description="Second description",
+        affected_url="http://target.local/login",
+        evidence="second evidence",
+        validation_status="confirmed",
+    )
+    db_session.add_all([page, keeper, duplicate])
+    db_session.commit()
+    db_session.refresh(page)
+    db_session.refresh(keeper)
+    db_session.refresh(duplicate)
+    cell = PageOwaspTest(
+        test_run_id=run.id,
+        page_id=page.id,
+        owasp_category="A02",
+        status="finding",
+        finding_ids_json=json.dumps([keeper.id, duplicate.id]),
+        test_classes_json=json.dumps(
+            {"transport": {"finding_ids": [keeper.id, duplicate.id]}}
+        ),
+    )
+    db_session.add(cell)
+    db_session.commit()
+    keeper_id = keeper.id
+    duplicate_id = duplicate.id
+
+    result = json.loads(
+        await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="consolidate_findings",
+            tool_input={
+                "keep_finding_reference": "TEST-001",
+                "remove_finding_references": ["TEST-002"],
+                "title": "Cleartext HTTP exposes sensitive traffic",
+                "description": "The application serves sensitive routes over HTTP.",
+                "affected_url": "http://target.local/",
+                "evidence": "Affected routes include /account and /login.",
+                "recommendation": "Require HTTPS across the application.",
+            },
+            step=1,
+        )
+    )
+
+    db_session.expire_all()
+    saved = db_session.get(ScanFinding, keeper_id)
+    saved_cell = db_session.get(PageOwaspTest, cell.id)
+    assert result["ok"] is True
+    assert result["removed_finding_references"] == ["TEST-002"]
+    assert saved.title == "Cleartext HTTP exposes sensitive traffic"
+    assert saved.validation_status == "confirmed"
+    assert db_session.get(ScanFinding, duplicate_id) is None
+    assert json.loads(saved_cell.finding_ids_json) == [keeper_id]
+    assert json.loads(saved_cell.test_classes_json)["transport"]["finding_ids"] == [
+        keeper_id
+    ]
+    merged = json.loads(saved.merged_instances)
+    assert merged[0]["finding_reference"] == "TEST-002"
+
+    update_result = json.loads(
+        await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="update_finding",
+            tool_input={
+                "finding_reference": "TEST-001",
+                "impact": "Credentials and account data may be intercepted.",
+            },
+            step=2,
+        )
+    )
+    db_session.expire_all()
+    assert update_result["ok"] is True
+    assert db_session.get(ScanFinding, keeper_id).impact.startswith("Credentials")
+    assert db_session.get(ScanFinding, keeper_id).validation_status == "confirmed"
 
 
 def test_goal_mode_done_schema_requires_completion_state():
@@ -540,6 +671,44 @@ async def test_alice_turn_includes_live_status_for_operational_questions(
     initial_message = captured["initial_message"]
     assert "CURRENT AESPA RUN STATUS" in initial_message
     assert '"pages_discovered": 4' in initial_message
+
+
+@pytest.mark.anyio
+async def test_alice_finding_management_turn_uses_writable_saved_record_tools(
+    db_session, test_data
+):
+    run = test_data["run"]
+    captured = {}
+
+    async def mock_call_with_tools(*args, **kwargs):
+        captured["system"] = args[1]
+        captured["tools"] = {tool["name"] for tool in kwargs["tools"]}
+        blocks = [
+            {
+                "type": "tool_use",
+                "id": "done-1",
+                "name": "done",
+                "input": {"summary": "Finding consolidation is complete."},
+            }
+        ]
+        return blocks, "tool_use", blocks
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        response = await run_alice_turn(
+            run.id,
+            'consolidate all of the "cleartext HTTP" findings into one',
+            [],
+        )
+
+    assert response["status"] == "complete"
+    assert "managing findings already saved in AESPA" in captured["system"]
+    assert captured["tools"] == {
+        "context_tool",
+        "update_finding",
+        "consolidate_findings",
+        "remove_finding",
+        "done",
+    }
 
 
 @pytest.mark.anyio

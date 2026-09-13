@@ -26,6 +26,8 @@ from aespa.schemas import (
     ComponentMapperConfigOut,
     CrawlerConfigIn,
     CrawlerConfigOut,
+    DeepScanConfigIn,
+    DeepScanConfigOut,
     GlobalHttpHeaderConfigIn,
     GlobalHttpHeaderConfigOut,
     LLMConfigExport,
@@ -607,6 +609,21 @@ def upsert_specialist_agent_config(
     session: Session = Depends(get_session),
 ) -> SpecialistAgentConfigOut:
     return integration_settings.upsert_specialist_agent_config(session, payload)
+
+
+@router.get("/deep-scan-config", response_model=DeepScanConfigOut)
+def get_deep_scan_config(
+    session: Session = Depends(get_session),
+) -> DeepScanConfigOut:
+    return integration_settings.get_deep_scan_config(session)
+
+
+@router.put("/deep-scan-config", response_model=DeepScanConfigOut)
+def upsert_deep_scan_config(
+    payload: DeepScanConfigIn,
+    session: Session = Depends(get_session),
+) -> DeepScanConfigOut:
+    return integration_settings.upsert_deep_scan_config(session, payload)
 
 
 @router.get("/adversarial-validator-config", response_model=ValidatorConfigOut)

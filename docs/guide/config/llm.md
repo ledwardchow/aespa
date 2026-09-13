@@ -72,7 +72,7 @@ On the **Profiles** tab, click **New Profile** to create a scan profile:
   - **Adversarial Validator**: Disproof validator.
   - **API Scanner**: API scan loop. It falls back to the Test Lead model when unset.
   - **SAST**: Static source analysis workers.
-  - **Component Mapper**: Cross-repository interface mapping for Applications.
+  - **Component Mapper**: Cross-repository interface mapping for Systems.
   - **A.L.I.C.E.**: Interactive pentest chat agent.
 
 Click **Use** on a profile to set it as the default system-wide profile.
