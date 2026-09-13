@@ -97,6 +97,8 @@ export const stopThinkingScan = (id) =>
 
 export const getThinkingStatus = (id) => req(`/api/test-runs/${id}/thinking-scan/status`);
 
+export const getDeepQueue = (id) => req(`/api/test-runs/${id}/deep-queue`);
+
 export const getCheckpointStatus = (id) => req(`/api/test-runs/${id}/thinking-scan/checkpoint`);
 
 export const getScanLog = (id) => req(`/api/test-runs/${id}/scan-log`);

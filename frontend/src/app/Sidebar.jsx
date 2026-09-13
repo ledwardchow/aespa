@@ -8,20 +8,14 @@ import {
   IconChevronRight,
   IconBug,
   IconChart,
-  IconApplications,
+  IconSystems,
 } from "../shared/ui/Icons.jsx";
 export function Sidebar({ section, collapsed, onToggle, preferences }) {
-  const {
-    appVersion,
-    username,
-    showUsername,
-    showApplications,
-    reportingDebugCfg,
-    benchmarkLabCfg,
-  } = preferences;
+  const { appVersion, username, showUsername, showSystems, reportingDebugCfg, benchmarkLabCfg } =
+    preferences;
   const onSites = section === "sites";
   const onApis = section === "apis";
-  const onApplications = section === "applications";
+  const onSystems = section === "systems";
   const onActiveJobs = section === "active-jobs";
   const onSettings = section === "settings";
   const onScanPolicy = section === "scan-policy";
@@ -111,16 +105,12 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
       </div>
       <nav className="sidebar-nav">
         {!collapsed && <div className="nav-section-label">Targets</div>}
-        {showApplications && (
-          <a
-            href="#/applications"
-            className={"nav-item" + (onApplications ? " active" : "")}
-            title="Applications"
-          >
+        {showSystems && (
+          <a href="#/systems" className={"nav-item" + (onSystems ? " active" : "")} title="Systems">
             <span className="nav-icon">
-              <IconApplications />
+              <IconSystems />
             </span>
-            {!collapsed && " Applications"}
+            {!collapsed && " Systems"}
           </a>
         )}
         <a href="#/" className={"nav-item" + (onSites ? " active" : "")} title="Sites">

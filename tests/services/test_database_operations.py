@@ -8,7 +8,7 @@ from sqlmodel import Session, SQLModel, select
 from aespa.models import (
     ApiCollection,
     ApiTestRun,
-    Application,
+    System,
     AssessmentCampaign,
     LLMProviderConfig,
     PublicReferenceNamespace,
@@ -50,22 +50,22 @@ def test_clear_scans_keeps_targets_llm_and_settings(fk_engine, monkeypatch):
         policy = ScannerPolicy(scan_mode="safe_active")
         site = Site(name="Kept site", base_url="https://example.test")
         collection = ApiCollection(name="Kept API", base_url="https://api.example.test")
-        application = Application(name="Kept application")
+        system = System(name="Kept system")
         session.add(provider)
         session.add(policy)
         session.add(site)
         session.add(collection)
-        session.add(application)
+        session.add(system)
         session.commit()
         session.refresh(site)
         session.refresh(collection)
-        session.refresh(application)
+        session.refresh(system)
 
         web_run = TestRun(site_id=site.id, name="Web scan")
         api_run = ApiTestRun(collection_id=collection.id, name="API scan")
         sast_run = SastRun(name="SAST scan")
         campaign = AssessmentCampaign(
-            application_id=application.id, name="Campaign scan"
+            system_id=system.id, name="Campaign scan"
         )
         session.add(web_run)
         session.add(api_run)
@@ -99,10 +99,10 @@ def test_clear_scans_keeps_targets_llm_and_settings(fk_engine, monkeypatch):
         assert _count(session, ApiCollection) == 1
         assert _count(session, LLMProviderConfig) == 1
         assert _count(session, ScannerPolicy) == 1
-        assert _count(session, Application) == 1
+        assert _count(session, System) == 1
 
 
-def test_reset_database_removes_all_application_rows(fk_engine, monkeypatch):
+def test_reset_database_removes_all_system_rows(fk_engine, monkeypatch):
     monkeypatch.setattr(database_operations, "_has_active_jobs", lambda session: False)
     with Session(fk_engine) as session:
         session.add(LLMProviderConfig(name="Removed provider"))

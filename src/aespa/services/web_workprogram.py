@@ -281,6 +281,12 @@ def _web_route_obligations(
     parameters = [str(item) for item in route.get("parameters") or [] if item]
     parameter_text = " ".join(parameters).lower()
     access = str((route.get("access") or {}).get("classification") or "unknown")
+    identity_content = str(
+        (route.get("access") or {}).get("identity_content") or "unknown"
+    )
+    effectively_public = access == "anonymous" or (
+        access == "mixed" and identity_content == "equivalent"
+    )
     methods = {str(method).upper() for method in route.get("methods") or []}
     state_changing = bool(methods & {"POST", "PUT", "PATCH", "DELETE"})
     has_object_ref = "{id}" in lowered or any(
@@ -296,7 +302,7 @@ def _web_route_obligations(
 
     obligations: set[tuple[str, str, str | None, str | None]] = set()
 
-    if access in {"authenticated", "mixed"}:
+    if access == "authenticated" or (access == "mixed" and not effectively_public):
         obligations.add(("A01", "auth_vs_unauth", None, "authenticated_vs_anonymous"))
     if has_object_ref:
         obligations.add(("A01", "user_a_vs_user_b", None, "user_a_vs_user_b"))
@@ -304,7 +310,7 @@ def _web_route_obligations(
         obligations.add(("A01", "privilege_escalation", None, "user_vs_admin"))
         obligations.add(("A05", "admin_route_exposure", None, None))
 
-    if url.lower().startswith("http://") and (access != "anonymous" or parameters):
+    if url.lower().startswith("http://") and (not effectively_public or parameters):
         obligations.add(("A02", "http_cleartext_sensitive", None, None))
     if any(
         word in lowered for word in ("health", "config", "profile", "token", "auth")

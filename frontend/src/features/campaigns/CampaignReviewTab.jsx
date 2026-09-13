@@ -1,4 +1,4 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useMemo } from "react";
 import { useReviewLeads } from "./useReviewLeads.js";
 
@@ -91,7 +91,7 @@ function endpointInstancesFor(mappings) {
 // fan-out, and no "detail unavailable" fallback, since the mapping endpoint
 // itself now resolves cross-repository leads too.
 export function CampaignReviewTab({
-  applicationId,
+  systemId,
   campaignId,
   campaign,
   canContinue,
@@ -100,7 +100,7 @@ export function CampaignReviewTab({
   onSubmitted,
 }) {
   const { mappings, targets, validationCases, error, setError, submitReview } = useReviewLeads(
-    applicationId,
+    systemId,
     campaignId,
   );
   const [decisions, setDecisions] = useState({}); // mapping_id -> "approve" | "reject"
@@ -249,12 +249,9 @@ export function CampaignReviewTab({
     setSupplementalBusy(targetId);
     setError(null);
     try {
-      await applicationsApi.supplementalValidateCampaignTarget(
-        applicationId,
-        campaignId,
-        targetId,
-        { mapping_ids: mappingIds },
-      );
+      await systemsApi.supplementalValidateCampaignTarget(systemId, campaignId, targetId, {
+        mapping_ids: mappingIds,
+      });
       await onSubmitted?.();
     } catch (e) {
       setError(e.message);
@@ -454,7 +451,7 @@ export function CampaignReviewTab({
           selected={selected}
           onSetDecision={setDecision}
           onToggleSelected={toggleSelected}
-          applicationId={applicationId}
+          systemId={systemId}
           campaignId={campaignId}
           casesByMapping={casesByMapping}
         />
@@ -470,7 +467,7 @@ function LeadGroup({
   selected,
   onSetDecision,
   onToggleSelected,
-  applicationId,
+  systemId,
   campaignId,
   casesByMapping,
 }) {
@@ -605,7 +602,7 @@ function LeadGroup({
               selected={selected}
               onSetDecision={onSetDecision}
               onToggleSelected={onToggleSelected}
-              applicationId={applicationId}
+              systemId={systemId}
               campaignId={campaignId}
               validationCases={casesByMapping.get(String(mapping.id)) || []}
             />
@@ -623,7 +620,7 @@ function MappingRow({
   selected,
   onSetDecision,
   onToggleSelected,
-  applicationId,
+  systemId,
   campaignId,
   validationCases,
 }) {
@@ -678,7 +675,7 @@ function MappingRow({
         <tr className="app-review-path-editor-row">
           <td colSpan={5}>
             <MappingPathEditor
-              applicationId={applicationId}
+              systemId={systemId}
               campaignId={campaignId}
               mapping={mapping}
               editorId={editorId}
@@ -700,7 +697,7 @@ function MappingRow({
   );
 }
 
-function MappingPathEditor({ applicationId, campaignId, mapping, editorId }) {
+function MappingPathEditor({ systemId, campaignId, mapping, editorId }) {
   const initial = safeParseJson(mapping.path_json, {});
   const [entry, setEntry] = useState(initial.entry || "");
   const [dynamicTest, setDynamicTest] = useState(initial.dynamic_test || "");
@@ -720,7 +717,7 @@ function MappingPathEditor({ applicationId, campaignId, mapping, editorId }) {
           .map((value) => value.trim())
           .filter(Boolean),
       };
-      await applicationsApi.editCampaignMapping(applicationId, campaignId, mapping.id, {
+      await systemsApi.editCampaignMapping(systemId, campaignId, mapping.id, {
         expected_updated_at: mapping.updated_at,
         path,
       });

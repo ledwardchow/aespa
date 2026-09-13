@@ -15,6 +15,7 @@ from aespa.models import (
     CodeExecutionConfig,
     ComponentMapperConfig,
     CrawlerConfig,
+    DeepScanConfig,
     GlobalHttpHeaderConfig,
     ReportingDebugConfig,
     ScannerPolicy,
@@ -37,6 +38,8 @@ from aespa.schemas import (
     ComponentMapperConfigOut,
     CrawlerConfigIn,
     CrawlerConfigOut,
+    DeepScanConfigIn,
+    DeepScanConfigOut,
     GlobalHttpHeaderConfigIn,
     GlobalHttpHeaderConfigOut,
     ReportingDebugConfigIn,
@@ -379,6 +382,43 @@ def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
         trigger_specialist_on_burp=cfg.trigger_specialist_on_burp,
         updated_at=cfg.updated_at,
     )
+
+
+def get_deep_scan_config(session: Session) -> DeepScanConfigOut:
+    cfg = session.get(DeepScanConfig, _SINGLETON_ID)
+    if cfg is None:
+        return DeepScanConfigOut(
+            **DeepScanConfigIn().model_dump(), updated_at=_utcnow()
+        )
+    return DeepScanConfigOut(
+        max_concurrent_workers=cfg.max_concurrent_workers,
+        max_concurrent_planners=cfg.max_concurrent_planners,
+        max_tasks=cfg.max_tasks,
+        max_steps_per_task=cfg.max_steps_per_task,
+        initial_variants_per_campaign=cfg.initial_variants_per_campaign,
+        max_variants_per_campaign=cfg.max_variants_per_campaign,
+        max_total_variants=cfg.max_total_variants,
+        adaptive_follow_up=cfg.adaptive_follow_up,
+        minimum_signal_strength=cfg.minimum_signal_strength,
+        reuse_captured_baselines=cfg.reuse_captured_baselines,
+        include_sast_leads=cfg.include_sast_leads,
+        include_recon_checks=cfg.include_recon_checks,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_deep_scan_config(
+    session: Session, payload: DeepScanConfigIn
+) -> DeepScanConfigOut:
+    cfg = session.get(DeepScanConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = DeepScanConfig(id=_SINGLETON_ID)
+    for field, value in payload.model_dump().items():
+        setattr(cfg, field, value)
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    return get_deep_scan_config(session)
 
 
 def upsert_specialist_agent_config(

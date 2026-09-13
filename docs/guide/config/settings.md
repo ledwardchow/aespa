@@ -43,7 +43,7 @@ The **Agent Settings** page is divided into these tabs:
   concurrency, inline validation, and concrete-disproof requirements.
 - **Reporting**: Controls the finding write-up and final reporting stages.
 - **Component Mapper**: Sets source, fact, path, confidence, and concurrency limits
-  for cross-repository Application matching.
+  for cross-repository System matching.
 - **Python Sandbox**: Enables isolated `execute_python` runs and configures the
   Docker image, allowed agent roles, time and resource limits, output limits,
   request limits, and concurrency.
@@ -60,7 +60,7 @@ The **Agent Settings** page is divided into these tabs:
 
 The **System Settings** page contains feature visibility, debug settings, browser
 selection, database operations, and runtime information. Optional Reporting Lab,
-Benchmark Lab, and Applications entries appear in the sidebar only when enabled.
+Benchmark Lab, and Systems entries appear in the sidebar only when enabled.
 
 The browser setting can use Playwright Chromium or installed stable Google Chrome.
 It can also make normal crawl, scan, and ALICE browser sessions visible for

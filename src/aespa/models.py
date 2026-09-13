@@ -684,6 +684,27 @@ class SpecialistAgentConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class DeepScanConfig(SQLModel, table=True):
+    """Singleton settings used only by the optional Deep web DAST mode."""
+
+    __tablename__ = "deep_scan_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    max_concurrent_workers: int = Field(default=6)
+    max_concurrent_planners: int = Field(default=4)
+    max_tasks: int = Field(default=200)
+    max_steps_per_task: int = Field(default=30)
+    initial_variants_per_campaign: int = Field(default=2)
+    max_variants_per_campaign: int = Field(default=4)
+    max_total_variants: int = Field(default=400)
+    adaptive_follow_up: bool = Field(default=True)
+    minimum_signal_strength: int = Field(default=2)
+    reuse_captured_baselines: bool = Field(default=True)
+    include_sast_leads: bool = Field(default=True)
+    include_recon_checks: bool = Field(default=True)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class AdversarialValidatorConfig(SQLModel, table=True):
     """Singleton row (id always = 1) for adversarial validator settings."""
 
@@ -2085,18 +2106,18 @@ class BenchmarkComparisonEvaluation(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
-# ── Applications & multi-repository campaigns ───────────────────────────────
+# ── Systems & multi-repository campaigns ───────────────────────────────
 #
-# An Application groups named code components (repositories/micro-frontends),
+# A System groups named code components (repositories/micro-frontends),
 # their immutable uploaded ZIP snapshots, and the existing Site/ApiCollection
 # targets that make up one product. An AssessmentCampaign coordinates ordinary
-# SastRun/TestRun/ApiTestRun children for one application, joining the global
+# SastRun/TestRun/ApiTestRun children for one system, joining the global
 # run_identity namespace (kind="campaign") so its events/logs never collide
 # with a web/api/sast run id. See docs/architecture.md for the full design.
 
 
-class Application(SQLModel, table=True):
-    __tablename__ = "application"
+class System(SQLModel, table=True):
+    __tablename__ = "system"
 
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True, unique=True)
@@ -2105,16 +2126,16 @@ class Application(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
-class ApplicationComponent(SQLModel, table=True):
-    """A named repository or micro-frontend belonging to an Application."""
+class SystemComponent(SQLModel, table=True):
+    """A named repository or micro-frontend belonging to a System."""
 
-    __tablename__ = "application_component"
+    __tablename__ = "system_component"
     __table_args__ = (
-        UniqueConstraint("application_id", "name", name="uq_component_app_name"),
+        UniqueConstraint("system_id", "name", name="uq_component_app_name"),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    application_id: int = Field(foreign_key="application.id", index=True)
+    system_id: int = Field(foreign_key="system.id", index=True)
     name: str
     role: Optional[str] = Field(default=None)  # e.g. "Backend API", "Micro-frontend"
     description: Optional[str] = Field(default=None)
@@ -2123,7 +2144,7 @@ class ApplicationComponent(SQLModel, table=True):
 
 
 class ComponentSnapshot(SQLModel, table=True):
-    """One immutable uploaded ZIP version for an ApplicationComponent.
+    """One immutable uploaded ZIP version for a SystemComponent.
 
     Snapshots are never edited in place — uploading again creates a new row so
     a campaign that already froze an older snapshot keeps its exact meaning.
@@ -2132,7 +2153,7 @@ class ComponentSnapshot(SQLModel, table=True):
     __tablename__ = "component_snapshot"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    component_id: int = Field(foreign_key="application_component.id", index=True)
+    component_id: int = Field(foreign_key="system_component.id", index=True)
     filename: str
     stored_path: str  # absolute path to the stored zip
     size_bytes: int = Field(default=0)
@@ -2140,8 +2161,8 @@ class ComponentSnapshot(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
-class ApplicationTarget(SQLModel, table=True):
-    """An existing Site or ApiCollection attached to an Application.
+class SystemTarget(SQLModel, table=True):
+    """An existing Site or ApiCollection attached to a System.
 
     ``target_id`` refers to ``site.id`` or ``api_collection.id`` depending on
     ``target_type`` — the underlying target row is reused, never copied.
@@ -2152,19 +2173,17 @@ class ApplicationTarget(SQLModel, table=True):
     review-gated.
     """
 
-    __tablename__ = "application_target"
+    __tablename__ = "system_target"
     __table_args__ = (
-        UniqueConstraint(
-            "application_id", "target_type", "target_id", name="uq_app_target"
-        ),
+        UniqueConstraint("system_id", "target_type", "target_id", name="uq_app_target"),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    application_id: int = Field(foreign_key="application.id", index=True)
+    system_id: int = Field(foreign_key="system.id", index=True)
     target_type: str = Field(index=True)  # "site" | "api_collection"
     target_id: int = Field(index=True)
     component_id: Optional[int] = Field(
-        default=None, foreign_key="application_component.id", index=True
+        default=None, foreign_key="system_component.id", index=True
     )
     created_at: datetime = Field(default_factory=_utcnow)
 
@@ -2182,15 +2201,15 @@ class ComponentTargetHint(SQLModel, table=True):
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    application_id: int = Field(foreign_key="application.id", index=True)
-    component_id: int = Field(foreign_key="application_component.id", index=True)
-    target_id: int = Field(foreign_key="application_target.id", index=True)
+    system_id: int = Field(foreign_key="system.id", index=True)
+    component_id: int = Field(foreign_key="system_component.id", index=True)
+    target_id: int = Field(foreign_key="system_target.id", index=True)
     note: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
 
 
 class AssessmentCampaign(SQLModel, table=True):
-    """One coordinated multi-repository test of an Application.
+    """One coordinated multi-repository test of a System.
 
     Joins the global run_identity namespace (kind="campaign") purely so its
     SSE events / AgentLog / ScanLog rows use the shared id space; it does not
@@ -2200,7 +2219,7 @@ class AssessmentCampaign(SQLModel, table=True):
     __tablename__ = "assessment_campaign"
 
     id: Optional[int] = Field(default=None, sa_column=_run_identity_pk())
-    application_id: int = Field(foreign_key="application.id", index=True)
+    system_id: int = Field(foreign_key="system.id", index=True)
     name: str
     status: str = Field(default="draft", index=True)
     # draft -> sast_running -> correlating -> awaiting_review -> dast_running
@@ -2238,7 +2257,7 @@ class CampaignSourceMember(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     campaign_id: int = Field(sa_column=_run_identity_fk())
-    component_id: int = Field(foreign_key="application_component.id", index=True)
+    component_id: int = Field(foreign_key="system_component.id", index=True)
     snapshot_id: int = Field(foreign_key="component_snapshot.id", index=True)
     sast_run_id: Optional[int] = Field(default=None, index=True)
     status: str = Field(
@@ -2258,7 +2277,7 @@ class CampaignTargetMember(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     campaign_id: int = Field(sa_column=_run_identity_fk())
-    target_id: int = Field(foreign_key="application_target.id", index=True)
+    target_id: int = Field(foreign_key="system_target.id", index=True)
     target_type: str = Field(index=True)  # "site" | "api_collection"
     test_run_id: Optional[int] = Field(default=None, index=True)  # web child
     api_test_run_id: Optional[int] = Field(default=None, index=True)  # api child
@@ -2286,7 +2305,7 @@ class ComponentFact(SQLModel, table=True):
     # Populated via CampaignSourceMember lookup when the SastRun belongs to a
     # campaign; NULL for a standalone SAST run.
     component_id: Optional[int] = Field(
-        default=None, foreign_key="application_component.id", index=True
+        default=None, foreign_key="system_component.id", index=True
     )
     fact_type: str = Field(
         index=True
@@ -2302,7 +2321,7 @@ class ComponentFact(SQLModel, table=True):
 
 
 class ComponentConnection(SQLModel, table=True):
-    """One matched edge in a campaign's cross-repository application map."""
+    """One matched edge in a campaign's cross-repository system map."""
 
     __tablename__ = "component_connection"
     __table_args__ = (
@@ -2317,9 +2336,9 @@ class ComponentConnection(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     campaign_id: int = Field(sa_column=_run_identity_fk())
-    source_component_id: int = Field(foreign_key="application_component.id", index=True)
+    source_component_id: int = Field(foreign_key="system_component.id", index=True)
     source_fact_id: int = Field(foreign_key="component_fact.id", index=True)
-    target_component_id: int = Field(foreign_key="application_component.id", index=True)
+    target_component_id: int = Field(foreign_key="system_component.id", index=True)
     target_fact_id: int = Field(foreign_key="component_fact.id", index=True)
     match_kind: str = Field(default="deterministic")  # deterministic|hint|llm_assisted
     confidence: float = Field(default=0.0)
@@ -2346,7 +2365,7 @@ class LeadTargetMapping(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     campaign_id: int = Field(sa_column=_run_identity_fk())
     lead_id: int = Field(foreign_key="scan_lead.id", index=True)
-    target_id: int = Field(foreign_key="application_target.id", index=True)
+    target_id: int = Field(foreign_key="system_target.id", index=True)
     target_type: str = Field(index=True)  # "site" | "api_collection"
     score: float = Field(default=0.0)
     rationale: str = Field(default="")
@@ -2434,7 +2453,7 @@ class ScanLeadComponentProvenance(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     scan_lead_id: int = Field(foreign_key="scan_lead.id", index=True)
-    component_id: int = Field(foreign_key="application_component.id", index=True)
+    component_id: int = Field(foreign_key="system_component.id", index=True)
     role: str = Field(default="contributing")  # primary|contributing
     fact_id: Optional[int] = Field(default=None, foreign_key="component_fact.id")
     created_at: datetime = Field(default_factory=_utcnow)
@@ -2575,6 +2594,286 @@ class ScanObligation(SQLModel, table=True):
         default="not_planned", index=True
     )  # not_planned|queued|attempted|evaluated|passed|finding|inconclusive|not_applicable|blocked
     exemption_reason: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class DeepScanTask(SQLModel, table=True):
+    """One durable operation, workflow, systemic, or SAST campaign."""
+
+    __tablename__ = "deep_scan_task"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "fingerprint",
+            name="uq_deep_scan_task_scope",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    fingerprint: str = Field(index=True)
+    source: str = Field(default="coverage", index=True)
+    task_kind: str = Field(default="operation", index=True)
+    route_template: str = Field(default="", index=True)
+    inputs_json: str = Field(default="[]")
+    identities_json: str = Field(default="[]")
+    obligation_id: Optional[int] = Field(
+        default=None, foreign_key="scan_obligation.id", index=True
+    )
+    lead_id: Optional[int] = Field(default=None, foreign_key="scan_lead.id", index=True)
+    page_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("crawled_page.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    attack_class: str = Field(index=True)
+    owasp_category: str = Field(default="", index=True)
+    target_url: str
+    http_method: str = Field(default="GET")
+    parameter: Optional[str] = Field(default=None)
+    session_label: Optional[str] = Field(default=None)
+    title: str = Field(default="")
+    hypothesis: str = Field(default="")
+    priority: int = Field(default=5, index=True)
+    risk_level: str = Field(default="safe_active")
+    status: str = Field(default="queued", index=True)
+    attempt_count: int = Field(default=0)
+    max_attempts: int = Field(default=2)
+    worker_id: Optional[str] = Field(default=None, index=True)
+    handoff_id: Optional[int] = Field(
+        default=None, foreign_key="specialist_handoff.id", index=True
+    )
+    finding_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("scan_finding.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    outcome: str = Field(default="")
+    error_message: str = Field(default="")
+    created_at: datetime = Field(default_factory=_utcnow)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class DeepScanCheck(SQLModel, table=True):
+    """One test hypothesis bundled into a Deep scan task."""
+
+    __tablename__ = "deep_scan_check"
+    __table_args__ = (
+        UniqueConstraint("task_id", "fingerprint", name="uq_deep_scan_check_task"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    task_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("deep_scan_task.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    fingerprint: str = Field(index=True)
+    source: str = Field(default="coverage", index=True)
+    obligation_id: Optional[int] = Field(
+        default=None, foreign_key="scan_obligation.id", index=True
+    )
+    lead_id: Optional[int] = Field(default=None, foreign_key="scan_lead.id", index=True)
+    attack_class: str = Field(index=True)
+    owasp_category: str = Field(default="", index=True)
+    parameter: Optional[str] = Field(default=None)
+    parameter_location: str = Field(default="")
+    session_label: Optional[str] = Field(default=None)
+    hypothesis: str = Field(default="")
+    priority: int = Field(default=5, index=True)
+    status: str = Field(default="queued", index=True)
+    finding_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("scan_finding.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    outcome: str = Field(default="")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class DeepScanTaskFinding(SQLModel, table=True):
+    """Many-to-many attribution between a Deep task and its findings."""
+
+    __tablename__ = "deep_scan_task_finding"
+    __table_args__ = (
+        UniqueConstraint("task_id", "finding_id", name="uq_deep_scan_task_finding"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    task_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("deep_scan_task.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    variant_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("deep_scan_variant.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    finding_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("scan_finding.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class DeepScanAttempt(SQLModel, table=True):
+    """Execution history for one DeepScanTask claim."""
+
+    __tablename__ = "deep_scan_attempt"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    task_id: int = Field(foreign_key="deep_scan_task.id", index=True)
+    variant_id: Optional[int] = Field(
+        default=None,
+        foreign_key="deep_scan_variant.id",
+        index=True,
+    )
+    worker_id: str = Field(index=True)
+    attempt_number: int = Field(default=1)
+    status: str = Field(default="running", index=True)
+    traffic_ids_json: str = Field(default="[]")
+    outcome: str = Field(default="")
+    error_message: str = Field(default="")
+    started_at: datetime = Field(default_factory=_utcnow)
+    completed_at: Optional[datetime] = Field(default=None)
+
+
+class DeepScanVariant(SQLModel, table=True):
+    """One saved execution purpose within a Deep scan campaign."""
+
+    __tablename__ = "deep_scan_variant"
+    __table_args__ = (
+        UniqueConstraint("task_id", "fingerprint", name="uq_deep_scan_variant_task"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    task_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("deep_scan_task.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    fingerprint: str = Field(index=True)
+    variant_index: int = Field(default=1)
+    kind: str = Field(default="planned", index=True)
+    strategy: str = Field(default="targeted", index=True)
+    purpose: str
+    rationale: str = Field(default="")
+    difference: str = Field(default="")
+    identity_requirements_json: str = Field(default="[]")
+    check_ids_json: str = Field(default="[]")
+    status: str = Field(default="queued", index=True)
+    priority: int = Field(default=5, index=True)
+    attempt_count: int = Field(default=0)
+    max_attempts: int = Field(default=2)
+    worker_id: Optional[str] = Field(default=None, index=True)
+    handoff_id: Optional[int] = Field(
+        default=None, foreign_key="specialist_handoff.id", index=True
+    )
+    assigned_purpose: str = Field(default="")
+    current_purpose: str = Field(default="")
+    checkpoint_json: str = Field(default="{}")
+    pivot_history_json: str = Field(default="[]")
+    finding_count: int = Field(default=0)
+    novelty_score: int = Field(default=0)
+    outcome: str = Field(default="")
+    error_message: str = Field(default="")
+    created_at: datetime = Field(default_factory=_utcnow)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class DeepScanProbeOutcome(SQLModel, table=True):
+    """Shared probe ledger used by all variants in a Deep campaign."""
+
+    __tablename__ = "deep_scan_probe_outcome"
+    __table_args__ = (
+        UniqueConstraint("run_id", "fingerprint", name="uq_deep_probe_outcome_run"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    task_id: int = Field(foreign_key="deep_scan_task.id", index=True)
+    variant_id: Optional[int] = Field(
+        default=None, foreign_key="deep_scan_variant.id", index=True
+    )
+    check_id: Optional[int] = Field(
+        default=None, foreign_key="deep_scan_check.id", index=True
+    )
+    traffic_id: Optional[int] = Field(
+        default=None, foreign_key="traffic_entry.id", index=True
+    )
+    fingerprint: str = Field(index=True)
+    technique: str = Field(default="")
+    identity_label: str = Field(default="")
+    request_summary: str = Field(default="")
+    response_status: Optional[int] = Field(default=None)
+    signal_type: str = Field(default="none", index=True)
+    signal_strength: int = Field(default=0)
+    evidence_json: str = Field(default="{}")
+    outcome: str = Field(default="observed")
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class DeepScanClaim(SQLModel, table=True):
+    """Shared claim ledger for candidate and confirmed Deep findings."""
+
+    __tablename__ = "deep_scan_claim"
+    __table_args__ = (
+        UniqueConstraint("run_id", "fingerprint", name="uq_deep_scan_claim_run"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(sa_column=_run_identity_fk())
+    task_id: int = Field(foreign_key="deep_scan_task.id", index=True)
+    variant_id: Optional[int] = Field(
+        default=None, foreign_key="deep_scan_variant.id", index=True
+    )
+    fingerprint: str = Field(index=True)
+    title: str
+    status: str = Field(default="unverified", index=True)
+    finding_id: Optional[int] = Field(
+        default=None, foreign_key="scan_finding.id", index=True
+    )
+    evidence_json: str = Field(default="{}")
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

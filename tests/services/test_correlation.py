@@ -16,9 +16,9 @@ from sqlmodel import Session, select
 from aespa.models import (
     ApiCollection,
     ApiEndpoint,
-    Application,
-    ApplicationComponent,
-    ApplicationTarget,
+    System,
+    SystemComponent,
+    SystemTarget,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
@@ -92,12 +92,12 @@ def _seed_two_component_campaign(engine, *, public_route: bool = True) -> dict:
     Both SAST runs are marked completed already.
     """
     with Session(engine) as s:
-        app = Application(name="Acme")
+        app = System(name="Acme")
         s.add(app)
         s.flush()
 
-        ui = ApplicationComponent(application_id=app.id, name="checkout-ui")
-        api = ApplicationComponent(application_id=app.id, name="orders-api")
+        ui = SystemComponent(system_id=app.id, name="checkout-ui")
+        api = SystemComponent(system_id=app.id, name="orders-api")
         s.add(ui)
         s.add(api)
         s.flush()
@@ -123,8 +123,8 @@ def _seed_two_component_campaign(engine, *, public_route: bool = True) -> dict:
         collection = ApiCollection(name="Orders API", base_url="https://api.acme.test")
         s.add(collection)
         s.flush()
-        target = ApplicationTarget(
-            application_id=app.id, target_type="api_collection", target_id=collection.id
+        target = SystemTarget(
+            system_id=app.id, target_type="api_collection", target_id=collection.id
         )
         s.add(target)
         s.flush()
@@ -133,7 +133,7 @@ def _seed_two_component_campaign(engine, *, public_route: bool = True) -> dict:
         )
         s.add(endpoint)
 
-        campaign = AssessmentCampaign(application_id=app.id, name="release-1")
+        campaign = AssessmentCampaign(system_id=app.id, name="release-1")
         s.add(campaign)
         s.flush()
 
@@ -220,7 +220,7 @@ def _seed_two_component_campaign(engine, *, public_route: bool = True) -> dict:
         s.commit()
 
         return {
-            "application_id": app.id,
+            "system_id": app.id,
             "campaign_id": campaign.id,
             "ui_component_id": ui.id,
             "api_component_id": api.id,
@@ -1130,14 +1130,14 @@ async def test_llm_correlation_skips_failed_source_scan(
     isolated_db_engine, monkeypatch
 ):
     with Session(isolated_db_engine) as session:
-        app = Application(name="Partial mapping app")
+        app = System(name="Partial mapping app")
         session.add(app)
         session.flush()
-        good_component = ApplicationComponent(
-            application_id=app.id, name="good-component"
+        good_component = SystemComponent(
+            system_id=app.id, name="good-component"
         )
-        failed_component = ApplicationComponent(
-            application_id=app.id, name="failed-component"
+        failed_component = SystemComponent(
+            system_id=app.id, name="failed-component"
         )
         session.add(good_component)
         session.add(failed_component)
@@ -1163,7 +1163,7 @@ async def test_llm_correlation_skips_failed_source_scan(
         session.add(good_run)
         session.add(failed_run)
         session.flush()
-        campaign = AssessmentCampaign(application_id=app.id, name="partial")
+        campaign = AssessmentCampaign(system_id=app.id, name="partial")
         session.add(campaign)
         session.flush()
         session.add(
@@ -1239,7 +1239,7 @@ def test_explicit_target_component_creates_approved_mapping_before_copy(
 ):
     ctx = _seed_two_component_campaign(isolated_db_engine)
     with Session(isolated_db_engine) as s:
-        target = s.get(ApplicationTarget, ctx["target_id"])
+        target = s.get(SystemTarget, ctx["target_id"])
         target.component_id = ctx["ui_component_id"]
         from aespa.models import ApiTestRun
 
@@ -1479,10 +1479,10 @@ def test_correlate_campaign_does_not_fabricate_lead_without_connection(
 ):
     """No http_call/route match at all -> no connections, no cross-repo leads."""
     with Session(isolated_db_engine) as s:
-        app = Application(name="Lonely App")
+        app = System(name="Lonely App")
         s.add(app)
         s.flush()
-        component = ApplicationComponent(application_id=app.id, name="solo")
+        component = SystemComponent(system_id=app.id, name="solo")
         s.add(component)
         s.flush()
         snapshot = ComponentSnapshot(
@@ -1494,7 +1494,7 @@ def test_correlate_campaign_does_not_fabricate_lead_without_connection(
         )
         s.add(snapshot)
         s.flush()
-        campaign = AssessmentCampaign(application_id=app.id, name="solo-campaign")
+        campaign = AssessmentCampaign(system_id=app.id, name="solo-campaign")
         s.add(campaign)
         s.flush()
         s.add(
@@ -1701,11 +1701,11 @@ def test_generate_cross_repo_lead_checks_auth_boundary_scoped_to_exact_sast_run(
 
 def test_absolute_outbound_url_matches_relative_route_path(isolated_db_engine):
     with Session(isolated_db_engine) as s:
-        app = Application(name="AbsUrlApp")
+        app = System(name="AbsUrlApp")
         s.add(app)
         s.flush()
-        ui = ApplicationComponent(application_id=app.id, name="ui")
-        api = ApplicationComponent(application_id=app.id, name="api")
+        ui = SystemComponent(system_id=app.id, name="ui")
+        api = SystemComponent(system_id=app.id, name="api")
         s.add(ui)
         s.add(api)
         s.flush()
@@ -1725,7 +1725,7 @@ def test_absolute_outbound_url_matches_relative_route_path(isolated_db_engine):
         )
         s.add(ui_snap)
         s.add(api_snap)
-        campaign = AssessmentCampaign(application_id=app.id, name="abs-url")
+        campaign = AssessmentCampaign(system_id=app.id, name="abs-url")
         s.add(campaign)
         s.flush()
         s.add(
@@ -2163,11 +2163,11 @@ def _seed_single_component_frontend_campaign(
 ) -> dict:
     """Create one action with both direct and handler-backed graph variants."""
     with Session(engine) as session:
-        app = Application(name="Frontend quality")
+        app = System(name="Frontend quality")
         session.add(app)
         session.flush()
-        ui = ApplicationComponent(application_id=app.id, name="face-ui")
-        other = ApplicationComponent(application_id=app.id, name="other-ui")
+        ui = SystemComponent(system_id=app.id, name="face-ui")
+        other = SystemComponent(system_id=app.id, name="other-ui")
         session.add_all([ui, other])
         session.flush()
         snapshot = ComponentSnapshot(
@@ -2182,8 +2182,8 @@ def _seed_single_component_frontend_campaign(
         own_site = Site(name="FACE site", base_url="https://face.example.test")
         session.add(own_site)
         session.flush()
-        own_target = ApplicationTarget(
-            application_id=app.id,
+        own_target = SystemTarget(
+            system_id=app.id,
             target_type="site",
             target_id=own_site.id,
             component_id=ui.id,
@@ -2194,15 +2194,15 @@ def _seed_single_component_frontend_campaign(
             other_site = Site(name="Other site", base_url="https://other.example.test")
             session.add(other_site)
             session.flush()
-            other_target = ApplicationTarget(
-                application_id=app.id,
+            other_target = SystemTarget(
+                system_id=app.id,
                 target_type="site",
                 target_id=other_site.id,
                 component_id=other.id,
             )
             session.add(other_target)
         session.flush()
-        campaign = AssessmentCampaign(application_id=app.id, name="frontend quality")
+        campaign = AssessmentCampaign(system_id=app.id, name="frontend quality")
         session.add(campaign)
         session.flush()
         session.add(

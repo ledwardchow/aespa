@@ -347,7 +347,7 @@ export function useWebRunEvents(options) {
             histEntry,
           );
         });
-      } else if (evt.type === "specialist_step") {
+      } else if (evt.type === "specialist_step" || evt.type === "deep_worker_step") {
         const ts = new Date().toLocaleTimeString("en-US", {
           hour12: false,
           hour: "2-digit",
@@ -361,13 +361,31 @@ export function useWebRunEvents(options) {
             const stepEntry = {
               ts,
               step: evt.step,
+              description: evt.description,
+              tool_name: evt.tool_name,
+              context_tool: evt.context_tool,
               action_type: evt.action_type,
               method: evt.method,
               url: evt.url,
               status: evt.status,
               observation: evt.observation,
+              hypothesis: evt.hypothesis,
+              payload_purpose: evt.payload_purpose,
+              payload_summary: evt.payload_summary,
             };
-            if (idx === -1) return prev;
+            if (idx === -1) {
+              return [
+                ...prev,
+                {
+                  id: agentId,
+                  role: evt.type === "deep_worker_step" ? "Deep Attack Worker" : "Specialist",
+                  status: "active",
+                  currentTask: evt.description || "Working on the assigned test",
+                  taskHistory: [],
+                  stepHistory: [stepEntry],
+                },
+              ];
+            }
             const updated = [...prev];
             const prev_agent = updated[idx];
             updated[idx] = {

@@ -89,7 +89,7 @@ Done when common editors and details have one implementation, their interaction 
 
 ## 3. Extract data processing from routers
 
-Starting points: `src/aespa/api/test_runs.py` and `src/aespa/api/applications.py`.
+Starting points: `src/aespa/api/test_runs.py` and `src/aespa/api/systems.py`.
 
 Use separate changes for these boundaries:
 
@@ -154,7 +154,7 @@ Done when migrated selectors have an identifiable owner and affected pages retai
 
 For each substantive frontend change, run `npm run check` from `frontend/` and the affected Playwright tests. The check command includes formatting, lint, architecture checks, type checks, unit tests, build, and generated-output checks. Inspect compiled production pages for CSS changes, using the existing production-preview browser configuration.
 
-For backend extractions, run affected pytest files and Ruff checks. Existing starting points include `tests/api/test_applications.py`, `tests/api/test_settings.py`, and `tests/providers/test_resolved_llm_config.py`; locate archive and graph coverage by behavior before adding tests. Run the full backend suite after the backend changes are integrated. Tests use isolated data and mocked external calls.
+For backend extractions, run affected pytest files and Ruff checks. Existing starting points include `tests/api/test_systems.py`, `tests/api/test_settings.py`, and `tests/providers/test_resolved_llm_config.py`; locate archive and graph coverage by behavior before adding tests. Run the full backend suite after the backend changes are integrated. Tests use isolated data and mocked external calls.
 
 Suggested review sequence:
 

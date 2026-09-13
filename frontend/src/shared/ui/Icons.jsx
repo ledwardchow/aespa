@@ -189,9 +189,9 @@ export const IconBrain = () => (
   </svg>
 );
 // A grouped-boxes glyph: several separate components (like Sites' 2x2 grid)
-// drawn wrapped inside one outer boundary — represents an Application as the
+// drawn wrapped inside one outer boundary. This represents a System as the
 // grouping of several repos/targets into one product.
-export const IconApplications = () => (
+export const IconSystems = () => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
     <rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.3" />
     <rect x="3.3" y="3.3" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3" />
