@@ -1178,7 +1178,7 @@ def extract_component_facts(root: Path) -> list[dict]:
                                 "asset_type": (
                                     "sensitive_data"
                                     if _SENSITIVE_DATA_NAMES.search(table_name)
-                                    else "application_data"
+                                    else "system_data"
                                 ),
                             },
                             "evidence_location": location,
@@ -1191,7 +1191,7 @@ def extract_component_facts(root: Path) -> list[dict]:
 def persist_component_facts(sast_run_id: int, root: Path) -> int:
     """Extract and upsert deterministic ``ComponentFact`` rows for one run.
 
-    Looks up the owning ``ApplicationComponent`` via ``CampaignSourceMember``
+    Looks up the owning ``SystemComponent`` via ``CampaignSourceMember``
     (``component_id`` stays ``NULL`` for a standalone SAST run — this never
     requires the run to know about campaigns itself). Idempotent per run: a
     deterministic facts while preserving facts recorded by the LLM mapper.

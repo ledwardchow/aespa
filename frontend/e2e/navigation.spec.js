@@ -17,9 +17,9 @@ const screens = [
   ["#/sast-runs/1/coverage", "Fixture SAST"],
   ["#/sast-runs/1/candidates", "Fixture SAST"],
   ["#/sast-runs/1/activity", "Fixture SAST"],
-  ["#/applications", "Fixture application"],
-  ["#/applications/1", "Fixture application"],
-  ["#/applications/1/campaigns/1/runs", "Fixture campaign"],
+  ["#/systems", "Fixture system"],
+  ["#/systems/1", "Fixture system"],
+  ["#/systems/1/campaigns/1/runs", "Fixture campaign"],
   ["#/api-runs/1/findings", "Fixture run"],
   ["#/api-runs/1/status", "Fixture run"],
   ["#/runs/1/findings", "Fixture run"],
@@ -34,11 +34,11 @@ const screens = [
   ["#/runs/1/traffic", "Fixture run"],
   ["#/runs/1/sessions", "Fixture run"],
   ["#/runs/1/leads", "Fixture run"],
-  ["#/applications/1/campaigns/1/components", "Fixture campaign"],
-  ["#/applications/1/campaigns/1/connections", "Fixture campaign"],
-  ["#/applications/1/campaigns/1/review", "Fixture campaign"],
-  ["#/applications/1/campaigns/1/findings", "Fixture campaign"],
-  ["#/applications/1/campaigns/1/activity", "Fixture campaign"],
+  ["#/systems/1/campaigns/1/components", "Fixture campaign"],
+  ["#/systems/1/campaigns/1/connections", "Fixture campaign"],
+  ["#/systems/1/campaigns/1/review", "Fixture campaign"],
+  ["#/systems/1/campaigns/1/findings", "Fixture campaign"],
+  ["#/systems/1/campaigns/1/activity", "Fixture campaign"],
 ];
 for (const [route, text] of screens) {
   test(`${route} renders without runtime errors`, async ({ page }) => {
@@ -81,7 +81,7 @@ test("System Settings groups feature visibility and debug controls into tabs", a
   await expect(featureTab).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("Browser", { exact: true })).toBeVisible();
   await expect(page.getByText("Reporting Lab", { exact: true })).toBeVisible();
-  await expect(page.getByText("Applications", { exact: true })).toBeVisible();
+  await expect(page.getByText("Systems", { exact: true })).toBeVisible();
   await expect(page.getByText("Sitemap Graph", { exact: true })).toHaveCount(0);
 
   await debugTab.click();
@@ -410,4 +410,86 @@ test("the SAST agent list scrolls without an enclosing activity box", async ({ p
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(errors).toEqual([]);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-agents-scroll.png") });
+});
+
+test("Deep work queue groups checks under an expandable operation", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.route("**/api/test-runs/1", (route) =>
+    route.fulfill({
+      json: {
+        id: 1,
+        site_id: 1,
+        name: "Fixture Deep run",
+        status: "complete",
+        phase: "finished",
+        thinking_status: "complete",
+        coverage_mode: "deep",
+        scope_hosts: [],
+        per_user_progress: [],
+        llm_profile_id: 1,
+      },
+    }),
+  );
+  await page.route("**/api/test-runs/1/deep-queue", (route) =>
+    route.fulfill({
+      json: {
+        total: 1,
+        checks_total: 2,
+        counts: { finding: 1 },
+        tasks: [
+          {
+            id: 42,
+            task_kind: "operation",
+            status: "finding",
+            title: "Test GET http://example.test/api/accounts/{id}",
+            http_method: "GET",
+            target_url: "http://example.test/api/accounts/12?search=Ada",
+            route_template: "http://example.test/api/accounts/{id}",
+            inputs: ["account_id", "search"],
+            identities: ["user_a_vs_user_b"],
+            finding_count: 1,
+            priority: 9,
+            checks: [
+              {
+                id: 1,
+                attack_class: "idor",
+                owasp_category: "A01",
+                parameter: "account_id",
+                session_label: "user_a_vs_user_b",
+                status: "finding",
+                hypothesis: "Compare account ownership across two users.",
+              },
+              {
+                id: 2,
+                attack_class: "sqli",
+                owasp_category: "A03",
+                parameter: "search",
+                status: "complete",
+                hypothesis: "Compare a quote probe with the baseline.",
+              },
+            ],
+          },
+        ],
+      },
+    }),
+  );
+
+  await page.goto("/#/runs/1/activity");
+  await page.getByRole("button", { name: "Work Queue", exact: true }).click();
+  await expect(page.getByText("1 worker tasks", { exact: false })).toBeVisible();
+  const task = page.locator(".deep-task-toggle");
+  await expect(task).toHaveAttribute("aria-expanded", "false");
+  await expect(task.getByText("2 inputs", { exact: true })).toBeVisible();
+  await expect(task.getByText("1 identity comparison", { exact: true })).toBeVisible();
+  await task.click();
+  await expect(page.getByText("Compare account ownership across two users.")).toBeVisible();
+  await expect(page.getByText("Compare a quote probe with the baseline.")).toBeVisible();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-deep-grouped-queue.png") });
 });

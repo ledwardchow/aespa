@@ -20,14 +20,14 @@ beforeEach(() => {
   settingsApi.getCloudflareAccessConfig.mockResolvedValue({ audience: null });
 });
 
-test("groups Applications and Deep Scan under Experimental Features", () => {
+test("groups Systems and Deep Scan under Experimental Features", () => {
   const setShowDeepScan = vi.fn();
   render(
     <DebugPage
       showUsername={true}
       setShowUsername={vi.fn()}
-      showApplications={true}
-      setShowApplications={vi.fn()}
+      showSystems={true}
+      setShowSystems={vi.fn()}
       showDeepScan={false}
       setShowDeepScan={setShowDeepScan}
       username=""
@@ -39,7 +39,7 @@ test("groups Applications and Deep Scan under Experimental Features", () => {
   );
 
   expect(screen.getByText("Experimental Features")).toBeTruthy();
-  expect(screen.getByLabelText("Applications scanning").checked).toBe(true);
+  expect(screen.getByLabelText("Systems scanning").checked).toBe(true);
   const deepScanToggle = screen.getByLabelText("DAST Deep Scan Mode");
   expect(deepScanToggle.checked).toBe(false);
 

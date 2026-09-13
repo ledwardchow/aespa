@@ -36,7 +36,7 @@ const agents = [
   },
   {
     id: "deep-worker-1-task-41",
-    role: "Deep Attack Worker",
+    role: "IDOR on /accounts/{id}",
     status: "active",
     currentTask: "Testing account access",
     stepHistory: [
@@ -53,7 +53,7 @@ const agents = [
   },
   {
     id: "deep-worker-2-task-40",
-    role: "Deep Attack Worker",
+    role: "Cross-origin policy review",
     status: "complete",
     currentTask: "Checked CORS policy",
   },
@@ -72,7 +72,7 @@ test("groups Deep tasks and shows only currently running worker status in Agents
 
   expect(screen.getAllByText("Deep Attack Workers")).toHaveLength(1);
   expect(screen.getByText("1 running, 1 complete")).toBeTruthy();
-  expect(screen.getByText("Worker 1")).toBeTruthy();
+  expect(screen.getByText("IDOR on /accounts/{id}")).toBeTruthy();
   expect(screen.getByText("Testing account access")).toBeTruthy();
   expect(screen.queryByText("https://target.test/accounts/1")).toBeNull();
 });
@@ -96,7 +96,7 @@ test("shows specialist and Deep task detail together in Workers", () => {
   fireEvent.click(screen.getByRole("button", { name: /Workers/ }));
 
   expect(screen.getByText("Specialist sqli #1")).toBeTruthy();
-  expect(screen.getByText("Attack worker 1 · Task #41")).toBeTruthy();
+  expect(screen.getByText("IDOR on /accounts/{id}")).toBeTruthy();
   expect(screen.getByText("Testing account access")).toBeTruthy();
   expect(
     screen.getByText("Step 7: Compare the account response with another signed-in user."),

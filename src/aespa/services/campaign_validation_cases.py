@@ -19,12 +19,12 @@ from sqlmodel import Session, select
 from aespa.db import get_engine
 from aespa.models import (
     ApiEndpoint,
-    ApplicationTarget,
     CampaignTargetMember,
     CampaignValidationCase,
     LeadTargetMapping,
     ScanFinding,
     ScanLead,
+    SystemTarget,
 )
 
 READINESS_PENDING = "pending"
@@ -532,9 +532,9 @@ def resolve_cases_for_api_target(
         if target_member.api_test_run_id is None:
             target_member.api_test_run_id = api_test_run_id
             session.add(target_member)
-        target = session.get(ApplicationTarget, target_member.target_id)
+        target = session.get(SystemTarget, target_member.target_id)
         if target is None:
-            raise ValueError("Application target does not exist")
+            raise ValueError("System target does not exist")
         endpoints = session.exec(
             select(ApiEndpoint)
             .where(ApiEndpoint.collection_id == target.target_id)

@@ -48,7 +48,7 @@ frontend/
       api-collections/
       api-runs/
       sast-runs/
-      applications/
+      systems/
       campaigns/
       settings/
       active-jobs/
@@ -145,7 +145,7 @@ Use separate changes for each feature:
 | 3 | Web activity and sitemap | Separate list selection, resizing, graph lifecycle, event presentation, and tab composition. Keep D3 DOM ownership inside its graph component and clean up simulations/listeners. |
 | 4 | API collections and run screens | Separate collection CRUD, files, endpoints, and run display. Keep form state with forms and tab state with navigation. |
 | 5 | SAST | Split list/form/detail modules. Check references to `LegacySastRunDetail`, progress, and leads exports; remove only unreachable compatibility code after preserving aliases. |
-| 6 | Applications and campaigns | Preserve existing focused hooks such as `useCampaign` and `useTargets`; split review-table interactions and wizard steps where ownership is still mixed. |
+| 6 | Systems and campaigns | Preserve existing focused hooks such as `useCampaign` and `useTargets`; split review-table interactions and wizard steps where ownership is still mixed. |
 | 7 | Chat presentation | Split `aliceRender.jsx` into pure parsers and rendering components. Separate session persistence from UI interactions in the web and API chat screens. Preserve message order, replay, active-tab selection, and popout behavior. |
 | 8 | Remaining small pages and utilities | Standardize Active Jobs and Statistics, split report/file/date/storage utilities, and remove temporary compatibility exports. |
 

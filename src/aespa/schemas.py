@@ -1561,8 +1561,8 @@ class ActiveJobSummary(BaseModel):
     run_id: int
     site_id: Optional[int] = None
     site_name: Optional[str] = None
-    application_id: Optional[int] = None
-    application_name: Optional[str] = None
+    system_id: Optional[int] = None
+    system_name: Optional[str] = None
     run_name: str
     job_type: str
     status: str
@@ -1917,20 +1917,20 @@ class ScanCheckpointStatusOut(BaseModel):
     updated_at: datetime | None = None
 
 
-# ── Applications & multi-repository campaigns ────────────────────────────────
+# ── Systems & multi-repository campaigns ────────────────────────────────
 
 
-class ApplicationCreate(BaseModel):
+class SystemCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = None
 
 
-class ApplicationUpdate(BaseModel):
+class SystemUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
 
 
-class ApplicationSummary(BaseModel):
+class SystemSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -1944,26 +1944,26 @@ class ApplicationSummary(BaseModel):
     last_campaign_status: str | None = None
 
 
-class ApplicationDetail(ApplicationSummary):
+class SystemDetail(SystemSummary):
     pass
 
 
-class ApplicationComponentCreate(BaseModel):
+class SystemComponentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     role: str | None = None
     description: str | None = None
 
 
-class ApplicationComponentUpdate(BaseModel):
+class SystemComponentUpdate(BaseModel):
     role: str | None = None
     description: str | None = None
 
 
-class ApplicationComponentOut(BaseModel):
+class SystemComponentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     name: str
     role: str | None
     description: str | None
@@ -1984,20 +1984,20 @@ class ComponentSnapshotOut(BaseModel):
     created_at: datetime
 
 
-class ApplicationTargetCreate(BaseModel):
+class SystemTargetCreate(BaseModel):
     target_type: Literal["site", "api_collection"]
     target_id: int
 
 
-class ApplicationTargetUpdate(BaseModel):
+class SystemTargetUpdate(BaseModel):
     component_id: int | None = None
 
 
-class ApplicationTargetOut(BaseModel):
+class SystemTargetOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     target_type: str
     target_id: int
     component_id: int | None = None
@@ -2015,7 +2015,7 @@ class ComponentTargetHintOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     component_id: int
     target_id: int
     note: str | None
@@ -2083,7 +2083,7 @@ class CampaignSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     name: str
     status: str
     max_parallel_sast: int

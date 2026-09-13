@@ -102,7 +102,12 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                   <div className="agent-task-history">
                     {activeWorkers.map((worker) => {
                       const match = worker.id.match(/^deep-worker-(\d+)-task-(\d+)$/);
-                      const workerLabel = match ? `Worker ${match[1]}` : worker.id;
+                      const workerLabel =
+                        worker.role && worker.role !== "Deep Attack Worker"
+                          ? worker.role
+                          : match
+                            ? `Worker ${match[1]}`
+                            : worker.id;
                       const task =
                         worker.currentTask ||
                         worker.taskHistory?.slice(-1)[0]?.task ||

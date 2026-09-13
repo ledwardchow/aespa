@@ -10,7 +10,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from aespa import models
 from aespa.db import get_session
 from aespa.models import (
-    Application,
+    System,
     AssessmentCampaign,
     ScannerSession,
     TargetIntelItem,
@@ -260,11 +260,11 @@ def test_list_active_jobs_includes_active_campaign_scan(
     client: TestClient, isolated_db_engine
 ):
     with Session(isolated_db_engine) as session:
-        application = Application(name="Checkout")
-        session.add(application)
+        system = System(name="Checkout")
+        session.add(system)
         session.flush()
         campaign = AssessmentCampaign(
-            application_id=application.id,
+            system_id=system.id,
             name="Release validation",
             status="dast_running",
         )
@@ -273,7 +273,7 @@ def test_list_active_jobs_includes_active_campaign_scan(
         session.refresh(campaign)
 
         campaign_id = campaign.id
-        application_id = application.id
+        system_id = system.id
 
     response = client.get("/api/test-runs/active")
 
@@ -281,8 +281,8 @@ def test_list_active_jobs_includes_active_campaign_scan(
     campaign_jobs = [job for job in response.json() if job["run_type"] == "campaign"]
     assert len(campaign_jobs) == 1
     assert campaign_jobs[0]["run_id"] == campaign_id
-    assert campaign_jobs[0]["application_id"] == application_id
-    assert campaign_jobs[0]["application_name"] == "Checkout"
+    assert campaign_jobs[0]["system_id"] == system_id
+    assert campaign_jobs[0]["system_name"] == "Checkout"
     assert campaign_jobs[0]["job_type"] == "Campaign Scan"
     assert campaign_jobs[0]["status"] == "dast_running"
 
@@ -1465,7 +1465,7 @@ def test_export_and_import_crawl_into_new_run(client: TestClient):
 
     imported = client.post(
         f"/api/test-runs/{target['id']}/crawl/import",
-        files={"file": ("crawl.json", json.dumps(archive), "application/json")},
+        files={"file": ("crawl.json", json.dumps(archive), "system/json")},
     )
     assert imported.status_code == 200
     assert imported.json()["status"] == "complete"
@@ -1508,7 +1508,7 @@ def test_import_crawl_rejects_another_site(client: TestClient):
 
     imported = client.post(
         f"/api/test-runs/{target['id']}/crawl/import",
-        files={"file": ("crawl.json", archive.content, "application/json")},
+        files={"file": ("crawl.json", archive.content, "system/json")},
     )
     assert imported.status_code == 400
     assert "different site" in imported.json()["detail"]

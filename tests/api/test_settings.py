@@ -1119,7 +1119,7 @@ def test_delete_model_used_by_scan_profile_returns_conflict(fk_engine):
     from aespa.models import (
         ApiCollection,
         ApiTestRun,
-        Application,
+        System,
         AssessmentCampaign,
         LLMConfig,
         LLMProfile,
@@ -1182,11 +1182,11 @@ def test_delete_model_used_by_scan_profile_returns_conflict(fk_engine):
         sast_run = SastRun(name="SAST Run", llm_config_id=model1.id)
         session.add(sast_run)
 
-        app = Application(name="Test App")
+        app = System(name="Test App")
         session.add(app)
         session.flush()
         campaign = AssessmentCampaign(
-            application_id=app.id, name="Campaign", llm_config_id=model1.id
+            system_id=app.id, name="Campaign", llm_config_id=model1.id
         )
         session.add(campaign)
         session.commit()

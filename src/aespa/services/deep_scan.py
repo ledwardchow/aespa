@@ -6,9 +6,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from collections import Counter
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 from sqlmodel import Session, select
 
@@ -17,7 +18,9 @@ from aespa.models import (
     CoverageEvidence,
     CrawledPage,
     DeepScanAttempt,
+    DeepScanCheck,
     DeepScanTask,
+    DeepScanTaskFinding,
     ProbeExecution,
     ScanFinding,
     ScanObligation,
@@ -38,6 +41,15 @@ from aespa.services.settings import (
 log = logging.getLogger("aespa.deep_scan")
 _UTC = timezone.utc
 _claim_locks: dict[int, asyncio.Lock] = {}
+
+_DEEP_CAMPAIGN_PROMPT = """You are a Deep Attack Worker. Test one bounded HTTP operation,
+saved workflow, systemic recon area, or imported SAST lead. Your briefing lists the checks
+inside this campaign. Reuse request baselines, browser state, and sessions across those checks.
+Work through applicable checks in risk order. Do not repeat the same request for each label.
+Create a follow-up probe only when traffic, a response difference, or source evidence supports
+it. Put the relevant OWASP category and test class on each probe. Write a finding only with
+direct tool evidence. Stop before bulk data access or unsafe state changes. Call done when the
+applicable checks are complete or the remaining checks have a specific blocker."""
 
 _TECHNIQUE_TO_ATTACK_CLASS = {
     "auth_vs_unauth": "auth_bypass",
@@ -101,10 +113,99 @@ def _page_for_target(pages: list[CrawledPage], target_url: str) -> CrawledPage |
     return None
 
 
-def _task_dict(task: DeepScanTask) -> dict:
+def _json_list(value: str) -> list[str]:
+    try:
+        parsed = json.loads(value or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [str(item) for item in parsed if item not in (None, "")]
+
+
+def _canonical_route(url: str) -> str:
+    parsed = urlparse(url)
+    path = re.sub(
+        r"/(?:(?:\d+)|(?:[0-9a-f]{8}-[0-9a-f-]{27,}))(?=/|$)",
+        "/{id}",
+        parsed.path,
+        flags=re.I,
+    )
+    return urlunparse((parsed.scheme, parsed.netloc, path or "/", "", "", parsed.fragment))
+
+
+def _traffic_inputs(row: TrafficEntry) -> set[str]:
+    names = set(parse_qs(urlparse(row.url).query, keep_blank_values=True))
+    body = row.request_body or ""
+    try:
+        parsed = json.loads(body)
+        if isinstance(parsed, dict):
+            names.update(str(key) for key in parsed)
+    except (TypeError, json.JSONDecodeError):
+        names.update(parse_qs(body, keep_blank_values=True))
+    return names
+
+
+def _operation_for_obligation(
+    obligation: ScanObligation,
+    pages: list[CrawledPage],
+    traffic: list[TrafficEntry],
+) -> tuple[str, str, CrawledPage | None]:
+    page = _page_for_target(pages, obligation.route_template)
+    route = _canonical_route(obligation.route_template)
+    method = (obligation.http_method or "GET").upper()
+    matches = [row for row in traffic if (row.method or "GET").upper() == method]
+    direct = [row for row in matches if _canonical_route(row.url) == route]
+    if direct:
+        chosen = direct[-1]
+        return chosen.url, _canonical_route(chosen.url), page
+    if page is not None:
+        related = [row for row in matches if row.page_id == page.id]
+        if obligation.parameter:
+            parameter_matches = [
+                row for row in related if obligation.parameter in _traffic_inputs(row)
+            ]
+            if parameter_matches:
+                chosen = parameter_matches[-1]
+                return chosen.url, _canonical_route(chosen.url), page
+        api_related = [row for row in related if "/api/" in urlparse(row.url).path]
+        if len({_canonical_route(row.url) for row in api_related}) == 1:
+            chosen = api_related[-1]
+            return chosen.url, _canonical_route(chosen.url), page
+        return page.url, _canonical_route(page.url), page
+    return obligation.route_template, route, None
+
+
+def _check_dict(check: DeepScanCheck) -> dict:
+    return {
+        "id": check.id,
+        "source": check.source,
+        "attack_class": check.attack_class,
+        "owasp_category": check.owasp_category,
+        "parameter": check.parameter,
+        "parameter_location": check.parameter_location,
+        "session_label": check.session_label,
+        "hypothesis": check.hypothesis,
+        "status": check.status,
+        "finding_id": check.finding_id,
+        "outcome": check.outcome,
+    }
+
+
+def _task_dict(
+    task: DeepScanTask,
+    checks: list[DeepScanCheck] | None = None,
+    finding_ids: list[int] | None = None,
+) -> dict:
+    checks = checks or []
+    finding_ids = finding_ids or ([task.finding_id] if task.finding_id else [])
+    finding_count = len(finding_ids)
+    if not finding_count:
+        legacy_count = re.search(r"\b(\d+) new findings?\b", task.outcome or "", re.I)
+        finding_count = int(legacy_count.group(1)) if legacy_count else 0
     return {
         "id": task.id,
         "source": task.source,
+        "task_kind": task.task_kind,
+        "route_template": task.route_template or _canonical_route(task.target_url),
         "attack_class": task.attack_class,
         "owasp_category": task.owasp_category,
         "target_url": task.target_url,
@@ -118,6 +219,12 @@ def _task_dict(task: DeepScanTask) -> dict:
         "attempt_count": task.attempt_count,
         "worker_id": task.worker_id,
         "finding_id": task.finding_id,
+        "inputs": _json_list(task.inputs_json),
+        "identities": _json_list(task.identities_json),
+        "checks": [_check_dict(check) for check in checks],
+        "check_count": len(checks),
+        "finding_ids": finding_ids,
+        "finding_count": finding_count,
         "outcome": task.outcome,
         "error_message": task.error_message,
         "created_at": task.created_at.isoformat(),
@@ -135,44 +242,101 @@ def get_queue(run_id: int) -> dict:
                 .order_by(DeepScanTask.priority.desc(), DeepScanTask.id)
             ).all()
         )
+        checks = list(
+            session.exec(
+                select(DeepScanCheck)
+                .where(DeepScanCheck.run_id == run_id)
+                .order_by(DeepScanCheck.id)
+            ).all()
+        )
+        links = list(
+            session.exec(
+                select(DeepScanTaskFinding).where(
+                    DeepScanTaskFinding.run_id == run_id
+                )
+            ).all()
+        )
+    checks_by_task: dict[int, list[DeepScanCheck]] = {}
+    findings_by_task: dict[int, list[int]] = {}
+    for check in checks:
+        checks_by_task.setdefault(check.task_id, []).append(check)
+    for link in links:
+        findings_by_task.setdefault(link.task_id, []).append(link.finding_id)
     counts = Counter(row.status for row in rows)
     return {
         "run_id": run_id,
         "total": len(rows),
         "counts": dict(counts),
-        "tasks": [_task_dict(row) for row in rows],
+        "checks_total": len(checks),
+        "tasks": [
+            _task_dict(
+                row,
+                checks_by_task.get(row.id or -1, []),
+                findings_by_task.get(row.id or -1, []),
+            )
+            for row in rows
+        ],
     }
 
 
-def _add_task(session: Session, *, run_id: int, max_tasks: int, **values) -> bool:
-    current = len(
-        session.exec(select(DeepScanTask.id).where(DeepScanTask.run_id == run_id)).all()
+def _campaign_brief(checks: list[dict]) -> str:
+    lines = [
+        "Test this operation as one campaign. Work through these checks and reuse request and session context:",
+    ]
+    for check in checks:
+        detail = f"- [{check['owasp_category']}] {check['attack_class']}"
+        if check.get("parameter"):
+            detail += f" input={check['parameter']}"
+        if check.get("session_label"):
+            detail += f" identity={check['session_label']}"
+        lines.append(f"{detail}: {check['hypothesis']}")
+    lines.append("Create follow-up probes only when observed evidence supports them.")
+    return "\n".join(lines)[:12000]
+
+
+def _persist_campaign(session: Session, run_id: int, campaign: dict) -> None:
+    checks = campaign.pop("checks")
+    task = DeepScanTask(
+        run_id=run_id,
+        fingerprint=_fingerprint(
+            campaign["task_kind"],
+            campaign["route_template"],
+            campaign["http_method"],
+            campaign.get("lead_id"),
+            campaign["source"],
+            campaign["title"],
+        ),
+        inputs_json=json.dumps(
+            sorted({c["parameter"] for c in checks if c.get("parameter")})
+        ),
+        identities_json=json.dumps(
+            sorted({c["session_label"] for c in checks if c.get("session_label")})
+        ),
+        hypothesis=_campaign_brief(checks),
+        **campaign,
     )
-    if current >= max_tasks:
-        return False
-    fingerprint = _fingerprint(
-        values.get("source"),
-        values.get("attack_class"),
-        values.get("target_url"),
-        values.get("http_method"),
-        values.get("parameter"),
-        values.get("session_label"),
-        values.get("lead_id"),
-    )
-    exists = session.exec(
-        select(DeepScanTask)
-        .where(DeepScanTask.run_id == run_id)
-        .where(DeepScanTask.fingerprint == fingerprint)
-    ).first()
-    if exists is not None:
-        return False
-    session.add(DeepScanTask(run_id=run_id, fingerprint=fingerprint, **values))
+    session.add(task)
     session.flush()
-    return True
+    for check in checks:
+        session.add(
+            DeepScanCheck(
+                run_id=run_id,
+                task_id=task.id,
+                fingerprint=_fingerprint(
+                    check["source"],
+                    check.get("obligation_id"),
+                    check.get("lead_id"),
+                    check["attack_class"],
+                    check.get("parameter"),
+                    check.get("session_label"),
+                ),
+                **check,
+            )
+        )
 
 
 def seed_deep_tasks(run_id: int) -> int:
-    """Build an idempotent Deep queue from recon, coverage, and imported SAST leads."""
+    """Build grouped Deep campaigns from recon, coverage, and imported SAST leads."""
     from aespa.services.scan_leads import get_leads_for_run
     from aespa.services.web_workprogram import (
         seed_scan_obligations,
@@ -204,33 +368,73 @@ def seed_deep_tasks(run_id: int) -> int:
                 .order_by(ScanObligation.id)
             ).all()
         )
-        created = 0
+        if session.exec(
+            select(DeepScanTask.id).where(DeepScanTask.run_id == run_id)
+        ).first():
+            return 0
+        traffic = list(
+            session.exec(
+                select(TrafficEntry)
+                .where(TrafficEntry.test_run_id == run_id)
+                .order_by(TrafficEntry.created_at, TrafficEntry.id)
+            ).all()
+        )
+        groups: dict[tuple, dict] = {}
+
+        def add_group(key: tuple, values: dict, check: dict) -> None:
+            campaign = groups.get(key)
+            if campaign is None:
+                campaign = {**values, "checks": []}
+                groups[key] = campaign
+            check_key = _fingerprint(
+                check["source"],
+                check.get("obligation_id"),
+                check.get("lead_id"),
+                check["attack_class"],
+                check.get("parameter"),
+                check.get("session_label"),
+            )
+            if all(existing["_key"] != check_key for existing in campaign["checks"]):
+                campaign["checks"].append({**check, "_key": check_key})
+            campaign["priority"] = max(campaign["priority"], check["priority"])
 
         if config.include_sast_leads:
             severity_priority = {"critical": 10, "high": 9, "medium": 8, "low": 6}
             for lead in get_leads_for_run("web", run_id):
                 target = urljoin(site.base_url, lead.suggested_endpoint or "/")
                 page = _page_for_target(pages, target)
-                created += _add_task(
-                    session,
-                    run_id=run_id,
-                    max_tasks=config.max_tasks,
-                    source="sast_lead",
-                    lead_id=lead.id,
-                    page_id=page.id if page else None,
-                    attack_class=_lead_attack_class(lead),
-                    owasp_category=lead.category or "",
-                    target_url=target,
-                    http_method="GET",
-                    title=f"Validate SAST lead {lead.reference}: {lead.title}",
-                    hypothesis=(
-                        f"Validate imported SAST lead {lead.reference}. Retrieve its full "
-                        "lead_detail before testing. " + (lead.description or "")
-                    )[:4000],
-                    priority=severity_priority.get(
-                        (lead.severity or "medium").lower(), 7
-                    ),
-                    risk_level="safe_active",
+                attack_class = _lead_attack_class(lead)
+                priority = severity_priority.get((lead.severity or "medium").lower(), 7)
+                add_group(
+                    ("sast", lead.id),
+                    {
+                        "source": "sast_lead",
+                        "task_kind": "sast",
+                        "route_template": _canonical_route(target),
+                        "lead_id": lead.id,
+                        "page_id": page.id if page else None,
+                        "attack_class": attack_class,
+                        "owasp_category": lead.category or "",
+                        "target_url": target,
+                        "http_method": "GET",
+                        "title": f"Validate SAST lead {lead.reference}: {lead.title}",
+                        "priority": priority,
+                        "risk_level": "safe_active",
+                    },
+                    {
+                        "source": "sast_lead",
+                        "lead_id": lead.id,
+                        "attack_class": attack_class,
+                        "owasp_category": lead.category or "",
+                        "parameter": None,
+                        "parameter_location": "",
+                        "session_label": None,
+                        "hypothesis": (
+                            f"Validate imported SAST lead {lead.reference}. Retrieve its full "
+                            "lead_detail before testing. " + (lead.description or "")
+                        )[:4000],
+                        "priority": priority,
+                    },
                 )
 
         for obligation in obligations:
@@ -239,33 +443,42 @@ def seed_deep_tasks(run_id: int) -> int:
             )
             if not attack_class:
                 continue
-            page = _page_for_target(pages, obligation.route_template)
+            target, route_template, page = _operation_for_obligation(
+                obligation, pages, traffic
+            )
             identity = obligation.required_identity_comparison
-            created += _add_task(
-                session,
-                run_id=run_id,
-                max_tasks=config.max_tasks,
-                source="coverage",
-                obligation_id=obligation.id,
-                page_id=page.id if page else None,
-                attack_class=attack_class,
-                owasp_category=obligation.owasp_category,
-                target_url=page.url if page else obligation.route_template,
-                http_method=obligation.http_method,
-                parameter=obligation.parameter,
-                session_label=identity,
-                title=(
-                    f"{obligation.vulnerability_technique.replace('_', ' ')} on "
-                    f"{obligation.route_template}"
-                ),
-                hypothesis=(
-                    f"Test the {obligation.vulnerability_technique} obligation. "
-                    f"Use obligation_id={obligation.id}, method={obligation.http_method}, "
-                    f"OWASP category={obligation.owasp_category} on every probe. "
-                    f"Required identity comparison: {identity or 'none'}."
-                ),
-                priority=9 if obligation.owasp_category in {"A01", "A03", "A07"} else 6,
-                risk_level="safe_active",
+            priority = 9 if obligation.owasp_category in {"A01", "A03", "A07"} else 6
+            key = ("operation", obligation.http_method.upper(), route_template)
+            add_group(
+                key,
+                {
+                    "source": "coverage",
+                    "task_kind": "operation",
+                    "route_template": route_template,
+                    "obligation_id": obligation.id,
+                    "page_id": page.id if page else None,
+                    "attack_class": "business_logic",
+                    "owasp_category": obligation.owasp_category,
+                    "target_url": target,
+                    "http_method": obligation.http_method.upper(),
+                    "title": f"Test {obligation.http_method.upper()} {route_template}",
+                    "priority": priority,
+                    "risk_level": "safe_active",
+                },
+                {
+                    "source": "coverage",
+                    "obligation_id": obligation.id,
+                    "attack_class": attack_class,
+                    "owasp_category": obligation.owasp_category,
+                    "parameter": obligation.parameter,
+                    "parameter_location": "",
+                    "session_label": identity,
+                    "hypothesis": (
+                        f"Test {obligation.vulnerability_technique}. Use obligation_id="
+                        f"{obligation.id} and OWASP category {obligation.owasp_category} on probes."
+                    ),
+                    "priority": priority,
+                },
             )
 
         if config.include_recon_checks:
@@ -292,44 +505,103 @@ def seed_deep_tasks(run_id: int) -> int:
                     6,
                 ),
             ):
-                created += _add_task(
-                    session,
-                    run_id=run_id,
-                    max_tasks=config.max_tasks,
-                    source="recon",
-                    attack_class=attack_class,
-                    owasp_category=category,
-                    target_url=site.base_url,
-                    http_method="GET",
-                    parameter=category,
-                    title=title,
-                    hypothesis=hypothesis,
-                    priority=priority,
-                    risk_level="safe_active",
+                add_group(
+                    ("systemic", category, attack_class),
+                    {
+                        "source": "recon",
+                        "task_kind": "systemic",
+                        "route_template": _canonical_route(site.base_url),
+                        "attack_class": attack_class,
+                        "owasp_category": category,
+                        "target_url": site.base_url,
+                        "http_method": "GET",
+                        "title": title,
+                        "priority": priority,
+                        "risk_level": "safe_active",
+                    },
+                    {
+                        "source": "recon",
+                        "attack_class": attack_class,
+                        "owasp_category": category,
+                        "parameter": None,
+                        "parameter_location": "",
+                        "session_label": None,
+                        "hypothesis": hypothesis,
+                        "priority": priority,
+                    },
                 )
             for page in pages:
                 if page.state_kind == "interactive" or page.has_business_logic:
-                    created += _add_task(
-                        session,
-                        run_id=run_id,
-                        max_tasks=config.max_tasks,
-                        source="workflow_recon",
-                        page_id=page.id,
-                        attack_class="business_logic",
-                        owasp_category="A04",
-                        target_url=page.url,
-                        http_method="POST",
-                        parameter=f"page:{page.id}",
-                        title=f"Replay and test workflow: {page.state_label or page.url}",
-                        hypothesis=(
-                            "Replay the saved interactive state, identify the workflow's "
-                            "captured request, and test safe ordering, replay, and authorization variants."
-                        ),
-                        priority=8,
-                        risk_level="safe_active",
+                    add_group(
+                        ("workflow", page.id),
+                        {
+                            "source": "workflow_recon",
+                            "task_kind": "workflow",
+                            "route_template": _canonical_route(page.url),
+                            "page_id": page.id,
+                            "attack_class": "business_logic",
+                            "owasp_category": "A04",
+                            "target_url": page.url,
+                            "http_method": "POST",
+                            "title": f"Replay and test workflow: {page.state_label or page.url}",
+                            "priority": 8,
+                            "risk_level": "safe_active",
+                        },
+                        {
+                            "source": "workflow_recon",
+                            "attack_class": "business_logic",
+                            "owasp_category": "A04",
+                            "parameter": None,
+                            "parameter_location": "",
+                            "session_label": None,
+                            "hypothesis": (
+                                "Replay the saved interactive state, identify the workflow's "
+                                "captured request, and test safe ordering, replay, and authorization variants."
+                            ),
+                            "priority": 8,
+                        },
                     )
+
+        campaigns = list(groups.values())
+        for campaign in campaigns:
+            for check in campaign["checks"]:
+                check.pop("_key", None)
+        def ranked(kind: str) -> list[dict]:
+            return sorted(
+                (c for c in campaigns if c["task_kind"] == kind),
+                key=lambda c: (-c["priority"], c["title"]),
+            )
+
+        sast = ranked("sast")
+        systemic = ranked("systemic")
+        workflows = ranked("workflow")
+        operations = sorted(
+            (c for c in campaigns if c["task_kind"] == "operation"),
+            key=lambda c: (-c["priority"], c["title"]),
+        )
+        # SAST evidence and the small systemic recon set are never hidden behind a
+        # large endpoint inventory. Keep at most one third of the remaining slots
+        # for workflow campaigns while operation campaigns are waiting.
+        selected = sast[: config.max_tasks]
+        remaining = config.max_tasks - len(selected)
+        systemic_slots = (
+            min(len(systemic), max(1, remaining // 10))
+            if remaining and (remaining > 1 or not operations)
+            else 0
+        )
+        selected.extend(systemic[:systemic_slots])
+        remaining = config.max_tasks - len(selected)
+        workflow_slots = remaining if not operations else min(len(workflows), remaining // 3)
+        selected.extend(workflows[:workflow_slots])
+        remaining = config.max_tasks - len(selected)
+        selected.extend(operations[:remaining])
+        remaining = config.max_tasks - len(selected)
+        leftovers = systemic[systemic_slots:] + workflows[workflow_slots:]
+        selected.extend(leftovers[:remaining])
+        for campaign in selected:
+            _persist_campaign(session, run_id, campaign)
         session.commit()
-    return created
+    return len(selected)
 
 
 async def _claim_task(run_id: int, worker_id: str) -> tuple[DeepScanTask, int] | None:
@@ -364,6 +636,12 @@ async def _claim_task(run_id: int, worker_id: str) -> tuple[DeepScanTask, int] |
             )
             session.add(task)
             session.add(attempt)
+            for check in session.exec(
+                select(DeepScanCheck).where(DeepScanCheck.task_id == task.id)
+            ).all():
+                check.status = "running"
+                check.updated_at = now
+                session.add(check)
             session.commit()
             session.refresh(attempt)
             return task, attempt.id
@@ -411,19 +689,59 @@ def _finish_task(
         attempt.error_message = error[:4000]
         attempt.traffic_ids_json = json.dumps(traffic_ids)
         attempt.completed_at = now
-        if task.obligation_id and status != "queued":
-            obligation = session.get(ScanObligation, task.obligation_id)
+        checks = list(
+            session.exec(
+                select(DeepScanCheck).where(DeepScanCheck.task_id == task.id)
+            ).all()
+        )
+        finding_links = list(
+            session.exec(
+                select(DeepScanTaskFinding).where(
+                    DeepScanTaskFinding.task_id == task.id
+                )
+            ).all()
+        )
+        linked_finding_ids = {link.finding_id for link in finding_links}
+        if finding_id and finding_id not in linked_finding_ids:
+            session.add(
+                DeepScanTaskFinding(
+                    run_id=task.run_id, task_id=task.id, finding_id=finding_id
+                )
+            )
+            linked_finding_ids.add(finding_id)
+        for check in checks:
+            if status == "queued":
+                check.status = "queued"
+            elif check.finding_id:
+                check.status = "finding"
+            elif status == "failed":
+                check.status = "failed"
+            else:
+                check.status = "complete"
+            check.outcome = outcome[:4000]
+            check.updated_at = now
+            session.add(check)
+            if check.obligation_id and status != "queued":
+                obligation = session.get(ScanObligation, check.obligation_id)
+            else:
+                obligation = None
             if obligation is not None:
-                obligation.status = "finding" if finding_id else "inconclusive"
+                obligation.status = "finding" if check.finding_id else "inconclusive"
                 obligation.updated_at = now
                 session.add(obligation)
-                for traffic in traffic_rows:
+                matching_traffic = [
+                    traffic
+                    for traffic in traffic_rows
+                    if not traffic.owasp_category
+                    or traffic.owasp_category == check.owasp_category
+                ]
+                for traffic in matching_traffic[:1]:
                     execution = ProbeExecution(
                         run_kind="web",
                         run_id=task.run_id,
                         obligation_id=obligation.id,
                         traffic_id=traffic.id,
-                        session_identity=task.session_label,
+                        session_identity=check.session_label,
                         status_code=traffic.status,
                         response_time_ms=traffic.duration_ms,
                     )
@@ -434,7 +752,7 @@ def _finish_task(
                             execution_id=execution.id,
                             observed_behavior=outcome[:2000],
                             evaluation_oracle="deep_worker",
-                            outcome="finding" if finding_id else "inconclusive",
+                            outcome="finding" if check.finding_id else "inconclusive",
                         )
                     )
         session.add(task)
@@ -462,6 +780,12 @@ def _recover_queue(run_id: int) -> None:
             task.error_message = "Recovered after an interrupted Deep scan."
             task.updated_at = datetime.now(_UTC)
             session.add(task)
+            for check in session.exec(
+                select(DeepScanCheck).where(DeepScanCheck.task_id == task.id)
+            ).all():
+                check.status = task.status
+                check.updated_at = datetime.now(_UTC)
+                session.add(check)
         for attempt in session.exec(
             select(DeepScanAttempt)
             .where(DeepScanAttempt.run_id == run_id)
@@ -472,6 +796,66 @@ def _recover_queue(run_id: int) -> None:
             attempt.error_message = "Recovered when the Deep scan resumed."
             attempt.completed_at = datetime.now(_UTC)
             session.add(attempt)
+        session.commit()
+
+
+def _mark_check_probe(
+    task_id: int, owasp_category: str, test_class: str | None
+) -> None:
+    with Session(get_engine()) as session:
+        checks = list(
+            session.exec(
+                select(DeepScanCheck)
+                .where(DeepScanCheck.task_id == task_id)
+                .where(DeepScanCheck.status.in_(("queued", "running")))
+            ).all()
+        )
+        matching = [
+            check
+            for check in checks
+            if (not owasp_category or check.owasp_category == owasp_category)
+            and (not test_class or check.attack_class == _TECHNIQUE_TO_ATTACK_CLASS.get(test_class, test_class))
+        ]
+        if not matching and owasp_category:
+            matching = [c for c in checks if c.owasp_category == owasp_category]
+        if matching:
+            matching[0].status = "running"
+            matching[0].updated_at = datetime.now(_UTC)
+            session.add(matching[0])
+            session.commit()
+
+
+def _record_task_finding(
+    run_id: int, task_id: int, finding: ScanFinding, raw: dict
+) -> None:
+    with Session(get_engine()) as session:
+        if session.exec(
+            select(DeepScanTaskFinding)
+            .where(DeepScanTaskFinding.task_id == task_id)
+            .where(DeepScanTaskFinding.finding_id == finding.id)
+        ).first() is None:
+            session.add(
+                DeepScanTaskFinding(
+                    run_id=run_id, task_id=task_id, finding_id=finding.id
+                )
+            )
+        checks = list(
+            session.exec(
+                select(DeepScanCheck).where(DeepScanCheck.task_id == task_id)
+            ).all()
+        )
+        category = str(raw.get("owasp_category") or finding.owasp_category or "")
+        title = str(raw.get("title") or finding.title or "").lower()
+        matching = [check for check in checks if check.owasp_category == category]
+        if len(matching) > 1:
+            named = [check for check in matching if check.attack_class in title]
+            matching = named or matching
+        if matching:
+            matching[0].finding_id = finding.id
+            matching[0].status = "finding"
+            matching[0].outcome = finding.title
+            matching[0].updated_at = datetime.now(_UTC)
+            session.add(matching[0])
         session.commit()
 
 
@@ -563,17 +947,6 @@ async def _run_deep_scan(run_id: int) -> None:
             )
             try:
                 base_post_probe = _make_web_post_probe_fn(run_id)
-                task_test_class = None
-                if task.obligation_id:
-                    with Session(get_engine()) as session:
-                        obligation = session.get(ScanObligation, task.obligation_id)
-                        if (
-                            obligation is not None
-                            and obligation.owasp_category == "A03"
-                        ):
-                            task_test_class = obligation.vulnerability_technique
-                elif task.owasp_category == "A03" and task.attack_class == "sqli":
-                    task_test_class = "sqli"
 
                 def deep_post_probe(
                     url: str,
@@ -583,19 +956,25 @@ async def _run_deep_scan(run_id: int) -> None:
                     response_status: int | None = None,
                     page_id: int | None = None,
                 ):
-                    return base_post_probe(
+                    category = owasp_category or task.owasp_category
+                    result = base_post_probe(
                         url,
                         method,
-                        owasp_category or task.owasp_category,
-                        test_class or task_test_class,
+                        category,
+                        test_class,
                         response_status,
                         page_id if page_id is not None else task.page_id,
                     )
+                    _mark_check_probe(task.id, category, test_class)
+                    return result
+
+                def deep_post_finding(finding: ScanFinding, raw: dict) -> None:
+                    _record_task_finding(run_id, task.id, finding, raw)
 
                 await scanner_svc._run_specialist_agent(
                     run_id=run_id,
                     agent_id=agent_id,
-                    attack_class=task.attack_class,
+                    attack_class="deep_campaign",
                     target_url=task.target_url,
                     rationale=task.hypothesis,
                     session_vault=session_vault,
@@ -607,15 +986,35 @@ async def _run_deep_scan(run_id: int) -> None:
                     target_page_id=task.page_id,
                     target_session_label=None,
                     handoff_id=handoff.id,
-                    agent_role="Deep Attack Worker",
+                    agent_role=(
+                        task.title or task.attack_class.replace("_", " ").capitalize()
+                    ),
                     event_phase="deep_worker_step",
                     post_probe_fn=deep_post_probe,
+                    post_finding_fn=deep_post_finding,
                     default_owasp_category=task.owasp_category,
+                    system_prompt_override=_DEEP_CAMPAIGN_PROMPT,
+                    tools_override=scanner_svc._get_specialist_tools("crypto"),
                 )
                 persisted = handoff_svc.get_handoff(handoff.id)
-                finding_id = persisted.finding_id if persisted else None
+                with Session(get_engine()) as session:
+                    links = list(
+                        session.exec(
+                            select(DeepScanTaskFinding).where(
+                                DeepScanTaskFinding.task_id == task.id
+                            )
+                        ).all()
+                    )
+                finding_id = links[0].finding_id if links else (
+                    persisted.finding_id if persisted else None
+                )
+                finding_count = len({link.finding_id for link in links}) or int(
+                    bool(finding_id)
+                )
                 outcome = (persisted.outcome if persisted else None) or (
-                    f"Finding #{finding_id}" if finding_id else "No confirmed finding"
+                    f"{finding_count} new finding{'s' if finding_count != 1 else ''}"
+                    if finding_id
+                    else "No confirmed finding"
                 )
                 if persisted is not None and persisted.status == "failed":
                     retry_status = (
@@ -636,9 +1035,19 @@ async def _run_deep_scan(run_id: int) -> None:
                         outcome=outcome,
                         finding_id=finding_id,
                     )
-                    if task.lead_id:
+                    with Session(get_engine()) as session:
+                        lead_ids = {
+                            check.lead_id
+                            for check in session.exec(
+                                select(DeepScanCheck).where(
+                                    DeepScanCheck.task_id == task.id
+                                )
+                            ).all()
+                            if check.lead_id
+                        }
+                    for lead_id in lead_ids:
                         update_lead(
-                            task.lead_id,
+                            lead_id,
                             status="confirmed" if finding_id else "inconclusive",
                             note=outcome,
                             owner_run_type="web",
