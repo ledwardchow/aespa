@@ -28,6 +28,13 @@ export function useAppPreferences() {
       return false;
     }
   });
+  const [showTeamScan, setShowTeamScan] = useState(() => {
+    try {
+      return localStorage.getItem("aespa_show_team_scan") === "true";
+    } catch {
+      return false;
+    }
+  });
   const [reportingDebugCfg, setReportingDebugCfg] = useState(null);
   const [benchmarkLabCfg, setBenchmarkLabCfg] = useState(null);
   useEffect(() => {
@@ -57,6 +64,8 @@ export function useAppPreferences() {
     setShowSystems,
     showDeepScan,
     setShowDeepScan,
+    showTeamScan,
+    setShowTeamScan,
     reportingDebugCfg,
     setReportingDebugCfg,
     benchmarkLabCfg,

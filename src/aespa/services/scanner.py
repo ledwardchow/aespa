@@ -5627,8 +5627,9 @@ async def _run_specialist_agent(
             },
         )
 
-        specialist_system_prompt = system_prompt_override or _specialist_system_prompt_for_run(
-            attack_class, is_api_run=is_api_run
+        specialist_system_prompt = (
+            system_prompt_override
+            or _specialist_system_prompt_for_run(attack_class, is_api_run=is_api_run)
         )
 
         await llm_svc.thinking_agentic_loop(
@@ -6468,6 +6469,12 @@ async def start_thinking_scan(run_id: int) -> None:
             session.commit()
     # Clear any stale checkpoint so the scan starts fresh.
     checkpoint_svc.clear_checkpoint(run_id)
+    with Session(get_engine()) as session:
+        run = session.get(TestRun, run_id)
+        if run is not None and run.coverage_mode == "team":
+            from aespa.services.team_scan import reset_team_progress
+
+            reset_team_progress(run_id)
     # Tag this run's events as run_kind='web'.  The scope — snapshotted by
     # create_task below — keeps web log rows correctly tagged for compatibility
     # run earlier in this process.
@@ -6549,14 +6556,21 @@ def _emit_thinking_status(run_id: int) -> None:
     )
 
 
-def _emit_reporting_handoff(run_id: int, probe_count: int, batch_count: int) -> None:
+def _emit_reporting_handoff(
+    run_id: int,
+    probe_count: int,
+    batch_count: int,
+    *,
+    agent_id: str = "scanner",
+    role: str = "Test Lead",
+) -> None:
     """Keep the scan active while the Test Lead delegates probe analysis."""
     events_svc.emit(
         run_id,
         {
             "type": "agent_status",
-            "agent_id": "scanner",
-            "role": "Test Lead",
+            "agent_id": agent_id,
+            "role": role,
             "status": "active",
             "current_task": "Testing complete - handed traffic to reporting agent for analysis...",
             "outcome": (
@@ -6998,7 +7012,12 @@ async def _run_post_scan_llm_review(
     )
 
 
-async def _do_thinking_scan(run_id: int) -> None:
+async def _do_thinking_scan(
+    run_id: int,
+    *,
+    effective_coverage_mode: str | None = None,
+    team_assignment: dict | None = None,
+) -> None:
     """LLM-directed scan: the model decides each HTTP request to issue, observes
     the response, and adaptively chooses what to probe next — exactly like a human
     tester working through curl."""
@@ -7007,11 +7026,21 @@ async def _do_thinking_scan(run_id: int) -> None:
     with Session(get_engine()) as _mode_session:
         _mode_run = _mode_session.get(TestRun, run_id)
         _coverage_mode = getattr(_mode_run, "coverage_mode", "track")
-    if _coverage_mode == "deep":
+    if _coverage_mode == "deep" and effective_coverage_mode is None:
         from aespa.services.deep_scan import run_deep_scan
 
         await run_deep_scan(run_id)
         return
+    if _coverage_mode == "team" and effective_coverage_mode is None:
+        from aespa.services.team_scan import run_team_scan
+
+        await run_team_scan(run_id)
+        return
+
+    test_lead_agent_id = (
+        f"team-{team_assignment['key']}" if team_assignment else "scanner"
+    )
+    test_lead_role = team_assignment["label"] if team_assignment else "Test Lead"
 
     # ── Load config ───────────────────────────────────────────────────────────
     with Session(get_engine()) as s:
@@ -7025,7 +7054,9 @@ async def _do_thinking_scan(run_id: int) -> None:
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
         guidance = (site.scan_guidance or "").strip()
-        coverage_mode = getattr(run, "coverage_mode", "track") or "track"
+        coverage_mode = effective_coverage_mode or (
+            getattr(run, "coverage_mode", "track") or "track"
+        )
         try:
             target_page_ids = {
                 int(value)
@@ -7159,8 +7190,8 @@ async def _do_thinking_scan(run_id: int) -> None:
             run_id,
             {
                 "type": "agent_status",
-                "agent_id": "scanner",
-                "role": "Test Lead",
+                "agent_id": test_lead_agent_id,
+                "role": test_lead_role,
                 "status": "active",
                 "current_task": f"Resuming from step {_resume_checkpoint.get('step_count', '?')}…",
                 "outcome": None,
@@ -7172,6 +7203,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         not resuming
         and coverage_mode != "sast_validate"
         and not scanner_policy.disable_deterministic_checks
+        and (team_assignment is None or team_assignment.get("run_preflight", False))
     ):
         # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM
         # loop starts. The thinking-scan agent can then find them via target_inventory
@@ -7208,6 +7240,15 @@ async def _do_thinking_scan(run_id: int) -> None:
         intel_context = _build_target_intelligence_context(run_id)
         if intel_context:
             crawl_context = f"{crawl_context}\n\n{intel_context}"
+
+        if team_assignment:
+            crawl_context = (
+                f"TEAM TEST LEAD ASSIGNMENT\n"
+                f"You are {team_assignment['label']}. Your conversation and browser "
+                "state are independent from the other Team members. Saved findings "
+                "from earlier members are included only to prevent duplicate reports.\n\n"
+                f"{team_assignment['mission']}\n\n{crawl_context}"
+            )
 
         # Append any SAST leads imported into this web run so the Test Lead can
         # investigate them (mirrors the API scan's collection-keyed lead injection).
@@ -7290,20 +7331,23 @@ async def _do_thinking_scan(run_id: int) -> None:
         else _web_post_finding_fn  # covers specialists + all other paths
     )
 
-    _persist_execution_snapshot(
-        run_id,
-        llm_cfg=llm_cfg,
-        scanner_policy=scanner_policy,
-        pages_snapshot=pages_snapshot,
-        coverage_mode=coverage_mode,
-        enforce_coverage=bool(
-            coverage_mode == "enforce"
-            and (
-                scanner_policy is not None
-                and getattr(scanner_policy, "enforce_full_coverage_obligations", False)
-            )
-        ),
-    )
+    if team_assignment is None or team_assignment.get("key") == "primary":
+        _persist_execution_snapshot(
+            run_id,
+            llm_cfg=llm_cfg,
+            scanner_policy=scanner_policy,
+            pages_snapshot=pages_snapshot,
+            coverage_mode="team" if team_assignment else coverage_mode,
+            enforce_coverage=bool(
+                coverage_mode == "enforce"
+                and (
+                    scanner_policy is not None
+                    and getattr(
+                        scanner_policy, "enforce_full_coverage_obligations", False
+                    )
+                )
+            ),
+        )
 
     creds_for_llm = [
         {
@@ -7603,6 +7647,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         if (
             run_id not in _thinking_stop_requested
             and not scanner_policy.disable_deterministic_checks
+            and (team_assignment is None or team_assignment.get("run_preflight", False))
         ):
             if coverage_mode == "sast_validate":
                 tls_findings = await _run_tls_posture_module(
@@ -7665,7 +7710,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                     system_message_override=(
                         get_sast_validate_system(is_api_run=False)
                         if coverage_mode == "sast_validate"
-                        else None
+                        else (
+                            get_thinking_agent_system(False)
+                            + "\n\nTEAM MODE\n"
+                            + team_assignment["mission"]
+                            if team_assignment
+                            else None
+                        )
                     ),
                     tools_override=(
                         get_sast_validate_tools(is_api_run=False)
@@ -7681,6 +7732,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                         else _web_post_finding_fn
                     ),
                     coverage_mode=coverage_mode,
+                    display_agent_id=test_lead_agent_id,
+                    display_role=test_lead_role,
                 )
             # ── Step-by-step path (fallback for non-agentic providers) ──────
             step = 0
@@ -7705,8 +7758,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     run_id,
                     {
                         "type": "agent_status",
-                        "agent_id": "scanner",
-                        "role": "Test Lead",
+                        "agent_id": test_lead_agent_id,
+                        "role": test_lead_role,
                         "status": "active",
                         "current_task": f"Step {step}: deciding next action…",
                         "outcome": None,
@@ -9014,7 +9067,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                 ),
             },
         )
-        _emit_reporting_handoff(run_id, len(all_results), total_batches)
+        _emit_reporting_handoff(
+            run_id,
+            len(all_results),
+            total_batches,
+            agent_id=test_lead_agent_id,
+            role=test_lead_role,
+        )
         events_svc.emit(
             run_id,
             {
@@ -9236,8 +9295,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                 run_id,
                 {
                     "type": "agent_status",
-                    "agent_id": "scanner",
-                    "role": "Test Lead",
+                    "agent_id": test_lead_agent_id,
+                    "role": test_lead_role,
                     "status": "active",
                     "current_task": "Completing full web coverage — resolving remaining cells…",
                     "outcome": None,
@@ -9277,6 +9336,12 @@ async def _do_thinking_scan(run_id: int) -> None:
             await _run_post_scan_llm_review(run_id, llm_cfg, _pre_scan_max_id)
         except Exception as _rev_exc:
             log.warning("Post-scan review failed (non-fatal): %s", _rev_exc)
+    if team_assignment is not None and not team_assignment.get("final", False):
+        if stopped:
+            llm_svc.clear_run_context()
+            raise asyncio.CancelledError
+        llm_svc.clear_run_context()
+        return
     standard_progress = None
     standard_target_unmet = False
     if not stopped and coverage_mode == "standard":
@@ -9310,8 +9375,8 @@ async def _do_thinking_scan(run_id: int) -> None:
             run_id,
             {
                 "type": "agent_status",
-                "agent_id": "scanner",
-                "role": "Test Lead",
+                "agent_id": test_lead_agent_id,
+                "role": test_lead_role,
                 "status": "complete",
                 "current_task": "Scan stopped",
                 "outcome": f"Stopped with {_finding_count} finding(s) recorded",
@@ -9323,8 +9388,8 @@ async def _do_thinking_scan(run_id: int) -> None:
             run_id,
             {
                 "type": "agent_status",
-                "agent_id": "scanner",
-                "role": "Test Lead",
+                "agent_id": test_lead_agent_id,
+                "role": test_lead_role,
                 "status": "incomplete",
                 "current_task": "Standard coverage target not reached",
                 "outcome": (
@@ -9421,6 +9486,8 @@ async def _do_agentic_thinking_loop(
     post_probe_fn=None,  # callable(url, method, owasp_category) -> None; called after every http_request
     persist_credential_fn=None,  # callable(username, password, login_url) -> None; replaces site-credential persistence
     coverage_mode: str = "track",
+    display_agent_id: str = "scanner",
+    display_role: str = "Test Lead",
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -9707,8 +9774,8 @@ async def _do_agentic_thinking_loop(
             run_id,
             {
                 "type": "agent_status",
-                "agent_id": "scanner",
-                "role": "Test Lead",
+                "agent_id": display_agent_id,
+                "role": display_role,
                 "status": "active",
                 "current_task": f"Step {step}: Called done",
                 "outcome": summary[:2000] or None,
@@ -9920,8 +9987,8 @@ async def _do_agentic_thinking_loop(
             run_id,
             {
                 "type": "agent_status",
-                "agent_id": "scanner",
-                "role": "Test Lead",
+                "agent_id": display_agent_id,
+                "role": display_role,
                 "status": "active",
                 "current_task": f"Step {step}: {note}",
                 "outcome": None,

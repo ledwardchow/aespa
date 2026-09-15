@@ -1,10 +1,15 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { expect, test, vi } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { ActivityAgents } from "./ActivityAgents.jsx";
 import { WebRunActivityTab } from "./WebRunActivityTab.jsx";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 
 vi.mock("../../shared/api/webRuns.js", () => ({ getDeepQueue: vi.fn() }));
+
+const chatState = vi.hoisted(() => ({
+  aliceChats: [],
+  collapseAgentId: vi.fn(),
+}));
 
 webRunsApi.getDeepQueue.mockResolvedValue({
   total: 1,
@@ -43,7 +48,8 @@ vi.mock("./WebRunChat.jsx", () => ({
   useWebRunChat: () => ({
     collapsedAgentIds: new Set(["alice", "specialist"]),
     toggleAgentId: vi.fn(),
-    aliceChats: [],
+    collapseAgentId: chatState.collapseAgentId,
+    aliceChats: chatState.aliceChats,
     activeAliceTabId: "default",
     setActiveAliceTabId: vi.fn(),
     deleteAliceTab: vi.fn(),
@@ -62,6 +68,11 @@ vi.mock("./WebRunChat.jsx", () => ({
     submitAliceDirective: vi.fn(),
   }),
 }));
+
+beforeEach(() => {
+  chatState.aliceChats = [];
+  chatState.collapseAgentId.mockClear();
+});
 
 const agents = [
   {
@@ -143,4 +154,117 @@ test("shows Deep worker traces inside Work Queue without a separate Workers tab"
   expect(
     screen.getAllByText(/Pivoted to: Confirm the ownership difference\./).length,
   ).toBeGreaterThan(0);
+});
+
+test("hides the empty Burp row when the integration is disabled", () => {
+  render(
+    <ActivityAgents
+      runId={1}
+      agents={[]}
+      run={{ coverage_mode: "standard", status: "complete" }}
+      thinkingStatus={{ status: "complete" }}
+      activityLog={[]}
+      burpIntegrationEnabled={false}
+    />,
+  );
+
+  expect(screen.queryByText("Burp")).toBeNull();
+});
+
+test("keeps the Burp row when a disabled integration has scan activity", () => {
+  render(
+    <ActivityAgents
+      runId={1}
+      agents={[
+        {
+          id: "burp-scan-1",
+          role: "Burp",
+          status: "complete",
+          currentTask: "Burp scan complete",
+        },
+      ]}
+      run={{ coverage_mode: "team", status: "complete" }}
+      thinkingStatus={{ status: "complete" }}
+      activityLog={[]}
+      burpIntegrationEnabled={false}
+    />,
+  );
+
+  expect(screen.getByText("Burp")).toBeTruthy();
+  expect(screen.getByText("1 scan complete")).toBeTruthy();
+});
+
+test("shows the empty Burp row when the integration is enabled", () => {
+  render(
+    <ActivityAgents
+      runId={1}
+      agents={[]}
+      run={{ coverage_mode: "deep", status: "complete" }}
+      thinkingStatus={{ status: "complete" }}
+      activityLog={[]}
+      burpIntegrationEnabled
+    />,
+  );
+
+  expect(screen.getByText("Burp")).toBeTruthy();
+  expect(screen.getByText("No active scan dispatched")).toBeTruthy();
+});
+
+test("minimizes an empty Alice chat while another agent is active", () => {
+  render(
+    <ActivityAgents
+      runId={1}
+      agents={[{ id: "scanner", role: "Test Lead", status: "active" }]}
+      run={{ coverage_mode: "standard", status: "running" }}
+      thinkingStatus={{ status: "running" }}
+      activityLog={[]}
+    />,
+  );
+
+  expect(chatState.collapseAgentId).toHaveBeenCalledWith("alice");
+});
+
+test("does not count the Alice welcome message as chat activity", () => {
+  chatState.aliceChats = [
+    {
+      id: "default",
+      messages: [{ id: "welcome", sender: "alice", text: "Hello! I am A.L.I.C.E." }],
+    },
+  ];
+
+  render(
+    <ActivityAgents
+      runId={1}
+      agents={[{ id: "scanner", role: "Test Lead", status: "active" }]}
+      run={{ coverage_mode: "standard", status: "running" }}
+      thinkingStatus={{ status: "running" }}
+      activityLog={[]}
+    />,
+  );
+
+  expect(chatState.collapseAgentId).toHaveBeenCalledWith("alice");
+});
+
+test("keeps Alice open when the chat already has activity", () => {
+  chatState.aliceChats = [
+    {
+      id: "default",
+      messages: [
+        { id: "welcome", sender: "alice", text: "Hello! I am A.L.I.C.E." },
+        { id: "user-1", sender: "user", text: "Check login" },
+      ],
+    },
+  ];
+
+  render(
+    <ActivityAgents
+      runId={1}
+      agents={[{ id: "scanner", role: "Test Lead", status: "active" }]}
+      run={{ coverage_mode: "team", status: "running" }}
+      thinkingStatus={{ status: "running" }}
+      activityLog={[]}
+    />,
+  );
+
+  expect(chatState.collapseAgentId).not.toHaveBeenCalled();
 });

@@ -3,10 +3,23 @@ import { activityPresentation } from "./activityPresentation.js";
 import { truncUrl } from "../../shared/lib/urls.js";
 import { AliceChatPanel } from "./AliceChatPanel.jsx";
 import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
-export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog }) {
+import { useEffect } from "react";
+
+const isAliceWelcomeMessage = (message) =>
+  message?.id === "welcome" || String(message?.id || "").startsWith("welcome-");
+
+export function ActivityAgents({
+  runId,
+  agents,
+  run,
+  thinkingStatus,
+  activityLog,
+  burpIntegrationEnabled = null,
+}) {
   const {
     collapsedAgentIds,
     toggleAgentId,
+    collapseAgentId,
     aliceChats,
     activeAliceTabId,
     setActiveAliceTabId,
@@ -35,10 +48,26 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
     agentTaskHistory,
     agentStatusLabel,
   } = activityPresentation({ run, thinkingStatus, aliceIsThinking, activityLog });
+  const hasActiveNonAliceAgent =
+    agents.some((agent) => agent.id !== "alice" && agent.status === "active") ||
+    defaultAgentRoster().some((agent) => agent.id !== "alice" && agent.status === "active");
+  const hasAliceChatActivity =
+    aliceIsThinking ||
+    aliceChats.some((chat) =>
+      (chat.messages || []).some((message) => !isAliceWelcomeMessage(message)),
+    );
+
+  useEffect(() => {
+    if (hasActiveNonAliceAgent && !hasAliceChatActivity) collapseAgentId("alice");
+  }, [collapseAgentId, hasActiveNonAliceAgent, hasAliceChatActivity]);
+
   return (
     <div className="agents-panel">
       {(() => {
-        const roster = defaultAgentRoster();
+        const hasBurpActivity = agents.some((agent) => representsAgent(agent, { id: "burp" }));
+        const roster = defaultAgentRoster().filter(
+          (agent) => agent.id !== "burp" || burpIntegrationEnabled !== false || hasBurpActivity,
+        );
         // Container slots must always render as
         // their placeholder so the multi-agent container row fires correctly.
         const CONTAINER_IDS = new Set(["specialist", "deep-workers", "burp", "validator"]);
@@ -492,6 +521,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                 {roleLabel}
                 {a.id.includes("-") &&
                 !["scanner", "crawler"].includes(a.id) &&
+                !a.id.startsWith("team-") &&
                 !a.id.startsWith("burp-") ? (
                   <>
                     <br />

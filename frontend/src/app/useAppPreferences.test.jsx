@@ -25,3 +25,13 @@ test("restores an enabled Deep Scan preference", () => {
 
   expect(result.current.showDeepScan).toBe(true);
 });
+
+test("hides Team Scan by default and restores its experimental preference", () => {
+  const hidden = renderHook(() => useAppPreferences());
+  expect(hidden.result.current.showTeamScan).toBe(false);
+  hidden.unmount();
+
+  localStorage.setItem("aespa_show_team_scan", "true");
+  const enabled = renderHook(() => useAppPreferences());
+  expect(enabled.result.current.showTeamScan).toBe(true);
+});

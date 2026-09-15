@@ -369,6 +369,34 @@ def test_posix_page_key_sequences_are_handled(monkeypatch) -> None:
     assert calls == ["up", "down", "previous", "next", "toggle"]
 
 
+def test_posix_mouse_wheel_sequences_scroll_console_pages(monkeypatch) -> None:
+    console = InteractiveConsole(
+        input_stream=io.StringIO(), output_stream=io.StringIO()
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(console.handler, "page_up", lambda: calls.append("up"))
+    monkeypatch.setattr(console.handler, "page_down", lambda: calls.append("down"))
+
+    console._process_posix_keys(b"\x1b[<64;20")
+    assert calls == []
+    console._process_posix_keys(b";8M\x1b[<65;20;8M")
+    console._process_posix_keys(b"\x1b[M`44\x1b[Ma44")
+
+    assert calls == ["up", "down", "up", "down"]
+
+
+def test_console_enables_and_restores_terminal_mouse_reporting() -> None:
+    output = io.StringIO()
+    handler = InteractiveConsoleHandler(output)
+
+    handler.start_screen()
+    handler.stop_screen()
+
+    rendered = output.getvalue()
+    assert "\x1b[?1049h\x1b[?1000h\x1b[?1006h" in rendered
+    assert rendered.endswith("\x1b[?1006l\x1b[?1000l\x1b[?1049l")
+
+
 def test_terminal_resize_reflows_and_redraws_viewport(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output)

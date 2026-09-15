@@ -14,7 +14,7 @@ import { FindingsDataProvider, useFindingsData } from "./FindingsData.jsx";
 import { useActivity } from "./useActivity.js";
 import {
   canResumeSelectedScanMode,
-  hasResumableDeepScan,
+  hasResumableExperimentalScan,
   isCrawlerAgentActive,
 } from "./runState.js";
 
@@ -46,6 +46,7 @@ export function TestRunDetail(props) {
 function TestRunContent({
   runId,
   showDeepScan = false,
+  showTeamScan = false,
   initialTab,
   initialFindingRef,
   initialLeadRef,
@@ -100,6 +101,7 @@ function TestRunContent({
     setActivityLog,
     agents,
     setAgents,
+    burpIntegrationEnabled,
     tokenUsage,
     setTokenUsage,
     sitePlanData,
@@ -382,7 +384,7 @@ function TestRunContent({
     canStartAnyScan &&
     ["idle", "complete", "stopped", "failed", null].includes(effectiveThinkingStatus);
   const hasCheckpoint =
-    (checkpointStatus?.exists === true || hasResumableDeepScan(run)) &&
+    (checkpointStatus?.exists === true || hasResumableExperimentalScan(run)) &&
     canStartAnyScan &&
     !isDynamicScanActive(effectiveThinkingStatus);
   const canResume = canResumeSelectedScanMode(hasCheckpoint, coverageMode, run?.coverage_mode);
@@ -443,6 +445,7 @@ function TestRunContent({
         scanStopping={thinkingStopRequested}
         coverageMode={coverageMode}
         showDeepScan={showDeepScan}
+        showTeamScan={showTeamScan}
         onCoverageMode={setCoverageMode}
         onStart={onStart}
         onStop={onStop}
@@ -643,6 +646,7 @@ function TestRunContent({
             thinkingStatus={thinkingStatus}
             activityLog={activityLog}
             agents={agents}
+            burpIntegrationEnabled={burpIntegrationEnabled}
             tokenUsage={tokenUsage}
             sitePlanData={sitePlanData}
             onClearLog={async () => {

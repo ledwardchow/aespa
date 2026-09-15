@@ -353,6 +353,15 @@ def test_deep_mode_is_web_only():
         ApiTestRunCreate(coverage_mode="deep")
 
 
+def test_team_mode_is_web_only():
+    from aespa.api.scan import _StartScanBody
+    from aespa.schemas import ApiTestRunCreate
+
+    assert _StartScanBody(coverage_mode="team").coverage_mode == "team"
+    with pytest.raises(ValidationError):
+        ApiTestRunCreate(coverage_mode="team")
+
+
 def test_deep_is_a_web_only_scan_mode():
     from aespa.api.scan import _StartScanBody
     from aespa.schemas import ApiTestRunCreate

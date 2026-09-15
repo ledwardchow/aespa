@@ -43,6 +43,11 @@ _PAGE_UP = b"\x1b[5~"
 _PAGE_DOWN = b"\x1b[6~"
 _ARROW_UP = b"\x1b[A"
 _ARROW_DOWN = b"\x1b[B"
+_SGR_MOUSE_PREFIX = b"\x1b[<"
+_LEGACY_MOUSE_PREFIX = b"\x1b[M"
+_MOUSE_MODIFIER_MASK = 4 | 8 | 16
+_MOUSE_WHEEL_UP = 64
+_MOUSE_WHEEL_DOWN = 65
 _PYTHON_EXECUTOR_IMAGE = "ledwardchow/aespa-python-executor:0.1"
 _ANSI_RED = "\x1b[38;5;196m"
 _ANSI_ORANGE = "\x1b[38;5;202m"
@@ -460,7 +465,7 @@ class InteractiveConsoleHandler(logging.Handler):
                     )
                 self._ready_announced = True
             self._screen_active = True
-            self.stream.write("\x1b[?1049h")
+            self.stream.write("\x1b[?1049h\x1b[?1000h\x1b[?1006h")
             self._redraw_locked()
 
     def stop_screen(self) -> None:
@@ -468,7 +473,7 @@ class InteractiveConsoleHandler(logging.Handler):
             if not self._screen_active:
                 return
             self._screen_active = False
-            self.stream.write("\x1b[?1049l")
+            self.stream.write("\x1b[?1006l\x1b[?1000l\x1b[?1049l")
             self.stream.flush()
 
     def refresh_for_resize(self) -> bool:
@@ -925,7 +930,10 @@ def _legend(
         if editing:
             return "[0-9] Port  [Backspace] Delete  [Enter] Save  [Esc] Cancel"
         return "[Enter] Change port  [Esc] Back  [Ctrl+C] Stop"
-    return "[1-6] Views  [↑/↓] Select  [Enter] Expand  [PgUp/PgDn] Page  [Ctrl+C] Stop"
+    return (
+        "[1-6] Views  [↑/↓] Select  [Enter] Expand  "
+        "[Wheel/PgUp/PgDn] Scroll  [Ctrl+C] Stop"
+    )
 
 
 def _listening_url(host: str, port: int) -> str:
@@ -1256,6 +1264,11 @@ class InteractiveConsole:
             _ARROW_DOWN: self.handler.select_next_llm,
         }
         while self._key_buffer:
+            mouse_result = self._consume_mouse_sequence()
+            if mouse_result is None:
+                return
+            if mouse_result:
+                continue
             if self.handler.mode == SETTINGS and self.handler.settings_editing:
                 key = self._key_buffer[:1].decode(errors="ignore")
                 self._key_buffer = self._key_buffer[1:]
@@ -1283,6 +1296,43 @@ class InteractiveConsole:
                 self.handler.switch(_MODE_KEYS[key])
             elif key in ("\r", "\n"):
                 self.handler.toggle_selected_llm()
+
+    def _consume_mouse_sequence(self) -> bool | None:
+        """Consume one terminal mouse report, waiting when a report is incomplete."""
+        if self._key_buffer.startswith(_SGR_MOUSE_PREFIX):
+            match = re.match(rb"\x1b\[<(\d+);\d+;\d+([Mm])", self._key_buffer)
+            if match is None:
+                if len(self._key_buffer) <= 64 and not self._key_buffer.endswith(
+                    (b"M", b"m")
+                ):
+                    return None
+                self._key_buffer = self._key_buffer[1:]
+                return True
+            self._key_buffer = self._key_buffer[match.end() :]
+            if match.group(2) == b"M":
+                self._handle_mouse_button(int(match.group(1)))
+            return True
+
+        if self._key_buffer.startswith(_LEGACY_MOUSE_PREFIX):
+            if len(self._key_buffer) < 6:
+                return None
+            button = self._key_buffer[3] - 32
+            self._key_buffer = self._key_buffer[6:]
+            self._handle_mouse_button(button)
+            return True
+
+        if _SGR_MOUSE_PREFIX.startswith(
+            self._key_buffer
+        ) or _LEGACY_MOUSE_PREFIX.startswith(self._key_buffer):
+            return None
+        return False
+
+    def _handle_mouse_button(self, button: int) -> None:
+        button &= ~_MOUSE_MODIFIER_MASK
+        if button == _MOUSE_WHEEL_UP:
+            self.handler.page_up()
+        elif button == _MOUSE_WHEEL_DOWN:
+            self.handler.page_down()
 
     def _read_windows_keys(self) -> None:
         import msvcrt
