@@ -21,6 +21,8 @@ export function DebugPage({
   setShowSystems,
   showDeepScan,
   setShowDeepScan,
+  showTeamScan,
+  setShowTeamScan,
   username,
   reportingDebugCfg,
   setReportingDebugCfg,
@@ -369,6 +371,23 @@ export function DebugPage({
             </label>
             <div className="field-hint" style={{ marginTop: 6 }}>
               Show Deep mode for web DAST runs and its settings under Agent Settings.
+            </div>
+            <label className="toggle-row" style={{ marginTop: 16 }}>
+              <input
+                type="checkbox"
+                checked={showTeamScan ?? false}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setShowTeamScan(checked);
+                  try {
+                    localStorage.setItem("aespa_show_team_scan", String(checked));
+                  } catch {}
+                }}
+              />
+              <span>DAST Team Scan Mode</span>
+            </label>
+            <div className="field-hint" style={{ marginTop: 6 }}>
+              Show the experimental Team mode for web DAST runs.
             </div>
           </div>
         )}

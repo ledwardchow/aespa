@@ -486,6 +486,7 @@ export function SiteDetail({ siteId }) {
                         <span className="run-name">
                           <strong>{r.name}</strong>
                           {r.coverage_mode === "deep" && <span className="badge deep">Deep</span>}
+                          {r.coverage_mode === "team" && <span className="badge">Team</span>}
                         </span>
                         {r.llm_profile_id && (
                           <div

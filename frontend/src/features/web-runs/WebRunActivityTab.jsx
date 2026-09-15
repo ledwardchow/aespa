@@ -15,6 +15,7 @@ export function WebRunActivityTab(props) {
     thinkingStatus,
     activityLog,
     agents,
+    burpIntegrationEnabled,
     tokenUsage,
     sitePlanData,
     onClearLog,
@@ -102,6 +103,7 @@ export function WebRunActivityTab(props) {
           <ActivityAgents
             runId={runId}
             agents={agents}
+            burpIntegrationEnabled={burpIntegrationEnabled}
             run={run}
             thinkingStatus={thinkingStatus}
             activityLog={activityLog}

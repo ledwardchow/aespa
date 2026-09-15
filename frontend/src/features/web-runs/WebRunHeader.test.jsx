@@ -39,6 +39,42 @@ test("only shows Deep mode when its feature preference is enabled", () => {
   expect(screen.getByRole("option", { name: "Deep" })).toBeTruthy();
 });
 
+test("only shows Team mode when its feature preference is enabled", () => {
+  const { rerender } = render(<WebRunHeader {...props} showTeamScan={false} />);
+  expect(screen.queryByRole("option", { name: "Team" })).toBeNull();
+
+  rerender(<WebRunHeader {...props} showTeamScan />);
+  expect(screen.getByRole("option", { name: "Team" })).toBeTruthy();
+});
+
+test("locks a started Team run to Team mode", () => {
+  render(
+    <WebRunHeader
+      {...props}
+      run={{ ...props.run, coverage_mode: "team", scan_mode_locked: true }}
+      coverageMode="team"
+      showDeepScan
+    />,
+  );
+
+  expect(screen.getByRole("combobox", { name: "Scan mode:" }).disabled).toBe(true);
+  expect(screen.getByRole("option", { name: "Team" }).disabled).toBe(false);
+  expect(screen.getByRole("option", { name: "Standard" }).disabled).toBe(true);
+  expect(screen.getByRole("option", { name: "Deep" }).disabled).toBe(true);
+  expect(screen.getByTitle("Test run is inactive").textContent).toBe("Inactive");
+});
+
+test.each([
+  ["crawler", { crawlerActive: true }],
+  ["Test Lead", { testLeadActive: true }],
+  ["ALICE", { aliceRunning: true }],
+])("shows one Active badge while %s is running", (_agent, activeProp) => {
+  render(<WebRunHeader {...props} {...activeProp} />);
+
+  expect(screen.getByTitle("Test run is active").textContent).toBe("Active");
+  expect(screen.queryByTitle(/agent is/)).toBeNull();
+});
+
 test("locks a started Deep run to Deep mode", () => {
   render(
     <WebRunHeader
@@ -62,9 +98,11 @@ test("prevents a started non-Deep run from selecting Deep", () => {
       {...props}
       run={{ ...props.run, coverage_mode: "track", scan_mode_locked: true }}
       showDeepScan
+      showTeamScan
     />,
   );
 
   expect(screen.getByRole("option", { name: "Deep" }).disabled).toBe(true);
+  expect(screen.getByRole("option", { name: "Team" }).disabled).toBe(true);
   expect(screen.getByRole("option", { name: "Standard" }).disabled).toBe(false);
 });

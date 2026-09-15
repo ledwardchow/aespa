@@ -20,8 +20,9 @@ beforeEach(() => {
   settingsApi.getCloudflareAccessConfig.mockResolvedValue({ audience: null });
 });
 
-test("groups Systems and Deep Scan under Experimental Features", () => {
+test("groups Systems, Deep Scan, and Team Scan under Experimental Features", () => {
   const setShowDeepScan = vi.fn();
+  const setShowTeamScan = vi.fn();
   render(
     <DebugPage
       showUsername={true}
@@ -30,6 +31,8 @@ test("groups Systems and Deep Scan under Experimental Features", () => {
       setShowSystems={vi.fn()}
       showDeepScan={false}
       setShowDeepScan={setShowDeepScan}
+      showTeamScan={false}
+      setShowTeamScan={setShowTeamScan}
       username=""
       reportingDebugCfg={{ capture_enabled: false, panel_enabled: false }}
       setReportingDebugCfg={vi.fn()}
@@ -47,4 +50,10 @@ test("groups Systems and Deep Scan under Experimental Features", () => {
 
   expect(setShowDeepScan).toHaveBeenCalledWith(true);
   expect(localStorage.getItem("aespa_show_deep_scan")).toBe("true");
+
+  const teamScanToggle = screen.getByLabelText("DAST Team Scan Mode");
+  expect(teamScanToggle.checked).toBe(false);
+  fireEvent.click(teamScanToggle);
+  expect(setShowTeamScan).toHaveBeenCalledWith(true);
+  expect(localStorage.getItem("aespa_show_team_scan")).toBe("true");
 });

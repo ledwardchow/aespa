@@ -1,8 +1,8 @@
 export const isCrawlerAgentActive = (agent, crawlStopping = false) =>
   crawlStopping || agent?.status === "active";
 
-export const hasResumableDeepScan = (run) =>
-  run?.coverage_mode === "deep" && ["paused", "stopped"].includes(run?.status);
+export const hasResumableExperimentalScan = (run) =>
+  ["deep", "team"].includes(run?.coverage_mode) && ["paused", "stopped"].includes(run?.status);
 
 export const canResumeSelectedScanMode = (hasCheckpoint, selectedMode, savedMode) =>
   hasCheckpoint && selectedMode === savedMode;

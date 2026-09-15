@@ -54,7 +54,7 @@ class _StartScanBody(BaseModel):
 
 
 def _scan_mode_group(coverage_mode: str) -> str:
-    return "deep" if coverage_mode == "deep" else "standard"
+    return coverage_mode if coverage_mode in {"deep", "team"} else "standard"
 
 
 def _reject_incompatible_scan_mode(
@@ -64,12 +64,19 @@ def _reject_incompatible_scan_mode(
         return
     if _scan_mode_group(run.coverage_mode) == _scan_mode_group(requested_mode):
         return
-    saved_label = "Deep" if run.coverage_mode == "deep" else "non-Deep"
+    saved_label = {
+        "deep": "Deep",
+        "team": "Team",
+    }.get(run.coverage_mode, "Quick, Standard, Full, or SAST Validate")
+    requested_label = {
+        "deep": "Deep",
+        "team": "Team",
+    }.get(requested_mode, "Quick, Standard, Full, or SAST Validate")
     raise HTTPException(
         status_code=409,
         detail=(
             f"This run already started in {saved_label} mode and cannot switch "
-            "between Deep and non-Deep scanning. Create a new run to use the other mode."
+            f"to {requested_label}. Create a new run to use the other mode."
         ),
     )
 
@@ -231,7 +238,7 @@ async def resume_thinking_scan(
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     status = checkpoint_svc.checkpoint_status(run_id)
-    if not status["exists"] and run.coverage_mode != "deep":
+    if not status["exists"] and run.coverage_mode not in {"deep", "team"}:
         raise HTTPException(status_code=404, detail="No checkpoint found for this run")
     if run.coverage_mode == "sast_validate":
         from aespa.services.scan_leads import get_leads_for_run

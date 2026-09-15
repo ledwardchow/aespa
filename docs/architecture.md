@@ -2,7 +2,7 @@
 
 AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security scanner. It covers four related surfaces:
 
-- **Web application scanning** - discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage in Quick, Standard, and Full modes, while SAST Validate focuses only on imported SAST leads.
+- **Web application scanning** - discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage in Quick, Standard, Full, and experimental Team modes, while SAST Validate focuses only on imported SAST leads.
 - **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
 - **SAST assistance** — a standalone agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
 - **Multi-repository systems** - when a product's code is split across several repositories/micro-frontends, a **System** groups them (with immutable uploaded ZIP snapshots) alongside the existing Sites/API Collections that make up the live product. An **AssessmentCampaign** coordinates ordinary SAST/web/API child runs for that system, joins compact per-repository interface facts into a cross-repository map, and proposes which live target should receive each SAST lead, subject to human review before any dynamic scan starts.
@@ -728,6 +728,33 @@ Each saved worker step includes a readable description of the intended check,
 followed by its request or tool details and any observation. The Work Queue
 restores Deep worker traces from the scan log after navigation or restart.
 
+### Team web DAST mode
+
+Team is an experimental web scan mode that reuses the Standard Test Lead instead
+of the Deep worker engine. It runs three Test Lead conversations in sequence so
+state-changing browser workflows do not interfere with each other:
+
+1. The Test Co-ordinator runs the normal broad Standard scan and shared preflight
+   checks.
+2. The Pair Tester starts with a fresh conversation and browser context.
+   It uses a different route and test order and revisits high-risk authorization,
+   injection, authentication, and business-logic assumptions.
+3. The QA Tester starts with another fresh context, reads the
+   remaining coverage gaps and saved evidence, and tests unresolved gaps and
+   possible cross-route chains.
+
+The members share persisted routes, traffic, sessions, findings, coverage, and
+specialist handoffs. They do not share conversation history or mutable browser
+state. Findings use the normal deduplication path. JS sink analysis and
+deterministic site checks run for the first member only. Each member waits for its
+specialists and runs the normal finding review before the next member starts.
+
+Completed member markers use phase checkpoints. Stopping or pausing Team leaves
+the current Test Lead checkpoint in place, while resuming skips members that
+already finished. Starting a fresh Team scan clears the old member markers. A run
+cannot switch between Team, Deep, and the ordinary scan engine after its first
+dynamic scan starts. Team is hidden until enabled under Experimental Features.
+
 **TLS/SSL posture (deterministic).** Unless deterministic checks are disabled, any
 `https://` target runs `_run_tls_posture_module` first through
 `_run_deterministic_site_modules` — an
@@ -829,8 +856,9 @@ never reject `done` indefinitely.
 | `skip_coverage` | Resolve an inapplicable or technically blocked web coverage obligation |
 | `done` | Finish the scan with a summary |
 
-The `coverage_mode` selector has four values: `track` (Quick), `standard`
-(Standard), `enforce` (Full), and `sast_validate` (SAST Validate). Standard
+The web `coverage_mode` selector has six values: `track` (Quick), `standard`
+(Standard), `enforce` (Full), `deep` (Deep), `team` (Team), and
+`sast_validate` (SAST Validate). Standard
 requires the configured percentage of applicable coverage cells before accepting
 completion. SAST Validate does not seed or resolve
 normal coverage obligations, dispatch specialists, schedule Burp work, or run the

@@ -304,7 +304,7 @@ class ApiCredentialCreate(BaseModel):
 
 CoverageModeLiteral = Literal["track", "standard", "enforce", "sast_validate"]
 WebCoverageModeLiteral = Literal[
-    "track", "standard", "enforce", "deep", "sast_validate"
+    "track", "standard", "enforce", "deep", "team", "sast_validate"
 ]
 
 

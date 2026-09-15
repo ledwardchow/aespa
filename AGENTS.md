@@ -135,6 +135,10 @@ Tables shared across both run kinds, such as `agent_log`, `scan_log`, `scanner_s
 - The app intentionally has no auth and is localhost-only by design. Optional Cloudflare Access JWT verification in `main.py` is only for users who front it with a reverse proxy. Do not add features assuming a trusted multi-user deployment.
 - When interacting with GitHub, use the `gh` command, because the repo may be on a different account than the authenticated GitHub Copilot session.
 
+### Terminology
+
+- Use clear, specific terms such as "test case," "test," "coverage item," or "remaining test." Avoid calling testing work an "obligation" unless that word has a precise, defined meaning in the code or domain. If it is necessary, define it where it first appears.
+
 ## Desktop Launchers & PyInstaller Builds
 
 When adding new runtime dependencies, backend frameworks, data assets, or modifying desktop launchers (`src/aespa/desktop.py`, `src/aespa/desktop_win.py`) and PyInstaller scripts (`scripts/build_mac.sh`, `scripts/build_win.ps1`, `scripts/AESPA.spec`):

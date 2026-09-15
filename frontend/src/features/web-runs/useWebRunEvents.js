@@ -5,6 +5,10 @@ import { truncUrl } from "../../shared/lib/urls.js";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
 import { runStatusFromThinkingStatus } from "./runState.js";
 import { useEventStream } from "../../shared/hooks/useEventStream.js";
+import {
+  routeScannerEventToActiveTeamTester,
+  teamCoordinatorStatus,
+} from "./activityPresentation.js";
 
 const isHidden404Node = (node) =>
   node?.status === "failed" &&
@@ -329,13 +333,10 @@ export function useWebRunEvents(options) {
           second: "2-digit",
         });
         setAgents((prev) => {
-          const histEntry = {
-            ts,
-            task: evt.current_task,
-            outcome: evt.outcome,
-          };
-          return upsertAgent(
-            prev,
+          const activeTeamTester = prev.find(
+            (agent) => agent.id.startsWith("team-") && agent.status === "active",
+          );
+          const patch = routeScannerEventToActiveTeamTester(
             {
               id: evt.agent_id,
               role: evt.role,
@@ -344,8 +345,23 @@ export function useWebRunEvents(options) {
               outcome: evt.outcome,
               findingReference: evt.finding_reference,
             },
-            histEntry,
+            activeTeamTester,
           );
+          const histEntry = {
+            ts,
+            task: patch.currentTask,
+            outcome: patch.outcome,
+          };
+          const next = upsertAgent(prev, patch, histEntry);
+          if (evt.agent_id?.startsWith("team-") && evt.status === "active") {
+            const existingCoordinator = next.find((agent) => agent.id === "scanner");
+            if (existingCoordinator?.currentTask?.startsWith(`Co-ordinating ${patch.role}:`)) {
+              return next;
+            }
+            const coordinator = teamCoordinatorStatus(patch, evt.current_task);
+            return upsertAgent(next, coordinator);
+          }
+          return next;
         });
       } else if (evt.type === "specialist_step" || evt.type === "deep_worker_step") {
         const ts = new Date().toLocaleTimeString("en-US", {
