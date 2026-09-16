@@ -4,6 +4,8 @@ import asyncio
 import io
 import logging
 import re
+import sqlite3
+import subprocess
 import sys
 from datetime import datetime
 from types import SimpleNamespace
@@ -23,6 +25,7 @@ from aespa.console import (
     InteractiveConsole,
     InteractiveConsoleHandler,
     _aespa_logo_lines,
+    _legend,
     _python_executor_runtime_status,
     _wave_visual_center,
     _write_port_setting,
@@ -498,6 +501,17 @@ def test_legend_is_drawn_on_last_terminal_row(monkeypatch) -> None:
     assert "\x1b[12;1H\x1b[2K[1-6] Views" in output.getvalue()
 
 
+def test_console_legends_call_ctrl_c_quit() -> None:
+    legends = [
+        _legend(AGENT),
+        _legend(SETTINGS, settings_section="root"),
+        _legend(SETTINGS, settings_section="server"),
+    ]
+
+    assert all("[Ctrl+C] Quit" in legend for legend in legends)
+    assert all("[Ctrl+C] Stop" not in legend for legend in legends)
+
+
 def test_page_up_and_page_down_navigate_fixed_viewport(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output)
@@ -791,6 +805,7 @@ def test_settings_menu_hides_server_details_until_opened() -> None:
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
     assert "Server Settings" in frame
     assert "Database Operations" in frame
+    assert "Console Log Database" in frame
     assert "Listening address" not in frame
     assert "Port                " not in frame
 
@@ -798,6 +813,85 @@ def test_settings_menu_hides_server_details_until_opened() -> None:
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
     assert "Listening address" in frame
     assert "Port                8000" in frame
+
+
+def test_console_log_database_is_disabled_by_default(tmp_path) -> None:
+    log_db_path = tmp_path / "logs.db"
+    handler = InteractiveConsoleHandler(io.StringIO(), log_db_path=log_db_path)
+
+    handler.emit(_record("aespa.agent.activity", logging.INFO, "not persisted"))
+
+    assert handler.log_store.enabled is False
+    assert not log_db_path.exists()
+
+
+def test_console_log_database_records_full_logs_except_testing_traffic(
+    tmp_path,
+) -> None:
+    output = io.StringIO()
+    log_db_path = tmp_path / "logs.db"
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=output,
+        log_db_path=log_db_path,
+    )
+    console.handler.start_screen()
+
+    console._process_posix_keys(b"6\x1b[B\x1b[B\r\r")
+
+    assert console.handler.settings_section == "logging"
+    assert console.handler.log_store.enabled is True
+    assert log_db_path.is_file()
+    frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "Status              Enabled" in frame
+    assert "Testing Traffic is excluded" in frame
+    assert "without truncation" in frame
+
+    request = "request line one\nrequest line two\nsecret-token"
+    response = "response line one\nresponse line two"
+    console.handler.emit(_llm_record(41, "REQUEST", request))
+    console.handler.emit(_llm_record(41, "RESPONSE", response))
+    console.handler.emit(
+        _record("aespa.agent.activity", logging.INFO, "agent detail")
+    )
+    console.handler.emit(_record("aespa.service", logging.ERROR, "error detail"))
+    console.handler.emit(
+        _record(
+            "uvicorn.access",
+            logging.INFO,
+            '%s - "%s %s HTTP/%s" %d',
+            ("127.0.0.1:1234", "GET", "/api/health", "1.1", 200),
+        )
+    )
+    console.handler.emit(_testing_record(99, "POST", "https://target.test", 201))
+
+    with sqlite3.connect(log_db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT view, message, llm_direction, llm_payload
+            FROM console_logs ORDER BY id
+            """
+        ).fetchall()
+
+    assert [row[0] for row in rows] == [LLM, LLM, AGENT, ERRORS, HTTP]
+    assert rows[0][2:] == ("REQUEST", request)
+    assert rows[1][2:] == ("RESPONSE", response)
+    assert rows[2][1] == "agent detail"
+    assert rows[3][1] == "error detail"
+    assert "/api/health" in rows[4][1]
+
+    console._process_posix_keys(b"\r")
+    console.handler.emit(
+        _record("aespa.agent.activity", logging.INFO, "after disabling")
+    )
+    with sqlite3.connect(log_db_path) as connection:
+        count = connection.execute("SELECT COUNT(*) FROM console_logs").fetchone()[0]
+    assert count == 5
+    assert (
+        InteractiveConsoleHandler(io.StringIO(), log_db_path=log_db_path)
+        .log_store.enabled
+        is False
+    )
 
 
 def test_settings_rejects_invalid_or_occupied_ports(tmp_path, monkeypatch) -> None:
@@ -905,6 +999,29 @@ def test_console_removes_handlers_that_bypass_view_filter() -> None:
         root.handlers.clear()
         root.handlers.extend(old_handlers)
         root.setLevel(old_level)
+
+
+def test_crawler_import_does_not_configure_process_logging() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import logging; "
+                "root = logging.getLogger(); "
+                "level = root.level; "
+                "handlers = list(root.handlers); "
+                "import aespa.services.crawler; "
+                "assert root.level == level; "
+                "assert root.handlers == handlers"
+            ),
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_llm_traffic_delimiters_identify_operation_and_pair(

@@ -43,11 +43,6 @@ from aespa.services.settings import (
 )
 
 log = logging.getLogger("aespa.crawler")
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
