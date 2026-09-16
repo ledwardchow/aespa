@@ -19,6 +19,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from aespa.console_logs import ConsoleLogStore
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import TextIO
@@ -196,6 +198,7 @@ class InteractiveConsoleHandler(logging.Handler):
         on_port_change: Callable[[int], None] | None = None,
         allow_port_change: bool = True,
         terminal_size: tuple[int, int] | None = None,
+        log_db_path: Path | None = None,
     ) -> None:
         super().__init__(level=logging.DEBUG)
         self.stream = stream
@@ -220,6 +223,7 @@ class InteractiveConsoleHandler(logging.Handler):
         self.on_port_change = on_port_change
         self.allow_port_change = allow_port_change
         self.fixed_terminal_size = terminal_size
+        self.log_store = ConsoleLogStore(log_db_path or Path("logs.db"))
         self.settings_editing = False
         self.settings_replace_on_digit = False
         self.settings_value = str(port)
@@ -244,6 +248,8 @@ class InteractiveConsoleHandler(logging.Handler):
             return
         try:
             with self._output_lock:
+                if view != TESTING:
+                    self.log_store.append(record, view)
                 if view == AGENT:
                     self._agent_message_seen = True
                     self._finishing_logo_animation = False
@@ -300,12 +306,14 @@ class InteractiveConsoleHandler(logging.Handler):
         with self._output_lock:
             if self.settings_section == "database":
                 return self._handle_database_key(key)
+            if self.settings_section == "logging":
+                return self._handle_log_database_key(key)
             if self.settings_section == "root":
                 if key not in ("\r", "\n"):
                     return False
-                self.settings_section = (
-                    "server" if self.settings_selected == 0 else "database"
-                )
+                self.settings_section = ("server", "database", "logging")[
+                    self.settings_selected
+                ]
                 self.settings_status = ""
                 self._redraw_locked()
                 return True
@@ -357,6 +365,26 @@ class InteractiveConsoleHandler(logging.Handler):
                 self._redraw_locked()
                 return True
             return True
+
+    def _handle_log_database_key(self, key: str) -> bool:
+        if key == "\x1b":
+            self.settings_section = "root"
+            self.settings_status = ""
+            self._redraw_locked()
+            return True
+        if key not in ("\r", "\n"):
+            return False
+        enabled = not self.log_store.enabled
+        if self.log_store.set_enabled(enabled):
+            state = "enabled" if enabled else "disabled"
+            self.settings_status = f"Console log database {state}."
+        else:
+            self.settings_status = (
+                "Could not update the console log database: "
+                f"{self.log_store.last_error}"
+            )
+        self._redraw_locked()
+        return True
 
     def _handle_database_key(self, key: str) -> bool:
         if self.database_action is None:
@@ -484,7 +512,7 @@ class InteractiveConsoleHandler(logging.Handler):
             if self.settings_section == "database":
                 self.database_selected = min(max(self.database_selected + delta, 0), 2)
             elif self.settings_section == "root":
-                self.settings_selected = min(max(self.settings_selected + delta, 0), 1)
+                self.settings_selected = min(max(self.settings_selected + delta, 0), 2)
             self._redraw_locked()
 
     def toggle_selected_llm(self) -> None:
@@ -559,8 +587,12 @@ class InteractiveConsoleHandler(logging.Handler):
                 self._ready_announced = True
             if not self._screen_active:
                 self._logo_animation_frame = 0
-                self._startup_logo_active = self.mode == AGENT
-                self._startup_logo_completed = self.mode != AGENT
+                self._startup_logo_active = (
+                    self.mode == AGENT and not self._agent_message_seen
+                )
+                self._startup_logo_completed = (
+                    self.mode != AGENT or self._agent_message_seen
+                )
                 self._startup_fade_phase = None
                 self._startup_fade_frame = 0
             self._screen_active = True
@@ -792,9 +824,12 @@ class InteractiveConsoleHandler(logging.Handler):
             return self._database_settings_body_lines(width)
         if self.settings_section == "server":
             return self._server_settings_body_lines(width)
+        if self.settings_section == "logging":
+            return self._log_database_settings_body_lines(width)
         return [
             f"{'▶' if self.settings_selected == 0 else ' '} Server Settings",
             f"{'▶' if self.settings_selected == 1 else ' '} Database Operations",
+            f"{'▶' if self.settings_selected == 2 else ' '} Console Log Database",
         ]
 
     def _server_settings_body_lines(self, width: int) -> list[str]:
@@ -869,6 +904,33 @@ class InteractiveConsoleHandler(logging.Handler):
             )
         else:
             lines.extend(["", "Press Esc to return to Settings."])
+        if self.settings_status:
+            lines.extend(["", self.settings_status])
+        wrapped: list[str] = []
+        for line in lines:
+            wrapped.extend(_wrap_console_line(line, width))
+        return wrapped
+
+    def _log_database_settings_body_lines(self, width: int) -> list[str]:
+        enabled = self.log_store.enabled
+        lines = [
+            "Console Log Database",
+            "",
+            f"  Status              {'Enabled' if enabled else 'Disabled'}",
+            f"  Database            {self.log_store.path}",
+            "",
+            "Stores new Agent, Errors, LLM, and HTTP console entries.",
+            "Testing Traffic is excluded because it is already stored by the scanner.",
+            "Complete LLM requests and responses are stored without truncation.",
+            "",
+            "Warning: prompts and responses may contain credentials, cookies,",
+            "tokens, source code, or other sensitive data.",
+            "",
+            f"Press Enter to {'disable' if enabled else 'enable'} logging.",
+            "Press Esc to return to Settings.",
+        ]
+        if self.log_store.last_error:
+            lines.extend(["", f"Last write error: {self.log_store.last_error}"])
         if self.settings_status:
             lines.extend(["", self.settings_status])
         wrapped: list[str] = []
@@ -1150,18 +1212,20 @@ def _legend(
     mode: str = AGENT, editing: bool = False, settings_section: str = "root"
 ) -> str:
     if mode == SETTINGS:
+        if settings_section == "logging":
+            return "[Enter] Enable/Disable  [Esc] Back  [Ctrl+C] Quit"
         if settings_section == "database":
             if editing:
                 return "[Enter] Confirm  [Backspace] Delete  [Esc] Cancel"
             return "[↑/↓] Select  [Enter] Open  [Esc] Back"
         if settings_section == "root":
-            return "[1-6] Views  [↑/↓] Select  [Enter] Open  [Ctrl+C] Stop"
+            return "[1-6] Views  [↑/↓] Select  [Enter] Open  [Ctrl+C] Quit"
         if editing:
             return "[0-9] Port  [Backspace] Delete  [Enter] Save  [Esc] Cancel"
-        return "[Enter] Change port  [Esc] Back  [Ctrl+C] Stop"
+        return "[Enter] Change port  [Esc] Back  [Ctrl+C] Quit"
     return (
         "[1-6] Views  [↑/↓] Select  [Enter] Expand  "
-        "[Wheel/PgUp/PgDn] Scroll  [Ctrl+C] Stop"
+        "[Wheel/PgUp/PgDn] Scroll  [Ctrl+C] Quit"
     )
 
 
@@ -1536,6 +1600,7 @@ class InteractiveConsole:
         allow_port_change: bool = True,
         replace_logging_handlers: bool = True,
         terminal_size: tuple[int, int] | None = None,
+        log_db_path: Path | None = None,
     ) -> None:
         self.input_stream = input_stream
         self.handler = InteractiveConsoleHandler(
@@ -1546,6 +1611,7 @@ class InteractiveConsole:
             on_port_change=on_port_change,
             allow_port_change=allow_port_change,
             terminal_size=terminal_size,
+            log_db_path=log_db_path,
         )
         self.replace_logging_handlers = replace_logging_handlers
         self._stop = threading.Event()
@@ -1629,6 +1695,7 @@ class InteractiveConsole:
             return
         root = logging.getLogger()
         root.removeHandler(self.handler)
+        self.handler.log_store.close()
         if not self.replace_logging_handlers:
             if self._previous_root_level is not None:
                 root.setLevel(self._previous_root_level)

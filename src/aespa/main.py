@@ -26,7 +26,7 @@ from aespa.api.statistics import router as statistics_router
 from aespa.api.systems import router as systems_router
 from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
-from aespa.config import Settings, get_settings
+from aespa.config import DEFAULT_LOG_DB_PATH, Settings, get_settings
 from aespa.db import get_session, init_db
 from aespa.services import alice_goals as alice_goals_svc
 from aespa.services import antigravity_provider as antigravity_provider_svc
@@ -307,6 +307,7 @@ def main() -> None:
             host=settings.host,
             env_path=Path.cwd() / ".env",
             on_port_change=change_port,
+            log_db_path=DEFAULT_LOG_DB_PATH,
         )
         if interactive_console_available()
         else None
