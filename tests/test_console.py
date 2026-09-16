@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 import sys
 from datetime import datetime
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from aespa.console import (
     ERRORS,
     HTTP,
     LLM,
+    LOGO,
     SETTINGS,
     TESTING,
     InteractiveConsole,
@@ -140,11 +142,24 @@ def test_agent_is_initial_view_and_number_keys_switch_all_views() -> None:
     assert console.handler.mode == SETTINGS
     assert "[6 Settings]" in output.getvalue()
 
+    console._process_posix_keys(b"0")
+    assert console.handler.mode == LOGO
+    logo_frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "+ooooooooooooooooooooooooo+" in _ANSI_SGR.sub("", logo_frame)
+    assert "A E S P A" not in logo_frame
+    assert "[1 Agent]" not in logo_frame
+    assert "[1-6] Views" not in logo_frame
+
+    console._process_posix_keys(b"1")
+    assert console.handler.mode == AGENT
+
 
 def test_agent_logo_is_colored_and_clears_on_first_agent_message(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output, terminal_size=(100, 35))
-    monkeypatch.setattr("aespa.console._python_executor_runtime_status", lambda: "ready")
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "ready"
+    )
 
     handler.start_screen()
 
@@ -153,23 +168,128 @@ def test_agent_logo_is_colored_and_clears_on_first_agent_message(monkeypatch) ->
     assert "\x1b[38;5;196m" in initial_frame
     assert "\x1b[38;5;203m" in initial_frame
     assert "Ready - listening" in initial_frame
+    assert handler.advance_logo_animation() is True
 
     handler.emit(_record("aespa.agent.activity", logging.INFO, "Scanner started"))
 
     agent_frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
     assert "+ooooooooooooooooooooooooo+" not in _ANSI_SGR.sub("", agent_frame)
     assert "Scanner started" in agent_frame
+    assert handler.advance_logo_animation() is False
+
+
+def test_agent_logo_pulse_moves_left_to_right_across_waveform() -> None:
+    first_frame = _aespa_logo_lines(98, animation_frame=3)
+    second_frame = _aespa_logo_lines(98, animation_frame=7)
+    peak_frame = _aespa_logo_lines(98, animation_frame=12)
+    trough_frame = _aespa_logo_lines(98, animation_frame=17)
+    compact_frame = _aespa_logo_lines(40, animation_frame=12)
+
+    def pulse_cells(lines: list[str]) -> list[tuple[int, int, int]]:
+        cells: list[tuple[int, int, int]] = []
+        for row, line in enumerate(lines):
+            for match in re.finditer(
+                r"\x1b\[38;5;(248|250|252|254|255)m([^\x1b]+)", line
+            ):
+                start = len(_ANSI_SGR.sub("", line[: match.start()]))
+                cells.extend(
+                    (int(match.group(1)), start + offset, row)
+                    for offset, character in enumerate(match.group(2))
+                    if character != " "
+                )
+        return cells
+
+    first_cells = pulse_cells(first_frame)
+    second_cells = pulse_cells(second_frame)
+    assert max(column for _, column, _ in second_cells) > max(
+        column for _, column, _ in first_cells
+    )
+    assert {color for color, _, _ in first_cells} == {248, 250, 252, 254, 255}
+
+    assert min(row for _, _, row in pulse_cells(peak_frame)) <= 11
+    assert max(row for _, _, row in pulse_cells(trough_frame)) >= 20
+    assert min(row for _, _, row in pulse_cells(compact_frame)) < 8
+    for paused_frame in (30, 40, 49):
+        assert pulse_cells(_aespa_logo_lines(98, animation_frame=paused_frame)) == []
+    assert _aespa_logo_lines(98, animation_frame=50) == _aespa_logo_lines(
+        98, animation_frame=0
+    )
+    assert _aespa_logo_lines(40, animation_frame=50) == _aespa_logo_lines(
+        40, animation_frame=0
+    )
+
+
+def test_hidden_logo_view_centres_full_logo_and_keeps_animating(monkeypatch) -> None:
+    output = io.StringIO()
+    handler = InteractiveConsoleHandler(output, terminal_size=(100, 35))
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "ready"
+    )
+    handler.start_screen()
+    handler.emit(_record("aespa.agent.activity", logging.INFO, "Scanner started"))
+
+    handler.switch(LOGO)
+    frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+
+    assert "\x1b[7;1H" in frame
+    assert "+ooooooooooooooooooooooooo+" in _ANSI_SGR.sub("", frame)
+    assert "[1 Agent]" not in frame
+    assert "[1-6] Views" not in frame
+    assert handler.advance_logo_animation() is True
+
+
+def test_large_terminal_uses_high_detail_logo_and_traced_heartbeat(monkeypatch) -> None:
+    output = io.StringIO()
+    handler = InteractiveConsoleHandler(output, terminal_size=(120, 50))
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "ready"
+    )
+
+    handler.start_screen()
+    agent_frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    plain_agent_frame = _ANSI_SGR.sub("", agent_frame)
+    assert "+oo+     ooo               ssssso" in plain_agent_frame
+    assert "A E S P A" not in plain_agent_frame
+
+    handler.switch(LOGO)
+    logo_frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "\x1b[5;1H" in logo_frame
+    assert "+oo+     ooo               ssssso" in _ANSI_SGR.sub("", logo_frame)
+
+    pulse_pattern = re.compile(r"\x1b\[38;5;(248|250|252|254|255)m")
+    peak_rows = [
+        row
+        for row, line in enumerate(
+            _aespa_logo_lines(120, animation_frame=12, large=True)
+        )
+        if pulse_pattern.search(line)
+    ]
+    trough_rows = [
+        row
+        for row, line in enumerate(
+            _aespa_logo_lines(120, animation_frame=18, large=True)
+        )
+        if pulse_pattern.search(line)
+    ]
+    assert min(peak_rows) <= 20
+    assert max(trough_rows) >= 33
+    assert not any(
+        pulse_pattern.search(line)
+        for line in _aespa_logo_lines(120, animation_frame=40, large=True)
+    )
 
 
 def test_agent_logo_has_a_compact_narrow_terminal_variant(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output, terminal_size=(40, 24))
-    monkeypatch.setattr("aespa.console._python_executor_runtime_status", lambda: "ready")
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "ready"
+    )
 
     handler.start_screen()
 
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
-    assert "A E S P A" in frame
+    assert "A E S P A" not in frame
     assert ".ossssssssssssso." in _ANSI_SGR.sub("", frame)
 
     plain_lines = [_ANSI_SGR.sub("", line) for line in _aespa_logo_lines(38)]
@@ -184,7 +304,9 @@ def test_agent_logo_has_a_compact_narrow_terminal_variant(monkeypatch) -> None:
 def test_console_ready_line_uses_configured_ipv6_host_and_port(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output, host="::1", port=8123)
-    monkeypatch.setattr("aespa.console._python_executor_runtime_status", lambda: "ready")
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "ready"
+    )
 
     handler.start_screen()
     handler.start_screen()
@@ -249,7 +371,7 @@ def test_python_executor_check_inspects_the_published_image(monkeypatch) -> None
             "image",
             "inspect",
             "ledwardchow/aespa-python-executor:0.1",
-        ]
+        ],
     ]
 
 

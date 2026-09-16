@@ -15,6 +15,7 @@ import textwrap
 import threading
 from collections import deque
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,9 +30,11 @@ LLM = "llm"
 AGENT = "agent"
 TESTING = "testing"
 SETTINGS = "settings"
+LOGO = "logo"
 
-_MODES = (AGENT, ERRORS, LLM, HTTP, TESTING, SETTINGS)
+_MODES = (AGENT, ERRORS, LLM, HTTP, TESTING, SETTINGS, LOGO)
 _MODE_KEYS = {
+    "0": LOGO,
     "1": AGENT,
     "2": ERRORS,
     "3": LLM,
@@ -53,8 +56,22 @@ _ANSI_RED = "\x1b[38;5;196m"
 _ANSI_ORANGE = "\x1b[38;5;202m"
 _ANSI_CORAL = "\x1b[38;5;203m"
 _ANSI_DIM_RED = "\x1b[38;5;88m"
+_ANSI_WHITE = "\x1b[38;5;255m"
 _ANSI_RESET = "\x1b[0m"
 _ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+_LOGO_ANIMATION_INTERVAL = 0.05
+_LOGO_LOOP_DURATION = 1.5
+_LOGO_PAUSE_DURATION = 1.0
+_LOGO_PULSE_RADIUS = 7.0
+_LOGO_ROW_ASPECT = 2.0
+_LOGO_TRACE_RADIUS = 2.1
+_LOGO_PULSE_GRADIENT = (
+    (1.25, _ANSI_WHITE),
+    (2.5, "\x1b[38;5;254m"),
+    (4.0, "\x1b[38;5;252m"),
+    (5.5, "\x1b[38;5;250m"),
+    (_LOGO_PULSE_RADIUS, "\x1b[38;5;248m"),
+)
 
 _AESPA_LOGO = (
     "                     +ooooooooooooooooooooooooo+",
@@ -79,7 +96,6 @@ _AESPA_LOGO = (
     "     .osso.+so+      +oso+          oso+   +oso+      +os+.osso.",
     "    +ossooosooooooooooso+           .+.     +osoooooooooosooosso+",
     "    ossssssssssssssssso+                     +ossssssssssssssssso",
-    "                              A E S P A",
 )
 
 _AESPA_LOGO_COMPACT = (
@@ -96,8 +112,57 @@ _AESPA_LOGO_COMPACT = (
     " .+++os++++++os+  +s++so++++++so+++.",
     "  .+ss++++++ss+.  .oos+ss++++++ss+.",
     "  +ssssssssso+     +s+ +osssssssss+",
-    "              A E S P A",
 )
+
+# High-detail terminal trace derived from frontend/public/icon.png.  It keeps
+# the raster mark's outer A, central flare, circuit branches, and heartbeat.
+_AESPA_LOGO_LARGE = (
+    "                                                o",
+    "                                       +oooooooosoooooooo+",
+    "                                      osssssssssssssssssss+",
+    "                                     osso      +s       sss+",
+    "                                    osso     +ossoo.     sss+",
+    "                                   osso    +sssssssso    .sss.",
+    "                                  osso...++sssssssssso++...sss.",
+    "                                 +sso.++++ossssssssssso+++++sss.",
+    "                                +sso       .sssssssss       .sss.",
+    "                               +sso          +ossso+         .sss",
+    "                              +sss    ..       +s             .sss",
+    "                             +sss   .ssss+     os+             +sss",
+    "                            .sss    +s++ss    osss+     .osso   +sso",
+    "                           .sss.    ossoo    osssss+    so +s+   +sso",
+    "                          .sss     osso     osso sss.   +ssss.    +sso",
+    "                         .sss.    +sso     +sso   sss.    .sss     +sso",
+    "                        .sss.    +sso     +sso     sss.    .sss     +sso",
+    "                        sss.    +sso     +sso      .sss.    .sss     +sso",
+    "                       sss.    +sso     +sso        .sss.    .sso     +sso",
+    "                      sss.    +sso     +sso          .sss     +sso     osso",
+    "                     sss+    +sss     +sso    .o      .sss     +ssso+   osso",
+    "                    sss+    .sss     +sso     ss.      .sss     +ssssssoossso",
+    "                   sss+    .sss     +sss     osso       .sss     +sso+ossssss+",
+    "                  oss+    .sss      +++     +ssss.       .++.     +sso   .+oos+",
+    "                 +oo+     ooo               ssssso                 +sso",
+    "                                           oss.oss.                 osso",
+    "      ossssssssssssssssssssssssssssssssssssss+  sso   .sssssssssssssssss+     osssssssssss+",
+    "     .ooooooooooooooooosssoooooooooooooooooo+   oss.  sssooooooooooooooss+     ossooooooooo",
+    "                      sss.                       sso oss+              oss+     sss.",
+    "            osso     sss.                        ossosso                oss+     sss.",
+    "           osso     sss.    .sssssssssssssso      sssss    sssssssso     oss+     sss.",
+    "          +sso     sss.    .sssoooooooooooo+      osss.    ooooooosso     oss.    .sss.",
+    "         +sso     oss+    .sss                     ss+            +sso     sss.    .sss.",
+    "        +sso   .osss+    .sss.                     oo              +sso     sss+.   .sss",
+    "       +sso   .so+os    .sss.                                       +sso    .sooso   .sss",
+    "      +sso     ssoso   .sss.                                         +sso   +so+ss    .sss",
+    "     +sss       ...    sss.                                           +sso   .oo+      +sss",
+    "    +sss              sss.                                             osso             +sss",
+    "   .ssso+++++++++++++sss.                                               osso+++++++++++++osso",
+    "  .ssssssssssssssssssss+                                                 ossssssssssssssssssso",
+    "   ...................                                                     ..................",
+)
+
+_AESPA_WAVE_PATH = ((2, 15), (29, 15), (34, 12), (38, 20), (43, 15), (66, 15))
+_AESPA_WAVE_PATH_COMPACT = ((0, 9), (14, 9), (17, 7), (20, 12), (23, 9), (35, 9))
+_AESPA_WAVE_PATH_LARGE = ((6, 27), (42, 27), (47, 20), (53, 34), (58, 27), (94, 27))
 
 
 def _record_view(record: logging.LogRecord) -> str | None:
@@ -163,6 +228,7 @@ class InteractiveConsoleHandler(logging.Handler):
         self.database_input = ""
         self._ready_announced = False
         self._agent_message_seen = False
+        self._logo_animation_frame = 0
 
     def emit(self, record: logging.LogRecord) -> None:
         view = _record_view(record)
@@ -485,14 +551,30 @@ class InteractiveConsoleHandler(logging.Handler):
             self._redraw_locked(size=size)
             return True
 
+    def advance_logo_animation(self) -> bool:
+        """Advance the idle Agent-view pulse and redraw when it is visible."""
+        with self._output_lock:
+            if (
+                not self._screen_active
+                or self.mode not in (AGENT, LOGO)
+                or (self.mode == AGENT and self._agent_message_seen)
+            ):
+                return False
+            self._logo_animation_frame += 1
+            self._redraw_locked()
+            return True
+
     def _redraw_locked(self, *, size: tuple[int, int] | None = None) -> None:
         width, height = size or self._terminal_size()
         width = max(20, width)
         height = max(5, height)
         self._screen_size = (width, height)
+        if self.mode == LOGO:
+            self._redraw_logo_locked(width, height)
+            return
         body_height = height - 3
         content_width = width - 2
-        body_lines = self._body_lines(content_width)
+        body_lines = self._body_lines(content_width, body_height)
         page_count = max(1, (len(body_lines) + body_height - 1) // body_height)
         if self.follow_live[self.mode]:
             page = page_count - 1
@@ -527,6 +609,26 @@ class InteractiveConsoleHandler(logging.Handler):
         self.stream.write(screen)
         self.stream.flush()
 
+    def _redraw_logo_locked(self, width: int, height: int) -> None:
+        """Render the hidden logo-only view without tabs, chrome, or legend."""
+        large = width >= 100 and height >= len(_AESPA_LOGO_LARGE)
+        compact = not large and (width < 69 or height < len(_AESPA_LOGO))
+        logo_lines = _aespa_logo_lines(
+            width,
+            animation_frame=self._logo_animation_frame,
+            compact=compact,
+            large=large,
+        )
+        first_row = max(1, ((height - len(logo_lines)) // 2) + 1)
+        screen = "\x1b[2J\x1b[H"
+        for index, line in enumerate(logo_lines):
+            row = first_row + index
+            if row > height:
+                break
+            screen += f"\x1b[{row};1H{_truncate_terminal_line(line, width)}"
+        self.stream.write(screen)
+        self.stream.flush()
+
     def _terminal_size(self) -> tuple[int, int]:
         if self.fixed_terminal_size is not None:
             return self.fixed_terminal_size
@@ -536,7 +638,16 @@ class InteractiveConsoleHandler(logging.Handler):
             size = shutil.get_terminal_size(fallback=(120, 30))
         return max(20, int(size[0])), max(5, int(size[1]))
 
-    def _body_lines(self, width: int) -> list[str]:
+    def _body_lines(self, width: int, available_height: int | None = None) -> list[str]:
+        large = width >= 100 and bool(
+            available_height and available_height >= len(_AESPA_LOGO_LARGE) + 2
+        )
+        if self.mode == LOGO:
+            return _aespa_logo_lines(
+                width,
+                animation_frame=self._logo_animation_frame,
+                large=large,
+            )
         if self.mode == SETTINGS:
             return self._settings_body_lines(width)
         if self.mode == LLM and self.llm_calls:
@@ -545,7 +656,13 @@ class InteractiveConsoleHandler(logging.Handler):
             return self._testing_body_lines(width)[0]
         body_lines: list[str] = []
         if self.mode == AGENT and not self._agent_message_seen:
-            body_lines.extend(_aespa_logo_lines(width))
+            body_lines.extend(
+                _aespa_logo_lines(
+                    width,
+                    animation_frame=self._logo_animation_frame,
+                    large=large,
+                )
+            )
             body_lines.append("")
         for record in self.buffers[self.mode]:
             for line in record.replace("\r", "").replace("\x1b", "\\x1b").split("\n"):
@@ -814,7 +931,7 @@ class InteractiveConsoleHandler(logging.Handler):
             self.page_indices[self.mode] = positions[selected] // body_height
 
     def _page_count(self, body_height: int, content_width: int) -> int:
-        line_count = len(self._body_lines(content_width))
+        line_count = len(self._body_lines(content_width, body_height))
         return max(1, (line_count + body_height - 1) // body_height)
 
     def _format_record(self, record: logging.LogRecord, view: str) -> str:
@@ -941,25 +1058,111 @@ def _listening_url(host: str, port: int) -> str:
     return f"http://{display_host}:{port}"
 
 
-def _aespa_logo_lines(width: int) -> list[str]:
+def _aespa_logo_lines(
+    width: int,
+    *,
+    animation_frame: int = 0,
+    compact: bool | None = None,
+    large: bool = False,
+) -> list[str]:
     """Return a centered ANSI-color logo for the empty Agent screen."""
-    if width < 46:
+    if compact is None:
+        compact = width < 46 and not large
+    if large:
+        art = _AESPA_LOGO_LARGE
+        wave_path = _AESPA_WAVE_PATH_LARGE
+    elif compact:
         art = _AESPA_LOGO_COMPACT
+        wave_path = _AESPA_WAVE_PATH_COMPACT
     else:
         art = _AESPA_LOGO
+        wave_path = _AESPA_WAVE_PATH
 
     art_width = max(len(line) for line in art)
     padding = " " * max(0, (width - art_width) // 2)
+    trace_progress, trace_length = _wave_trace_progress(art, wave_path)
+    pulse_span = trace_length + (_LOGO_PULSE_RADIUS * 2)
+    cycle_duration = _LOGO_LOOP_DURATION + _LOGO_PAUSE_DURATION
+    elapsed = animation_frame * _LOGO_ANIMATION_INTERVAL % cycle_duration
+    pulse_position = (
+        elapsed / _LOGO_LOOP_DURATION * pulse_span - _LOGO_PULSE_RADIUS
+        if elapsed < _LOGO_LOOP_DURATION
+        else None
+    )
     lines: list[str] = []
-    for line in art:
+    for row, line in enumerate(art):
         if not line:
             lines.append("")
             continue
-        lines.append(padding + _color_ascii_logo_line(line))
+        pulse_colors = {
+            column: color
+            for (trace_row, column), progress in trace_progress.items()
+            if trace_row == row
+            and pulse_position is not None
+            and (color := _pulse_gradient_color(abs(progress - pulse_position)))
+        }
+        lines.append(
+            padding
+            + _color_ascii_logo_line(
+                line,
+                pulse_colors=pulse_colors,
+            )
+        )
     return lines
 
 
-def _color_ascii_logo_line(line: str) -> str:
+@lru_cache(maxsize=3)
+def _wave_trace_progress(
+    art: tuple[str, ...], path: tuple[tuple[int, int], ...]
+) -> tuple[dict[tuple[int, int], float], float]:
+    """Map visible glyphs near the heartbeat polyline to distance along its path."""
+    segments: list[tuple[float, float, float, float, float, float]] = []
+    elapsed = 0.0
+    for (start_x, start_y), (end_x, end_y) in zip(path, path[1:]):
+        scaled_start_y = start_y * _LOGO_ROW_ASPECT
+        scaled_end_y = end_y * _LOGO_ROW_ASPECT
+        delta_x = end_x - start_x
+        delta_y = scaled_end_y - scaled_start_y
+        length = (delta_x**2 + delta_y**2) ** 0.5
+        segments.append((start_x, scaled_start_y, delta_x, delta_y, length, elapsed))
+        elapsed += length
+
+    progress: dict[tuple[int, int], float] = {}
+    for row, line in enumerate(art):
+        scaled_row = row * _LOGO_ROW_ASPECT
+        for column, character in enumerate(line):
+            if character == " ":
+                continue
+            nearest_distance = float("inf")
+            nearest_progress = 0.0
+            for start_x, start_y, delta_x, delta_y, length, segment_start in segments:
+                projection = (
+                    (column - start_x) * delta_x + (scaled_row - start_y) * delta_y
+                ) / (length**2)
+                projection = min(1.0, max(0.0, projection))
+                projected_x = start_x + projection * delta_x
+                projected_y = start_y + projection * delta_y
+                distance = (
+                    (column - projected_x) ** 2 + (scaled_row - projected_y) ** 2
+                ) ** 0.5
+                if distance < nearest_distance:
+                    nearest_distance = distance
+                    nearest_progress = segment_start + projection * length
+            if nearest_distance <= _LOGO_TRACE_RADIUS:
+                progress[(row, column)] = nearest_progress
+    return progress, elapsed
+
+
+def _pulse_gradient_color(distance: float) -> str | None:
+    for edge, color in _LOGO_PULSE_GRADIENT:
+        if distance <= edge:
+            return color
+    return None
+
+
+def _color_ascii_logo_line(
+    line: str, *, pulse_colors: dict[int, str] | None = None
+) -> str:
     """Color density characters separately to retain the shaded ASCII effect."""
     density_colors = {
         ".": _ANSI_DIM_RED,
@@ -967,13 +1170,13 @@ def _color_ascii_logo_line(line: str) -> str:
         "o": _ANSI_RED,
         "s": _ANSI_CORAL,
     }
-    if line.strip() == "A E S P A":
-        return f"{_ANSI_CORAL}{line}{_ANSI_RESET}"
-
     rendered: list[str] = []
     active_color = ""
-    for character in line:
-        color = density_colors.get(character, _ANSI_RED if character != " " else "")
+    for column, character in enumerate(line):
+        color = (pulse_colors or {}).get(
+            column,
+            density_colors.get(character, _ANSI_RED if character != " " else ""),
+        )
         if color != active_color:
             if active_color:
                 rendered.append(_ANSI_RESET)
@@ -1100,7 +1303,9 @@ class InteractiveConsole:
         )
         self.replace_logging_handlers = replace_logging_handlers
         self._stop = threading.Event()
+        self._logo_animation_stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._animation_thread: threading.Thread | None = None
         self._terminal_state = None
         self._key_buffer = b""
         self._previous_root_level: int | None = None
@@ -1138,6 +1343,7 @@ class InteractiveConsole:
         self.handler.stream = output_stream
         self.handler.fixed_terminal_size = terminal_size
         self._stop.clear()
+        self._logo_animation_stop.clear()
         self._key_buffer = b""
         self._enable_immediate_keys()
         self.handler.start_screen()
@@ -1146,18 +1352,30 @@ class InteractiveConsole:
             target=self._read_keys, name="aespa-console-input", daemon=True
         )
         self._thread.start()
+        self._animation_thread = threading.Thread(
+            target=self._animate_logo, name="aespa-console-logo", daemon=True
+        )
+        self._animation_thread.start()
 
     def detach(self) -> None:
         """Detach the terminal but continue buffering console records."""
         if not self._attached:
             return
         self._stop.set()
+        self._logo_animation_stop.set()
         self._restore_terminal()
         try:
             self.handler.stop_screen()
         finally:
+            animation_thread = self._animation_thread
+            if (
+                animation_thread is not None
+                and animation_thread is not threading.current_thread()
+            ):
+                animation_thread.join(timeout=_LOGO_ANIMATION_INTERVAL * 2)
             self._attached = False
             self._thread = None
+            self._animation_thread = None
 
     def stop(self) -> None:
         self.detach()
@@ -1241,6 +1459,11 @@ class InteractiveConsole:
                 self.handler.refresh_for_resize()
         except (AttributeError, OSError):
             return
+
+    def _animate_logo(self) -> None:
+        """Drive the idle logo independently of keyboard and resize events."""
+        while not self._logo_animation_stop.wait(_LOGO_ANIMATION_INTERVAL):
+            self.handler.advance_logo_animation()
 
     def _read_stream_keys(self) -> None:
         """Read ANSI key bytes from a redirected stream or console bridge."""
