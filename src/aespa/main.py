@@ -274,6 +274,15 @@ def _ensure_port_available(host: str, port: int) -> None:
         raise SystemExit(f"[aespa] Cannot listen on {host}:{port}: {exc}") from exc
 
 
+def _run_server(server) -> bool:
+    """Run Uvicorn and return false for its expected Ctrl+C interrupt."""
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        return False
+    return True
+
+
 def main() -> None:
     import uvicorn
 
@@ -328,7 +337,8 @@ def main() -> None:
             restart["server"] = server
             if console:
                 console.handler.set_runtime_port(port)
-            server.run()
+            if not _run_server(server):
+                break
             next_port = restart["port"]
             if next_port is None:
                 break
