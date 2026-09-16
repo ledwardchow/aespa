@@ -11,12 +11,14 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Animated console logo**: This is possibly the most important feature of the app so far.
 - **Test run status**: Test run headers now show one Active or Inactive badge instead of separate badges for the crawler, Test Lead, and A.L.I.C.E.
 - **Cleaner agent roster**: The Agents panel hides the empty Burp row when the Burp integration is disabled. Runs that contain Burp activity keep the row so their scan history remains available. An A.L.I.C.E. chat with no user activity automatically minimizes while another agent is active and can still be expanded manually. The built-in welcome message does not count as activity.
 - **Systems scan mode**: Applications has been renamed to Systems across the interface, API, data model, and documentation. Existing data is migrated automatically, and old saved interface links continue to open the matching System.
 
 ### Fixes
 
+- **Clean console shutdown**: Pressing Ctrl+C now exits the terminal console without printing the expected Python cancellation and keyboard-interrupt tracebacks.
 - **Console mouse scrolling**: The terminal console now captures the mouse wheel and scrolls through AESPA's buffered output instead of moving into the terminal's earlier command history.
 - **A.L.I.C.E. finding edits**: Requests to rewrite, merge, consolidate, update, or delete saved findings now use a finding-management turn instead of being treated as read-only questions. A.L.I.C.E. can update one finding or consolidate duplicates in one transaction while preserving the retained reference, validation state, coverage links, and scan provenance.
 - **Fewer false access-control findings on public pages**: Scans now recognise when a public page renders the same content for signed-in and signed-out visitors. Public landing-page examples and product mockups are no longer treated as protected account data, and matching generic page text cannot automatically confirm an access-control finding.

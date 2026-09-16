@@ -59,10 +59,13 @@ _ANSI_DIM_RED = "\x1b[38;5;88m"
 _ANSI_WHITE = "\x1b[38;5;255m"
 _ANSI_RESET = "\x1b[0m"
 _ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+_ANSI_256_FOREGROUND = re.compile(r"\x1b\[38;5;(\d+)m")
 _LOGO_ANIMATION_INTERVAL = 0.05
 _LOGO_LOOP_DURATION = 1.5
 _LOGO_PAUSE_DURATION = 1.0
+_STARTUP_FADE_FRAMES = 4
 _LOGO_PULSE_RADIUS = 7.0
+_LOGO_RADIAL_PULSE_DURATION = 0.65
 _LOGO_ROW_ASPECT = 2.0
 _LOGO_TRACE_RADIUS = 2.1
 _LOGO_PULSE_GRADIENT = (
@@ -229,6 +232,11 @@ class InteractiveConsoleHandler(logging.Handler):
         self._ready_announced = False
         self._agent_message_seen = False
         self._logo_animation_frame = 0
+        self._startup_logo_active = False
+        self._startup_logo_completed = False
+        self._startup_fade_phase: str | None = None
+        self._startup_fade_frame = 0
+        self._finishing_logo_animation = False
 
     def emit(self, record: logging.LogRecord) -> None:
         view = _record_view(record)
@@ -238,6 +246,7 @@ class InteractiveConsoleHandler(logging.Handler):
             with self._output_lock:
                 if view == AGENT:
                     self._agent_message_seen = True
+                    self._finishing_logo_animation = False
                 if view == LLM and hasattr(record, "aespa_llm_call_id"):
                     self._store_llm_record(record)
                 elif view == TESTING and hasattr(record, "aespa_testing_traffic_id"):
@@ -253,6 +262,24 @@ class InteractiveConsoleHandler(logging.Handler):
         if mode not in self.buffers:
             raise ValueError(f"Unknown console mode: {mode}")
         with self._output_lock:
+            previous_mode = self.mode
+            if self._startup_logo_active or self._startup_fade_phase is not None:
+                self._startup_logo_active = False
+                self._startup_logo_completed = True
+                self._startup_fade_phase = None
+                self._startup_fade_frame = 0
+            self._finishing_logo_animation = False
+            if previous_mode == LOGO and mode == AGENT and not self._agent_message_seen:
+                cycle_frames = round(
+                    (_LOGO_LOOP_DURATION + _LOGO_PAUSE_DURATION)
+                    / _LOGO_ANIMATION_INTERVAL
+                )
+                active_frames = round(
+                    _LOGO_LOOP_DURATION / _LOGO_ANIMATION_INTERVAL
+                )
+                self._finishing_logo_animation = (
+                    self._logo_animation_frame % cycle_frames < active_frames
+                )
             self.mode = mode
             self._redraw_locked()
 
@@ -530,8 +557,14 @@ class InteractiveConsoleHandler(logging.Handler):
                         f"docker pull {_PYTHON_EXECUTOR_IMAGE}"
                     )
                 self._ready_announced = True
+            if not self._screen_active:
+                self._logo_animation_frame = 0
+                self._startup_logo_active = self.mode == AGENT
+                self._startup_logo_completed = self.mode != AGENT
+                self._startup_fade_phase = None
+                self._startup_fade_frame = 0
             self._screen_active = True
-            self.stream.write("\x1b[?1049h\x1b[?1000h\x1b[?1006h")
+            self.stream.write("\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?25l")
             self._redraw_locked()
 
     def stop_screen(self) -> None:
@@ -539,7 +572,7 @@ class InteractiveConsoleHandler(logging.Handler):
             if not self._screen_active:
                 return
             self._screen_active = False
-            self.stream.write("\x1b[?1006l\x1b[?1000l\x1b[?1049l")
+            self.stream.write("\x1b[?1006l\x1b[?1000l\x1b[?1049l\x1b[?25h")
             self.stream.flush()
 
     def refresh_for_resize(self) -> bool:
@@ -557,10 +590,42 @@ class InteractiveConsoleHandler(logging.Handler):
             if (
                 not self._screen_active
                 or self.mode not in (AGENT, LOGO)
-                or (self.mode == AGENT and self._agent_message_seen)
+                or (
+                    self.mode == AGENT
+                    and not self._startup_logo_active
+                    and self._startup_fade_phase != "console"
+                    and not self._finishing_logo_animation
+                    and (self._agent_message_seen or self._startup_logo_completed)
+                )
             ):
                 return False
-            self._logo_animation_frame += 1
+            if self.mode == LOGO:
+                self._logo_animation_frame += 1
+            elif self._startup_logo_active:
+                self._logo_animation_frame += 1
+                if (
+                    self._logo_animation_frame * _LOGO_ANIMATION_INTERVAL
+                    >= _LOGO_LOOP_DURATION
+                ):
+                    self._startup_logo_active = False
+                    self._startup_fade_phase = "console"
+                    self._startup_fade_frame = 0
+            elif self._startup_fade_phase == "console":
+                self._startup_fade_frame += 1
+                if self._startup_fade_frame >= _STARTUP_FADE_FRAMES:
+                    self._startup_fade_phase = None
+                    self._startup_logo_completed = True
+            elif self._finishing_logo_animation:
+                self._logo_animation_frame += 1
+                cycle_frames = round(
+                    (_LOGO_LOOP_DURATION + _LOGO_PAUSE_DURATION)
+                    / _LOGO_ANIMATION_INTERVAL
+                )
+                active_frames = round(
+                    _LOGO_LOOP_DURATION / _LOGO_ANIMATION_INTERVAL
+                )
+                if self._logo_animation_frame % cycle_frames >= active_frames:
+                    self._finishing_logo_animation = False
             self._redraw_locked()
             return True
 
@@ -569,8 +634,13 @@ class InteractiveConsoleHandler(logging.Handler):
         width = max(20, width)
         height = max(5, height)
         self._screen_size = (width, height)
-        if self.mode == LOGO:
+        if self.mode == LOGO or self._startup_logo_active:
             self._redraw_logo_locked(width, height)
+            return
+        if self.mode == AGENT and (
+            not self._agent_message_seen or self._startup_fade_phase == "console"
+        ):
+            self._redraw_agent_logo_locked(width, height)
             return
         body_height = height - 3
         content_width = width - 2
@@ -606,6 +676,10 @@ class InteractiveConsoleHandler(logging.Handler):
             f"\x1b[{height};1H\x1b[2K"
             f"{_legend(self.mode, self.settings_editing, self.settings_section)[:width]}"
         )
+        if self._startup_fade_phase == "console":
+            screen = _fade_terminal_frame(
+                screen, self._startup_fade_frame / _STARTUP_FADE_FRAMES
+            )
         self.stream.write(screen)
         self.stream.flush()
 
@@ -626,6 +700,44 @@ class InteractiveConsoleHandler(logging.Handler):
             if row > height:
                 break
             screen += f"\x1b[{row};1H{_truncate_terminal_line(line, width)}"
+        self.stream.write(screen)
+        self.stream.flush()
+
+    def _redraw_agent_logo_locked(self, width: int, height: int) -> None:
+        """Render normal console chrome around a logo that stays screen-centred."""
+        large = width >= 100 and height >= len(_AESPA_LOGO_LARGE)
+        compact = not large and (width < 69 or height < len(_AESPA_LOGO))
+        logo_lines = _aespa_logo_lines(
+            width,
+            animation_frame=self._logo_animation_frame,
+            compact=compact,
+            large=large,
+        )
+        first_row = max(1, ((height - len(logo_lines)) // 2) + 1)
+        title = _title(AGENT, 1, 1, width=width)
+        screen = f"\x1b[2J\x1b[H{title[:width]}\x1b[2;1H{'─' * width}"
+        record_row = max(3, first_row + len(logo_lines))
+        for record in self.buffers[AGENT]:
+            for line in record.splitlines() or [""]:
+                if record_row >= height:
+                    break
+                rendered_line = _truncate_terminal_line(line, width)
+                visible_width = len(_ANSI_SGR.sub("", rendered_line))
+                column = max(1, ((width - visible_width) // 2) + 1)
+                screen += (
+                    f"\x1b[{record_row};{column}H"
+                    f"{rendered_line}"
+                )
+                record_row += 1
+        screen += f"\x1b[{height};1H\x1b[2K{_legend(AGENT, False, 'root')[:width]}"
+        if self._startup_fade_phase == "console":
+            screen = _fade_terminal_frame(
+                screen, self._startup_fade_frame / _STARTUP_FADE_FRAMES
+            )
+        for index, line in enumerate(logo_lines):
+            row = first_row + index
+            if 3 <= row < height:
+                screen += f"\x1b[{row};1H{_truncate_terminal_line(line, width)}"
         self.stream.write(screen)
         self.stream.flush()
 
@@ -1089,6 +1201,19 @@ def _aespa_logo_lines(
         if elapsed < _LOGO_LOOP_DURATION
         else None
     )
+    radial_trigger_progress = _wave_progress_at_vertex(wave_path, 2)
+    radial_origin = _wave_visual_center(wave_path)
+    radial_trigger = (
+        (radial_trigger_progress + _LOGO_PULSE_RADIUS)
+        / pulse_span
+        * _LOGO_LOOP_DURATION
+    )
+    radial_elapsed = elapsed - radial_trigger
+    radial_radius = (
+        _radial_pulse_radius(art, radial_origin, radial_elapsed)
+        if 0 <= radial_elapsed < _LOGO_RADIAL_PULSE_DURATION
+        else None
+    )
     lines: list[str] = []
     for row, line in enumerate(art):
         if not line:
@@ -1101,6 +1226,20 @@ def _aespa_logo_lines(
             and pulse_position is not None
             and (color := _pulse_gradient_color(abs(progress - pulse_position)))
         }
+        if radial_radius is not None:
+            scaled_row = row * _LOGO_ROW_ASPECT
+            for column, character in enumerate(line):
+                if character == " ":
+                    continue
+                distance = (
+                    (column - radial_origin[0]) ** 2
+                    + (scaled_row - radial_origin[1]) ** 2
+                ) ** 0.5
+                radial_color = _pulse_gradient_color(abs(distance - radial_radius))
+                if radial_color is not None:
+                    pulse_colors[column] = _brighter_pulse_color(
+                        pulse_colors.get(column), radial_color
+                    )
         lines.append(
             padding
             + _color_ascii_logo_line(
@@ -1109,6 +1248,59 @@ def _aespa_logo_lines(
             )
         )
     return lines
+
+
+def _wave_visual_center(path: tuple[tuple[int, int], ...]) -> tuple[float, float]:
+    """Return the display-scaled centre of the heartbeat path bounds."""
+    columns = [column for column, _ in path]
+    rows = [row for _, row in path]
+    return (
+        (min(columns) + max(columns)) / 2,
+        ((min(rows) + max(rows)) / 2) * _LOGO_ROW_ASPECT,
+    )
+
+
+def _wave_progress_at_vertex(
+    path: tuple[tuple[int, int], ...], vertex_index: int
+) -> float:
+    """Return the display-scaled path distance to one heartbeat vertex."""
+    progress = 0.0
+    for (start_x, start_y), (end_x, end_y) in zip(
+        path[:vertex_index], path[1 : vertex_index + 1]
+    ):
+        progress += (
+            (end_x - start_x) ** 2
+            + ((end_y - start_y) * _LOGO_ROW_ASPECT) ** 2
+        ) ** 0.5
+    return progress
+
+
+def _radial_pulse_radius(
+    art: tuple[str, ...], center: tuple[float, float], elapsed: float
+) -> float:
+    """Expand the radial pulse far enough to clear every visible logo glyph."""
+    center_x, center_y = center
+    furthest_distance = max(
+        (
+            (column - center_x) ** 2
+            + ((row * _LOGO_ROW_ASPECT) - center_y) ** 2
+        )
+        ** 0.5
+        for row, line in enumerate(art)
+        for column, character in enumerate(line)
+        if character != " "
+    )
+    return (elapsed / _LOGO_RADIAL_PULSE_DURATION) * (
+        furthest_distance + _LOGO_PULSE_RADIUS
+    )
+
+
+def _brighter_pulse_color(current: str | None, candidate: str) -> str:
+    """Keep the brighter color where the travelling and radial pulses overlap."""
+    if current is None:
+        return candidate
+    colors = [color for _, color in _LOGO_PULSE_GRADIENT]
+    return min((current, candidate), key=colors.index)
 
 
 @lru_cache(maxsize=3)
@@ -1210,6 +1402,60 @@ def _truncate_terminal_line(value: str, width: int) -> str:
     if "\x1b[" in rendered and not rendered.endswith(_ANSI_RESET):
         rendered += _ANSI_RESET
     return rendered
+
+
+def _fade_terminal_frame(value: str, brightness: float) -> str:
+    """Dim an ANSI frame while preserving its cursor-positioning sequences."""
+    brightness = min(1.0, max(0.0, brightness))
+    default_level = round(255 * brightness)
+    default_color = (
+        f"\x1b[38;2;{default_level};{default_level};{default_level}m"
+    )
+
+    def fade_color(match: re.Match[str]) -> str:
+        red, green, blue = _xterm_color_rgb(int(match.group(1)))
+        return (
+            f"\x1b[38;2;{round(red * brightness)};"
+            f"{round(green * brightness)};{round(blue * brightness)}m"
+        )
+
+    faded = _ANSI_256_FOREGROUND.sub(fade_color, value)
+    faded = faded.replace(_ANSI_RESET, _ANSI_RESET + default_color)
+    return default_color + faded + _ANSI_RESET
+
+
+def _xterm_color_rgb(index: int) -> tuple[int, int, int]:
+    """Convert one xterm 256-color index to RGB for startup fading."""
+    system_colors = (
+        (0, 0, 0),
+        (128, 0, 0),
+        (0, 128, 0),
+        (128, 128, 0),
+        (0, 0, 128),
+        (128, 0, 128),
+        (0, 128, 128),
+        (192, 192, 192),
+        (128, 128, 128),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    )
+    if index < 16:
+        return system_colors[index]
+    if index < 232:
+        cube = index - 16
+        levels = (0, 95, 135, 175, 215, 255)
+        return (
+            levels[cube // 36],
+            levels[(cube % 36) // 6],
+            levels[cube % 6],
+        )
+    gray = 8 + ((index - 232) * 10)
+    return gray, gray, gray
 
 
 def _default_database_backup_path() -> Path:
