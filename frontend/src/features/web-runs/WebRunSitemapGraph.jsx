@@ -1,3 +1,4 @@
+import { matchesSitemapSearch } from "./sitemapSearch.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useEffect, useMemo, useState } from "react";
 
@@ -20,6 +21,7 @@ import { buildSitemapDisplayGraph } from "./sitemapGraph.js";
 
 /** The interactive sitemap canvas and its selected-page inspector. */
 export function WebRunSitemapGraph({
+  site,
   runId,
   run,
   crawlerActive,
@@ -54,6 +56,16 @@ export function WebRunSitemapGraph({
     [apiDisplay, excludedExtensions, graph, pageDisplay],
   );
   const displayStats = filteredGraph?.displayStats;
+  const [searchTerm, setSearchTerm] = useState("");
+  const searchMatches = useMemo(
+    () =>
+      new Set(
+        (filteredGraph?.nodes || [])
+          .filter((node) => matchesSitemapSearch(node, searchTerm))
+          .map((node) => node.id),
+      ),
+    [filteredGraph, searchTerm],
+  );
 
   useEffect(() => {
     if (
@@ -77,6 +89,8 @@ export function WebRunSitemapGraph({
     };
   }, [runId]);
   const { svgRef } = useSitemapGraph({
+    searchMatches,
+    site,
     graph: filteredGraph,
     activeTab: active ? "sitemap" : "hidden",
     graphView,
@@ -203,6 +217,33 @@ export function WebRunSitemapGraph({
           </div>
         </div>
         <div className="graph-canvas-wrap">
+          <div className="sitemap-search">
+            <input
+              type="search"
+              aria-label="Search site map nodes"
+              placeholder="Search nodes…"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setSearchTerm("");
+              }}
+            />
+            {searchTerm && (
+              <button
+                type="button"
+                className="btn ghost sm"
+                aria-label="Clear node search"
+                onClick={() => setSearchTerm("")}
+              >
+                ×
+              </button>
+            )}
+            <span role="status" aria-live="polite">
+              {searchTerm.trim()
+                ? `${searchMatches.size} ${searchMatches.size === 1 ? "match" : "matches"}`
+                : ""}
+            </span>
+          </div>
           {graph && graph.nodes.length === 0 && (
             <div className="graph-empty">
               <WebRunSitemapTab
