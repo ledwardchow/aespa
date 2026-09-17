@@ -3,7 +3,7 @@ import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useEffect, useMemo, useState } from "react";
 
 import { apiTranscriptText } from "../../shared/lib/transcript.js";
-import { parseExcludedExtensions } from "../../shared/lib/urlExtensions.js";
+import { isApiGraphNode, parseExcludedExtensions } from "../../shared/lib/urlExtensions.js";
 import { OWASP_WEB_LABELS } from "./coverageLabels.js";
 import {
   SCOPE_IN_COLOR,
@@ -46,14 +46,16 @@ export function WebRunSitemapGraph({
   const [excludedExtensionsInput, setExcludedExtensionsInput] = useState(".svg, .js");
   const [pageDisplay, setPageDisplay] = useState("grouped");
   const [apiDisplay, setApiDisplay] = useState("grouped");
+  const [displayApis, setDisplayApis] = useState(false);
   const [displaySettingsOpen, setDisplaySettingsOpen] = useState(false);
+  const effectiveApiDisplay = displayApis ? apiDisplay : "hidden";
   const excludedExtensions = useMemo(
     () => parseExcludedExtensions(excludedExtensionsInput),
     [excludedExtensionsInput],
   );
   const filteredGraph = useMemo(
-    () => buildSitemapDisplayGraph(graph, excludedExtensions, apiDisplay, pageDisplay),
-    [apiDisplay, excludedExtensions, graph, pageDisplay],
+    () => buildSitemapDisplayGraph(graph, excludedExtensions, effectiveApiDisplay, pageDisplay),
+    [effectiveApiDisplay, excludedExtensions, graph, pageDisplay],
   );
   const displayStats = filteredGraph?.displayStats;
   const [searchTerm, setSearchTerm] = useState("");
@@ -68,14 +70,16 @@ export function WebRunSitemapGraph({
   );
 
   useEffect(() => {
+    const selectedNodeIsApi =
+      selectedNode?.isApiGroup || selectedNode?.isApiNode || isApiGraphNode(selectedNode);
     if (
       selectedNode &&
-      filteredGraph &&
-      !filteredGraph.nodes.some((node) => node.id === selectedNode.id)
+      ((!displayApis && selectedNodeIsApi) ||
+        (filteredGraph && !filteredGraph.nodes.some((node) => node.id === selectedNode.id)))
     ) {
       setSelectedNode(null);
     }
-  }, [filteredGraph, selectedNode, setSelectedNode]);
+  }, [displayApis, filteredGraph, selectedNode, setSelectedNode]);
   useEffect(() => {
     let cancelled = false;
     webRunsApi
@@ -96,6 +100,7 @@ export function WebRunSitemapGraph({
     graphView,
     credentials: run?.credentials,
     currentUrl: run?.current_url,
+    pageOnly: !displayApis,
     selectedNodeId: selectedNode?.id,
     onSelectNode: setSelectedNode,
   });
@@ -170,7 +175,7 @@ export function WebRunSitemapGraph({
             <SitemapDisplaySummary
               filteredGraph={filteredGraph}
               pageDisplay={pageDisplay}
-              apiDisplay={apiDisplay}
+              apiDisplay={effectiveApiDisplay}
               displayStats={displayStats}
             />
           </div>
@@ -207,42 +212,56 @@ export function WebRunSitemapGraph({
                 aria-label="API display"
                 value={apiDisplay}
                 onChange={(event) => setApiDisplay(event.target.value)}
+                disabled={!displayApis}
               >
                 <option value="grouped">Grouped endpoints</option>
                 <option value="individual">Individual requests</option>
-                <option value="hidden">Hidden</option>
               </select>
             </label>
           </div>
         </div>
         <div className="graph-canvas-wrap">
           <div className="sitemap-search">
+            <div className="sitemap-search-row">
+              <input
+                type="search"
+                aria-label="Search site map nodes"
+                placeholder="Search nodes…"
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setSearchTerm("");
+                }}
+              />
+              {searchTerm && (
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  aria-label="Clear node search"
+                  onClick={() => setSearchTerm("")}
+                >
+                  ×
+                </button>
+              )}
+              <span role="status" aria-live="polite">
+                {searchTerm.trim()
+                  ? `${searchMatches.size} ${searchMatches.size === 1 ? "match" : "matches"}`
+                  : ""}
+              </span>
+            </div>
+          </div>
+          <label className="sitemap-api-toggle">
             <input
-              type="search"
-              aria-label="Search site map nodes"
-              placeholder="Search nodes…"
-              value={searchTerm}
-              onChange={(event) => setSearchTerm(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") setSearchTerm("");
+              type="checkbox"
+              checked={displayApis}
+              onChange={(event) => {
+                const checked = event.target.checked;
+                setDisplayApis(checked);
+                if (!checked) setSelectedNode(null);
               }}
             />
-            {searchTerm && (
-              <button
-                type="button"
-                className="btn ghost sm"
-                aria-label="Clear node search"
-                onClick={() => setSearchTerm("")}
-              >
-                ×
-              </button>
-            )}
-            <span role="status" aria-live="polite">
-              {searchTerm.trim()
-                ? `${searchMatches.size} ${searchMatches.size === 1 ? "match" : "matches"}`
-                : ""}
-            </span>
-          </div>
+            <span>Display APIs</span>
+          </label>
           {graph && graph.nodes.length === 0 && (
             <div className="graph-empty">
               <WebRunSitemapTab
