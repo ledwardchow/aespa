@@ -15,11 +15,11 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Site map readability**: Page nodes now use larger circles and stronger labels than API nodes, regardless of the count shown on grouped nodes. Page-to-page links are thicker and brighter than links involving APIs. Nodes have more space between neighbours and spread around their connections without separate page and API columns. Status updates keep the live layout running instead of stopping it partway through.
 - **Compact user crawl progress**: Multi-user web crawls now share one compact bar with the site map display settings. Per-user page counts and current URLs expand into compact cards across the row, while the active crawl stage stays visible.
 - **Clickable navigation rows**: Site, System, API collection, campaign, active job, benchmark, and web, API, or SAST run tables now open their destination when the non-interactive area of a row is clicked. Existing row actions such as Edit, Export, Delete, Stop, and New campaign continue to work independently.
 - **Independent upstream proxies**: Testing traffic and LLM requests can now use separate upstream proxy URLs. Existing proxy settings are copied to both traffic types during upgrade so current routing continues unchanged, and crawler model requests use the configured LLM proxy.
 - **Console quit hint**: The terminal console now labels Ctrl+C as Quit instead of Stop.
-- **Animated console logo**: This is possibly the most important feature of the app so far.
 - **Test run status**: Test run headers now show one Active or Inactive badge instead of separate badges for the crawler, Test Lead, and A.L.I.C.E.
 - **Cleaner agent roster**: The Agents panel hides the empty Burp row when the Burp integration is disabled. Runs that contain Burp activity keep the row so their scan history remains available. An A.L.I.C.E. chat with no user activity automatically minimizes while another agent is active and can still be expanded manually. The built-in welcome message does not count as activity.
 - **Systems scan mode**: Applications has been renamed to Systems across the interface, API, data model, and documentation. Existing data is migrated automatically, and old saved interface links continue to open the matching System.
