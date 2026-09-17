@@ -38,7 +38,7 @@ export function WebRunSitemapGraph({
   const [testStateMessage, setTestStateMessage] = useState("");
   const [scannerSessions, setScannerSessions] = useState([]);
   const [selectedSession, setSelectedSession] = useState("");
-  const [excludedExtensionsInput, setExcludedExtensionsInput] = useState(".svg");
+  const [excludedExtensionsInput, setExcludedExtensionsInput] = useState(".svg, .js");
   const [hideApis, setHideApis] = useState(false);
   const excludedExtensions = useMemo(
     () => parseExcludedExtensions(excludedExtensionsInput),
