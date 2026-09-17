@@ -226,6 +226,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   );
   const workItemSummary = analysis.work_program?.work_items || {};
   const workerSummary = analysis.work_program?.workers || {};
+  const resumableFailedWorkers = workerSummary.failed || 0;
   const fileSummary = analysis.work_program?.files || {};
   const failedWorkers = (workerSummary.failed || 0) + (workerSummary.blocked || 0);
   const unfinishedWorkers = Math.max(
@@ -344,8 +345,16 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       setProfileBusy(false);
     }
   };
+  const canResume =
+    run &&
+    !scanRunning &&
+    (run.status === "paused" ||
+      (["completed", "failed"].includes(run.status) && resumableFailedWorkers > 0));
   const canStart =
-    run && !scanRunning && ["pending", "completed", "failed", "cancelled"].includes(run.status);
+    run &&
+    !scanRunning &&
+    !canResume &&
+    ["pending", "completed", "failed", "cancelled"].includes(run.status);
 
   if (!run)
     return (
@@ -386,9 +395,13 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                 {startBusy ? "Starting…" : "Start SAST Scan"}
               </button>
             )}
-            {run.status === "paused" && (
+            {canResume && (
               <button className="btn" disabled={startBusy} onClick={onResume}>
-                {startBusy ? "Resuming…" : "Resume SAST Scan"}
+                {startBusy
+                  ? "Resuming…"
+                  : run.status === "paused"
+                    ? "Resume SAST Scan"
+                    : "Resume Failed Work"}
               </button>
             )}
             {scanRunning && (

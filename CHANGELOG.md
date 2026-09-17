@@ -20,6 +20,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Resumable Deep SAST worker failures**: A Deep SAST run now pauses when discovery workers fail instead of presenting partial work as a completed scan. Resume continues only unfinished workers from their saved checkpoints, compacts an oversized checkpoint before retrying a context-window failure, and also recovers older completed runs that contain failed workers.
 - **Cleaner console launch and shutdown**: The terminal console no longer prints unrelated library debug messages during launch. Pressing Ctrl+C exits without printing the expected Python cancellation and keyboard-interrupt tracebacks.
 - **Console mouse scrolling**: The terminal console now captures the mouse wheel and scrolls through AESPA's buffered output instead of moving into the terminal's earlier command history.
 - **A.L.I.C.E. finding edits**: Requests to rewrite, merge, consolidate, update, or delete saved findings now use a finding-management turn instead of being treated as read-only questions. A.L.I.C.E. can update one finding or consolidate duplicates in one transaction while preserving the retained reference, validation state, coverage links, and scan provenance.

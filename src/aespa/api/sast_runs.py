@@ -592,11 +592,21 @@ async def resume_sast_scan(
 
     run = session.get(SastRun, run_id)
     pause = run_pause_svc.get_pause("sast", run_id)
-    if run is None or pause is None or run.status != "paused":
-        raise HTTPException(status_code=409, detail="SAST scan is not paused")
+    resumable_terminal_run = bool(
+        run is not None
+        and run.status in {"completed", "failed"}
+        and sast_scanner.has_resumable_sast_work(run_id)
+    )
+    if run is None or not (
+        (run.status == "paused" and pause is not None) or resumable_terminal_run
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="SAST scan has no paused or failed worker work to resume",
+        )
     if sast_scanner.is_sast_scan_running(run_id):
         raise HTTPException(status_code=409, detail="SAST scan is already running")
-    if pause.reset_at and pause.reset_at > datetime.now(_UTC):
+    if pause and pause.reset_at and pause.reset_at > datetime.now(_UTC):
         raise HTTPException(
             status_code=409,
             detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
