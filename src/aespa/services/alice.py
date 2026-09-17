@@ -50,11 +50,12 @@ def _apply_upstream_proxy(session: Session) -> None:
     from aespa.services.settings import get_upstream_proxy_config
 
     cfg = get_upstream_proxy_config(session)
-    _scanner_proxy_var.set(cfg.proxy_url if cfg.proxy_scanner else None)
-    llm_svc.set_llm_proxy(cfg.proxy_url if cfg.proxy_llm else None)
+    _scanner_proxy_var.set(cfg.scanner_proxy_url if cfg.proxy_scanner else None)
+    llm_svc.set_llm_proxy(cfg.llm_proxy_url if cfg.proxy_llm else None)
     log.info(
-        "ALICE upstream proxy: url=%s scanner=%s llm=%s",
-        cfg.proxy_url,
+        "ALICE upstream proxy: scanner_url=%s llm_url=%s scanner=%s llm=%s",
+        cfg.scanner_proxy_url,
+        cfg.llm_proxy_url,
         cfg.proxy_scanner,
         cfg.proxy_llm,
     )

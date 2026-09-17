@@ -981,11 +981,12 @@ class ComponentMapperConfigOut(ComponentMapperConfigBase):
 
 
 class UpstreamProxyConfigBase(BaseModel):
-    proxy_url: str | None = Field(default=None, max_length=500)
+    scanner_proxy_url: str | None = Field(default=None, max_length=500)
+    llm_proxy_url: str | None = Field(default=None, max_length=500)
     proxy_scanner: bool = False
     proxy_llm: bool = False
 
-    @field_validator("proxy_url")
+    @field_validator("scanner_proxy_url", "llm_proxy_url")
     @classmethod
     def _normalize_proxy_url(cls, v):
         if not v:
@@ -994,7 +995,7 @@ class UpstreamProxyConfigBase(BaseModel):
         if not v:
             return None
         if not v.startswith(("http://", "https://")):
-            raise ValueError("proxy_url must start with http:// or https://")
+            raise ValueError("proxy URL must start with http:// or https://")
         return v
 
 

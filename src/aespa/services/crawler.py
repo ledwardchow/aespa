@@ -489,7 +489,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         crawler_cfg = get_crawler_config(s)
         browser_debug_cfg = get_browser_debug_config(s)
         crawl_proxy_url = (
-            upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+            upstream_proxy.scanner_proxy_url if upstream_proxy.proxy_scanner else None
         )
         global_header_cfg = get_global_http_header_config(s)
         for obj in [*creds, site, run]:

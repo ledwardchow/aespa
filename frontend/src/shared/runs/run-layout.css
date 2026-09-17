@@ -441,11 +441,33 @@
   margin: 0 -28px -0px; /* bleed to content edges */
 }
 
+.sitemap-graph-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.sitemap-filter-panel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2, var(--panel));
+  flex-wrap: wrap;
+}
+
+.sitemap-filter-panel .traffic-filter {
+  max-width: 260px;
+}
+
 .graph-canvas-wrap {
   flex: 1;
   position: relative;
   background: var(--bg);
-  border-top: 1px solid var(--border);
   min-height: 0;
   overflow: hidden;
 }

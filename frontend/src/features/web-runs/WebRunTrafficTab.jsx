@@ -6,33 +6,11 @@ import { useColResize } from "../../shared/hooks/useColResize.js";
 import { TrafficDetail, TrafficTable } from "../../shared/ui/TrafficView.jsx";
 import { nav } from "../../shared/navigation/router.js";
 import { runHref } from "../../shared/navigation/links.ts";
-
-function parseExcludedExtensions(value) {
-  return new Set(
-    value
-      .split(",")
-      .map((part) => part.trim().toLowerCase())
-      .filter(Boolean)
-      .map((part) => (part.startsWith(".") ? part : `.${part}`)),
-  );
-}
+import { extractUrlExtension, parseExcludedExtensions } from "../../shared/lib/urlExtensions.js";
 
 function extractUrlHostname(url) {
   try {
     return new URL(url).hostname.toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-function extractUrlExtension(url) {
-  try {
-    const pathname = new URL(url).pathname || "";
-    const slash = pathname.lastIndexOf("/");
-    const segment = slash >= 0 ? pathname.slice(slash + 1) : pathname;
-    const dot = segment.lastIndexOf(".");
-    if (dot <= 0 || dot === segment.length - 1) return "";
-    return segment.slice(dot).toLowerCase();
   } catch {
     return "";
   }

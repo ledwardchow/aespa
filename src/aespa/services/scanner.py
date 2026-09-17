@@ -7132,9 +7132,11 @@ async def _do_thinking_scan(
 
         upstream_proxy = get_upstream_proxy_config(s)
         scanner_proxy_url = (
-            upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+            upstream_proxy.scanner_proxy_url if upstream_proxy.proxy_scanner else None
         )
-        llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
+        llm_proxy_url = (
+            upstream_proxy.llm_proxy_url if upstream_proxy.proxy_llm else None
+        )
         specialist_cfg = get_specialist_agent_config(s)
         global_header_cfg = get_global_http_header_config(s)
         browser_debug_cfg = get_browser_debug_config(s)

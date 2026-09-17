@@ -298,7 +298,8 @@ def get_upstream_proxy_config(session: Session) -> UpstreamProxyConfigOut:
             **UpstreamProxyConfigIn().model_dump(), updated_at=_utcnow()
         )
     return UpstreamProxyConfigOut(
-        proxy_url=cfg.proxy_url,
+        scanner_proxy_url=cfg.scanner_proxy_url,
+        llm_proxy_url=cfg.llm_proxy_url,
         proxy_scanner=cfg.proxy_scanner,
         proxy_llm=cfg.proxy_llm,
         updated_at=cfg.updated_at,
@@ -311,7 +312,8 @@ def upsert_upstream_proxy_config(
     cfg = session.get(UpstreamProxyConfig, _SINGLETON_ID)
     if cfg is None:
         cfg = UpstreamProxyConfig(id=_SINGLETON_ID)
-    cfg.proxy_url = payload.proxy_url
+    cfg.scanner_proxy_url = payload.scanner_proxy_url
+    cfg.llm_proxy_url = payload.llm_proxy_url
     cfg.proxy_scanner = payload.proxy_scanner
     cfg.proxy_llm = payload.proxy_llm
     cfg.updated_at = _utcnow()

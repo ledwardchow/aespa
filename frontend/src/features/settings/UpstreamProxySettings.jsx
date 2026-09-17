@@ -31,8 +31,8 @@ export function UpstreamProxySettings() {
     setSaved(false);
     try {
       const saved = await settingsApi.upsertUpstreamProxy({
-        proxy_url:
-          form.proxy_scanner || form.proxy_llm ? (form.proxy_url || "").trim() || null : null,
+        scanner_proxy_url: (form.scanner_proxy_url || "").trim() || null,
+        llm_proxy_url: (form.llm_proxy_url || "").trim() || null,
         proxy_scanner: !!form.proxy_scanner,
         proxy_llm: !!form.proxy_llm,
       });
@@ -44,7 +44,6 @@ export function UpstreamProxySettings() {
       setSaving(false);
     }
   };
-  const anyProxy = form && (form.proxy_scanner || form.proxy_llm);
   return (
     <>
       {!form && !error && <div className="subtle">Loading…</div>}
@@ -64,6 +63,23 @@ export function UpstreamProxySettings() {
             />
             <span>Send target requests through an upstream proxy</span>
           </label>
+          {form.proxy_scanner && (
+            <div className="field">
+              <label htmlFor="scanner-proxy-url">Testing traffic proxy URL</label>
+              <input
+                id="scanner-proxy-url"
+                type="url"
+                required
+                value={form.scanner_proxy_url || ""}
+                placeholder="http://127.0.0.1:8080"
+                onChange={(e) =>
+                  upd({
+                    scanner_proxy_url: e.target.value,
+                  })
+                }
+              />
+            </div>
+          )}
           <label className="toggle-row">
             <input
               type="checkbox"
@@ -76,17 +92,18 @@ export function UpstreamProxySettings() {
             />
             <span>Send LLM requests through the upstream proxy</span>
           </label>
-          {anyProxy && (
+          {form.proxy_llm && (
             <div className="field">
-              <label>Proxy URL</label>
+              <label htmlFor="llm-proxy-url">LLM traffic proxy URL</label>
               <input
+                id="llm-proxy-url"
                 type="url"
                 required
-                value={form.proxy_url || ""}
+                value={form.llm_proxy_url || ""}
                 placeholder="http://127.0.0.1:8080"
                 onChange={(e) =>
                   upd({
-                    proxy_url: e.target.value,
+                    llm_proxy_url: e.target.value,
                   })
                 }
               />
