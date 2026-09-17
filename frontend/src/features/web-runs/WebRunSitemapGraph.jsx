@@ -96,7 +96,6 @@ export function WebRunSitemapGraph({
     graphView,
     credentials: run?.credentials,
     currentUrl: run?.current_url,
-    layoutMode: apiDisplay === "hidden" ? "force" : "api-lanes",
     selectedNodeId: selectedNode?.id,
     onSelectNode: setSelectedNode,
   });

@@ -66,6 +66,10 @@ _LOGO_ANIMATION_INTERVAL = 0.05
 _LOGO_LOOP_DURATION = 1.5
 _LOGO_PAUSE_DURATION = 1.0
 _STARTUP_FADE_FRAMES = 4
+_STARTUP_SIDE_HOLD = 0.5
+_STARTUP_SIDE_FADE = 0.4
+_STARTUP_INTERFACE_HOLD = 0.5
+_STARTUP_WAVE_DURATION = 1.0
 _LOGO_PULSE_RADIUS = 7.0
 _LOGO_RADIAL_PULSE_DURATION = 0.65
 _LOGO_ROW_ASPECT = 2.0
@@ -280,9 +284,7 @@ class InteractiveConsoleHandler(logging.Handler):
                     (_LOGO_LOOP_DURATION + _LOGO_PAUSE_DURATION)
                     / _LOGO_ANIMATION_INTERVAL
                 )
-                active_frames = round(
-                    _LOGO_LOOP_DURATION / _LOGO_ANIMATION_INTERVAL
-                )
+                active_frames = round(_LOGO_LOOP_DURATION / _LOGO_ANIMATION_INTERVAL)
                 self._finishing_logo_animation = (
                     self._logo_animation_frame % cycle_frames < active_frames
                 )
@@ -616,6 +618,16 @@ class InteractiveConsoleHandler(logging.Handler):
             self._redraw_locked(size=size)
             return True
 
+    def _startup_duration(self) -> float:
+        width, height = self._terminal_size()
+        if width >= 100 and height >= len(_AESPA_LOGO_LARGE):
+            art, path = _AESPA_LOGO_LARGE, _AESPA_WAVE_PATH_LARGE
+        elif width < 69 or height < len(_AESPA_LOGO):
+            art, path = _AESPA_LOGO_COMPACT, _AESPA_WAVE_PATH_COMPACT
+        else:
+            art, path = _AESPA_LOGO, _AESPA_WAVE_PATH
+        return _startup_wave_timing(width, art, path)[-1] + _STARTUP_INTERFACE_HOLD
+
     def advance_logo_animation(self) -> bool:
         """Advance the idle Agent-view pulse and redraw when it is visible."""
         with self._output_lock:
@@ -637,9 +649,13 @@ class InteractiveConsoleHandler(logging.Handler):
                 self._logo_animation_frame += 1
                 if (
                     self._logo_animation_frame * _LOGO_ANIMATION_INTERVAL
-                    >= _LOGO_LOOP_DURATION
+                    >= self._startup_duration()
                 ):
                     self._startup_logo_active = False
+                    # Park on the idle frame, not the next pulse's first frame.
+                    self._logo_animation_frame = round(
+                        _LOGO_LOOP_DURATION / _LOGO_ANIMATION_INTERVAL
+                    )
                     self._startup_fade_phase = "console"
                     self._startup_fade_frame = 0
             elif self._startup_fade_phase == "console":
@@ -653,9 +669,7 @@ class InteractiveConsoleHandler(logging.Handler):
                     (_LOGO_LOOP_DURATION + _LOGO_PAUSE_DURATION)
                     / _LOGO_ANIMATION_INTERVAL
                 )
-                active_frames = round(
-                    _LOGO_LOOP_DURATION / _LOGO_ANIMATION_INTERVAL
-                )
+                active_frames = round(_LOGO_LOOP_DURATION / _LOGO_ANIMATION_INTERVAL)
                 if self._logo_animation_frame % cycle_frames >= active_frames:
                     self._finishing_logo_animation = False
             self._redraw_locked()
@@ -724,6 +738,7 @@ class InteractiveConsoleHandler(logging.Handler):
             animation_frame=self._logo_animation_frame,
             compact=compact,
             large=large,
+            reveal=self._startup_logo_active,
         )
         first_row = max(1, ((height - len(logo_lines)) // 2) + 1)
         screen = "\x1b[2J\x1b[H"
@@ -756,10 +771,7 @@ class InteractiveConsoleHandler(logging.Handler):
                 rendered_line = _truncate_terminal_line(line, width)
                 visible_width = len(_ANSI_SGR.sub("", rendered_line))
                 column = max(1, ((width - visible_width) // 2) + 1)
-                screen += (
-                    f"\x1b[{record_row};{column}H"
-                    f"{rendered_line}"
-                )
+                screen += f"\x1b[{record_row};{column}H{rendered_line}"
                 record_row += 1
         screen += f"\x1b[{height};1H\x1b[2K{_legend(AGENT, False, 'root')[:width]}"
         if self._startup_fade_phase == "console":
@@ -1240,6 +1252,7 @@ def _aespa_logo_lines(
     animation_frame: int = 0,
     compact: bool | None = None,
     large: bool = False,
+    reveal: bool = False,
 ) -> list[str]:
     """Return a centered ANSI-color logo for the empty Agent screen."""
     if compact is None:
@@ -1259,24 +1272,39 @@ def _aespa_logo_lines(
     trace_progress, trace_length = _wave_trace_progress(art, wave_path)
     pulse_span = trace_length + (_LOGO_PULSE_RADIUS * 2)
     cycle_duration = _LOGO_LOOP_DURATION + _LOGO_PAUSE_DURATION
-    elapsed = animation_frame * _LOGO_ANIMATION_INTERVAL % cycle_duration
+    elapsed = animation_frame * _LOGO_ANIMATION_INTERVAL
+    if not reveal:
+        elapsed %= cycle_duration
+    speed, entry_duration, wave_duration, exit_start, fade_end = _startup_wave_timing(
+        width, art, wave_path
+    )
+    if not reveal:
+        entry_duration, wave_duration = 0.0, _STARTUP_WAVE_DURATION
+    wave_elapsed = elapsed - entry_duration
     pulse_position = (
-        elapsed / _LOGO_LOOP_DURATION * pulse_span - _LOGO_PULSE_RADIUS
-        if elapsed < _LOGO_LOOP_DURATION
+        wave_elapsed / wave_duration * pulse_span - _LOGO_PULSE_RADIUS
+        if wave_elapsed < wave_duration
         else None
     )
     radial_trigger_progress = _wave_progress_at_vertex(wave_path, 2)
     radial_origin = _wave_visual_center(wave_path)
     radial_trigger = (
-        (radial_trigger_progress + _LOGO_PULSE_RADIUS)
-        / pulse_span
-        * _LOGO_LOOP_DURATION
-    )
+        radial_trigger_progress + _LOGO_PULSE_RADIUS
+    ) / pulse_span * wave_duration + entry_duration
     radial_elapsed = elapsed - radial_trigger
     radial_radius = (
         _radial_pulse_radius(art, radial_origin, radial_elapsed)
         if 0 <= radial_elapsed < _LOGO_RADIAL_PULSE_DURATION
         else None
+    )
+    revealed_radius = (
+        _radial_pulse_radius(art, radial_origin, radial_elapsed)
+        if radial_elapsed >= 0
+        else -1.0
+    )
+    radial_speed = (
+        _radial_pulse_radius(art, radial_origin, _LOGO_RADIAL_PULSE_DURATION)
+        / _LOGO_RADIAL_PULSE_DURATION
     )
     lines: list[str] = []
     for row, line in enumerate(art):
@@ -1304,6 +1332,79 @@ def _aespa_logo_lines(
                     pulse_colors[column] = _brighter_pulse_color(
                         pulse_colors.get(column), radial_color
                     )
+        visible = []
+        if reveal:
+            pulse_colors = {}
+        for column, character in enumerate(line):
+            progress = trace_progress.get((row, column))
+            if progress is not None:
+                shown = pulse_position is None or progress <= pulse_position
+                struck_at = (
+                    progress + _LOGO_PULSE_RADIUS
+                ) / pulse_span * wave_duration + entry_duration
+            else:
+                distance = (
+                    (column - radial_origin[0]) ** 2
+                    + (row * _LOGO_ROW_ASPECT - radial_origin[1]) ** 2
+                ) ** 0.5
+                shown = distance <= revealed_radius
+                struck_at = radial_trigger + distance / radial_speed
+            visible.append(character if shown or not reveal else " ")
+            if shown and character != " ":
+                # A crisp white strike leaves a warm afterglow as it settles.
+                age = elapsed - struck_at
+                if age < 0.10:
+                    pulse_colors[column] = _ANSI_WHITE
+                elif age < 0.20:
+                    pulse_colors[column] = "\x1b[38;5;217m"
+                elif age < 0.32:
+                    pulse_colors[column] = _ANSI_CORAL
+        line = "".join(visible)
+        sample_column = wave_path[0][0] + 4
+        side_glyph = art[row][sample_column] if sample_column < len(art[row]) else " "
+        if (
+            reveal
+            and abs(row - wave_path[0][1]) <= 1
+            and side_glyph != " "
+            and 0 < elapsed < fade_end
+        ):
+            # Extend only the baseline outside the artwork, preserving logo glyphs.
+            original = art[row]
+            left = len(padding) + len(original) - len(original.lstrip())
+            right = len(padding) + len(original.rstrip())
+            full_line = list((padding + line).ljust(width))
+            colors = {
+                column + len(padding): color for column, color in pulse_colors.items()
+            }
+            brightness = min(
+                1.0,
+                max(
+                    0.0,
+                    (fade_end - elapsed) / _STARTUP_SIDE_FADE,
+                ),
+            )
+            for column in range(width):
+                if column < left:
+                    arrival = column / speed
+                elif column >= right:
+                    arrival = (
+                        exit_start + (column - len(padding) - wave_path[-1][0]) / speed
+                    )
+                else:
+                    continue
+                if elapsed < arrival:
+                    continue
+                full_line[column] = side_glyph
+                base_color = {".": 88, "+": 202, "o": 196, "s": 203}.get(
+                    side_glyph, 196
+                )
+                rgb = _xterm_color_rgb(255 if elapsed - arrival < 0.10 else base_color)
+                red, green, blue = (round(channel * brightness) for channel in rgb)
+                colors[column] = f"\x1b[38;2;{red};{green};{blue}m"
+            lines.append(
+                _color_ascii_logo_line("".join(full_line), pulse_colors=colors)
+            )
+            continue
         lines.append(
             padding
             + _color_ascii_logo_line(
@@ -1312,6 +1413,23 @@ def _aespa_logo_lines(
             )
         )
     return lines
+
+
+def _startup_wave_timing(
+    width: int, art: tuple[str, ...], path: tuple[tuple[int, int], ...]
+) -> tuple[float, float, float, float, float]:
+    """Cross the terminal in one second at a shared side-line and wave speed."""
+    _, trace_length = _wave_trace_progress(art, path)
+    padding = max(0, (width - max(map(len, art))) // 2)
+    exit_distance = max(0, width - 1 - padding - path[-1][0])
+    distance = padding + path[0][0] + trace_length + exit_distance
+    speed = distance / _STARTUP_WAVE_DURATION
+    entry = (padding + path[0][0] - _LOGO_PULSE_RADIUS) / speed
+    duration = (trace_length + 2 * _LOGO_PULSE_RADIUS) / speed
+    exit_start = (padding + path[0][0] + trace_length) / speed
+    exit_end = _STARTUP_WAVE_DURATION
+    fade_end = exit_end + _STARTUP_SIDE_HOLD + _STARTUP_SIDE_FADE
+    return speed, entry, duration, exit_start, fade_end
 
 
 def _wave_visual_center(path: tuple[tuple[int, int], ...]) -> tuple[float, float]:
@@ -1333,8 +1451,7 @@ def _wave_progress_at_vertex(
         path[:vertex_index], path[1 : vertex_index + 1]
     ):
         progress += (
-            (end_x - start_x) ** 2
-            + ((end_y - start_y) * _LOGO_ROW_ASPECT) ** 2
+            (end_x - start_x) ** 2 + ((end_y - start_y) * _LOGO_ROW_ASPECT) ** 2
         ) ** 0.5
     return progress
 
@@ -1345,11 +1462,7 @@ def _radial_pulse_radius(
     """Expand the radial pulse far enough to clear every visible logo glyph."""
     center_x, center_y = center
     furthest_distance = max(
-        (
-            (column - center_x) ** 2
-            + ((row * _LOGO_ROW_ASPECT) - center_y) ** 2
-        )
-        ** 0.5
+        ((column - center_x) ** 2 + ((row * _LOGO_ROW_ASPECT) - center_y) ** 2) ** 0.5
         for row, line in enumerate(art)
         for column, character in enumerate(line)
         if character != " "
@@ -1472,9 +1585,7 @@ def _fade_terminal_frame(value: str, brightness: float) -> str:
     """Dim an ANSI frame while preserving its cursor-positioning sequences."""
     brightness = min(1.0, max(0.0, brightness))
     default_level = round(255 * brightness)
-    default_color = (
-        f"\x1b[38;2;{default_level};{default_level};{default_level}m"
-    )
+    default_color = f"\x1b[38;2;{default_level};{default_level};{default_level}m"
 
     def fade_color(match: re.Match[str]) -> str:
         red, green, blue = _xterm_color_rgb(int(match.group(1)))
