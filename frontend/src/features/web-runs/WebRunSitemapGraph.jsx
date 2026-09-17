@@ -2,7 +2,7 @@ import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useEffect, useMemo, useState } from "react";
 
 import { apiTranscriptText } from "../../shared/lib/transcript.js";
-import { filterSitemapGraph, parseExcludedExtensions } from "../../shared/lib/urlExtensions.js";
+import { parseExcludedExtensions } from "../../shared/lib/urlExtensions.js";
 import { OWASP_WEB_LABELS } from "./coverageLabels.js";
 import {
   SCOPE_IN_COLOR,
@@ -15,6 +15,7 @@ import {
 import { useSelectedSitemapPage } from "./useSelectedSitemapPage.js";
 import { useSitemapGraph } from "./useSitemapGraph.js";
 import { WebRunSitemapTab } from "./WebRunSitemapTab.jsx";
+import { buildSitemapDisplayGraph } from "./sitemapGraph.js";
 
 /** The interactive sitemap canvas and its selected-page inspector. */
 export function WebRunSitemapGraph({
@@ -39,16 +40,16 @@ export function WebRunSitemapGraph({
   const [scannerSessions, setScannerSessions] = useState([]);
   const [selectedSession, setSelectedSession] = useState("");
   const [excludedExtensionsInput, setExcludedExtensionsInput] = useState(".svg, .js");
-  const [hideApis, setHideApis] = useState(false);
+  const [apiDisplay, setApiDisplay] = useState("grouped");
   const excludedExtensions = useMemo(
     () => parseExcludedExtensions(excludedExtensionsInput),
     [excludedExtensionsInput],
   );
   const filteredGraph = useMemo(
-    () => filterSitemapGraph(graph, excludedExtensions, hideApis),
-    [excludedExtensions, graph, hideApis],
+    () => buildSitemapDisplayGraph(graph, excludedExtensions, apiDisplay),
+    [apiDisplay, excludedExtensions, graph],
   );
-  const hiddenNodeCount = (graph?.nodes.length || 0) - (filteredGraph?.nodes.length || 0);
+  const displayStats = filteredGraph?.displayStats;
 
   useEffect(() => {
     if (
@@ -77,6 +78,8 @@ export function WebRunSitemapGraph({
     graphView,
     credentials: run?.credentials,
     currentUrl: run?.current_url,
+    layoutMode: apiDisplay === "grouped" ? "api-lanes" : "force",
+    selectedNodeId: selectedNode?.id,
     onSelectNode: setSelectedNode,
   });
 
@@ -146,20 +149,36 @@ export function WebRunSitemapGraph({
               onInput={(event) => setExcludedExtensionsInput(event.target.value)}
             />
           </label>
-          <label className="traffic-scope-only">
-            <input
-              type="checkbox"
-              checked={hideApis}
-              onChange={(event) => setHideApis(event.target.checked)}
-            />
-            Hide APIs
+          <label className="traffic-filter-ext sitemap-api-display">
+            <span>API display</span>
+            <select
+              aria-label="API display"
+              value={apiDisplay}
+              onChange={(event) => setApiDisplay(event.target.value)}
+            >
+              <option value="grouped">Grouped endpoints</option>
+              <option value="individual">Individual requests</option>
+              <option value="hidden">Hidden</option>
+            </select>
           </label>
           <span className="traffic-count-label">
             {filteredGraph?.nodes.length || 0} shown
-            {hiddenNodeCount > 0 ? ` · ${hiddenNodeCount} hidden` : ""}
+            {apiDisplay === "grouped" && displayStats?.apiNodeCount > 0
+              ? ` · ${displayStats.apiNodeCount} API requests in ${displayStats.apiGroupCount} endpoints`
+              : ""}
+            {apiDisplay === "hidden" && displayStats?.apiNodeCount > 0
+              ? ` · ${displayStats.apiNodeCount} APIs hidden`
+              : ""}
+            {displayStats?.excludedCount > 0 ? ` · ${displayStats.excludedCount} files hidden` : ""}
           </span>
         </div>
         <div className="graph-canvas-wrap">
+          {apiDisplay === "grouped" && displayStats?.apiGroupCount > 0 && (
+            <div className="sitemap-lane-labels" aria-hidden="true">
+              <span>Pages</span>
+              <span>API endpoints</span>
+            </div>
+          )}
           {graph && graph.nodes.length === 0 && (
             <div className="graph-empty">
               <WebRunSitemapTab
@@ -241,7 +260,16 @@ export function WebRunSitemapGraph({
           )}
         </div>
       </div>
-      {selectedNode && (
+      {selectedNode?.isApiGroup ? (
+        <SitemapApiGroupInspector
+          node={selectedNode}
+          onClose={() => setSelectedNode(null)}
+          onExpand={() => {
+            setApiDisplay("individual");
+            setSelectedNode(selectedNode.memberNodes[0] || null);
+          }}
+        />
+      ) : selectedNode ? (
         <SitemapPageInspector
           node={selectedNode}
           detail={pageDetail}
@@ -259,7 +287,82 @@ export function WebRunSitemapGraph({
           onDelete={deleteNode}
           onTestState={testState}
         />
-      )}
+      ) : null}
+    </div>
+  );
+}
+
+function SitemapApiGroupInspector({ node, onClose, onExpand }) {
+  return (
+    <div className="graph-panel api-group-panel">
+      <div className="graph-panel-header">
+        <div>
+          <div className="api-group-method">{node.apiMethod}</div>
+          <div className="graph-panel-url">{node.apiOrigin + node.apiPath}</div>
+        </div>
+        <button className="btn ghost sm" onClick={onClose} aria-label="Close API endpoint details">
+          ✕
+        </button>
+      </div>
+      <div className="graph-panel-body">
+        <div className="api-group-summary">
+          <div>
+            <strong>{node.variantCount}</strong>
+            <span>Request {node.variantCount === 1 ? "variant" : "variants"}</span>
+          </div>
+          <div>
+            <strong>{node.callers.length}</strong>
+            <span>Calling {node.callers.length === 1 ? "page" : "pages"}</span>
+          </div>
+          <div>
+            <strong>{node.parameters.length}</strong>
+            <span>Parameters</span>
+          </div>
+        </div>
+
+        <div className="graph-panel-section-label">Calling pages</div>
+        {node.callers.length > 0 ? (
+          <div className="api-group-list">
+            {node.callers.map((caller) => (
+              <div key={caller.id} className="api-group-list-row">
+                <span title={caller.url}>{caller.label}</span>
+                {caller.observationCount > 1 && <small>×{caller.observationCount}</small>}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="subtle">No calling page was recorded.</div>
+        )}
+
+        <div className="graph-panel-section-label api-group-section">Observed parameters</div>
+        {node.parameters.length > 0 ? (
+          <div className="api-parameter-table">
+            {node.parameters.map((parameter) => (
+              <div key={`${parameter.location}:${parameter.name}`} className="api-parameter-row">
+                <span className="api-parameter-location">{parameter.location}</span>
+                <code>{parameter.name}</code>
+                <span title={parameter.values.join(", ")}>
+                  {parameter.values.slice(0, 3).join(", ")}
+                  {parameter.values.length > 3 ? ` +${parameter.values.length - 3}` : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="subtle">No path or query parameters were observed.</div>
+        )}
+
+        <div className="graph-panel-section-label api-group-section">Request variants</div>
+        <div className="api-group-variants">
+          {node.variants.slice(0, 12).map((url) => (
+            <code key={url}>{url}</code>
+          ))}
+          {node.variants.length > 12 && <span>+{node.variants.length - 12} more</span>}
+        </div>
+        <button className="btn sm api-group-expand" onClick={onExpand}>
+          Show individual requests
+        </button>
+      </div>
     </div>
   );
 }
