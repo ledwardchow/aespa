@@ -43,6 +43,48 @@ def test_sast_analysis_mode_migration_marks_existing_runs_light():
         engine.dispose()
 
 
+def test_upstream_proxy_migration_preserves_url_for_both_traffic_types():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "8f0b3d5e7a92")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO upstream_proxy_config "
+                    "(id, proxy_url, proxy_scanner, proxy_llm, updated_at) "
+                    "VALUES (1, 'http://legacy-proxy.local:8080', 1, 1, CURRENT_TIMESTAMP)"
+                )
+            )
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT scanner_proxy_url, llm_proxy_url "
+                    "FROM upstream_proxy_config WHERE id = 1"
+                )
+            ).one()
+            columns = {
+                item[1]
+                for item in conn.execute(
+                    text("PRAGMA table_info(upstream_proxy_config)")
+                )
+            }
+
+        assert row == (
+            "http://legacy-proxy.local:8080",
+            "http://legacy-proxy.local:8080",
+        )
+        assert "proxy_url" not in columns
+    finally:
+        engine.dispose()
+
+
 def test_new_sqlite_database_enables_full_auto_vacuum(tmp_path):
     database_path = tmp_path / "new.db"
     engine = db._build_engine(Settings(database_url=f"sqlite:///{database_path}"))
@@ -80,6 +122,48 @@ def test_ensure_column_adds_missing_column():
             }
 
         assert "name" in columns
+    finally:
+        engine.dispose()
+
+
+def test_legacy_upstream_proxy_upgrade_preserves_shared_url():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE upstream_proxy_config ("
+                    "id INTEGER PRIMARY KEY, proxy_url TEXT, "
+                    "proxy_scanner INTEGER NOT NULL DEFAULT 0, "
+                    "proxy_llm INTEGER NOT NULL DEFAULT 0, updated_at DATETIME)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO upstream_proxy_config "
+                    "(id, proxy_url, proxy_scanner, proxy_llm, updated_at) "
+                    "VALUES (1, 'http://legacy-proxy.local:8080', 1, 1, CURRENT_TIMESTAMP)"
+                )
+            )
+
+        db_legacy._ensure_upstream_proxy_config(engine)
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT scanner_proxy_url, llm_proxy_url "
+                    "FROM upstream_proxy_config WHERE id = 1"
+                )
+            ).one()
+
+        assert row == (
+            "http://legacy-proxy.local:8080",
+            "http://legacy-proxy.local:8080",
+        )
     finally:
         engine.dispose()
 
@@ -873,7 +957,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert ("page_id", "crawled_page", "id") in handoff_foreign_keys
         assert "max_concurrent_planners" in deep_config_columns
         assert was_pre_alembic is False
-        assert version == "8f0b3d5e7a92"
+        assert version == "3e7a9c1d5f20"
     finally:
         engine.dispose()
 
@@ -915,7 +999,7 @@ def test_deep_task_finding_timestamp_is_added_and_backfilled():
 
         assert "created_at" in columns
         assert created_at is not None
-        assert version == "8f0b3d5e7a92"
+        assert version == "3e7a9c1d5f20"
     finally:
         engine.dispose()
 
@@ -1219,7 +1303,7 @@ def test_legacy_db_with_run_identity_but_no_systems_tables_gets_new_schema():
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "8f0b3d5e7a92"
+        assert version == "3e7a9c1d5f20"
     finally:
         engine.dispose()
 
@@ -1256,7 +1340,7 @@ def test_current_db_with_systems_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "8f0b3d5e7a92"
+        assert version == "3e7a9c1d5f20"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

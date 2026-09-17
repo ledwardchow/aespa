@@ -330,11 +330,12 @@ Singleton row (id = 1). Configures the optional Burp Suite Professional active-s
 
 ### Upstream Proxy Config (`UpstreamProxyConfig` model)
 
-Singleton row (id = 1). Routes scanner and/or LLM traffic through an upstream HTTP proxy.
+Singleton row (id = 1). Routes scanner and/or LLM traffic through independently configured upstream HTTP proxies.
 
 | Field | Default | Description |
 |---|---|---|
-| `proxy_url` | — | `http://host:port` proxy URL |
+| `scanner_proxy_url` | — | `http://host:port` proxy URL for testing traffic |
+| `llm_proxy_url` | — | `http://host:port` proxy URL for LLM traffic |
 | `proxy_scanner` | `false` | Route scanner HTTP and Playwright traffic through proxy |
 | `proxy_llm` | `false` | Route LLM API calls through proxy |
 

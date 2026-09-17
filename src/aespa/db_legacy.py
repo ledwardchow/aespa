@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 
@@ -340,19 +341,7 @@ def upgrade_pre_alembic_schema(engine: Engine) -> None:
         "batch_max_concurrent",
         "INTEGER NOT NULL DEFAULT 4",
     )
-    with engine.connect() as conn:
-        conn.execute(
-            __import__("sqlalchemy").text("""
-            CREATE TABLE IF NOT EXISTS upstream_proxy_config (
-                id INTEGER PRIMARY KEY,
-                proxy_url TEXT,
-                proxy_scanner INTEGER NOT NULL DEFAULT 0,
-                proxy_llm INTEGER NOT NULL DEFAULT 0,
-                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        )
-        conn.commit()
+    _ensure_upstream_proxy_config(engine)
     with engine.connect() as conn:
         conn.execute(
             __import__("sqlalchemy").text("""
@@ -1291,6 +1280,41 @@ def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> Non
             conn.execute(
                 __import__("sqlalchemy").text(
                     f"ALTER TABLE {table} ADD COLUMN {column} {col_def}"
+                )
+            )
+            conn.commit()
+
+
+def _ensure_upstream_proxy_config(engine: Engine) -> None:
+    """Create or upgrade the legacy singleton to use per-traffic proxy URLs."""
+    with engine.connect() as conn:
+        conn.execute(
+            text("""
+                CREATE TABLE IF NOT EXISTS upstream_proxy_config (
+                    id INTEGER PRIMARY KEY,
+                    proxy_url TEXT,
+                    scanner_proxy_url TEXT,
+                    llm_proxy_url TEXT,
+                    proxy_scanner INTEGER NOT NULL DEFAULT 0,
+                    proxy_llm INTEGER NOT NULL DEFAULT 0,
+                    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+        )
+        conn.commit()
+
+    _ensure_column(engine, "upstream_proxy_config", "scanner_proxy_url", "TEXT")
+    _ensure_column(engine, "upstream_proxy_config", "llm_proxy_url", "TEXT")
+    columns = {
+        item["name"] for item in inspect(engine).get_columns("upstream_proxy_config")
+    }
+    if "proxy_url" in columns:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "UPDATE upstream_proxy_config "
+                    "SET scanner_proxy_url = COALESCE(scanner_proxy_url, proxy_url), "
+                    "llm_proxy_url = COALESCE(llm_proxy_url, proxy_url)"
                 )
             )
             conn.commit()

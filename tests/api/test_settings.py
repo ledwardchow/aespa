@@ -216,6 +216,37 @@ def test_burp_rest_api_config_round_trip(client: TestClient):
     assert data["scan_ssti"] is True
 
 
+def test_upstream_proxy_config_uses_separate_urls(client: TestClient):
+    initial = client.get("/api/settings/upstream-proxy")
+    assert initial.status_code == 200
+    assert initial.json()["scanner_proxy_url"] is None
+    assert initial.json()["llm_proxy_url"] is None
+
+    payload = {
+        "scanner_proxy_url": " http://scanner-proxy.local:8080 ",
+        "llm_proxy_url": "https://llm-proxy.local:8443",
+        "proxy_scanner": True,
+        "proxy_llm": True,
+    }
+    updated = client.put("/api/settings/upstream-proxy", json=payload)
+
+    assert updated.status_code == 200
+    assert updated.json()["scanner_proxy_url"] == "http://scanner-proxy.local:8080"
+    assert updated.json()["llm_proxy_url"] == "https://llm-proxy.local:8443"
+    assert updated.json()["proxy_scanner"] is True
+    assert updated.json()["proxy_llm"] is True
+
+
+@pytest.mark.parametrize("field", ["scanner_proxy_url", "llm_proxy_url"])
+def test_upstream_proxy_config_rejects_invalid_url(client: TestClient, field: str):
+    response = client.put(
+        "/api/settings/upstream-proxy",
+        json={field: "socks5://proxy.local:1080"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_cloudflare_access_config_round_trip(client: TestClient):
     # Defaults to no audience (legacy behaviour: audience check skipped).
     r = client.get("/api/settings/cloudflare-access")

@@ -72,6 +72,56 @@ test("settings tabs, edit cancellation, and sidebar history work", async ({ page
   await expect(page.getByText("LLM Profiles", { exact: true })).toBeVisible();
 });
 
+test("site map filters extensions and optionally hides APIs", async ({ page }) => {
+  await installFixtures(page);
+  await page.route("**/api/test-runs/1/graph", (route) =>
+    route.fulfill({
+      json: {
+        nodes: [
+          { id: 1, url: "http://example.test/", depth: 0, in_scope: true },
+          { id: 2, url: "http://example.test/assets/logo.svg", depth: 1, in_scope: true },
+          { id: 3, url: "http://example.test/account", depth: 1, in_scope: true },
+          {
+            id: 4,
+            url: "http://example.test/api/account",
+            title: "API GET 200 /api/account",
+            context: "[API endpoint] Observed GET request during crawl.",
+            depth: 1,
+            in_scope: true,
+          },
+        ],
+        links: [
+          { source: 1, target: 2 },
+          { source: 1, target: 3 },
+          { source: 1, target: 4 },
+        ],
+      },
+    }),
+  );
+
+  await page.goto("/#/runs/1/sitemap");
+
+  const extensionFilter = page.getByLabel("Exclude site map extensions");
+  const hideApis = page.getByRole("checkbox", { name: "Hide APIs" });
+  await expect(extensionFilter).toHaveValue(".svg");
+  await expect(hideApis).not.toBeChecked();
+  await expect(page.getByText("3 shown · 1 hidden", { exact: true })).toBeVisible();
+  await expect(page.locator("g.node-group")).toHaveCount(3);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-extension-filter.png") });
+
+  await hideApis.check();
+  await expect(page.getByText("2 shown · 2 hidden", { exact: true })).toBeVisible();
+  await expect(page.locator("g.node-group")).toHaveCount(2);
+
+  await extensionFilter.fill("");
+  await expect(page.getByText("3 shown · 1 hidden", { exact: true })).toBeVisible();
+  await expect(page.locator("g.node-group")).toHaveCount(3);
+
+  await hideApis.uncheck();
+  await expect(page.getByText("4 shown", { exact: true })).toBeVisible();
+  await expect(page.locator("g.node-group")).toHaveCount(4);
+});
+
 test("System Settings groups feature visibility and debug controls into tabs", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/debug");

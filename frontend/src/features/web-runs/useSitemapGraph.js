@@ -50,7 +50,15 @@ export function useSitemapGraph({
 
   useEffect(() => {
     if (!graph || !svgRef.current) return;
-    const structureKey = `${activeTab}:${graphView}:${graph.nodes.length}:${graph.links.length}`;
+    const nodeStructure = graph.nodes.map((node) => node.id).join(",");
+    const linkStructure = graph.links
+      .map((link) => {
+        const source = typeof link.source === "object" ? link.source?.id : link.source;
+        const target = typeof link.target === "object" ? link.target?.id : link.target;
+        return `${source}>${target}`;
+      })
+      .join(",");
+    const structureKey = `${activeTab}:${graphView}:${nodeStructure}:${linkStructure}`;
 
     // Status-only updates retain the settled simulation and repaint in place.
     if (structureKey === previousStructureKeyRef.current && simulationRef.current) {

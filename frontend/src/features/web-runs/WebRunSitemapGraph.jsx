@@ -1,7 +1,8 @@
 import * as webRunsApi from "../../shared/api/webRuns.js";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { apiTranscriptText } from "../../shared/lib/transcript.js";
+import { filterSitemapGraph, parseExcludedExtensions } from "../../shared/lib/urlExtensions.js";
 import { OWASP_WEB_LABELS } from "./coverageLabels.js";
 import {
   SCOPE_IN_COLOR,
@@ -37,6 +38,27 @@ export function WebRunSitemapGraph({
   const [testStateMessage, setTestStateMessage] = useState("");
   const [scannerSessions, setScannerSessions] = useState([]);
   const [selectedSession, setSelectedSession] = useState("");
+  const [excludedExtensionsInput, setExcludedExtensionsInput] = useState(".svg");
+  const [hideApis, setHideApis] = useState(false);
+  const excludedExtensions = useMemo(
+    () => parseExcludedExtensions(excludedExtensionsInput),
+    [excludedExtensionsInput],
+  );
+  const filteredGraph = useMemo(
+    () => filterSitemapGraph(graph, excludedExtensions, hideApis),
+    [excludedExtensions, graph, hideApis],
+  );
+  const hiddenNodeCount = (graph?.nodes.length || 0) - (filteredGraph?.nodes.length || 0);
+
+  useEffect(() => {
+    if (
+      selectedNode &&
+      filteredGraph &&
+      !filteredGraph.nodes.some((node) => node.id === selectedNode.id)
+    ) {
+      setSelectedNode(null);
+    }
+  }, [filteredGraph, selectedNode, setSelectedNode]);
   useEffect(() => {
     let cancelled = false;
     webRunsApi
@@ -50,7 +72,7 @@ export function WebRunSitemapGraph({
     };
   }, [runId]);
   const { svgRef } = useSitemapGraph({
-    graph,
+    graph: filteredGraph,
     activeTab: active ? "sitemap" : "hidden",
     graphView,
     credentials: run?.credentials,
@@ -111,81 +133,113 @@ export function WebRunSitemapGraph({
 
   return (
     <div className="graph-layout" style={{ display: active ? "flex" : "none" }}>
-      <div className="graph-canvas-wrap">
-        {graph && graph.nodes.length === 0 && (
-          <div className="graph-empty">
-            <WebRunSitemapTab
-              activeTab="sitemap"
-              run={run}
-              onStart={onStart}
-              onStartThinkingScan={onStartThinkingScan}
-              hasCheckpoint={hasCheckpoint}
-              onResumeThinkingScan={onResumeThinkingScan}
-              checkpointStatus={checkpointStatus}
+      <div className="sitemap-graph-main">
+        <div className="sitemap-filter-panel">
+          <label className="traffic-filter-ext">
+            <span>Exclude extensions</span>
+            <input
+              className="traffic-filter"
+              type="text"
+              aria-label="Exclude site map extensions"
+              placeholder=".svg, .png, .woff2"
+              value={excludedExtensionsInput}
+              onInput={(event) => setExcludedExtensionsInput(event.target.value)}
             />
-          </div>
-        )}
-        <svg
-          ref={svgRef}
-          className="graph-svg"
-          width="100%"
-          height="100%"
-          style={{ pointerEvents: !graph || graph.nodes.length === 0 ? "none" : "all" }}
-        />
-        {graph && graph.nodes.length > 0 && (
-          <div className="graph-legend">
-            {graphView === "user" && run?.credentials?.length > 1 ? (
-              <>
-                {(run.credentials || []).map((credential, index) => (
-                  <div key={credential.id} className="legend-item">
+          </label>
+          <label className="traffic-scope-only">
+            <input
+              type="checkbox"
+              checked={hideApis}
+              onChange={(event) => setHideApis(event.target.checked)}
+            />
+            Hide APIs
+          </label>
+          <span className="traffic-count-label">
+            {filteredGraph?.nodes.length || 0} shown
+            {hiddenNodeCount > 0 ? ` · ${hiddenNodeCount} hidden` : ""}
+          </span>
+        </div>
+        <div className="graph-canvas-wrap">
+          {graph && graph.nodes.length === 0 && (
+            <div className="graph-empty">
+              <WebRunSitemapTab
+                activeTab="sitemap"
+                run={run}
+                onStart={onStart}
+                onStartThinkingScan={onStartThinkingScan}
+                hasCheckpoint={hasCheckpoint}
+                onResumeThinkingScan={onResumeThinkingScan}
+                checkpointStatus={checkpointStatus}
+              />
+            </div>
+          )}
+          {graph && graph.nodes.length > 0 && filteredGraph.nodes.length === 0 && (
+            <div className="graph-empty">All site map pages are hidden by the current filters.</div>
+          )}
+          <svg
+            ref={svgRef}
+            className="graph-svg"
+            width="100%"
+            height="100%"
+            style={{
+              pointerEvents: !filteredGraph || filteredGraph.nodes.length === 0 ? "none" : "all",
+            }}
+          />
+          {filteredGraph && filteredGraph.nodes.length > 0 && (
+            <div className="graph-legend">
+              {graphView === "user" && run?.credentials?.length > 1 ? (
+                <>
+                  {(run.credentials || []).map((credential, index) => (
+                    <div key={credential.id} className="legend-item">
+                      <span
+                        className="legend-dot"
+                        style={{ background: USER_PALETTE[index % USER_PALETTE.length] }}
+                      />
+                      {credential.label || credential.username}
+                    </div>
+                  ))}
+                  <div className="legend-item">
+                    <span className="legend-dot" style={{ background: USER_ANONYMOUS_COLOR }} />
+                    Unauthenticated
+                  </div>
+                  <div className="legend-item">
+                    <span className="legend-dot" style={{ background: USER_MULTIPLE_COLOR }} />
+                    Multiple users
+                  </div>
+                  <div className="legend-item">
+                    <span className="legend-dot" style={{ background: USER_ALL_COLOR }} />
+                    All users
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="legend-item">
+                    <span className="legend-dot" style={{ background: SCOPE_IN_COLOR }} />
+                    In Scope
+                  </div>
+                  <div className="legend-item">
+                    <span className="legend-dot" style={{ background: SCOPE_OUT_COLOR }} />
+                    Out of Scope
+                  </div>
+                  <div className="legend-item">
                     <span
                       className="legend-dot"
-                      style={{ background: USER_PALETTE[index % USER_PALETTE.length] }}
+                      style={{ background: "var(--bg)", border: "2px solid #fbbf24" }}
                     />
-                    {credential.label || credential.username}
+                    Failed
                   </div>
-                ))}
-                <div className="legend-item">
-                  <span className="legend-dot" style={{ background: USER_ANONYMOUS_COLOR }} />
-                  Unauthenticated
-                </div>
-                <div className="legend-item">
-                  <span className="legend-dot" style={{ background: USER_MULTIPLE_COLOR }} />
-                  Multiple users
-                </div>
-                <div className="legend-item">
-                  <span className="legend-dot" style={{ background: USER_ALL_COLOR }} />
-                  All users
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="legend-item">
-                  <span className="legend-dot" style={{ background: SCOPE_IN_COLOR }} />
-                  In Scope
-                </div>
-                <div className="legend-item">
-                  <span className="legend-dot" style={{ background: SCOPE_OUT_COLOR }} />
-                  Out of Scope
-                </div>
-                <div className="legend-item">
-                  <span
-                    className="legend-dot"
-                    style={{ background: "var(--bg)", border: "2px solid #fbbf24" }}
-                  />
-                  Failed
-                </div>
-              </>
-            )}
-            <div className="legend-item">
-              <span
-                className="pulse-legend-dot"
-                style={{ border: "2px solid #f59e0b", background: "transparent" }}
-              />
-              Pending LLM Analysis
+                </>
+              )}
+              <div className="legend-item">
+                <span
+                  className="pulse-legend-dot"
+                  style={{ border: "2px solid #f59e0b", background: "transparent" }}
+                />
+                Pending LLM Analysis
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
       {selectedNode && (
         <SitemapPageInspector
