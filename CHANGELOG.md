@@ -13,7 +13,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
-- **Independent upstream proxies**: Testing traffic and LLM requests can now use separate upstream proxy URLs. Existing proxy settings are copied to both traffic types during upgrade so current routing continues unchanged.
+- **Independent upstream proxies**: Testing traffic and LLM requests can now use separate upstream proxy URLs. Existing proxy settings are copied to both traffic types during upgrade so current routing continues unchanged, and crawler model requests use the configured LLM proxy.
 - **Console quit hint**: The terminal console now labels Ctrl+C as Quit instead of Stop.
 - **Animated console logo**: This is possibly the most important feature of the app so far.
 - **Test run status**: Test run headers now show one Active or Inactive badge instead of separate badges for the crawler, Test Lead, and A.L.I.C.E.

@@ -464,10 +464,15 @@ def _crawl_progress(
 
 
 async def _do_crawl(run_id: int) -> None:
+    with Session(get_engine()) as s:
+        upstream_proxy = get_upstream_proxy_config(s)
+    llm_proxy_url = upstream_proxy.llm_proxy_url if upstream_proxy.proxy_llm else None
+    llm_svc.set_llm_proxy(llm_proxy_url)
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
     try:
         await _do_crawl_inner(run_id)
     finally:
+        llm_svc.set_llm_proxy(None)
         llm_svc.clear_run_context()
 
 
