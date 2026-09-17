@@ -22,6 +22,7 @@ export function extractUrlExtension(url) {
 }
 
 export function isApiGraphNode(node) {
+  if (node?.state_kind === "api" || node?.isApiGroup) return true;
   const context = String(node?.context || "").trimStart();
   if (/^\[api endpoint\b/i.test(context)) return true;
   return /^API\s+(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b/i.test(node?.title || "");

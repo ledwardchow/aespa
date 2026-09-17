@@ -100,7 +100,12 @@ test("site and SAST navigation rows open from their non-interactive cells", asyn
   expect(errors).toEqual([]);
 });
 
-test("site map filters extensions and optionally hides APIs", async ({ page }) => {
+test("site map groups API variants and keeps individual and hidden modes", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
   await installFixtures(page);
   await page.route("**/api/test-runs/1/graph", (route) =>
     route.fulfill({
@@ -111,45 +116,73 @@ test("site map filters extensions and optionally hides APIs", async ({ page }) =
           { id: 3, url: "http://example.test/account", depth: 1, in_scope: true },
           {
             id: 4,
-            url: "http://example.test/api/account",
+            url: "http://example.test/api/account?id=123",
             title: "API GET 200 /api/account",
             context: "[API endpoint] Observed GET request during crawl.",
             depth: 1,
             in_scope: true,
           },
           { id: 5, url: "http://example.test/assets/app.js", depth: 1, in_scope: true },
+          {
+            id: 6,
+            url: "http://example.test/api/account?id=456&view=full",
+            title: "API GET 200 /api/account",
+            context: "[API endpoint] Observed GET request during crawl.",
+            depth: 2,
+            in_scope: true,
+          },
         ],
         links: [
           { source: 1, target: 2 },
           { source: 1, target: 3 },
           { source: 1, target: 4 },
           { source: 1, target: 5 },
+          { source: 3, target: 6 },
         ],
       },
     }),
   );
 
   await page.goto("/#/runs/1/sitemap");
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 
   const extensionFilter = page.getByLabel("Exclude site map extensions");
-  const hideApis = page.getByRole("checkbox", { name: "Hide APIs" });
+  const apiDisplay = page.getByLabel("API display");
   await expect(extensionFilter).toHaveValue(".svg, .js");
-  await expect(hideApis).not.toBeChecked();
-  await expect(page.getByText("3 shown · 2 hidden", { exact: true })).toBeVisible();
+  await expect(apiDisplay).toHaveValue("grouped");
+  await expect(
+    page.getByText("3 shown · 2 API requests in 1 endpoints · 2 files hidden", { exact: true }),
+  ).toBeVisible();
   await expect(page.locator("g.node-group")).toHaveCount(3);
-  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-extension-filter.png") });
+  const apiNode = page.locator("g.node-group", { hasText: "GET /api/account" });
+  await expect(apiNode).toBeVisible();
+  await apiNode.dispatchEvent("click");
+  const apiPanel = page.locator(".api-group-panel");
+  await expect(
+    apiPanel.locator(".graph-panel-section-label", { hasText: "Request variants" }),
+  ).toBeVisible();
+  await expect(
+    apiPanel.locator(".graph-panel-section-label", { hasText: "Calling pages" }),
+  ).toBeVisible();
+  await expect(apiPanel.locator(".api-parameter-row code", { hasText: "id" })).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-grouped-api.png") });
 
-  await hideApis.check();
-  await expect(page.getByText("2 shown · 3 hidden", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Show individual requests" }).click();
+  await expect(apiDisplay).toHaveValue("individual");
+  await expect(page.getByText("4 shown · 2 files hidden", { exact: true })).toBeVisible();
+  await expect(page.locator("g.node-group")).toHaveCount(4);
+
+  await apiDisplay.selectOption("hidden");
+  await expect(
+    page.getByText("2 shown · 2 APIs hidden · 2 files hidden", { exact: true }),
+  ).toBeVisible();
   await expect(page.locator("g.node-group")).toHaveCount(2);
 
   await extensionFilter.fill("");
-  await expect(page.getByText("4 shown · 1 hidden", { exact: true })).toBeVisible();
+  await expect(page.getByText("4 shown · 2 APIs hidden", { exact: true })).toBeVisible();
   await expect(page.locator("g.node-group")).toHaveCount(4);
-
-  await hideApis.uncheck();
-  await expect(page.getByText("5 shown", { exact: true })).toBeVisible();
-  await expect(page.locator("g.node-group")).toHaveCount(5);
+  expect(errors).toEqual([]);
 });
 
 test("System Settings groups feature visibility and debug controls into tabs", async ({ page }) => {

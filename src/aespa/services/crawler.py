@@ -4403,6 +4403,7 @@ async def _promote_api_calls(
                     "node": {
                         "id": page_id,
                         "url": url,
+                        "state_kind": "api",
                         "title": api_title,
                         "depth": source_depth + 1,
                         "status": "crawled",
@@ -4492,6 +4493,7 @@ def _save_api_page(
         cp = CrawledPage(
             test_run_id=run_id,
             url=call.get("url") or "",
+            state_kind="api",
             title=title,
             page_text=_api_page_text(call)[:10_000],
             screenshot_b64=None,
