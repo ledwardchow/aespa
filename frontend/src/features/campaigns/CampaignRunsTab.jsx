@@ -5,6 +5,7 @@ import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useState, useEffect } from "react";
 
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import {
   campaignDisplayStatus,
@@ -200,7 +201,11 @@ export function CampaignRunsTab({ systemId, campaign, error, resumeSource, resum
             </thead>
             <tbody>
               {sourceRuns.map((m) => (
-                <tr key={m.id}>
+                <NavigationRow
+                  key={m.id}
+                  href={m.sast_run_id ? `#/sast-runs/${m.sast_run_id}/progress` : undefined}
+                  label={`Open ${componentNames[m.component_id] || `Component #${m.component_id}`}`}
+                >
                   <td>{componentNames[m.component_id] || `Component #${m.component_id}`}</td>
                   <td>
                     <StatusBadge status={campaignMemberDisplayStatus(m)} />
@@ -225,7 +230,7 @@ export function CampaignRunsTab({ systemId, campaign, error, resumeSource, resum
                       </button>
                     )}
                   </td>
-                </tr>
+                </NavigationRow>
               ))}
               {sourceRuns.length === 0 && (
                 <tr>
@@ -252,7 +257,17 @@ export function CampaignRunsTab({ systemId, campaign, error, resumeSource, resum
             </thead>
             <tbody>
               {targetRuns.map((m) => (
-                <tr key={m.id}>
+                <NavigationRow
+                  key={m.id}
+                  href={
+                    m.test_run_id
+                      ? `#/runs/${m.test_run_id}/status`
+                      : m.api_test_run_id
+                        ? `#/api-runs/${m.api_test_run_id}/status`
+                        : undefined
+                  }
+                  label={`Open ${targetNames[m.target_id] || `Target #${m.target_id}`}`}
+                >
                   <td>{targetNames[m.target_id] || `#${m.target_id}`}</td>
                   <td>{m.target_type === "site" ? "Web" : "API"}</td>
                   <td>
@@ -283,7 +298,7 @@ export function CampaignRunsTab({ systemId, campaign, error, resumeSource, resum
                       </button>
                     )}
                   </td>
-                </tr>
+                </NavigationRow>
               ))}
               {targetRuns.length === 0 && (
                 <tr>

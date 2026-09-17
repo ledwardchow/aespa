@@ -13,6 +13,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Clickable navigation rows**: Site, System, API collection, campaign, active job, benchmark, and web, API, or SAST run tables now open their destination when the non-interactive area of a row is clicked. Existing row actions such as Edit, Export, Delete, Stop, and New campaign continue to work independently.
 - **Independent upstream proxies**: Testing traffic and LLM requests can now use separate upstream proxy URLs. Existing proxy settings are copied to both traffic types during upgrade so current routing continues unchanged, and crawler model requests use the configured LLM proxy.
 - **Console quit hint**: The terminal console now labels Ctrl+C as Quit instead of Stop.
 - **Animated console logo**: This is possibly the most important feature of the app so far.

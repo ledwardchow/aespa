@@ -8,6 +8,7 @@ import { fmtDate } from "../../shared/lib/dates.js";
 
 import { nav } from "../../shared/navigation/router.js";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 
 // ── Active jobs ───────────────────────────────────────────────────────────────
@@ -309,7 +310,7 @@ export function ActiveJobsPage() {
                           ? `#/api-runs/${j.run_id}/status`
                           : `#/runs/${j.run_id}`;
                   return (
-                    <tr key={key}>
+                    <NavigationRow key={key} href={runLink} label={`Open ${j.run_name}`}>
                       <td>
                         <a
                           href={runLink}
@@ -358,7 +359,7 @@ export function ActiveJobsPage() {
                           </button>
                         </div>
                       </td>
-                    </tr>
+                    </NavigationRow>
                   );
                 })}
               </tbody>

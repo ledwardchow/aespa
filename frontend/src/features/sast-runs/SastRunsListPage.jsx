@@ -7,6 +7,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { nav } from "../../shared/navigation/router.js";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 
@@ -240,7 +241,11 @@ export function SastRunsListPage() {
               </thead>
               <tbody>
                 {sortedRuns.map((r) => (
-                  <tr key={r.id}>
+                  <NavigationRow
+                    key={r.id}
+                    href={`#/sast-runs/${r.id}/progress`}
+                    label={`View ${r.name}`}
+                  >
                     <td>
                       <a
                         href={`#/sast-runs/${r.id}/progress`}
@@ -306,7 +311,7 @@ export function SastRunsListPage() {
                         </button>
                       </div>
                     </td>
-                  </tr>
+                  </NavigationRow>
                 ))}
               </tbody>
             </table>

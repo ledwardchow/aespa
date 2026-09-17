@@ -3,6 +3,7 @@ import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { nav } from "../../shared/navigation/router.js";
 
 function asArray(value) {
@@ -170,7 +171,11 @@ export function BenchmarkLabPage() {
                   {comparisons.map((comparison) => {
                     const metrics = asObject(comparison.metrics_json);
                     return (
-                      <tr key={comparison.id}>
+                      <NavigationRow
+                        key={comparison.id}
+                        href={`#/benchmark-lab/comparisons/${comparison.id}`}
+                        label={`Open ${comparison.name}`}
+                      >
                         <td>{comparison.name}</td>
                         <td>{metrics.eligible_count ?? comparison.evaluation_ids?.length ?? 0}</td>
                         <td>
@@ -184,7 +189,7 @@ export function BenchmarkLabPage() {
                             Open →
                           </a>
                         </td>
-                      </tr>
+                      </NavigationRow>
                     );
                   })}
                 </tbody>
@@ -214,7 +219,11 @@ export function BenchmarkLabPage() {
                   const metrics = asObject(evaluation.metrics_json || evaluation.metrics);
                   const recall = metrics.full_recall ?? metrics.recall;
                   return (
-                    <tr key={evaluation.id}>
+                    <NavigationRow
+                      key={evaluation.id}
+                      href={`#/benchmark-lab/evaluations/${evaluation.id}`}
+                      label={`Open ${evaluation.name || `Evaluation #${evaluation.id}`}`}
+                    >
                       <td>
                         <a
                           className="benchmark-name"
@@ -254,7 +263,7 @@ export function BenchmarkLabPage() {
                           Open →
                         </a>
                       </td>
-                    </tr>
+                    </NavigationRow>
                   );
                 })}
               </tbody>

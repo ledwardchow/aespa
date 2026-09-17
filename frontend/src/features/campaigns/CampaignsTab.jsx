@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 import { nav } from "../../shared/navigation/router.js";
 
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { fmtDate } from "../../shared/lib/dates.js";
@@ -80,7 +81,11 @@ export function CampaignsTab({ systemId }) {
             </thead>
             <tbody>
               {campaigns.map((c) => (
-                <tr key={c.id}>
+                <NavigationRow
+                  key={c.id}
+                  href={`#/systems/${systemId}/campaigns/${c.id}`}
+                  label={`Open ${c.name}`}
+                >
                   <td>
                     <a href={`#/systems/${systemId}/campaigns/${c.id}`} style={{ fontWeight: 600 }}>
                       {c.name}
@@ -104,7 +109,7 @@ export function CampaignsTab({ systemId }) {
                       </button>
                     </div>
                   </td>
-                </tr>
+                </NavigationRow>
               ))}
             </tbody>
           </table>

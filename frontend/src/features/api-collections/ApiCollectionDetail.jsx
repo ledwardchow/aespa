@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { nav } from "../../shared/navigation/router.js";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 
 const API_COLLECTION_TABS = [
@@ -856,7 +857,11 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                         </thead>
                         <tbody>
                           {sortedApiRuns.map((r) => (
-                            <tr key={r.id}>
+                            <NavigationRow
+                              key={r.id}
+                              href={`#/api-runs/${r.id}/status`}
+                              label={`Open ${r.name}`}
+                            >
                               <td>
                                 <a
                                   href={`#/api-runs/${r.id}/status`}
@@ -892,7 +897,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                                   Open
                                 </a>
                               </td>
-                            </tr>
+                            </NavigationRow>
                           ))}
                         </tbody>
                       </table>
