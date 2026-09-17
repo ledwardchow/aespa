@@ -15,6 +15,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Animated console logo**: This is possibly the most important feature of the app so far.
 - **Site map readability**: Page nodes now use larger circles and stronger labels than API nodes, regardless of the count shown on grouped nodes. Page-to-page links are thicker and brighter than links involving APIs. Nodes have more space between neighbours and spread around their connections without separate page and API columns. Status updates keep the live layout running instead of stopping it partway through.
 - **Compact user crawl progress**: Multi-user web crawls now share one compact bar with the site map display settings. Per-user page counts and current URLs expand into compact cards across the row, while the active crawl stage stays visible.
 - **Clickable navigation rows**: Site, System, API collection, campaign, active job, benchmark, and web, API, or SAST run tables now open their destination when the non-interactive area of a row is clicked. Existing row actions such as Edit, Export, Delete, Stop, and New campaign continue to work independently.
