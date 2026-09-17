@@ -10810,6 +10810,7 @@ async def _do_agentic_thinking_loop(
                         response_body=resp_body,
                         authenticated=bool(cookie_list),
                         browser_observation=True,
+                        source_page_id=br_page_id,
                     )
                 except Exception as _route_exc:
                     log.debug("Dynamic browser route enrichment failed: %s", _route_exc)
@@ -12039,6 +12040,7 @@ async def _do_agentic_thinking_loop(
                             for key in hr_headers
                         )
                     ),
+                    source_page_id=hr_page_id,
                 )
             except Exception as _route_exc:
                 log.debug("Dynamic HTTP route enrichment failed: %s", _route_exc)

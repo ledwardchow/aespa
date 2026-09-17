@@ -8,7 +8,12 @@ export function useSelectedSitemapPage(runId) {
   const [pageViews, setPageViews] = useState([]);
 
   useEffect(() => {
-    if (!selectedNode || selectedNode.isApiGroup) {
+    if (
+      !selectedNode ||
+      selectedNode.isApiGroup ||
+      selectedNode.isPageGroup ||
+      selectedNode.isDiscoveryGroup
+    ) {
       setPageDetail(null);
       setPageViews([]);
       return;

@@ -895,6 +895,70 @@ def test_get_scanner_sessions_redacts_auth_material():
         engine.dispose()
 
 
+def test_get_graph_recovers_dynamic_scan_links_from_saved_traffic():
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import CrawledPage, Site, TestRun, TrafficEntry
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(site_id=site.id, name="Dynamic graph recovery")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            source_page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/account",
+                title="Account",
+            )
+            dynamic_page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/api/preferences",
+                title="Dynamic API route",
+                llm_context="Discovered during Dynamic Scan.",
+                state_kind="api",
+            )
+            session.add_all([source_page, dynamic_page])
+            session.commit()
+            session.refresh(source_page)
+            session.refresh(dynamic_page)
+            session.add(
+                TrafficEntry(
+                    test_run_id=run.id,
+                    source="httpx",
+                    method="GET",
+                    url=dynamic_page.url,
+                    status=200,
+                    page_id=source_page.id,
+                )
+            )
+            session.commit()
+
+            graph = test_runs_api.get_graph(run.id, session=session)
+
+        recovered = [
+            link for link in graph.links if link.action_kind == "dynamic_request"
+        ]
+        assert len(recovered) == 1
+        assert recovered[0].source == source_page.id
+        assert recovered[0].target == dynamic_page.id
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_update_scanner_session_renames_and_deactivates():
     from aespa.api import test_runs as test_runs_api
     from aespa.models import Site, TestRun
@@ -1357,7 +1421,7 @@ def test_get_graph_reports_unauthenticated_access():
         engine.dispose()
 
 
-def test_get_graph_hides_404_failures_but_keeps_other_failures(client: TestClient):
+def test_get_graph_hides_failed_crawls(client: TestClient):
     from aespa.api import test_runs as test_runs_api
     from aespa.models import CrawledPage, Site, TestRun
 
@@ -1402,10 +1466,87 @@ def test_get_graph_hides_404_failures_but_keeps_other_failures(client: TestClien
 
             graph = test_runs_api.get_graph(run.id, session=session)
 
-        assert len(graph.nodes) == 1
-        node = graph.nodes[0]
-        assert node.status == "failed"
-        assert node.error_message == "Navigation timeout"
+        assert graph.nodes == []
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_get_graph_hides_pages_with_only_4xx_responses():
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import CrawledPage, Site, TestRun, TrafficEntry
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(site_id=site.id, name="Run 1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            session.add_all(
+                [
+                    CrawledPage(
+                        test_run_id=run.id,
+                        url="https://target.local/rejected",
+                    ),
+                    CrawledPage(
+                        test_run_id=run.id,
+                        url="https://target.local/mixed",
+                    ),
+                    CrawledPage(
+                        test_run_id=run.id,
+                        url="https://target.local/no-traffic",
+                    ),
+                    TrafficEntry(
+                        test_run_id=run.id,
+                        source="playwright",
+                        method="GET",
+                        url="https://target.local/rejected",
+                        status=401,
+                    ),
+                    TrafficEntry(
+                        test_run_id=run.id,
+                        source="playwright",
+                        method="GET",
+                        url="https://target.local/rejected",
+                        status=404,
+                    ),
+                    TrafficEntry(
+                        test_run_id=run.id,
+                        source="playwright",
+                        method="GET",
+                        url="https://target.local/mixed",
+                        status=403,
+                    ),
+                    TrafficEntry(
+                        test_run_id=run.id,
+                        source="playwright",
+                        method="GET",
+                        url="https://target.local/mixed",
+                        status=200,
+                    ),
+                ]
+            )
+            session.commit()
+
+            graph = test_runs_api.get_graph(run.id, session=session)
+
+        assert {node.url for node in graph.nodes} == {
+            "https://target.local/mixed",
+            "https://target.local/no-traffic",
+        }
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

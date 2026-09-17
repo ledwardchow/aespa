@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlmodel import Session, select
 
-from aespa.models import CrawledPage, PageOwaspTest, Site, TestRun
+from aespa.models import CrawledPage, PageLink, PageOwaspTest, Site, TestRun
 from aespa.services.web_route_inventory import (
     classify_http_exchange,
     enrich_dynamic_route,
@@ -189,3 +189,38 @@ def test_dynamic_route_enrichment_reuses_existing_page_and_llm_analysis(db_engin
         assert applicable["A01"] is True
         assert applicable["A05"] is True
         assert applicable["A07"] is True
+
+
+def test_dynamic_route_enrichment_records_source_page_link(db_engine, run):
+    with Session(db_engine) as session:
+        source_page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/account",
+            title="Account",
+        )
+        session.add(source_page)
+        session.commit()
+        session.refresh(source_page)
+        source_page_id = source_page.id
+
+    page_id = asyncio.run(
+        enrich_dynamic_route(
+            run_id=run.id,
+            llm_cfg=None,
+            url="https://target.local/api/account/preferences",
+            method="GET",
+            response_status=200,
+            source_page_id=source_page_id,
+        )
+    )
+
+    with Session(db_engine) as session:
+        link = session.exec(
+            select(PageLink)
+            .where(PageLink.test_run_id == run.id)
+            .where(PageLink.source_page_id == source_page_id)
+            .where(PageLink.target_page_id == page_id)
+        ).one()
+
+    assert link.action_kind == "dynamic_request"
+    assert link.link_text == "Observed during Dynamic Scan"

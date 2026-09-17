@@ -202,6 +202,7 @@ label {
 input[type="text"],
 input[type="url"],
 input[type="password"],
+.cred-row select,
 textarea {
   width: 100%;
   background: var(--panel-2);
@@ -217,6 +218,7 @@ textarea {
   outline: none;
 }
 input:focus,
+.cred-row select:focus,
 textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-glow);
@@ -258,6 +260,7 @@ textarea {
 }
 
 fieldset {
+  min-width: 0;
   border: 1px solid var(--border-2);
   border-radius: 8px;
   padding: 14px;
@@ -290,6 +293,7 @@ legend {
   padding-bottom: 1px;
 }
 .login-fields-editor {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -303,22 +307,52 @@ legend {
 }
 .login-field-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) auto minmax(140px, 1fr) auto;
-  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
   align-items: end;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
 }
 .login-field-sensitive {
+  grid-column: 1;
+  grid-row: 3;
   display: flex;
   align-items: center;
   gap: 6px;
   min-height: 34px;
   font-size: 12px;
 }
-@media (max-width: 900px) {
+.login-field-row > .field {
+  min-width: 0;
+}
+.login-field-row > .field:nth-of-type(3) {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+.login-field-row > .btn {
+  grid-column: 2;
+  grid-row: 3;
+  justify-self: end;
+  align-self: center;
+}
+.login-fields-editor > .btn {
+  align-self: flex-start;
+}
+@container (max-width: 400px) {
   .login-field-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .login-field-row > .field {
+    grid-column: 1 / -1;
+  }
+  .login-field-row > .field:nth-of-type(3) {
+    grid-row: 3;
+  }
+  .login-field-sensitive,
+  .login-field-row > .btn {
+    grid-row: 4;
   }
 }
 

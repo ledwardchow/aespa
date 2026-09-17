@@ -450,22 +450,142 @@
 }
 
 .sitemap-filter-panel {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 14px;
+  display: grid;
+  grid-template-columns: fit-content(440px) minmax(0, 1fr);
+  flex-shrink: 0;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   background: var(--bg-2, var(--panel));
+}
+
+.sitemap-filter-summary {
+  min-width: 0;
+  align-content: start;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  align-items: center;
+  display: flex;
   flex-wrap: wrap;
+  gap: 2px 10px;
+  min-height: 34px;
+  padding: 3px 14px;
+}
+
+.sitemap-filter-panel:has(.crawl-user-progress-summary) .sitemap-filter-summary {
+  grid-column: 2;
+}
+
+.sitemap-filter-summary .traffic-count-label,
+.crawl-user-progress-count {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.sitemap-filter-toggle {
+  align-items: center;
+  display: inline-flex;
+  flex: none;
+  gap: 6px;
+}
+
+.sitemap-filter-toggle span {
+  color: var(--muted);
+  font-size: 10px;
+  width: 8px;
+}
+
+.sitemap-filter-controls {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 14px;
+}
+
+.sitemap-filter-controls[hidden] {
+  display: none;
+}
+
+.sitemap-filter-controls .traffic-filter-ext {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.sitemap-filter-controls input,
+.sitemap-filter-controls select {
+  box-sizing: border-box;
+  height: 30px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  padding: 0 8px;
+  color-scheme: dark;
 }
 
 .sitemap-filter-panel .traffic-filter {
-  max-width: 260px;
+  width: 140px;
+  min-width: 0;
 }
 
 .sitemap-api-display select {
-  min-width: 156px;
+  width: 156px;
+}
+
+.sitemap-filter-controls input:focus-visible,
+.sitemap-filter-controls select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.btn.sitemap-filter-toggle,
+.btn.crawl-user-progress-toggle {
+  min-height: 28px;
+  padding: 3px 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.btn.sitemap-filter-toggle:hover,
+.btn.crawl-user-progress-toggle:hover {
+  color: var(--text);
+}
+
+@media (max-width: 640px) {
+  .sitemap-filter-panel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sitemap-filter-summary,
+  .crawl-user-progress-summary {
+    padding-inline: 10px;
+    gap: 2px;
+  }
+
+  .sitemap-filter-controls .traffic-filter-ext {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .sitemap-filter-controls input,
+  .sitemap-filter-controls select {
+    max-width: 60%;
+  }
 }
 
 .graph-link-count {
@@ -484,29 +604,6 @@
   background: var(--bg);
   min-height: 0;
   overflow: hidden;
-}
-
-.sitemap-lane-labels {
-  color: var(--muted);
-  display: grid;
-  font-size: 10px;
-  font-weight: 700;
-  grid-template-columns: 1fr 1fr;
-  inset: 14px 0 auto;
-  letter-spacing: 0.08em;
-  pointer-events: none;
-  position: absolute;
-  text-align: center;
-  text-transform: uppercase;
-  z-index: 1;
-}
-
-.sitemap-lane-labels span:first-child {
-  transform: translateX(6%);
-}
-
-.sitemap-lane-labels span:last-child {
-  transform: translateX(2%);
 }
 
 .graph-svg {
@@ -668,21 +765,66 @@
 }
 
 /* Per-credential crawl progress */
-.crawl-user-progress {
+.crawl-user-progress-panel {
+  display: contents;
+}
+
+.crawl-user-progress-summary {
+  min-width: 0;
+  align-content: center;
+  grid-column: 1;
+  grid-row: 1;
+  align-items: center;
   display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 8px 28px 10px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  margin: 0 -28px;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-height: 34px;
+  padding: 3px 14px;
+}
+
+.crawl-user-progress-toggle {
+  align-items: center;
+  display: inline-flex;
+  flex: none;
+  gap: 6px;
+}
+
+.crawl-user-progress-toggle span {
+  color: var(--muted);
+  font-size: 10px;
+  width: 8px;
+}
+
+.crawl-user-progress-count {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.crawl-user-progress {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 14px 8px;
+}
+
+.crawl-user-progress[hidden] {
+  display: none;
 }
 .crawl-user-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px;
-  font-size: 12px;
+  gap: 3px 7px;
+  width: 200px;
+  max-width: 100%;
   min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  font-size: 11px;
 }
 .crawl-user-dot {
   width: 8px;
@@ -705,8 +847,8 @@
   }
 }
 .crawl-user-name {
-  width: 90px;
-  font-weight: 600;
+  min-width: 0;
+  font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -727,14 +869,14 @@
   transition: width 0.7s ease;
 }
 .crawl-user-pages {
-  width: 38px;
+  font-variant-numeric: tabular-nums;
   text-align: right;
   flex-shrink: 0;
   color: var(--muted);
   font-size: 11px;
 }
 .crawl-user-url {
-  flex: 1;
+  grid-column: 2 / -1;
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
@@ -1022,12 +1164,31 @@
   border-bottom-color: var(--accent);
 }
 .web-run-tab-bar {
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  scrollbar-width: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  padding-inline: 14px;
 }
-.web-run-tab-bar::-webkit-scrollbar {
+.web-run-tab-links {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.web-run-tab-actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-block: 5px;
+  margin-left: auto;
+}
+.web-run-tab-actions:empty {
   display: none;
+}
+.web-run-tab-bar .tab-btn {
+  padding-inline: 10px;
 }
 .activity-live-dot {
   display: inline-block;
@@ -1348,4 +1509,91 @@
   color: var(--text-2);
   cursor: pointer;
   user-select: none;
+}
+
+/* Use explicit rows and columns instead of independently wrapping controls. */
+.web-run-tab-bar {
+  container-type: inline-size;
+}
+.web-run-section-select {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding-block: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.web-run-section-select select {
+  height: 30px;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 0 8px;
+  font: inherit;
+  color-scheme: dark;
+}
+@container (max-width: 1050px) {
+  .web-run-tab-links {
+    display: none;
+  }
+  .web-run-section-select {
+    display: flex;
+    flex: 1 1 220px;
+  }
+}
+@media (max-width: 1100px) {
+  .sitemap-filter-panel {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  }
+  .sitemap-filter-summary,
+  .crawl-user-progress-summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    align-items: start;
+    gap: 0;
+    padding: 5px 14px 7px;
+  }
+  .sitemap-filter-panel:has(.crawl-user-progress-summary) .sitemap-filter-summary {
+    border-left: 1px solid var(--border);
+  }
+  .sitemap-filter-toggle,
+  .crawl-user-progress-toggle {
+    justify-self: start;
+  }
+  .sitemap-filter-controls {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: start;
+    gap: 14px;
+  }
+  .sitemap-filter-controls .traffic-filter-ext {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px;
+  }
+  .sitemap-filter-controls input,
+  .sitemap-filter-controls select,
+  .sitemap-filter-panel .traffic-filter {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+  @media (max-width: 640px) {
+    .sitemap-filter-controls {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 8px;
+    }
+    .sitemap-filter-controls .traffic-filter-ext {
+      grid-template-columns: 100px minmax(0, 1fr);
+      align-items: center;
+    }
+    .sitemap-filter-summary,
+    .crawl-user-progress-summary {
+      padding-inline: 10px;
+    }
+  }
 }

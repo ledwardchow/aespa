@@ -12,6 +12,9 @@ const needsLlmAnalysis = (node) =>
   node.analysis_status !== "skipped" &&
   (node.analysis_status === "pending" || !node.context);
 
+const isGroupedNode = (node) => node.isApiGroup || node.isPageGroup || node.isDiscoveryGroup;
+const isApiLaneNode = (node) => node.isApiGroup || node.isApiNode;
+
 // Owns the imperative D3 lifecycle while TestRunDetail keeps the selected-node
 // state and the page-detail actions that depend on it.
 export function useSitemapGraph({
@@ -157,14 +160,14 @@ export function useSitemapGraph({
         "x",
         d3
           .forceX((item) =>
-            layoutMode === "api-lanes" ? width * (item.isApiGroup ? 0.76 : 0.28) : width / 2,
+            layoutMode === "api-lanes" ? width * (isApiLaneNode(item) ? 0.76 : 0.28) : width / 2,
           )
           .strength(layoutMode === "api-lanes" ? 0.28 : gravityRef.current),
       )
       .force("y", d3.forceY(height / 2).strength(gravityRef.current))
       .force(
         "collision",
-        d3.forceCollide((item) => (item.isApiGroup ? 34 : 22)),
+        d3.forceCollide((item) => (isGroupedNode(item) ? 34 : 22)),
       );
     const node = graphGroup
       .append("g")
@@ -209,12 +212,12 @@ export function useSitemapGraph({
     node
       .append("circle")
       .attr("class", "node-dot")
-      .attr("r", (item) => (item.isApiGroup ? 15 : 10))
+      .attr("r", (item) => (isGroupedNode(item) ? 15 : 10))
       .attr("fill", nodeColor)
       .attr("stroke", (node) => (node.status === "failed" ? "#fbbf24" : "var(--bg)"))
       .attr("stroke-width", 2);
     node
-      .filter((item) => item.isApiGroup)
+      .filter(isGroupedNode)
       .append("text")
       .attr("class", "api-node-count")
       .attr("dy", 4)
@@ -223,7 +226,7 @@ export function useSitemapGraph({
       .attr("font-size", "10px")
       .attr("font-weight", "700")
       .attr("pointer-events", "none")
-      .text((item) => item.variantCount);
+      .text((item) => item.variantCount ?? item.discoveryCount);
     const rootNode = nodes.find((node) => node.depth === 0);
     let baseHost = null;
     try {
@@ -231,13 +234,15 @@ export function useSitemapGraph({
     } catch {}
     node
       .append("text")
-      .attr("dy", (item) => (item.isApiGroup ? 30 : 22))
+      .attr("dy", (item) => (isGroupedNode(item) ? 30 : 22))
       .attr("text-anchor", "middle")
       .attr("fill", "var(--muted)")
       .attr("font-size", "10px")
       .attr("pointer-events", "none")
       .text((node) => {
+        if (node.isDiscoveryGroup) return "Direct scan discoveries";
         if (node.isApiGroup) return `${node.apiMethod} ${node.apiPath}`;
+        if (node.isPageGroup) return node.routePath;
         try {
           const url = new URL(node.url);
           const address =
@@ -249,6 +254,9 @@ export function useSitemapGraph({
         }
       });
     node.append("title").text((node) => {
+      if (node.isDiscoveryGroup) {
+        return `${node.discoveryCount} routes observed without a recorded source page`;
+      }
       const err =
         node.status === "failed" && node.error_message
           ? `\n(Failed: ${node.error_message})`
