@@ -184,6 +184,23 @@ test("site map groups page and API variants with individual modes", async ({ pag
   ).toBeVisible();
   await expect(page.locator("g.node-group")).toHaveCount(4);
   await expect(page.locator(".sitemap-lane-labels")).toHaveCount(0);
+  const nodeSearch = page.getByRole("searchbox", { name: "Search site map nodes" });
+  await nodeSearch.fill("ORDER 456");
+  await expect(page.locator(".sitemap-search-match")).toHaveCount(1);
+  await expect(page.locator(".sitemap-search-match")).toContainText("/orders/{id}");
+  await expect(page.locator(".sitemap-search [role=status]")).toHaveText("1 match");
+  await expect(page.locator("g.node-group")).toHaveCount(4);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-node-search.png") });
+  await nodeSearch.fill("no-such-node");
+  await expect(page.locator(".sitemap-search-match")).toHaveCount(0);
+  await expect(page.locator(".sitemap-search [role=status]")).toHaveText("0 matches");
+  await nodeSearch.press("Escape");
+  await expect(nodeSearch).toHaveValue("");
+  await nodeSearch.fill("account");
+  await expect(page.locator(".sitemap-search-match")).toHaveCount(2);
+  await page.getByRole("button", { name: "Clear node search" }).click();
+  await expect(page.locator(".sitemap-search-match")).toHaveCount(0);
+
   await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-collapsed.png") });
 
   await displaySettings.click();

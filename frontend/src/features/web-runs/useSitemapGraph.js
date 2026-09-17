@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as d3 from "d3";
 import { truncUrl } from "../../shared/lib/urls.js";
 import { getSitemapGravity } from "../../shared/lib/sitemapPreferences.js";
+import { markSiteEntries } from "./sitemapRootLayout.js";
 import { scopeColor, userColor } from "../../shared/runs/presentation.jsx";
 
 const needsLlmAnalysis = (node) =>
@@ -12,12 +13,14 @@ const needsLlmAnalysis = (node) =>
   node.analysis_status !== "skipped" &&
   (node.analysis_status === "pending" || !node.context);
 
-const isGroupedNode = (node) => node.isApiGroup || node.isPageGroup || node.isDiscoveryGroup;
 const isApiLaneNode = (node) => node.isApiGroup || node.isApiNode;
+const isGroupedNode = (node) => node.isApiGroup || node.isPageGroup || node.isDiscoveryGroup;
 
 // Owns the imperative D3 lifecycle while TestRunDetail keeps the selected-node
 // state and the page-detail actions that depend on it.
 export function useSitemapGraph({
+  searchMatches,
+  site,
   graph,
   activeTab,
   graphView,
@@ -32,7 +35,6 @@ export function useSitemapGraph({
   const previousStructureKeyRef = useRef("");
   const [gravity, setGravity] = useState(getSitemapGravity);
   const gravityRef = useRef(gravity);
-  const hasSelection = Boolean(selectedNodeId);
 
   useEffect(() => {
     gravityRef.current = gravity;
@@ -64,7 +66,7 @@ export function useSitemapGraph({
         return `${source}>${target}`;
       })
       .join(",");
-    const structureKey = `${activeTab}:${graphView}:${layoutMode}:${hasSelection ? "panel" : "full"}:${nodeStructure}:${linkStructure}`;
+    const structureKey = `${activeTab}:${graphView}:${layoutMode}:${JSON.stringify([site?.base_url, site?.login_url, site?.credentials?.map((item) => item.login_url)])}:${nodeStructure}:${linkStructure}`;
 
     // Status-only updates retain the settled simulation and repaint in place.
     if (structureKey === previousStructureKeyRef.current && simulationRef.current) {
@@ -94,8 +96,6 @@ export function useSitemapGraph({
     previousStructureKeyRef.current = structureKey;
     const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove();
-    const width = svgRef.current.clientWidth || 800;
-    const height = svgRef.current.clientHeight || 500;
     const nodes = graph.nodes.map((node) => ({ ...node }));
     const nodeIds = new Set(nodes.map((n) => n.id));
     const links = graph.links
@@ -144,6 +144,9 @@ export function useSitemapGraph({
       .attr("font-size", "10px")
       .attr("pointer-events", "none")
       .text((item) => `×${item.count}`);
+    markSiteEntries(nodes, site);
+    const width = svgRef.current.clientWidth || 800;
+    const height = svgRef.current.clientHeight || 500;
     const simulation = d3
       .forceSimulation(nodes)
       .force(
@@ -212,7 +215,7 @@ export function useSitemapGraph({
     node
       .append("circle")
       .attr("class", "node-dot")
-      .attr("r", (item) => (isGroupedNode(item) ? 15 : 10))
+      .attr("r", (item) => (item.isSiteEntry ? 18 : isGroupedNode(item) ? 15 : 10))
       .attr("fill", nodeColor)
       .attr("stroke", (node) => (node.status === "failed" ? "#fbbf24" : "var(--bg)"))
       .attr("stroke-width", 2);
@@ -253,6 +256,16 @@ export function useSitemapGraph({
           return truncUrl(node.url, 36);
         }
       });
+    node
+      .filter((item) => item.entryRole)
+      .append("text")
+      .attr("class", "sitemap-entry-label")
+      .attr("y", -28)
+      .attr("text-anchor", "middle")
+      .attr("fill", "var(--text)")
+      .attr("font-size", 11)
+      .attr("font-weight", 600)
+      .text((item) => item.entryRole);
     node.append("title").text((node) => {
       if (node.isDiscoveryGroup) {
         return `${node.discoveryCount} routes observed without a recorded source page`;
@@ -266,7 +279,7 @@ export function useSitemapGraph({
       return node.state_label ? `${node.url}\n${node.state_label}${err}` : `${node.url}${err}`;
     });
     svg.on("click", () => onSelectNode(null));
-    simulation.on("tick", () => {
+    const render = () => {
       link
         .attr("x1", (node) => node.source.x)
         .attr("y1", (node) => node.source.y)
@@ -276,12 +289,34 @@ export function useSitemapGraph({
       linkCount
         .attr("x", (item) => (item.source.x + item.target.x) / 2)
         .attr("y", (item) => (item.source.y + item.target.y) / 2 - 5);
-    });
+    };
+    simulation.on("tick", render);
+    simulation.tick();
+    render();
     simulationRef.current = simulation;
-    return () => simulation.stop();
-    // Note: `gravity` is intentionally excluded here — changes to it are applied
-    // live to the existing simulation by the effect below, not by rebuilding the graph.
-  }, [activeTab, graph, graphView, hasSelection, layoutMode, nodeColor, onSelectNode]);
+    const observer = new window.ResizeObserver(() => {
+      const width = svgRef.current?.clientWidth;
+      const height = svgRef.current?.clientHeight;
+      if (!width || !height) return;
+      const bounds = graphGroup.node().getBBox();
+      const scale = Math.max(
+        0.2,
+        Math.min(1, width / (bounds.width + 80), height / (bounds.height + 80)),
+      );
+      svg.call(
+        zoom.transform,
+        d3.zoomIdentity
+          .translate(width / 2, height / 2)
+          .scale(scale)
+          .translate(-bounds.x - bounds.width / 2, -bounds.y - bounds.height / 2),
+      );
+    });
+    observer.observe(svgRef.current);
+    return () => {
+      observer.disconnect();
+      simulation.stop();
+    };
+  }, [activeTab, graph, graphView, site, layoutMode, nodeColor, onSelectNode]);
 
   useEffect(() => {
     if (!svgRef.current) return;
@@ -320,17 +355,7 @@ export function useSitemapGraph({
           ? 1
           : 0.08,
       );
-  }, [graph, selectedNodeId]);
-
-  // Retune the centering force in place when the gravity setting changes so
-  // dragging the debug slider doesn't reset node positions/zoom.
-  useEffect(() => {
-    const simulation = simulationRef.current;
-    if (!simulation) return;
-    if (layoutMode !== "api-lanes") simulation.force("x")?.strength(gravity);
-    simulation.force("y")?.strength(gravity);
-    simulation.alpha(0.3).restart();
-  }, [gravity, layoutMode]);
+  }, [activeTab, graph, graphView, layoutMode, site, nodeColor, onSelectNode, selectedNodeId]);
 
   useEffect(() => {
     if (!svgRef.current || !graph) return;
@@ -360,6 +385,23 @@ export function useSitemapGraph({
       }
     });
   }, [currentUrl, graph]);
+
+  // Retune the centering force in place when the gravity setting changes so
+  // dragging the debug slider doesn't reset node positions/zoom.
+  useEffect(() => {
+    const simulation = simulationRef.current;
+    if (!simulation) return;
+    if (layoutMode !== "api-lanes") simulation.force("x")?.strength(gravity);
+    simulation.force("y")?.strength(gravity);
+    simulation.alpha(0.3).restart();
+  }, [gravity, layoutMode]);
+
+  useEffect(() => {
+    if (!svgRef.current) return;
+    d3.select(svgRef.current)
+      .selectAll("g.node-group")
+      .classed("sitemap-search-match", (node) => searchMatches?.has(node.id) || false);
+  }, [searchMatches, activeTab, graph, graphView, layoutMode, site, nodeColor, onSelectNode]);
 
   return { svgRef };
 }

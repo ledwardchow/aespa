@@ -1597,3 +1597,45 @@
     }
   }
 }
+
+.sitemap-search {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 20px);
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.sitemap-search input {
+  width: 180px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px;
+}
+.sitemap-search span {
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+.node-group.sitemap-search-match {
+  opacity: 1 !important;
+}
+.node-group.sitemap-search-match .node-dot {
+  stroke: #facc15;
+  stroke-width: 4px;
+  filter: drop-shadow(0 0 5px #facc1580);
+}
+
+.sitemap-search input::-webkit-search-cancel-button {
+  display: none;
+}

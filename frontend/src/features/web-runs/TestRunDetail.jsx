@@ -54,6 +54,7 @@ function TestRunContent({
 }) {
   const [run, setRun] = useState(null);
   const [siteName, setSiteName] = useState(null);
+  const [sitemapSite, setSitemapSite] = useState(null);
   const [graph, setGraph] = useState(null);
   const activeTab = normaliseWebTab(initialTab);
   const setActiveTab = (tab) => nav(runHref({ runKind: "web", runId }, tab));
@@ -139,7 +140,10 @@ function TestRunContent({
         .catch(() => {});
       sitesApi
         .getSite(r.site_id)
-        .then((s) => setSiteName(s.name))
+        .then((s) => {
+          setSiteName(s.name);
+          setSitemapSite(s);
+        })
         .catch(() => {});
     } catch (e) {
       setError(e.message);
@@ -581,6 +585,7 @@ function TestRunContent({
         )}
 
         <WebRunSitemapGraph
+          site={sitemapSite}
           crawlerActive={crawlerActive}
           runId={runId}
           run={run}
