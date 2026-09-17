@@ -4,7 +4,7 @@ import json
 import pytest
 from sqlmodel import Session
 
-from aespa.models import Site, TestRun, TestRunStatus
+from aespa.models import Site, TestRun, TestRunStatus, UpstreamProxyConfig
 from aespa.services import crawler
 
 
@@ -17,9 +17,41 @@ def test_page_function_label_removes_credential_possessive():
     )
 
 
-def test_cancelled_crawl_preserves_finished_scan_state(
-    isolated_db_engine, monkeypatch
+@pytest.mark.parametrize(
+    ("proxy_llm", "expected_proxy"),
+    [
+        (True, "http://llm-proxy.local:8080"),
+        (False, None),
+    ],
+)
+def test_crawl_applies_configured_llm_proxy(
+    isolated_db_engine, monkeypatch, proxy_llm, expected_proxy
 ):
+    with Session(isolated_db_engine) as session:
+        session.add(
+            UpstreamProxyConfig(
+                id=1,
+                llm_proxy_url="http://llm-proxy.local:8080",
+                proxy_llm=proxy_llm,
+            )
+        )
+        session.commit()
+
+    observed = []
+
+    async def fake_crawl_inner(run_id):
+        assert run_id == 41
+        observed.append(crawler.llm_svc._llm_proxy_var.get())
+
+    monkeypatch.setattr(crawler, "_do_crawl_inner", fake_crawl_inner)
+
+    asyncio.run(crawler._do_crawl(41))
+
+    assert observed == [expected_proxy]
+    assert crawler.llm_svc._llm_proxy_var.get() is None
+
+
+def test_cancelled_crawl_preserves_finished_scan_state(isolated_db_engine, monkeypatch):
     with Session(isolated_db_engine) as session:
         site = Site(name="Target", base_url="https://target.local")
         session.add(site)
