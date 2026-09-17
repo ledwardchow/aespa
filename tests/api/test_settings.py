@@ -255,6 +255,8 @@ def test_cloudflare_access_config_round_trip(client: TestClient):
 
 
 def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
+    monkeypatch.setattr("aespa.browser.playwright_chromium_available", lambda: True)
+    monkeypatch.setattr("aespa.browser.chromium_install_state", lambda: "available")
     monkeypatch.setattr(
         "aespa.runtime_capabilities.graphical_display_available", lambda: True
     )
@@ -262,6 +264,7 @@ def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
     assert initial.status_code == 200
     assert initial.json()["browser_engine"] == "playwright_chromium"
     assert initial.json()["browser_visible"] is False
+    assert initial.json()["playwright_chromium_available"] is True
 
     updated = client.put(
         "/api/settings/browser-debug",
@@ -274,9 +277,32 @@ def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
     assert updated.json()["graphical_display_message"] is None
 
 
+def test_browser_debug_defaults_to_system_chrome_after_install_failure(
+    client: TestClient, monkeypatch
+):
+    monkeypatch.setattr("aespa.browser.playwright_chromium_available", lambda: False)
+    monkeypatch.setattr("aespa.browser.chromium_install_state", lambda: "failed")
+
+    initial = client.get("/api/settings/browser-debug")
+
+    assert initial.status_code == 200
+    assert initial.json()["browser_engine"] == "system_chrome"
+    assert initial.json()["playwright_chromium_available"] is False
+    assert initial.json()["playwright_chromium_installing"] is False
+
+    updated = client.put(
+        "/api/settings/browser-debug",
+        json={"browser_engine": "playwright_chromium", "browser_visible": False},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["browser_engine"] == "system_chrome"
+
+
 def test_browser_debug_disables_visible_mode_without_display(
     client: TestClient, monkeypatch
 ):
+    monkeypatch.setattr("aespa.browser.playwright_chromium_available", lambda: True)
+    monkeypatch.setattr("aespa.browser.chromium_install_state", lambda: "available")
     monkeypatch.setattr(
         "aespa.runtime_capabilities.graphical_display_available", lambda: False
     )

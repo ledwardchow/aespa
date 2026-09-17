@@ -622,26 +622,40 @@ def upsert_benchmark_lab_config(
 
 
 def get_browser_debug_config(session: Session) -> BrowserDebugConfigOut:
+    from aespa.browser import chromium_install_state, playwright_chromium_available
     from aespa.runtime_capabilities import (
         NO_GRAPHICAL_DISPLAY_MESSAGE,
         graphical_display_available,
     )
 
     display_available = graphical_display_available()
+    chromium_available = playwright_chromium_available()
+    chromium_installing = chromium_install_state() == "installing"
     cfg = session.get(BrowserDebugConfig, _SINGLETON_ID)
     if cfg is None:
+        defaults = BrowserDebugConfigIn().model_dump()
+        if not chromium_available:
+            defaults["browser_engine"] = "system_chrome"
         return BrowserDebugConfigOut(
-            **BrowserDebugConfigIn().model_dump(),
+            **defaults,
             updated_at=_utcnow(),
+            playwright_chromium_available=chromium_available,
+            playwright_chromium_installing=chromium_installing,
             graphical_display_available=display_available,
             graphical_display_message=(
                 None if display_available else NO_GRAPHICAL_DISPLAY_MESSAGE
             ),
         )
     return BrowserDebugConfigOut(
-        browser_engine=cfg.browser_engine,
+        browser_engine=(
+            "system_chrome"
+            if cfg.browser_engine == "playwright_chromium" and not chromium_available
+            else cfg.browser_engine
+        ),
         browser_visible=cfg.browser_visible and display_available,
         updated_at=cfg.updated_at,
+        playwright_chromium_available=chromium_available,
+        playwright_chromium_installing=chromium_installing,
         graphical_display_available=display_available,
         graphical_display_message=(
             None if display_available else NO_GRAPHICAL_DISPLAY_MESSAGE
@@ -652,12 +666,18 @@ def get_browser_debug_config(session: Session) -> BrowserDebugConfigOut:
 def upsert_browser_debug_config(
     session: Session, payload: BrowserDebugConfigIn
 ) -> BrowserDebugConfigOut:
+    from aespa.browser import playwright_chromium_available
     from aespa.runtime_capabilities import graphical_display_available
 
     cfg = session.get(BrowserDebugConfig, _SINGLETON_ID)
     if cfg is None:
         cfg = BrowserDebugConfig(id=_SINGLETON_ID)
-    cfg.browser_engine = payload.browser_engine
+    cfg.browser_engine = (
+        "system_chrome"
+        if payload.browser_engine == "playwright_chromium"
+        and not playwright_chromium_available()
+        else payload.browser_engine
+    )
     cfg.browser_visible = payload.browser_visible and graphical_display_available()
     cfg.updated_at = _utcnow()
     session.add(cfg)
