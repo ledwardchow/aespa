@@ -4,6 +4,7 @@ import { nav } from "../../shared/navigation/router.js";
 
 import { IconPlus, IconSystems } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 
 // ── Systems list ───────────────────────────────────────────────────────
@@ -76,7 +77,7 @@ export function SystemsList() {
               </thead>
               <tbody>
                 {apps.map((a) => (
-                  <tr key={a.id}>
+                  <NavigationRow key={a.id} href={`#/systems/${a.id}`} label={`Open ${a.name}`}>
                     <td>
                       <a href={`#/systems/${a.id}`} style={{ fontWeight: 600 }}>
                         {a.name}
@@ -115,7 +116,7 @@ export function SystemsList() {
                         </button>
                       </div>
                     </td>
-                  </tr>
+                  </NavigationRow>
                 ))}
               </tbody>
             </table>

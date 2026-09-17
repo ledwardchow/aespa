@@ -9,6 +9,7 @@ import { nav } from "../../shared/navigation/router.js";
 import { fmtDate } from "../../shared/lib/dates.js";
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 
 import { workflowBadge } from "../../shared/runs/presentation.jsx";
@@ -481,7 +482,7 @@ export function SiteDetail({ siteId }) {
                 </thead>
                 <tbody>
                   {sortedRuns.map((r) => (
-                    <tr key={r.id}>
+                    <NavigationRow key={r.id} href={`#/runs/${r.id}`} label={`Open ${r.name}`}>
                       <td>
                         <span className="run-name">
                           <strong>{r.name}</strong>
@@ -530,7 +531,7 @@ export function SiteDetail({ siteId }) {
                           </button>
                         </div>
                       </td>
-                    </tr>
+                    </NavigationRow>
                   ))}
                 </tbody>
               </table>

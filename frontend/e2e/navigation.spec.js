@@ -72,6 +72,34 @@ test("settings tabs, edit cancellation, and sidebar history work", async ({ page
   await expect(page.getByText("LLM Profiles", { exact: true })).toBeVisible();
 });
 
+test("site and SAST navigation rows open from their non-interactive cells", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+
+  await page.goto("/#/");
+  const siteRow = page.getByRole("row", { name: /Open Fixture site/ });
+  await expect(siteRow).toBeVisible();
+  await siteRow.focus();
+  await expect(siteRow).toBeFocused();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-navigation-row-site.png") });
+  await siteRow.locator("td").nth(1).click();
+  await expect(page).toHaveURL(/#\/sites\/1$/);
+  await expect(page.getByText("Test Runs", { exact: true })).toBeVisible();
+
+  await page.goto("/#/sast-runs");
+  const sastRow = page.getByRole("row", { name: /View Fixture SAST/ });
+  await expect(sastRow).toBeVisible();
+  await sastRow.locator("td").nth(1).click();
+  await expect(page).toHaveURL(/#\/sast-runs\/1\/progress$/);
+  await expect(page.getByText("Fixture SAST", { exact: true })).toBeVisible();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 test("site map filters extensions and optionally hides APIs", async ({ page }) => {
   await installFixtures(page);
   await page.route("**/api/test-runs/1/graph", (route) =>
