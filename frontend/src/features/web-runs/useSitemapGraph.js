@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as d3 from "d3";
 import { truncUrl } from "../../shared/lib/urls.js";
 import { getSitemapGravity } from "../../shared/lib/sitemapPreferences.js";
+import { forceAvoidLinkCrossings } from "./sitemapLinkCrossingForce.js";
 import { markSiteEntries } from "./sitemapRootLayout.js";
 import { scopeColor, userColor } from "../../shared/runs/presentation.jsx";
 
@@ -32,6 +33,7 @@ export function useSitemapGraph({
   graphView,
   credentials,
   currentUrl,
+  pageOnly,
   selectedNodeId,
   onSelectNode,
 }) {
@@ -73,7 +75,7 @@ export function useSitemapGraph({
         return `${source}>${target}`;
       })
       .join(",");
-    const structureKey = `${activeTab}:${graphView}:${JSON.stringify([site?.base_url, site?.login_url, site?.credentials?.map((item) => item.login_url)])}:${nodeStructure}:${linkStructure}`;
+    const structureKey = `${activeTab}:${graphView}:${pageOnly}:${JSON.stringify([site?.base_url, site?.login_url, site?.credentials?.map((item) => item.login_url)])}:${nodeStructure}:${linkStructure}`;
 
     // Status-only updates retain the settled simulation and repaint in place.
     if (structureKey === previousStructureKeyRef.current && simulationRef.current) {
@@ -181,14 +183,18 @@ export function useSitemapGraph({
         d3
           .forceLink(links)
           .id((item) => item.id)
-          .distance(180)
-          .strength(0.35),
+          .distance(pageOnly ? 220 : 180)
+          .strength(pageOnly ? 0.5 : 0.35),
       )
-      .force("charge", d3.forceManyBody().strength(-650))
+      .force("charge", d3.forceManyBody().strength(pageOnly ? -850 : -650))
       .force("center", d3.forceCenter(width / 2, height / 2))
       .force("x", d3.forceX(width / 2).strength(gravityRef.current))
       .force("y", d3.forceY(height / 2).strength(gravityRef.current))
-      .force("collision", d3.forceCollide((item) => nodeRadius(item) + 26).iterations(2));
+      .force(
+        "collision",
+        d3.forceCollide((item) => nodeRadius(item) + (pageOnly ? 38 : 26)).iterations(3),
+      )
+      .force("link-crossings", pageOnly ? forceAvoidLinkCrossings(links) : null);
     const node = graphGroup
       .append("g")
       .selectAll("g")
@@ -335,7 +341,7 @@ export function useSitemapGraph({
       observer.disconnect();
       simulation.stop();
     };
-  }, [activeTab, graph, graphView, site, nodeColor, onSelectNode]);
+  }, [activeTab, graph, graphView, pageOnly, site, nodeColor, onSelectNode]);
 
   useEffect(() => {
     if (!svgRef.current) return;

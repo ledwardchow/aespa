@@ -168,6 +168,7 @@ test("site map groups page and API variants with individual modes", async ({ pag
   const extensionFilter = page.getByLabel("Exclude site map extensions");
   const pageDisplay = page.getByLabel("Page display");
   const apiDisplay = page.getByLabel("API display");
+  const displayApis = page.getByRole("checkbox", { name: "Display APIs" });
   const displaySettings = page.getByRole("button", { name: "Display settings" });
   const displayControls = page.locator("#sitemap-display-settings");
   await expect(displaySettings).toHaveAttribute("aria-expanded", "false");
@@ -176,6 +177,19 @@ test("site map groups page and API variants with individual modes", async ({ pag
   await expect(extensionFilter).toHaveValue(".svg, .js");
   await expect(pageDisplay).toHaveValue("grouped");
   await expect(apiDisplay).toHaveValue("grouped");
+  await expect(displayApis).not.toBeChecked();
+  await expect(apiDisplay).toBeDisabled();
+  const searchBounds = await page.locator(".sitemap-search").boundingBox();
+  const apiToggleBounds = await page.locator(".sitemap-api-toggle").boundingBox();
+  expect(apiToggleBounds.y).toBeGreaterThanOrEqual(searchBounds.y + searchBounds.height + 4);
+  await expect(
+    page.getByText("3 shown · 2 pages in 1 routes · 2 APIs hidden · 2 files hidden", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(page.locator("g.node-group")).toHaveCount(3);
+  await displayApis.check();
+  await expect(apiDisplay).toBeEnabled();
   await expect(
     page.getByText(
       "4 shown · 2 pages in 1 routes · 2 API requests in 1 endpoints · 2 files hidden",
@@ -252,19 +266,28 @@ test("site map groups page and API variants with individual modes", async ({ pag
   await expect(page.locator("g.node-group")).toHaveCount(5);
 
   await displaySettings.click();
-  await apiDisplay.selectOption("hidden");
+  await displayApis.uncheck();
+  await expect(apiDisplay).toBeDisabled();
+  await expect(apiDisplay).toHaveValue("individual");
+  await expect(apiPanel).toBeHidden();
+  await expect(page.locator(".graph-panel")).toBeHidden();
   await expect(
     page.getByText("3 shown · 2 pages in 1 routes · 2 APIs hidden · 2 files hidden", {
       exact: true,
     }),
   ).toBeVisible();
   await expect(page.locator("g.node-group")).toHaveCount(3);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-apis-hidden.png") });
 
   await extensionFilter.fill("");
   await expect(
     page.getByText("5 shown · 2 pages in 1 routes · 2 APIs hidden", { exact: true }),
   ).toBeVisible();
   await expect(page.locator("g.node-group")).toHaveCount(5);
+  await displayApis.check();
+  await expect(apiDisplay).toBeEnabled();
+  await expect(apiDisplay).toHaveValue("individual");
+  await expect(page.locator("g.node-group")).toHaveCount(7);
   expect(errors).toEqual([]);
 });
 
