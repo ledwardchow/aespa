@@ -75,6 +75,17 @@ export function DebugPage({
       }
     })();
   }, [setBenchmarkLabCfg, setReportingDebugCfg]);
+  useEffect(() => {
+    if (!browserCfg?.playwright_chromium_installing) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        setBrowserCfg(await settingsApi.getBrowserDebugConfig());
+      } catch (e) {
+        setBrowserError(e.message);
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [browserCfg?.playwright_chromium_installing]);
   const toggleBenchmarkLab = async (patch) => {
     const base = benchmarkLabCfg || {
       panel_enabled: false,
@@ -174,9 +185,8 @@ export function DebugPage({
           <div className="card" style={{ marginTop: 16, maxWidth: 680 }}>
             <div className="form-section-title">Browser</div>
             <div className="field-hint" style={{ marginBottom: 12 }}>
-              Choose which Chromium build powers crawls, scans, and browser-based testing. The
-              bundled Playwright Chromium build is the default. System Chrome uses the stable Google
-              Chrome installation on the machine running AESPA.
+              Choose which Chromium build powers crawls, scans, and browser-based testing. System
+              Chrome uses the stable Google Chrome installation on the machine running AESPA.
             </div>
             {browserError && <div className="alert error">{browserError}</div>}
             {browserCfg && (
@@ -192,12 +202,24 @@ export function DebugPage({
                     disabled={browserSaving}
                     onChange={(e) => toggleBrowserDebug({ browser_engine: e.target.value })}
                   >
-                    <option value="playwright_chromium">
-                      Bundled Playwright Chromium (default)
-                    </option>
+                    {browserCfg.playwright_chromium_available !== false && (
+                      <option value="playwright_chromium">
+                        Bundled Playwright Chromium (default)
+                      </option>
+                    )}
                     <option value="system_chrome">System installed Google Chrome</option>
                   </select>
                 </div>
+                {browserCfg.playwright_chromium_installing && (
+                  <div className="field-hint" style={{ marginTop: 8 }}>
+                    Installing Playwright Chromium…
+                  </div>
+                )}
+                {browserCfg.playwright_chromium_available === false && (
+                  <div className="alert warning" style={{ marginTop: 8 }}>
+                    Playwright Chromium could not be installed. AESPA will use system Chrome.
+                  </div>
+                )}
                 <label className="toggle-row" style={{ marginTop: 12 }}>
                   <input
                     type="checkbox"

@@ -1403,6 +1403,8 @@ class BrowserDebugConfigIn(BrowserDebugConfigBase):
 
 class BrowserDebugConfigOut(BrowserDebugConfigBase):
     updated_at: datetime
+    playwright_chromium_available: bool = True
+    playwright_chromium_installing: bool = False
     graphical_display_available: bool = True
     graphical_display_message: str | None = None
 
