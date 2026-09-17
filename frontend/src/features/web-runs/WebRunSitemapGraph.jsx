@@ -14,6 +14,7 @@ import {
 } from "../../shared/runs/presentation.jsx";
 import { useSelectedSitemapPage } from "./useSelectedSitemapPage.js";
 import { useSitemapGraph } from "./useSitemapGraph.js";
+import { WebRunUserCrawlProgress } from "./WebRunCrawlProgress.jsx";
 import { WebRunSitemapTab } from "./WebRunSitemapTab.jsx";
 import { buildSitemapDisplayGraph } from "./sitemapGraph.js";
 
@@ -21,6 +22,7 @@ import { buildSitemapDisplayGraph } from "./sitemapGraph.js";
 export function WebRunSitemapGraph({
   runId,
   run,
+  crawlerActive,
   graph,
   active,
   graphView,
@@ -40,14 +42,16 @@ export function WebRunSitemapGraph({
   const [scannerSessions, setScannerSessions] = useState([]);
   const [selectedSession, setSelectedSession] = useState("");
   const [excludedExtensionsInput, setExcludedExtensionsInput] = useState(".svg, .js");
+  const [pageDisplay, setPageDisplay] = useState("grouped");
   const [apiDisplay, setApiDisplay] = useState("grouped");
+  const [displaySettingsOpen, setDisplaySettingsOpen] = useState(false);
   const excludedExtensions = useMemo(
     () => parseExcludedExtensions(excludedExtensionsInput),
     [excludedExtensionsInput],
   );
   const filteredGraph = useMemo(
-    () => buildSitemapDisplayGraph(graph, excludedExtensions, apiDisplay),
-    [apiDisplay, excludedExtensions, graph],
+    () => buildSitemapDisplayGraph(graph, excludedExtensions, apiDisplay, pageDisplay),
+    [apiDisplay, excludedExtensions, graph, pageDisplay],
   );
   const displayStats = filteredGraph?.displayStats;
 
@@ -78,7 +82,7 @@ export function WebRunSitemapGraph({
     graphView,
     credentials: run?.credentials,
     currentUrl: run?.current_url,
-    layoutMode: apiDisplay === "grouped" ? "api-lanes" : "force",
+    layoutMode: apiDisplay === "hidden" ? "force" : "api-lanes",
     selectedNodeId: selectedNode?.id,
     onSelectNode: setSelectedNode,
   });
@@ -138,47 +142,67 @@ export function WebRunSitemapGraph({
     <div className="graph-layout" style={{ display: active ? "flex" : "none" }}>
       <div className="sitemap-graph-main">
         <div className="sitemap-filter-panel">
-          <label className="traffic-filter-ext">
-            <span>Exclude extensions</span>
-            <input
-              className="traffic-filter"
-              type="text"
-              aria-label="Exclude site map extensions"
-              placeholder=".svg, .png, .woff2"
-              value={excludedExtensionsInput}
-              onInput={(event) => setExcludedExtensionsInput(event.target.value)}
-            />
-          </label>
-          <label className="traffic-filter-ext sitemap-api-display">
-            <span>API display</span>
-            <select
-              aria-label="API display"
-              value={apiDisplay}
-              onChange={(event) => setApiDisplay(event.target.value)}
+          <WebRunUserCrawlProgress run={run} crawlerActive={crawlerActive} />
+          <div className="sitemap-filter-summary">
+            <button
+              className="btn ghost sm sitemap-filter-toggle"
+              type="button"
+              aria-expanded={displaySettingsOpen}
+              aria-controls="sitemap-display-settings"
+              onClick={() => setDisplaySettingsOpen((open) => !open)}
             >
-              <option value="grouped">Grouped endpoints</option>
-              <option value="individual">Individual requests</option>
-              <option value="hidden">Hidden</option>
-            </select>
-          </label>
-          <span className="traffic-count-label">
-            {filteredGraph?.nodes.length || 0} shown
-            {apiDisplay === "grouped" && displayStats?.apiNodeCount > 0
-              ? ` · ${displayStats.apiNodeCount} API requests in ${displayStats.apiGroupCount} endpoints`
-              : ""}
-            {apiDisplay === "hidden" && displayStats?.apiNodeCount > 0
-              ? ` · ${displayStats.apiNodeCount} APIs hidden`
-              : ""}
-            {displayStats?.excludedCount > 0 ? ` · ${displayStats.excludedCount} files hidden` : ""}
-          </span>
+              <span aria-hidden="true">{displaySettingsOpen ? "▾" : "▸"}</span>
+              Display settings
+            </button>
+            <SitemapDisplaySummary
+              filteredGraph={filteredGraph}
+              pageDisplay={pageDisplay}
+              apiDisplay={apiDisplay}
+              displayStats={displayStats}
+            />
+          </div>
+          <div
+            id="sitemap-display-settings"
+            className="sitemap-filter-controls"
+            hidden={!displaySettingsOpen}
+          >
+            <label className="traffic-filter-ext">
+              <span>Exclude extensions</span>
+              <input
+                className="traffic-filter"
+                type="text"
+                aria-label="Exclude site map extensions"
+                placeholder=".svg, .png, .woff2"
+                value={excludedExtensionsInput}
+                onInput={(event) => setExcludedExtensionsInput(event.target.value)}
+              />
+            </label>
+            <label className="traffic-filter-ext sitemap-api-display">
+              <span>Page display</span>
+              <select
+                aria-label="Page display"
+                value={pageDisplay}
+                onChange={(event) => setPageDisplay(event.target.value)}
+              >
+                <option value="grouped">Grouped routes</option>
+                <option value="individual">Individual pages</option>
+              </select>
+            </label>
+            <label className="traffic-filter-ext sitemap-api-display">
+              <span>API display</span>
+              <select
+                aria-label="API display"
+                value={apiDisplay}
+                onChange={(event) => setApiDisplay(event.target.value)}
+              >
+                <option value="grouped">Grouped endpoints</option>
+                <option value="individual">Individual requests</option>
+                <option value="hidden">Hidden</option>
+              </select>
+            </label>
+          </div>
         </div>
         <div className="graph-canvas-wrap">
-          {apiDisplay === "grouped" && displayStats?.apiGroupCount > 0 && (
-            <div className="sitemap-lane-labels" aria-hidden="true">
-              <span>Pages</span>
-              <span>API endpoints</span>
-            </div>
-          )}
           {graph && graph.nodes.length === 0 && (
             <div className="graph-empty">
               <WebRunSitemapTab
@@ -260,7 +284,18 @@ export function WebRunSitemapGraph({
           )}
         </div>
       </div>
-      {selectedNode?.isApiGroup ? (
+      {selectedNode?.isDiscoveryGroup ? (
+        <SitemapDiscoveryInspector node={selectedNode} onClose={() => setSelectedNode(null)} />
+      ) : selectedNode?.isPageGroup ? (
+        <SitemapPageGroupInspector
+          node={selectedNode}
+          onClose={() => setSelectedNode(null)}
+          onExpand={() => {
+            setPageDisplay("individual");
+            setSelectedNode(selectedNode.memberNodes[0] || null);
+          }}
+        />
+      ) : selectedNode?.isApiGroup ? (
         <SitemapApiGroupInspector
           node={selectedNode}
           onClose={() => setSelectedNode(null)}
@@ -288,6 +323,108 @@ export function WebRunSitemapGraph({
           onTestState={testState}
         />
       ) : null}
+    </div>
+  );
+}
+
+function SitemapDiscoveryInspector({ node, onClose }) {
+  return (
+    <div className="graph-panel page-group-panel">
+      <div className="graph-panel-header">
+        <div>
+          <div className="api-group-method">DYNAMIC SCAN</div>
+          <div className="graph-panel-url">Direct scan discoveries</div>
+        </div>
+        <button className="btn ghost sm" onClick={onClose} aria-label="Close discovery details">
+          ✕
+        </button>
+      </div>
+      <div className="graph-panel-body">
+        <div className="api-group-summary">
+          <div>
+            <strong>{node.discoveryCount}</strong>
+            <span>Unattributed {node.discoveryCount === 1 ? "route" : "routes"}</span>
+          </div>
+        </div>
+        <div className="graph-panel-context">
+          These routes were observed by the Dynamic Scan, but the saved traffic does not identify
+          another page as their source. They are grouped here instead of being shown as unrelated
+          nodes.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SitemapDisplaySummary({ filteredGraph, pageDisplay, apiDisplay, displayStats }) {
+  return (
+    <span className="traffic-count-label">
+      {filteredGraph?.nodes.length || 0} shown
+      {pageDisplay === "grouped" && displayStats?.pageGroupCount > 0
+        ? ` · ${displayStats.groupedPageVariantCount} pages in ${displayStats.pageGroupCount} routes`
+        : ""}
+      {apiDisplay === "grouped" && displayStats?.apiNodeCount > 0
+        ? ` · ${displayStats.apiNodeCount} API requests in ${displayStats.apiGroupCount} endpoints`
+        : ""}
+      {apiDisplay === "hidden" && displayStats?.apiNodeCount > 0
+        ? ` · ${displayStats.apiNodeCount} APIs hidden`
+        : ""}
+      {displayStats?.excludedCount > 0 ? ` · ${displayStats.excludedCount} files hidden` : ""}
+    </span>
+  );
+}
+
+function SitemapPageGroupInspector({ node, onClose, onExpand }) {
+  return (
+    <div className="graph-panel page-group-panel">
+      <div className="graph-panel-header">
+        <div>
+          <div className="api-group-method">PAGE ROUTE</div>
+          <div className="graph-panel-url">{node.routeOrigin + node.routePath}</div>
+        </div>
+        <button className="btn ghost sm" onClick={onClose} aria-label="Close page route details">
+          ✕
+        </button>
+      </div>
+      <div className="graph-panel-body">
+        <div className="api-group-summary">
+          <div>
+            <strong>{node.variantCount}</strong>
+            <span>Page {node.variantCount === 1 ? "variant" : "variants"}</span>
+          </div>
+          <div>
+            <strong>{node.parameters.length}</strong>
+            <span>Parameters</span>
+          </div>
+          <div>
+            <strong>{node.connections.length}</strong>
+            <span>Connections</span>
+          </div>
+        </div>
+
+        <ObservedParameters parameters={node.parameters} />
+
+        {node.connections.length > 0 && (
+          <>
+            <div className="graph-panel-section-label api-group-section">Connected nodes</div>
+            <div className="api-group-list">
+              {node.connections.map((connection) => (
+                <div key={connection.id} className="api-group-list-row">
+                  <span title={connection.label}>
+                    <small>{connection.direction}</small> {connection.label}
+                  </span>
+                  {connection.count > 1 && <small>×{connection.count}</small>}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        <ObservedVariants label="Page variants" variants={node.variants} />
+        <button className="btn sm api-group-expand" onClick={onExpand}>
+          Show individual pages
+        </button>
+      </div>
     </div>
   );
 }
@@ -334,36 +471,51 @@ function SitemapApiGroupInspector({ node, onClose, onExpand }) {
           <div className="subtle">No calling page was recorded.</div>
         )}
 
-        <div className="graph-panel-section-label api-group-section">Observed parameters</div>
-        {node.parameters.length > 0 ? (
-          <div className="api-parameter-table">
-            {node.parameters.map((parameter) => (
-              <div key={`${parameter.location}:${parameter.name}`} className="api-parameter-row">
-                <span className="api-parameter-location">{parameter.location}</span>
-                <code>{parameter.name}</code>
-                <span title={parameter.values.join(", ")}>
-                  {parameter.values.slice(0, 3).join(", ")}
-                  {parameter.values.length > 3 ? ` +${parameter.values.length - 3}` : ""}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="subtle">No path or query parameters were observed.</div>
-        )}
-
-        <div className="graph-panel-section-label api-group-section">Request variants</div>
-        <div className="api-group-variants">
-          {node.variants.slice(0, 12).map((url) => (
-            <code key={url}>{url}</code>
-          ))}
-          {node.variants.length > 12 && <span>+{node.variants.length - 12} more</span>}
-        </div>
+        <ObservedParameters parameters={node.parameters} />
+        <ObservedVariants label="Request variants" variants={node.variants} />
         <button className="btn sm api-group-expand" onClick={onExpand}>
           Show individual requests
         </button>
       </div>
     </div>
+  );
+}
+
+function ObservedParameters({ parameters }) {
+  return (
+    <>
+      <div className="graph-panel-section-label api-group-section">Observed parameters</div>
+      {parameters.length > 0 ? (
+        <div className="api-parameter-table">
+          {parameters.map((parameter) => (
+            <div key={`${parameter.location}:${parameter.name}`} className="api-parameter-row">
+              <span className="api-parameter-location">{parameter.location}</span>
+              <code>{parameter.name}</code>
+              <span title={parameter.values.join(", ")}>
+                {parameter.values.slice(0, 3).join(", ")}
+                {parameter.values.length > 3 ? ` +${parameter.values.length - 3}` : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="subtle">No path or query parameters were observed.</div>
+      )}
+    </>
+  );
+}
+
+function ObservedVariants({ label, variants }) {
+  return (
+    <>
+      <div className="graph-panel-section-label api-group-section">{label}</div>
+      <div className="api-group-variants">
+        {variants.slice(0, 12).map((url) => (
+          <code key={url}>{url}</code>
+        ))}
+        {variants.length > 12 && <span>+{variants.length - 12} more</span>}
+      </div>
+    </>
   );
 }
 

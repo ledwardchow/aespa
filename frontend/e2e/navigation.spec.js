@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
-import { installFixtures } from "./fixtures.js";
+import { installFixtures, run } from "./fixtures.js";
 
 const screens = [
   ["#/", "Fixture site"],
@@ -100,7 +100,7 @@ test("site and SAST navigation rows open from their non-interactive cells", asyn
   expect(errors).toEqual([]);
 });
 
-test("site map groups API variants and keeps individual and hidden modes", async ({ page }) => {
+test("site map groups page and API variants with individual modes", async ({ page }) => {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
@@ -131,6 +131,20 @@ test("site map groups API variants and keeps individual and hidden modes", async
             depth: 2,
             in_scope: true,
           },
+          {
+            id: 7,
+            url: "http://example.test/orders/123?tab=summary",
+            title: "Order 123",
+            depth: 1,
+            in_scope: true,
+          },
+          {
+            id: 8,
+            url: "http://example.test/orders/456?tab=history",
+            title: "Order 456",
+            depth: 1,
+            in_scope: true,
+          },
         ],
         links: [
           { source: 1, target: 2 },
@@ -138,6 +152,10 @@ test("site map groups API variants and keeps individual and hidden modes", async
           { source: 1, target: 4 },
           { source: 1, target: 5 },
           { source: 3, target: 6 },
+          { source: 1, target: 7 },
+          { source: 1, target: 8 },
+          { source: 7, target: 4 },
+          { source: 8, target: 6 },
         ],
       },
     }),
@@ -148,13 +166,54 @@ test("site map groups API variants and keeps individual and hidden modes", async
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 
   const extensionFilter = page.getByLabel("Exclude site map extensions");
+  const pageDisplay = page.getByLabel("Page display");
   const apiDisplay = page.getByLabel("API display");
+  const displaySettings = page.getByRole("button", { name: "Display settings" });
+  const displayControls = page.locator("#sitemap-display-settings");
+  await expect(displaySettings).toHaveAttribute("aria-expanded", "false");
+  await expect(displayControls).toBeHidden();
+  await expect(extensionFilter).toBeHidden();
   await expect(extensionFilter).toHaveValue(".svg, .js");
+  await expect(pageDisplay).toHaveValue("grouped");
   await expect(apiDisplay).toHaveValue("grouped");
   await expect(
-    page.getByText("3 shown · 2 API requests in 1 endpoints · 2 files hidden", { exact: true }),
+    page.getByText(
+      "4 shown · 2 pages in 1 routes · 2 API requests in 1 endpoints · 2 files hidden",
+      { exact: true },
+    ),
   ).toBeVisible();
-  await expect(page.locator("g.node-group")).toHaveCount(3);
+  await expect(page.locator("g.node-group")).toHaveCount(4);
+  await expect(page.locator(".sitemap-lane-labels")).toHaveCount(0);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-collapsed.png") });
+
+  await displaySettings.click();
+  await expect(displaySettings).toHaveAttribute("aria-expanded", "true");
+  await expect(displayControls).toBeVisible();
+  await expect(extensionFilter).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-expanded.png") });
+  await displaySettings.click();
+  await expect(displayControls).toBeHidden();
+
+  const pageRouteNode = page.locator("g.node-group", { hasText: "/orders/{id}" });
+  await expect(pageRouteNode).toBeVisible();
+  await pageRouteNode.dispatchEvent("click");
+  const pagePanel = page.locator(".page-group-panel");
+  await expect(
+    pagePanel.locator(".graph-panel-section-label", { hasText: "Page variants" }),
+  ).toBeVisible();
+  await expect(pagePanel.locator(".api-parameter-row code", { hasText: "id" })).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-grouped-page-route.png") });
+
+  await page.getByRole("button", { name: "Show individual pages" }).click();
+  await expect(pageDisplay).toHaveValue("individual");
+  await expect(
+    page.getByText("5 shown · 2 API requests in 1 endpoints · 2 files hidden", { exact: true }),
+  ).toBeVisible();
+  await displaySettings.click();
+  await pageDisplay.selectOption("grouped");
+  await expect(page.locator("g.node-group")).toHaveCount(4);
+  await displaySettings.click();
+
   const apiNode = page.locator("g.node-group", { hasText: "GET /api/account" });
   await expect(apiNode).toBeVisible();
   await apiNode.dispatchEvent("click");
@@ -170,18 +229,96 @@ test("site map groups API variants and keeps individual and hidden modes", async
 
   await page.getByRole("button", { name: "Show individual requests" }).click();
   await expect(apiDisplay).toHaveValue("individual");
-  await expect(page.getByText("4 shown · 2 files hidden", { exact: true })).toBeVisible();
-  await expect(page.locator("g.node-group")).toHaveCount(4);
+  await expect(
+    page.getByText("5 shown · 2 pages in 1 routes · 2 files hidden", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("g.node-group")).toHaveCount(5);
 
+  await displaySettings.click();
   await apiDisplay.selectOption("hidden");
   await expect(
-    page.getByText("2 shown · 2 APIs hidden · 2 files hidden", { exact: true }),
+    page.getByText("3 shown · 2 pages in 1 routes · 2 APIs hidden · 2 files hidden", {
+      exact: true,
+    }),
   ).toBeVisible();
-  await expect(page.locator("g.node-group")).toHaveCount(2);
+  await expect(page.locator("g.node-group")).toHaveCount(3);
 
   await extensionFilter.fill("");
-  await expect(page.getByText("4 shown · 2 APIs hidden", { exact: true })).toBeVisible();
-  await expect(page.locator("g.node-group")).toHaveCount(4);
+  await expect(
+    page.getByText("5 shown · 2 pages in 1 routes · 2 APIs hidden", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("g.node-group")).toHaveCount(5);
+  expect(errors).toEqual([]);
+});
+
+test("multi-user crawl progress expands and collapses", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.route(/\/api\/test-runs\/1(?:\?.*)?$/, (route) =>
+    route.fulfill({
+      json: {
+        ...run,
+        status: "complete",
+        phase: "complete",
+        credentials: [
+          { id: 1, username: "alice@example.test", label: "Alice" },
+          { id: 2, username: "bob@example.test", label: "Bob" },
+        ],
+        per_user_progress: {
+          "alice@example.test": {
+            pages_visited: 3,
+            current_url: "http://example.test/account",
+            done: false,
+          },
+          "bob@example.test": { pages_visited: 2, current_url: null, done: true },
+        },
+      },
+    }),
+  );
+
+  await page.goto("/#/runs/1/sitemap");
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+
+  const toggle = page.getByRole("button", { name: "User crawl progress" });
+  const details = page.locator("#crawl-user-progress-details");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(details).toBeHidden();
+  await expect(page.getByText("2 users · 5 pages · 1 done", { exact: true })).toBeVisible();
+  const displayToggle = page.getByRole("button", { name: "Display settings" });
+  const progressBounds = await toggle.boundingBox();
+  const displayBounds = await displayToggle.boundingBox();
+  expect(Math.abs(progressBounds.y - displayBounds.y)).toBeLessThan(2);
+  const barBounds = await page.locator(".sitemap-filter-panel").boundingBox();
+  expect(barBounds.height).toBeLessThan(70);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-user-progress-collapsed.png") });
+
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(details).toBeVisible();
+  await expect(details.getByText("Alice", { exact: true })).toBeVisible();
+  await expect(details.getByText("Bob", { exact: true })).toBeVisible();
+  await expect(details.getByText("3 pg", { exact: true })).toBeVisible();
+  await expect(details.getByText("done", { exact: true })).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-user-progress-expanded.png") });
+
+  await displayToggle.click();
+  await expect(page.getByLabel("Page display")).toBeVisible();
+  await expect(details).toBeVisible();
+  const detailsBounds = await details.boundingBox();
+  const settingsBounds = await page.locator("#sitemap-display-settings").boundingBox();
+  expect(settingsBounds.y).toBeGreaterThanOrEqual(detailsBounds.y + detailsBounds.height);
+  await toggle.click();
+  await expect(details).toBeHidden();
+  await expect(page.getByLabel("Page display")).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(displayToggle).toBeVisible();
+  await expect(page.getByLabel("Page display")).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-toolbar-mobile.png") });
   expect(errors).toEqual([]);
 });
 
@@ -608,4 +745,100 @@ test("Deep work queue groups checks under an expandable operation", async ({ pag
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(errors).toEqual([]);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-deep-grouped-queue.png") });
+});
+
+test("site map controls remain reachable across widths", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await installFixtures(page);
+  await page.route(/\/api\/test-runs\/1(?:\?.*)?$/, (route) =>
+    route.fulfill({
+      json: {
+        ...run,
+        status: "complete",
+        phase: "complete",
+        pages_discovered: 286,
+        max_depth: 3,
+        max_pages: 500,
+        credentials: ["staff", "manager", "admin"].map((username, id) => ({
+          id: id + 1,
+          username,
+        })),
+        per_user_progress: Object.fromEntries(
+          ["staff", "manager", "admin"].map((name) => [name, { pages_visited: 123, done: true }]),
+        ),
+      },
+    }),
+  );
+  await page.route("**/api/test-runs/1/graph", (route) =>
+    route.fulfill({
+      json: {
+        nodes: [
+          ...Array.from({ length: 20 }, (_, id) => ({
+            id: id + 1,
+            url: `http://example.test/orders/${id + 1}`,
+            depth: 1,
+            in_scope: true,
+          })),
+          ...Array.from({ length: 20 }, (_, id) => ({
+            id: id + 21,
+            url: `http://example.test/api/orders/${id + 1}`,
+            title: "API GET 200 /api/orders",
+            context: "[API endpoint] Observed GET request during crawl.",
+            depth: 1,
+            in_scope: true,
+          })),
+        ],
+        links: [],
+      },
+    }),
+  );
+  await page.goto("/#/runs/1/sitemap");
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.getByRole("button", { name: "User crawl progress" })).toBeVisible();
+  for (const width of [2560, 1440, 1100, 900, 768, 640, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    if (await page.getByLabel("Run section").isVisible()) {
+      await expect(page.getByLabel("Run section").locator("option")).toHaveCount(7);
+    } else {
+      await expect(page.locator(".web-run-tab-links button:visible")).toHaveCount(7);
+    }
+    const overflow = await page
+      .locator(".web-run-tab-bar, .sitemap-filter-panel, .sitemap-meta, .scope-hosts-panel")
+      .evaluateAll((elements) =>
+        elements.filter((el) => el.scrollWidth > el.clientWidth + 1).map((el) => el.className),
+      );
+    expect(overflow, `overflow at ${width}px`).toEqual([]);
+    for (const selector of [
+      ".web-run-tab-links button",
+      ".web-run-tab-actions button",
+      ".sitemap-filter-summary .traffic-count-label",
+      ".crawl-user-progress-count",
+    ]) {
+      for (const element of await page.locator(selector).all()) {
+        if (!(await element.isVisible())) continue;
+        const bounds = await element.boundingBox();
+        expect(bounds.x).toBeGreaterThanOrEqual(0);
+        expect(bounds.x + bounds.width).toBeLessThanOrEqual(width + 1);
+      }
+    }
+    await page.getByRole("button", { name: "Display settings" }).click();
+    await expect(page.getByLabel("API display")).toBeVisible();
+    if (width > 1100) {
+      const stats = await page.locator(".sitemap-meta > .run-stat").all();
+      for (const stat of stats) {
+        const bounds = await stat.boundingBox();
+        expect(bounds.width, `stat width at ${width}px`).toBeLessThan(250);
+      }
+      const input = await page.getByLabel("Exclude site map extensions").boundingBox();
+      expect(input.width).toBeLessThan(200);
+    }
+    await page.screenshot({ path: path.join(tmpdir(), `aespa-responsive-${width}.png`) });
+    await page.getByRole("button", { name: "Display settings" }).click();
+  }
+  await page.getByRole("button", { name: "By User", exact: true }).click();
+  await expect(page.getByRole("button", { name: "By User", exact: true })).toHaveClass(/active/);
+  await page.getByLabel("Run section").selectOption({ label: "SAST Leads" });
+  await expect(page.getByLabel("Run section")).toHaveValue("leads");
+  expect(errors).toEqual([]);
 });

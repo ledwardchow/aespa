@@ -581,6 +581,7 @@ function TestRunContent({
         )}
 
         <WebRunSitemapGraph
+          crawlerActive={crawlerActive}
           runId={runId}
           run={run}
           graph={graph}

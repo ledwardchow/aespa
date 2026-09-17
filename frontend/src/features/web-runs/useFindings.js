@@ -65,7 +65,7 @@ export function useFindings(
       else next.add(title);
       return next;
     });
-  const [findColW, startFindResize] = useColResize("colw:findings:v2", [120, 52, null, 28, 60]);
+  const [findColW, startFindResize] = useColResize("colw:findings:v3", [120, 140, null, 52, 60]);
 
   // Poll findings when on findings tab.
   useEffect(() => {
