@@ -121,6 +121,10 @@ class SastNetworkPause(RuntimeError):
     """Transient provider connectivity remained unavailable after retries."""
 
 
+class SastWorkerPause(RuntimeError):
+    """One or more durable discovery workers failed and must be resumed."""
+
+
 def _llm_is_available_for_semantic_phases(config: Any) -> bool:
     """Return whether semantic model calls have an available auth path."""
     return bool(
@@ -248,6 +252,42 @@ def _is_transient_provider_error(exc: BaseException) -> bool:
     )
 
 
+def _is_context_limit_error(exc: BaseException) -> bool:
+    """Recognise provider-specific context exhaustion errors."""
+    text = f"{type(exc).__name__}: {exc}".casefold()
+    return any(
+        marker in text
+        for marker in (
+            "context length",
+            "context window",
+            "context size",
+            "maximum context",
+            "max context",
+            "too many tokens",
+            "input is too long",
+            "request too large",
+            "out of memory for context",
+        )
+    )
+
+
+def _incomplete_discovery_workers(sast_run_id: int) -> list[SastWorker]:
+    with Session(get_engine()) as session:
+        return list(
+            session.exec(
+                select(SastWorker)
+                .where(SastWorker.sast_run_id == sast_run_id)
+                .where(SastWorker.status == "failed")
+                .order_by(SastWorker.id)
+            ).all()
+        )
+
+
+def has_resumable_sast_work(sast_run_id: int) -> bool:
+    """Return whether a terminal Deep run has failed durable workers."""
+    return bool(_incomplete_discovery_workers(sast_run_id))
+
+
 async def _run_checkpointed_agent(
     *,
     sast_run_id: int,
@@ -271,7 +311,9 @@ async def _run_checkpointed_agent(
     key = _checkpoint_key(worker_key)
     saved = _load_checkpoint(sast_run_id, phase, key) if resume else {}
     last_error: BaseException | None = None
-    for attempt in range(len(_SAST_NETWORK_RETRY_DELAYS) + 1):
+    network_attempt = 0
+    context_recovery_used = False
+    while True:
         messages = saved.get("messages")
         step_count = int(saved.get("step_count") or 0)
         observed_step_count = step_count
@@ -312,12 +354,65 @@ async def _run_checkpointed_agent(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            recovery_messages = saved.get("messages")
+            recovery_step_count = int(saved.get("step_count") or step_count)
+            if (
+                _is_context_limit_error(exc)
+                and not context_recovery_used
+                and isinstance(recovery_messages, list)
+                and recovery_messages
+            ):
+                configured_limit = int(getattr(config, "max_context_tokens", 0) or 0)
+                emergency_limit = max(
+                    int(getattr(config, "max_tokens", 0) or 0) + 2048,
+                    int(configured_limit * 0.6),
+                )
+                compacted, stats = llm_svc.compact_agentic_messages(
+                    recovery_messages,
+                    max_context_tokens=emergency_limit,
+                    max_output_tokens=int(getattr(config, "max_tokens", 0) or 0),
+                    system_message=system_message,
+                    tools=tools,
+                    model=getattr(config, "model", None),
+                    provider=str(
+                        getattr(
+                            getattr(config, "provider", None),
+                            "value",
+                            getattr(config, "provider", "openai"),
+                        )
+                    ),
+                    recent_messages=8,
+                )
+                context_recovery_used = True
+                if stats:
+                    saved = {
+                        "messages": compacted,
+                        "step_count": recovery_step_count,
+                        "worker_key": worker_key,
+                        "context_recovery": stats,
+                    }
+                    _save_checkpoint(sast_run_id, phase, key, saved)
+                    events_svc.emit(
+                        sast_run_id,
+                        {
+                            "type": "scanner_phase",
+                            "phase": "context_compaction",
+                            "status": "warning",
+                            "message": (
+                                "The provider rejected the saved context. AESPA "
+                                "compacted the checkpoint and is retrying this worker."
+                            ),
+                            "data": stats,
+                        },
+                    )
+                    continue
             if not _is_transient_provider_error(exc):
                 raise
             last_error = exc
-            if attempt >= len(_SAST_NETWORK_RETRY_DELAYS):
+            if network_attempt >= len(_SAST_NETWORK_RETRY_DELAYS):
                 break
-            delay = _SAST_NETWORK_RETRY_DELAYS[attempt]
+            delay = _SAST_NETWORK_RETRY_DELAYS[network_attempt]
+            network_attempt += 1
             events_svc.emit(
                 sast_run_id,
                 {
@@ -328,7 +423,7 @@ async def _run_checkpointed_agent(
                         "The LLM connection was interrupted. Retrying from the "
                         f"last saved step in {delay:g} second(s)."
                     ),
-                    "data": {"attempt": attempt + 1, "error": str(exc)},
+                    "data": {"attempt": network_attempt, "error": str(exc)},
                 },
             )
             await asyncio.sleep(delay)
@@ -1932,12 +2027,16 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         except (TypeError, ValueError):
             saved_phases = {}
 
+        resume_discovery = resume and has_resumable_sast_work(sast_run_id)
+        discovery_and_later = set(_PHASES[_PHASES.index("discovery") :])
+
         def _phase_was_complete(phase: str) -> bool:
             entry = saved_phases.get(phase, {})
             return (
                 isinstance(entry, dict)
                 and entry.get("status") == "complete"
                 and not (phase == "discovery" and work_program_built)
+                and not (resume_discovery and phase in discovery_and_later)
             )
 
         def _completed_phase_data(phase: str) -> dict[str, Any] | None:
@@ -2276,6 +2375,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                             candidate.update(
                                 {
                                     "validation_status": "inconclusive",
+                                    "validation_retry_pending": True,
                                     "validation_reasoning": f"Validator failed: {exc}",
                                     "proof_gaps": [
                                         *candidate.get("proof_gaps", []),
@@ -2620,6 +2720,18 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             discovery_summary = "\n".join(worker_summaries)
             _raise_if_stopped()
 
+            incomplete_workers = _incomplete_discovery_workers(sast_run_id)
+            if incomplete_workers:
+                names = ", ".join(
+                    worker.worker_key for worker in incomplete_workers[:8]
+                )
+                suffix = "" if len(incomplete_workers) <= 8 else ", …"
+                raise SastWorkerPause(
+                    f"{len(incomplete_workers)} discovery worker(s) failed "
+                    f"({names}{suffix}). Resume the scan to continue them "
+                    "from their saved checkpoints."
+                )
+
             if not scanner_policy.disable_deterministic_checks:
                 deterministic_candidates = (
                     semantic_svc.deterministic_security_candidates(root)
@@ -2715,6 +2827,15 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             )
         if not _phase_was_complete("validation"):
             for candidate in candidates:
+                if candidate.pop("validation_retry_pending", False):
+                    candidate["validation_status"] = "pending"
+                    candidate["validation_reasoning"] = ""
+                    candidate["proof_gaps"] = [
+                        gap
+                        for gap in candidate.get("proof_gaps", [])
+                        if gap
+                        != "Independent validator failed before closing this candidate."
+                    ]
                 if (
                     candidate.get("validation_status") == "pending"
                     and candidate.get("confidence") is not None
@@ -2725,16 +2846,17 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             if validation_tasks:
                 await asyncio.gather(*validation_tasks)
                 _raise_if_stopped()
+                if validation_failures:
+                    _persist_candidate_state(sast_run_id)
+                    raise SastWorkerPause(
+                        f"{len(validation_failures)} candidate validator(s) failed. "
+                        "Resume the scan to continue them from their saved checkpoints."
+                    )
                 validated_count = sum(c.get("reportable", False) for c in candidates)
                 validation_summary = (
                     f"Independent validation retained {validated_count} of "
                     f"{candidate_count} candidate(s)."
                 )
-                if validation_failures:
-                    validation_summary += (
-                        f" {len(validation_failures)} validator task(s) failed "
-                        "and were marked inconclusive."
-                    )
             else:
                 validated_count = sum(c.get("reportable", False) for c in candidates)
                 validation_summary = "No candidates required validation."
@@ -2881,6 +3003,10 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     current_task="Closure review failed",
                     outcome=str(exc)[:500],
                 )
+                raise SastWorkerPause(
+                    "The closure analyst failed. Resume the scan to continue it "
+                    "from its saved checkpoint."
+                ) from exc
 
         if len(candidates) > candidates_before_closure:
             closure_reconciliation = _reconcile_candidate_ledger(sast_run_id)
@@ -3172,8 +3298,14 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
 
             persist_component_facts(sast_run_id, root)
 
-    except (SastPauseRequested, SastNetworkPause) as exc:
-        reason = "network" if isinstance(exc, SastNetworkPause) else "user"
+    except (SastPauseRequested, SastNetworkPause, SastWorkerPause) as exc:
+        reason = (
+            "network"
+            if isinstance(exc, SastNetworkPause)
+            else "worker_error"
+            if isinstance(exc, SastWorkerPause)
+            else "user"
+        )
         log.info(
             "SAST scan paused: sast_run_id=%s reason=%s: %s",
             sast_run_id,
