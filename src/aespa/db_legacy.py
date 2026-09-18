@@ -115,6 +115,7 @@ def upgrade_pre_alembic_schema(engine: Engine) -> None:
         engine, "llm_config", "force_tool_choice", "INTEGER NOT NULL DEFAULT 0"
     )
     _ensure_column(engine, "llm_config", "project_id", "TEXT")
+    _ensure_column(engine, "llm_config", "location", "TEXT")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
     _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
     _ensure_column(
@@ -276,6 +277,7 @@ def upgrade_pre_alembic_schema(engine: Engine) -> None:
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "project_id", "TEXT")
+    _ensure_column(engine, "llm_provider_config", "location", "TEXT")
     _ensure_column(engine, "llm_provider_config", "username", "TEXT")
     _ensure_column(engine, "llm_config", "username", "TEXT")
     # agent_log / scan_log retain a shared test_run_id column and a run kind so

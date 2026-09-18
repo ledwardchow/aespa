@@ -331,6 +331,7 @@ class LLMProviderAPI(str, Enum):
     openai_compatible = "openai_compatible"
     openrouter = "openrouter"
     google = "google"
+    google_vertex = "google_vertex"
     bedrock = "bedrock"
     bedrock_mantle = "bedrock_mantle"
     azure_openai = "azure_openai"
@@ -351,15 +352,15 @@ class LLMProviderConfig(SQLModel, table=True):
     base_url: Optional[str] = Field(default=None)
     # Optional Copilot CLI account login. Blank uses Copilot CLI's default.
     username: Optional[str] = Field(default=None)
-    # Bedrock Mantle project id (proj_…); sent as the OpenAI-Project header for
-    # cost/usage attribution. Ignored by other provider formats.
+    # Provider-specific project. Bedrock Mantle uses a proj_… id for cost
+    # attribution; Google Vertex AI uses the Google Cloud project id.
     project_id: Optional[str] = Field(default=None)
+    # Google Vertex AI location. Other providers ignore this value.
+    location: Optional[str] = Field(default=None)
     models_json: str = Field(default="[]")
     # Per-model capability metadata discovered from the provider or OpenRouter.
     # Kept as JSON so providers can add metadata without another migration.
     model_capabilities_json: str = Field(default="{}")
-    max_tpm: Optional[int] = Field(default=None, nullable=True)
-    max_rpm: Optional[int] = Field(default=None, nullable=True)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -460,7 +461,7 @@ class LLMPriceFeed(SQLModel, table=True):
 
 
 class LLMConfig(SQLModel, table=True):
-    """Saved LLM settings profile."""
+    """Saved LLM model configuration."""
 
     __tablename__ = "llm_config"
 
@@ -475,9 +476,14 @@ class LLMConfig(SQLModel, table=True):
     base_url: Optional[str] = Field(default=None)
     # Denormalized from the provider for the Copilot SDK adapter.
     username: Optional[str] = Field(default=None)
-    # Denormalized from the provider (see LLMProviderConfig.project_id).
+    # Denormalized from the provider (see LLMProviderConfig.project_id/location).
     project_id: Optional[str] = Field(default=None)
+    location: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")
+    # Shared pacing limits for this provider/model pair. Saving one duplicate
+    # model configuration keeps the other entries for the same pair in sync.
+    max_tpm: Optional[int] = Field(default=None, nullable=True)
+    max_rpm: Optional[int] = Field(default=None, nullable=True)
     max_tokens: int = Field(default=16384)
     # Total model context window, including the requested output allowance.
     max_context_tokens: int = Field(

@@ -189,6 +189,9 @@ from aespa.services.settings_providers import (
     _provider_out as _provider_out,
 )
 from aespa.services.settings_providers import (
+    _reconcile_provider_model_configs as _reconcile_provider_model_configs,
+)
+from aespa.services.settings_providers import (
     create_llm_provider as create_llm_provider,
 )
 from aespa.services.settings_providers import (
@@ -249,6 +252,7 @@ def resolve_llm_config(
             "base_url": provider.base_url,
             "username": provider.username,
             "project_id": provider.project_id,
+            "location": provider.location,
         }
     )
 
@@ -273,7 +277,10 @@ def llm_profile_out_model(
         base_url=resolved.base_url,
         username=resolved.username,
         project_id=resolved.project_id,
+        location=resolved.location,
         model=resolved.model,
+        max_tpm=resolved.max_tpm,
+        max_rpm=resolved.max_rpm,
         max_tokens=resolved.max_tokens,
         max_context_tokens=resolved.max_context_tokens,
         context_limit_source=resolved.context_limit_source,
@@ -364,12 +371,16 @@ async def discover_models_for_format(
     api_key: str | None = None,
     base_url: str | None = None,
     username: str | None = None,
+    project_id: str | None = None,
+    location: str | None = None,
 ) -> list[str]:
     options = await discover_model_options_for_format(
         api_format=api_format,
         api_key=api_key,
         base_url=base_url,
         username=username,
+        project_id=project_id,
+        location=location,
     )
     return list(options["models"])
 
@@ -379,6 +390,8 @@ async def discover_model_options_for_format(
     api_key: str | None = None,
     base_url: str | None = None,
     username: str | None = None,
+    project_id: str | None = None,
+    location: str | None = None,
 ) -> dict[str, object]:
     """Discover model names and per-model reasoning capability metadata."""
     native: dict[str, object] = {}
@@ -468,6 +481,19 @@ async def discover_model_options_for_format(
             capability = documented_model_capability("google", model)
             if capability is not None:
                 native[model] = native.get(model) or capability
+    elif api_format == "google_vertex":
+        from aespa.services import model_discovery
+
+        raw = await model_discovery.discover_google_vertex_model_options(
+            project_id=project_id or "",
+            location=location or "global",
+        )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
+        for model in discovered:
+            capability = documented_model_capability("google_vertex", model)
+            if capability is not None:
+                native[model] = {**capability, **native.get(model, {})}
     elif api_format in {"azure_openai", "azure_foundry", "azure_foundry_openai"}:
         from aespa.services import model_discovery
 
@@ -578,12 +604,11 @@ def export_llm_config(
             base_url=p.base_url,
             username=p.username,
             project_id=p.project_id,
+            location=p.location,
             models=_provider_models(p),
             model_capabilities=_provider_capabilities(p),
             has_api_key=bool(p.api_key and p.api_key.strip()),
             api_key=p.api_key if include_raw_keys else None,
-            max_tpm=p.max_tpm,
-            max_rpm=p.max_rpm,
         )
         for p in providers_db
     ]
@@ -595,6 +620,8 @@ def export_llm_config(
             if c.provider_id is not None
             else "",
             model=c.model,
+            max_tpm=c.max_tpm,
+            max_rpm=c.max_rpm,
             max_tokens=c.max_tokens,
             max_context_tokens=c.max_context_tokens,
             temperature=c.temperature,
@@ -663,6 +690,7 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             existing_providers[key] = provider
         else:
             result.providers_updated += 1
+        _reconcile_provider_model_configs(session, provider, item.models)
         provider.name = item.name
         provider.api_format = item.api_format
         provider.base_url = item.base_url
@@ -671,13 +699,14 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             username or None if item.api_format == "github_copilot" else None
         )
         provider.project_id = item.project_id
+        provider.location = (
+            (item.location or "global") if item.api_format == "google_vertex" else None
+        )
         if item.api_key is not None:
             key_str = item.api_key.strip()
             provider.api_key = key_str if key_str else None
         provider.models_json = _json_dumps(item.models)
         provider.model_capabilities_json = _json_dumps(item.model_capabilities)
-        provider.max_tpm = item.max_tpm
-        provider.max_rpm = item.max_rpm
         provider.updated_at = _utcnow()
         session.add(provider)
         session.flush()  # assign id before we need it
@@ -697,6 +726,11 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
     }
 
     imported_active_name: str | None = None
+    legacy_provider_limits = {
+        item.name.strip().casefold(): (item.max_tpm, item.max_rpm)
+        for item in payload.providers
+    }
+    imported_pair_limits: dict[tuple[int, str], tuple[int | None, int | None]] = {}
     for item in payload.profiles:
         provider_key = item.provider_name.strip().casefold()
         provider_id = provider_name_to_id.get(provider_key)
@@ -732,6 +766,25 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         cfg.api_key = provider.api_key
         cfg.base_url = provider.base_url
         cfg.model = item.model
+        legacy_tpm, legacy_rpm = legacy_provider_limits.get(provider_key, (None, None))
+        pair_limits = (
+            item.max_tpm if item.max_tpm is not None else legacy_tpm,
+            item.max_rpm if item.max_rpm is not None else legacy_rpm,
+        )
+        pair_key = (provider_id, item.model)
+        if (
+            pair_key in imported_pair_limits
+            and imported_pair_limits[pair_key] != pair_limits
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Profiles using provider '{item.provider_name}' and model "
+                    f"'{item.model}' must use the same rate limits"
+                ),
+            )
+        imported_pair_limits[pair_key] = pair_limits
+        cfg.max_tpm, cfg.max_rpm = pair_limits
         cfg.max_tokens = item.max_tokens
         if item.max_context_tokens is None:
             cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
@@ -763,6 +816,19 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             imported_active_name = item.name.strip().casefold()
 
     session.flush()
+
+    # Saved configurations for one provider/model pair use one limiter. Apply
+    # imported values to existing configurations for that pair as well.
+    for (provider_id, model), (max_tpm, max_rpm) in imported_pair_limits.items():
+        for cfg in session.exec(
+            select(LLMConfig).where(
+                LLMConfig.provider_id == provider_id,
+                LLMConfig.model == model,
+            )
+        ).all():
+            cfg.max_tpm = max_tpm
+            cfg.max_rpm = max_rpm
+            session.add(cfg)
 
     # ── 3. Activate the designated profile (if any) ───────────────────────────
     if imported_active_name is not None:

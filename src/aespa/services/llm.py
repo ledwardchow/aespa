@@ -421,43 +421,29 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
     if config.provider_id is None:
         return None
 
-    key = f"{config.provider}:{config.model}"
-    try:
-        from sqlmodel import Session
+    key = f"{config.provider_id}:{config.model}"
+    if not config.max_tpm and not config.max_rpm:
+        _limiters.pop(key, None)
+        return None
 
-        from aespa.db import get_engine
-        from aespa.models import LLMProviderConfig
-
-        with Session(get_engine()) as session:
-            provider = session.get(LLMProviderConfig, config.provider_id)
-            if not provider or (not provider.max_tpm and not provider.max_rpm):
-                _limiters.pop(key, None)
-                return None
-
-            tpm = provider.max_tpm or 10_000_000
-            rpm = provider.max_rpm
-
-            limiter = _limiters.get(key)
-            burst_seconds = 0.0 if config.provider == "openai_codex" else 60.0
-            burst_requests = 1 if config.provider == "openai_codex" else None
-            if (
-                not limiter
-                or limiter.tpm != tpm
-                or limiter.rpm != rpm
-                or limiter.burst_seconds != burst_seconds
-                or (
-                    config.provider == "openai_codex"
-                    and limiter.request_capacity != 1.0
-                )
-            ):
-                _limiters[key] = AsyncTokenBucketLimiter(
-                    tpm=tpm,
-                    rpm=rpm,
-                    burst_seconds=burst_seconds,
-                    burst_requests=burst_requests,
-                )
-    except Exception as e:
-        log.warning(f"Failed to lookup rate limit for provider: {e}")
+    tpm = config.max_tpm or 10_000_000
+    rpm = config.max_rpm
+    limiter = _limiters.get(key)
+    burst_seconds = 0.0 if config.provider == "openai_codex" else 60.0
+    burst_requests = 1 if config.provider == "openai_codex" else None
+    if (
+        not limiter
+        or limiter.tpm != tpm
+        or limiter.rpm != rpm
+        or limiter.burst_seconds != burst_seconds
+        or (config.provider == "openai_codex" and limiter.request_capacity != 1.0)
+    ):
+        _limiters[key] = AsyncTokenBucketLimiter(
+            tpm=tpm,
+            rpm=rpm,
+            burst_seconds=burst_seconds,
+            burst_requests=burst_requests,
+        )
 
     return _limiters.get(key)
 
@@ -723,8 +709,7 @@ def _usage_totals(
         "total_requests": sum(v.get("requests", 0) for v in bucket.values()),
         "pending_requests": len(pending),
         "pending_input_tokens": sum(
-            max(0, int(call.get("input_tokens", 0) or 0))
-            for call in pending.values()
+            max(0, int(call.get("input_tokens", 0) or 0)) for call in pending.values()
         ),
         "estimated_token_cost_usd": _cost_total(bucket, "estimated_token_cost_usd"),
         "estimated_credit_cost_usd": _cost_total(bucket, "estimated_credit_cost_usd"),
@@ -738,9 +723,7 @@ def _usage_totals(
     }
 
 
-def _emit_pending_usage_update(
-    context: _UsageContext, key: tuple[str, int]
-) -> None:
+def _emit_pending_usage_update(context: _UsageContext, key: tuple[str, int]) -> None:
     if context.emit_fn is None:
         return
     try:
@@ -829,6 +812,7 @@ def _record_usage(
         "azure_foundry_openai",
         "bedrock_mantle",
         "google",
+        "google_vertex",
         "openai_codex",
         "google_antigravity",
     }
@@ -1562,7 +1546,7 @@ async def _call_impl(
             return await _google_antigravity(config, prompt, screenshot_b64)
         if config.provider == "anthropic":
             return await _anthropic(config, prompt, screenshot_b64)
-        if config.provider == "google":
+        if config.provider in {"google", "google_vertex"}:
             return await _google(config, prompt, screenshot_b64)
         if config.provider == "azure_openai":
             return await _azure_openai(config, prompt, screenshot_b64)
@@ -1606,7 +1590,7 @@ async def _call_impl(
             resp = await _google_antigravity(config, prompt, screenshot_b64)
         elif config.provider == "anthropic":
             resp = await _anthropic(config, prompt, screenshot_b64)
-        elif config.provider == "google":
+        elif config.provider in {"google", "google_vertex"}:
             resp = await _google(config, prompt, screenshot_b64)
         elif config.provider == "azure_openai":
             resp = await _azure_openai(config, prompt, screenshot_b64)
@@ -2447,19 +2431,10 @@ async def _anthropic(
 
 
 async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    from google import genai
     from google.genai import types
 
-    _g_proxy = _llm_proxy_var.get()
-    _g_http_opts: dict = {}
-    if config.base_url:
-        _g_http_opts["base_url"] = config.base_url
-    _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=_g_proxy is None,
-        headers=_LLM_HEADERS,
-        **({"proxy": _g_proxy} if _g_proxy else {}),
-    )
-    client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
+    client = _make_google_client(config)
+    async_client = client.aio
     parts: list = []
     if screenshot_b64:
         parts.append(
@@ -2470,21 +2445,62 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
         )
     parts.append(prompt)
 
-    resp = await client.aio.models.generate_content(
-        model=config.model,
-        contents=parts,
-        config=types.GenerateContentConfig(
-            max_output_tokens=config.max_tokens,
-            **_google_thinking_config(types, config),
-            **(
-                {"temperature": config.temperature}
-                if config.temperature is not None
-                else {}
+    try:
+        resp = await async_client.models.generate_content(
+            model=config.model,
+            contents=parts,
+            config=types.GenerateContentConfig(
+                max_output_tokens=config.max_tokens,
+                **_google_thinking_config(types, config),
+                **(
+                    {"temperature": config.temperature}
+                    if config.temperature is not None
+                    else {}
+                ),
             ),
-        ),
-    )
+        )
+    finally:
+        await async_client.aclose()
     _record_google_usage(config.model, getattr(resp, "usage_metadata", None))
     return resp.text or ""
+
+
+def _make_google_client(config: LLMConfig):
+    """Build a Gemini Developer API or Vertex AI client for one request."""
+    from google import genai
+
+    project_id = None
+    if config.provider == "google_vertex":
+        project_id = (getattr(config, "project_id", None) or "").strip()
+        if not project_id:
+            raise ValueError("Google Cloud project id is required for Vertex AI")
+
+    _g_proxy = _llm_proxy_var.get()
+    _g_http_opts: dict = {}
+    if config.provider == "google_vertex":
+        _g_http_opts["api_version"] = "v1"
+    elif config.base_url:
+        _g_http_opts["base_url"] = config.base_url
+    _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
+        verify=_g_proxy is None,
+        headers=_LLM_HEADERS,
+        **({"proxy": _g_proxy} if _g_proxy else {}),
+    )
+    if config.provider == "google_vertex":
+        return genai.Client(
+            vertexai=True,
+            project=project_id,
+            location=(getattr(config, "location", None) or "global").strip()
+            or "global",
+            http_options=_g_http_opts,
+        )
+    return genai.Client(api_key=config.api_key, http_options=_g_http_opts)
+
+
+def _google_candidate_parts(candidate: Any | None) -> list[Any]:
+    """Return response parts when a Google candidate carries content."""
+    content = getattr(candidate, "content", None)
+    return list(getattr(content, "parts", None) or [])
 
 
 async def _github_copilot(
@@ -4919,6 +4935,7 @@ AGENTIC_LOOP_PROVIDERS = frozenset(
         "azure_foundry",
         "azure_foundry_openai",
         "google",
+        "google_vertex",
     }
 )
 
@@ -6207,19 +6224,23 @@ async def _call_with_tools_impl(
         return blocks, stop_reason, blocks  # store Anthropic-format in history
 
     # ── Google Gemini (function calling) ──────────────────────────────────────
-    if config.provider == "google":
-        from google import genai
+    if config.provider in {"google", "google_vertex"}:
         from google.genai import types as _gtypes
 
         def _ant_tools_to_gemini() -> list:
             fn_decls = []
             for t in _active_tools:
                 schema = t.get("input_schema") or {}
+                schema_arg = (
+                    {"parameters_json_schema": schema if schema else None}
+                    if config.provider == "google_vertex"
+                    else {"parameters": schema if schema else None}
+                )
                 fn_decls.append(
                     _gtypes.FunctionDeclaration(
                         name=t["name"],
                         description=t.get("description", ""),
-                        parameters=schema if schema else None,
+                        **schema_arg,
                     )
                 )
             return [_gtypes.Tool(function_declarations=fn_decls)]
@@ -6266,16 +6287,8 @@ async def _call_with_tools_impl(
                     result.append(_gtypes.Content(role=role, parts=parts))
             return result
 
-        _g_proxy = _llm_proxy_var.get()
-        _g_http_opts: dict = {}
-        if config.base_url:
-            _g_http_opts["base_url"] = config.base_url
-        _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-            verify=_g_proxy is None,
-            headers=_LLM_HEADERS,
-            **({"proxy": _g_proxy} if _g_proxy else {}),
-        )
-        g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
+        g_client = _make_google_client(config)
+        g_async = g_client.aio
         g_tools = _ant_tools_to_gemini()
         g_contents = _ant_contents_to_gemini(messages)
         generate_config = _gtypes.GenerateContentConfig(
@@ -6294,35 +6307,40 @@ async def _call_with_tools_impl(
             text_parts: list[str] = []
             streamed_functions: list[dict[str, Any]] = []
             usage_metadata = None
-            g_stream = await g_client.aio.models.generate_content_stream(
-                model=config.model,
-                contents=g_contents,
-                config=generate_config,
-            )
-            async for chunk in g_stream:
-                usage_metadata = (
-                    getattr(chunk, "usage_metadata", None) or usage_metadata
+            try:
+                g_stream = await g_async.models.generate_content_stream(
+                    model=config.model,
+                    contents=g_contents,
+                    config=generate_config,
                 )
-                candidates = getattr(chunk, "candidates", None) or []
-                parts = candidates[0].content.parts if candidates else []
-                for part in parts:
-                    if getattr(part, "text", None):
-                        text_parts.append(part.text)
-                        await on_text_delta(part.text)
-                    elif getattr(part, "function_call", None):
-                        fc = part.function_call
-                        streamed_functions.append(
-                            {
-                                "type": "tool_use",
-                                "id": fc.name,
-                                "name": fc.name,
-                                "input": dict(fc.args) if fc.args else {},
-                                "text": None,
-                                "thought_signature": getattr(
-                                    part, "thought_signature", None
-                                ),
-                            }
-                        )
+                async for chunk in g_stream:
+                    usage_metadata = (
+                        getattr(chunk, "usage_metadata", None) or usage_metadata
+                    )
+                    candidates = getattr(chunk, "candidates", None) or []
+                    parts = _google_candidate_parts(
+                        candidates[0] if candidates else None
+                    )
+                    for part in parts:
+                        if getattr(part, "text", None):
+                            text_parts.append(part.text)
+                            await on_text_delta(part.text)
+                        elif getattr(part, "function_call", None):
+                            fc = part.function_call
+                            streamed_functions.append(
+                                {
+                                    "type": "tool_use",
+                                    "id": fc.name,
+                                    "name": fc.name,
+                                    "input": dict(fc.args) if fc.args else {},
+                                    "text": None,
+                                    "thought_signature": getattr(
+                                        part, "thought_signature", None
+                                    ),
+                                }
+                            )
+            finally:
+                await g_async.aclose()
             blocks: list[dict[str, Any]] = []
             streamed_text = "".join(text_parts)
             if streamed_text:
@@ -6343,13 +6361,17 @@ async def _call_with_tools_impl(
             )
             _record_google_usage(config.model, usage_metadata)
             return blocks, stop_reason, blocks
-        g_resp = await g_client.aio.models.generate_content(
-            model=config.model,
-            contents=g_contents,
-            config=generate_config,
-        )
+        try:
+            g_resp = await g_async.models.generate_content(
+                model=config.model,
+                contents=g_contents,
+                config=generate_config,
+            )
+        finally:
+            await g_async.aclose()
         blocks = []
-        for part in g_resp.candidates[0].content.parts if g_resp.candidates else []:
+        candidates = getattr(g_resp, "candidates", None) or []
+        for part in _google_candidate_parts(candidates[0] if candidates else None):
             if getattr(part, "text", None):
                 blocks.append(
                     {

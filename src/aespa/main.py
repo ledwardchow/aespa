@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -283,6 +284,20 @@ def _run_server(server) -> bool:
     return True
 
 
+def _server_startup_failure_message(server, console=None) -> str | None:
+    """Return the captured startup error when Uvicorn exits before listening."""
+    if bool(getattr(server, "started", False)):
+        return None
+
+    header = "[aespa] Backend startup failed."
+    if console is None:
+        return header
+    errors = list(console.handler.buffers.get("errors", ()))
+    if not errors:
+        return header
+    return f"{header}\n\n" + "\n\n".join(errors)
+
+
 def main() -> None:
     import uvicorn
 
@@ -322,6 +337,7 @@ def main() -> None:
 
         if not graphical_display_available():
             agent_activity_log.warning(NO_GRAPHICAL_DISPLAY_MESSAGE)
+    startup_failure: str | None = None
     try:
         port = settings.port
         while True:
@@ -340,6 +356,9 @@ def main() -> None:
                 console.handler.set_runtime_port(port)
             if not _run_server(server):
                 break
+            startup_failure = _server_startup_failure_message(server, console)
+            if startup_failure is not None:
+                break
             next_port = restart["port"]
             if next_port is None:
                 break
@@ -349,6 +368,9 @@ def main() -> None:
         restart["server"] = None
         if console:
             console.stop()
+    if startup_failure is not None:
+        print(startup_failure, file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

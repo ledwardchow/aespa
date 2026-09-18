@@ -207,21 +207,20 @@ LLM settings are structured into three entities to separate reusable provider co
 
 #### 1. Reusable Provider Config (`LLMProviderConfig` model)
 
-Defines API connections, optional project identifiers, and rate limits for LLM backends:
+Defines API connections, optional project identifiers, and model discovery settings for LLM backends:
 
 | Field | Default | Description |
 |---|---|---|
 | `name` | `Default Provider` | Label for the provider |
-| `api_format` | `anthropic` | API format: `factory_droid`, `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
+| `api_format` | `anthropic` | API format: `factory_droid`, `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `google_vertex`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
 | `api_key` | — | Provider API key (stored in DB; masked and excluded from non-localhost exports) |
 | `base_url` | — | Override endpoint URL |
 | `username` | — | Optional Copilot CLI account login; blank uses Copilot CLI's selected default account |
-| `project_id` | — | Bedrock Mantle project ID (sent as `OpenAI-Project` header for cost/usage attribution) |
-| `models_json` | `[]` | JSON list of available model names for this provider |
-| `max_tpm` | — | Optional Token-Per-Minute rate limit for this provider |
-| `max_rpm` | — | Optional Request-Per-Minute rate limit for this provider |
+| `project_id` | — | Bedrock Mantle project ID, or Google Cloud project ID for Vertex AI |
+| `location` | — | Google Vertex AI location; defaults to `global` |
+| `models_json` | `[]` | JSON list of available model names for this provider. Removing a name deletes unused saved model settings; names used by a scan profile cannot be removed until the profile is updated. API model refreshes keep names used by scan profiles. |
 
-#### 2. Saved LLM Profile (`LLMConfig` model)
+#### 2. Saved LLM Model Configuration (`LLMConfig` model)
 
 Defines execution parameters linked to a provider:
 
@@ -231,6 +230,8 @@ Defines execution parameters linked to a provider:
 | `is_active` | `false` | Global active switch (only one profile active globally) |
 | `provider_id` | — | Foreign key linking to the `LLMProviderConfig` connection |
 | `model` | `claude-opus-4-5` | Specific model identifier to run |
+| `max_tpm` | — | Optional token-per-minute limit shared by saved configurations using this provider and model |
+| `max_rpm` | — | Optional request-per-minute limit shared by saved configurations using this provider and model |
 | `max_tokens` | `16384` | Maximum output tokens per LLM call |
 | `max_context_tokens` | `200000` | Total model context window, including prompts, tools, conversation history, and the output allowance. Auto mode stores the latest provider-discovered value, follows later provider metadata refreshes, and uses a conservative fallback only when discovery has no context limit. |
 | `temperature` | — | Unset by default (falls through to provider/model default) |
@@ -1081,12 +1082,15 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 | `openai_codex` | External Codex app-server, using the local Codex CLI's default ChatGPT login |
 | `anthropic` | `anthropic` Python SDK (native tool-use supported) |
 | `openai` | `openai` Python SDK |
-| `google` | `google-generativeai` |
+| `google` | `google-genai` with a Gemini Developer API key |
+| `google_vertex` | `google-genai` with Google Cloud Application Default Credentials |
 | `bedrock` | `boto3` / `anthropic` Bedrock adapter |
 | `bedrock_mantle` | `openai` SDK with Bedrock Mantle endpoint (`project_id` sent as `OpenAI-Project` header) |
 | `azure_openai` | `openai` SDK with Azure base URL |
 | `openai_compatible` | `openai` SDK with custom base URL |
 | `openrouter` | `openai` SDK with OpenRouter base URL |
+
+The Google Vertex AI provider saves only the Google Cloud project and location. It reads Application Default Credentials from the AESPA process and does not copy credentials into the database. It accepts serverless publisher model IDs used by Vertex `generateContent`. User-managed endpoint resources, tuned models, and self-deployed Model Garden models are rejected. Model discovery lists Google publisher models available in the configured project and location; compatible Model-as-a-Service publisher IDs can be entered manually.
 
 When both the provider token and username are blank, the GitHub Copilot SDK reads Copilot CLI's real home directory and uses the account selected there. A configured username resolves that account's stored Copilot CLI credential, while an explicit provider token takes precedence over both choices. The provider form lists locally authenticated Copilot accounts and can launch Copilot CLI's device-code login command; AESPA exposes only the verification URL, one-time code, completion state, and account login to the browser, while Copilot CLI stores the resulting credential in its normal credential store. Named-account and explicit-token sessions get a temporary Copilot home. Every path keeps scans isolated: they use a temporary working directory, remove Copilot's repository environment from the prompt, disable instructions, skills, memory, hooks, embeddings, telemetry, host Git operations, and session storage, and expose only the custom tools AESPA explicitly registers. One Copilot session stays alive for the full AESPA agent conversation, allowing the provider to reuse conversation state and prompt caches. When Copilot requests a tool, its SDK handler pauses while AESPA applies the existing scope checks, execution monitoring, checkpointing, and tool-result limits. AESPA returns the real result to that handler and the same Copilot session continues.
 
@@ -1138,10 +1142,10 @@ All LLM SDK clients (GitHub Copilot, Anthropic, OpenAI, Azure, OpenRouter, Bedro
 
 ### Rate Limiting & Pacing
 
-To prevent exceeding upstream LLM API limits (which can cause active scans to fail or encounter transient errors), `llm.py` implements a provider-level **Rate Limiting & Pacing** layer:
+To prevent exceeding upstream LLM API limits (which can cause active scans to fail or encounter transient errors), `llm.py` implements a model-level **Rate Limiting & Pacing** layer:
 
-- **Token Bucket Algorithm:** Uses an asynchronous token-bucket rate limiter (`AsyncTokenBucketLimiter`) linked to each unique `(provider, model)` pair.
-- **Coverage:** Pacing wraps **both** the non-agentic path (`_call` — page analysis, probe planning, reporting) **and** the agentic tool-using path (`_call_with_tools`, used by every dynamic / API / SAST / ALICE scan loop), so a configured `max_tpm` / `max_rpm` applies to the whole run, not just page analysis.
+- **Token Bucket Algorithm:** Uses an asynchronous token-bucket rate limiter (`AsyncTokenBucketLimiter`) linked to each unique provider connection and model pair.
+- **Coverage:** Pacing wraps **both** the non-agentic path (`_call` - page analysis, probe planning, reporting) **and** the agentic tool-using path (`_call_with_tools`, used by every dynamic / API / SAST / ALICE scan loop), so configured `max_tpm` / `max_rpm` values apply to every call using that provider and model pair.
 - **Estimated Pre-allocation:**
   - Before making an API request, the limiter estimates token usage (`estimate_tokens`) for prompt text (1.1x scaling of character count divided by 4) and vision payloads (765–1600 tokens depending on the provider). The agentic path flattens the running message history to estimate input size.
   - It also includes the configured `max_tokens` (or a 4096 default) for the model's response.

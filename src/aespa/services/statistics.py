@@ -86,6 +86,7 @@ _INCLUSIVE_INPUT_PROVIDERS = {
     "azure_foundry_openai",
     "bedrock_mantle",
     "google",
+    "google_vertex",
     "openai_codex",
     "google_antigravity",
 }
@@ -130,6 +131,7 @@ def _provider_aliases(provider: str) -> set[str]:
             "azure_foundry_anthropic": "anthropic",
             "bedrock_mantle": "bedrock",
             "google": "vertex_ai",
+            "google_vertex": "vertex_ai",
             "openrouter": "openrouter",
         }.get(provider, provider),
     }

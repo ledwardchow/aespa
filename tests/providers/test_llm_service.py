@@ -361,6 +361,38 @@ def test_limiter_oversized_estimate_does_not_hang():
     assert slept is False  # clamped to max_tokens; the full bucket satisfies it at once
 
 
+def test_model_limiters_are_shared_only_by_provider_and_model_pair():
+    llm._limiters.clear()
+    first = LLMConfig(
+        provider_id=10,
+        provider="openai",
+        model="shared-model",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+    duplicate = LLMConfig(
+        provider_id=10,
+        provider="openai",
+        model="shared-model",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+    other_connection = LLMConfig(
+        provider_id=20,
+        provider="openai",
+        model="shared-model",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+
+    first_limiter = llm.get_limiter_for_config(first)
+
+    assert first_limiter is llm.get_limiter_for_config(duplicate)
+    assert first_limiter is not llm.get_limiter_for_config(other_connection)
+    assert first_limiter.tpm == 120_000
+    assert first_limiter.rpm == 60
+
+
 def test_limiter_on_wait_fires_when_pacing(monkeypatch):
     # When the bucket is empty the next acquire must pace, and on_wait must fire
     # (before the sleep) so callers can tell the user it is not stuck.
@@ -2856,6 +2888,217 @@ def test_bedrock_mantle_omits_project_when_unset(monkeypatch):
     asyncio.run(llm._call(config, "hello", None))
 
     assert "project" not in captured["client"]
+
+
+def test_google_vertex_client_uses_adc_project_and_location(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("google.genai.Client", _Client)
+    config = LLMConfig(
+        provider="google_vertex",
+        api_key="must-not-be-used",
+        base_url="https://must-not-be-used.example",
+        project_id="example-project",
+        location="australia-southeast1",
+        model="gemini-2.5-flash",
+    )
+
+    llm._make_google_client(config)
+
+    assert captured["vertexai"] is True
+    assert captured["project"] == "example-project"
+    assert captured["location"] == "australia-southeast1"
+    assert "api_key" not in captured
+    assert captured["http_options"]["api_version"] == "v1"
+    assert "base_url" not in captured["http_options"]
+    asyncio.run(captured["http_options"]["httpx_async_client"].aclose())
+
+
+def test_google_vertex_tools_keep_json_schema_integer_constraints(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Models:
+        async def generate_content(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(candidates=[], usage_metadata=None)
+
+    class _AsyncClient:
+        models = _Models()
+
+        async def aclose(self):
+            pass
+
+    client = SimpleNamespace(aio=_AsyncClient())
+    monkeypatch.setattr(llm, "_make_google_client", lambda _config: client)
+    config = LLMConfig(
+        provider="google_vertex",
+        project_id="example-project",
+        location="global",
+        model="gemini-2.5-flash",
+    )
+    tools = [
+        {
+            "name": "consolidate_findings",
+            "description": "Consolidate duplicate findings.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "remove_finding_references": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                    }
+                },
+                "required": ["remove_finding_references"],
+            },
+        }
+    ]
+
+    asyncio.run(
+        llm._call_with_tools_impl(
+            config,
+            system_message="system",
+            messages=[{"role": "user", "content": "start"}],
+            tools=tools,
+        )
+    )
+
+    declaration = captured["config"].tools[0].function_declarations[0]
+    assert declaration.parameters is None
+    assert (
+        declaration.parameters_json_schema["properties"]["remove_finding_references"][
+            "minItems"
+        ]
+        == 1
+    )
+    assert isinstance(
+        declaration.parameters_json_schema["properties"]["remove_finding_references"][
+            "minItems"
+        ],
+        int,
+    )
+
+
+def test_google_vertex_stream_ignores_candidate_with_null_parts(monkeypatch):
+    text_deltas: list[str] = []
+
+    class _Stream:
+        def __init__(self):
+            self._chunks = iter(
+                [
+                    SimpleNamespace(
+                        candidates=[
+                            SimpleNamespace(
+                                content=SimpleNamespace(
+                                    parts=[SimpleNamespace(text="hello")]
+                                )
+                            )
+                        ],
+                        usage_metadata=None,
+                    ),
+                    SimpleNamespace(
+                        candidates=[
+                            SimpleNamespace(content=SimpleNamespace(parts=None))
+                        ],
+                        usage_metadata=None,
+                    ),
+                ]
+            )
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._chunks)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class _Models:
+        async def generate_content_stream(self, **_kwargs):
+            return _Stream()
+
+    class _AsyncClient:
+        models = _Models()
+
+        async def aclose(self):
+            pass
+
+    async def _on_text(delta: str):
+        text_deltas.append(delta)
+
+    async def _run():
+        client = SimpleNamespace(aio=_AsyncClient())
+        monkeypatch.setattr(llm, "_make_google_client", lambda _config: client)
+        config = LLMConfig(
+            provider="google_vertex",
+            project_id="example-project",
+            location="global",
+            model="xai/grok-4.6",
+        )
+        token = llm._tool_text_delta_var.set(_on_text)
+        try:
+            return await llm._call_with_tools_impl(
+                config,
+                system_message="system",
+                messages=[{"role": "user", "content": "start"}],
+                tools=[],
+            )
+        finally:
+            llm._tool_text_delta_var.reset(token)
+
+    blocks, stop_reason, _raw_content = asyncio.run(_run())
+
+    assert text_deltas == ["hello"]
+    assert blocks == [
+        {
+            "type": "text",
+            "id": None,
+            "name": None,
+            "input": None,
+            "text": "hello",
+        }
+    ]
+    assert stop_reason == "end_turn"
+
+
+def test_google_vertex_response_ignores_candidate_with_null_parts(monkeypatch):
+    class _Models:
+        async def generate_content(self, **_kwargs):
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(content=SimpleNamespace(parts=None))],
+                usage_metadata=None,
+            )
+
+    class _AsyncClient:
+        models = _Models()
+
+        async def aclose(self):
+            pass
+
+    client = SimpleNamespace(aio=_AsyncClient())
+    monkeypatch.setattr(llm, "_make_google_client", lambda _config: client)
+    config = LLMConfig(
+        provider="google_vertex",
+        project_id="example-project",
+        location="global",
+        model="xai/grok-4.6",
+    )
+
+    result = asyncio.run(
+        llm._call_with_tools_impl(
+            config,
+            system_message="system",
+            messages=[{"role": "user", "content": "start"}],
+            tools=[],
+        )
+    )
+
+    assert result == ([], "end_turn", [])
 
 
 def test_mantle_message_translation_to_responses_items():

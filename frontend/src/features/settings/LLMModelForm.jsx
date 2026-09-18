@@ -10,6 +10,7 @@ export function LLMModelForm({
   mode,
   profile,
   providers,
+  modelConfigs = [],
   initialProviderId,
   initialModel,
   onSaved,
@@ -59,6 +60,15 @@ export function LLMModelForm({
     }
   };
   const selectedProvider = providers.find((p) => p.id === Number(form.provider_id));
+  const limitsForModel = (providerId, modelName) => {
+    const configured = modelConfigs.find(
+      (item) => item.provider_id === Number(providerId) && item.model === modelName,
+    );
+    return {
+      max_tpm: configured?.max_tpm ?? "",
+      max_rpm: configured?.max_rpm ?? "",
+    };
+  };
   const models = useMemo(
     () => sortModelNames(selectedProvider?.models),
     [selectedProvider?.models],
@@ -150,6 +160,7 @@ export function LLMModelForm({
                 provider_id: newProviderId,
                 model: newModel,
                 reasoning_effort: "",
+                ...limitsForModel(newProviderId, newModel),
               };
               if (!nameTouched || !form.name.trim()) {
                 updates.name =
@@ -177,6 +188,7 @@ export function LLMModelForm({
               const updates = {
                 model: newModel,
                 reasoning_effort: "",
+                ...limitsForModel(form.provider_id, newModel),
               };
               if (!nameTouched || !form.name.trim()) {
                 const provider = providers.find((p) => p.id === Number(form.provider_id));
@@ -321,6 +333,38 @@ export function LLMModelForm({
                   temperature: e.target.value,
                 })
               }
+            />
+          </div>
+        </div>
+        <div className="divider" />
+        <div className="form-section-title">
+          Rate Limits <span className="field-optional">(optional)</span>
+        </div>
+        <div className="field-hint">
+          Pace requests for this provider and model pair. Saved configurations using the same pair
+          share these limits.
+        </div>
+        <div className="two-col">
+          <div className="field">
+            <label htmlFor="model-max-tpm">Max Tokens Per Minute (TPM)</label>
+            <input
+              id="model-max-tpm"
+              type="number"
+              min="1"
+              placeholder="Unlimited"
+              value={form.max_tpm}
+              onChange={(e) => upd({ max_tpm: e.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="model-max-rpm">Max Requests Per Minute (RPM)</label>
+            <input
+              id="model-max-rpm"
+              type="number"
+              min="1"
+              placeholder="Unlimited"
+              value={form.max_rpm}
+              onChange={(e) => upd({ max_rpm: e.target.value })}
             />
           </div>
         </div>

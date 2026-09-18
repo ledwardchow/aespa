@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
-import { installFixtures, provider, run } from "./fixtures.js";
+import { installFixtures, model, profile, provider, run } from "./fixtures.js";
 
 const screens = [
   ["#/", "Fixture site"],
@@ -185,6 +185,53 @@ test("provider models use a table and open their model configuration", async ({ 
   await expect(page).toHaveURL(/#\/settings\/models\/new\?provider_id=1&model=aaa-unconfigured$/);
   await expect(page.getByText("New LLM Model", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Model", { exact: true })).toHaveValue("aaa-unconfigured");
+});
+
+test("loading provider models keeps models used by scan profiles", async ({ page }) => {
+  const errors = [];
+  const savedPayloads = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.route("**/api/settings/llm/model-configs", (route) =>
+    route.fulfill({ json: [model] }),
+  );
+  await page.route("**/api/settings/llm/profiles", (route) => route.fulfill({ json: [profile] }));
+  await page.route("**/api/settings/llm/discover-model-options", (route) =>
+    route.fulfill({
+      json: {
+        models: ["new-api-model"],
+        capabilities: { "new-api-model": { context_window_tokens: 128000 } },
+      },
+    }),
+  );
+  await page.route("**/api/settings/llm/providers/1", async (route) => {
+    const body = route.request().postDataJSON();
+    savedPayloads.push(body);
+    await route.fulfill({ json: { ...provider, ...body, id: 1 } });
+  });
+
+  await page.goto("/#/settings/providers/1/edit");
+  await expect(page).toHaveURL(/#\/settings\/providers\/1\/edit$/);
+  await expect(page.getByText("Edit LLM Provider", { exact: true })).toBeVisible();
+  await expect(page.getByText("Used by: Fixture profile", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Load models from API" }).click();
+
+  await expect(page.getByRole("button", { name: "new-api-model", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "fixture-model", exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Kept 1 model(s) used by scan profiles.", { exact: false }),
+  ).toBeVisible();
+  expect(savedPayloads).toHaveLength(1);
+  expect(savedPayloads[0].models).toEqual(["new-api-model", "fixture-model"]);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({
+    path: path.join(tmpdir(), "aespa-provider-load-models-keeps-profile-model.png"),
+    fullPage: true,
+  });
 });
 
 test("provider without a configured model shows a setup prompt", async ({ page }) => {

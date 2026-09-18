@@ -468,6 +468,7 @@ LLMProviderAPILiteral = Literal[
     "openai_compatible",
     "openrouter",
     "google",
+    "google_vertex",
     "bedrock",
     "bedrock_mantle",
     "azure_openai",
@@ -539,6 +540,11 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "gemini-1.5-pro",
         "gemini-1.5-flash",
     ],
+    "google_vertex": [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    ],
     "bedrock": [
         "global.anthropic.claude-opus-4-8",
         "global.anthropic.claude-sonnet-4-6",
@@ -604,11 +610,10 @@ class LLMProviderConfigIn(BaseModel):
     base_url: str | None = None
     username: str | None = Field(default=None, max_length=255)
     project_id: str | None = Field(default=None, max_length=120)
+    location: str | None = Field(default=None, max_length=120)
     models: list[str] = Field(default_factory=list, min_length=1)
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     api_key: str | None = None
-    max_tpm: int | None = Field(default=None, ge=1)
-    max_rpm: int | None = Field(default=None, ge=1)
 
     @field_validator("models")
     @classmethod
@@ -638,12 +643,39 @@ class LLMProviderConfigIn(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_codex_connection(self) -> "LLMProviderConfigIn":
+    def _validate_provider_connection(self) -> "LLMProviderConfigIn":
         if self.api_format == "openai_codex":
             self.api_key = None
             self.base_url = None
             self.username = None
             self.project_id = None
+            self.location = None
+        elif self.api_format == "google_vertex":
+            if not self.project_id:
+                raise ValueError("project_id is required for Google Vertex AI")
+            self.location = self.location or "global"
+            self.api_key = None
+            self.base_url = None
+            self.username = None
+            for model in self.models:
+                lowered = model.casefold()
+                if (
+                    lowered.startswith(
+                        ("projects/", "models/", "tunedmodels/", "endpoints/")
+                    )
+                    or "/endpoints/" in lowered
+                    or "/models/" in lowered
+                    and not lowered.startswith("publishers/")
+                ):
+                    raise ValueError(
+                        "Google Vertex AI models must be serverless publisher model IDs"
+                    )
+                if "/" not in model and not lowered.startswith("gemini-"):
+                    raise ValueError(
+                        "Use a Gemini model ID or a publisher/model ID for Google Vertex AI"
+                    )
+        else:
+            self.location = None
         return self
 
 
@@ -656,11 +688,11 @@ class LLMProviderConfigOut(BaseModel):
     base_url: str | None
     username: str | None = None
     project_id: str | None = None
+    location: str | None = None
     models: list[str] = Field(default_factory=list)
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key: str | None = None
-    max_tpm: int | None = None
     updated_at: datetime
 
 
@@ -673,6 +705,8 @@ class LLMModelDiscoveryRequest(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     username: str | None = None
+    project_id: str | None = None
+    location: str | None = None
 
 
 class LLMModelDiscoveryOut(BaseModel):
@@ -702,6 +736,8 @@ class LLMConfigIn(BaseModel):
     name: Optional[str] = Field(default=None, max_length=120)
     provider_id: int
     model: str = Field(min_length=1)
+    max_tpm: int | None = Field(default=None, ge=1)
+    max_rpm: int | None = Field(default=None, ge=1)
     max_tokens: int = Field(default=16384, ge=1, le=256000)
     # ``None`` asks the server to use the detected model context window.
     max_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
@@ -744,7 +780,10 @@ class LLMConfigOut(BaseModel):
     base_url: str | None
     username: str | None = None
     project_id: str | None = None
+    location: str | None = None
     model: str
+    max_tpm: int | None = None
+    max_rpm: int | None = None
     max_tokens: int
     max_context_tokens: int
     context_limit_source: str = "configured"
@@ -1434,18 +1473,22 @@ class LLMExportProviderItem(BaseModel):
     base_url: str | None = None
     username: str | None = None
     project_id: str | None = None
+    location: str | None = None
     models: list[str]
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key: str | None = None
-    max_tpm: int | None = None
-    max_rpm: int | None = None
+    # Accepted when importing version 1 exports. Version 2 exports omit these.
+    max_tpm: int | None = Field(default=None, exclude=True)
+    max_rpm: int | None = Field(default=None, exclude=True)
 
 
 class LLMExportProfileItem(BaseModel):
     name: str
     provider_name: str
     model: str
+    max_tpm: int | None = None
+    max_rpm: int | None = None
     max_tokens: int = 16384
     max_context_tokens: int | None = None
     temperature: Optional[float] = None
@@ -1456,7 +1499,7 @@ class LLMExportProfileItem(BaseModel):
 
 
 class LLMConfigExport(BaseModel):
-    version: int = 1
+    version: int = 2
     exported_at: datetime
     providers: list[LLMExportProviderItem]
     profiles: list[LLMExportProfileItem]

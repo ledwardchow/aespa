@@ -8,6 +8,7 @@ export const API_FORMAT_LABELS = {
   openai_compatible: "OpenAI-compatible API",
   openrouter: "OpenRouter",
   google: "Google Gemini API",
+  google_vertex: "Google Vertex AI (ADC)",
   bedrock: "Amazon Bedrock Runtime",
   bedrock_mantle: "Amazon Bedrock Mantle",
   azure_openai: "Azure OpenAI",
@@ -23,11 +24,10 @@ export const DEFAULT_PROVIDER_FORM = {
   region: "",
   username: "",
   project_id: "",
+  location: "",
   models: "",
   model_capabilities: {},
   api_key: "",
-  max_tpm: "",
-  max_rpm: "",
 };
 
 export const DEFAULT_LLM_FORM = {
@@ -43,6 +43,8 @@ export const DEFAULT_LLM_FORM = {
   use_vision: false,
   force_tool_choice: false,
   reasoning_effort: "",
+  max_tpm: "",
+  max_rpm: "",
 };
 
 export const PROVIDER_BASE_URL_PLACEHOLDERS = {
@@ -55,6 +57,7 @@ export const PROVIDER_BASE_URL_PLACEHOLDERS = {
   openai_compatible: "http://localhost:1234/v1",
   openrouter: "https://openrouter.ai/api/v1",
   google: "https://generativelanguage.googleapis.com",
+  google_vertex: "Not required",
   bedrock: "https://bedrock-runtime.ap-southeast-2.amazonaws.com",
   bedrock_mantle: "https://bedrock-mantle.us-east-2.api.aws/v1",
   azure_openai: "https://myresource.openai.azure.com",
@@ -74,6 +77,7 @@ export const PROVIDER_DEFAULT_BASE_URLS = {
   // no sensible default — must be set
   openrouter: "https://openrouter.ai/api/v1",
   google: "https://generativelanguage.googleapis.com",
+  google_vertex: "Application Default Credentials",
   bedrock: "AWS SDK default (ap-southeast-2)",
   bedrock_mantle: "https://bedrock-mantle.us-east-2.api.aws/v1",
   azure_openai: null,
@@ -93,6 +97,7 @@ export const PROVIDER_MODEL_PLACEHOLDERS = {
   openai_compatible: "llama-3.1-8b-instruct\nqwen2.5-coder",
   openrouter: "Models are loaded from OpenRouter API",
   google: "gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",
+  google_vertex: "gemini-2.5-pro\ngemini-2.5-flash\ngemini-2.5-flash-lite",
   bedrock: "global.anthropic.claude-opus-4-8\nglobal.anthropic.claude-sonnet-4-6",
   bedrock_mantle: "openai.gpt-5.5\nopenai.gpt-oss-120b",
   azure_openai: "gpt-5.5\ngpt-4o\ngpt-4.1",

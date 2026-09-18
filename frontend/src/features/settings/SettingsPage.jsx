@@ -87,6 +87,11 @@ export function SettingsPage({
     });
     nav(`#/settings/models/new?${query}`);
   };
+  const onProviderUpdated = useCallback((savedProvider) => {
+    setProviders((current) =>
+      current?.map((item) => (item.id === savedProvider.id ? savedProvider : item)),
+    );
+  }, []);
   const onCancel = () => {
     if (section === "models") {
       const providerId = editing?.provider_id || initialProviderId;
@@ -277,6 +282,7 @@ export function SettingsPage({
           <LLMModelForm
             mode="new"
             providers={providers}
+            modelConfigs={models}
             initialProviderId={initialProviderId}
             initialModel={initialModel}
             onSaved={onSaved}
@@ -288,6 +294,7 @@ export function SettingsPage({
             mode="edit"
             profile={editing}
             providers={providers}
+            modelConfigs={models}
             onSaved={onSaved}
             onCancel={onCancel}
           />
@@ -310,6 +317,7 @@ export function SettingsPage({
             onConfigureModel={(modelName, configuredModel) =>
               onConfigureProviderModel(editing, modelName, configuredModel)
             }
+            onProviderUpdated={onProviderUpdated}
             onSaved={onSaved}
             onCancel={onCancel}
           />

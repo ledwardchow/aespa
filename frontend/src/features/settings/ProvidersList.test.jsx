@@ -39,6 +39,7 @@ test("shows and sorts the number of configured models for each provider", async 
 
   const rows = () => [...container.querySelectorAll(".settings-list-row")];
   expect(screen.getByText("Configured models")).toBeTruthy();
+  expect(screen.queryByText("Limits")).toBeNull();
   expect(within(rows()[0]).getByText("1")).toBeTruthy();
   expect(within(rows()[1]).getByText("2")).toBeTruthy();
   expect(screen.queryByText("available-a")).toBeNull();

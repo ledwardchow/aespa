@@ -59,6 +59,8 @@ echo "==> Building app bundle with PyInstaller"
     --collect-all alembic \
     --collect-all uvicorn \
     --collect-all tiktoken \
+    --collect-all google.genai \
+    --collect-submodules google.auth \
     --collect-submodules aespa \
     "$REPO_ROOT/src/aespa/desktop.py"
 

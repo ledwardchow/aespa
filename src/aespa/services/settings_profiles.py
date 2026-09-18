@@ -287,7 +287,10 @@ def _apply_llm_config(
     cfg.base_url = provider.base_url
     cfg.username = provider.username
     cfg.project_id = provider.project_id
+    cfg.location = provider.location
     cfg.model = payload.model
+    cfg.max_tpm = payload.max_tpm
+    cfg.max_rpm = payload.max_rpm
     cfg.max_tokens = payload.max_tokens
     if payload.max_context_tokens is None:
         cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
@@ -316,6 +319,22 @@ def _apply_llm_config(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     cfg.updated_at = _utcnow()
+
+    # Limits belong to the provider/model pair. Duplicate saved configurations
+    # share one limiter, so keep their persisted values consistent as well.
+    peer_models = session.exec(
+        select(LLMConfig).where(
+            LLMConfig.provider_id == payload.provider_id,
+            LLMConfig.model == payload.model,
+        )
+    ).all()
+    for peer in peer_models:
+        if peer.id == cfg.id:
+            continue
+        peer.max_tpm = payload.max_tpm
+        peer.max_rpm = payload.max_rpm
+        peer.updated_at = cfg.updated_at
+        session.add(peer)
 
     if cfg.is_active:
         for profile in session.exec(select(LLMConfig)).all():
