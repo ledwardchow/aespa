@@ -1049,6 +1049,22 @@
   border-collapse: collapse;
   font-size: 10px;
 }
+.sast-efficiency-table {
+  min-width: 900px;
+  table-layout: fixed;
+}
+.sast-efficiency-table .sast-phase-column {
+  width: 16%;
+}
+.sast-efficiency-table .sast-active-time-column {
+  width: 11%;
+}
+.sast-efficiency-table .sast-run-timeline-column {
+  width: 31%;
+}
+.sast-efficiency-table .sast-work-completed-column {
+  width: 42%;
+}
 .sast-semantic-table th {
   padding: 8px 10px;
   color: var(--muted);
@@ -1077,6 +1093,72 @@
   font-size: 9px;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+.sast-phase-work {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.sast-phase-work span {
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-2);
+  background: var(--panel-2);
+  white-space: nowrap;
+}
+.sast-timeline-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.sast-timeline-heading small {
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.sast-timeline-cell {
+  vertical-align: middle !important;
+}
+.sast-phase-timeline {
+  position: relative;
+  height: 18px;
+  overflow: hidden;
+  border-inline: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 3px;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent calc(25% - 1px),
+    color-mix(in srgb, var(--border) 55%, transparent) 25%
+  );
+}
+.sast-phase-timeline::before {
+  position: absolute;
+  top: 8px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--border);
+  content: "";
+}
+.sast-phase-timeline > span {
+  position: absolute;
+  top: 5px;
+  left: var(--timeline-left);
+  width: var(--timeline-width);
+  min-width: 3px;
+  height: 8px;
+  border-radius: 3px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 70%, white 10%);
+}
+.sast-timeline-unavailable {
+  color: var(--muted);
+  font-size: 9px;
 }
 .sast-table-limit {
   padding: 9px 12px;

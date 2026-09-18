@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { nav } from "../../shared/navigation/router.js";
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 
 export function ApiCollectionsList() {
@@ -217,7 +218,7 @@ export function ApiCollectionsList() {
               </thead>
               <tbody>
                 {sortedCollections.map((c) => (
-                  <tr key={c.id}>
+                  <NavigationRow key={c.id} href={`#/apis/${c.id}`} label={`Open ${c.name}`}>
                     <td>
                       <a
                         href={`#/apis/${c.id}`}
@@ -253,7 +254,7 @@ export function ApiCollectionsList() {
                         </button>
                       </div>
                     </td>
-                  </tr>
+                  </NavigationRow>
                 ))}
               </tbody>
             </table>

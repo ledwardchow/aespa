@@ -333,6 +333,7 @@ class _Broker:
     max_requests: int
     max_concurrent: int
     post_probe_fn: Callable | None = None
+    default_owasp_category: str = ""
     attempt_count: int = 0
     request_count: int = 0
     denied_count: int = 0
@@ -542,18 +543,21 @@ class _Broker:
                     if key.lower()
                     not in {"set-cookie", "authorization", "proxy-authenticate"}
                 }
-                if self.post_probe_fn and spec.get("owasp_category"):
+                probe_category = str(
+                    spec.get("owasp_category") or self.default_owasp_category
+                )
+                if self.post_probe_fn and probe_category:
                     try:
                         self.post_probe_fn(
                             url,
                             method,
-                            str(spec.get("owasp_category")),
+                            probe_category,
                             test_class=str(spec.get("test_class") or "") or None,
                             response_status=response.status_code,
                             page_id=spec.get("page_id"),
                         )
                     except TypeError:
-                        self.post_probe_fn(url, method, str(spec.get("owasp_category")))
+                        self.post_probe_fn(url, method, probe_category)
                 return {
                     "ok": True,
                     "status_code": response.status_code,
@@ -722,6 +726,7 @@ async def execute_agent_python(
     scanner_policy,
     scope_check_fn: Callable[[str], str | None],
     post_probe_fn: Callable | None = None,
+    default_owasp_category: str = "",
     requested_timeout_s: int | None = None,
 ) -> str:
     if not code.strip():
@@ -806,6 +811,7 @@ async def execute_agent_python(
         max_requests=config.max_requests_per_execution,
         max_concurrent=config.max_concurrent_requests,
         post_probe_fn=post_probe_fn,
+        default_owasp_category=default_owasp_category,
     )
     config.timeout_s = effective_timeout
     status = "failed"

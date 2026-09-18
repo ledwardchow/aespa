@@ -1,14 +1,20 @@
 import { parseDate } from "../../shared/lib/dates.js";
+import * as settingsApi from "../../shared/api/settings.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useState, useEffect, useCallback } from "react";
 
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
+import {
+  routeScannerEventToActiveTeamTester,
+  teamCoordinatorStatus,
+} from "./activityPresentation.js";
 
 // Stored activity and usage data share the route event subscription.
 // Display helpers and local interactions live with the activity components.
 export function useActivity(runId) {
   const [activityLog, setActivityLog] = useState([]);
   const [agents, setAgents] = useState([]);
+  const [burpIntegrationEnabled, setBurpIntegrationEnabled] = useState(null);
   const [tokenUsage, setTokenUsage] = useState(null); // {total_input, total_output, by_model}
   const [sitePlanData, setSitePlanData] = useState(null);
 
@@ -82,13 +88,36 @@ export function useActivity(runId) {
       webRunsApi.getThinkingStatus(runId),
       webRunsApi.getValidateStatus(runId),
       webRunsApi.getCrawlStatus(runId).catch(() => null),
+      webRunsApi.getScanLog(runId).catch(() => []),
+      settingsApi.getBurpRestApiConfig().catch(() => null),
     ])
-      .then(([entries, scanStatus, validationStatus, crawlStatus]) => {
+      .then(([entries, scanStatus, validationStatus, crawlStatus, scanEntries, burpConfig]) => {
+        setBurpIntegrationEnabled(
+          typeof burpConfig?.enabled === "boolean" ? burpConfig.enabled : null,
+        );
         entries = entries || [];
         const scanRunning = isDynamicScanActive(scanStatus?.status);
         const validationRunning = validationStatus?.status === "running";
         const agentsMap = new Map();
         for (const e of entries) {
+          const activeTeamTester = [...agentsMap.values()].find(
+            (agent) => agent.id.startsWith("team-") && agent.status === "active",
+          );
+          const routed = routeScannerEventToActiveTeamTester(
+            {
+              id: e.agent_id,
+              role:
+                e.agent_id === "crawler"
+                  ? "Crawler"
+                  : e.agent_id === "scanner"
+                    ? "Test Lead"
+                    : e.role,
+              status: e.status,
+              currentTask: e.current_task,
+              outcome: e.outcome,
+            },
+            activeTeamTester,
+          );
           const entryTs = e.created_at
             ? parseDate(e.created_at).toLocaleTimeString("en-US", {
                 hour12: false,
@@ -97,25 +126,89 @@ export function useActivity(runId) {
                 second: "2-digit",
               })
             : "--:--:--";
-          const role =
-            e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
-          const existing = agentsMap.get(e.agent_id) || {
-            id: e.agent_id,
-            role,
-            status: e.status,
-            currentTask: e.current_task,
+          const existing = agentsMap.get(routed.id) || {
+            id: routed.id,
+            role: routed.role,
+            status: routed.status,
+            currentTask: routed.currentTask,
             taskHistory: [],
             crawlEvents: [],
           };
-          existing.status = e.status;
-          existing.role = role;
-          existing.currentTask = e.current_task;
+          existing.status = routed.status;
+          existing.role = routed.role;
+          existing.currentTask = routed.currentTask;
           existing.taskHistory.push({
             ts: entryTs,
-            task: e.current_task,
-            outcome: e.outcome,
+            task: routed.currentTask,
+            outcome: routed.outcome,
           });
-          agentsMap.set(e.agent_id, existing);
+          agentsMap.set(routed.id, existing);
+        }
+        const activeTeamTester = [...agentsMap.values()].find(
+          (agent) => agent.id.startsWith("team-") && agent.status === "active",
+        );
+        if (activeTeamTester) {
+          const mission = (activeTeamTester.taskHistory || []).find(
+            (entry) => entry.task && !/^Step \d+:/i.test(entry.task),
+          )?.task;
+          const coordinator = teamCoordinatorStatus(activeTeamTester, mission);
+          const existingCoordinator = agentsMap.get("scanner");
+          if (
+            !existingCoordinator?.currentTask?.startsWith(`Co-ordinating ${activeTeamTester.role}:`)
+          ) {
+            agentsMap.set("scanner", {
+              ...existingCoordinator,
+              ...coordinator,
+              taskHistory: existingCoordinator?.taskHistory || [],
+              crawlEvents: existingCoordinator?.crawlEvents || [],
+            });
+          }
+        }
+        for (const e of scanEntries || []) {
+          if (
+            !["specialist_step", "deep_worker_step"].includes(e.phase) ||
+            e.status !== "running" ||
+            !e.data?.agent_id
+          ) {
+            continue;
+          }
+          const data = e.data;
+          const agentId = data.agent_id;
+          const existing = agentsMap.get(agentId) || {
+            id: agentId,
+            role: e.phase === "deep_worker_step" ? "Deep Attack Worker" : "Specialist",
+            status: "idle",
+            currentTask: data.description || "Saved worker activity",
+            taskHistory: [],
+            crawlEvents: [],
+          };
+          const entryTs = e._persisted_at
+            ? parseDate(e._persisted_at).toLocaleTimeString("en-US", {
+                hour12: false,
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })
+            : "--:--:--";
+          existing.stepHistory = [
+            ...(existing.stepHistory || []),
+            {
+              ts: entryTs,
+              step: data.step,
+              description: data.description,
+              tool_name: data.tool_name,
+              context_tool: data.context_tool,
+              action_type: data.action_type,
+              method: data.method,
+              url: data.url,
+              status: data.status,
+              observation: data.observation,
+              hypothesis: data.hypothesis,
+              payload_purpose: data.payload_purpose,
+              payload_summary: data.payload_summary,
+            },
+          ].slice(-200);
+          agentsMap.set(agentId, existing);
         }
         const crawler = agentsMap.get("crawler");
         if (crawlStatus?.running) {
@@ -170,6 +263,7 @@ export function useActivity(runId) {
     setActivityLog,
     agents,
     setAgents,
+    burpIntegrationEnabled,
     tokenUsage,
     setTokenUsage,
     sitePlanData,

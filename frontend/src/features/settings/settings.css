@@ -73,6 +73,145 @@
   gap: 8px;
 }
 
+.provider-models-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.provider-model-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid rgba(245, 166, 35, 0.32);
+  border-radius: 7px;
+  background: rgba(245, 166, 35, 0.09);
+}
+
+.provider-model-prompt > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.provider-model-prompt strong {
+  color: var(--warn, #f5a623);
+  font-size: 13px;
+}
+
+.provider-model-prompt span {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.provider-model-prompt .btn {
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .provider-model-prompt {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+.provider-models-heading label {
+  margin: 0;
+}
+
+.provider-models-table-wrap {
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid var(--border-2);
+  border-radius: 7px;
+  background: var(--panel-2);
+}
+
+.provider-models-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.provider-models-table th,
+.provider-models-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.provider-models-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--muted);
+  background: var(--panel-2);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+.provider-models-table th:nth-child(2) {
+  width: 26%;
+}
+
+.provider-models-table th:last-child {
+  width: 88px;
+}
+
+.provider-models-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.provider-models-table td:last-child {
+  text-align: right;
+}
+
+.provider-model-usage {
+  margin-top: 3px;
+  color: var(--warn, #f5a623);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.provider-model-link {
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.provider-model-link:hover,
+.provider-model-link:focus-visible {
+  text-decoration: underline;
+}
+
+.provider-models-empty {
+  color: var(--muted);
+  text-align: center !important;
+}
+
+.provider-model-add-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.provider-model-add-row input {
+  flex: 1;
+}
+
 .settings-tab-bar {
   margin-bottom: 14px;
 }

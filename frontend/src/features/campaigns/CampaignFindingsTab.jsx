@@ -1,4 +1,4 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
@@ -90,7 +90,7 @@ function FindingDetail({ row }) {
   );
 }
 
-export function CampaignFindingsTab({ applicationId, campaignId, initialFindingRef }) {
+export function CampaignFindingsTab({ systemId, campaignId, initialFindingRef }) {
   const [rows, setRows] = useState(null);
   const [validationCases, setValidationCases] = useState(null);
   const [error, setError] = useState(null);
@@ -101,8 +101,8 @@ export function CampaignFindingsTab({ applicationId, campaignId, initialFindingR
   );
 
   const load = useCallback(() => {
-    applicationsApi
-      .getCampaignFindings(applicationId, campaignId)
+    systemsApi
+      .getCampaignFindings(systemId, campaignId)
       .then((data) => {
         setRows(data);
         if (initialFindingRef) {
@@ -111,7 +111,7 @@ export function CampaignFindingsTab({ applicationId, campaignId, initialFindingR
         }
       })
       .catch((e) => setError(e.message));
-  }, [applicationId, campaignId, initialFindingRef]);
+  }, [systemId, campaignId, initialFindingRef]);
 
   useEffect(() => {
     load();
@@ -119,8 +119,8 @@ export function CampaignFindingsTab({ applicationId, campaignId, initialFindingR
 
   useEffect(() => {
     let cancelled = false;
-    applicationsApi
-      .getCampaignValidationCases(applicationId, campaignId)
+    systemsApi
+      .getCampaignValidationCases(systemId, campaignId)
       .then((value) => {
         if (!cancelled) setValidationCases(validationCasesFromResponse(value));
       })
@@ -132,7 +132,7 @@ export function CampaignFindingsTab({ applicationId, campaignId, initialFindingR
     return () => {
       cancelled = true;
     };
-  }, [applicationId, campaignId]);
+  }, [systemId, campaignId]);
 
   const groups = useMemo(() => {
     if (!rows) return [];
@@ -227,7 +227,7 @@ export function CampaignFindingsTab({ applicationId, campaignId, initialFindingR
                         description={group.items[0].description}
                         severity={group.items[0].severity}
                         validation_status={group.items[0].status}
-                        href={`#/applications/${applicationId}/campaigns/${campaignId}/findings?finding=${encodeURIComponent(group.items[0].reference || "")}`}
+                        href={`#/systems/${systemId}/campaigns/${campaignId}/findings?finding=${encodeURIComponent(group.items[0].reference || "")}`}
                       />
                     </td>
                     <td className="subtle">{group.items[0].component_name || "—"}</td>

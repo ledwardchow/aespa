@@ -57,6 +57,9 @@ from aespa.services.settings_integrations import (
     get_crawler_config as get_crawler_config,
 )
 from aespa.services.settings_integrations import (
+    get_deep_scan_config as get_deep_scan_config,
+)
+from aespa.services.settings_integrations import (
     get_global_http_header_config as get_global_http_header_config,
 )
 from aespa.services.settings_integrations import (
@@ -94,6 +97,9 @@ from aespa.services.settings_integrations import (
 )
 from aespa.services.settings_integrations import (
     upsert_crawler_config as upsert_crawler_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_deep_scan_config as upsert_deep_scan_config,
 )
 from aespa.services.settings_integrations import (
     upsert_global_http_header_config as upsert_global_http_header_config,

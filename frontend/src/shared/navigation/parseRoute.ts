@@ -4,6 +4,9 @@ export type Route = {
   siteId?: number;
   campaignId?: number;
   tab?: string;
+  screen?: "list" | "new" | "edit";
+  providerId?: number;
+  modelName?: string;
   findingRef?: string;
   leadRef?: string;
   trafficCoverage?: {
@@ -21,7 +24,9 @@ function cleanReference(value: string | null) {
 export function parseRoute(hash = "#/"): Route {
   if (!hash || hash === "#/" || hash === "#") return { name: "list" };
 
-  const [routeHash, queryString = ""] = hash.split("?", 2);
+  const [rawRouteHash, queryString = ""] = hash.split("?", 2);
+  // Keep bookmarks created before Applications was renamed to Systems working.
+  const routeHash = rawRouteHash.replace(/^#\/applications(?=\/|$)/, "#/systems");
   const query = new URLSearchParams(queryString);
   const findingRef = cleanReference(query.get("finding"));
   const leadRef = cleanReference(query.get("lead"));
@@ -74,22 +79,45 @@ export function parseRoute(hash = "#/"): Route {
     };
   if ((m = routeHash.match(/^#\/runs\/(\d+)$/)))
     return { name: "run-detail", id: +m[1], findingRef, leadRef };
-  if (routeHash === "#/applications/new") return { name: "app-new" };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)\/edit$/)))
-    return { name: "app-edit", id: +m[1] };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)\/campaigns\/new$/)))
+  if (routeHash === "#/systems/new") return { name: "system-new" };
+  if ((m = routeHash.match(/^#\/systems\/(\d+)\/edit$/))) return { name: "system-edit", id: +m[1] };
+  if ((m = routeHash.match(/^#\/systems\/(\d+)\/campaigns\/new$/)))
     return { name: "campaign-new", id: +m[1] };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)\/campaigns\/(\d+)\/([a-z]+)$/)))
+  if ((m = routeHash.match(/^#\/systems\/(\d+)\/campaigns\/(\d+)\/([a-z]+)$/)))
     return { name: "campaign-detail", id: +m[1], campaignId: +m[2], tab: m[3], findingRef };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)\/campaigns\/(\d+)$/)))
+  if ((m = routeHash.match(/^#\/systems\/(\d+)\/campaigns\/(\d+)$/)))
     return { name: "campaign-detail", id: +m[1], campaignId: +m[2], findingRef };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)\/([a-z-]+)$/)))
-    return { name: "app-detail", id: +m[1], tab: m[2] };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)$/))) return { name: "app-detail", id: +m[1] };
-  if (routeHash === "#/applications") return { name: "app-list" };
+  if ((m = routeHash.match(/^#\/systems\/(\d+)\/([a-z-]+)$/)))
+    return { name: "system-detail", id: +m[1], tab: m[2] };
+  if ((m = routeHash.match(/^#\/systems\/(\d+)$/))) return { name: "system-detail", id: +m[1] };
+  if (routeHash === "#/systems") return { name: "system-list" };
   if (routeHash === "#/active-jobs") return { name: "active-jobs" };
   if (routeHash === "#/stats" || routeHash === "#/stats/usage") return { name: "stats" };
-  if (routeHash === "#/settings") return { name: "settings" };
+  if (routeHash === "#/settings" || routeHash === "#/settings/profiles")
+    return { name: "settings", tab: "profiles", screen: "list" };
+  if (routeHash === "#/settings/profiles/new")
+    return { name: "settings", tab: "profiles", screen: "new" };
+  if ((m = routeHash.match(/^#\/settings\/profiles\/(\d+)\/edit$/)))
+    return { name: "settings", tab: "profiles", screen: "edit", id: +m[1] };
+  if (routeHash === "#/settings/providers")
+    return { name: "settings", tab: "providers", screen: "list" };
+  if (routeHash === "#/settings/providers/new")
+    return { name: "settings", tab: "providers", screen: "new" };
+  if ((m = routeHash.match(/^#\/settings\/providers\/(\d+)\/edit$/)))
+    return { name: "settings", tab: "providers", screen: "edit", id: +m[1] };
+  if (routeHash === "#/settings/models/new") {
+    const providerId = Number(query.get("provider_id"));
+    const modelName = query.get("model")?.trim() || undefined;
+    return {
+      name: "settings",
+      tab: "models",
+      screen: "new",
+      providerId: Number.isInteger(providerId) && providerId > 0 ? providerId : undefined,
+      modelName,
+    };
+  }
+  if ((m = routeHash.match(/^#\/settings\/models\/(\d+)\/edit$/)))
+    return { name: "settings", tab: "models", screen: "edit", id: +m[1] };
   if (routeHash === "#/scan-policy") return { name: "scan-policy" };
   if (routeHash === "#/external-integrations") return { name: "external-integrations" };
   if (routeHash === "#/debug") return { name: "debug" };

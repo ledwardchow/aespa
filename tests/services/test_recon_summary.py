@@ -14,7 +14,7 @@ from aespa.models import (
 )
 from aespa.models import TestRun as RunModel
 from aespa.services import recon_summary as recon_summary_svc
-from aespa.services import scanner
+from aespa.services import scanner, web_workprogram
 
 
 def _make_engine():
@@ -99,6 +99,67 @@ def test_build_recon_summary_access_observations(monkeypatch):
     assert routes["https://target.local/profile"]["access"]["classification"] == "mixed"
     assert routes["https://target.local/account"]["access"]["labels"] == ["Customer"]
     assert summary["access"]["profiles"][0]["username"] == "alice"
+
+
+def test_public_page_with_same_authenticated_content_skips_auth_obligations(
+    monkeypatch,
+):
+    engine = _make_engine()
+    monkeypatch.setattr(recon_summary_svc, "get_engine", lambda: engine)
+    monkeypatch.setattr(web_workprogram, "get_engine", lambda: engine)
+
+    with Session(engine) as s:
+        run = _seed_run(s, engine)
+        run_id = run.id
+        credential = Credential(
+            site_id=run.site_id, username="alice", password="secret"
+        )
+        s.add(credential)
+        s.flush()
+        page_text = "Open an account today. Total Balance $42,816.50"
+        page = CrawledPage(
+            test_run_id=run_id,
+            url="http://target.local/",
+            req_auth=False,
+            page_text=page_text,
+            accessible_by=f"[{credential.id}]",
+        )
+        s.add(page)
+        s.flush()
+        s.add_all(
+            [
+                PageCredentialView(
+                    page_id=page.id,
+                    test_run_id=run_id,
+                    credential_id=None,
+                    username="unauthenticated",
+                    req_auth=False,
+                    page_text=page_text,
+                ),
+                PageCredentialView(
+                    page_id=page.id,
+                    test_run_id=run_id,
+                    credential_id=credential.id,
+                    username="alice",
+                    req_auth=False,
+                    page_text=page_text,
+                ),
+            ]
+        )
+        s.commit()
+
+    summary = recon_summary_svc.build_recon_summary(run_id)
+    route = next(
+        route
+        for route in summary["routes"]
+        if route["canonical_url"] == "http://target.local/"
+    )
+
+    assert route["access"]["classification"] == "mixed"
+    assert route["access"]["identity_content"] == "equivalent"
+    obligations = web_workprogram._web_route_obligations(route, scan_mode="full")
+    assert not any(item[1] == "auth_vs_unauth" for item in obligations)
+    assert not any(item[1] == "http_cleartext_sensitive" for item in obligations)
 
 
 def test_build_recon_summary_evidence_signals(monkeypatch):

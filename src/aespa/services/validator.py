@@ -30,6 +30,7 @@ from aespa.db import get_engine
 from aespa.models import (
     CrawledPage,
     Credential,
+    PageCredentialView,
     ScanFinding,
     ScanLead,
     Site,
@@ -1535,6 +1536,17 @@ async def _deterministic_validate_finding(
         )
         page_text = page.page_text or "" if page else ""
         page_title = page.title or "" if page else ""
+        page_views = (
+            list(
+                s.exec(
+                    select(PageCredentialView).where(
+                        PageCredentialView.page_id == finding.page_id
+                    )
+                )
+            )
+            if page_matches_finding
+            else []
+        )
         baseline_bodies = list(
             s.exec(
                 select(TrafficEntry.response_body)
@@ -1550,6 +1562,12 @@ async def _deterministic_validate_finding(
     # Missing-auth findings have a decisive, always-available actor: anonymous.
     # Test it before consulting any account inventory.
     if claims_anonymous_access:
+        # A page seen with and without credentials can be a public landing page.
+        # When both rendered views are identical, a 200 response only proves public
+        # reachability. Let the adversarial validator decide whether the claimed
+        # content is genuinely protected instead of auto-confirming it.
+        if page and _has_equivalent_public_and_authenticated_views(page, page_views):
+            return None
         anonymous_result = await _request_access_validation_actor(
             finding,
             scanner_policy,
@@ -1754,6 +1772,36 @@ def _first_matching_response_evidence(
                     return marker
             return candidate[:120]
     return ""
+
+
+def _has_equivalent_public_and_authenticated_views(
+    page: CrawledPage,
+    views: list[PageCredentialView],
+) -> bool:
+    def normalise(value: str | None) -> str:
+        return re.sub(r"\s+", " ", value or "").strip()
+
+    anonymous_texts: set[str] = set()
+    authenticated_texts: set[str] = set()
+    page_text = normalise(page.page_text)
+    if page_text:
+        if page.req_auth is False:
+            anonymous_texts.add(page_text)
+        else:
+            authenticated_texts.add(page_text)
+    for view in views:
+        view_text = normalise(view.page_text)
+        if not view_text:
+            continue
+        if view.credential_id is None and view.req_auth is False:
+            anonymous_texts.add(view_text)
+        elif view.credential_id is not None:
+            authenticated_texts.add(view_text)
+    return bool(
+        anonymous_texts
+        and authenticated_texts
+        and anonymous_texts == authenticated_texts
+    )
 
 
 def _is_access_control_finding(finding: ScanFinding) -> bool:

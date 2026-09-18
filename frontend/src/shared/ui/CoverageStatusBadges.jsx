@@ -4,9 +4,13 @@ export function CoverageStatusBadges({ mode = "track", percent, covered, total, 
       ? "Full"
       : mode === "standard"
         ? "Standard"
-        : mode === "sast_validate"
-          ? "SAST Validate"
-          : "Quick";
+        : mode === "deep"
+          ? "Deep"
+          : mode === "team"
+            ? "Team"
+            : mode === "sast_validate"
+              ? "SAST Validate"
+              : "Quick";
   return (
     <>
       <span className={"badge " + (mode === "enforce" ? "warning" : "neutral")}>

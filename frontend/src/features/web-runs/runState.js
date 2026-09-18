@@ -1,6 +1,12 @@
 export const isCrawlerAgentActive = (agent, crawlStopping = false) =>
   crawlStopping || agent?.status === "active";
 
+export const hasResumableExperimentalScan = (run) =>
+  ["deep", "team"].includes(run?.coverage_mode) && ["paused", "stopped"].includes(run?.status);
+
+export const canResumeSelectedScanMode = (hasCheckpoint, selectedMode, savedMode) =>
+  hasCheckpoint && selectedMode === savedMode;
+
 export const RUN_PRIMARY_ACTION = Object.freeze({
   START_CRAWL: "start_crawl",
   START_PENTEST: "start_pentest",

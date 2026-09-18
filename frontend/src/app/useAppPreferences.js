@@ -12,12 +12,27 @@ export function useAppPreferences() {
       return true;
     }
   });
-  const [showApplications, setShowApplications] = useState(() => {
+  const [showSystems, setShowSystems] = useState(() => {
     try {
-      const val = localStorage.getItem("aespa_show_applications");
-      return val === null ? true : val === "true";
+      const val = localStorage.getItem("aespa_show_systems");
+      const legacyVal = localStorage.getItem("aespa_show_applications");
+      return val === null ? (legacyVal === null ? true : legacyVal === "true") : val === "true";
     } catch {
       return true;
+    }
+  });
+  const [showDeepScan, setShowDeepScan] = useState(() => {
+    try {
+      return localStorage.getItem("aespa_show_deep_scan") === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [showTeamScan, setShowTeamScan] = useState(() => {
+    try {
+      return localStorage.getItem("aespa_show_team_scan") === "true";
+    } catch {
+      return false;
     }
   });
   const [reportingDebugCfg, setReportingDebugCfg] = useState(null);
@@ -45,8 +60,12 @@ export function useAppPreferences() {
     username,
     showUsername,
     setShowUsername,
-    showApplications,
-    setShowApplications,
+    showSystems,
+    setShowSystems,
+    showDeepScan,
+    setShowDeepScan,
+    showTeamScan,
+    setShowTeamScan,
     reportingDebugCfg,
     setReportingDebugCfg,
     benchmarkLabCfg,

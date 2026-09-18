@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from types import SimpleNamespace
 
 from aespa import browser
@@ -46,8 +47,9 @@ def test_playwright_chromium_present_checks_the_resolved_executable(
 
 def test_download_chromium_installs_missing_browser_in_dev(monkeypatch):
     commands = []
+    monkeypatch.setattr(browser, "_chromium_install_state", "unknown")
     monkeypatch.setattr(browser, "_bundled", lambda: False)
-    monkeypatch.setattr(browser, "playwright_chromium_present", lambda: False)
+    monkeypatch.setattr(browser, "playwright_chromium_present", lambda: bool(commands))
     monkeypatch.setattr(browser.sys, "executable", "/test/python")
     monkeypatch.setattr(
         browser.subprocess,
@@ -55,7 +57,7 @@ def test_download_chromium_installs_missing_browser_in_dev(monkeypatch):
         lambda command, **kwargs: commands.append((command, kwargs)),
     )
 
-    browser.download_chromium_if_missing()
+    assert browser.download_chromium_if_missing() is True
 
     assert commands == [
         (
@@ -63,9 +65,35 @@ def test_download_chromium_installs_missing_browser_in_dev(monkeypatch):
             {"check": True},
         )
     ]
+    assert browser.chromium_install_state() == "available"
+
+
+def test_download_chromium_failure_soft_fails_and_marks_unavailable(monkeypatch):
+    monkeypatch.setattr(browser, "_chromium_install_state", "unknown")
+    monkeypatch.setattr(browser, "_bundled", lambda: False)
+    monkeypatch.setattr(browser, "playwright_chromium_present", lambda: False)
+    monkeypatch.setattr(browser.sys, "executable", "/test/python")
+
+    def fail_install(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(1, "playwright install chromium")
+
+    monkeypatch.setattr(browser.subprocess, "run", fail_install)
+
+    assert browser.download_chromium_if_missing() is False
+    assert browser.chromium_install_state() == "failed"
+    assert browser.playwright_chromium_available() is False
+
+
+def test_failed_install_becomes_available_after_external_install(monkeypatch):
+    monkeypatch.setattr(browser, "_chromium_install_state", "failed")
+    monkeypatch.setattr(browser, "playwright_chromium_present", lambda: True)
+
+    assert browser.playwright_chromium_available() is True
+    assert browser.chromium_install_state() == "available"
 
 
 def test_download_chromium_skips_installer_when_browser_is_present(monkeypatch):
+    monkeypatch.setattr(browser, "_chromium_install_state", "unknown")
     monkeypatch.setattr(browser, "playwright_chromium_present", lambda: True)
     monkeypatch.setattr(
         browser.subprocess,
@@ -73,7 +101,8 @@ def test_download_chromium_skips_installer_when_browser_is_present(monkeypatch):
         lambda *_args, **_kwargs: raise_unexpected_install(),
     )
 
-    browser.download_chromium_if_missing()
+    assert browser.download_chromium_if_missing() is True
+    assert browser.chromium_install_state() == "available"
 
 
 def raise_unexpected_install():

@@ -90,6 +90,7 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     policy = settings_service.get_run_scanner_policy(session, run)
     s.scanner_policy = policy.model_dump(mode="json")
     s.scan_mode = policy.scan_mode
+    s.scan_mode_locked = scanner_svc.is_scan_mode_locked(session, run)
     import json as _json
 
     s.scope_hosts = _json.loads(site.scope_hosts or "[]") if site else []

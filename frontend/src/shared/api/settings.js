@@ -113,6 +113,11 @@ export const getSpecialistAgentConfig = () => req("/api/settings/specialist-agen
 export const upsertSpecialistAgentConfig = (b) =>
   req("/api/settings/specialist-agent-config", { method: "PUT", body: b });
 
+export const getDeepScanConfig = () => req("/api/settings/deep-scan-config");
+
+export const upsertDeepScanConfig = (b) =>
+  req("/api/settings/deep-scan-config", { method: "PUT", body: b });
+
 export const getAdversarialValidatorConfig = () =>
   req("/api/settings/adversarial-validator-config");
 

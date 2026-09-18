@@ -5,8 +5,8 @@ import json
 from sqlmodel import Session, select
 
 from aespa.models import (
-    Application,
-    ApplicationTarget,
+    System,
+    SystemTarget,
     AssessmentCampaign,
     CampaignTargetMember,
     CampaignValidationCase,
@@ -22,19 +22,19 @@ from aespa.services.scan_leads import update_lead
 
 def _seed_web_case(engine, *, path: dict):
     with Session(engine) as session:
-        app = Application(name="Insurance")
+        app = System(name="Insurance")
         site = Site(name="FACE", base_url="https://face.test")
         sast_run = SastRun(name="backend", status="completed")
         session.add(app)
         session.add(site)
         session.add(sast_run)
         session.flush()
-        target = ApplicationTarget(
-            application_id=app.id,
+        target = SystemTarget(
+            system_id=app.id,
             target_type="site",
             target_id=site.id,
         )
-        campaign = AssessmentCampaign(application_id=app.id, name="validation")
+        campaign = AssessmentCampaign(system_id=app.id, name="validation")
         child_run = TestRun(site_id=site.id, name="FACE validation")
         session.add(target)
         session.add(campaign)

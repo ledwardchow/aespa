@@ -171,6 +171,51 @@ def test_running_phase_updates_sast_analyst_status(
     assert analyst.current_task == "Reviewing source-to-sink paths."
 
 
+@pytest.mark.parametrize(
+    "scanner_module", [sast_scanner, pytest.param(None, id="light")]
+)
+def test_phase_timing_keeps_only_active_resume_intervals(
+    isolated_db_engine, scanner_module
+):
+    if scanner_module is None:
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+
+    phase_state = scanner_module._empty_phase_state()
+    phase_state["discovery"] = {
+        "status": "paused",
+        "message": "Paused",
+        "data": {},
+        "active_elapsed_ms": 1200,
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "active_intervals": [
+            {
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "ended_at": "2026-01-01T00:00:01.200000+00:00",
+            }
+        ],
+    }
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="phase timing", phase_state_json=json.dumps(phase_state))
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    scanner_module._set_phase(run_id, "discovery", "running", "Resumed")
+    scanner_module._set_phase(run_id, "discovery", "complete", "Done")
+
+    with Session(isolated_db_engine) as session:
+        saved = json.loads(session.get(SastRun, run_id).phase_state_json)
+
+    assert saved["discovery"]["active_elapsed_ms"] >= 1200
+    assert saved["discovery"]["active_elapsed_ms"] < 5000
+    assert saved["discovery"]["first_started_at"] == "2026-01-01T00:00:00+00:00"
+    assert len(saved["discovery"]["active_intervals"]) == 2
+    assert saved["discovery"]["completed_at"] >= saved["discovery"]["started_at"]
+
+
 def test_agent_log_replays_persisted_worker_and_validator_activity(
     client, isolated_db_engine
 ):
@@ -264,6 +309,42 @@ def test_pause_endpoint_requests_cooperative_pause(
     assert response.json() == {"ok": True, "pause_requested": True}
 
 
+def test_completed_run_with_failed_worker_can_resume(
+    client, isolated_db_engine, monkeypatch
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        session.add(
+            SastWorker(
+                sast_run_id=sast_run_id,
+                worker_key="sink-audit:resume",
+                class_group="sink",
+                status="failed",
+                error_message="maximum context length exceeded",
+            )
+        )
+        session.commit()
+
+    starts = []
+
+    async def fake_start(run_id, *, resume=False):
+        starts.append((run_id, resume))
+
+    monkeypatch.setattr(sast_scanner, "start_sast_scan", fake_start)
+    monkeypatch.setattr(sast_scanner, "is_sast_scan_running", lambda _run_id: False)
+    monkeypatch.setattr(
+        sast_scanner,
+        "get_sast_status",
+        lambda run_id: {"run_id": run_id, "running": True},
+    )
+
+    response = client.post(f"/api/sast-runs/{sast_run_id}/scan/resume")
+
+    assert response.status_code == 200
+    assert response.json()["running"] is True
+    assert starts == [(sast_run_id, True)]
+
+
 def test_checkpointed_agent_retries_from_last_saved_turn(
     isolated_db_engine, monkeypatch
 ):
@@ -315,6 +396,74 @@ def test_checkpointed_agent_retries_from_last_saved_turn(
             .where(PhaseCheckpoint.run_id == sast_run_id)
         ).one()
     assert checkpoint.idempotency_key == "agent:discovery"
+
+
+def test_checkpointed_agent_compacts_provider_rejected_context(
+    isolated_db_engine, monkeypatch
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    attempts = []
+    oversized = [
+        {"role": "user", "content": "initial"},
+        {"role": "assistant", "content": "x" * 20_000},
+        {"role": "user", "content": "continue"},
+    ]
+
+    async def fake_loop(_config, **kwargs):
+        attempts.append(kwargs.get("resume_messages"))
+        if len(attempts) == 1:
+            await kwargs["on_checkpoint"](oversized, 7)
+            raise RuntimeError("out of memory for context size")
+        return "continued after compaction"
+
+    compact_calls = []
+
+    def fake_compact(messages, **kwargs):
+        compact_calls.append((messages, kwargs))
+        return [messages[0], messages[-1]], {
+            "before_chars": 20_100,
+            "after_chars": 50,
+            "compaction_applied": True,
+        }
+
+    from aespa.services import llm
+
+    monkeypatch.setattr(llm, "thinking_agentic_loop", fake_loop)
+    monkeypatch.setattr(llm, "compact_agentic_messages", fake_compact)
+    config = SimpleNamespace(
+        max_context_tokens=100_000,
+        max_tokens=10_000,
+        model="fake-model",
+        provider="openai",
+    )
+
+    result = asyncio.run(
+        sast_scanner._run_checkpointed_agent(
+            sast_run_id=sast_run_id,
+            phase="discovery",
+            worker_key="context-worker",
+            config=config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *_args: None,
+            emit_fn=lambda _event: None,
+            stop_check=lambda: False,
+            tools=[],
+            resume=False,
+        )
+    )
+
+    assert result == "continued after compaction"
+    assert len(compact_calls) == 1
+    assert attempts[1] == [oversized[0], oversized[-1]]
+    with Session(isolated_db_engine) as session:
+        checkpoint = session.exec(
+            select(PhaseCheckpoint)
+            .where(PhaseCheckpoint.run_kind == "sast")
+            .where(PhaseCheckpoint.run_id == sast_run_id)
+            .where(PhaseCheckpoint.idempotency_key == "agent:context-worker")
+        ).one()
+    assert json.loads(checkpoint.data_json)["context_recovery"]["after_chars"] == 50
 
 
 def test_resume_start_keeps_existing_leads_and_phase_state(
@@ -501,6 +650,60 @@ def test_provider_network_failure_pauses_sast_run(
     assert saved.status == "paused"
     assert pause.reason == "network"
     assert "resumed safely" in pause.message
+
+
+def test_failed_discovery_workers_pause_instead_of_completing(
+    isolated_db_engine, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr(
+            "app.py",
+            "def item(request):\n    return db.execute(request.args['id'])\n",
+        )
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="worker failure pause",
+            status="scanning",
+            source_archive_path=str(archive),
+            source_filename="source.zip",
+            llm_config_id=config.id,
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    async def context_failure(_config, **_kwargs):
+        raise RuntimeError("maximum context length exceeded")
+
+    from aespa.services import llm
+
+    monkeypatch.setattr(llm, "thinking_agentic_loop", context_failure)
+    monkeypatch.setattr(llm, "set_run_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm, "clear_run_context", lambda: None)
+
+    asyncio.run(sast_scanner._sast_scan_task(run_id))
+
+    with Session(isolated_db_engine) as session:
+        saved = session.get(SastRun, run_id)
+        pause = session.exec(
+            select(RunPause)
+            .where(RunPause.run_kind == "sast")
+            .where(RunPause.run_id == run_id)
+        ).one()
+        workers = session.exec(
+            select(SastWorker).where(SastWorker.sast_run_id == run_id)
+        ).all()
+    assert saved.status == "paused"
+    assert saved.completed_at is None
+    assert pause.reason == "worker_error"
+    assert workers and all(worker.status == "failed" for worker in workers)
 
 
 def test_sast_usage_context_starts_before_repository_model(
@@ -1033,6 +1236,8 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
                 },
                 1,
             )
+        elif "semantic closure reviewer" in prompt:
+            calls.append("discovery")
         else:
             calls.append("discovery")
             payload = json.loads(await execute("get_work_program", {}, 0))
@@ -1086,8 +1291,7 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
     with events_svc.run_kind_scope("sast"):
         asyncio.run(sast_scanner._sast_scan_task(run_id))
 
-    # Four discovery workers plus the semantic closure worker. The fixture's
-    # generic fallback branch records both as source-review calls.
+    # Four discovery workers plus the semantic closure worker.
     assert calls.count("discovery") == 5
     assert calls.count("validation") == 1
     assert calls[-1] == "attack_path"
@@ -1125,7 +1329,7 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
     assert status_by_agent == {
         "sast-repository-modeller": "complete",
         "sast-threat-modeller": "complete",
-        "sast-closure-analyst": "failed",
+        "sast-closure-analyst": "complete",
         "sast-attack-path": "complete",
     }
 
@@ -1231,6 +1435,8 @@ def test_sast_validation_starts_after_discovery_reconciliation(
                     },
                     1,
                 )
+        elif "semantic closure reviewer" in prompt:
+            calls.append("discovery")
         else:
             calls.append("discovery")
             payload = json.loads(await execute("get_work_program", {}, 0))

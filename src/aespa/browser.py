@@ -20,6 +20,7 @@ log = logging.getLogger("aespa.browser")
 # restore it after browser windows are created. A weak map avoids retaining
 # closed browser objects for the lifetime of the server.
 _browser_focus_apps: WeakKeyDictionary = WeakKeyDictionary()
+_chromium_install_state = "unknown"
 
 
 def _bundled() -> bool:
@@ -83,40 +84,102 @@ def playwright_chromium_present() -> bool:
     return executable.is_file()
 
 
-def download_chromium_if_missing() -> None:
+def chromium_install_state() -> str:
+    """Return the current built-in Chromium provisioning state.
+
+    ``failed`` is only recorded after both the executable check and installer
+    fail, so callers can safely hide this option without reacting to a
+    transient download or an old cache-directory heuristic.
+    """
+    return _chromium_install_state
+
+
+def playwright_chromium_available() -> bool:
+    """Return false only after a missing Chromium install has actually failed."""
+    global _chromium_install_state
+
+    if _chromium_install_state != "failed":
+        return True
+    if playwright_chromium_present():
+        _chromium_install_state = "available"
+        return True
+    return False
+
+
+def download_chromium_if_missing() -> bool:
     """Download Chromium into the configured dir if it isn't there. Blocking.
 
     Safe to run on a background thread. The resolved executable check handles
     Playwright upgrades where an older Chromium directory may still exist.
     """
+    global _chromium_install_state
+
     configure_browsers_path()
     if playwright_chromium_present():
-        return
+        _chromium_install_state = "available"
+        return True
 
-    if getattr(sys, "frozen", False):
-        target = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", browsers_dir()))
-        target.mkdir(parents=True, exist_ok=True)
-        print(f"[aespa] First run: downloading Chromium into {target} ...", flush=True)
-        # Frozen: sys.executable can't run `-m`; invoke Playwright's node driver.
-        from playwright._impl._driver import compute_driver_executable, get_driver_env
+    _chromium_install_state = "installing"
 
-        exe = compute_driver_executable()
-        driver = [exe] if isinstance(exe, str) else list(exe)
-        cmd = [*driver, "install", "chromium"]
-        subprocess.run(cmd, check=True, env=get_driver_env())
-    else:
+    try:
+        if getattr(sys, "frozen", False):
+            target = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", browsers_dir()))
+            target.mkdir(parents=True, exist_ok=True)
+            print(
+                f"[aespa] First run: downloading Chromium into {target} ...",
+                flush=True,
+            )
+            # Frozen: sys.executable can't run `-m`; invoke Playwright's node driver.
+            from playwright._impl._driver import (
+                compute_driver_executable,
+                get_driver_env,
+            )
+
+            exe = compute_driver_executable()
+            driver = [exe] if isinstance(exe, str) else list(exe)
+            cmd = [*driver, "install", "chromium"]
+            subprocess.run(cmd, check=True, env=get_driver_env())
+        else:
+            print(
+                "[aespa] Playwright Chromium is missing; installing it now ...",
+                flush=True,
+            )
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True,
+            )
+    except Exception as exc:
+        if playwright_chromium_present():
+            _chromium_install_state = "available"
+            return True
+        _chromium_install_state = "failed"
+        log.warning(
+            "Could not install Playwright Chromium; AESPA will use system Chrome: %s",
+            exc,
+        )
         print(
-            "[aespa] Playwright Chromium is missing; installing it now ...", flush=True
+            "[aespa] Chromium download failed; continuing with system Chrome.",
+            file=sys.stderr,
+            flush=True,
         )
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"], check=True
-        )
+        return False
+
+    if playwright_chromium_present():
+        _chromium_install_state = "available"
+        return True
+
+    _chromium_install_state = "failed"
+    log.warning(
+        "Playwright's Chromium installer completed without a usable executable; "
+        "AESPA will use system Chrome"
+    )
+    return False
 
 
-def ensure_chromium() -> None:
+def ensure_chromium() -> bool:
     """Configure the browsers path and download Chromium if missing (blocking)."""
     configure_browsers_path()
-    download_chromium_if_missing()
+    return download_chromium_if_missing()
 
 
 def _capture_frontmost_application() -> object | None:

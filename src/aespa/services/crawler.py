@@ -43,11 +43,6 @@ from aespa.services.settings import (
 )
 
 log = logging.getLogger("aespa.crawler")
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -469,10 +464,15 @@ def _crawl_progress(
 
 
 async def _do_crawl(run_id: int) -> None:
+    with Session(get_engine()) as s:
+        upstream_proxy = get_upstream_proxy_config(s)
+    llm_proxy_url = upstream_proxy.llm_proxy_url if upstream_proxy.proxy_llm else None
+    llm_svc.set_llm_proxy(llm_proxy_url)
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
     try:
         await _do_crawl_inner(run_id)
     finally:
+        llm_svc.set_llm_proxy(None)
         llm_svc.clear_run_context()
 
 
@@ -494,7 +494,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         crawler_cfg = get_crawler_config(s)
         browser_debug_cfg = get_browser_debug_config(s)
         crawl_proxy_url = (
-            upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+            upstream_proxy.scanner_proxy_url if upstream_proxy.proxy_scanner else None
         )
         global_header_cfg = get_global_http_header_config(s)
         for obj in [*creds, site, run]:
@@ -4403,6 +4403,7 @@ async def _promote_api_calls(
                     "node": {
                         "id": page_id,
                         "url": url,
+                        "state_kind": "api",
                         "title": api_title,
                         "depth": source_depth + 1,
                         "status": "crawled",
@@ -4492,6 +4493,7 @@ def _save_api_page(
         cp = CrawledPage(
             test_run_id=run_id,
             url=call.get("url") or "",
+            state_kind="api",
             title=title,
             page_text=_api_page_text(call)[:10_000],
             screenshot_b64=None,

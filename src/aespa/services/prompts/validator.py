@@ -78,6 +78,9 @@ Disproof checklist for A01 (Broken Access Control / IDOR):
 • Re-request the resource with no authentication at all (strip cookies and auth headers). \
 If you receive the same data, the endpoint may be intentionally public — not an access \
 control failure.
+• Check whether values that look like account, profile, or transaction data are part of a \
+public landing-page illustration, product preview, documentation example, or demo fixture. \
+Static sample values are not proof that live user records were disclosed.
 • Verify the response is not a generic SPA shell (React/Vue root div + bundled script \
 tags with minimal readable text). A shell page is never sensitive data disclosure.
 • For IDOR claims: confirm the session token in the original evidence belonged to a \

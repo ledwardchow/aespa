@@ -1,10 +1,10 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useCampaign } from "./useCampaign.js";
 
-vi.mock("../../shared/api/applications.js", () => ({
+vi.mock("../../shared/api/systems.js", () => ({
   getCampaign: vi.fn(),
   startCampaign: vi.fn(),
   stopCampaign: vi.fn(),
@@ -21,17 +21,17 @@ afterEach(() => {
 
 test("refreshes an interrupted snapshot when the campaign resumes elsewhere", async () => {
   vi.useFakeTimers();
-  applicationsApi.getCampaign
+  systemsApi.getCampaign
     .mockResolvedValueOnce({
       id: 218,
-      application_id: 1,
+      system_id: 1,
       status: "interrupted",
       source_members: [{ id: 1, status: "completed", run_status: "completed" }],
       target_members: [],
     })
     .mockResolvedValue({
       id: 218,
-      application_id: 1,
+      system_id: 1,
       status: "correlating",
       source_members: [{ id: 1, status: "completed", run_status: "completed" }],
       target_members: [],
@@ -49,15 +49,13 @@ test("refreshes an interrupted snapshot when the campaign resumes elsewhere", as
 });
 
 test("clears a request error after a later refresh succeeds", async () => {
-  applicationsApi.getCampaign
-    .mockRejectedValueOnce(new Error("Scan interrupted"))
-    .mockResolvedValue({
-      id: 218,
-      application_id: 1,
-      status: "correlating",
-      source_members: [],
-      target_members: [],
-    });
+  systemsApi.getCampaign.mockRejectedValueOnce(new Error("Scan interrupted")).mockResolvedValue({
+    id: 218,
+    system_id: 1,
+    status: "correlating",
+    source_members: [],
+    target_members: [],
+  });
 
   const { result } = renderHook(() => useCampaign(1, 218));
   await waitFor(() => expect(result.current.error).toBe("Scan interrupted"));

@@ -12,7 +12,11 @@ import { nav } from "../../shared/navigation/router.js";
 import { WebRunChatProvider, useWebRunChat } from "./WebRunChat.jsx";
 import { FindingsDataProvider, useFindingsData } from "./FindingsData.jsx";
 import { useActivity } from "./useActivity.js";
-import { isCrawlerAgentActive } from "./runState.js";
+import {
+  canResumeSelectedScanMode,
+  hasResumableExperimentalScan,
+  isCrawlerAgentActive,
+} from "./runState.js";
 
 import { WebRunFindingsTab } from "./WebRunFindingsTab.jsx";
 import { WebRunActivityTab } from "./WebRunActivityTab.jsx";
@@ -41,6 +45,8 @@ export function TestRunDetail(props) {
 
 function TestRunContent({
   runId,
+  showDeepScan = false,
+  showTeamScan = false,
   initialTab,
   initialFindingRef,
   initialLeadRef,
@@ -48,6 +54,7 @@ function TestRunContent({
 }) {
   const [run, setRun] = useState(null);
   const [siteName, setSiteName] = useState(null);
+  const [sitemapSite, setSitemapSite] = useState(null);
   const [graph, setGraph] = useState(null);
   const activeTab = normaliseWebTab(initialTab);
   const setActiveTab = (tab) => nav(runHref({ runKind: "web", runId }, tab));
@@ -95,6 +102,7 @@ function TestRunContent({
     setActivityLog,
     agents,
     setAgents,
+    burpIntegrationEnabled,
     tokenUsage,
     setTokenUsage,
     sitePlanData,
@@ -119,7 +127,9 @@ function TestRunContent({
       setRun(r);
       setGraph(g);
       if (r?.scope_hosts) setScopeHosts(r.scope_hosts);
-      if (r?.coverage_mode) setCoverageMode(r.coverage_mode);
+      if (r?.coverage_mode) {
+        setCoverageMode(r.coverage_mode);
+      }
       webRunsApi
         .getThinkingStatus(runId)
         .then(setThinkingStatus)
@@ -130,7 +140,10 @@ function TestRunContent({
         .catch(() => {});
       sitesApi
         .getSite(r.site_id)
-        .then((s) => setSiteName(s.name))
+        .then((s) => {
+          setSiteName(s.name);
+          setSitemapSite(s);
+        })
         .catch(() => {});
     } catch (e) {
       setError(e.message);
@@ -266,6 +279,7 @@ function TestRunContent({
         status: "running",
       });
       setCheckpointStatus(null);
+      setRun((current) => (current ? { ...current, coverage_mode: coverageMode } : current));
       const s = await webRunsApi.startThinkingScan(runId, coverageMode);
       setThinkingStatus(s);
       setWpReloadKey((k) => k + 1);
@@ -277,6 +291,9 @@ function TestRunContent({
   const onResumeThinkingScan = async () => {
     try {
       setThinkingStopReq(false);
+      setRun((current) =>
+        current ? { ...current, status: "running", phase: "scanning" } : current,
+      );
       setThinkingStatus({
         status: "running",
       });
@@ -371,9 +388,10 @@ function TestRunContent({
     canStartAnyScan &&
     ["idle", "complete", "stopped", "failed", null].includes(effectiveThinkingStatus);
   const hasCheckpoint =
-    checkpointStatus?.exists === true &&
+    (checkpointStatus?.exists === true || hasResumableExperimentalScan(run)) &&
     canStartAnyScan &&
     !isDynamicScanActive(effectiveThinkingStatus);
+  const canResume = canResumeSelectedScanMode(hasCheckpoint, coverageMode, run?.coverage_mode);
   const interactiveLogins = useMemo(
     () =>
       (run?.credentials || []).flatMap((credential) => {
@@ -425,11 +443,13 @@ function TestRunContent({
         canStop={canStop}
         canStartScan={canStartThinking}
         canStopScan={canStopThinking}
-        canResume={hasCheckpoint}
+        canResume={canResume}
         canImportCrawl={canImportCrawl}
         crawlStopping={crawlStopRequested}
         scanStopping={thinkingStopRequested}
         coverageMode={coverageMode}
+        showDeepScan={showDeepScan}
+        showTeamScan={showTeamScan}
         onCoverageMode={setCoverageMode}
         onStart={onStart}
         onStop={onStop}
@@ -565,6 +585,8 @@ function TestRunContent({
         )}
 
         <WebRunSitemapGraph
+          site={sitemapSite}
+          crawlerActive={crawlerActive}
           runId={runId}
           run={run}
           graph={graph}
@@ -630,6 +652,7 @@ function TestRunContent({
             thinkingStatus={thinkingStatus}
             activityLog={activityLog}
             agents={agents}
+            burpIntegrationEnabled={burpIntegrationEnabled}
             tokenUsage={tokenUsage}
             sitePlanData={sitePlanData}
             onClearLog={async () => {

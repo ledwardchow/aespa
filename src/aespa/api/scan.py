@@ -20,13 +20,13 @@ from aespa.models import (
     TestRun,
 )
 from aespa.schemas import (
-    CoverageModeLiteral,
     ScanCheckpointStatusOut,
     ScanFindingImportIn,
     ScanFindingImportResult,
     ScanFindingOut,
     ScanFindingUpdateIn,
     ValidationStatusOut,
+    WebCoverageModeLiteral,
 )
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import crawler as crawler_svc
@@ -47,10 +47,38 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
 
 
 class _StartScanBody(BaseModel):
-    coverage_mode: Optional[CoverageModeLiteral] = None
+    coverage_mode: Optional[WebCoverageModeLiteral] = None
     target_page_id: Optional[int] = None
     target_page_ids: Optional[list[int]] = None
     use_session: Optional[str] = None
+
+
+def _scan_mode_group(coverage_mode: str) -> str:
+    return coverage_mode if coverage_mode in {"deep", "team"} else "standard"
+
+
+def _reject_incompatible_scan_mode(
+    session: Session, run: TestRun, requested_mode: str
+) -> None:
+    if not scanner_svc.is_scan_mode_locked(session, run):
+        return
+    if _scan_mode_group(run.coverage_mode) == _scan_mode_group(requested_mode):
+        return
+    saved_label = {
+        "deep": "Deep",
+        "team": "Team",
+    }.get(run.coverage_mode, "Quick, Standard, Full, or SAST Validate")
+    requested_label = {
+        "deep": "Deep",
+        "team": "Team",
+    }.get(requested_mode, "Quick, Standard, Full, or SAST Validate")
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"This run already started in {saved_label} mode and cannot switch "
+            f"to {requested_label}. Create a new run to use the other mode."
+        ),
+    )
 
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/start")
@@ -68,6 +96,7 @@ async def start_thinking_scan(
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     if body and body.coverage_mode is not None:
+        _reject_incompatible_scan_mode(session, run, body.coverage_mode)
         run.coverage_mode = body.coverage_mode
     if body:
         target_ids = body.target_page_ids or (
@@ -161,6 +190,16 @@ def thinking_scan_status(run_id: int, session: Session = Depends(get_session)) -
     return scanner_svc.get_thinking_scan_status(run_id)
 
 
+@router.get("/api/test-runs/{run_id}/deep-queue")
+def deep_scan_queue(run_id: int, session: Session = Depends(get_session)) -> dict:
+    run = _get_run_or_404(session, run_id)
+    if run.coverage_mode != "deep":
+        raise HTTPException(status_code=409, detail="This run is not using Deep mode")
+    from aespa.services.deep_scan import get_queue
+
+    return get_queue(run_id)
+
+
 @router.get(
     "/api/test-runs/{run_id}/thinking-scan/checkpoint",
     response_model=ScanCheckpointStatusOut,
@@ -199,7 +238,7 @@ async def resume_thinking_scan(
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     status = checkpoint_svc.checkpoint_status(run_id)
-    if not status["exists"]:
+    if not status["exists"] and run.coverage_mode not in {"deep", "team"}:
         raise HTTPException(status_code=404, detail="No checkpoint found for this run")
     if run.coverage_mode == "sast_validate":
         from aespa.services.scan_leads import get_leads_for_run

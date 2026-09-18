@@ -116,3 +116,71 @@
   z-index: 2;
   background: var(--panel-2);
 }
+
+/* Keep crawl settings compact when the available content width changes. */
+.sitemap-meta {
+  gap: 10px 20px;
+  padding: 10px 14px;
+  flex-shrink: 0;
+}
+.sitemap-meta .run-stat {
+  min-width: 0;
+  max-width: 100%;
+}
+.sitemap-meta .run-stat-val,
+.sitemap-meta .run-stat-lbl {
+  overflow-wrap: anywhere;
+}
+.sitemap-meta .run-stat-edit {
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: 10px;
+}
+.sitemap-crawl-identity {
+  flex: 0 1 190px;
+}
+.sitemap-crawl-identity .select {
+  min-width: 0;
+  width: 100%;
+  height: 30px;
+}
+
+.sitemap-pages-stat {
+  position: relative;
+  padding-right: 32px;
+}
+.sitemap-edit-button {
+  position: absolute;
+  right: 0;
+  top: 0;
+  padding: 2px 5px;
+}
+.sitemap-meta .sitemap-queue-stat {
+  margin-left: auto;
+}
+@media (max-width: 1100px) {
+  .sitemap-meta {
+    display: grid;
+    align-items: start;
+    gap: 12px 16px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .sitemap-meta .run-stat {
+    padding-left: 10px;
+    border-left: 1px solid var(--border);
+    min-height: 32px;
+  }
+  .sitemap-meta .run-stat-edit {
+    grid-column: 2 / -1;
+  }
+  .sitemap-meta .sitemap-crawl-identity {
+    grid-column: span 2;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+  }
+  .sitemap-meta .sitemap-queue-stat {
+    grid-column: span 1;
+    align-self: end;
+  }
+}

@@ -426,6 +426,7 @@
   }
 }
 .scope-hosts-panel {
+  flex-shrink: 0;
   margin: 0 -28px;
   padding: 10px 14px;
   background: var(--surface);
@@ -445,6 +446,7 @@
   white-space: nowrap;
 }
 .scope-hosts-list {
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -457,6 +459,8 @@
   font-style: italic;
 }
 .scope-host-chip {
+  max-width: 100%;
+  overflow-wrap: anywhere;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -481,11 +485,14 @@
   opacity: 1;
 }
 .scope-hosts-add {
+  min-width: 0;
+  max-width: 100%;
   display: flex;
   gap: 6px;
   align-items: center;
 }
 .scope-hosts-input {
+  min-width: 0;
   font-size: 12px;
   padding: 3px 8px;
   border: 1px solid var(--border);

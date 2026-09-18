@@ -140,8 +140,10 @@
   border-bottom: 1px solid var(--border-subtle, var(--border));
   vertical-align: middle;
 }
-.finding-title {
+.findings-table .finding-title {
   font-weight: 500;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .findings-table .finding-reference-cell {
   width: 120px;
