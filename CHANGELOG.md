@@ -2,7 +2,7 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## Unreleased
+## [PR #272] September 18 Update - mostly UI fixes
 
 ### New features
 
