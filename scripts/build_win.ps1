@@ -63,6 +63,8 @@ if (Test-Path "dist\AESPA") { Remove-Item -Recurse -Force "dist\AESPA" }
     --collect-all alembic `
     --collect-all uvicorn `
     --collect-all tiktoken `
+    --collect-all google.genai `
+    --collect-submodules google.auth `
     --collect-submodules pystray `
     --collect-submodules aespa `
     "$RepoRoot\src\aespa\desktop_win.py"

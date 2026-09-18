@@ -2,6 +2,23 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## Unreleased
+
+### New features
+
+- **Google Vertex AI provider**: AESPA can use Google Cloud Application Default Credentials with a selected project and location. The provider loads serverless Gemini publisher models, supports compatible Model Garden models, and handles their empty completion chunks during streaming and tool calls. It supports the existing vision and thinking workflows, preserves numeric tool-schema constraints required by Vertex AI, and does not store Google credentials. Deployed endpoints and tuned model resources are excluded.
+
+### Updates
+
+- **Per-model LLM pacing**: TPM and RPM limits are now configured in the model editor for each provider and model pair. Existing provider limits are copied safely to saved models during upgrade, including when recovering from an interrupted upgrade, and saved configurations using the same pair share one pacing limit.
+- **Provider model setup**: Adding a model name to a saved provider now saves the provider immediately, so the model can be selected and configured without a separate provider save.
+- **LLM profile editing**: Default and per-role models are now selected by choosing a provider first, followed by one of its configured models. The profile list uses a clear Set as default action and marks the current default in place of a separate status column.
+
+### Fixes
+
+- **Visible startup failures**: When the backend cannot start, the terminal console now restores the normal prompt, prints the captured startup error, and exits with a failure status instead of hiding the cause.
+- **Provider model cleanup**: Removing a model from a provider now removes its unused saved model settings as well. Models assigned to a scan profile cannot be removed until that profile is updated, and loading a fresh model list from the provider API keeps those assigned models.
+
 ## [PR #272] September 18 Update - mostly UI fixes
 
 ### New features

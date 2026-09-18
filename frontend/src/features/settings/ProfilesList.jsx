@@ -61,9 +61,6 @@ export function ProfilesList({ visible, profiles, models, busyId, onActivate, on
           <div className="sortable" onClick={() => toggleSort(setProfileSort, "overrides_count")}>
             Overrides {sortArrow(profileSort, "overrides_count")}
           </div>
-          <div className="sortable" onClick={() => toggleSort(setProfileSort, "is_active")}>
-            Status {sortArrow(profileSort, "is_active")}
-          </div>
           <div></div>
         </div>
         {sortedProfiles.map((p) => (
@@ -77,23 +74,14 @@ export function ProfilesList({ visible, profiles, models, busyId, onActivate, on
             <div>
               {Object.keys(p.role_models || {}).length || <span className="subtle">none</span>}
             </div>
-            <div>
-              {p.is_active ? (
-                <span className="badge ok">Active</span>
-              ) : (
-                <span className="subtle">Inactive</span>
-              )}
-            </div>
             <div className="row settings-list-actions">
-              {!p.is_active && (
-                <button
-                  className="btn sm secondary"
-                  disabled={busyId === p.id}
-                  onClick={() => onActivate(p)}
-                >
-                  Use
-                </button>
-              )}
+              <button
+                className="btn sm secondary"
+                disabled={p.is_active || busyId === p.id}
+                onClick={() => onActivate(p)}
+              >
+                {p.is_active ? "Is currently default" : "Set as default"}
+              </button>
               <button className="btn sm" disabled={busyId === p.id} onClick={() => onEdit(p)}>
                 Edit
               </button>

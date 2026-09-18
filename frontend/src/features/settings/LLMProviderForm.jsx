@@ -390,12 +390,14 @@ export function LLMProviderForm({
   models,
   profiles,
   onConfigureModel,
+  onProviderUpdated,
   onSaved,
   onCancel,
 }) {
   const [form, setForm] = useState(() => providerToForm(provider));
   const [newModelName, setNewModelName] = useState("");
   const [saving, setSaving] = useState(false);
+  const [addingModel, setAddingModel] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
   const upd = useCallback((p) => {
@@ -443,11 +445,36 @@ export function LLMProviderForm({
       Number(configuredModelsByName.has(right)) - Number(configuredModelsByName.has(left)),
   );
 
-  const addModel = () => {
+  const addModel = async () => {
     const modelName = newModelName.trim();
     if (!modelName || providerModelNames.includes(modelName)) return;
-    upd({ models: [...providerModelNames, modelName].join("\n") });
-    setNewModelName("");
+    const nextForm = {
+      ...form,
+      models: [...providerModelNames, modelName].join("\n"),
+    };
+    if (mode !== "edit" || !provider?.id) {
+      upd(nextForm);
+      setNewModelName("");
+      return;
+    }
+
+    setError(null);
+    setAddingModel(true);
+    setSaved(false);
+    try {
+      const savedProvider = await settingsApi.updateLLMProvider(
+        provider.id,
+        providerPayload(nextForm),
+      );
+      setForm(providerToForm(savedProvider));
+      setNewModelName("");
+      setSaved(true);
+      onProviderUpdated?.(savedProvider);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setAddingModel(false);
+    }
   };
 
   const removeModel = (modelName) => {
@@ -472,11 +499,46 @@ export function LLMProviderForm({
           ? bedrockBaseUrl(form.api_format, form.region)
           : form.base_url,
         username: form.username,
+        project_id: form.project_id,
+        location: form.location,
       });
       if (fetched?.models?.length > 0) {
-        upd({ models: fetched.models.join("\n"), model_capabilities: fetched.capabilities || {} });
+        const discoveredModelNames = [...new Set(fetched.models)];
+        const retainedModelNames = [...configuredModelsByName.entries()]
+          .filter(([, modelConfig]) => profileNamesByModelId.has(String(modelConfig.id)))
+          .map(([modelName]) => modelName)
+          .filter((modelName) => !discoveredModelNames.includes(modelName));
+        const nextModelNames = [...discoveredModelNames, ...retainedModelNames];
+        const nextCapabilities = Object.fromEntries(
+          nextModelNames.flatMap((modelName) => {
+            const capability =
+              fetched.capabilities?.[modelName] || form.model_capabilities?.[modelName];
+            return capability ? [[modelName, capability]] : [];
+          }),
+        );
+        const nextForm = {
+          ...form,
+          models: nextModelNames.join("\n"),
+          model_capabilities: nextCapabilities,
+        };
+        if (mode === "edit" && provider?.id) {
+          setSaved(false);
+          const savedProvider = await settingsApi.updateLLMProvider(
+            provider.id,
+            providerPayload(nextForm),
+          );
+          setForm(providerToForm(savedProvider));
+          setSaved(true);
+          onProviderUpdated?.(savedProvider);
+        } else {
+          upd(nextForm);
+        }
         setLoadMessage(
-          `Loaded ${fetched.models.length} model(s) and capability metadata from API.`,
+          `Loaded ${fetched.models.length} model(s) and capability metadata from API.${
+            retainedModelNames.length > 0
+              ? ` Kept ${retainedModelNames.length} model(s) used by scan profiles.`
+              : ""
+          }`,
         );
       } else {
         setLoadFailed(true);
@@ -496,6 +558,7 @@ export function LLMProviderForm({
       api_format,
       region,
       base_url: isBedrockProvider(api_format) ? bedrockBaseUrl(api_format, region) : form.base_url,
+      location: api_format === "google_vertex" ? "global" : "",
       model_capabilities: {},
     });
     if (form.models.trim()) return;
@@ -563,6 +626,7 @@ export function LLMProviderForm({
             <option value="openai_compatible">OpenAI-compatible API</option>
             <option value="openrouter">OpenRouter</option>
             <option value="google">Google Gemini API</option>
+            <option value="google_vertex">Google Vertex AI (ADC)</option>
             <option value="bedrock">Amazon Bedrock Runtime</option>
             <option value="bedrock_mantle">Amazon Bedrock Mantle</option>
             <option value="azure_openai">Azure OpenAI</option>
@@ -600,7 +664,9 @@ export function LLMProviderForm({
             </div>
           </div>
         )}
-        {!["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format) &&
+        {!["factory_droid", "openai_codex", "google_antigravity", "google_vertex"].includes(
+          form.api_format,
+        ) &&
           !isBedrockProvider(form.api_format) && (
             <div className="field">
               <label>
@@ -634,6 +700,45 @@ export function LLMProviderForm({
             Uses the active Antigravity CLI / Google account login. No API key or base URL is
             required.
           </div>
+        )}
+        {form.api_format === "google_vertex" && (
+          <>
+            <div className="field-hint">
+              Uses Google Cloud Application Default Credentials from the AESPA process. AESPA saves
+              the project and location, but does not copy or store Google credentials.
+            </div>
+            <div className="two-col">
+              <div className="field">
+                <label htmlFor="provider-google-project">Google Cloud project ID</label>
+                <input
+                  id="provider-google-project"
+                  type="text"
+                  required
+                  value={form.project_id}
+                  placeholder="my-gcp-project"
+                  onChange={(e) => upd({ project_id: e.target.value })}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="provider-google-location">Vertex AI location</label>
+                <input
+                  id="provider-google-location"
+                  type="text"
+                  required
+                  value={form.location || "global"}
+                  placeholder="global"
+                  onChange={(e) => upd({ location: e.target.value })}
+                />
+                <div className="field-hint">
+                  Use global unless the selected model requires a region.
+                </div>
+              </div>
+            </div>
+            <div className="field-hint">
+              Only serverless publisher models are supported. Deployed endpoint and tuned-model
+              resource names are rejected.
+            </div>
+          </>
         )}
         {form.api_format === "openai_codex" && (
           <>
@@ -670,7 +775,9 @@ export function LLMProviderForm({
         {form.api_format === "github_copilot" && (
           <CopilotConnectionCard value={form.username} onSelect={selectCopilotUsername} />
         )}
-        {!["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format) && (
+        {!["factory_droid", "openai_codex", "google_antigravity", "google_vertex"].includes(
+          form.api_format,
+        ) && (
           <div className="field">
             <label htmlFor="provider-api-key">
               {form.api_format === "github_copilot" ? "GitHub token" : "API Key"}{" "}
@@ -757,7 +864,7 @@ export function LLMProviderForm({
                 Configure model
               </button>
             ) : (
-              <span className="field-hint">Add or load a model name, then save the provider.</span>
+              <span className="field-hint">Add a model name or load models from the API.</span>
             )}
           </div>
         )}
@@ -767,9 +874,9 @@ export function LLMProviderForm({
             <button
               type="button"
               className="btn secondary sm"
-              disabled={loadingModels}
+              disabled={loadingModels || saving || addingModel}
               onClick={onLoadModels}
-              title="Fetch available model names from API and overwrite current list"
+              title="Fetch available model names from API and keep models used by scan profiles"
             >
               {loadingModels ? "Loading models…" : "Load models from API"}
             </button>
@@ -856,17 +963,23 @@ export function LLMProviderForm({
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  addModel();
+                  void addModel();
                 }
               }}
             />
             <button
               type="button"
               className="btn secondary sm"
-              disabled={!newModelName.trim() || providerModelNames.includes(newModelName.trim())}
-              onClick={addModel}
+              disabled={
+                addingModel ||
+                saving ||
+                loadingModels ||
+                !newModelName.trim() ||
+                providerModelNames.includes(newModelName.trim())
+              }
+              onClick={() => void addModel()}
             >
-              Add model
+              {addingModel ? "Saving…" : "Add model"}
             </button>
           </div>
           {loadMessage && (
@@ -880,55 +993,6 @@ export function LLMProviderForm({
           <div className="field-hint">
             Select a model name to open its configuration. Models without a configuration open a
             prefilled new model form.
-          </div>
-        </div>
-        <div className="divider" />
-        <div className="form-section-title">
-          Rate Limits <span className="field-optional">(optional)</span>
-        </div>
-        <div
-          className="field-hint"
-          style={{
-            marginBottom: "8px",
-          }}
-        >
-          Set token and request limits to automatically pace requests and prevent API rate-limiting
-          errors (429).
-        </div>
-        <div
-          className="two-col"
-          style={{
-            gap: "16px",
-            marginBottom: "8px",
-          }}
-        >
-          <div className="field">
-            <label>Max Tokens Per Minute (TPM)</label>
-            <input
-              type="number"
-              min="1"
-              placeholder="Unlimited"
-              value={form.max_tpm}
-              onChange={(e) =>
-                upd({
-                  max_tpm: e.target.value,
-                })
-              }
-            />
-          </div>
-          <div className="field">
-            <label>Max Requests Per Minute (RPM)</label>
-            <input
-              type="number"
-              min="1"
-              placeholder="Unlimited"
-              value={form.max_rpm}
-              onChange={(e) =>
-                upd({
-                  max_rpm: e.target.value,
-                })
-              }
-            />
           </div>
         </div>
         <div className="divider" />
@@ -946,7 +1010,7 @@ export function LLMProviderForm({
                 Cancel
               </button>
             )}
-            <button type="submit" className="btn" disabled={saving}>
+            <button type="submit" className="btn" disabled={saving || addingModel}>
               {saving ? "Saving…" : mode === "edit" ? "Save provider" : "Create provider"}
             </button>
           </div>

@@ -345,12 +345,19 @@ async def default_models(
         api_key = p.api_key if p else None
         base_url = p.base_url if p else None
         username = p.username if p else None
+        project_id = p.project_id if p else None
+        location = p.location if p else None
         try:
-            discovered = await settings_service.discover_models_for_format(
+            discovery_kwargs = dict(
                 api_format=fmt,
                 api_key=api_key,
                 base_url=base_url,
                 username=username,
+            )
+            if fmt == "google_vertex":
+                discovery_kwargs.update(project_id=project_id, location=location)
+            discovered = await settings_service.discover_models_for_format(
+                **discovery_kwargs
             )
             if discovered:
                 models[fmt] = discovered
@@ -370,6 +377,8 @@ async def discover_llm_models(
     api_key = payload.api_key
     base_url = payload.base_url
     username = payload.username
+    project_id = payload.project_id
+    location = payload.location
 
     if not api_key or api_key.startswith("••"):
         db_prov = (
@@ -387,13 +396,22 @@ async def discover_llm_models(
                 base_url = db_prov.base_url
             if not username:
                 username = db_prov.username
+            if not project_id:
+                project_id = db_prov.project_id
+            if not location:
+                location = db_prov.location
 
     try:
-        discovered = await settings_service.discover_models_for_format(
+        discovery_kwargs = dict(
             api_format=api_format,
             api_key=api_key,
             base_url=base_url,
             username=username,
+        )
+        if api_format == "google_vertex":
+            discovery_kwargs.update(project_id=project_id, location=location)
+        discovered = await settings_service.discover_models_for_format(
+            **discovery_kwargs
         )
         if discovered:
             return discovered
@@ -420,6 +438,8 @@ async def discover_llm_model_options(
     api_key = payload.api_key
     base_url = payload.base_url
     username = payload.username
+    project_id = payload.project_id
+    location = payload.location
     if not api_key or api_key.startswith("••"):
         db_prov = (
             session.get(LLMProviderConfig, payload.provider_id)
@@ -434,12 +454,19 @@ async def discover_llm_model_options(
             api_key = db_prov.api_key or api_key
             base_url = base_url or db_prov.base_url
             username = username or db_prov.username
+            project_id = project_id or db_prov.project_id
+            location = location or db_prov.location
     try:
-        result = await settings_service.discover_model_options_for_format(
+        discovery_kwargs = dict(
             api_format=api_format,
             api_key=api_key,
             base_url=base_url,
             username=username,
+        )
+        if api_format == "google_vertex":
+            discovery_kwargs.update(project_id=project_id, location=location)
+        result = await settings_service.discover_model_options_for_format(
+            **discovery_kwargs
         )
         capabilities = dict(result.get("capabilities", {}))
         for model in payload.models:

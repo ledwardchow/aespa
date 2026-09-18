@@ -11,6 +11,8 @@ export function llmProfileToForm(cfg, providers = []) {
       name: cfg.name ?? (provider?.name && cfg.model ? `${provider.name}/${cfg.model}` : "Default"),
       provider_id: providerId,
       model: cfg.model,
+      max_tpm: cfg.max_tpm != null ? cfg.max_tpm : "",
+      max_rpm: cfg.max_rpm != null ? cfg.max_rpm : "",
       max_tokens: cfg.max_tokens,
       max_context_tokens: cfg.max_context_tokens || 128000,
       max_context_auto: cfg.context_limit_source !== "manual",
@@ -41,6 +43,8 @@ export function llmPayload(form) {
     name: form.name.trim(),
     provider_id: Number(form.provider_id),
     model: form.model.trim(),
+    max_tpm: form.max_tpm !== "" ? Number(form.max_tpm) : null,
+    max_rpm: form.max_rpm !== "" ? Number(form.max_rpm) : null,
     max_tokens: Number(form.max_tokens),
     max_context_tokens: form.max_context_auto ? null : Number(form.max_context_tokens),
     detected_context_tokens: form.max_context_auto

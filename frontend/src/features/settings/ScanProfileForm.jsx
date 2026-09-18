@@ -7,7 +7,7 @@ import { IconCheck } from "../../shared/ui/Icons.jsx";
 import { sortModelConfigs } from "../../shared/lib/modelSorting.js";
 
 export function ScanProfileForm({ mode, profile, models, onSaved, onCancel }) {
-  const [form, setForm] = useState(() => scanProfileToForm(profile));
+  const [form, setForm] = useState(() => scanProfileToForm(profile, models));
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
@@ -18,13 +18,17 @@ export function ScanProfileForm({ mode, profile, models, onSaved, onCancel }) {
       ...p,
     }));
   };
-  const updRole = (role, v) => {
+  const updRole = (role, values) => {
     setSaved(false);
     setForm((f) => ({
       ...f,
       role_models: {
         ...f.role_models,
-        [role]: v,
+        ...(values.model !== undefined && { [role]: values.model }),
+      },
+      role_providers: {
+        ...f.role_providers,
+        ...(values.provider !== undefined && { [role]: values.provider }),
       },
     }));
   };
@@ -57,9 +61,30 @@ export function ScanProfileForm({ mode, profile, models, onSaved, onCancel }) {
     }
   };
   const modelName = (id) => (models.find((m) => m.id === Number(id)) || {}).name;
-  const modelOpts = sortModelConfigs(models).map((m) => (
-    <option key={m.id} value={m.id}>
-      {m.name} ({m.model})
+  const providers = Array.from(
+    models
+      .reduce((items, model) => {
+        if (model.provider_id != null && !items.has(model.provider_id)) {
+          items.set(model.provider_id, {
+            id: model.provider_id,
+            name: model.provider_name || `Provider #${model.provider_id}`,
+          });
+        }
+        return items;
+      }, new Map())
+      .values(),
+  ).sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }));
+  const modelOptions = (providerId) =>
+    sortModelConfigs(models)
+      .filter((model) => String(model.provider_id) === providerId)
+      .map((model) => (
+        <option key={model.id} value={model.id}>
+          {model.name} ({model.model})
+        </option>
+      ));
+  const providerOptions = providers.map((provider) => (
+    <option key={provider.id} value={provider.id}>
+      {provider.name}
     </option>
   ));
   return (
@@ -83,19 +108,42 @@ export function ScanProfileForm({ mode, profile, models, onSaved, onCancel }) {
         </div>
         <div className="field">
           <label>Default model</label>
-          <select
-            className="select"
-            required
-            value={form.default_model_id}
-            onChange={(e) =>
-              upd({
-                default_model_id: e.target.value,
-              })
-            }
-          >
-            <option value="">Select a model…</option>
-            {modelOpts}
-          </select>
+          <div className="profile-model-selectors">
+            <label>
+              <span>Provider</span>
+              <select
+                aria-label="Default model provider"
+                className="select"
+                required
+                value={form.default_provider_id}
+                onChange={(e) =>
+                  upd({
+                    default_provider_id: e.target.value,
+                    default_model_id: "",
+                  })
+                }
+              >
+                <option value="">Select a provider…</option>
+                {providerOptions}
+              </select>
+            </label>
+            <label>
+              <span>Model</span>
+              <select
+                aria-label="Default model"
+                className="select"
+                required
+                disabled={!form.default_provider_id}
+                value={form.default_model_id}
+                onChange={(e) => upd({ default_model_id: e.target.value })}
+              >
+                <option value="">
+                  {form.default_provider_id ? "Select a model…" : "Select a provider first"}
+                </option>
+                {modelOptions(form.default_provider_id)}
+              </select>
+            </label>
+          </div>
           <div className="field-hint">Used for any agent role left on “Use default” below.</div>
         </div>
         <div className="divider" />
@@ -112,17 +160,47 @@ export function ScanProfileForm({ mode, profile, models, onSaved, onCancel }) {
         {AGENT_ROLE_LABELS.map(([role, label, hint]) => (
           <div className="field" key={role}>
             <label>{label}</label>
-            <select
-              className="select"
-              value={form.role_models[role]}
-              onChange={(e) => updRole(role, e.target.value)}
-            >
-              <option value="">
-                Use default
-                {form.default_model_id ? ` (${modelName(form.default_model_id) || "—"})` : ""}
-              </option>
-              {modelOpts}
-            </select>
+            <div className="profile-model-selectors">
+              <label>
+                <span>Provider</span>
+                <select
+                  aria-label={`${label} provider`}
+                  className="select"
+                  value={form.role_providers[role]}
+                  onChange={(e) =>
+                    updRole(role, {
+                      provider: e.target.value,
+                      model: "",
+                    })
+                  }
+                >
+                  <option value="">Use default</option>
+                  {providerOptions}
+                </select>
+              </label>
+              <label>
+                <span>Model</span>
+                <select
+                  aria-label={`${label} model`}
+                  className="select"
+                  disabled={!form.role_providers[role]}
+                  required={Boolean(form.role_providers[role])}
+                  value={form.role_models[role]}
+                  onChange={(e) => updRole(role, { model: e.target.value })}
+                >
+                  <option value="">
+                    {form.role_providers[role]
+                      ? "Select a model…"
+                      : `Use default${
+                          form.default_model_id
+                            ? ` (${modelName(form.default_model_id) || "—"})`
+                            : ""
+                        }`}
+                  </option>
+                  {modelOptions(form.role_providers[role])}
+                </select>
+              </label>
+            </div>
             <div className="field-hint">{hint}</div>
           </div>
         ))}

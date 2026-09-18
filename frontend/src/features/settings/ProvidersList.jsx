@@ -40,9 +40,6 @@ export function ProvidersList({ visible, providers, models, busyId, onEdit, onDe
       } else if (field === "configured_model_count") {
         valA = configuredModelCounts.get(a.id) || 0;
         valB = configuredModelCounts.get(b.id) || 0;
-      } else if (field === "limits") {
-        valA = (a.max_tpm || 0) * 1000000 + (a.max_rpm || 0);
-        valB = (b.max_tpm || 0) * 1000000 + (b.max_rpm || 0);
       }
       if (valA == null) valA = "";
       if (valB == null) valB = "";
@@ -75,9 +72,6 @@ export function ProvidersList({ visible, providers, models, busyId, onEdit, onDe
         >
           Configured models {sortArrow(providerSort, "configured_model_count")}
         </div>
-        <div className="sortable" onClick={() => toggleSort(setProviderSort, "limits")}>
-          Limits {sortArrow(providerSort, "limits")}
-        </div>
         <div></div>
       </div>
       {sortedProviders.map((p) => (
@@ -90,28 +84,6 @@ export function ProvidersList({ visible, providers, models, busyId, onEdit, onDe
             {p.base_url || PROVIDER_DEFAULT_BASE_URLS[p.api_format] || "(must be set)"}
           </div>
           <div>{configuredModelCounts.get(p.id) || 0}</div>
-          <div>
-            {p.max_tpm || p.max_rpm ? (
-              <>
-                {p.max_tpm ? <div>{Number(p.max_tpm).toLocaleString()} TPM</div> : ""}
-                {p.max_rpm ? (
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: "var(--muted)",
-                      marginTop: 1,
-                    }}
-                  >
-                    {Number(p.max_rpm).toLocaleString()} RPM
-                  </div>
-                ) : (
-                  ""
-                )}
-              </>
-            ) : (
-              <span className="subtle">Unlimited</span>
-            )}
-          </div>
           <div className="row settings-list-actions">
             <button className="btn sm" disabled={busyId === p.id} onClick={() => onEdit(p)}>
               Edit

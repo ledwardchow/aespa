@@ -542,6 +542,112 @@ def test_create_provider_and_profile(client: TestClient):
     assert active["provider"] == "openai"
 
 
+def test_model_rate_limits_are_saved_and_shared_by_provider_model_pair(
+    client: TestClient,
+):
+    provider = _make_provider(client).json()
+    first = _make_profile(
+        client,
+        provider["id"],
+        name="Primary llama",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+    second = _make_profile(
+        client,
+        provider["id"],
+        name="Secondary llama",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert "max_tpm" not in provider
+    assert "max_rpm" not in provider
+
+    updated = client.put(
+        f"/api/settings/llm/model-configs/{second.json()['id']}",
+        json={
+            "name": "Secondary llama",
+            "provider_id": provider["id"],
+            "model": "llama-3",
+            "max_tpm": 240_000,
+            "max_rpm": 90,
+            "max_tokens": 4096,
+        },
+    )
+
+    assert updated.status_code == 200
+    models = {
+        item["id"]: item
+        for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    for model_id in (first.json()["id"], second.json()["id"]):
+        assert models[model_id]["max_tpm"] == 240_000
+        assert models[model_id]["max_rpm"] == 90
+
+
+def test_llm_export_places_rate_limits_on_models(client: TestClient):
+    provider = _make_provider(client).json()
+    model = _make_profile(
+        client,
+        provider["id"],
+        max_tpm=120_000,
+        max_rpm=60,
+    ).json()
+
+    exported = client.get("/api/settings/llm/export").json()
+
+    assert exported["version"] == 2
+    exported_provider = next(
+        item for item in exported["providers"] if item["name"] == provider["name"]
+    )
+    exported_model = next(
+        item for item in exported["profiles"] if item["name"] == model["name"]
+    )
+    assert "max_tpm" not in exported_provider
+    assert "max_rpm" not in exported_provider
+    assert exported_model["max_tpm"] == 120_000
+    assert exported_model["max_rpm"] == 60
+
+
+def test_llm_import_accepts_legacy_provider_rate_limits(client: TestClient):
+    response = client.post(
+        "/api/settings/llm/import",
+        json={
+            "version": 1,
+            "exported_at": "2026-09-18T00:00:00Z",
+            "providers": [
+                {
+                    "name": "Legacy provider",
+                    "api_format": "openai",
+                    "models": ["gpt-4o"],
+                    "max_tpm": 100_000,
+                    "max_rpm": 50,
+                }
+            ],
+            "profiles": [
+                {
+                    "name": "Legacy model",
+                    "provider_name": "Legacy provider",
+                    "model": "gpt-4o",
+                    "max_tokens": 4096,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    model = next(
+        item
+        for item in client.get("/api/settings/llm/model-configs").json()
+        if item["name"] == "Legacy model"
+    )
+    assert model["max_tpm"] == 100_000
+    assert model["max_rpm"] == 50
+
+
 def test_create_model_defaults_name_to_provider_model(client: TestClient):
     provider_r = _make_provider(
         client, name="OpenAI Prod", models=["gpt-4o", "gpt-4o-mini"]
@@ -653,6 +759,64 @@ def test_bedrock_mantle_project_id_round_trips(client: TestClient):
     active = client.get("/api/settings/llm").json()
     assert active["provider"] == "bedrock_mantle"
     assert active["project_id"] == "proj_5d5ykleja6cwpirysbb7"
+
+
+def test_google_vertex_provider_uses_adc_settings(client: TestClient):
+    provider_r = _make_provider(
+        client,
+        name="Vertex",
+        api_format="google_vertex",
+        base_url="https://should-not-be-stored.example",
+        project_id="example-project",
+        location="us-central1",
+        models=["gemini-2.5-flash"],
+        api_key="should-not-be-stored",
+    )
+
+    assert provider_r.status_code == 200
+    provider = provider_r.json()
+    assert provider["api_format"] == "google_vertex"
+    assert provider["project_id"] == "example-project"
+    assert provider["location"] == "us-central1"
+    assert provider["base_url"] is None
+    assert provider["has_api_key"] is False
+
+    profile_r = _make_profile(client, provider["id"], model="gemini-2.5-flash")
+    assert profile_r.status_code == 200
+    active = client.get("/api/settings/llm").json()
+    assert active["provider"] == "google_vertex"
+    assert active["project_id"] == "example-project"
+    assert active["location"] == "us-central1"
+    exported = client.get("/api/settings/llm/export").json()
+    exported_provider = next(
+        item for item in exported["providers"] if item["name"] == "Vertex"
+    )
+    assert exported_provider["project_id"] == "example-project"
+    assert exported_provider["location"] == "us-central1"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "projects/example/locations/us-central1/endpoints/123",
+        "projects/example/locations/us-central1/models/123",
+        "tunedModels/example",
+    ],
+)
+def test_google_vertex_rejects_non_serverless_model_resources(
+    client: TestClient, model: str
+):
+    response = _make_provider(
+        client,
+        name=f"Vertex {model}",
+        api_format="google_vertex",
+        project_id="example-project",
+        location="global",
+        models=[model],
+    )
+
+    assert response.status_code == 422
+    assert "serverless publisher model" in response.text
 
 
 def test_legacy_provider_formats_are_supported(client: TestClient):
@@ -900,6 +1064,57 @@ def test_cannot_remove_provider_model_used_by_scan_profile(client: TestClient):
         if item["id"] == provider["id"]
     )
     assert "llama-3" in saved_provider["models"]
+
+
+def test_removing_unused_provider_model_deletes_its_model_record(client: TestClient):
+    provider = _make_provider(client).json()
+    removed_model = _make_profile(client, provider["id"], name="Removed model").json()
+    retained_model = _make_profile(
+        client, provider["id"], name="Retained model", model="gpt-4o"
+    ).json()
+
+    response = client.put(
+        f"/api/settings/llm/providers/{provider['id']}",
+        json={
+            "name": provider["name"],
+            "api_format": provider["api_format"],
+            "base_url": provider["base_url"],
+            "models": ["gpt-4o"],
+            "api_key": None,
+        },
+    )
+
+    assert response.status_code == 200
+    models = {
+        item["id"]: item
+        for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    assert removed_model["id"] not in models
+    assert models[retained_model["id"]]["is_active"] is True
+
+
+def test_import_removing_unused_provider_model_deletes_its_model_record(
+    client: TestClient,
+):
+    provider = _make_provider(client).json()
+    removed_model = _make_profile(client, provider["id"], name="Removed model").json()
+    _make_profile(client, provider["id"], name="Retained model", model="gpt-4o")
+    exported = client.get("/api/settings/llm/export").json()
+    exported_provider = next(
+        item for item in exported["providers"] if item["name"] == provider["name"]
+    )
+    exported_provider["models"] = ["gpt-4o"]
+    exported["profiles"] = [
+        item for item in exported["profiles"] if item["name"] != removed_model["name"]
+    ]
+
+    response = client.post("/api/settings/llm/import", json=exported)
+
+    assert response.status_code == 200
+    model_ids = {
+        item["id"] for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    assert removed_model["id"] not in model_ids
 
 
 def test_delete_scan_profile_clears_run_reference(client: TestClient):

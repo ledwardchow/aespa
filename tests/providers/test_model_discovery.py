@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from aespa.services import model_discovery, settings
@@ -201,3 +202,73 @@ def test_discover_google_models():
     with patch("httpx.AsyncClient", _MockClient):
         models = asyncio.run(model_discovery.discover_google_models(api_key="test-key"))
         assert models == ["gemini-2.0-flash-exp", "gemini-1.5-pro"]
+
+
+def test_discover_google_vertex_models_uses_adc_and_filters_publishers(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Pager:
+        def __init__(self):
+            self._items = iter(
+                [
+                    SimpleNamespace(
+                        name="publishers/google/models/gemini-2.5-flash",
+                        input_token_limit=1_048_576,
+                        output_token_limit=65_536,
+                        supported_actions=["generateContent"],
+                    ),
+                    SimpleNamespace(
+                        name="projects/p/locations/us-central1/endpoints/123",
+                        input_token_limit=None,
+                        output_token_limit=None,
+                        supported_actions=["predict"],
+                    ),
+                    SimpleNamespace(
+                        name="publishers/google/models/text-embedding-005",
+                        input_token_limit=None,
+                        output_token_limit=None,
+                        supported_actions=["embedContent"],
+                    ),
+                ]
+            )
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._items)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class _Models:
+        async def list(self, *, config):
+            captured["list_config"] = config
+            return _Pager()
+
+    class _AsyncClient:
+        models = _Models()
+
+        async def aclose(self):
+            captured["closed"] = True
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.aio = _AsyncClient()
+
+    monkeypatch.setattr("google.genai.Client", _Client)
+
+    records = asyncio.run(
+        model_discovery.discover_google_vertex_model_options(
+            project_id="example-project", location="us-central1"
+        )
+    )
+
+    assert [record["id"] for record in records] == ["gemini-2.5-flash"]
+    assert records[0]["input_token_limit"] == 1_048_576
+    assert captured["client"]["vertexai"] is True
+    assert captured["client"]["project"] == "example-project"
+    assert captured["client"]["location"] == "us-central1"
+    assert captured["list_config"] == {"query_base": True}
+    assert captured["closed"] is True

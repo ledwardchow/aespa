@@ -14,6 +14,10 @@ def _upgrade_to(engine, revision: str) -> None:
     command.upgrade(db._get_alembic_config(engine), revision)
 
 
+def _downgrade_to(engine, revision: str) -> None:
+    command.downgrade(db._get_alembic_config(engine), revision)
+
+
 def test_sast_analysis_mode_migration_marks_existing_runs_light():
     engine = create_engine(
         "sqlite:///:memory:",
@@ -81,6 +85,165 @@ def test_upstream_proxy_migration_preserves_url_for_both_traffic_types():
             "http://legacy-proxy.local:8080",
         )
         assert "proxy_url" not in columns
+    finally:
+        engine.dispose()
+
+
+def test_llm_rate_limit_migration_moves_provider_limits_to_saved_models():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "7b2d4f6a8c10")
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            conn.execute(
+                text(
+                    "INSERT INTO llm_provider_config "
+                    "(id, name, api_format, models_json, max_tpm, max_rpm, "
+                    "updated_at, model_capabilities_json) VALUES "
+                    "(1, 'Legacy provider', 'openai', '[\"gpt-4o\"]', "
+                    "120000, 60, CURRENT_TIMESTAMP, '{}')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO llm_config "
+                    "(id, name, is_active, provider_id, provider, model, max_tokens, "
+                    "use_vision, force_tool_choice, updated_at, max_context_tokens, "
+                    "context_limit_source) VALUES "
+                    "(1, 'Saved model', 1, 1, 'openai', 'gpt-4o', 4096, 0, 0, "
+                    "CURRENT_TIMESTAMP, 128000, 'provider')"
+                )
+            )
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+            limits = conn.execute(
+                text("SELECT max_tpm, max_rpm FROM llm_config WHERE id = 1")
+            ).one()
+            provider_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(llm_provider_config)"))
+            }
+            model_columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(llm_config)"))
+            }
+
+        assert limits == (120_000, 60)
+        assert "max_tpm" not in provider_columns
+        assert "max_rpm" not in provider_columns
+        assert {"max_tpm", "max_rpm"}.issubset(model_columns)
+    finally:
+        engine.dispose()
+
+
+def test_llm_rate_limit_migration_recovers_after_partial_application():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "7b2d4f6a8c10")
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            conn.execute(
+                text(
+                    "INSERT INTO llm_provider_config "
+                    "(id, name, api_format, models_json, max_tpm, max_rpm, "
+                    "updated_at, model_capabilities_json) VALUES "
+                    "(1, 'Legacy provider', 'openai', '[\"gpt-4o\"]', "
+                    "120000, 60, CURRENT_TIMESTAMP, '{}')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO llm_config "
+                    "(id, name, is_active, provider_id, provider, model, max_tokens, "
+                    "use_vision, force_tool_choice, updated_at, max_context_tokens, "
+                    "context_limit_source) VALUES "
+                    "(1, 'Saved model', 1, 1, 'openai', 'gpt-4o', 4096, 0, 0, "
+                    "CURRENT_TIMESTAMP, 128000, 'provider')"
+                )
+            )
+            # This is the state left by the original failed migration: the
+            # model columns and copied values exist, but the provider columns
+            # remain and the Alembic revision has not advanced.
+            conn.execute(text("ALTER TABLE llm_config ADD COLUMN max_tpm INTEGER"))
+            conn.execute(text("ALTER TABLE llm_config ADD COLUMN max_rpm INTEGER"))
+            conn.execute(text("UPDATE llm_config SET max_tpm = 120000, max_rpm = 60"))
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            limits = conn.execute(
+                text("SELECT max_tpm, max_rpm FROM llm_config WHERE id = 1")
+            ).one()
+            provider_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(llm_provider_config)"))
+            }
+
+        assert version == "6d4f8a2c9b10"
+        assert limits == (120_000, 60)
+        assert "max_tpm" not in provider_columns
+        assert "max_rpm" not in provider_columns
+    finally:
+        engine.dispose()
+
+
+def test_llm_rate_limit_migration_downgrades_with_foreign_keys_enabled():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "head")
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            conn.execute(
+                text(
+                    "INSERT INTO llm_provider_config "
+                    "(id, name, api_format, models_json, updated_at, "
+                    "model_capabilities_json) VALUES "
+                    "(1, 'Provider', 'openai', '[\"gpt-4o\"]', "
+                    "CURRENT_TIMESTAMP, '{}')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO llm_config "
+                    "(id, name, is_active, provider_id, provider, model, max_tpm, "
+                    "max_rpm, max_tokens, use_vision, force_tool_choice, updated_at, "
+                    "max_context_tokens, context_limit_source) VALUES "
+                    "(1, 'Saved model', 1, 1, 'openai', 'gpt-4o', 120000, 60, "
+                    "4096, 0, 0, CURRENT_TIMESTAMP, 128000, 'provider')"
+                )
+            )
+
+        _downgrade_to(engine, "7b2d4f6a8c10")
+
+        with engine.connect() as conn:
+            assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+            limits = conn.execute(
+                text("SELECT max_tpm, max_rpm FROM llm_provider_config WHERE id = 1")
+            ).one()
+            model_columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(llm_config)"))
+            }
+
+        assert limits == (120_000, 60)
+        assert "max_tpm" not in model_columns
+        assert "max_rpm" not in model_columns
     finally:
         engine.dispose()
 
@@ -949,6 +1112,13 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
                 row[1]
                 for row in conn.execute(text("PRAGMA table_info(deep_scan_config)"))
             }
+            provider_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(llm_provider_config)"))
+            }
+            llm_config_columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(llm_config)"))
+            }
 
         assert "alembic_version" in tables
         assert "site" in tables
@@ -956,8 +1126,10 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "page_id" in handoff_columns
         assert ("page_id", "crawled_page", "id") in handoff_foreign_keys
         assert "max_concurrent_planners" in deep_config_columns
+        assert "location" in provider_columns
+        assert "location" in llm_config_columns
         assert was_pre_alembic is False
-        assert version == "3e7a9c1d5f20"
+        assert version == "6d4f8a2c9b10"
     finally:
         engine.dispose()
 
@@ -999,7 +1171,7 @@ def test_deep_task_finding_timestamp_is_added_and_backfilled():
 
         assert "created_at" in columns
         assert created_at is not None
-        assert version == "3e7a9c1d5f20"
+        assert version == "6d4f8a2c9b10"
     finally:
         engine.dispose()
 
@@ -1303,7 +1475,7 @@ def test_legacy_db_with_run_identity_but_no_systems_tables_gets_new_schema():
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "3e7a9c1d5f20"
+        assert version == "6d4f8a2c9b10"
     finally:
         engine.dispose()
 
@@ -1340,7 +1512,7 @@ def test_current_db_with_systems_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "3e7a9c1d5f20"
+        assert version == "6d4f8a2c9b10"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

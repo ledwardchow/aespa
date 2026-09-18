@@ -6,9 +6,13 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from aespa.models import (
+    ApiTestRun,
+    AssessmentCampaign,
     LLMConfig,
     LLMProfile,
     LLMProviderConfig,
+    SastRun,
+    TestRun,
 )
 from aespa.schemas import (
     LLMProviderConfigIn,
@@ -79,12 +83,11 @@ def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
         base_url=provider.base_url,
         username=provider.username,
         project_id=provider.project_id,
+        location=provider.location,
         models=_provider_models(provider),
         model_capabilities=_provider_capabilities(provider),
         has_api_key=bool(provider.api_key and provider.api_key.strip()),
         api_key=None,
-        max_tpm=provider.max_tpm,
-        max_rpm=provider.max_rpm,
         updated_at=provider.updated_at,
     )
 
@@ -137,17 +140,17 @@ def _apply_llm_provider(
     session: Session, provider: LLMProviderConfig, payload: LLMProviderConfigIn
 ) -> LLMProviderConfigOut:
     _ensure_unique_llm_provider_name(session, payload.name, provider.id)
-    _ensure_referenced_model_names_remain(session, provider, payload.models)
+    _reconcile_provider_model_configs(session, provider, payload.models)
     provider.name = payload.name
     provider.api_format = payload.api_format
-    if payload.api_format in {"factory_droid", "openai_codex"}:
+    if payload.api_format in {"factory_droid", "openai_codex", "google_vertex"}:
         provider.api_key = None
     elif payload.api_key is not None:
         key_str = payload.api_key.strip()
         provider.api_key = key_str if key_str else None
     provider.base_url = (
         None
-        if payload.api_format in {"factory_droid", "openai_codex"}
+        if payload.api_format in {"factory_droid", "openai_codex", "google_vertex"}
         else payload.base_url
     )
     username = (payload.username or "").strip()
@@ -159,6 +162,9 @@ def _apply_llm_provider(
         if payload.api_format in {"factory_droid", "openai_codex"}
         else payload.project_id
     )
+    provider.location = (
+        payload.location if payload.api_format == "google_vertex" else None
+    )
     provider.models_json = _json_dumps(payload.models)
     provider.model_capabilities_json = _json_dumps(
         {
@@ -167,8 +173,6 @@ def _apply_llm_provider(
             if model in payload.model_capabilities
         }
     )
-    provider.max_tpm = payload.max_tpm
-    provider.max_rpm = payload.max_rpm
     provider.updated_at = _utcnow()
     session.add(provider)
     session.flush()
@@ -191,7 +195,7 @@ def _apply_llm_provider(
     return _provider_out(provider)
 
 
-def _ensure_referenced_model_names_remain(
+def _reconcile_provider_model_configs(
     session: Session, provider: LLMProviderConfig, requested_models: list[str]
 ) -> None:
     if provider.id is None:
@@ -232,6 +236,35 @@ def _ensure_referenced_model_names_remain(
                 "Update those scan profiles first."
             ),
         )
+
+    removed_ids = {config.id for config in removed_configs if config.id is not None}
+    if any(config.is_active for config in removed_configs):
+        replacement = next(
+            (
+                config
+                for config in session.exec(
+                    select(LLMConfig).order_by(
+                        LLMConfig.is_active.desc(), LLMConfig.updated_at.desc()
+                    )
+                ).all()
+                if config.id not in removed_ids
+            ),
+            None,
+        )
+        if replacement is not None:
+            replacement.is_active = True
+            session.add(replacement)
+
+    for config in removed_configs:
+        if config.id is None:
+            continue
+        for run_type in (TestRun, ApiTestRun, SastRun, AssessmentCampaign):
+            for run in session.exec(
+                select(run_type).where(run_type.llm_config_id == config.id)
+            ).all():
+                run.llm_config_id = None
+                session.add(run)
+        session.delete(config)
 
 
 def _ensure_unique_llm_provider_name(
