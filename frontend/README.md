@@ -32,9 +32,9 @@ Run the backend separately with `uv run aespa` from the repository root. Use the
 | `src/styles` | Global tokens, base styles, layout, and the stylesheet import order |
 | `src/test`, `e2e` | Unit/component setup and browser fixtures |
 
-The old `pages`, `components`, and catch-all `lib` directories have been replaced. Web runs, API runs, SAST runs, collections, sites, settings, applications, and campaigns each have an owner under `features`.
+The old `pages`, `components`, and catch-all `lib` directories have been replaced. Web runs, API runs, SAST runs, collections, sites, settings, systems, and campaigns each have an owner under `features`.
 
-Imports flow from app to features to shared code. Shared modules cannot import features or app. Features cannot import another feature's private files. A small `public.js` module may expose a deliberate integration, such as the campaign list embedded in an application. `npm run check:architecture` enforces these rules and rejects cycles and missing imports. Add `-- --inventory` to inspect reachability and cross-feature dependencies.
+Imports flow from app to features to shared code. Shared modules cannot import features or app. Features cannot import another feature's private files. A small `public.js` module may expose a deliberate integration, such as the campaign list embedded in a system. `npm run check:architecture` enforces these rules and rejects cycles and missing imports. Add `-- --inventory` to inspect reachability and cross-feature dependencies.
 
 Keep local state, handlers, and effects with the component that owns the interaction. The settings lists own sorting; forms own drafts; SAST views own table/menu interactions; the API chat panel owns chat state. Avoid replacing a large component with a hook that exposes all of its internal setters.
 

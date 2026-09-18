@@ -4,7 +4,7 @@ import socket
 
 import pytest
 
-from aespa.main import _ensure_port_available
+from aespa.main import _ensure_port_available, _run_server
 
 
 def test_port_check_accepts_an_available_port() -> None:
@@ -27,3 +27,20 @@ def test_port_check_explains_how_to_resolve_an_occupied_port() -> None:
     message = str(exc_info.value)
     assert f"127.0.0.1:{port} is already in use" in message
     assert f"AESPA_PORT={port + 1}" in message
+
+
+def test_server_runner_treats_ctrl_c_as_a_clean_exit() -> None:
+    class InterruptedServer:
+        def run(self) -> None:
+            raise KeyboardInterrupt
+
+    assert _run_server(InterruptedServer()) is False
+
+
+def test_server_runner_does_not_hide_other_errors() -> None:
+    class FailedServer:
+        def run(self) -> None:
+            raise RuntimeError("startup failed")
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        _run_server(FailedServer())

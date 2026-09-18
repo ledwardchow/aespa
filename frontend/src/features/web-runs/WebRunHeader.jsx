@@ -130,6 +130,8 @@ export function WebRunHeader({
   crawlStopping,
   scanStopping,
   coverageMode,
+  showDeepScan = false,
+  showTeamScan = false,
   onCoverageMode,
   onStart,
   onStop,
@@ -143,6 +145,12 @@ export function WebRunHeader({
 }) {
   const profile = profiles.find((item) => item.id === run?.llm_profile_id);
   const hasCrawlResult = (run?.pages_discovered || 0) > 0;
+  const experimentalMode = ["deep", "team"].includes(run?.coverage_mode) ? run.coverage_mode : null;
+  const experimentalModeLocked = run?.scan_mode_locked && experimentalMode;
+  const ordinaryModeLocked = run?.scan_mode_locked && !experimentalMode;
+  const showDeepOption = showDeepScan || run?.coverage_mode === "deep";
+  const showTeamOption = showTeamScan || run?.coverage_mode === "team";
+  const runActive = crawlerActive || testLeadActive || aliceRunning;
   const canStartPentest = !scanStopping && canStartScan;
   const primaryAction = resolveRunPrimaryAction({
     hasCrawlResult,
@@ -163,22 +171,10 @@ export function WebRunHeader({
             {run && (
               <span className="run-agent-badges">
                 <span
-                  className={`badge ${crawlerActive ? "ok" : "neutral"}`}
-                  title={`Crawler agent is ${crawlerActive ? "active" : "inactive"}`}
+                  className={`badge ${runActive ? "ok" : "neutral"}`}
+                  title={`Test run is ${runActive ? "active" : "inactive"}`}
                 >
-                  Crawler {crawlerActive ? "active" : "inactive"}
-                </span>
-                <span
-                  className={`badge ${testLeadActive ? "ok" : "neutral"}`}
-                  title={`Test Lead agent is ${testLeadActive ? "active" : "inactive"}`}
-                >
-                  Test Lead {testLeadActive ? "active" : "inactive"}
-                </span>
-                <span
-                  className={`badge ${aliceRunning ? "ok" : "neutral"}`}
-                  title={`ALICE agent is ${aliceRunning ? "active" : "inactive"}`}
-                >
-                  ALICE {aliceRunning ? "active" : "inactive"}
+                  {runActive ? "Active" : "Inactive"}
                 </span>
               </span>
             )}
@@ -201,14 +197,41 @@ export function WebRunHeader({
             <label
               className="subtle"
               style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}
-              title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: test every applicable page × category obligation. SAST Validate: validate only imported SAST leads."
+              title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: test every applicable page × category obligation. Deep: use a persistent tester queue and attack workers. Team: run independent Standard Test Leads followed by a coverage and chain review. SAST Validate: validate only imported SAST leads."
             >
               Scan mode:
-              <select value={coverageMode} onChange={(event) => onCoverageMode(event.target.value)}>
-                <option value="track">Quick</option>
-                <option value="standard">Standard</option>
-                <option value="enforce">Full</option>
-                <option value="sast_validate">SAST Validate</option>
+              <select
+                value={coverageMode}
+                onChange={(event) => onCoverageMode(event.target.value)}
+                disabled={Boolean(experimentalModeLocked)}
+                title={
+                  run?.scan_mode_locked
+                    ? "This run cannot switch scan engines after its first pentest starts."
+                    : undefined
+                }
+              >
+                <option value="track" disabled={Boolean(experimentalModeLocked)}>
+                  Quick
+                </option>
+                <option value="standard" disabled={Boolean(experimentalModeLocked)}>
+                  Standard
+                </option>
+                <option value="enforce" disabled={Boolean(experimentalModeLocked)}>
+                  Full
+                </option>
+                {showDeepOption && (
+                  <option value="deep" disabled={ordinaryModeLocked || experimentalMode === "team"}>
+                    Deep
+                  </option>
+                )}
+                {showTeamOption && (
+                  <option value="team" disabled={ordinaryModeLocked || experimentalMode === "deep"}>
+                    Team
+                  </option>
+                )}
+                <option value="sast_validate" disabled={Boolean(experimentalModeLocked)}>
+                  SAST Validate
+                </option>
               </select>
             </label>
           )}

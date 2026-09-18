@@ -134,7 +134,7 @@ def clear_scans() -> int:
 
 
 def reset_database() -> None:
-    """Delete every application record while retaining the database schema."""
+    """Delete every system record while retaining the database schema."""
     with Session(get_engine()) as session:
         _require_idle(session)
         for table in reversed(SQLModel.metadata.sorted_tables):

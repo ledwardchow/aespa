@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 
+from aespa.config import DEFAULT_LOG_DB_PATH
 from aespa.console import InteractiveConsole
 
 
@@ -35,6 +36,7 @@ class DesktopConsoleServer:
             port=self.port,
             allow_port_change=False,
             replace_logging_handlers=False,
+            log_db_path=DEFAULT_LOG_DB_PATH,
         )
         self._console.start_capture()
         threading.Thread(

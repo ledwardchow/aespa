@@ -25,6 +25,7 @@ else:
     _DATA_ROOT = PROJECT_ROOT
 
 DEFAULT_DB_PATH = _DATA_ROOT / "aespa.db"
+DEFAULT_LOG_DB_PATH = _DATA_ROOT / "logs.db"
 DEFAULT_DATA_DIR = _DATA_ROOT / "aespa_data"
 
 

@@ -2,11 +2,28 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## Unreleased
+## [PR #272] September 18 Update - mostly UI fixes
+
+### New features
+
+- **Optional console log database**: Terminal console settings can now write Agent, Errors, LLM, and HTTP entries to a separate `logs.db` file. The feature is disabled by default. Stored LLM entries include the complete request or response payload. Testing Traffic remains in the main scanner database and is not copied.
+- **New experimental DAST modes**: Team and Deep. Team does 3 test passes, deep does test planning and spawns a swarm of agents which run simultaneously. Both modes hidden by default, not quite ready for use yet.
+
+### Updates
+
+- **LLM settings navigation**: Models are now configured inside the Provider settings. 
+- **Site Map interface revamp**: The site map display has been cleaned up, with only page nodes showing by default. 
+- **Independent upstream proxies**: Testing traffic and LLM requests can now use separate upstream proxy URLs. Existing proxy settings are copied to both traffic types during upgrade so current routing continues unchanged, and crawler model requests use the configured LLM proxy.
 
 ### Fixes
 
-- **Desktop release builds**: macOS and Windows packaging now finds application files after the build scripts were moved into `scripts/`. Windows builds also stop at the PyInstaller error instead of continuing to a missing executable check.
+- **UI cleanup**: Lots of UI fixes everywhere - fixing alignment, content boxes that inexplicably don't take up all available space, responsive layout not compressing elements appropriately.
+- **Playwright browser install soft fail**: If Playwright can't install its browser, it soft-fails and allows the user to use their Chrome instead of blocking the launch.
+- **Resumable Deep SAST worker failures**: When deep SAST runs error out/terminate early they are now resumable.
+- **Console mouse scrolling**: The terminal console now captures the mouse wheel and scrolls through AESPA's buffered output instead of moving into the terminal's earlier command history.
+- **A.L.I.C.E. finding edits**: Requests to ALICE to review and change findings sometimes entered the read-only info mode of operation, which would make editing findings fail. Now they don't. 
+- **Fewer false access-control findings on public pages**: Scans now recognise when a public page renders the same content for signed-in and signed-out visitors. Public landing-page examples and product mockups are no longer treated as protected account data, and matching generic page text cannot automatically confirm an access-control finding.
+- **Desktop release builds**: The GitHub actions packaging broke because I moved scripts, it's fixed now. 
 
 ## [PR #269] September 11 Update - SAST rework and fixes
 
@@ -44,7 +61,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Linux display detection**: AESPA now warns when a Linux host cannot access X11 or Wayland. Guided login and visible browser mode are disabled until a graphical display is available.
 
-- **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser, Reporting Lab, and Applications options are grouped under Feature Visibility, and settings tabs support keyboard navigation.
+- **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser and lab options are grouped under Feature Visibility, while Applications scanning and DAST Deep Scan Mode are grouped under Experimental Features. Settings tabs support keyboard navigation.
 
 - **Configurable Standard scan mode**: Standard scans now continue until the Test Lead has tested the configured percentage of applicable OWASP coverage items. Set the target in the Test Lead agent settings; the default is 60%.
 

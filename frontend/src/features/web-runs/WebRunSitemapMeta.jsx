@@ -82,10 +82,19 @@ export function WebRunSitemapMeta({
   };
 
   return (
-    <div className="run-meta">
-      <div className="run-stat">
+    <div className="run-meta sitemap-meta">
+      <div className="run-stat sitemap-pages-stat">
         <span className="run-stat-val">{run.pages_discovered}</span>
         <span className="run-stat-lbl">Pages found</span>
+        {run.status !== "running" && !editing && (
+          <button
+            className="btn ghost sm sitemap-edit-button"
+            title="Edit depth / pages / LLM concurrency"
+            onClick={edit}
+          >
+            ✎
+          </button>
+        )}
       </div>
       {editing ? (
         <div className="run-stat-edit">
@@ -174,16 +183,6 @@ export function WebRunSitemapMeta({
               <span className="run-stat-lbl">LLM profile</span>
             </div>
           )}
-          {run.status !== "running" && (
-            <button
-              className="btn ghost sm"
-              style={{ alignSelf: "center", marginLeft: 4 }}
-              title="Edit depth / pages / LLM concurrency"
-              onClick={edit}
-            >
-              ✎
-            </button>
-          )}
         </>
       )}
       {!multiUser && (
@@ -205,7 +204,7 @@ export function WebRunSitemapMeta({
         </>
       )}
       {credentials.length > 0 && run.status !== "running" && (
-        <div className="run-stat" style={{ flexDirection: "column", gap: 2 }}>
+        <div className="run-stat sitemap-crawl-identity">
           <span className="run-stat-lbl">Next crawl as</span>
           <select
             className="select"
@@ -233,8 +232,8 @@ export function WebRunSitemapMeta({
         (run.llm_completed || 0) > 0 ||
         pendingNodes.length > 0) && (
         <div
-          className="run-stat"
-          style={{ minWidth: 90, marginLeft: "auto", cursor: "pointer", position: "relative" }}
+          className="run-stat sitemap-queue-stat"
+          style={{ cursor: "pointer", position: "relative" }}
           onClick={() => setShowFlyout((prev) => !prev)}
           title="Click to view LLM analysis queue details"
         >

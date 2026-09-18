@@ -45,8 +45,8 @@ class DuplicateSiteName(SiteServiceError):
     pass
 
 
-class SiteReferencedByApplication(SiteServiceError):
-    """Raised when a Site is still attached to an Application as a target."""
+class SiteReferencedBySystem(SiteServiceError):
+    """Raised when a Site is still attached to a System as a target."""
 
 
 def _utcnow() -> datetime:
@@ -159,18 +159,18 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
 
 
 def delete_site(session: Session, site_id: int) -> None:
-    from aespa.models import ApplicationTarget, TestRun
+    from aespa.models import SystemTarget, TestRun
     from aespa.services import run_cleanup
 
     site = get_site(session, site_id)
     referenced = session.exec(
-        select(ApplicationTarget.id)
-        .where(ApplicationTarget.target_type == "site")
-        .where(ApplicationTarget.target_id == site_id)
+        select(SystemTarget.id)
+        .where(SystemTarget.target_type == "site")
+        .where(SystemTarget.target_id == site_id)
     ).first()
     if referenced is not None:
-        raise SiteReferencedByApplication(
-            "This site is attached to an application — detach it there first."
+        raise SiteReferencedBySystem(
+            "This site is attached to a system. Detach it there first."
         )
     runs = session.exec(select(TestRun).where(TestRun.site_id == site_id)).all()
     for run in runs:

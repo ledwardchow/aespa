@@ -1,4 +1,4 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useMemo, useEffect } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
@@ -10,12 +10,12 @@ import { formatBytes, shortHash } from "../../shared/runs/campaignPresentation.j
 // ── CampaignNewForm ──────────────────────────────────────────────────────────
 // A short guided setup rather than one giant form: pick snapshots, pick
 // targets, pick a profile/parallelism, then a frozen-selection review before
-// creating (and starting) the campaign. All application targets and each
+// creating (and starting) the campaign. All system targets and each
 // component's latest snapshot are preselected per the plan.
 
-export function CampaignNewForm({ applicationId }) {
+export function CampaignNewForm({ systemId }) {
   const { components, snapshotsByComponent, targets, profiles, error, setError } =
-    useCampaignWizardData(applicationId);
+    useCampaignWizardData(systemId);
   const [step, setStep] = useState("configure"); // "configure" | "review"
   const [name, setName] = useState("");
   const [includedComponents, setIncludedComponents] = useState(new Set());
@@ -104,23 +104,22 @@ export function CampaignNewForm({ applicationId }) {
           max_paths_per_lead: tracePaths ? +tracePaths : null,
           min_trace_confidence: traceConfidence ? +traceConfidence : null,
         };
-        const campaign = await applicationsApi.createCampaign(applicationId, body);
+        const campaign = await systemsApi.createCampaign(systemId, body);
         id = campaign.id;
         // Commit this before the start call can throw — a second click of
         // "Create & start"/"Retry start" after a failed start will see this
         // and only retry starting, never re-run createCampaign.
         setCreatedCampaignId(id);
       }
-      await applicationsApi.startCampaign(applicationId, id);
-      nav(`#/applications/${applicationId}/campaigns/${id}/runs`);
+      await systemsApi.startCampaign(systemId, id);
+      nav(`#/systems/${systemId}/campaigns/${id}/runs`);
     } catch (e) {
       setError(e.message);
       setSaving(false);
     }
   };
 
-  const onOpenDraft = () =>
-    nav(`#/applications/${applicationId}/campaigns/${createdCampaignId}/runs`);
+  const onOpenDraft = () => nav(`#/systems/${systemId}/campaigns/${createdCampaignId}/runs`);
 
   if (components === null || targets === null) {
     return (
@@ -140,7 +139,7 @@ export function CampaignNewForm({ applicationId }) {
         <PageHeader
           title={
             <>
-              <Crumb href={`#/applications/${applicationId}`}>Application</Crumb>
+              <Crumb href={`#/systems/${systemId}`}>System</Crumb>
               <Sep />
               New campaign
             </>
@@ -151,10 +150,7 @@ export function CampaignNewForm({ applicationId }) {
             title="Not ready for a campaign yet"
             sub="A campaign needs at least one component with an uploaded snapshot and at least one attached live target."
             action={
-              <button
-                className="btn"
-                onClick={() => nav(`#/applications/${applicationId}/components`)}
-              >
+              <button className="btn" onClick={() => nav(`#/systems/${systemId}/components`)}>
                 Go to Code Components
               </button>
             }
@@ -169,7 +165,7 @@ export function CampaignNewForm({ applicationId }) {
       <PageHeader
         title={
           <>
-            <Crumb href={`#/applications/${applicationId}`}>Application</Crumb>
+            <Crumb href={`#/systems/${systemId}`}>System</Crumb>
             <Sep />
             New campaign
           </>
@@ -347,7 +343,7 @@ export function CampaignNewForm({ applicationId }) {
               <button
                 type="button"
                 className="btn ghost"
-                onClick={() => nav(`#/applications/${applicationId}/campaigns`)}
+                onClick={() => nav(`#/systems/${systemId}/campaigns`)}
               >
                 Cancel
               </button>
@@ -410,8 +406,8 @@ function ReviewStep({
     >
       <div className="form-section-title">Frozen selection — review</div>
       <div className="alert warning">
-        This exact snapshot and target selection is frozen for this campaign. Changing the
-        application later (new snapshots, attaching/detaching targets) will not alter it.
+        This exact snapshot and target selection is frozen for this campaign. Changing the system
+        later (new snapshots, attaching/detaching targets) will not alter it.
       </div>
       {created && (
         <div className="alert warning">
@@ -465,7 +461,7 @@ function ReviewStep({
           disabled={saving || created}
           title={
             created
-              ? "This draft is already created — go to the application's Campaigns tab for a fresh attempt instead."
+              ? "This draft is already created. Go to the system's Campaigns tab for a fresh attempt instead."
               : undefined
           }
         >

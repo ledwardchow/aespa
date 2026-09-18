@@ -216,6 +216,37 @@ def test_burp_rest_api_config_round_trip(client: TestClient):
     assert data["scan_ssti"] is True
 
 
+def test_upstream_proxy_config_uses_separate_urls(client: TestClient):
+    initial = client.get("/api/settings/upstream-proxy")
+    assert initial.status_code == 200
+    assert initial.json()["scanner_proxy_url"] is None
+    assert initial.json()["llm_proxy_url"] is None
+
+    payload = {
+        "scanner_proxy_url": " http://scanner-proxy.local:8080 ",
+        "llm_proxy_url": "https://llm-proxy.local:8443",
+        "proxy_scanner": True,
+        "proxy_llm": True,
+    }
+    updated = client.put("/api/settings/upstream-proxy", json=payload)
+
+    assert updated.status_code == 200
+    assert updated.json()["scanner_proxy_url"] == "http://scanner-proxy.local:8080"
+    assert updated.json()["llm_proxy_url"] == "https://llm-proxy.local:8443"
+    assert updated.json()["proxy_scanner"] is True
+    assert updated.json()["proxy_llm"] is True
+
+
+@pytest.mark.parametrize("field", ["scanner_proxy_url", "llm_proxy_url"])
+def test_upstream_proxy_config_rejects_invalid_url(client: TestClient, field: str):
+    response = client.put(
+        "/api/settings/upstream-proxy",
+        json={field: "socks5://proxy.local:1080"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_cloudflare_access_config_round_trip(client: TestClient):
     # Defaults to no audience (legacy behaviour: audience check skipped).
     r = client.get("/api/settings/cloudflare-access")
@@ -224,6 +255,8 @@ def test_cloudflare_access_config_round_trip(client: TestClient):
 
 
 def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
+    monkeypatch.setattr("aespa.browser.playwright_chromium_available", lambda: True)
+    monkeypatch.setattr("aespa.browser.chromium_install_state", lambda: "available")
     monkeypatch.setattr(
         "aespa.runtime_capabilities.graphical_display_available", lambda: True
     )
@@ -231,6 +264,7 @@ def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
     assert initial.status_code == 200
     assert initial.json()["browser_engine"] == "playwright_chromium"
     assert initial.json()["browser_visible"] is False
+    assert initial.json()["playwright_chromium_available"] is True
 
     updated = client.put(
         "/api/settings/browser-debug",
@@ -243,9 +277,32 @@ def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
     assert updated.json()["graphical_display_message"] is None
 
 
+def test_browser_debug_defaults_to_system_chrome_after_install_failure(
+    client: TestClient, monkeypatch
+):
+    monkeypatch.setattr("aespa.browser.playwright_chromium_available", lambda: False)
+    monkeypatch.setattr("aespa.browser.chromium_install_state", lambda: "failed")
+
+    initial = client.get("/api/settings/browser-debug")
+
+    assert initial.status_code == 200
+    assert initial.json()["browser_engine"] == "system_chrome"
+    assert initial.json()["playwright_chromium_available"] is False
+    assert initial.json()["playwright_chromium_installing"] is False
+
+    updated = client.put(
+        "/api/settings/browser-debug",
+        json={"browser_engine": "playwright_chromium", "browser_visible": False},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["browser_engine"] == "system_chrome"
+
+
 def test_browser_debug_disables_visible_mode_without_display(
     client: TestClient, monkeypatch
 ):
+    monkeypatch.setattr("aespa.browser.playwright_chromium_available", lambda: True)
+    monkeypatch.setattr("aespa.browser.chromium_install_state", lambda: "available")
     monkeypatch.setattr(
         "aespa.runtime_capabilities.graphical_display_available", lambda: False
     )
@@ -816,6 +873,35 @@ def test_cannot_delete_model_used_by_scan_profile(client: TestClient):
     )
 
 
+def test_cannot_remove_provider_model_used_by_scan_profile(client: TestClient):
+    provider = _make_provider(client).json()
+    model = _make_profile(client, provider["id"], name="Shared model").json()
+    client.post(
+        "/api/settings/llm/profiles",
+        json={"name": "Full scan", "default_model_id": model["id"]},
+    )
+
+    response = client.put(
+        f"/api/settings/llm/providers/{provider['id']}",
+        json={
+            "name": provider["name"],
+            "api_format": provider["api_format"],
+            "base_url": provider["base_url"],
+            "models": ["gpt-4o"],
+            "api_key": None,
+        },
+    )
+
+    assert response.status_code == 409
+    assert '"llama-3" is used by Full scan' in response.json()["detail"]
+    saved_provider = next(
+        item
+        for item in client.get("/api/settings/llm/providers").json()
+        if item["id"] == provider["id"]
+    )
+    assert "llama-3" in saved_provider["models"]
+
+
 def test_delete_scan_profile_clears_run_reference(client: TestClient):
     provider = _make_provider(client).json()
     model = _make_profile(client, provider["id"]).json()
@@ -921,6 +1007,31 @@ def test_upsert_scanner_policy_invalid_limit(client: TestClient):
     payload["max_probes_per_page"] = 9999
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 422
+
+
+def test_deep_scan_settings_are_separate_from_specialists(client: TestClient):
+    defaults = client.get("/api/settings/deep-scan-config")
+    assert defaults.status_code == 200
+    assert defaults.json()["max_concurrent_workers"] == 6
+    assert defaults.json()["max_concurrent_planners"] == 4
+
+    payload = {
+        "max_concurrent_workers": 8,
+        "max_concurrent_planners": 3,
+        "max_tasks": 250,
+        "max_steps_per_task": 40,
+        "include_sast_leads": True,
+        "include_recon_checks": False,
+    }
+    saved = client.put("/api/settings/deep-scan-config", json=payload)
+    assert saved.status_code == 200
+    assert saved.json()["max_concurrent_workers"] == 8
+    assert saved.json()["max_concurrent_planners"] == 3
+    assert saved.json()["include_recon_checks"] is False
+
+    specialist = client.get("/api/settings/specialist-agent-config")
+    assert specialist.status_code == 200
+    assert specialist.json()["max_concurrent"] == 5
 
 
 def test_upsert_scanner_policy_rejects_invalid_standard_target(client: TestClient):
@@ -1097,13 +1208,13 @@ def test_delete_model_used_by_scan_profile_returns_conflict(fk_engine):
     from aespa.models import (
         ApiCollection,
         ApiTestRun,
-        Application,
         AssessmentCampaign,
         LLMConfig,
         LLMProfile,
         LLMProviderConfig,
         SastRun,
         Site,
+        System,
         TestRun,
     )
     from aespa.services import settings as settings_svc
@@ -1160,11 +1271,11 @@ def test_delete_model_used_by_scan_profile_returns_conflict(fk_engine):
         sast_run = SastRun(name="SAST Run", llm_config_id=model1.id)
         session.add(sast_run)
 
-        app = Application(name="Test App")
+        app = System(name="Test App")
         session.add(app)
         session.flush()
         campaign = AssessmentCampaign(
-            application_id=app.id, name="Campaign", llm_config_id=model1.id
+            system_id=app.id, name="Campaign", llm_config_id=model1.id
         )
         session.add(campaign)
         session.commit()

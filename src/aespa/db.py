@@ -14,11 +14,12 @@ from alembic import command
 
 _engine: Engine | None = None
 
-# The revision immediately before the Applications/Campaign schema
+# The revision immediately before the Systems/Campaign schema
 # (`00c6c82b48b7`'s own ``down_revision``). Fixed on purpose — unlike the
 # symbolic ``"head"``, this never silently drifts forward as new migrations
 # are added; see ``_stamp_legacy_db_if_needed``.
-_LAST_PRE_APPLICATIONS_REVISION = "3d4e5f6a7b8c"
+_LAST_PRE_SYSTEMS_REVISION = "3d4e5f6a7b8c"
+_LAST_APPLICATIONS_REVISION = "3b5d7f9a1c24"
 
 
 def _build_engine(settings: Settings) -> Engine:
@@ -93,7 +94,7 @@ def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> bool:
     "this must already be current" assumption — the previous version of this
     function stamped any DB with ``run_identity`` present straight at literal
     ``"head"``, which was correct the day it was written but silently started
-    skipping every migration added since (including the entire Applications/
+    skipping every migration added since (including the entire Systems/
     Campaign schema) for a genuine legacy database that has ``run_identity``
     but predates that feature.
 
@@ -102,10 +103,10 @@ def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> bool:
         Stamp immediately before it so ids/child rows get remapped for real
         instead of silently skipped.
       * ``run_identity`` present but not yet ``assessment_campaign`` (or any
-        other Applications/Campaign table) — a genuine legacy database that
-        predates that feature. Stamp at ``_LAST_PRE_APPLICATIONS_REVISION``
+        other Systems/Campaign table) - a genuine legacy database that
+        predates that feature. Stamp at ``_LAST_PRE_SYSTEMS_REVISION``
         (immediately before it) so those migrations replay for real.
-      * Every Applications/Campaign table already present — e.g. a dev/test
+      * Every Systems/Campaign table already present - e.g. a dev/test
         database built via ``metadata.create_all()`` with current models, so
         it is genuinely at head already. Stamp there directly; replaying
         those migrations would try to create tables that already exist.
@@ -120,10 +121,14 @@ def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> bool:
 
     if "run_identity" not in tables:
         command.stamp(alembic_cfg, "d2f9a6b1c340")
-    elif "assessment_campaign" in tables:
+    elif "system" in tables:
         command.stamp(alembic_cfg, "head")
+    elif "assessment_campaign" in tables:
+        # This database has the complete schema from immediately before the
+        # Applications to Systems rename, but no Alembic bookkeeping row.
+        command.stamp(alembic_cfg, _LAST_APPLICATIONS_REVISION)
     else:
-        command.stamp(alembic_cfg, _LAST_PRE_APPLICATIONS_REVISION)
+        command.stamp(alembic_cfg, _LAST_PRE_SYSTEMS_REVISION)
     return True
 
 

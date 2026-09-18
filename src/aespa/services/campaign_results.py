@@ -7,17 +7,17 @@ import json
 from sqlmodel import Session, select
 
 from aespa.models import (
-    ApplicationComponent,
     CampaignSourceMember,
     CampaignTargetMember,
     LeadTargetMapping,
     ScanFinding,
     ScanLead,
     ScanLeadComponentProvenance,
+    SystemComponent,
 )
 from aespa.schemas import CampaignFindingRow, LeadTargetMappingOut
-from aespa.services import applications as applications_svc
 from aespa.services import scan_leads as scan_leads_svc
+from aespa.services import systems as systems_svc
 from aespa.services.references import (
     ensure_campaign_finding_reference,
     ensure_finding_reference,
@@ -44,8 +44,8 @@ def _component_names_by_id(session: Session, component_ids: set[int]) -> dict[in
     return {
         component.id: component.name
         for component in session.exec(
-            select(ApplicationComponent).where(
-                ApplicationComponent.id.in_(component_ids)
+            select(SystemComponent).where(
+                SystemComponent.id.in_(component_ids)
             )
         ).all()
     }
@@ -242,7 +242,7 @@ def enrich_mappings(
 
 
 def list_campaign_findings(
-    session: Session, application_id: int, campaign_id: int
+    session: Session, system_id: int, campaign_id: int
 ) -> list[CampaignFindingRow]:
     """Return campaign findings with references and component names."""
     target_members = session.exec(
@@ -335,10 +335,10 @@ def list_campaign_findings(
 
     rows: list[tuple[CampaignFindingRow, tuple[str, str, int, str, str] | None]] = []
     for target_member, run_id, findings in findings_by_target:
-        target = applications_svc.get_target(
-            session, application_id, target_member.target_id
+        target = systems_svc.get_target(
+            session, system_id, target_member.target_id
         )
-        target_name = applications_svc.target_display_name(session, target)
+        target_name = systems_svc.target_display_name(session, target)
         for finding in findings:
             ensure_finding_reference(session, finding)
             campaign_reference = ensure_campaign_finding_reference(

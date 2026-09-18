@@ -35,6 +35,8 @@ _HOUSEKEEPING_TOOLS = frozenset(
         "skip_coverage",
         "update_lead",
         "write_finding",
+        "update_finding",
+        "consolidate_findings",
         "remove_finding",
         "done",
     }

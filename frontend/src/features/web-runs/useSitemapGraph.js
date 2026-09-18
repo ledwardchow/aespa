@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as d3 from "d3";
 import { truncUrl } from "../../shared/lib/urls.js";
 import { getSitemapGravity } from "../../shared/lib/sitemapPreferences.js";
+import { forceAvoidLinkCrossings } from "./sitemapLinkCrossingForce.js";
+import { markSiteEntries } from "./sitemapRootLayout.js";
 import { scopeColor, userColor } from "../../shared/runs/presentation.jsx";
 
 const needsLlmAnalysis = (node) =>
@@ -12,21 +14,36 @@ const needsLlmAnalysis = (node) =>
   node.analysis_status !== "skipped" &&
   (node.analysis_status === "pending" || !node.context);
 
+const isApiNode = (node) => node.isApiGroup || node.isApiNode;
+const isGroupedNode = (node) => node.isApiGroup || node.isPageGroup || node.isDiscoveryGroup;
+const isPageNode = (node) => !isApiNode(node) && !node.isDiscoveryGroup;
+const nodeRadius = (node) => {
+  if (isApiNode(node)) return node.isApiGroup ? 12 : 9;
+  if (node.isDiscoveryGroup) return 12;
+  return node.isSiteEntry ? 22 : node.isPageGroup ? 20 : 18;
+};
+
 // Owns the imperative D3 lifecycle while TestRunDetail keeps the selected-node
 // state and the page-detail actions that depend on it.
 export function useSitemapGraph({
+  searchMatches,
+  site,
   graph,
   activeTab,
   graphView,
   credentials,
   currentUrl,
+  pageOnly,
+  selectedNodeId,
   onSelectNode,
 }) {
   const svgRef = useRef(null);
   const simulationRef = useRef(null);
+  const resizeObserverRef = useRef(null);
   const previousStructureKeyRef = useRef("");
   const [gravity, setGravity] = useState(getSitemapGravity);
   const gravityRef = useRef(gravity);
+  const appliedGravityRef = useRef(gravity);
 
   useEffect(() => {
     gravityRef.current = gravity;
@@ -50,7 +67,15 @@ export function useSitemapGraph({
 
   useEffect(() => {
     if (!graph || !svgRef.current) return;
-    const structureKey = `${activeTab}:${graphView}:${graph.nodes.length}:${graph.links.length}`;
+    const nodeStructure = graph.nodes.map((node) => node.id).join(",");
+    const linkStructure = graph.links
+      .map((link) => {
+        const source = typeof link.source === "object" ? link.source?.id : link.source;
+        const target = typeof link.target === "object" ? link.target?.id : link.target;
+        return `${source}>${target}`;
+      })
+      .join(",");
+    const structureKey = `${activeTab}:${graphView}:${pageOnly}:${JSON.stringify([site?.base_url, site?.login_url, site?.credentials?.map((item) => item.login_url)])}:${nodeStructure}:${linkStructure}`;
 
     // Status-only updates retain the settled simulation and repaint in place.
     if (structureKey === previousStructureKeyRef.current && simulationRef.current) {
@@ -74,23 +99,39 @@ export function useSitemapGraph({
             g.insert("circle", ":first-child").attr("class", "node-llm-pulse").attr("r", 10);
           }
         });
-      return;
+      // React cleaned up the previous effect before this status-only repaint.
+      // Resume the same simulation rather than leaving its nodes frozen.
+      const simulation = simulationRef.current;
+      if (simulation.alpha() > simulation.alphaMin()) simulation.restart();
+      resizeObserverRef.current?.observe(svgRef.current);
+      return () => {
+        simulation.stop();
+        resizeObserverRef.current?.disconnect();
+      };
     }
 
     previousStructureKeyRef.current = structureKey;
     const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove();
-    const width = svgRef.current.clientWidth || 800;
-    const height = svgRef.current.clientHeight || 500;
     const nodes = graph.nodes.map((node) => ({ ...node }));
     const nodeIds = new Set(nodes.map((n) => n.id));
+    const nodesById = new Map(nodes.map((node) => [node.id, node]));
+    const isPageLink = (link) =>
+      [link.source, link.target].every((endpoint) => {
+        const node = nodesById.get(typeof endpoint === "object" ? endpoint.id : endpoint);
+        return node && isPageNode(node);
+      });
     const links = graph.links
       .filter((link) => {
         const s = typeof link.source === "object" ? link.source?.id : link.source;
         const t = typeof link.target === "object" ? link.target?.id : link.target;
         return nodeIds.has(s) && nodeIds.has(t);
       })
-      .map((link) => ({ ...link }));
+      .map((link) => ({
+        ...link,
+        source: nodesById.get(typeof link.source === "object" ? link.source.id : link.source),
+        target: nodesById.get(typeof link.target === "object" ? link.target.id : link.target),
+      }));
     const graphGroup = svg.append("g");
     const zoom = d3
       .zoom()
@@ -100,40 +141,60 @@ export function useSitemapGraph({
 
     svg
       .append("defs")
-      .append("marker")
-      .attr("id", "arrow")
+      .selectAll("marker")
+      .data(["arrow", "page-arrow"])
+      .join("marker")
+      .attr("id", (id) => id)
       .attr("viewBox", "0 -4 8 8")
-      .attr("refX", 18)
+      .attr("refX", (id) => (id === "page-arrow" ? 12 : 18))
       .attr("refY", 0)
       .attr("markerWidth", 6)
       .attr("markerHeight", 6)
       .attr("orient", "auto")
       .append("path")
       .attr("d", "M0,-4L8,0L0,4")
-      .attr("fill", "var(--border-2)");
+      .attr("fill", (id) => (id === "page-arrow" ? "var(--muted)" : "var(--border-2)"));
     const link = graphGroup
       .append("g")
       .selectAll("line")
       .data(links)
       .join("line")
-      .attr("stroke", "var(--border-2)")
-      .attr("stroke-width", 1.5)
-      .attr("marker-end", "url(#arrow)");
+      .attr("stroke", (item) => (isPageLink(item) ? "var(--muted)" : "var(--border-2)"))
+      .attr("stroke-width", (item) => (isPageLink(item) ? 2.5 : 1.5))
+      .attr("marker-end", (item) => (isPageLink(item) ? "url(#page-arrow)" : "url(#arrow)"));
+    const linkCount = graphGroup
+      .append("g")
+      .selectAll("text")
+      .data(links.filter((item) => item.count > 1))
+      .join("text")
+      .attr("class", "graph-link-count")
+      .attr("text-anchor", "middle")
+      .attr("fill", "var(--muted)")
+      .attr("font-size", "10px")
+      .attr("pointer-events", "none")
+      .text((item) => `×${item.count}`);
+    markSiteEntries(nodes, site);
+    const width = svgRef.current.clientWidth || 800;
+    const height = svgRef.current.clientHeight || 500;
     const simulation = d3
       .forceSimulation(nodes)
       .force(
         "link",
         d3
           .forceLink(links)
-          .id((node) => node.id)
-          .distance(110)
-          .strength(0.8),
+          .id((item) => item.id)
+          .distance(pageOnly ? 220 : 180)
+          .strength(pageOnly ? 0.5 : 0.35),
       )
-      .force("charge", d3.forceManyBody().strength(-350))
+      .force("charge", d3.forceManyBody().strength(pageOnly ? -850 : -650))
       .force("center", d3.forceCenter(width / 2, height / 2))
       .force("x", d3.forceX(width / 2).strength(gravityRef.current))
       .force("y", d3.forceY(height / 2).strength(gravityRef.current))
-      .force("collision", d3.forceCollide(22));
+      .force(
+        "collision",
+        d3.forceCollide((item) => nodeRadius(item) + (pageOnly ? 38 : 26)).iterations(3),
+      )
+      .force("link-crossings", pageOnly ? forceAvoidLinkCrossings(links) : null);
     const node = graphGroup
       .append("g")
       .selectAll("g")
@@ -177,10 +238,21 @@ export function useSitemapGraph({
     node
       .append("circle")
       .attr("class", "node-dot")
-      .attr("r", 10)
+      .attr("r", nodeRadius)
       .attr("fill", nodeColor)
       .attr("stroke", (node) => (node.status === "failed" ? "#fbbf24" : "var(--bg)"))
       .attr("stroke-width", 2);
+    node
+      .filter(isGroupedNode)
+      .append("text")
+      .attr("class", "api-node-count")
+      .attr("dy", 4)
+      .attr("text-anchor", "middle")
+      .attr("fill", "white")
+      .attr("font-size", "10px")
+      .attr("font-weight", "700")
+      .attr("pointer-events", "none")
+      .text((item) => item.variantCount ?? item.discoveryCount);
     const rootNode = nodes.find((node) => node.depth === 0);
     let baseHost = null;
     try {
@@ -188,12 +260,16 @@ export function useSitemapGraph({
     } catch {}
     node
       .append("text")
-      .attr("dy", 22)
+      .attr("dy", (item) => nodeRadius(item) + 15)
       .attr("text-anchor", "middle")
-      .attr("fill", "var(--muted)")
-      .attr("font-size", "10px")
+      .attr("fill", (item) => (isPageNode(item) ? "var(--text)" : "var(--muted)"))
+      .attr("font-size", (item) => (isPageNode(item) ? "11px" : "10px"))
+      .attr("font-weight", (item) => (isPageNode(item) ? 600 : 400))
       .attr("pointer-events", "none")
       .text((node) => {
+        if (node.isDiscoveryGroup) return "Direct scan discoveries";
+        if (node.isApiGroup) return `${node.apiMethod} ${node.apiPath}`;
+        if (node.isPageGroup) return node.routePath;
         try {
           const url = new URL(node.url);
           const address =
@@ -204,7 +280,20 @@ export function useSitemapGraph({
           return truncUrl(node.url, 36);
         }
       });
+    node
+      .filter((item) => item.entryRole)
+      .append("text")
+      .attr("class", "sitemap-entry-label")
+      .attr("y", (item) => -nodeRadius(item) - 10)
+      .attr("text-anchor", "middle")
+      .attr("fill", "var(--text)")
+      .attr("font-size", 11)
+      .attr("font-weight", 600)
+      .text((item) => item.entryRole);
     node.append("title").text((node) => {
+      if (node.isDiscoveryGroup) {
+        return `${node.discoveryCount} routes observed without a recorded source page`;
+      }
       const err =
         node.status === "failed" && node.error_message
           ? `\n(Failed: ${node.error_message})`
@@ -214,29 +303,84 @@ export function useSitemapGraph({
       return node.state_label ? `${node.url}\n${node.state_label}${err}` : `${node.url}${err}`;
     });
     svg.on("click", () => onSelectNode(null));
-    simulation.on("tick", () => {
+    const render = () => {
       link
         .attr("x1", (node) => node.source.x)
         .attr("y1", (node) => node.source.y)
         .attr("x2", (node) => node.target.x)
         .attr("y2", (node) => node.target.y);
       node.attr("transform", (node) => `translate(${node.x},${node.y})`);
-    });
+      linkCount
+        .attr("x", (item) => (item.source.x + item.target.x) / 2)
+        .attr("y", (item) => (item.source.y + item.target.y) / 2 - 5);
+    };
+    simulation.on("tick", render);
+    render();
     simulationRef.current = simulation;
-    return () => simulation.stop();
-    // Note: `gravity` is intentionally excluded here — changes to it are applied
-    // live to the existing simulation by the effect below, not by rebuilding the graph.
-  }, [activeTab, graph, graphView, nodeColor, onSelectNode]);
+    simulation.alpha(1).restart();
+    const observer = new window.ResizeObserver(() => {
+      const width = svgRef.current?.clientWidth;
+      const height = svgRef.current?.clientHeight;
+      if (!width || !height) return;
+      const bounds = graphGroup.node().getBBox();
+      const scale = Math.max(
+        0.2,
+        Math.min(1, width / (bounds.width + 80), height / (bounds.height + 80)),
+      );
+      svg.call(
+        zoom.transform,
+        d3.zoomIdentity
+          .translate(width / 2, height / 2)
+          .scale(scale)
+          .translate(-bounds.x - bounds.width / 2, -bounds.y - bounds.height / 2),
+      );
+    });
+    resizeObserverRef.current = observer;
+    observer.observe(svgRef.current);
+    return () => {
+      observer.disconnect();
+      simulation.stop();
+    };
+  }, [activeTab, graph, graphView, pageOnly, site, nodeColor, onSelectNode]);
 
-  // Retune the centering force in place when the gravity setting changes so
-  // dragging the debug slider doesn't reset node positions/zoom.
   useEffect(() => {
-    const simulation = simulationRef.current;
-    if (!simulation) return;
-    simulation.force("x")?.strength(gravity);
-    simulation.force("y")?.strength(gravity);
-    simulation.alpha(0.3).restart();
-  }, [gravity]);
+    if (!svgRef.current) return;
+    const svg = d3.select(svgRef.current);
+    const graphNodes = simulationRef.current?.nodes() || [];
+    const selected = graphNodes.find((node) => node.id === selectedNodeId);
+    if (!selected) {
+      svg.selectAll("g.node-group, line, .graph-link-count").style("opacity", 1);
+      return;
+    }
+    const connectedIds = new Set([selected.id]);
+    svg.selectAll("line").each((link) => {
+      const sourceId = typeof link.source === "object" ? link.source.id : link.source;
+      const targetId = typeof link.target === "object" ? link.target.id : link.target;
+      if (sourceId === selected.id || targetId === selected.id) {
+        connectedIds.add(sourceId);
+        connectedIds.add(targetId);
+      }
+    });
+    svg
+      .selectAll("g.node-group")
+      .style("opacity", (node) => (connectedIds.has(node.id) ? 1 : 0.14));
+    svg
+      .selectAll("line")
+      .style("opacity", (link) =>
+        (typeof link.source === "object" ? link.source.id : link.source) === selected.id ||
+        (typeof link.target === "object" ? link.target.id : link.target) === selected.id
+          ? 1
+          : 0.08,
+      );
+    svg
+      .selectAll(".graph-link-count")
+      .style("opacity", (link) =>
+        (typeof link.source === "object" ? link.source.id : link.source) === selected.id ||
+        (typeof link.target === "object" ? link.target.id : link.target) === selected.id
+          ? 1
+          : 0.08,
+      );
+  }, [activeTab, graph, graphView, site, nodeColor, onSelectNode, selectedNodeId]);
 
   useEffect(() => {
     if (!svgRef.current || !graph) return;
@@ -247,7 +391,12 @@ export function useSitemapGraph({
       svg
         .select("g")
         .selectAll("g.node-group")
-        .filter((node) => node && node.url && node.url.replace(/\/$/, "") === normalizedUrl)
+        .filter(
+          (node) =>
+            node &&
+            (node.url?.replace(/\/$/, "") === normalizedUrl ||
+              node.memberNodes?.some((member) => member.url?.replace(/\/$/, "") === normalizedUrl)),
+        )
         .insert("circle", ":first-child")
         .attr("class", "node-crawl-pulse")
         .attr("r", 10);
@@ -261,6 +410,25 @@ export function useSitemapGraph({
       }
     });
   }, [currentUrl, graph]);
+
+  // Retune the centering force in place when the gravity setting changes so
+  // dragging the debug slider doesn't reset node positions/zoom.
+  useEffect(() => {
+    const simulation = simulationRef.current;
+    if (!simulation) return;
+    if (appliedGravityRef.current === gravity) return;
+    appliedGravityRef.current = gravity;
+    simulation.force("x")?.strength(gravity);
+    simulation.force("y")?.strength(gravity);
+    simulation.alpha(0.3).restart();
+  }, [gravity]);
+
+  useEffect(() => {
+    if (!svgRef.current) return;
+    d3.select(svgRef.current)
+      .selectAll("g.node-group")
+      .classed("sitemap-search-match", (node) => searchMatches?.has(node.id) || false);
+  }, [searchMatches, activeTab, graph, graphView, site, nodeColor, onSelectNode]);
 
   return { svgRef };
 }

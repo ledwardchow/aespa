@@ -1,4 +1,4 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useEffect } from "react";
 
 import { safeParseJson, confidencePct } from "../../shared/runs/campaignPresentation.js";
@@ -23,7 +23,7 @@ const EVIDENCE_KEY_LABELS = {
 // A detailed connection diagram view — folds confidence, evidence, source facts,
 // and origin type directly into each row.
 export function CampaignConnectionsTab({
-  applicationId,
+  systemId,
   campaignId,
   campaign,
   rebuildConnections,
@@ -36,8 +36,8 @@ export function CampaignConnectionsTab({
   useEffect(() => {
     let cancelled = false;
     Promise.all([
-      applicationsApi.getCampaignConnections(applicationId, campaignId, "cross_component"),
-      applicationsApi.listAppComponents(applicationId),
+      systemsApi.getCampaignConnections(systemId, campaignId, "cross_component"),
+      systemsApi.listSystemComponents(systemId),
     ])
       .then(([conns, comps]) => {
         if (cancelled) return;
@@ -52,16 +52,14 @@ export function CampaignConnectionsTab({
     return () => {
       cancelled = true;
     };
-  }, [applicationId, campaignId, campaign?.status, campaign?.updated_at]);
+  }, [systemId, campaignId, campaign?.status, campaign?.updated_at]);
 
   const hasLiveRuns = (campaign?.target_members || []).some(
     (member) => member.test_run_id != null || member.api_test_run_id != null,
   );
   const canRebuild =
     !hasLiveRuns &&
-    ["failed", "interrupted", "awaiting_review", "completed", "stopped"].includes(
-      campaign?.status,
-    );
+    ["failed", "interrupted", "awaiting_review", "completed", "stopped"].includes(campaign?.status);
   const retrying = campaign?.status === "failed" || campaign?.status === "interrupted";
   const rebuildLabel = retrying ? "Resume context matching" : "Re-run context matching";
   const matchingControls = (
@@ -69,8 +67,8 @@ export function CampaignConnectionsTab({
       <div>
         <div className="form-section-title">Context matching</div>
         <div className="subtle" style={{ fontSize: 12 }}>
-          Re-running clears generated leads, mappings, and review decisions, then rebuilds them
-          from the frozen source snapshots.
+          Re-running clears generated leads, mappings, and review decisions, then rebuilds them from
+          the frozen source snapshots.
         </div>
       </div>
       {canRebuild && (

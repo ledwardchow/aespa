@@ -7,8 +7,8 @@ import json
 from sqlmodel import Session, select
 
 from aespa.models import (
-    Application,
-    ApplicationComponent,
+    System,
+    SystemComponent,
     AssessmentCampaign,
     CampaignSourceMember,
     ComponentConnection,
@@ -21,11 +21,11 @@ from aespa.services.route_tracing import trace_lead_paths
 
 
 def _seed_source_members(session: Session) -> tuple[int, list[CampaignSourceMember]]:
-    app = Application(name="Mapping gate")
+    app = System(name="Mapping gate")
     session.add(app)
     session.flush()
-    ui = ApplicationComponent(application_id=app.id, name="checkout-ui")
-    api = ApplicationComponent(application_id=app.id, name="orders-api")
+    ui = SystemComponent(system_id=app.id, name="checkout-ui")
+    api = SystemComponent(system_id=app.id, name="orders-api")
     session.add_all([ui, api])
     session.flush()
     ui_snapshot = ComponentSnapshot(
@@ -44,7 +44,7 @@ def _seed_source_members(session: Session) -> tuple[int, list[CampaignSourceMemb
     )
     session.add_all([ui_snapshot, api_snapshot])
     session.flush()
-    campaign = AssessmentCampaign(application_id=app.id, name="mapping")
+    campaign = AssessmentCampaign(system_id=app.id, name="mapping")
     session.add(campaign)
     session.flush()
     members = [

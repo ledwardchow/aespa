@@ -19,9 +19,9 @@ import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
-    Application,
-    ApplicationComponent,
-    ApplicationTarget,
+    System,
+    SystemComponent,
+    SystemTarget,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
@@ -46,10 +46,10 @@ from aespa.services import campaigns as campaigns_svc
 
 
 def _seed_application(session: Session) -> dict:
-    app = Application(name="Acme")
+    app = System(name="Acme")
     session.add(app)
     session.flush()
-    component = ApplicationComponent(application_id=app.id, name="checkout-ui")
+    component = SystemComponent(system_id=app.id, name="checkout-ui")
     session.add(component)
     session.flush()
     snapshot = ComponentSnapshot(
@@ -63,8 +63,8 @@ def _seed_application(session: Session) -> dict:
     site = Site(name="Portal", base_url="http://portal.test")
     session.add(site)
     session.flush()
-    target = ApplicationTarget(
-        application_id=app.id, target_type="site", target_id=site.id
+    target = SystemTarget(
+        system_id=app.id, target_type="site", target_id=site.id
     )
     session.add(target)
     session.commit()
@@ -72,7 +72,7 @@ def _seed_application(session: Session) -> dict:
     session.refresh(snapshot)
     session.refresh(target)
     return {
-        "application_id": app.id,
+        "system_id": app.id,
         "component_id": component.id,
         "snapshot_id": snapshot.id,
         "target_id": target.id,
@@ -90,7 +90,7 @@ def _create_draft_campaign(session: Session, ctx: dict) -> AssessmentCampaign:
         ],
         target_members=[CampaignTargetMemberCreate(target_id=ctx["target_id"])],
     )
-    return campaigns_svc.create_campaign(session, ctx["application_id"], payload)
+    return campaigns_svc.create_campaign(session, ctx["system_id"], payload)
 
 
 def test_campaign_id_joins_global_run_identity_namespace(isolated_db_engine):
@@ -142,7 +142,7 @@ def test_create_campaign_rejects_duplicate_component_selection(isolated_db_engin
             target_members=[CampaignTargetMemberCreate(target_id=ctx["target_id"])],
         )
         with pytest.raises(campaigns_svc.InvalidCampaignState):
-            campaigns_svc.create_campaign(s, ctx["application_id"], payload)
+            campaigns_svc.create_campaign(s, ctx["system_id"], payload)
 
 
 @pytest.mark.anyio
@@ -192,11 +192,11 @@ async def test_partial_sast_failure_produces_warning_but_still_reaches_review(
     isolated_db_engine, monkeypatch
 ):
     with Session(isolated_db_engine) as s:
-        app = Application(name="Acme2")
+        app = System(name="Acme2")
         s.add(app)
         s.flush()
-        good = ApplicationComponent(application_id=app.id, name="good-component")
-        bad = ApplicationComponent(application_id=app.id, name="bad-component")
+        good = SystemComponent(system_id=app.id, name="good-component")
+        bad = SystemComponent(system_id=app.id, name="bad-component")
         s.add(good)
         s.add(bad)
         s.flush()
@@ -219,8 +219,8 @@ async def test_partial_sast_failure_produces_warning_but_still_reaches_review(
         site = Site(name="P2", base_url="http://p2.test")
         s.add(site)
         s.flush()
-        target = ApplicationTarget(
-            application_id=app.id, target_type="site", target_id=site.id
+        target = SystemTarget(
+            system_id=app.id, target_type="site", target_id=site.id
         )
         s.add(target)
         s.commit()
@@ -353,8 +353,8 @@ async def test_resume_source_member_retries_only_selected_child(
 ):
     with Session(isolated_db_engine) as s:
         ctx = _seed_application(s)
-        second = ApplicationComponent(
-            application_id=ctx["application_id"], name="orders-api"
+        second = SystemComponent(
+            system_id=ctx["system_id"], name="orders-api"
         )
         s.add(second)
         s.flush()
@@ -370,7 +370,7 @@ async def test_resume_source_member_retries_only_selected_child(
         second_snapshot_id = second_snapshot.id
         campaign = campaigns_svc.create_campaign(
             s,
-            ctx["application_id"],
+            ctx["system_id"],
             CampaignCreate(
                 name="resume-one",
                 source_members=[
@@ -604,7 +604,7 @@ async def test_delete_campaign_immediately_after_stop_does_not_race(
         ctx = _seed_application(s)
         campaign = _create_draft_campaign(s, ctx)
         campaign_id = campaign.id
-        application_id = ctx["application_id"]
+        system_id = ctx["system_id"]
 
     started = asyncio.Event()
 
@@ -643,7 +643,7 @@ async def test_delete_campaign_immediately_after_stop_does_not_race(
     # No sleep/yield here on purpose — this is exactly the "stop then
     # immediately delete" sequence a UI action would perform.
     with Session(isolated_db_engine) as s:
-        campaigns_svc.delete_campaign(s, application_id, campaign_id)
+        campaigns_svc.delete_campaign(s, system_id, campaign_id)
 
     with Session(isolated_db_engine) as s:
         assert s.get(AssessmentCampaign, campaign_id) is None
@@ -733,7 +733,7 @@ def test_delete_campaign_cascades_child_runs_and_facts(isolated_db_engine):
         sast_run_id = sast_run.id
 
     with Session(isolated_db_engine) as s:
-        campaigns_svc.delete_campaign(s, ctx["application_id"], campaign_id)
+        campaigns_svc.delete_campaign(s, ctx["system_id"], campaign_id)
 
     with Session(isolated_db_engine) as s:
         assert s.get(AssessmentCampaign, campaign_id) is None
@@ -764,7 +764,7 @@ def test_delete_campaign_blocked_while_active(isolated_db_engine):
 
     with Session(isolated_db_engine) as s:
         with pytest.raises(campaigns_svc.InvalidCampaignState):
-            campaigns_svc.delete_campaign(s, ctx["application_id"], campaign_id)
+            campaigns_svc.delete_campaign(s, ctx["system_id"], campaign_id)
 
 
 # ── Regression: cascade_delete_campaign FK order + snapshot ownership ───────
@@ -792,8 +792,8 @@ def test_cascade_delete_campaign_respects_fk_order(fk_engine, tmp_path):
         s.add(collection)
         s.flush()
         s.add(ApiEndpoint(collection_id=collection.id, method="POST", path="/orders"))
-        target = ApplicationTarget(
-            application_id=ctx["application_id"],
+        target = SystemTarget(
+            system_id=ctx["system_id"],
             target_type="api_collection",
             target_id=collection.id,
         )
@@ -886,7 +886,7 @@ def test_cascade_delete_campaign_respects_fk_order(fk_engine, tmp_path):
 
     # Must not raise sqlalchemy.exc.IntegrityError with FK enforcement on.
     with Session(fk_engine) as s:
-        campaigns_svc.delete_campaign(s, ctx["application_id"], campaign_id)
+        campaigns_svc.delete_campaign(s, ctx["system_id"], campaign_id)
 
     with Session(fk_engine) as s:
         assert s.get(AssessmentCampaign, campaign_id) is None
@@ -928,7 +928,7 @@ def test_cascade_delete_campaign_preserves_shared_snapshot_file(fk_engine, tmp_p
         s.commit()
 
     with Session(fk_engine) as s:
-        campaigns_svc.delete_campaign(s, ctx["application_id"], campaign_id)
+        campaigns_svc.delete_campaign(s, ctx["system_id"], campaign_id)
 
     assert snapshot_path.is_file()  # the shared archive survives
 
@@ -1160,8 +1160,8 @@ def test_direct_api_run_deletion_detaches_campaign_member(
         collection = ApiCollection(name="Orders API", base_url="http://api.test")
         s.add(collection)
         s.flush()
-        target = ApplicationTarget(
-            application_id=ctx["application_id"],
+        target = SystemTarget(
+            system_id=ctx["system_id"],
             target_type="api_collection",
             target_id=collection.id,
         )
@@ -1202,10 +1202,10 @@ def test_site_deletion_blocked_while_attached_to_application(client):
         "/api/sites", json={"name": "S1", "base_url": "http://t.local"}
     )
     site_id = site_resp.json()["id"]
-    app_resp = client.post("/api/applications", json={"name": "App1"})
+    app_resp = client.post("/api/systems", json={"name": "App1"})
     app_id = app_resp.json()["id"]
     client.post(
-        f"/api/applications/{app_id}/targets",
+        f"/api/systems/{app_id}/targets",
         json={"target_type": "site", "target_id": site_id},
     )
     resp = client.delete(f"/api/sites/{site_id}")
@@ -1218,10 +1218,10 @@ def test_api_collection_deletion_blocked_while_attached_to_application(client):
         json={"name": "Orders", "base_url": "http://api.test"},
     )
     collection_id = coll_resp.json()["id"]
-    app_resp = client.post("/api/applications", json={"name": "App2"})
+    app_resp = client.post("/api/systems", json={"name": "App2"})
     app_id = app_resp.json()["id"]
     client.post(
-        f"/api/applications/{app_id}/targets",
+        f"/api/systems/{app_id}/targets",
         json={"target_type": "api_collection", "target_id": collection_id},
     )
     resp = client.delete(f"/api/api-collections/{collection_id}")
@@ -1237,10 +1237,10 @@ def test_direct_test_run_delete_endpoint_detaches_campaign_member(client):
     run_resp = client.post(f"/api/sites/{site_id}/test-runs", json={"name": "run"})
     run_id = run_resp.json()["id"]
 
-    app_resp = client.post("/api/applications", json={"name": "AppDirect"})
+    app_resp = client.post("/api/systems", json={"name": "AppDirect"})
     app_id = app_resp.json()["id"]
     target_resp = client.post(
-        f"/api/applications/{app_id}/targets",
+        f"/api/systems/{app_id}/targets",
         json={"target_type": "site", "target_id": site_id},
     )
     target_id = target_resp.json()["id"]
@@ -1249,7 +1249,7 @@ def test_direct_test_run_delete_endpoint_detaches_campaign_member(client):
     from aespa.models import CampaignTargetMember
 
     with Session(get_engine()) as s:
-        campaign = AssessmentCampaign(application_id=app_id, name="c")
+        campaign = AssessmentCampaign(system_id=app_id, name="c")
         s.add(campaign)
         s.flush()
         s.add(
@@ -1356,8 +1356,8 @@ async def test_dast_stage_is_incomplete_when_one_of_two_targets_fails(
         collection = ApiCollection(name="Second API", base_url="http://api2.test")
         s.add(collection)
         s.flush()
-        target2 = ApplicationTarget(
-            application_id=ctx["application_id"],
+        target2 = SystemTarget(
+            system_id=ctx["system_id"],
             target_type="api_collection",
             target_id=collection.id,
         )
@@ -1377,7 +1377,7 @@ async def test_dast_stage_is_incomplete_when_one_of_two_targets_fails(
                 CampaignTargetMemberCreate(target_id=target2.id),
             ],
         )
-        campaign = campaigns_svc.create_campaign(s, ctx["application_id"], payload)
+        campaign = campaigns_svc.create_campaign(s, ctx["system_id"], payload)
         campaign.status = "awaiting_review"
         campaign.review_submitted_at = campaign.created_at
         s.add(campaign)
@@ -1903,8 +1903,8 @@ def _seed_campaign_with_one_proposal(session) -> dict:
     session.add(collection)
     session.flush()
     session.add(ApiEndpoint(collection_id=collection.id, method="POST", path="/orders"))
-    target = ApplicationTarget(
-        application_id=ctx["application_id"],
+    target = SystemTarget(
+        system_id=ctx["system_id"],
         target_type="api_collection",
         target_id=collection.id,
     )

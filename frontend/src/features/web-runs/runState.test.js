@@ -2,11 +2,27 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import {
+  canResumeSelectedScanMode,
+  hasResumableExperimentalScan,
   isCrawlerAgentActive,
   resolveRunPrimaryAction,
   RUN_PRIMARY_ACTION,
   runStatusFromThinkingStatus,
 } from "./runState.js";
+
+test("only resumes when the selected scan mode matches the saved mode", () => {
+  assert.equal(canResumeSelectedScanMode(true, "deep", "deep"), true);
+  assert.equal(canResumeSelectedScanMode(true, "track", "deep"), false);
+  assert.equal(canResumeSelectedScanMode(true, "deep", "track"), false);
+  assert.equal(canResumeSelectedScanMode(false, "track", "track"), false);
+});
+
+test("stopped and quota-paused experimental scans remain resumable without a checkpoint", () => {
+  assert.equal(hasResumableExperimentalScan({ coverage_mode: "deep", status: "stopped" }), true);
+  assert.equal(hasResumableExperimentalScan({ coverage_mode: "team", status: "paused" }), true);
+  assert.equal(hasResumableExperimentalScan({ coverage_mode: "team", status: "complete" }), false);
+  assert.equal(hasResumableExperimentalScan({ coverage_mode: "track", status: "stopped" }), false);
+});
 
 test("crawler activity follows its own agent state", () => {
   assert.equal(isCrawlerAgentActive({ status: "active" }), true);

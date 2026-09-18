@@ -401,6 +401,175 @@
 }
 
 /* ── Activity sub-tabs + Agents panel ────────────────────────────────────── */
+
+.deep-queue-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.deep-queue-findings-badge {
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  background: rgba(245, 158, 11, 0.1);
+  color: #f2b84b;
+}
+.deep-queue-statuses {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 5px;
+  white-space: nowrap;
+}
+.deep-queue-task {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: visible;
+  white-space: normal;
+}
+.deep-queue-task-summary {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deep-queue-task-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.deep-queue-task-detail {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  background: rgba(91, 141, 239, 0.08);
+  color: var(--text-2);
+  font-size: 10px;
+  line-height: 1.4;
+  text-transform: none;
+}
+.deep-queue-task-detail code {
+  overflow: hidden;
+  margin-left: 4px;
+  color: var(--text);
+  font-size: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deep-task-group {
+  border-bottom: 1px solid var(--border);
+}
+.agent-row.deep-task-toggle {
+  grid-template-columns: 14px 18px 130px auto 1fr auto;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.deep-task-toggle:hover {
+  background: rgba(91, 141, 239, 0.04);
+}
+.deep-expand-icon {
+  color: var(--muted);
+  font-size: 18px;
+  transition: transform 120ms ease;
+}
+.deep-expand-icon.is-open {
+  transform: rotate(90deg);
+}
+.deep-check-list {
+  padding: 4px 18px 12px 66px;
+  background: var(--panel-2);
+}
+.deep-expanded-label {
+  padding: 10px 0 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+.deep-variant-row {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border-top: 1px solid var(--border);
+  background: rgba(91, 141, 239, 0.035);
+  font-size: 11px;
+}
+.deep-variant-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.deep-variant-purpose {
+  color: var(--text);
+}
+.deep-variant-pivots {
+  display: grid;
+  gap: 3px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border-2);
+}
+.deep-worker-trace {
+  margin-top: 3px;
+  border-left: 2px solid var(--accent);
+  background: rgba(91, 141, 239, 0.05);
+}
+.deep-worker-trace-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 10px;
+  cursor: pointer;
+  list-style-position: inside;
+}
+.deep-worker-trace-heading .subtle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deep-worker-trace .agent-task-history {
+  margin: 0;
+}
+.deep-worker-trace-body {
+  padding: 0 10px 9px;
+}
+.deep-worker-assignment {
+  grid-column: 2 / -1;
+  display: grid;
+  gap: 4px;
+  padding: 7px 10px;
+  border-left: 2px solid var(--border-2);
+  color: var(--text-2);
+  font-size: 11px;
+}
+.deep-check-row {
+  display: grid;
+  grid-template-columns: auto minmax(80px, auto) auto auto minmax(120px, auto) 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+.deep-check-row code {
+  color: var(--text);
+}
+.deep-check-hypothesis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .activity-sub-tab-bar {
   display: flex;
   flex-wrap: wrap;
@@ -686,6 +855,14 @@
   color: var(--text-2);
   min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-step-description {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

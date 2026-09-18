@@ -21,9 +21,9 @@ from aespa.models import (
     AgentLog,
     ApiCollection,
     ApiTestRun,
-    Application,
-    ApplicationComponent,
-    ApplicationTarget,
+    System,
+    SystemComponent,
+    SystemTarget,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
@@ -86,12 +86,12 @@ def test_campaign_finding_rows_merge_cross_repo_instances():
 
 
 def _seed_two_component_application(session: Session) -> dict:
-    app = Application(name="Acme")
+    app = System(name="Acme")
     session.add(app)
     session.flush()
 
-    ui = ApplicationComponent(application_id=app.id, name="checkout-ui")
-    api = ApplicationComponent(application_id=app.id, name="orders-api")
+    ui = SystemComponent(system_id=app.id, name="checkout-ui")
+    api = SystemComponent(system_id=app.id, name="orders-api")
     session.add(ui)
     session.add(api)
     session.flush()
@@ -116,12 +116,12 @@ def _seed_two_component_application(session: Session) -> dict:
     collection = ApiCollection(name="Orders API", base_url="https://api.acme.test")
     session.add(collection)
     session.flush()
-    target = ApplicationTarget(
-        application_id=app.id, target_type="api_collection", target_id=collection.id
+    target = SystemTarget(
+        system_id=app.id, target_type="api_collection", target_id=collection.id
     )
     session.add(target)
 
-    campaign = AssessmentCampaign(application_id=app.id, name="release-1")
+    campaign = AssessmentCampaign(system_id=app.id, name="release-1")
     session.add(campaign)
     session.flush()
 
@@ -153,7 +153,7 @@ def _seed_two_component_application(session: Session) -> dict:
     session.commit()
 
     return {
-        "application_id": app.id,
+        "system_id": app.id,
         "campaign_id": campaign.id,
         "ui_component_id": ui.id,
         "api_component_id": api.id,
@@ -192,9 +192,9 @@ def test_mappings_endpoint_includes_lead_context_for_sast_lead(
         )
         s.add(mapping)
         s.commit()
-        app_id, campaign_id = ctx["application_id"], ctx["campaign_id"]
+        app_id, campaign_id = ctx["system_id"], ctx["campaign_id"]
 
-    resp = client.get(f"/api/applications/{app_id}/campaigns/{campaign_id}/mappings")
+    resp = client.get(f"/api/systems/{app_id}/campaigns/{campaign_id}/mappings")
     assert resp.status_code == 200, resp.text
     rows = resp.json()
     assert len(rows) == 1
@@ -254,10 +254,10 @@ def test_mappings_endpoint_includes_all_contributing_components_for_cross_repo_l
         )
         s.add(mapping)
         s.commit()
-        app_id, campaign_id = ctx["application_id"], ctx["campaign_id"]
+        app_id, campaign_id = ctx["system_id"], ctx["campaign_id"]
         ui_id, api_id = ctx["ui_component_id"], ctx["api_component_id"]
 
-    resp = client.get(f"/api/applications/{app_id}/campaigns/{campaign_id}/mappings")
+    resp = client.get(f"/api/systems/{app_id}/campaigns/{campaign_id}/mappings")
     assert resp.status_code == 200, resp.text
     row = resp.json()[0]
 
@@ -336,10 +336,10 @@ def test_activity_endpoint_replays_persisted_history_in_order(
     client, isolated_db_engine
 ):
     with Session(isolated_db_engine) as s:
-        app = Application(name="ActivityApp")
+        app = System(name="ActivityApp")
         s.add(app)
         s.flush()
-        campaign = AssessmentCampaign(application_id=app.id, name="c1")
+        campaign = AssessmentCampaign(system_id=app.id, name="c1")
         s.add(campaign)
         s.flush()
         campaign_id = campaign.id
@@ -382,7 +382,7 @@ def test_activity_endpoint_replays_persisted_history_in_order(
         )
         s.commit()
 
-    resp = client.get(f"/api/applications/{app_id}/campaigns/{campaign_id}/activity")
+    resp = client.get(f"/api/systems/{app_id}/campaigns/{campaign_id}/activity")
     assert resp.status_code == 200, resp.text
     entries = resp.json()
     assert len(entries) == 3
@@ -406,10 +406,10 @@ def test_activity_endpoint_replays_persisted_history_in_order(
 
 def test_activity_endpoint_is_isolated_from_other_run_kinds(client, isolated_db_engine):
     with Session(isolated_db_engine) as s:
-        app = Application(name="IsolationApp")
+        app = System(name="IsolationApp")
         s.add(app)
         s.flush()
-        campaign = AssessmentCampaign(application_id=app.id, name="c1")
+        campaign = AssessmentCampaign(system_id=app.id, name="c1")
         s.add(campaign)
         s.flush()
         campaign_id = campaign.id
@@ -460,7 +460,7 @@ def test_activity_endpoint_is_isolated_from_other_run_kinds(client, isolated_db_
         )
         s.commit()
 
-    resp = client.get(f"/api/applications/{app_id}/campaigns/{campaign_id}/activity")
+    resp = client.get(f"/api/systems/{app_id}/campaigns/{campaign_id}/activity")
     assert resp.status_code == 200, resp.text
     entries = resp.json()
     assert len(entries) == 1
@@ -471,15 +471,15 @@ def test_activity_endpoint_returns_empty_list_when_no_history(
     client, isolated_db_engine
 ):
     with Session(isolated_db_engine) as s:
-        app = Application(name="EmptyApp")
+        app = System(name="EmptyApp")
         s.add(app)
         s.flush()
-        campaign = AssessmentCampaign(application_id=app.id, name="c1")
+        campaign = AssessmentCampaign(system_id=app.id, name="c1")
         s.add(campaign)
         s.commit()
         app_id, campaign_id = app.id, campaign.id
 
-    resp = client.get(f"/api/applications/{app_id}/campaigns/{campaign_id}/activity")
+    resp = client.get(f"/api/systems/{app_id}/campaigns/{campaign_id}/activity")
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -523,10 +523,10 @@ def test_findings_resolves_component_for_sast_produced_lead(client, isolated_db_
         )
         s.add(lead)
         s.commit()
-        app_id, campaign_id = ctx["application_id"], ctx["campaign_id"]
+        app_id, campaign_id = ctx["system_id"], ctx["campaign_id"]
         ui_id = ctx["ui_component_id"]
 
-    resp = client.get(f"/api/applications/{app_id}/campaigns/{campaign_id}/findings")
+    resp = client.get(f"/api/systems/{app_id}/campaigns/{campaign_id}/findings")
     assert resp.status_code == 200, resp.text
     rows = resp.json()
     assert len(rows) == 1
@@ -602,10 +602,10 @@ def test_findings_resolves_components_for_campaign_cross_repo_lead(
         )
         s.add(copy)
         s.commit()
-        app_id, campaign_id = ctx["application_id"], ctx["campaign_id"]
+        app_id, campaign_id = ctx["system_id"], ctx["campaign_id"]
         ui_id, api_id = ctx["ui_component_id"], ctx["api_component_id"]
 
-    resp = client.get(f"/api/applications/{app_id}/campaigns/{campaign_id}/findings")
+    resp = client.get(f"/api/systems/{app_id}/campaigns/{campaign_id}/findings")
     assert resp.status_code == 200, resp.text
     row = resp.json()[0]
     assert set(row["component_ids"]) == {ui_id, api_id}
@@ -642,9 +642,9 @@ def test_findings_never_guesses_component_without_a_linked_lead(
         )
         s.add(finding)
         s.commit()
-        app_id, campaign_id = ctx["application_id"], ctx["campaign_id"]
+        app_id, campaign_id = ctx["system_id"], ctx["campaign_id"]
 
-    resp = client.get(f"/api/applications/{app_id}/campaigns/{campaign_id}/findings")
+    resp = client.get(f"/api/systems/{app_id}/campaigns/{campaign_id}/findings")
     assert resp.status_code == 200, resp.text
     row = resp.json()[0]
     assert row["component_id"] is None
@@ -660,8 +660,8 @@ def test_findings_resolves_component_for_web_target_member(client, isolated_db_e
         site = Site(name="Portal", base_url="http://portal.test")
         s.add(site)
         s.flush()
-        web_target = ApplicationTarget(
-            application_id=ctx["application_id"], target_type="site", target_id=site.id
+        web_target = SystemTarget(
+            system_id=ctx["system_id"], target_type="site", target_id=site.id
         )
         s.add(web_target)
         s.flush()
@@ -704,10 +704,10 @@ def test_findings_resolves_component_for_web_target_member(client, isolated_db_e
         )
         s.add(lead)
         s.commit()
-        app_id, campaign_id = ctx["application_id"], ctx["campaign_id"]
+        app_id, campaign_id = ctx["system_id"], ctx["campaign_id"]
         ui_id = ctx["ui_component_id"]
 
-    resp = client.get(f"/api/applications/{app_id}/campaigns/{campaign_id}/findings")
+    resp = client.get(f"/api/systems/{app_id}/campaigns/{campaign_id}/findings")
     assert resp.status_code == 200, resp.text
     web_rows = [r for r in resp.json() if r["target_type"] == "site"]
     assert len(web_rows) == 1
@@ -729,13 +729,13 @@ def test_activity_stream_generator_replays_then_follows_without_gap(
 
     import anyio
 
-    from aespa.api.applications import _stream_campaign_activity
+    from aespa.api.systems import _stream_campaign_activity
 
     with Session(isolated_db_engine) as s:
-        app = Application(name="StreamApp")
+        app = System(name="StreamApp")
         s.add(app)
         s.flush()
-        campaign = AssessmentCampaign(application_id=app.id, name="c1")
+        campaign = AssessmentCampaign(system_id=app.id, name="c1")
         s.add(campaign)
         s.flush()
         campaign_id = campaign.id
@@ -808,13 +808,13 @@ def test_activity_stream_resumes_from_supplied_cursor_without_duplicating(
 
     import anyio
 
-    from aespa.api.applications import _stream_campaign_activity
+    from aespa.api.systems import _stream_campaign_activity
 
     with Session(isolated_db_engine) as s:
-        app = Application(name="StreamApp2")
+        app = System(name="StreamApp2")
         s.add(app)
         s.flush()
-        campaign = AssessmentCampaign(application_id=app.id, name="c1")
+        campaign = AssessmentCampaign(system_id=app.id, name="c1")
         s.add(campaign)
         s.flush()
         campaign_id = campaign.id
@@ -863,5 +863,5 @@ def test_activity_stream_http_endpoint_404s_for_unknown_campaign(client):
     """The route is registered and wired to campaign lookup before it ever
     starts streaming — an unknown campaign 404s immediately rather than
     hanging on an infinite body."""
-    resp = client.get("/api/applications/1/campaigns/999999/activity/stream")
+    resp = client.get("/api/systems/1/campaigns/999999/activity/stream")
     assert resp.status_code == 404

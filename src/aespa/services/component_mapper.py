@@ -16,7 +16,6 @@ from sqlmodel import Session, select
 from aespa.config import get_settings
 from aespa.db import get_engine
 from aespa.models import (
-    ApplicationComponent,
     AssessmentCampaign,
     CampaignSourceMember,
     ComponentConnection,
@@ -25,6 +24,7 @@ from aespa.models import (
     SastRun,
     ScanLead,
     ScanLeadComponentProvenance,
+    SystemComponent,
 )
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
@@ -368,7 +368,7 @@ def _load_component_context(
 ) -> tuple[
     AssessmentCampaign,
     CampaignSourceMember,
-    ApplicationComponent,
+    SystemComponent,
     ComponentSnapshot,
     SastRun,
 ]:
@@ -379,7 +379,7 @@ def _load_component_context(
             raise ComponentMappingError(
                 "Campaign source member does not belong to campaign"
             )
-        component = session.get(ApplicationComponent, member.component_id)
+        component = session.get(SystemComponent, member.component_id)
         snapshot = session.get(ComponentSnapshot, member.snapshot_id)
         run = session.get(SastRun, member.sast_run_id) if member.sast_run_id else None
         if component is None or snapshot is None or run is None:

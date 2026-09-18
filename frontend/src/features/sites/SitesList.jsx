@@ -4,6 +4,7 @@ import { nav } from "../../shared/navigation/router.js";
 
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 
 // ── Sites list ────────────────────────────────────────────────────────────────
 
@@ -214,7 +215,7 @@ export function SitesList() {
               </thead>
               <tbody>
                 {sortedSites.map((s) => (
-                  <tr key={s.id}>
+                  <NavigationRow key={s.id} href={`#/sites/${s.id}`} label={`Open ${s.name}`}>
                     <td>
                       <a
                         href={`#/sites/${s.id}`}
@@ -258,7 +259,7 @@ export function SitesList() {
                         </button>
                       </div>
                     </td>
-                  </tr>
+                  </NavigationRow>
                 ))}
               </tbody>
             </table>

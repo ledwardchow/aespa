@@ -16,11 +16,11 @@ docs/images/.DS_Store
 .DS_Store
 /.vscode
 saml.b64
-aespa.db-journal
+*.db-journal
 *.backup
 *.db-backup
-aespa.db-shm
-aespa.db-wal
+*.db-shm
+*.db-wal
 
 # Local Docker executor exports (images published by buildx live in the registry)
 /runtime/python-executor/*.tar

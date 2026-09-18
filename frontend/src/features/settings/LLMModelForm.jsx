@@ -6,8 +6,26 @@ import { API_FORMAT_LABELS } from "./providerMetadata.js";
 import { IconCheck } from "../../shared/ui/Icons.jsx";
 import { sortModelNames } from "../../shared/lib/modelSorting.js";
 
-export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
-  const [form, setForm] = useState(() => llmProfileToForm(profile, providers));
+export function LLMModelForm({
+  mode,
+  profile,
+  providers,
+  initialProviderId,
+  initialModel,
+  onSaved,
+  onCancel,
+}) {
+  const [form, setForm] = useState(() => {
+    const initialForm = llmProfileToForm(profile, providers);
+    if (mode !== "new" || !initialProviderId || !initialModel) return initialForm;
+    const initialProvider = providers.find((item) => item.id === initialProviderId);
+    return {
+      ...initialForm,
+      name: initialProvider?.name ? `${initialProvider.name}/${initialModel}` : initialModel,
+      provider_id: initialProviderId,
+      model: initialModel,
+    };
+  });
   const [nameTouched, setNameTouched] = useState(mode === "edit");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -148,8 +166,9 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
           </select>
         </div>
         <div className="field">
-          <label>Model</label>
+          <label htmlFor="model-config-model">Model</label>
           <select
+            id="model-config-model"
             className="select"
             required
             value={form.model}

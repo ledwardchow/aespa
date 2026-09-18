@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, TestRun
+from aespa.models import CrawledPage, PageLink, TestRun
 from aespa.services import llm as llm_svc
 
 log = logging.getLogger(__name__)
@@ -123,6 +123,7 @@ async def enrich_dynamic_route(
     response_body: Any = None,
     authenticated: bool = False,
     browser_observation: bool = False,
+    source_page_id: int | None = None,
 ) -> int | None:
     """Upsert and classify a route observed during a dynamic web scan.
 
@@ -149,6 +150,7 @@ async def enrich_dynamic_route(
         run_id=run_id,
         url=url,
         browser_observation=browser_observation,
+        source_page_id=source_page_id,
     )
     if page_id is None:
         return None
@@ -199,7 +201,11 @@ def http_exchange_text(exchange: dict[str, Any]) -> str:
 
 
 def _upsert_route_shell(
-    *, run_id: int, url: str, browser_observation: bool
+    *,
+    run_id: int,
+    url: str,
+    browser_observation: bool,
+    source_page_id: int | None,
 ) -> tuple[int | None, bool]:
     from aespa.services.web_workprogram import _match_page_for_url
 
@@ -235,6 +241,33 @@ def _upsert_route_shell(
             session.flush()
             run.pages_discovered = (run.pages_discovered or 0) + 1
             session.add(run)
+        if source_page_id is not None and source_page_id != page.id:
+            source_page = session.get(CrawledPage, source_page_id)
+            action_kind = (
+                "dynamic_navigation" if browser_observation else "dynamic_request"
+            )
+            existing_link = session.exec(
+                select(PageLink)
+                .where(PageLink.test_run_id == run_id)
+                .where(PageLink.source_page_id == source_page_id)
+                .where(PageLink.target_page_id == page.id)
+                .where(PageLink.action_kind == action_kind)
+            ).first()
+            if (
+                source_page is not None
+                and source_page.test_run_id == run_id
+                and existing_link is None
+            ):
+                session.add(
+                    PageLink(
+                        test_run_id=run_id,
+                        source_page_id=source_page_id,
+                        target_page_id=page.id,
+                        target_url=url,
+                        link_text="Observed during Dynamic Scan",
+                        action_kind=action_kind,
+                    )
+                )
         try:
             prior_applicability = json.loads(page.owasp_applicable_json or "{}")
         except (TypeError, ValueError):

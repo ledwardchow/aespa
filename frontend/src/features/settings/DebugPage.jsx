@@ -17,8 +17,12 @@ const SYSTEM_SETTINGS_TABS = [
 export function DebugPage({
   showUsername,
   setShowUsername,
-  showApplications,
-  setShowApplications,
+  showSystems,
+  setShowSystems,
+  showDeepScan,
+  setShowDeepScan,
+  showTeamScan,
+  setShowTeamScan,
   username,
   reportingDebugCfg,
   setReportingDebugCfg,
@@ -71,6 +75,17 @@ export function DebugPage({
       }
     })();
   }, [setBenchmarkLabCfg, setReportingDebugCfg]);
+  useEffect(() => {
+    if (!browserCfg?.playwright_chromium_installing) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        setBrowserCfg(await settingsApi.getBrowserDebugConfig());
+      } catch (e) {
+        setBrowserError(e.message);
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [browserCfg?.playwright_chromium_installing]);
   const toggleBenchmarkLab = async (patch) => {
     const base = benchmarkLabCfg || {
       panel_enabled: false,
@@ -170,9 +185,8 @@ export function DebugPage({
           <div className="card" style={{ marginTop: 16, maxWidth: 680 }}>
             <div className="form-section-title">Browser</div>
             <div className="field-hint" style={{ marginBottom: 12 }}>
-              Choose which Chromium build powers crawls, scans, and browser-based testing. The
-              bundled Playwright Chromium build is the default. System Chrome uses the stable Google
-              Chrome installation on the machine running AESPA.
+              Choose which Chromium build powers crawls, scans, and browser-based testing. System
+              Chrome uses the stable Google Chrome installation on the machine running AESPA.
             </div>
             {browserError && <div className="alert error">{browserError}</div>}
             {browserCfg && (
@@ -188,12 +202,24 @@ export function DebugPage({
                     disabled={browserSaving}
                     onChange={(e) => toggleBrowserDebug({ browser_engine: e.target.value })}
                   >
-                    <option value="playwright_chromium">
-                      Bundled Playwright Chromium (default)
-                    </option>
+                    {browserCfg.playwright_chromium_available !== false && (
+                      <option value="playwright_chromium">
+                        Bundled Playwright Chromium (default)
+                      </option>
+                    )}
                     <option value="system_chrome">System installed Google Chrome</option>
                   </select>
                 </div>
+                {browserCfg.playwright_chromium_installing && (
+                  <div className="field-hint" style={{ marginTop: 8 }}>
+                    Installing Playwright Chromium…
+                  </div>
+                )}
+                {browserCfg.playwright_chromium_available === false && (
+                  <div className="alert warning" style={{ marginTop: 8 }}>
+                    Playwright Chromium could not be installed. AESPA will use system Chrome.
+                  </div>
+                )}
                 <label className="toggle-row" style={{ marginTop: 12 }}>
                   <input
                     type="checkbox"
@@ -325,30 +351,66 @@ export function DebugPage({
               maxWidth: 680,
             }}
           >
-            <div className="form-section-title">Applications</div>
+            <div className="form-section-title">Experimental Features</div>
             <div
               className="field-hint"
               style={{
                 marginBottom: 12,
               }}
             >
-              Show multi-repository application campaign scanning features under Targets in the
-              sidebar.
+              These features are still being tested. Enable them when you want to use them.
             </div>
             <label className="toggle-row">
               <input
                 type="checkbox"
-                checked={showApplications ?? false}
+                checked={showSystems ?? false}
                 onChange={(e) => {
                   const checked = e.target.checked;
-                  setShowApplications(checked);
+                  setShowSystems(checked);
                   try {
-                    localStorage.setItem("aespa_show_applications", String(checked));
+                    localStorage.setItem("aespa_show_systems", String(checked));
                   } catch {}
                 }}
               />
-              <span>Show Applications scanning feature</span>
+              <span>Systems scanning</span>
             </label>
+            <div className="field-hint" style={{ marginTop: 6 }}>
+              Show multi-repository system campaign scanning under Targets in the sidebar.
+            </div>
+            <label className="toggle-row" style={{ marginTop: 16 }}>
+              <input
+                type="checkbox"
+                checked={showDeepScan ?? false}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setShowDeepScan(checked);
+                  try {
+                    localStorage.setItem("aespa_show_deep_scan", String(checked));
+                  } catch {}
+                }}
+              />
+              <span>DAST Deep Scan Mode</span>
+            </label>
+            <div className="field-hint" style={{ marginTop: 6 }}>
+              Show Deep mode for web DAST runs and its settings under Agent Settings.
+            </div>
+            <label className="toggle-row" style={{ marginTop: 16 }}>
+              <input
+                type="checkbox"
+                checked={showTeamScan ?? false}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setShowTeamScan(checked);
+                  try {
+                    localStorage.setItem("aespa_show_team_scan", String(checked));
+                  } catch {}
+                }}
+              />
+              <span>DAST Team Scan Mode</span>
+            </label>
+            <div className="field-hint" style={{ marginTop: 6 }}>
+              Show the experimental Team mode for web DAST runs.
+            </div>
           </div>
         )}
 

@@ -1,4 +1,4 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useEffect, useRef } from "react";
 
 import { campaignDisplayWarnings } from "../../shared/runs/campaignPresentation.js";
@@ -40,7 +40,7 @@ function normalizeEntry(e, fallbackId) {
 // `lastEventIdRef` is passed back as `?cursor=` on (re)connect — including
 // across React StrictMode's dev-only double effect invocation — so a
 // reconnect never re-replays entries already rendered.
-export function CampaignActivityTab({ applicationId, campaignId, campaign }) {
+export function CampaignActivityTab({ systemId, campaignId, campaign }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [streaming, setStreaming] = useState(true);
@@ -64,8 +64,8 @@ export function CampaignActivityTab({ applicationId, campaignId, campaign }) {
       setEntries((prev) => [...prev, normalized].slice(-MAX_ENTRIES));
     };
 
-    const url = applicationsApi.getCampaignActivityStreamUrl(
-      applicationId,
+    const url = systemsApi.getCampaignActivityStreamUrl(
+      systemId,
       campaignId,
       lastEventIdRef.current,
     );
@@ -93,7 +93,7 @@ export function CampaignActivityTab({ applicationId, campaignId, campaign }) {
       clearTimeout(initialTimer);
       es.close();
     };
-  }, [applicationId, campaignId]);
+  }, [systemId, campaignId]);
 
   // Fallback: while the stream is down, synthesize entries from status
   // polls already driven by the parent's useCampaign hook (campaign prop

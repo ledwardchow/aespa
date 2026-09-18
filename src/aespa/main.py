@@ -15,7 +15,6 @@ from sqlmodel import Session
 from aespa.api.alice import router as alice_router
 from aespa.api.api_collections import router as api_collections_router
 from aespa.api.api_test_runs import router as api_test_runs_router
-from aespa.api.applications import router as applications_router
 from aespa.api.benchmark_lab import router as benchmark_lab_router
 from aespa.api.events import router as events_router
 from aespa.api.reporting_debug import router as reporting_debug_router
@@ -24,9 +23,10 @@ from aespa.api.scan import router as scan_router
 from aespa.api.settings import router as settings_router
 from aespa.api.sites import router as sites_router
 from aespa.api.statistics import router as statistics_router
+from aespa.api.systems import router as systems_router
 from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
-from aespa.config import Settings, get_settings
+from aespa.config import DEFAULT_LOG_DB_PATH, Settings, get_settings
 from aespa.db import get_session, init_db
 from aespa.services import alice_goals as alice_goals_svc
 from aespa.services import antigravity_provider as antigravity_provider_svc
@@ -137,7 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(reporting_debug_router)
     app.include_router(alice_router)
     app.include_router(statistics_router)
-    app.include_router(applications_router)
+    app.include_router(systems_router)
     app.include_router(benchmark_lab_router)
 
     @app.get("/api/health")
@@ -274,6 +274,15 @@ def _ensure_port_available(host: str, port: int) -> None:
         raise SystemExit(f"[aespa] Cannot listen on {host}:{port}: {exc}") from exc
 
 
+def _run_server(server) -> bool:
+    """Run Uvicorn and return false for its expected Ctrl+C interrupt."""
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        return False
+    return True
+
+
 def main() -> None:
     import uvicorn
 
@@ -298,6 +307,7 @@ def main() -> None:
             host=settings.host,
             env_path=Path.cwd() / ".env",
             on_port_change=change_port,
+            log_db_path=DEFAULT_LOG_DB_PATH,
         )
         if interactive_console_available()
         else None
@@ -328,7 +338,8 @@ def main() -> None:
             restart["server"] = server
             if console:
                 console.handler.set_runtime_port(port)
-            server.run()
+            if not _run_server(server):
+                break
             next_port = restart["port"]
             if next_port is None:
                 break
