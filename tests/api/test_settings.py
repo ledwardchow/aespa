@@ -873,6 +873,35 @@ def test_cannot_delete_model_used_by_scan_profile(client: TestClient):
     )
 
 
+def test_cannot_remove_provider_model_used_by_scan_profile(client: TestClient):
+    provider = _make_provider(client).json()
+    model = _make_profile(client, provider["id"], name="Shared model").json()
+    client.post(
+        "/api/settings/llm/profiles",
+        json={"name": "Full scan", "default_model_id": model["id"]},
+    )
+
+    response = client.put(
+        f"/api/settings/llm/providers/{provider['id']}",
+        json={
+            "name": provider["name"],
+            "api_format": provider["api_format"],
+            "base_url": provider["base_url"],
+            "models": ["gpt-4o"],
+            "api_key": None,
+        },
+    )
+
+    assert response.status_code == 409
+    assert '"llama-3" is used by Full scan' in response.json()["detail"]
+    saved_provider = next(
+        item
+        for item in client.get("/api/settings/llm/providers").json()
+        if item["id"] == provider["id"]
+    )
+    assert "llama-3" in saved_provider["models"]
+
+
 def test_delete_scan_profile_clears_run_reference(client: TestClient):
     provider = _make_provider(client).json()
     model = _make_profile(client, provider["id"]).json()

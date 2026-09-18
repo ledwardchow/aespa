@@ -4,6 +4,9 @@ export type Route = {
   siteId?: number;
   campaignId?: number;
   tab?: string;
+  screen?: "list" | "new" | "edit";
+  providerId?: number;
+  modelName?: string;
   findingRef?: string;
   leadRef?: string;
   trafficCoverage?: {
@@ -90,7 +93,31 @@ export function parseRoute(hash = "#/"): Route {
   if (routeHash === "#/systems") return { name: "system-list" };
   if (routeHash === "#/active-jobs") return { name: "active-jobs" };
   if (routeHash === "#/stats" || routeHash === "#/stats/usage") return { name: "stats" };
-  if (routeHash === "#/settings") return { name: "settings" };
+  if (routeHash === "#/settings" || routeHash === "#/settings/profiles")
+    return { name: "settings", tab: "profiles", screen: "list" };
+  if (routeHash === "#/settings/profiles/new")
+    return { name: "settings", tab: "profiles", screen: "new" };
+  if ((m = routeHash.match(/^#\/settings\/profiles\/(\d+)\/edit$/)))
+    return { name: "settings", tab: "profiles", screen: "edit", id: +m[1] };
+  if (routeHash === "#/settings/providers")
+    return { name: "settings", tab: "providers", screen: "list" };
+  if (routeHash === "#/settings/providers/new")
+    return { name: "settings", tab: "providers", screen: "new" };
+  if ((m = routeHash.match(/^#\/settings\/providers\/(\d+)\/edit$/)))
+    return { name: "settings", tab: "providers", screen: "edit", id: +m[1] };
+  if (routeHash === "#/settings/models/new") {
+    const providerId = Number(query.get("provider_id"));
+    const modelName = query.get("model")?.trim() || undefined;
+    return {
+      name: "settings",
+      tab: "models",
+      screen: "new",
+      providerId: Number.isInteger(providerId) && providerId > 0 ? providerId : undefined,
+      modelName,
+    };
+  }
+  if ((m = routeHash.match(/^#\/settings\/models\/(\d+)\/edit$/)))
+    return { name: "settings", tab: "models", screen: "edit", id: +m[1] };
   if (routeHash === "#/scan-policy") return { name: "scan-policy" };
   if (routeHash === "#/external-integrations") return { name: "external-integrations" };
   if (routeHash === "#/debug") return { name: "debug" };

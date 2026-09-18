@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 
 from aespa.models import (
     LLMConfig,
+    LLMProfile,
     LLMProviderConfig,
 )
 from aespa.schemas import (
@@ -136,6 +137,7 @@ def _apply_llm_provider(
     session: Session, provider: LLMProviderConfig, payload: LLMProviderConfigIn
 ) -> LLMProviderConfigOut:
     _ensure_unique_llm_provider_name(session, payload.name, provider.id)
+    _ensure_referenced_model_names_remain(session, provider, payload.models)
     provider.name = payload.name
     provider.api_format = payload.api_format
     if payload.api_format in {"factory_droid", "openai_codex"}:
@@ -187,6 +189,49 @@ def _apply_llm_provider(
     session.commit()
     session.refresh(provider)
     return _provider_out(provider)
+
+
+def _ensure_referenced_model_names_remain(
+    session: Session, provider: LLMProviderConfig, requested_models: list[str]
+) -> None:
+    if provider.id is None:
+        return
+    requested = set(requested_models)
+    removed_configs = [
+        config
+        for config in session.exec(
+            select(LLMConfig).where(LLMConfig.provider_id == provider.id)
+        ).all()
+        if config.model not in requested
+    ]
+    if not removed_configs:
+        return
+
+    profiles = session.exec(select(LLMProfile)).all()
+    blocked: list[tuple[LLMConfig, list[str]]] = []
+    for config in removed_configs:
+        profile_names = []
+        for profile in profiles:
+            role_models = _json_loads(profile.role_models_json, {})
+            if profile.default_model_id == config.id or any(
+                str(model_id) == str(config.id) for model_id in role_models.values()
+            ):
+                profile_names.append(profile.name)
+        if profile_names:
+            blocked.append((config, sorted(set(profile_names), key=str.casefold)))
+
+    if blocked:
+        details = "; ".join(
+            f'"{config.model}" is used by {", ".join(profile_names)}'
+            for config, profile_names in blocked
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot remove provider model names because {details}. "
+                "Update those scan profiles first."
+            ),
+        )
 
 
 def _ensure_unique_llm_provider_name(

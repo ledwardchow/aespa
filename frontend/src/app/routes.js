@@ -182,7 +182,14 @@ export const routes = {
   settings: {
     section: "settings",
     Component: lazyNamed(() => import("../features/settings/SettingsPage.jsx"), "SettingsPage"),
-    props: () => ({}),
+    props: (route) => ({
+      key: `${route.tab || "profiles"}-${route.screen || "list"}-${route.id || ""}-${route.providerId || ""}-${route.modelName || ""}`,
+      section: route.tab || "profiles",
+      screen: route.screen || "list",
+      itemId: route.id,
+      initialProviderId: route.providerId,
+      initialModel: route.modelName,
+    }),
   },
   "scan-policy": {
     section: "scan-policy",

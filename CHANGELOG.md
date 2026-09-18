@@ -15,6 +15,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **LLM settings navigation**: The provider list now shows the number of configured models instead of listing model names. Provider API keys appear before model names in the edit form. Model names are shown in a table with configured models first, and selecting one opens its existing model configuration or a prefilled new configuration. Models assigned to scan profiles show the profile names and cannot be removed until those assignments are changed. Providers without a configured model show a setup prompt with a direct configuration action. The separate Models tab has been removed. Profile, provider, and model configuration pages now have direct URLs that work with bookmarks and browser history.
+- **Collapsible site details**: Site pages start with notes, scan guidance, and credentials collapsed while keeping the Base URL, authentication status, and credential count visible. The details can be expanded when needed.
 - **Animated console logo**: This is possibly the most important feature of the app so far.
 - **Site map readability**: Page nodes now use larger circles and stronger labels than API nodes, regardless of the count shown on grouped nodes. Page-to-page links are thicker and brighter than links involving APIs. Nodes have more space between neighbours and spread around their connections without separate page and API columns. When APIs are hidden, the layout adds more page spacing and actively separates crossing links where possible. Status updates keep the live layout running instead of stopping it partway through.
 - **Compact user crawl progress**: Multi-user web crawls now share one compact bar with the site map display settings. Per-user page counts and current URLs expand into compact cards across the row, while the active crawl stage stays visible.
@@ -26,6 +28,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Systems scan mode**: Applications has been renamed to Systems across the interface, API, data model, and documentation. Existing data is migrated automatically, and old saved interface links continue to open the matching System.
 
 ### Fixes
+
+- **Test run list height**: The test run list on a site page grows up to the remaining screen height when needed, while short lists keep their natural height.
 
 - **Findings column widths**: Source labels and finding counts have more space, while titles use the remaining width and wrap when needed. Saved column widths reset to the corrected defaults.
 

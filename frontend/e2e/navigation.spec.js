@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
-import { installFixtures, run } from "./fixtures.js";
+import { installFixtures, provider, run } from "./fixtures.js";
 
 const screens = [
   ["#/", "Fixture site"],
@@ -59,17 +59,156 @@ for (const [route, text] of screens) {
 
 test("settings tabs, edit cancellation, and sidebar history work", async ({ page }) => {
   await installFixtures(page);
-  await page.goto("/#/settings");
+  await page.goto("/#/settings/profiles");
   await page.getByRole("tab", { name: "Providers", exact: true }).click();
+  await expect(page).toHaveURL(/#\/settings\/providers$/);
   await expect(page.getByText("Fixture provider", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(page).toHaveURL(/#\/settings\/providers\/1\/edit$/);
   await expect(page.getByText("Edit LLM Provider", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page).toHaveURL(/#\/settings\/providers$/);
   await expect(page.getByText("LLM Providers", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Sites", exact: true }).click();
   await expect(page.getByText("Fixture site", { exact: true }).first()).toBeVisible();
   await page.goBack();
-  await expect(page.getByText("LLM Profiles", { exact: true })).toBeVisible();
+  await expect(page.getByText("LLM Providers", { exact: true })).toBeVisible();
+});
+
+test("provider list shows and sorts configured model counts", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.route("**/api/settings/llm/providers", (route) =>
+    route.fulfill({
+      json: [
+        { ...provider, id: 1, name: "One configured", models: ["available-a", "available-b"] },
+        { ...provider, id: 2, name: "Two configured", models: ["available-c"] },
+      ],
+    }),
+  );
+  await page.route("**/api/settings/llm/model-configs", (route) =>
+    route.fulfill({
+      json: [
+        { id: 1, provider_id: 1, model: "available-a" },
+        { id: 2, provider_id: 2, model: "available-c" },
+        { id: 3, provider_id: 2, model: "custom-model" },
+      ],
+    }),
+  );
+  await page.goto("/#/settings/providers");
+
+  const rows = page.locator(".settings-list-row");
+  await expect(page.getByText("Configured models", { exact: true })).toBeVisible();
+  await expect(
+    rows.filter({ hasText: "One configured" }).locator(":scope > div").nth(3),
+  ).toHaveText("1");
+  await expect(
+    rows.filter({ hasText: "Two configured" }).locator(":scope > div").nth(3),
+  ).toHaveText("2");
+  await expect(page.getByText("available-a", { exact: true })).toHaveCount(0);
+
+  await page.getByText("Configured models", { exact: true }).click();
+  await expect(rows.first()).toContainText("One configured");
+  await page.getByText(/Configured models/).click();
+  await expect(rows.first()).toContainText("Two configured");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-provider-model-counts.png") });
+});
+
+test("each LLM settings page loads from its URL without a Models tab", async ({ page }) => {
+  await installFixtures(page);
+  const pages = [
+    ["/#/settings/profiles", "LLM Profiles"],
+    ["/#/settings/profiles/new", "New LLM Profile"],
+    ["/#/settings/profiles/1/edit", "Edit LLM Profile"],
+    ["/#/settings/providers", "LLM Providers"],
+    ["/#/settings/providers/new", "New LLM Provider"],
+    ["/#/settings/providers/1/edit", "Edit LLM Provider"],
+    ["/#/settings/models/1/edit", "Edit LLM Model"],
+    ["/#/settings/models/new?provider_id=1&model=fixture-model", "New LLM Model"],
+  ];
+  for (const [url, title] of pages) {
+    await page.goto(url);
+    await expect(page.getByText(title, { exact: true })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Models", exact: true })).toHaveCount(0);
+    await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  }
+});
+
+test("provider models use a table and open their model configuration", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.route("**/api/settings/llm/providers", (route) =>
+    route.fulfill({ json: [{ ...provider, models: ["aaa-unconfigured", "fixture-model"] }] }),
+  );
+  await page.goto("/#/settings");
+  await page.getByRole("tab", { name: "Providers", exact: true }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+
+  const apiKey = page.getByLabel("API Key (optional)");
+  const modelTable = page.getByRole("table");
+  await expect(apiKey).toBeVisible();
+  await expect(modelTable).toBeVisible();
+  await expect(page.getByText("No model configured", { exact: true })).toHaveCount(0);
+  await expect(modelTable.locator("tbody tr").first()).toContainText("fixture-model");
+  await expect(modelTable.getByText("Used by: Fixture profile", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove fixture-model" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Remove aaa-unconfigured" })).toBeEnabled();
+  const apiKeyBounds = await apiKey.boundingBox();
+  const modelTableBounds = await modelTable.boundingBox();
+  expect(apiKeyBounds.y).toBeLessThan(modelTableBounds.y);
+  await page.screenshot({
+    path: path.join(tmpdir(), "aespa-provider-model-table.png"),
+    fullPage: true,
+  });
+
+  await page.getByRole("button", { name: "fixture-model", exact: true }).click();
+  await expect(page).toHaveURL(/#\/settings\/models\/1\/edit$/);
+  await expect(page.getByText("Edit LLM Model", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("fixture-model");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-provider-model-configuration.png") });
+
+  await page.getByRole("tab", { name: "Providers", exact: true }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await page.getByRole("button", { name: "aaa-unconfigured", exact: true }).click();
+  await expect(page).toHaveURL(/#\/settings\/models\/new\?provider_id=1&model=aaa-unconfigured$/);
+  await expect(page.getByText("New LLM Model", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("aaa-unconfigured");
+});
+
+test("provider without a configured model shows a setup prompt", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.route("**/api/settings/llm/model-configs", (route) => route.fulfill({ json: [] }));
+  await page.goto("/#/settings/providers/1/edit");
+
+  await expect(page.getByText("No model configured", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Configure a model before using this provider/)).toBeVisible();
+  await page.screenshot({
+    path: path.join(tmpdir(), "aespa-provider-model-prompt.png"),
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "Configure model", exact: true }).click();
+  await expect(page).toHaveURL(/#\/settings\/models\/new\?provider_id=1&model=fixture-model$/);
+  await expect(page.getByText("New LLM Model", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("fixture-model");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
 });
 
 test("site and SAST navigation rows open from their non-interactive cells", async ({ page }) => {
@@ -518,6 +657,82 @@ test("empty sites and a narrow viewport remain usable", async ({ page }) => {
   await page.getByRole("tab", { name: "Providers", exact: true }).click();
   await expect(page.getByRole("button", { name: "New provider", exact: true })).toBeEnabled();
   await page.screenshot({ path: path.join(tmpdir(), "aespa-settings-mobile.png") });
+});
+
+test("the site test-run list uses its content height up to the remaining viewport height", async ({
+  page,
+}) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  const runs = Array.from({ length: 18 }, (_, index) => ({
+    ...run,
+    id: index + 1,
+    name: `Run ${String(index + 1).padStart(2, "0")}`,
+    pages_discovered: index + 1,
+    created_at: `2026-09-${String(index + 1).padStart(2, "0")}T01:00:00Z`,
+  }));
+  await page.route("**/api/sites/1/test-runs", (route) => route.fulfill({ json: runs }));
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/#/sites/1");
+
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.locator(".topbar-title")).toContainText("Fixture site");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+
+  const measurements = await page.locator(".site-detail-content").evaluate((content) => {
+    const table = content.querySelector(".site-runs-table");
+    const contentBox = content.getBoundingClientRect();
+    const tableBox = table.getBoundingClientRect();
+    const paddingBottom = Number.parseFloat(getComputedStyle(content).paddingBottom);
+    return {
+      bottomGap: contentBox.bottom - paddingBottom - tableBox.bottom,
+      tableHeight: tableBox.height,
+    };
+  });
+  expect(measurements.bottomGap).toBeLessThanOrEqual(1);
+  expect(measurements.tableHeight).toBeGreaterThan(600);
+
+  await expect(page.locator("tbody tr").first()).toContainText("Run 18");
+  await page.getByRole("columnheader", { name: /Created/ }).click();
+  await expect(page.locator("tbody tr").first()).toContainText("Run 01");
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-runs-full-height.png") });
+
+  await page.setViewportSize({ width: 900, height: 700 });
+  const narrowBottomGap = await page.locator(".site-detail-content").evaluate((content) => {
+    const table = content.querySelector(".site-runs-table");
+    const contentBox = content.getBoundingClientRect();
+    const tableBox = table.getBoundingClientRect();
+    const paddingBottom = Number.parseFloat(getComputedStyle(content).paddingBottom);
+    return contentBox.bottom - paddingBottom - tableBox.bottom;
+  });
+  expect(narrowBottomGap).toBeLessThanOrEqual(1);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-runs-narrow.png") });
+
+  await page.route("**/api/sites/1/test-runs", (route) =>
+    route.fulfill({ json: runs.slice(0, 2) }),
+  );
+  await page.reload();
+
+  const shortListMeasurements = await page.locator(".site-detail-content").evaluate((content) => {
+    const table = content.querySelector(".site-runs-table");
+    const contentBox = content.getBoundingClientRect();
+    const tableBox = table.getBoundingClientRect();
+    const paddingBottom = Number.parseFloat(getComputedStyle(content).paddingBottom);
+    return {
+      bottomGap: contentBox.bottom - paddingBottom - tableBox.bottom,
+      tableHeight: tableBox.height,
+    };
+  });
+  expect(shortListMeasurements.bottomGap).toBeGreaterThan(200);
+  expect(shortListMeasurements.tableHeight).toBeLessThan(200);
+  await expect(page.locator("tbody tr")).toHaveCount(2);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-runs-content-height.png") });
 });
 
 test("a failed request shows a useful error instead of an empty page", async ({ page }) => {
