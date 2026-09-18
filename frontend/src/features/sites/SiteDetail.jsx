@@ -7,7 +7,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { nav } from "../../shared/navigation/router.js";
 
 import { fmtDate } from "../../shared/lib/dates.js";
-import { IconPlus } from "../../shared/ui/Icons.jsx";
+import { IconChevronDown, IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
@@ -24,6 +24,7 @@ export function SiteDetail({ siteId }) {
   const [editSaving, setEditSaving] = useState(false);
   const [sortField, setSortField] = useState("created_at");
   const [sortDir, setSortDir] = useState("desc");
+  const [siteDetailsExpanded, setSiteDetailsExpanded] = useState(false);
 
   const toggleSort = (field) => {
     if (sortField === field) {
@@ -145,7 +146,7 @@ export function SiteDetail({ siteId }) {
           </>
         }
       />
-      <div className="content scroll-content stack">
+      <div className="content scroll-content stack site-detail-content">
         {error && <div className="alert error">{error}</div>}
 
         {editingRun && (
@@ -283,7 +284,7 @@ export function SiteDetail({ siteId }) {
               padding: "16px 20px",
             }}
           >
-            <div className="row spread">
+            <div className="row spread site-details-summary">
               <div
                 className="stack"
                 style={{
@@ -310,7 +311,7 @@ export function SiteDetail({ siteId }) {
               <div
                 className="row"
                 style={{
-                  gap: 16,
+                  gap: 12,
                 }}
               >
                 {site.requires_auth ? (
@@ -321,74 +322,96 @@ export function SiteDetail({ siteId }) {
                 <span className="subtle">
                   {site.credentials.length} credential{site.credentials.length !== 1 ? "s" : ""}
                 </span>
+                <button
+                  type="button"
+                  className="site-details-toggle"
+                  aria-label={siteDetailsExpanded ? "Collapse site details" : "Expand site details"}
+                  aria-expanded={siteDetailsExpanded}
+                  aria-controls="site-details-content"
+                  onClick={() => setSiteDetailsExpanded((expanded) => !expanded)}
+                  title={siteDetailsExpanded ? "Collapse site details" : "Expand site details"}
+                >
+                  <span
+                    className={`site-details-chevron${siteDetailsExpanded ? " is-expanded" : ""}`}
+                  >
+                    <IconChevronDown />
+                  </span>
+                </button>
               </div>
             </div>
-            {site.notes && (
-              <div
-                style={{
-                  marginTop: 10,
-                  fontSize: 13,
-                  color: "var(--muted)",
-                }}
-              >
-                {site.notes}
-              </div>
-            )}
-            {site.scan_guidance && (
-              <div
-                style={{
-                  marginTop: 8,
-                  fontSize: 13,
-                  color: "var(--muted)",
-                }}
-              >
-                <strong>Test Lead guidance:</strong> {site.scan_guidance}
-              </div>
-            )}
-            {site.requires_auth && site.credentials.length > 0 && (
-              <>
-                <div className="site-credentials-list">
-                  {site.credentials.map((c) => (
-                    <div key={c.id} className="site-credential-row">
-                      <div>
-                        <div className="site-credential-name">
-                          {c.label ||
-                            (c.login_fields?.[0]?.key === "username" ? c.username : "Test account")}
-                        </div>
-                        <div className="site-credential-user">
-                          {(c.login_fields || []).map((field) => field.label).join(" + ") ||
-                            "Username + Password"}
-                        </div>
-                      </div>
-                      <div className="site-credential-login mono">
-                        {c.login_url || site.login_url || "No login URL"}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                {site.credentials.some((c) => c.auth_mode === "guided") && (
+            {siteDetailsExpanded && (
+              <div id="site-details-content">
+                {site.notes && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      fontSize: 13,
+                      color: "var(--muted)",
+                    }}
+                  >
+                    {site.notes}
+                  </div>
+                )}
+                {site.scan_guidance && (
                   <div
                     style={{
                       marginTop: 8,
-                      padding: "8px 12px",
-                      background: "var(--surface-2,#2a2a2a)",
-                      border: "1px solid var(--warn,#f59e0b)",
-                      borderRadius: 5,
-                      fontSize: 12,
-                      color: "var(--warn,#f59e0b)",
+                      fontSize: 13,
+                      color: "var(--muted)",
                     }}
                   >
-                    ⚠️ This site is configured with interactive browser login credentials, which
-                    only works if you're running this scanner on your local machine with a GUI. It
-                    will not function if the scanner is installed on a headless host (i.e. server).
+                    <strong>Test Lead guidance:</strong> {site.scan_guidance}
                   </div>
                 )}
-              </>
+                {site.requires_auth && site.credentials.length > 0 && (
+                  <>
+                    <div className="site-credentials-list">
+                      {site.credentials.map((c) => (
+                        <div key={c.id} className="site-credential-row">
+                          <div>
+                            <div className="site-credential-name">
+                              {c.label ||
+                                (c.login_fields?.[0]?.key === "username"
+                                  ? c.username
+                                  : "Test account")}
+                            </div>
+                            <div className="site-credential-user">
+                              {(c.login_fields || []).map((field) => field.label).join(" + ") ||
+                                "Username + Password"}
+                            </div>
+                          </div>
+                          <div className="site-credential-login mono">
+                            {c.login_url || site.login_url || "No login URL"}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {site.credentials.some((c) => c.auth_mode === "guided") && (
+                      <div
+                        style={{
+                          marginTop: 8,
+                          padding: "8px 12px",
+                          background: "var(--surface-2,#2a2a2a)",
+                          border: "1px solid var(--warn,#f59e0b)",
+                          borderRadius: 5,
+                          fontSize: 12,
+                          color: "var(--warn,#f59e0b)",
+                        }}
+                      >
+                        ⚠️ This site is configured with interactive browser login credentials, which
+                        only works if you're running this scanner on your local machine with a GUI.
+                        It will not function if the scanner is installed on a headless host (i.e.
+                        server).
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
             )}
           </div>
         )}
 
-        <div>
+        <div className="site-runs-section">
           <div
             className="row spread"
             style={{
@@ -422,7 +445,7 @@ export function SiteDetail({ siteId }) {
             />
           )}
           {runs && runs.length > 0 && (
-            <div className="table-wrap">
+            <div className="table-wrap site-runs-table">
               <table>
                 <colgroup>
                   <col

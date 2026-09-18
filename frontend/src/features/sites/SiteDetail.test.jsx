@@ -1,4 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import * as settingsApi from "../../shared/api/settings.js";
 import * as sitesApi from "../../shared/api/sites.js";
@@ -48,4 +49,43 @@ test("shows a Deep badge beside runs started in Deep mode", async () => {
 
   expect(within(deepRow).getByText("Deep")).toBeTruthy();
   expect(within(standardRow).queryByText("Deep")).toBeNull();
+});
+
+test("starts with site details collapsed and allows them to be expanded", async () => {
+  const user = userEvent.setup();
+  sitesApi.getSite.mockResolvedValue({
+    ...site,
+    requires_auth: true,
+    notes: "Use the staging tenant.",
+    credentials: [
+      {
+        id: 8,
+        label: "Admin account",
+        auth_mode: "form",
+        login_url: "https://example.test/login",
+        login_fields: [{ key: "username", label: "Username" }],
+      },
+    ],
+  });
+  sitesApi.listRuns.mockResolvedValue([]);
+
+  render(<SiteDetail siteId={site.id} />);
+
+  expect(await screen.findByText("https://example.test")).toBeTruthy();
+  expect(screen.queryByText("Admin account")).toBeNull();
+  expect(screen.queryByText("Use the staging tenant.")).toBeNull();
+  expect(screen.getByText("1 credential")).toBeTruthy();
+
+  const expandButton = screen.getByRole("button", { name: "Expand site details" });
+  expect(expandButton.getAttribute("aria-expanded")).toBe("false");
+  await user.click(expandButton);
+
+  expect(screen.getByText("Admin account")).toBeTruthy();
+  expect(screen.getByText("Use the staging tenant.")).toBeTruthy();
+
+  const collapseButton = screen.getByRole("button", { name: "Collapse site details" });
+  expect(collapseButton.getAttribute("aria-expanded")).toBe("true");
+  await user.click(collapseButton);
+
+  expect(screen.queryByText("Admin account")).toBeNull();
 });

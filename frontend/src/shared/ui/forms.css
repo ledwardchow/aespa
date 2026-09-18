@@ -364,6 +364,56 @@ legend {
   flex-direction: column;
   gap: 8px;
 }
+.site-details-summary {
+  min-width: 0;
+}
+.site-runs-section {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  flex-direction: column;
+}
+.content.scroll-content.stack .site-runs-table {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 100%;
+}
+.site-details-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.site-details-toggle:hover {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.site-details-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.site-details-chevron {
+  display: inline-flex;
+  transition: transform 150ms ease;
+  transform: rotate(-90deg);
+}
+.site-details-chevron.is-expanded {
+  transform: rotate(0deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .site-details-chevron {
+    transition: none;
+  }
+}
 .site-credential-row {
   display: grid;
   grid-template-columns: minmax(120px, 0.7fr) minmax(0, 1fr);

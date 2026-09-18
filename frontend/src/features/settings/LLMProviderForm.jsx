@@ -4,6 +4,7 @@ import { PROVIDER_MODEL_PLACEHOLDERS, PROVIDER_BASE_URL_PLACEHOLDERS } from "./p
 import { providerPayload, providerToForm } from "./providerForm.js";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
+import { sortModelNames } from "../../shared/lib/modelSorting.js";
 import {
   BEDROCK_DEFAULT_REGIONS,
   BEDROCK_REGIONS,
@@ -383,8 +384,17 @@ function CopilotConnectionCard({ value, onSelect }) {
   );
 }
 
-export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
+export function LLMProviderForm({
+  mode,
+  provider,
+  models,
+  profiles,
+  onConfigureModel,
+  onSaved,
+  onCancel,
+}) {
   const [form, setForm] = useState(() => providerToForm(provider));
+  const [newModelName, setNewModelName] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
@@ -404,6 +414,50 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
   const [loadingModels, setLoadingModels] = useState(false);
   const [loadMessage, setLoadMessage] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
+  const configuredModelsByName = new Map(
+    (models || [])
+      .filter((modelConfig) => modelConfig.provider_id === provider?.id)
+      .map((modelConfig) => [modelConfig.model, modelConfig]),
+  );
+  const profileNamesByModelId = new Map();
+  for (const scanProfile of profiles || []) {
+    const referencedModelIds = new Set([
+      scanProfile.default_model_id,
+      ...Object.values(scanProfile.role_models || {}),
+    ]);
+    for (const modelId of referencedModelIds) {
+      if (modelId == null) continue;
+      const key = String(modelId);
+      const names = profileNamesByModelId.get(key) || new Set();
+      names.add(scanProfile.name);
+      profileNamesByModelId.set(key, names);
+    }
+  }
+  const providerModelNames = sortModelNames(
+    form.models
+      .split(/\r?\n|,/)
+      .map((modelName) => modelName.trim())
+      .filter(Boolean),
+  ).sort(
+    (left, right) =>
+      Number(configuredModelsByName.has(right)) - Number(configuredModelsByName.has(left)),
+  );
+
+  const addModel = () => {
+    const modelName = newModelName.trim();
+    if (!modelName || providerModelNames.includes(modelName)) return;
+    upd({ models: [...providerModelNames, modelName].join("\n") });
+    setNewModelName("");
+  };
+
+  const removeModel = (modelName) => {
+    const modelCapabilities = { ...form.model_capabilities };
+    delete modelCapabilities[modelName];
+    upd({
+      models: providerModelNames.filter((name) => name !== modelName).join("\n"),
+      model_capabilities: modelCapabilities,
+    });
+  };
 
   const onLoadModels = async () => {
     setLoadingModels(true);
@@ -592,10 +646,11 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
         )}
         {form.api_format === "bedrock_mantle" && (
           <div className="field">
-            <label>
+            <label htmlFor="provider-project-id">
               Project ID <span className="field-optional">(optional)</span>
             </label>
             <input
+              id="provider-project-id"
               type="text"
               value={form.project_id}
               placeholder="proj_5d5ykleja6cwpirysbb7"
@@ -615,59 +670,15 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
         {form.api_format === "github_copilot" && (
           <CopilotConnectionCard value={form.username} onSelect={selectCopilotUsername} />
         )}
-        <div className="field">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: "6px",
-            }}
-          >
-            <label style={{ margin: 0 }}>Model names</label>
-            <button
-              type="button"
-              className="btn secondary sm"
-              disabled={loadingModels}
-              onClick={onLoadModels}
-              title="Fetch available model names from API and overwrite current list"
-            >
-              {loadingModels ? "Loading models…" : "Load models from API"}
-            </button>
-          </div>
-          <textarea
-            rows="5"
-            value={form.models}
-            placeholder={PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""}
-            onChange={(e) =>
-              upd({
-                models: e.target.value,
-              })
-            }
-          ></textarea>
-          {loadMessage && (
-            <div
-              className="field-hint"
-              style={{ color: loadFailed ? "var(--danger)" : "var(--accent)", marginBottom: "4px" }}
-            >
-              {loadMessage}
-            </div>
-          )}
-          <div className="field-hint">
-            Enter one model per line, or separate models with commas.{" "}
-            {form.api_format === "openai_compatible"
-              ? "The examples in the placeholder are not saved automatically."
-              : "Leave blank to use the models shown in the placeholder."}
-          </div>
-        </div>
         {!["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format) && (
           <div className="field">
-            <label>
+            <label htmlFor="provider-api-key">
               {form.api_format === "github_copilot" ? "GitHub token" : "API Key"}{" "}
               <span className="field-optional">(optional)</span>
             </label>
             <div className="row" style={{ gap: "8px" }}>
               <input
+                id="provider-api-key"
                 type="password"
                 value={form.api_key}
                 placeholder={
@@ -731,6 +742,146 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
             )}
           </div>
         )}
+        {provider?.id && configuredModelsByName.size === 0 && (
+          <div className="provider-model-prompt" role="status">
+            <div>
+              <strong>No model configured</strong>
+              <span>Configure a model before using this provider in a scan profile.</span>
+            </div>
+            {providerModelNames.length > 0 ? (
+              <button
+                type="button"
+                className="btn sm"
+                onClick={() => onConfigureModel?.(providerModelNames[0], null)}
+              >
+                Configure model
+              </button>
+            ) : (
+              <span className="field-hint">Add or load a model name, then save the provider.</span>
+            )}
+          </div>
+        )}
+        <div className="field">
+          <div className="provider-models-heading">
+            <label>Model names</label>
+            <button
+              type="button"
+              className="btn secondary sm"
+              disabled={loadingModels}
+              onClick={onLoadModels}
+              title="Fetch available model names from API and overwrite current list"
+            >
+              {loadingModels ? "Loading models…" : "Load models from API"}
+            </button>
+          </div>
+          <div className="provider-models-table-wrap">
+            <table className="provider-models-table">
+              <thead>
+                <tr>
+                  <th>Model name</th>
+                  <th>Configuration</th>
+                  <th aria-label="Actions"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {providerModelNames.map((modelName) => {
+                  const configuredModel = configuredModelsByName.get(modelName);
+                  const usingProfiles = configuredModel
+                    ? [...(profileNamesByModelId.get(String(configuredModel.id)) || [])].sort(
+                        (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }),
+                      )
+                    : [];
+                  const removeBlocked = usingProfiles.length > 0;
+                  return (
+                    <tr key={modelName}>
+                      <td className="mono">
+                        {provider?.id && onConfigureModel ? (
+                          <button
+                            type="button"
+                            className="provider-model-link"
+                            onClick={() => onConfigureModel(modelName, configuredModel)}
+                          >
+                            {modelName}
+                          </button>
+                        ) : (
+                          modelName
+                        )}
+                      </td>
+                      <td>
+                        <div>{configuredModel ? configuredModel.name : "Not configured"}</div>
+                        {removeBlocked && (
+                          <div className="provider-model-usage">
+                            Used by: {usingProfiles.join(", ")}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn ghost sm"
+                          onClick={() => removeModel(modelName)}
+                          disabled={removeBlocked}
+                          title={
+                            removeBlocked
+                              ? `Used by scan profile${usingProfiles.length === 1 ? "" : "s"}: ${usingProfiles.join(", ")}`
+                              : undefined
+                          }
+                          aria-label={`Remove ${modelName}`}
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {providerModelNames.length === 0 && (
+                  <tr>
+                    <td colSpan="3" className="provider-models-empty">
+                      No model names added.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="provider-model-add-row">
+            <input
+              type="text"
+              value={newModelName}
+              placeholder={
+                PROVIDER_MODEL_PLACEHOLDERS[form.api_format]?.split(/\r?\n|,/)[0] || "Model name"
+              }
+              aria-label="New model name"
+              onChange={(e) => setNewModelName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addModel();
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="btn secondary sm"
+              disabled={!newModelName.trim() || providerModelNames.includes(newModelName.trim())}
+              onClick={addModel}
+            >
+              Add model
+            </button>
+          </div>
+          {loadMessage && (
+            <div
+              className="field-hint"
+              style={{ color: loadFailed ? "var(--danger)" : "var(--accent)", marginBottom: "4px" }}
+            >
+              {loadMessage}
+            </div>
+          )}
+          <div className="field-hint">
+            Select a model name to open its configuration. Models without a configuration open a
+            prefilled new model form.
+          </div>
+        </div>
         <div className="divider" />
         <div className="form-section-title">
           Rate Limits <span className="field-optional">(optional)</span>

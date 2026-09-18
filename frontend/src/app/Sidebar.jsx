@@ -167,7 +167,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           </div>
         )}
         <a
-          href="#/settings"
+          href="#/settings/profiles"
           className={"nav-item" + (onSettings ? " active" : "")}
           title="LLM Settings"
         >
