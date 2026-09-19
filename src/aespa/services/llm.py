@@ -1546,6 +1546,8 @@ async def _call_impl(
             return await _google_antigravity(config, prompt, screenshot_b64)
         if config.provider == "anthropic":
             return await _anthropic(config, prompt, screenshot_b64)
+        if config.provider == "google_vertex" and _uses_openai_responses(config):
+            return await _openai_responses(config, prompt, screenshot_b64)
         if config.provider in {"google", "google_vertex"}:
             return await _google(config, prompt, screenshot_b64)
         if config.provider == "azure_openai":
@@ -1590,6 +1592,8 @@ async def _call_impl(
             resp = await _google_antigravity(config, prompt, screenshot_b64)
         elif config.provider == "anthropic":
             resp = await _anthropic(config, prompt, screenshot_b64)
+        elif config.provider == "google_vertex" and _uses_openai_responses(config):
+            resp = await _openai_responses(config, prompt, screenshot_b64)
         elif config.provider in {"google", "google_vertex"}:
             resp = await _google(config, prompt, screenshot_b64)
         elif config.provider == "azure_openai":
@@ -2241,7 +2245,10 @@ def _is_gpt_5_6(model: str) -> bool:
 
 
 def _uses_openai_responses(config: LLMConfig) -> bool:
-    """Return whether this direct OpenAI model uses the Responses API."""
+    """Return whether this model uses an OpenAI-compatible Responses API."""
+    if config.provider == "google_vertex":
+        model_name = (config.model or "").lower().split("/")[-1]
+        return not model_name.startswith("gemini-")
     return config.provider == "openai" and (
         _is_gpt_6_astra(config.model) or _is_gpt_5_6(config.model)
     )
@@ -2741,6 +2748,87 @@ def _ant_tools_to_responses(tools: list[dict]) -> list[dict]:
     ]
 
 
+_RESPONSES_OUTPUT_ITEM_BLOCK = "responses_output_item"
+
+
+def _responses_output_item_dict(item: Any) -> dict[str, Any] | None:
+    """Serialize one Responses output item for exact replay on the next turn."""
+    if isinstance(item, dict):
+        return copy.deepcopy(item)
+    model_dump = getattr(item, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="json", exclude_none=True)
+        except TypeError:
+            try:
+                dumped = model_dump(exclude_none=True)
+            except Exception:
+                dumped = None
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            return dumped
+    to_dict = getattr(item, "to_dict", None)
+    if callable(to_dict):
+        try:
+            dumped = to_dict()
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            return dumped
+    values = getattr(item, "__dict__", None)
+    if isinstance(values, dict):
+        return {
+            key: copy.deepcopy(value)
+            for key, value in values.items()
+            if not str(key).startswith("_")
+        }
+    return None
+
+
+def _responses_replay_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep only fields Vertex accepts when response output becomes input."""
+
+    def without_none(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: without_none(child)
+                for key, child in value.items()
+                if child is not None
+            }
+        if isinstance(value, list):
+            return [without_none(child) for child in value if child is not None]
+        return copy.deepcopy(value)
+
+    cleaned = without_none(item)
+    item_type = cleaned.get("type")
+    allowed_fields = {
+        # xAI requires encrypted reasoning for cache-stable stateless turns.
+        # Its id and status are part of the documented replay shape.
+        "reasoning": {"type", "id", "summary", "encrypted_content", "status"},
+        # Vertex returns read-only ids, status, phase and log-probability data on
+        # these items. Replaying those fields produces INVALID_ARGUMENT,
+        # especially when parallel function calls share one response id.
+        "message": {"type", "role", "content"},
+        "function_call": {"type", "call_id", "name", "arguments"},
+    }.get(item_type)
+    if allowed_fields is None:
+        return cleaned
+    replay = {key: value for key, value in cleaned.items() if key in allowed_fields}
+    if item_type == "message" and isinstance(replay.get("content"), list):
+        replay["content"] = [
+            {
+                key: value
+                for key, value in part.items()
+                if key in {"type", "text", "annotations"}
+            }
+            if isinstance(part, dict)
+            else part
+            for part in replay["content"]
+        ]
+    return replay
+
+
 def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
     """Translate Anthropic-format history into a Responses ``input`` item list.
 
@@ -2774,6 +2862,19 @@ def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
             if joined:
                 items.append({"type": "message", "role": "user", "content": joined})
         elif role == "assistant":
+            native_items = [
+                block.get("item")
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type") == _RESPONSES_OUTPUT_ITEM_BLOCK
+                and isinstance(block.get("item"), dict)
+            ]
+            if native_items:
+                # Grok reasoning models require the previous output, including
+                # encrypted reasoning, to remain in the next request. Strip
+                # response-only metadata that Vertex rejects as input.
+                items.extend(_responses_replay_item(item) for item in native_items)
+                continue
             text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
             joined = " ".join(p for p in text_parts if p)
             if joined:
@@ -2807,6 +2908,8 @@ def _is_reasoning_model_without_sampling(model: str) -> bool:
 def _make_responses_client(config: LLMConfig) -> Any:
     if config.provider == "bedrock_mantle":
         return _make_bedrock_mantle_client(config)
+    if config.provider == "google_vertex":
+        return _make_google_vertex_responses_client(config)
 
     from openai import AsyncOpenAI
 
@@ -2818,6 +2921,43 @@ def _make_responses_client(config: LLMConfig) -> Any:
         kwargs["base_url"] = base
     kwargs.update(_llm_client_kwargs())
     return AsyncOpenAI(**kwargs)
+
+
+def _make_google_vertex_responses_client(config: LLMConfig) -> Any:
+    """Build an ADC-authenticated client for Vertex's Responses endpoint."""
+    from google import auth as google_auth
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from openai import AsyncOpenAI
+
+    project_id = (getattr(config, "project_id", None) or "").strip()
+    if not project_id:
+        raise ValueError("Google Cloud project id is required for Vertex AI")
+
+    credentials, _ = google_auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    credentials.refresh(GoogleAuthRequest())
+    access_token = str(getattr(credentials, "token", None) or "").strip()
+    if not access_token:
+        raise RuntimeError(
+            "Google Application Default Credentials returned no access token"
+        )
+
+    location = (getattr(config, "location", None) or "global").strip() or "global"
+    host = (
+        "aiplatform.googleapis.com"
+        if location == "global"
+        else f"{location}-aiplatform.googleapis.com"
+    )
+    base_url = (
+        f"https://{host}/v1/projects/{quote(project_id, safe='')}"
+        f"/locations/{quote(location, safe='')}/endpoints/openapi"
+    )
+    return AsyncOpenAI(
+        api_key=access_token,
+        base_url=base_url,
+        **_llm_client_kwargs(),
+    )
 
 
 def _responses_request_kwargs(
@@ -2833,6 +2973,19 @@ def _responses_request_kwargs(
         "input": input,
         "max_output_tokens": config.max_tokens,
     }
+    prompt_cache_key = _grok_prompt_cache_key(
+        config,
+        input=input,
+        instructions=instructions,
+        tools=tools,
+    )
+    if prompt_cache_key is not None:
+        kwargs["prompt_cache_key"] = prompt_cache_key
+        # Vertex-hosted Grok does not currently support previous_response_id.
+        # Return encrypted reasoning so stateless calls can replay the exact
+        # prior output and retain the prompt-cache prefix.
+        kwargs["include"] = ["reasoning.encrypted_content"]
+        kwargs["store"] = False
     if instructions is not None:
         kwargs["instructions"] = instructions
     reasoning_effort = config.reasoning_effort
@@ -2851,6 +3004,39 @@ def _responses_request_kwargs(
     if stream:
         kwargs["stream"] = True
     return kwargs
+
+
+def _grok_prompt_cache_key(
+    config: LLMConfig,
+    *,
+    input: Any,
+    instructions: str | None,
+    tools: list[dict] | None,
+) -> str | None:
+    """Return a stable routing key for one Vertex-hosted Grok conversation."""
+    model = (config.model or "").lower()
+    if config.provider != "google_vertex" or not model.startswith("xai/grok-"):
+        return None
+
+    # Grok uses this key to route related requests to the server holding their
+    # prompt cache. Hash only the stable opening prefix so appending later turns
+    # does not change the key. Instructions and tools separate agent roles that
+    # happen to start with the same user message.
+    opening_input = input[0] if isinstance(input, list) and input else input
+    seed = json.dumps(
+        {
+            "model": config.model,
+            "instructions": instructions or "",
+            "opening_input": opening_input,
+            "tools": tools or [],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return f"aespa-{digest[:58]}"
 
 
 async def _create_response(client: Any, kwargs: dict[str, Any]) -> Any:
@@ -4527,6 +4713,35 @@ def _content_blocks(message: dict) -> list[Any]:
     return []
 
 
+def _agentic_tool_use_block(block: Any) -> dict[str, Any] | None:
+    """Return a canonical tool-use view of a saved provider output block."""
+    if not isinstance(block, dict):
+        return None
+    if block.get("type") == "tool_use":
+        return block
+    if block.get("type") != _RESPONSES_OUTPUT_ITEM_BLOCK:
+        return None
+    item = block.get("item")
+    if not isinstance(item, dict) or item.get("type") != "function_call":
+        return None
+    arguments = item.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            tool_input = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            tool_input = {}
+    elif isinstance(arguments, dict):
+        tool_input = arguments
+    else:
+        tool_input = {}
+    return {
+        "type": "tool_use",
+        "id": item.get("call_id") or item.get("id") or "",
+        "name": item.get("name") or "",
+        "input": tool_input,
+    }
+
+
 def _journal_from_first_message(message: dict) -> tuple[dict, list[str]]:
     """Return a first message without old journals and their useful lines."""
     first = dict(message)
@@ -4572,6 +4787,13 @@ def _journal_from_first_message(message: dict) -> tuple[dict, list[str]]:
 
 def _tool_block_ids(message: dict, block_type: str) -> list[str]:
     content = _content_blocks(message)
+    if block_type == "tool_use":
+        return [
+            str(tool_block.get("id"))
+            for block in content
+            if (tool_block := _agentic_tool_use_block(block)) is not None
+            and tool_block.get("id")
+        ]
     key = "id" if block_type == "tool_use" else "tool_use_id"
     return [
         str(block.get(key))
@@ -4619,7 +4841,11 @@ def _protocol_valid_suffix(messages: list[dict], start: int) -> bool:
         # valid exchange appear complete. This also keeps model SDK objects
         # from being silently ignored by the protocol check.
         if any(
-            isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}
+            isinstance(block, dict)
+            and (
+                block.get("type") in {"tool_use", "tool_result"}
+                or _agentic_tool_use_block(block) is not None
+            )
             for block in blocks
         ) and not (use_ids or result_ids):
             return False
@@ -4714,13 +4940,14 @@ def compact_agentic_messages(
             for block in blocks:
                 if not isinstance(block, dict):
                     continue
-                if block.get("type") == "tool_use":
+                tool_block = _agentic_tool_use_block(block)
+                if tool_block is not None:
                     tool_input = (
-                        block.get("input")
-                        if isinstance(block.get("input"), dict)
+                        tool_block.get("input")
+                        if isinstance(tool_block.get("input"), dict)
                         else {}
                     )
-                    details = [str(block.get("name") or "tool")]
+                    details = [str(tool_block.get("name") or "tool")]
                     for key in (
                         "method",
                         "url",
@@ -5896,7 +6123,17 @@ async def _call_with_tools_impl(
                 raise RuntimeError("Responses API stream ended without a response")
 
         blocks = []
+        preserve_native_history = config.provider == "google_vertex" and (
+            config.model or ""
+        ).lower().startswith("xai/grok-")
+        native_history = []
         for item in getattr(resp, "output", None) or []:
+            if preserve_native_history:
+                native_item = _responses_output_item_dict(item)
+                if native_item is not None:
+                    native_history.append(
+                        {"type": _RESPONSES_OUTPUT_ITEM_BLOCK, "item": native_item}
+                    )
             itype = getattr(item, "type", None)
             if itype == "message":
                 for part in getattr(item, "content", None) or []:
@@ -5930,7 +6167,7 @@ async def _call_with_tools_impl(
             "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
         )
         _record_responses_usage(config, resp)
-        return blocks, stop_reason, blocks  # store Anthropic-format in history
+        return blocks, stop_reason, native_history or blocks
 
     # ── OpenAI-style providers ─────────────────────────────────────────────────
     # Covers: openai, openai_compatible, openrouter, azure_openai,
@@ -6499,11 +6736,10 @@ async def thinking_agentic_loop(
                 assistant_content if isinstance(assistant_content, list) else []
             )
             interrupted_tools = [
-                block
+                tool_block
                 for block in assistant_blocks
-                if isinstance(block, dict)
-                and block.get("type") == "tool_use"
-                and block.get("id")
+                if (tool_block := _agentic_tool_use_block(block)) is not None
+                and tool_block.get("id")
             ]
             if interrupted_tools:
                 repair_content = [

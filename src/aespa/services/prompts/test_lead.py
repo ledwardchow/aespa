@@ -734,9 +734,11 @@ _API_THINKING_AGENT_SYSTEM = (
     "   business-logic paths have been tested.\n\n"
     "Tool rules:\n"
     "- http_request: direct HTTP probes against API endpoints. No browser needed for REST.\n"
-    "  Always set owasp_category to the OWASP API Top 10 code you are testing for on this\n"
-    "  specific request (e.g. API1 for a BOLA id-swap probe, API2 for an auth bypass\n"
-    "  probe). This is required for coverage tracking — do not omit it.\n"
+    "  Set request_role='test' and owasp_category to the OWASP API Top 10 code for every\n"
+    "  request that tests a security hypothesis (e.g. API1 for a BOLA id-swap probe, API2\n"
+    "  for an auth bypass probe). Use request_role='setup' for authentication or other\n"
+    "  preparation and request_role='recon' for passive inspection; those requests may\n"
+    "  omit owasp_category. Baselines and controls used by a security test are test requests.\n"
     "- execute_python: use only when computation, custom encoding/parsing, state correlation, "
     "or a bounded request batch would be awkward or unreliable with individual http_request "
     "calls. Explain why ordinary tools are insufficient. It cannot access the browser DOM; "
@@ -790,7 +792,11 @@ _THINKING_AGENT_SYSTEM_BASE = (
     + _THINKING_PENTEST_PLAYBOOK
     + "\n\nTool rules:\n"
     "- http_request: direct HTTP probes. Use for APIs, assets, headers, and endpoint testing.\n"
-    "  ALWAYS set owasp_category to the OWASP Top 10 2025 code you are testing for (A01–A10).\n"
+    "  Set request_role='test' and owasp_category to the OWASP Top 10 2025 code "
+    "for every request that tests a security hypothesis (A01–A10). Use request_role='setup' "
+    "for authentication or other preparation and request_role='recon' for passive endpoint "
+    "or asset inspection; those requests may omit owasp_category. Baselines and control "
+    "requests used to evaluate a security hypothesis are test requests, not recon.\n"
     "  For A03 also set test_class (for example sqli, reflected_xss, or stored_xss); "
     "one injection class never proves coverage of another.\n"
     "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
@@ -883,6 +889,17 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "properties": {
                 "method": {"type": "string"},
                 "url": {"type": "string"},
+                "request_role": {
+                    "type": "string",
+                    "enum": ["setup", "recon", "test"],
+                    "description": (
+                        "Purpose of this request. Use 'test' for every request that "
+                        "exercises or measures a security hypothesis, including its "
+                        "baseline and control requests. Use 'setup' only for preparation "
+                        "such as authentication, and 'recon' only for passive endpoint or "
+                        "asset inspection. 'test' requires owasp_category."
+                    ),
+                },
                 "page_id": {
                     "type": "integer",
                     "description": "Optional crawled page ID. Keeps this request attributed to the exact URL/SPA state.",
@@ -910,8 +927,8 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "description": (
                         "The OWASP category this probe is testing for "
                         "(A01–A10 for web, API1–API10 for API). "
-                        "Required for both surfaces — drives the Work Program "
-                        "matrix; do not omit."
+                        "Required when request_role is 'test' because it drives the Work "
+                        "Program matrix. Setup and recon requests may omit it."
                     ),
                 },
                 "test_class": {
@@ -952,7 +969,7 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "payload_purpose": {"type": "string"},
                 "note": {"type": "string"},
             },
-            "required": ["method", "url"],
+            "required": ["method", "url", "request_role"],
         },
     },
     {

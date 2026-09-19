@@ -9453,6 +9453,30 @@ async def _do_thinking_scan(
 # ── Agentic loop helper ───────────────────────────────────────────────────────
 
 
+def _http_request_coverage_error(tool_input: dict, *, is_api_run: bool) -> str | None:
+    """Validate the coverage fields for a Test Lead HTTP request."""
+    request_role = str(tool_input.get("request_role") or "").strip().lower()
+    expected = "API1–API10" if is_api_run else "A01–A10"
+    if not request_role:
+        return (
+            "http_request: missing request_role. Set it to setup, recon, or test. "
+            "Use test for baselines, controls, and probes that evaluate a security "
+            "hypothesis."
+        )
+    if request_role not in {"setup", "recon", "test"}:
+        return "http_request: request_role must be setup, recon, or test."
+    if (
+        request_role == "test"
+        and not str(tool_input.get("owasp_category") or "").strip()
+    ):
+        return (
+            "http_request: test requests require owasp_category. Set it to the "
+            f"category this request is testing ({expected}) so the Work Program "
+            "can record it."
+        )
+    return None
+
+
 async def _do_agentic_thinking_loop(
     *,
     run_id: int,
@@ -11638,6 +11662,11 @@ async def _do_agentic_thinking_loop(
             hr_page_id = None
         if not hr_url:
             return "http_request: missing URL"
+        _coverage_error = _http_request_coverage_error(
+            tool_input, is_api_run=is_api_run
+        )
+        if _coverage_error:
+            return _coverage_error
         _scope_err = _active_scope_check(hr_url)
         if _scope_err:
             return f"[SCOPE BLOCK] {_scope_err}"

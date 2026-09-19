@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { nav } from "../../shared/navigation/router.js";
 import { sastCandidatesToMarkdown, sastReportFilename } from "../../shared/leads/files.js";
 import { downloadTextFile } from "../../shared/lib/download.js";
+import { usePolling } from "../../shared/hooks/usePolling.js";
 
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { DismissibleAlert } from "../../shared/ui/DismissibleAlert.jsx";
@@ -125,6 +126,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const bottomRef = useRef(null);
+  const liveEventSequence = useRef(0);
 
   const loadData = useCallback(async () => {
     try {
@@ -159,19 +161,13 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     }
   }, [runId, initialLeadRef]);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  usePolling(loadData, { intervalMs: 8000 });
   useEffect(() => {
     settingsApi
       .listLLMProfiles()
       .then((items) => setProfiles(items || []))
       .catch((err) => setError(err.message));
   }, []);
-  useEffect(() => {
-    const timer = setInterval(loadData, scanRunning ? 3000 : 8000);
-    return () => clearInterval(timer);
-  }, [loadData, scanRunning]);
   useEffect(() => {
     const es = new EventSource(`/api/sast-runs/${runId}/events`);
     es.onmessage = (event) => {
@@ -188,11 +184,20 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             },
           ]);
         }
-        if (payload.type === "scanner_phase") loadData();
+        if (payload.type === "scanner_phase") {
+          setLogs((previous) => [
+            ...previous,
+            {
+              ...payload,
+              id: `live-phase-${Date.now()}-${liveEventSequence.current++}`,
+              created_at: new Date().toISOString(),
+            },
+          ]);
+        }
       } catch {}
     };
     return () => es.close();
-  }, [runId, loadData]);
+  }, [runId]);
   useEffect(() => {
     if (tab === "activity" && scanRunning)
       bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });

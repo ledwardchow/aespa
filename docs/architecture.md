@@ -1083,14 +1083,14 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 | `anthropic` | `anthropic` Python SDK (native tool-use supported) |
 | `openai` | `openai` Python SDK |
 | `google` | `google-genai` with a Gemini Developer API key |
-| `google_vertex` | `google-genai` with Google Cloud Application Default Credentials |
+| `google_vertex` | `google-genai` for Gemini models and the `openai` SDK for other publisher models, using Google Cloud Application Default Credentials |
 | `bedrock` | `boto3` / `anthropic` Bedrock adapter |
 | `bedrock_mantle` | `openai` SDK with Bedrock Mantle endpoint (`project_id` sent as `OpenAI-Project` header) |
 | `azure_openai` | `openai` SDK with Azure base URL |
 | `openai_compatible` | `openai` SDK with custom base URL |
 | `openrouter` | `openai` SDK with OpenRouter base URL |
 
-The Google Vertex AI provider saves only the Google Cloud project and location. It reads Application Default Credentials from the AESPA process and does not copy credentials into the database. It accepts serverless publisher model IDs used by Vertex `generateContent`. User-managed endpoint resources, tuned models, and self-deployed Model Garden models are rejected. Model discovery lists Google publisher models available in the configured project and location; compatible Model-as-a-Service publisher IDs can be entered manually.
+The Google Vertex AI provider saves only the Google Cloud project and location. It reads Application Default Credentials from the AESPA process and does not copy credentials into the database. Gemini models use Vertex `generateContent`. All other serverless publisher models use Vertex's OpenAI-compatible Responses endpoint. User-managed endpoint resources, tuned models, and self-deployed Model Garden models are rejected. Model discovery lists Google publisher models available in the configured project and location; compatible Model-as-a-Service publisher IDs can be entered manually.
 
 When both the provider token and username are blank, the GitHub Copilot SDK reads Copilot CLI's real home directory and uses the account selected there. A configured username resolves that account's stored Copilot CLI credential, while an explicit provider token takes precedence over both choices. The provider form lists locally authenticated Copilot accounts and can launch Copilot CLI's device-code login command; AESPA exposes only the verification URL, one-time code, completion state, and account login to the browser, while Copilot CLI stores the resulting credential in its normal credential store. Named-account and explicit-token sessions get a temporary Copilot home. Every path keeps scans isolated: they use a temporary working directory, remove Copilot's repository environment from the prompt, disable instructions, skills, memory, hooks, embeddings, telemetry, host Git operations, and session storage, and expose only the custom tools AESPA explicitly registers. One Copilot session stays alive for the full AESPA agent conversation, allowing the provider to reuse conversation state and prompt caches. When Copilot requests a tool, its SDK handler pauses while AESPA applies the existing scope checks, execution monitoring, checkpointing, and tool-result limits. AESPA returns the real result to that handler and the same Copilot session continues.
 
@@ -1134,7 +1134,7 @@ If the compacted request fits only with a smaller response allowance, AESPA crea
 
 ### Prompt caching
 
-The LLM service uses Anthropic prompt caching for large, repeated context blocks (crawl summaries, system prompts). This significantly reduces token usage on multi-step dynamic scans where the same context is sent across many loop iterations.
+The LLM service uses Anthropic prompt caching for large, repeated context blocks (crawl summaries, system prompts). Vertex-hosted Grok conversations receive a stable cache-routing key derived from the model, system instructions, tool set, and opening message. The key stays unchanged as the agent appends turns, while separate Test Lead, Specialist, and Validator conversations use different keys. AESPA also requests and replays Grok's encrypted reasoning output because Vertex AI does not support stateful response chaining for these models. Response-only metadata is removed before replay so the saved output remains valid as Vertex input. This keeps the earlier prompt prefix unchanged across tool steps and improves cache reuse during multi-step scans.
 
 ### Upstream proxy
 

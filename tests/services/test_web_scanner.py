@@ -10,6 +10,36 @@ from aespa.models import ScanFinding, Site, TestRun
 from aespa.services import burp_rest, scanner
 
 
+def test_http_request_coverage_fields_follow_request_role() -> None:
+    assert scanner._http_request_coverage_error({}, is_api_run=False) == (
+        "http_request: missing request_role. Set it to setup, recon, or test. Use "
+        "test for baselines, controls, and probes that evaluate a security hypothesis."
+    )
+    assert (
+        scanner._http_request_coverage_error({"request_role": "test"}, is_api_run=False)
+        == "http_request: test requests require owasp_category. Set it to the category "
+        "this request is testing (A01–A10) so the Work Program can record it."
+    )
+    assert (
+        scanner._http_request_coverage_error(
+            {"request_role": "test", "owasp_category": "API1"}, is_api_run=True
+        )
+        is None
+    )
+    assert (
+        scanner._http_request_coverage_error(
+            {"request_role": "setup"}, is_api_run=False
+        )
+        is None
+    )
+    assert (
+        scanner._http_request_coverage_error(
+            {"request_role": "recon"}, is_api_run=False
+        )
+        is None
+    )
+
+
 def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypatch):
     engine = create_engine(
         "sqlite:///:memory:",

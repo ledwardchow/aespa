@@ -28,7 +28,8 @@ from aespa.services.scan_leads import create_lead
 
 
 @pytest.mark.parametrize(
-    "provider", ["openai_codex", "github_copilot", "factory_droid"]
+    "provider",
+    ["openai_codex", "github_copilot", "factory_droid", "google_vertex"],
 )
 def test_semantic_phases_accept_session_authenticated_providers(provider):
     config = SimpleNamespace(provider=provider, api_key=None, base_url=None)

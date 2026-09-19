@@ -588,6 +588,7 @@ def test_api_login_response_session_is_reused_by_stable_label(
             {
                 "method": "POST",
                 "url": "https://api.local/api/auth",
+                "request_role": "setup",
                 "body": {"email": "user@example.com", "password": "correct"},
                 "use_session": "anonymous",
                 "store_as": "configured_primary",
@@ -603,6 +604,7 @@ def test_api_login_response_session_is_reused_by_stable_label(
             {
                 "method": "GET",
                 "url": "https://api.local/api/private",
+                "request_role": "setup",
                 "use_session": "configured_primary",
                 "owasp_category": "API2",
             },
@@ -615,6 +617,7 @@ def test_api_login_response_session_is_reused_by_stable_label(
             {
                 "method": "POST",
                 "url": "https://api.local/api/cookie-auth",
+                "request_role": "setup",
                 "body": {"username": "cookie-user", "password": "correct"},
                 "use_session": "anonymous",
                 "store_as": "cookie_primary",
@@ -630,6 +633,7 @@ def test_api_login_response_session_is_reused_by_stable_label(
             {
                 "method": "GET",
                 "url": "https://api.local/api/cookie-private",
+                "request_role": "setup",
                 "use_session": "cookie_primary",
                 "owasp_category": "API2",
             },

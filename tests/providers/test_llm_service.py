@@ -2918,6 +2918,274 @@ def test_google_vertex_client_uses_adc_project_and_location(monkeypatch):
     asyncio.run(captured["http_options"]["httpx_async_client"].aclose())
 
 
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gemini-2.5-flash", False),
+        ("publishers/google/models/gemini-3-pro", False),
+        ("xai/grok-4.6", True),
+        ("anthropic/claude-sonnet-4-6", True),
+    ],
+)
+def test_google_vertex_transport_selection(model, expected):
+    config = LLMConfig(provider="google_vertex", model=model)
+
+    assert llm._uses_openai_responses(config) is expected
+
+
+def test_google_vertex_responses_client_uses_adc_and_openapi_endpoint(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCredentials:
+        token = None
+
+        def refresh(self, request):
+            captured["refresh_request"] = request
+            self.token = "adc-access-token"
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+    monkeypatch.setattr(
+        "google.auth.default", lambda **kwargs: (FakeCredentials(), "adc-project")
+    )
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+    config = LLMConfig(
+        provider="google_vertex",
+        project_id="example-project",
+        location="australia-southeast1",
+        model="xai/grok-4.6",
+    )
+
+    llm._make_google_vertex_responses_client(config)
+
+    client_kwargs = captured["client"]
+    assert client_kwargs["api_key"] == "adc-access-token"
+    assert client_kwargs["base_url"] == (
+        "https://australia-southeast1-aiplatform.googleapis.com/v1/"
+        "projects/example-project/locations/australia-southeast1/endpoints/openapi"
+    )
+    asyncio.run(client_kwargs["http_client"].aclose())
+
+
+def test_google_vertex_non_gemini_tool_calls_use_responses_api(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(
+                output=[
+                    SimpleNamespace(
+                        type="reasoning",
+                        id="reason_vertex",
+                        status="completed",
+                        summary=[],
+                        content=None,
+                        encrypted_content="encrypted-reasoning",
+                    ),
+                    SimpleNamespace(
+                        type="function_call",
+                        id="fc_vertex",
+                        status="completed",
+                        call_id="call_vertex",
+                        name="context_tool",
+                        arguments='{"tool":"site_map","args":{"limit":5}}',
+                        namespace=None,
+                    ),
+                ],
+                usage=SimpleNamespace(
+                    input_tokens=8,
+                    output_tokens=4,
+                    input_tokens_details=SimpleNamespace(cached_tokens=0),
+                ),
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+    monkeypatch.setattr(
+        llm,
+        "_make_google_vertex_responses_client",
+        lambda _config: FakeOpenAI(),
+    )
+    config = LLMConfig(
+        provider="google_vertex",
+        project_id="example-project",
+        location="global",
+        model="xai/grok-4.6",
+        max_tokens=4096,
+    )
+
+    blocks, stop_reason, raw_history = asyncio.run(
+        llm._call_with_tools_impl(
+            config,
+            system_message="Use tools.",
+            messages=[{"role": "user", "content": "Inspect the site."}],
+            tools=[
+                {
+                    "name": "context_tool",
+                    "description": "Read scanner context.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"tool": {"type": "string"}},
+                        "required": ["tool"],
+                    },
+                }
+            ],
+        )
+    )
+
+    assert captured["request"]["tools"][0]["name"] == "context_tool"
+    assert captured["request"]["prompt_cache_key"].startswith("aespa-")
+    assert len(captured["request"]["prompt_cache_key"]) == 64
+    assert captured["request"]["include"] == ["reasoning.encrypted_content"]
+    assert captured["request"]["store"] is False
+    assert blocks[0]["input"] == {"tool": "site_map", "args": {"limit": 5}}
+    assert stop_reason == "tool_use"
+    replayed = llm._ant_messages_to_responses(
+        [
+            {"role": "user", "content": "Inspect the site."},
+            {"role": "assistant", "content": raw_history},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_vertex",
+                        "content": "site map result",
+                    }
+                ],
+            },
+        ]
+    )
+    assert replayed[1] == {
+        "type": "reasoning",
+        "id": "reason_vertex",
+        "status": "completed",
+        "summary": [],
+        "encrypted_content": "encrypted-reasoning",
+    }
+    assert replayed[2] == {
+        "type": "function_call",
+        "call_id": "call_vertex",
+        "name": "context_tool",
+        "arguments": '{"tool":"site_map","args":{"limit":5}}',
+    }
+    assert replayed[3] == {
+        "type": "function_call_output",
+        "call_id": "call_vertex",
+        "output": "site map result",
+    }
+
+
+def test_google_vertex_grok_replay_strips_response_only_message_fields():
+    item = {
+        "id": "msg_response",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "phase": None,
+        "content": [
+            {
+                "type": "output_text",
+                "text": "Working.",
+                "annotations": [],
+                "logprobs": [],
+            }
+        ],
+    }
+
+    assert llm._responses_replay_item(item) == {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "Working.", "annotations": []}],
+    }
+
+
+def test_google_vertex_grok_cache_key_stays_stable_when_history_grows():
+    config = LLMConfig(provider="google_vertex", model="xai/grok-4.6")
+    opening = {"type": "message", "role": "user", "content": "Inspect the site."}
+    tools = [{"type": "function", "name": "context_tool", "parameters": {}}]
+
+    first = llm._responses_request_kwargs(
+        config,
+        input=[opening],
+        instructions="Use tools.",
+        tools=tools,
+    )
+    later = llm._responses_request_kwargs(
+        config,
+        input=[
+            opening,
+            {"type": "message", "role": "assistant", "content": "Working."},
+            {"type": "message", "role": "user", "content": "Continue."},
+        ],
+        instructions="Use tools.",
+        tools=tools,
+    )
+
+    assert later["prompt_cache_key"] == first["prompt_cache_key"]
+
+
+def test_google_vertex_grok_cache_key_separates_agent_transcripts():
+    config = LLMConfig(provider="google_vertex", model="xai/grok-4.6")
+
+    test_lead = llm._responses_request_kwargs(
+        config,
+        input="Inspect the whole site.",
+        instructions="You are the Test Lead.",
+    )
+    validator = llm._responses_request_kwargs(
+        config,
+        input="Disprove finding 42.",
+        instructions="You are the Validator.",
+    )
+    gemini = llm._responses_request_kwargs(
+        LLMConfig(provider="google_vertex", model="gemini-2.5-flash"),
+        input="Inspect the whole site.",
+    )
+
+    assert test_lead["prompt_cache_key"] != validator["prompt_cache_key"]
+    assert "prompt_cache_key" not in gemini
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_transport"),
+    [("xai/grok-4.6", "responses"), ("gemini-2.5-flash", "google")],
+)
+def test_google_vertex_plain_calls_select_transport(
+    monkeypatch, model, expected_transport
+):
+    calls: list[str] = []
+
+    async def fake_responses(*_args, **_kwargs):
+        calls.append("responses")
+        return "responses result"
+
+    async def fake_google(*_args, **_kwargs):
+        calls.append("google")
+        return "google result"
+
+    monkeypatch.setattr(llm, "_openai_responses", fake_responses)
+    monkeypatch.setattr(llm, "_google", fake_google)
+    config = LLMConfig(
+        provider="google_vertex",
+        project_id="example-project",
+        location="global",
+        model=model,
+    )
+
+    result = asyncio.run(llm._call_impl(config, "hello", None))
+
+    assert calls == [expected_transport]
+    assert result == f"{expected_transport} result"
+
+
 def test_google_vertex_tools_keep_json_schema_integer_constraints(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -3038,7 +3306,7 @@ def test_google_vertex_stream_ignores_candidate_with_null_parts(monkeypatch):
             provider="google_vertex",
             project_id="example-project",
             location="global",
-            model="xai/grok-4.6",
+            model="gemini-2.5-flash",
         )
         token = llm._tool_text_delta_var.set(_on_text)
         try:
@@ -3086,7 +3354,7 @@ def test_google_vertex_response_ignores_candidate_with_null_parts(monkeypatch):
         provider="google_vertex",
         project_id="example-project",
         location="global",
-        model="xai/grok-4.6",
+        model="gemini-2.5-flash",
     )
 
     result = asyncio.run(
@@ -3135,6 +3403,48 @@ def test_mantle_message_translation_to_responses_items():
         "type": "function_call_output",
         "call_id": "call_1",
         "output": "200 OK",
+    }
+
+
+def test_responses_native_function_call_keeps_checkpoint_protocol_valid():
+    messages = [
+        {"role": "user", "content": "start"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": llm._RESPONSES_OUTPUT_ITEM_BLOCK,
+                    "item": {
+                        "type": "reasoning",
+                        "encrypted_content": "encrypted-reasoning",
+                    },
+                },
+                {
+                    "type": llm._RESPONSES_OUTPUT_ITEM_BLOCK,
+                    "item": {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "http_request",
+                        "arguments": '{"url":"/x"}',
+                    },
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "200 OK"}
+            ],
+        },
+    ]
+
+    assert llm._protocol_valid_suffix(messages, 1) is True
+    tool_block = llm._agentic_tool_use_block(messages[1]["content"][1])
+    assert tool_block == {
+        "type": "tool_use",
+        "id": "call_1",
+        "name": "http_request",
+        "input": {"url": "/x"},
     }
 
 

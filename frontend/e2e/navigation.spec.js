@@ -812,6 +812,86 @@ test("back and forward restore the selected run tab", async ({ page }) => {
   await expect(page.locator(".web-run-tab-bar .active")).toContainText("Findings");
 });
 
+test("OWASP coverage cells filter the rendered traffic rows", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+
+  const traffic = Array.from({ length: 15 }, (_, index) => ({
+    id: index + 1,
+    created_at: "2026-09-19T00:00:00Z",
+    source: "agent",
+    purpose: index < 10 ? "A03 test" : "Other test",
+    method: "GET",
+    status: 200,
+    url: `http://example.test/request-${index + 1}`,
+    duration_ms: 10,
+    coverage_cell_id: index < 10 ? 101 : 202,
+    test_class: "xss",
+  }));
+  await page.route("**/api/test-runs/1/coverage", (route) =>
+    route.fulfill({
+      json: {
+        seeded: true,
+        columns: [
+          { key: "A03:xss", category: "A03", test_class: "xss", label: "Cross-site scripting" },
+        ],
+        pages: [
+          {
+            page_id: 1,
+            page_ids: [1],
+            url: "http://example.test/form",
+            cells: {
+              "A03:xss": {
+                status: "covered",
+                cell_ids: [101],
+                finding_ids: [],
+                test_classes: {},
+              },
+            },
+          },
+        ],
+        column_totals: { covered: 1 },
+      },
+    }),
+  );
+  await page.route("**/api/test-runs/1/traffic/count", (route) =>
+    route.fulfill({ json: { count: traffic.length } }),
+  );
+  await page.route("**/api/test-runs/1/traffic?**", (route) => {
+    const sinceId = Number(new URL(route.request().url()).searchParams.get("since_id") || 0);
+    return route.fulfill({ json: traffic.filter((entry) => entry.id > sinceId) });
+  });
+
+  await page.goto("/#/runs/1/traffic");
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.getByText("Fixture run", { exact: false }).first()).toBeVisible();
+  const visibleTrafficPanel = page.locator(".traffic-panel:visible");
+  await expect(visibleTrafficPanel.locator(".traffic-table tbody .traffic-row")).toHaveCount(15);
+  await visibleTrafficPanel.locator(".traffic-table tbody .traffic-row").last().click();
+  await expect(visibleTrafficPanel.locator(".traffic-detail")).toBeVisible();
+
+  await page.getByRole("button", { name: "Attack Surface & Coverage", exact: true }).click();
+  await page.locator("td.coverage-traffic-cell").click({ position: { x: 3, y: 3 } });
+
+  await expect(page).toHaveURL(/#\/runs\/1\/traffic\?.*coverage_cells=101/);
+  await expect(visibleTrafficPanel.locator(".traffic-count-label")).toHaveText("10 shown of 15");
+  await expect(visibleTrafficPanel.locator(".traffic-table tbody .traffic-row")).toHaveCount(10);
+  await expect(
+    visibleTrafficPanel.locator(".traffic-table tbody .traffic-row").first(),
+  ).toContainText("request-1");
+  await expect(visibleTrafficPanel.locator('[title="http://example.test/request-11"]')).toHaveCount(
+    0,
+  );
+  await expect(visibleTrafficPanel.locator(".traffic-detail")).toHaveCount(0);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-coverage-traffic-filter.png") });
+});
+
 test("SAST summary cards only appear on the Coverage tab", async ({ page }) => {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
