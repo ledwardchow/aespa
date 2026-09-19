@@ -143,8 +143,8 @@ These tools are in `SAST_TOOLS` with the read-only file tools.
 | `get_work_program` | Returns the source or sink checks assigned to the worker |
 | `record_disposition` | Records the evidence-backed result for one assigned work item |
 | `record_semantic_disposition` | Resolves a threat-scenario or repository-model obligation as assessed, a candidate, not applicable, or blocked |
-| `write_lead` | Records a candidate with its classification, root causes, location, source and sink traces, controls, and proof gaps |
-| `filter_lead` | Scores and reviews a written candidate. Candidates below 0.7 confidence are discarded |
+| `write_lead` | Records a candidate with its classification, root causes, location, source and sink traces, controls, proof gaps, confidence score, and confidence reasoning |
+| `filter_lead` | Revises the confidence score and reasoning of an existing candidate |
 | `done` | Signals that the assigned SAST phase is complete |
 
 ### Threat-model tools

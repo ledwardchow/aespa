@@ -1138,6 +1138,8 @@ def test_discovery_candidates_are_persisted_before_validation(
         "location": "app.py:1",
         "description": "Request input reaches SQL execution.",
         "evidence": "db.execute(request.args['id'])",
+        "confidence": 0.81,
+        "confidence_reasoning": "A request parameter reaches the SQL sink.",
     }
     asyncio.run(executor("write_lead", candidate_input, 1))
     replay = asyncio.run(executor("write_lead", candidate_input, 1))
@@ -1152,7 +1154,7 @@ def test_discovery_candidates_are_persisted_before_validation(
             .where(ScanLead.imported_into_run_id == None)  # noqa: E711
         ).one()
         assert lead.validation_status == "pending"
-        assert lead.confidence == 0.0
+        assert lead.confidence == 0.81
 
     response = client.get(f"/api/sast-runs/{run_id}/leads")
     assert response.status_code == 200
@@ -1175,6 +1177,76 @@ def test_discovery_candidates_are_persisted_before_validation(
         assert lead.confidence == 0.88
         assert lead.validation_status == "pending"
     sast_scanner._candidates.pop(run_id, None)
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_write_lead_requires_atomic_confidence(
+    analysis_mode, tmp_path, isolated_db_engine
+):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+
+    root = tmp_path / analysis_mode
+    root.mkdir()
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name=f"{analysis_mode} confidence", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    executor = scanner_module._make_tool_executor(run_id, root, None)
+    result = asyncio.run(
+        executor(
+            "write_lead",
+            {
+                "title": "Unscored lead",
+                "category": "A03",
+                "severity": "high",
+                "location": "app.py:1",
+                "description": "Missing a discovery score.",
+                "evidence": "db.execute(value)",
+            },
+            1,
+        )
+    )
+
+    assert result.startswith("Error: write_lead requires a numeric confidence")
+    assert scanner_module._candidates[run_id] == []
+    with Session(isolated_db_engine) as session:
+        assert (
+            session.exec(
+                select(ScanLead).where(ScanLead.producer_run_id == run_id)
+            ).all()
+            == []
+        )
+    scanner_module._candidates.pop(run_id, None)
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_unscored_checkpoint_candidates_become_inconclusive(analysis_mode):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+    candidates = [
+        {
+            "candidate_id": 7,
+            "confidence": None,
+            "validation_status": "pending",
+            "proof_gaps": [],
+            "reportable": False,
+        }
+    ]
+
+    assert scanner_module._close_unscored_candidates(candidates) == 1
+    assert candidates[0]["validation_status"] == "inconclusive"
+    assert "confidence score" in candidates[0]["validation_reasoning"]
+    assert scanner_module._pending_candidate_ids(candidates) == []
 
 
 def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
@@ -1262,6 +1334,8 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
                         "controls": [],
                         "sink_trace": {"file": "app.py", "line": 3},
                         "proof_gaps": [],
+                        "confidence": 0.88,
+                        "confidence_reasoning": "Concrete path",
                     },
                     1,
                 )
@@ -1474,6 +1548,8 @@ def test_sast_validation_starts_after_discovery_reconciliation(
                             if candidate_id == 0
                             else []
                         ),
+                        "confidence": 0.88,
+                        "confidence_reasoning": "Concrete path",
                     },
                     1,
                 )
@@ -1516,6 +1592,7 @@ def test_sast_validation_starts_after_discovery_reconciliation(
         ).all()
     assert saved_run.status == "completed"
     assert saved_run.leads_count == 3
+    assert json.loads(saved_run.report_json)["candidates"] == 3
     assert [lead.validation_status for lead in saved_leads] == [
         "confirmed",
         "confirmed",
