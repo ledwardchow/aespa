@@ -106,6 +106,7 @@ _SESSION_AUTHENTICATED_LLM_PROVIDERS = {
     "github_copilot",
     "factory_droid",
     "google_antigravity",
+    "google_vertex",
     "bedrock",
     "bedrock_mantle",
     "azure_openai",

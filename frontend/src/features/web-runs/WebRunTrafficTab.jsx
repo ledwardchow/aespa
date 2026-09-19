@@ -74,10 +74,13 @@ export function WebRunTrafficTab({
       if (entries.length > 0) {
         lastTrafficIdRef.current = entries[entries.length - 1].id;
         setTraffic((previous) => {
-          const stamped = entries.map((entry, index) => ({
-            ...entry,
-            _seq: previous.length + index + 1,
-          }));
+          const existingIds = new Set(previous.map((entry) => entry.id));
+          const stamped = entries
+            .filter((entry) => !existingIds.has(entry.id))
+            .map((entry, index) => ({
+              ...entry,
+              _seq: previous.length + index + 1,
+            }));
           const next = [...previous, ...stamped];
           return next.length > 2000 ? next.slice(-2000) : next;
         });
@@ -108,6 +111,17 @@ export function WebRunTrafficTab({
     }
     return hosts;
   }, [graph]);
+  const coverageFilterKey = useMemo(
+    () =>
+      coverageFilter?.cellIds?.length
+        ? `${[...coverageFilter.cellIds].sort((a, b) => a - b).join(",")}:${coverageFilter.testClass || ""}`
+        : "all",
+    [coverageFilter?.cellIds, coverageFilter?.testClass],
+  );
+
+  useEffect(() => {
+    setSelectedTraffic(null);
+  }, [coverageFilterKey]);
 
   // ── Traffic helpers ────────────────────────────────────────────────────────
   const filteredTraffic = (() => {
@@ -165,8 +179,15 @@ export function WebRunTrafficTab({
             dir: "asc",
           },
     );
+  const visibleSelectedTraffic = filteredTraffic.some((entry) => entry.id === selectedTraffic?.id)
+    ? selectedTraffic
+    : null;
   return (
-    <div className="traffic-panel" style={{ display: active ? undefined : "none" }}>
+    <div
+      key={coverageFilterKey}
+      className="traffic-panel"
+      style={{ display: active ? undefined : "none" }}
+    >
       <div className="traffic-toolbar">
         <input
           className="traffic-filter"
@@ -242,7 +263,7 @@ export function WebRunTrafficTab({
       <div className="traffic-table-wrap" ref={trafficTableRef}>
         <TrafficTable
           entries={filteredTraffic}
-          selected={selectedTraffic}
+          selected={visibleSelectedTraffic}
           onSelect={setSelectedTraffic}
           sequenceFor={(entry, index) => entry._seq ?? index + 1}
           sortable
@@ -265,7 +286,7 @@ export function WebRunTrafficTab({
           </div>
         )}
       </div>
-      <TrafficDetail entry={selectedTraffic} onClose={() => setSelectedTraffic(null)} />
+      <TrafficDetail entry={visibleSelectedTraffic} onClose={() => setSelectedTraffic(null)} />
     </div>
   );
 }

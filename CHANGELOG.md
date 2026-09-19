@@ -6,7 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **Google Vertex AI provider**: AESPA can use Google Cloud Application Default Credentials with a selected project and location. The provider loads serverless Gemini publisher models, supports compatible Model Garden models, and handles their empty completion chunks during streaming and tool calls. It supports the existing vision and thinking workflows, preserves numeric tool-schema constraints required by Vertex AI, and does not store Google credentials. Deployed endpoints and tuned model resources are excluded.
+- **Google Vertex AI provider**: AESPA can use Google Cloud Application Default Credentials with a selected project and location. Gemini models use the native Google content API, while other serverless publisher models use Vertex AI's OpenAI-compatible Responses API so tool arguments are preserved. Grok conversations use stable, agent-specific cache routing and replay encrypted reasoning between tool steps using Vertex-compatible request fields, so repeated context can be reused reliably. The provider supports the existing vision and thinking workflows, preserves numeric tool-schema constraints required by Vertex AI, and does not store Google credentials. Deployed endpoints and tuned model resources are excluded.
 
 ### Updates
 
@@ -16,6 +16,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **SAST run request volume**: Live scanner events now update the activity display directly instead of reloading every SAST data endpoint for each file read, search, model response, or heartbeat.
+- **Google Vertex AI SAST threat modelling**: Deep SAST scans now recognise Google Application Default Credentials during repository and threat-model review instead of incorrectly reporting that the provider has no credentials.
+- **Traffic coverage filters**: Opening the Traffic Log from an OWASP coverage item now refreshes the table rows and closes any previously selected request, so the visible rows match the filtered count.
+- **OWASP coverage tracking**: Test Lead HTTP requests now identify whether they are setup, reconnaissance, or active security tests. Active tests require an OWASP category and are rejected with guidance when it is missing, while setup and reconnaissance requests can remain uncategorized.
 - **Visible startup failures**: When the backend cannot start, the terminal console now restores the normal prompt, prints the captured startup error, and exits with a failure status instead of hiding the cause.
 - **Provider model cleanup**: Removing a model from a provider now removes its unused saved model settings as well. Models assigned to a scan profile cannot be removed until that profile is updated, and loading a fresh model list from the provider API keeps those assigned models.
 
