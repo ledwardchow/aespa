@@ -1805,8 +1805,8 @@ start_sast_scan(sast_run_id)
 | `get_work_program` | Return the current worker's assigned source or sink items |
 | `record_disposition` | Close one assigned item with a result, reason, trace, controls, and evidence |
 | `record_semantic_disposition` | Resolve one threat-scenario or repository-model security obligation |
-| `write_lead` | Record a source-backed discovery candidate |
-| `filter_lead` | Apply discovery confidence filtering before independent validation |
+| `write_lead` | Record a source-backed discovery candidate together with its confidence score and reasoning |
+| `filter_lead` | Revise the confidence score of an existing candidate before independent validation |
 
 Threat-model workers replace the discovery tools with `record_model_fact`,
 `record_threat_scenario`, and `finalize_threat_model`. Candidate validators use
@@ -1826,7 +1826,7 @@ where `reviewed` means the file was opened with `read_file`.
 ### Lead lifecycle
 
 ```
-Discovery calls write_lead(...) and filter_lead(...)
+Discovery calls write_lead(...) with confidence and reasoning
   └─ Candidate remains a hypothesis regardless of discovery self-score
 Independent validator calls validate_candidate(...)
   ├─ confirmed + confidence ≥ 0.7 → reportable
@@ -1836,6 +1836,12 @@ Attack-path analyst calls record_attack_path(...) for reportable candidates
   └─ Ordered nodes, impact, severity reasoning, and dynamic-test objective persisted
 Final sync upserts candidates by stable fingerprint, preventing rerun duplicates
 ```
+
+Candidate creation and discovery scoring are one database operation. Resumed
+checkpoints from older versions may contain unscored candidates; these are closed
+as inconclusive instead of being left pending. Validation cannot complete while
+any scored candidate still has a pending verdict. Reconciliation totals are
+calculated after candidates are split by root cause.
 
 ### ScanLead entity (`services/scan_leads.py`)
 

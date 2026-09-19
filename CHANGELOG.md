@@ -16,6 +16,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **SAST candidate validation**: Discovery now saves each candidate and its confidence score together, so reaching an agent tool limit cannot leave findings pending without a score. Older unscored candidates become inconclusive, validation cannot finish with pending candidates, and reports count candidates created during reconciliation.
 - **SAST run request volume**: Live scanner events now update the activity display directly instead of reloading every SAST data endpoint for each file read, search, model response, or heartbeat.
 - **Google Vertex AI SAST threat modelling**: Deep SAST scans now recognise Google Application Default Credentials during repository and threat-model review instead of incorrectly reporting that the provider has no credentials.
 - **Traffic coverage filters**: Opening the Traffic Log from an OWASP coverage item now refreshes the table rows and closes any previously selected request, so the visible rows match the filtered count.
