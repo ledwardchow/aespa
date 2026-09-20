@@ -410,7 +410,7 @@ function GlobalHttpHeadersSettings() {
   );
 }
 
-function PolicySettings({ Fields }) {
+export function PolicySettings({ Fields }) {
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);

@@ -43,8 +43,10 @@ export const defaultPolicyForm = () => ({
   sast_dependency_findings: true,
   sast_min_severity: "low",
   sast_min_confidence: 0.35,
+  sast_budget_mode: "adaptive",
   sast_baseline_budget: 80,
   sast_threat_budget: 60,
+  sast_worker_budget_max: 250,
   sast_closure_budget: 40,
   sast_validator_budget: 50,
 });
@@ -89,8 +91,10 @@ export const policyToForm = (p) => {
     sast_dependency_findings: p.sast_dependency_findings ?? true,
     sast_min_severity: p.sast_min_severity || "low",
     sast_min_confidence: p.sast_min_confidence ?? 0.35,
+    sast_budget_mode: p.sast_budget_mode || "adaptive",
     sast_baseline_budget: p.sast_baseline_budget ?? 80,
     sast_threat_budget: p.sast_threat_budget ?? 60,
+    sast_worker_budget_max: p.sast_worker_budget_max ?? 250,
     sast_closure_budget: p.sast_closure_budget ?? 40,
     sast_validator_budget: p.sast_validator_budget ?? 50,
   };
@@ -127,8 +131,10 @@ export const policyPayload = (form) => ({
   sast_dependency_findings: !!form.sast_dependency_findings,
   sast_min_severity: form.sast_min_severity,
   sast_min_confidence: Number(form.sast_min_confidence),
+  sast_budget_mode: form.sast_budget_mode,
   sast_baseline_budget: Number(form.sast_baseline_budget),
   sast_threat_budget: Number(form.sast_threat_budget),
+  sast_worker_budget_max: Number(form.sast_worker_budget_max),
   sast_closure_budget: Number(form.sast_closure_budget),
   sast_validator_budget: Number(form.sast_validator_budget),
 });

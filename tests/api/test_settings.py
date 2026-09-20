@@ -1179,6 +1179,8 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert data["allowed_schemes"] == ["http", "https"]
     assert "POST" in data["methods_by_mode"]["safe_active"]
     assert data["strict_locator_enforcement"] is True
+    assert data["sast_budget_mode"] == "adaptive"
+    assert data["sast_worker_budget_max"] == 250
 
 
 def test_upsert_scanner_policy(client: TestClient):
@@ -1197,6 +1199,7 @@ def test_upsert_scanner_policy(client: TestClient):
             "min_delay_s": 0.1,
             "blocked_headers": ["host", "cookie", "x-admin"],
             "strict_locator_enforcement": False,
+            "sast_budget_mode": "fixed",
         }
     )
     r = client.put("/api/settings/scanner-policy", json=payload)
@@ -1212,6 +1215,7 @@ def test_upsert_scanner_policy(client: TestClient):
     assert data["thinking_max_steps"] == 180
     assert data["blocked_headers"] == ["host", "cookie", "x-admin"]
     assert data["strict_locator_enforcement"] is False
+    assert data["sast_budget_mode"] == "fixed"
 
     r2 = client.get("/api/settings/scanner-policy")
     assert r2.json()["request_timeout_s"] == 12.5
@@ -1220,6 +1224,15 @@ def test_upsert_scanner_policy(client: TestClient):
 def test_upsert_scanner_policy_invalid_limit(client: TestClient):
     payload = client.get("/api/settings/scanner-policy").json()
     payload["max_probes_per_page"] = 9999
+    r = client.put("/api/settings/scanner-policy", json=payload)
+    assert r.status_code == 422
+
+
+def test_upsert_scanner_policy_rejects_adaptive_max_below_minimum(client: TestClient):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload["sast_budget_mode"] = "adaptive"
+    payload["sast_threat_budget"] = 80
+    payload["sast_worker_budget_max"] = 79
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 422
 

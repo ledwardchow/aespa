@@ -194,7 +194,10 @@ export const routes = {
   "scan-policy": {
     section: "scan-policy",
     Component: lazyNamed(() => import("../features/settings/ScanPolicyPage.jsx"), "ScanPolicyPage"),
-    props: (_route, preferences) => ({ showDeepScan: preferences.showDeepScan }),
+    props: (_route, preferences) => ({
+      showDeepScan: preferences.showDeepScan,
+      showSystems: preferences.showSystems,
+    }),
   },
   "external-integrations": {
     section: "external-integrations",

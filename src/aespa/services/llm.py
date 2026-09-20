@@ -140,6 +140,15 @@ _base_url_var: ContextVar[str | None] = ContextVar("_base_url", default=None)
 _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
+_last_response_cache_telemetry_var: ContextVar[dict[str, Any] | None] = ContextVar(
+    "last_response_cache_telemetry", default=None
+)
+_traffic_call_id_var: ContextVar[int | None] = ContextVar(
+    "llm_traffic_call_id", default=None
+)
+_traffic_operation_var: ContextVar[str | None] = ContextVar(
+    "llm_traffic_operation", default=None
+)
 _operation_var: ContextVar[str | None] = ContextVar("llm_operation", default=None)
 _traffic_call_ids = itertools.count(1)
 
@@ -1534,6 +1543,7 @@ async def _call_impl(
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
     _last_call_tokens_var.set(None)
+    _last_response_cache_telemetry_var.set(None)
     limiter = get_limiter_for_config(config)
     if limiter is None:
         if config.provider == "factory_droid":
@@ -1713,6 +1723,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             model=config.model,
         ),
     )
+    call_token = _traffic_call_id_var.set(call_id)
+    operation_token = _traffic_operation_var.set(operation)
     try:
         response = await _call_impl(config, prompt, screenshot_b64)
     except Exception as exc:
@@ -1724,18 +1736,31 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             operation=operation,
             call_id=call_id,
         )
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
         raise
     finally:
         _end_pending_usage(pending_token)
-    _log_llm_traffic(
-        "RESPONSE",
-        config,
-        response,
-        kind="completion",
-        operation=operation,
-        call_id=call_id,
-    )
-    return response
+    try:
+        telemetry = _last_response_cache_telemetry_var.get()
+        response_payload: Any = response
+        if telemetry is not None:
+            response_payload = {
+                "content": response,
+                "cache_telemetry": telemetry,
+            }
+        _log_llm_traffic(
+            "RESPONSE",
+            config,
+            response_payload,
+            kind="completion",
+            operation=operation,
+            call_id=call_id,
+        )
+        return response
+    finally:
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
 
 
 async def plain_completion(
@@ -3060,8 +3085,81 @@ async def _create_response(client: Any, kwargs: dict[str, Any]) -> Any:
         return await client.responses.create(**retry)
 
 
-def _record_responses_usage(config: LLMConfig, resp: Any) -> None:
+def _cache_key_fingerprint(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _response_metadata_value(resp: Any, name: str) -> Any:
+    metadata = getattr(resp, "metadata", None)
+    if isinstance(metadata, dict):
+        return metadata.get(name)
+    return getattr(metadata, name, None) if metadata is not None else None
+
+
+def _responses_cache_telemetry(
+    config: LLMConfig,
+    resp: Any,
+    *,
+    requested_prompt_cache_key: str | None = None,
+) -> dict[str, Any]:
     usage = getattr(resp, "usage", None)
+    input_tokens = max(0, int(getattr(usage, "input_tokens", 0) or 0))
+    output_tokens = max(0, int(getattr(usage, "output_tokens", 0) or 0))
+    cached_tokens = max(
+        0,
+        int(
+            getattr(
+                getattr(usage, "input_tokens_details", None),
+                "cached_tokens",
+                0,
+            )
+            or 0
+        ),
+    )
+    echoed_key = getattr(resp, "prompt_cache_key", None)
+    requested_fingerprint = _cache_key_fingerprint(requested_prompt_cache_key)
+    echoed_fingerprint = _cache_key_fingerprint(echoed_key)
+    cache_key_match = None
+    if requested_prompt_cache_key and echoed_key:
+        cache_key_match = str(requested_prompt_cache_key) == str(echoed_key)
+    return {
+        "provider": str(getattr(config.provider, "value", config.provider)),
+        "model": config.model,
+        "call_id": _traffic_call_id_var.get(),
+        "operation": _traffic_operation_var.get()
+        or _operation_var.get()
+        or _infer_llm_operation(),
+        "requested_cache_key_fingerprint": requested_fingerprint,
+        "echoed_cache_key_fingerprint": echoed_fingerprint,
+        "cache_key_echoed": echoed_fingerprint is not None,
+        "cache_key_match": cache_key_match,
+        "system_fingerprint": _response_metadata_value(resp, "system_fingerprint"),
+        "input_tokens": input_tokens,
+        "uncached_input_tokens": max(0, input_tokens - cached_tokens),
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cached_tokens,
+        "cache_hit_percent": round(100 * cached_tokens / input_tokens, 2)
+        if input_tokens
+        else 0.0,
+    }
+
+
+def _record_responses_usage(
+    config: LLMConfig,
+    resp: Any,
+    *,
+    requested_prompt_cache_key: str | None = None,
+) -> dict[str, Any]:
+    usage = getattr(resp, "usage", None)
+    telemetry = _responses_cache_telemetry(
+        config,
+        resp,
+        requested_prompt_cache_key=requested_prompt_cache_key,
+    )
+    _last_response_cache_telemetry_var.set(telemetry)
     _record_usage(
         config.model,
         getattr(usage, "input_tokens", 0) if usage else 0,
@@ -3072,6 +3170,30 @@ def _record_responses_usage(config: LLMConfig, resp: Any) -> None:
             else 0
         ),
     )
+    emit_fn = _emit_fn_var.get()
+    if emit_fn is not None and (
+        requested_prompt_cache_key is not None or telemetry["cache_read_tokens"] > 0
+    ):
+        try:
+            cached = telemetry["cache_read_tokens"]
+            total = telemetry["input_tokens"]
+            emit_fn(
+                {
+                    "type": "scanner_phase",
+                    "phase": "llm_cache",
+                    "status": "hit" if cached else "miss",
+                    "message": (
+                        f"LLM prompt cache {'hit' if cached else 'miss'}: "
+                        f"{cached:,} of {total:,} input tokens reused "
+                        f"({telemetry['cache_hit_percent']:.2f}%)."
+                    ),
+                    "data": telemetry,
+                    "_persist_only": True,
+                }
+            )
+        except Exception:
+            pass
+    return telemetry
 
 
 def _extract_responses_text(resp: Any) -> str:
@@ -3109,10 +3231,13 @@ async def _openai_responses(
         ]
     else:
         r_input = prompt
-    resp = await _create_response(
-        client, _responses_request_kwargs(config, input=r_input)
+    request_kwargs = _responses_request_kwargs(config, input=r_input)
+    resp = await _create_response(client, request_kwargs)
+    _record_responses_usage(
+        config,
+        resp,
+        requested_prompt_cache_key=request_kwargs.get("prompt_cache_key"),
     )
-    _record_responses_usage(config, resp)
     return _extract_responses_text(resp)
 
 
@@ -5471,6 +5596,7 @@ async def _call_with_tools_rate_limited(
     implementation.
     """
     _last_call_tokens_var.set(None)
+    _last_response_cache_telemetry_var.set(None)
     limiter = get_limiter_for_config(config)
     if limiter is None:
         return await _call_with_tools_impl(
@@ -5541,6 +5667,8 @@ async def _call_with_tools(
             provider=str(getattr(config.provider, "value", config.provider)),
         ),
     )
+    call_token = _traffic_call_id_var.set(call_id)
+    operation_token = _traffic_operation_var.set(operation)
     try:
         result = await _call_with_tools_rate_limited(
             config, system_message, messages, tools=tools
@@ -5554,19 +5682,29 @@ async def _call_with_tools(
             operation=operation,
             call_id=call_id,
         )
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
         raise
     finally:
         _end_pending_usage(pending_token)
-    blocks, stop_reason, raw_content = result
-    _log_llm_traffic(
-        "RESPONSE",
-        config,
-        {"stop_reason": stop_reason, "content": blocks},
-        kind="tools",
-        operation=operation,
-        call_id=call_id,
-    )
-    return blocks, stop_reason, raw_content
+    try:
+        blocks, stop_reason, raw_content = result
+        response_payload = {"stop_reason": stop_reason, "content": blocks}
+        telemetry = _last_response_cache_telemetry_var.get()
+        if telemetry is not None:
+            response_payload["cache_telemetry"] = telemetry
+        _log_llm_traffic(
+            "RESPONSE",
+            config,
+            response_payload,
+            kind="tools",
+            operation=operation,
+            call_id=call_id,
+        )
+        return blocks, stop_reason, raw_content
+    finally:
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
 
 
 async def stream_tools_call(
@@ -6166,7 +6304,11 @@ async def _call_with_tools_impl(
         stop_reason = (
             "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
         )
-        _record_responses_usage(config, resp)
+        _record_responses_usage(
+            config,
+            resp,
+            requested_prompt_cache_key=r_kwargs.get("prompt_cache_key"),
+        )
         return blocks, stop_reason, native_history or blocks
 
     # ── OpenAI-style providers ─────────────────────────────────────────────────
