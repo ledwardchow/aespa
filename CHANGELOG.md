@@ -6,6 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
+- **Extensions and GitHub SAST sources**: AESPA can load trusted Python extensions from the top-level `extensions` folder and the configured user extensions folder. The Extensions page lists every discovered extension, renders its settings without custom frontend code, and lets users enable or disable it. The shipped GitHub source extension creates SAST scans from public or private repositories using the local Git and GitHub CLI credentials. Each scan records the requested ref, resolved commit, source checksum, and repository provenance, then analyses an immutable archive so later branch changes do not affect the run.
 - **Google Vertex AI provider**: AESPA can use Google Cloud Application Default Credentials with a selected project and location. Gemini models use the native Google content API, while other serverless publisher models use Vertex AI's OpenAI-compatible Responses API so tool arguments are preserved. Grok conversations use stable, agent-specific cache routing and replay encrypted reasoning between tool steps using Vertex-compatible request fields. Each Grok call records whether the prompt cache was used, token reuse, cache-key fingerprints, and the provider system fingerprint so inconsistent cache reuse can be diagnosed. The provider supports the existing vision and thinking workflows, preserves numeric tool-schema constraints required by Vertex AI, and does not store Google credentials. Deployed endpoints and tuned model resources are excluded.
 
 ### Updates
@@ -25,6 +26,10 @@ All pull requests merged to `main`, in reverse chronological order.
 - **OWASP coverage tracking**: Test Lead HTTP requests now identify whether they are setup, reconnaissance, or active security tests. Active tests require an OWASP category and are rejected with guidance when it is missing, while setup and reconnaissance requests can remain uncategorized.
 - **Visible startup failures**: When the backend cannot start, the terminal console now restores the normal prompt, prints the captured startup error, and exits with a failure status instead of hiding the cause.
 - **Provider model cleanup**: Removing a model from a provider now removes its unused saved model settings as well. Models assigned to a scan profile cannot be removed until that profile is updated, and loading a fresh model list from the provider API keeps those assigned models.
+
+### Housekeeping
+
+- **Frontend build output**: Generated frontend files are no longer stored in Git. Frontend checks and desktop packaging continue to build the bundle from the Vite source when needed.
 
 ## [PR #272] September 18 Update - mostly UI fixes
 

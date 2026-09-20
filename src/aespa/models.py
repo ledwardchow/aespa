@@ -1479,13 +1479,19 @@ class SastRun(SQLModel, table=True):
         default=None
     )  # absolute path to stored zip
     source_filename: Optional[str] = Field(default=None)  # original upload filename
+    source_provider: str = Field(default="upload", index=True)
+    source_locator: Optional[str] = Field(default=None)
+    source_requested_ref: Optional[str] = Field(default=None)
+    source_revision: Optional[str] = Field(default=None, index=True)
+    source_archive_sha256: Optional[str] = Field(default=None)
+    source_metadata_json: Optional[str] = Field(default=None)
     name: str
     # Light uses the original bounded SAST workflow. Deep adds repository
     # modeling, threat planning, reconciliation, and semantic closure.
     analysis_mode: str = Field(default="deep", index=True)
     status: str = Field(
         default="pending"
-    )  # pending|scanning|paused|completed|failed|cancelled
+    )  # preparing|pending|scanning|paused|completed|failed|cancelled
     # What triggered this run: None=standalone, or the dynamic run that spawned it
     triggered_by_run_type: Optional[str] = Field(default=None)  # "api" | "web"
     triggered_by_run_id: Optional[int] = Field(default=None, index=True)
@@ -1508,6 +1514,18 @@ class SastRun(SQLModel, table=True):
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ExtensionSetting(SQLModel, table=True):
+    """Persisted non-secret settings owned by one loaded extension."""
+
+    __tablename__ = "extension_setting"
+
+    extension_id: str = Field(primary_key=True)
+    enabled: bool = Field(default=True)
+    schema_version: int = Field(default=1)
+    settings_json: str = Field(default="{}")
     updated_at: datetime = Field(default_factory=_utcnow)
 
 

@@ -194,10 +194,11 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             },
           ]);
         }
+        if (payload.type === "source_preparation") loadData();
       } catch {}
     };
     return () => es.close();
-  }, [runId]);
+  }, [runId, loadData]);
   useEffect(() => {
     if (tab === "activity" && scanRunning)
       bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -427,6 +428,30 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           </>
         }
       />
+      {run.status === "preparing" ? (
+        <div className="content" style={{ paddingBottom: 0 }}>
+          <div className="card" style={{ maxWidth: 760 }}>
+            <div className="form-section-title">Preparing source snapshot</div>
+            <p className="subtle" style={{ margin: "6px 0 0" }}>
+              AESPA is resolving the requested repository revision and creating an immutable
+              archive. The SAST scan will start automatically when it is ready.
+            </p>
+            {run.source_locator ? (
+              <div style={{ marginTop: 12, fontSize: 13 }}>
+                <strong>Source:</strong> {run.source_locator}
+                {run.source_requested_ref ? ` · ${run.source_requested_ref}` : " · default branch"}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      {run.source_provider !== "upload" && run.source_revision ? (
+        <div className="content" style={{ paddingBottom: 0 }}>
+          <div className="subtle" style={{ fontSize: 12 }}>
+            Source: {run.source_locator || run.source_provider} · {run.source_revision.slice(0, 12)}
+          </div>
+        </div>
+      ) : null}
       <div className="sast-run-shell">
         <div
           className="sast-phase-rail"

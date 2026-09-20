@@ -18,6 +18,7 @@ from aespa.api.api_collections import router as api_collections_router
 from aespa.api.api_test_runs import router as api_test_runs_router
 from aespa.api.benchmark_lab import router as benchmark_lab_router
 from aespa.api.events import router as events_router
+from aespa.api.extensions import router as extensions_router
 from aespa.api.reporting_debug import router as reporting_debug_router
 from aespa.api.sast_runs import router as sast_runs_router
 from aespa.api.scan import router as scan_router
@@ -35,6 +36,7 @@ from aespa.services import campaigns as campaigns_svc
 from aespa.services import codex_provider as codex_provider_svc
 from aespa.services import copilot_provider as copilot_provider_svc
 from aespa.services import droid_provider as droid_provider_svc
+from aespa.services import sast_sources as sast_sources_svc
 from aespa.services import validator as validator_svc
 from aespa.services.settings import get_cloudflare_access_config
 
@@ -42,6 +44,10 @@ from aespa.services.settings import get_cloudflare_access_config
 @asynccontextmanager
 async def _lifespan(app: FastAPI):  # noqa: ARG001
     init_db()
+    from aespa.extensions import get_extension_manager
+
+    get_extension_manager().load_extensions()
+    sast_sources_svc.reconcile_interrupted_source_preparations()
     alice_goals_svc.reconcile_interrupted_goals()
     await validator_svc.resume_interrupted_validations()
     campaigns_svc.reconcile_campaigns()
@@ -130,6 +136,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(api_collections_router)
     app.include_router(api_test_runs_router)
     app.include_router(sast_runs_router)
+    app.include_router(extensions_router)
     app.include_router(settings_router)
     app.include_router(test_runs_router)
     app.include_router(events_router)

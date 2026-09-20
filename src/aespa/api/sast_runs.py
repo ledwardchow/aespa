@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 import zipfile
@@ -54,6 +55,15 @@ _UPLOAD_CHUNK_BYTES = 1024 * 1024
 router = APIRouter(tags=["sast-runs"])
 
 
+class SastSourceRunCreate(BaseModel):
+    provider_id: str
+    parameters: dict[str, object]
+    name: str | None = None
+    analysis_mode: str = "deep"
+    llm_profile_id: int | None = None
+    start_scan: bool = True
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -64,6 +74,14 @@ def _get_run_or_404(session: Session, run_id: int) -> SastRun:
             status_code=status.HTTP_404_NOT_FOUND, detail="SAST run not found"
         )
     return run
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(_UPLOAD_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _to_summary(run: SastRun) -> SastRunSummary:
@@ -344,9 +362,75 @@ async def create_standalone_sast_run(
         name=name or f"SAST – {original_name}",
         source_archive_path=str(stored_path),
         source_filename=original_name,
+        source_provider="upload",
+        source_locator=original_name,
+        source_archive_sha256=_file_sha256(stored_path),
         analysis_mode=analysis_mode,
         llm_config_id=llm_config_id,
         llm_profile_id=llm_profile_id,
+    )
+    return _to_summary(run)
+
+
+@router.post(
+    "/api/sast-runs/from-source",
+    response_model=SastRunSummary,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_sast_run_from_source(
+    payload: SastSourceRunCreate,
+    session: Session = Depends(get_session),
+) -> SastRunSummary:
+    """Create a SAST run whose immutable archive is prepared by an extension."""
+    if payload.analysis_mode not in {"light", "deep"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Analysis mode must be either 'light' or 'deep'.",
+        )
+    if payload.llm_profile_id is not None:
+        from aespa.models import LLMProfile
+
+        if session.get(LLMProfile, payload.llm_profile_id) is None:
+            raise HTTPException(status_code=404, detail="Scan profile not found")
+
+    from aespa.extensions import get_extension_manager
+    from aespa.services import sast_scanner, sast_sources
+
+    manager = get_extension_manager()
+    manager.ensure_loaded()
+    registered = manager.source_providers.get(payload.provider_id)
+    if registered is None:
+        raise HTTPException(status_code=404, detail="SAST source provider not found")
+    availability = await registered.provider.check_availability(
+        manager.context_for(registered.extension_id)
+    )
+    if not availability.available:
+        raise HTTPException(status_code=409, detail=availability.message)
+
+    repository = payload.parameters.get("repository")
+    default_name = (
+        f"SAST - {repository}"
+        if isinstance(repository, str) and repository
+        else "SAST scan"
+    )
+    run = sast_scanner.create_sast_run(
+        collection_id=None,
+        name=(payload.name or "").strip() or default_name,
+        source_provider=payload.provider_id,
+        source_locator=repository if isinstance(repository, str) else None,
+        source_requested_ref=(str(payload.parameters.get("ref") or "").strip() or None),
+        source_metadata_json=json.dumps(
+            {"request": payload.parameters}, ensure_ascii=False
+        ),
+        analysis_mode=payload.analysis_mode,
+        llm_profile_id=payload.llm_profile_id,
+        status="preparing",
+    )
+    sast_sources.start_source_preparation(
+        run.id,
+        payload.provider_id,
+        payload.parameters,
+        auto_start=payload.start_scan,
     )
     return _to_summary(run)
 
@@ -529,9 +613,10 @@ async def delete_sast_run(run_id: int, session: Session = Depends(get_session)) 
             detail="Delete benchmark evaluations before deleting this SAST run",
         )
     from aespa.services import campaigns as campaigns_svc
-    from aespa.services import sast_scanner
+    from aespa.services import sast_scanner, sast_sources
 
     await campaigns_svc.stop_member_tasks_for_run("sast", run_id)
+    await sast_sources.stop_source_preparation_and_wait(run_id)
     if sast_scanner.is_sast_scan_running(run_id):
         await sast_scanner.stop_sast_scan_and_wait(run_id)
     run_cleanup.cascade_delete_sast_run(session, run_id)
@@ -546,7 +631,12 @@ async def start_sast_scan(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> dict:
-    _get_run_or_404(session, run_id)
+    run = _get_run_or_404(session, run_id)
+    if run.status == "preparing":
+        raise HTTPException(
+            status_code=409,
+            detail="The source snapshot is still being prepared.",
+        )
     from aespa.services import sast_scanner
 
     await sast_scanner.start_sast_scan(run_id)
@@ -559,10 +649,11 @@ async def stop_sast_scan(
     session: Session = Depends(get_session),
 ) -> dict:
     _get_run_or_404(session, run_id)
-    from aespa.services import sast_scanner
+    from aespa.services import sast_scanner, sast_sources
 
+    source_stopped = await sast_sources.stop_source_preparation_and_wait(run_id)
     stopped = await sast_scanner.stop_sast_scan(run_id)
-    return {"ok": True, "stopped": stopped}
+    return {"ok": True, "stopped": stopped or source_stopped}
 
 
 @router.post("/api/sast-runs/{run_id}/scan/pause")
@@ -623,9 +714,11 @@ def sast_scan_status(
     session: Session = Depends(get_session),
 ) -> dict:
     _get_run_or_404(session, run_id)
-    from aespa.services import sast_scanner
+    from aespa.services import sast_scanner, sast_sources
 
-    return sast_scanner.get_sast_status(run_id)
+    result = sast_scanner.get_sast_status(run_id)
+    result["preparing_source"] = sast_sources.is_source_preparation_running(run_id)
+    return result
 
 
 # ── SSE event stream ───────────────────────────────────────────────────────────

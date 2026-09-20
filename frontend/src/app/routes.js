@@ -207,6 +207,14 @@ export const routes = {
     ),
     props: () => ({}),
   },
+  extensions: {
+    section: "extensions",
+    Component: lazyNamed(
+      () => import("../features/extensions/ExtensionsPage.jsx"),
+      "ExtensionsPage",
+    ),
+    props: () => ({}),
+  },
   debug: {
     section: "debug",
     Component: lazyNamed(() => import("../features/settings/DebugPage.jsx"), "DebugPage"),

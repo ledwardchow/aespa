@@ -20,6 +20,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
   const onSettings = section === "settings";
   const onScanPolicy = section === "scan-policy";
   const onExternalIntegrations = section === "external-integrations";
+  const onExtensions = section === "extensions";
   const onSast = section === "sast";
   const onDebug = section === "debug";
   const onReportingDebug = section === "reporting-debug";
@@ -195,6 +196,16 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
             <IconShield />
           </span>
           {!collapsed && " External Integrations"}
+        </a>
+        <a
+          href="#/extensions"
+          className={"nav-item" + (onExtensions ? " active" : "")}
+          title="Extensions"
+        >
+          <span className="nav-icon">
+            <IconSettings />
+          </span>
+          {!collapsed && " Extensions"}
         </a>
         <a
           href="#/debug"

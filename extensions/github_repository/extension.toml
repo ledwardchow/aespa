@@ -1,0 +1,6 @@
+id = "github.repository"
+name = "GitHub repository source"
+version = "1.0.0"
+aespa_api = "1"
+entrypoint = "extension.py:create_extension"
+capabilities = ["sast.source_provider"]

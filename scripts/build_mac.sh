@@ -51,6 +51,7 @@ echo "==> Building app bundle with PyInstaller"
     --osx-bundle-identifier com.aespa.app \
     --add-data "$REPO_ROOT/src/aespa/web:aespa/web" \
     --add-data "$REPO_ROOT/src/aespa/services/data:aespa/services/data" \
+    --add-data "$REPO_ROOT/extensions:extensions" \
     --add-data "$REPO_ROOT/alembic.ini:." \
     --add-data "$REPO_ROOT/alembic:alembic" \
     --add-data "$REPO_ROOT/THIRD_PARTY_LICENSES.txt:." \

@@ -386,6 +386,12 @@ class SastRunSummary(BaseModel):
     collection_id: int | None
     document_id: int | None
     source_filename: str | None
+    source_provider: str = "upload"
+    source_locator: str | None = None
+    source_requested_ref: str | None = None
+    source_revision: str | None = None
+    source_archive_sha256: str | None = None
+    source_metadata_json: str | None = None
     name: str
     analysis_mode: Literal["light", "deep"] = "deep"
     status: str

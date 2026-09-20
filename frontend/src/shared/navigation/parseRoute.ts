@@ -120,6 +120,7 @@ export function parseRoute(hash = "#/"): Route {
     return { name: "settings", tab: "models", screen: "edit", id: +m[1] };
   if (routeHash === "#/scan-policy") return { name: "scan-policy" };
   if (routeHash === "#/external-integrations") return { name: "external-integrations" };
+  if (routeHash === "#/extensions") return { name: "extensions" };
   if (routeHash === "#/debug") return { name: "debug" };
   if (routeHash === "#/reporting-debug") return { name: "reporting-debug" };
   if (routeHash === "#/benchmark-lab") return { name: "benchmark-lab" };

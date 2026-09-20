@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -27,6 +28,11 @@ else:
 DEFAULT_DB_PATH = _DATA_ROOT / "aespa.db"
 DEFAULT_LOG_DB_PATH = _DATA_ROOT / "logs.db"
 DEFAULT_DATA_DIR = _DATA_ROOT / "aespa_data"
+DEFAULT_EXTENSIONS_DIR = _DATA_ROOT / "extensions"
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    BUNDLED_EXTENSIONS_DIR = Path(sys._MEIPASS) / "extensions"
+else:
+    BUNDLED_EXTENSIONS_DIR = PROJECT_ROOT / "extensions"
 
 
 class Settings(BaseSettings):
@@ -42,6 +48,7 @@ class Settings(BaseSettings):
     port: int = 8000
     web_dir: Path = DEFAULT_WEB_DIR
     data_dir: Path = DEFAULT_DATA_DIR
+    extensions_dir: Path = DEFAULT_EXTENSIONS_DIR
     app_version: str = _pkg_version
 
 

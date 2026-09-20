@@ -45,9 +45,27 @@ export const createStandaloneSastRun = (file, name, llm_profile_id, analysis_mod
   return req(`/api/sast-runs`, { method: "POST", body: fd });
 };
 
+export const createSastRunFromSource = ({
+  provider_id,
+  parameters,
+  name,
+  llm_profile_id,
+  analysis_mode,
+}) =>
+  req(`/api/sast-runs/from-source`, {
+    method: "POST",
+    body: {
+      provider_id,
+      parameters,
+      name,
+      llm_profile_id,
+      analysis_mode,
+      start_scan: true,
+    },
+  });
+
 export const getSastSarifUrl = (id, reportableOnly = false) =>
   `/api/sast-runs/${id}/sarif${reportableOnly ? "?reportable_only=true" : ""}`;
 
 export const getSastSarif = (id, reportableOnly = false) =>
   req(getSastSarifUrl(id, reportableOnly));
-
