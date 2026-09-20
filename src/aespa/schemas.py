@@ -866,8 +866,10 @@ class ScannerPolicyBase(BaseModel):
     sast_dependency_findings: bool = True
     sast_min_severity: Literal["low", "medium", "high", "critical"] = "low"
     sast_min_confidence: float = Field(default=0.35, ge=0, le=1)
+    sast_budget_mode: Literal["adaptive", "fixed"] = "adaptive"
     sast_baseline_budget: int = Field(default=80, ge=1, le=1000)
     sast_threat_budget: int = Field(default=60, ge=1, le=1000)
+    sast_worker_budget_max: int = Field(default=250, ge=1, le=1000)
     sast_closure_budget: int = Field(default=40, ge=1, le=1000)
     sast_validator_budget: int = Field(default=50, ge=1, le=1000)
 
@@ -916,6 +918,12 @@ class ScannerPolicyBase(BaseModel):
         ):
             raise ValueError(
                 "methods_by_mode must include methods for the selected scan_mode"
+            )
+        if self.sast_budget_mode == "adaptive" and self.sast_worker_budget_max < max(
+            self.sast_baseline_budget, self.sast_threat_budget
+        ):
+            raise ValueError(
+                "sast_worker_budget_max must be at least the baseline and threat minimums"
             )
         return self
 

@@ -3154,6 +3154,65 @@ def test_google_vertex_grok_cache_key_separates_agent_transcripts():
     assert "prompt_cache_key" not in gemini
 
 
+def test_google_vertex_grok_records_per_call_cache_telemetry(monkeypatch):
+    config = LLMConfig(provider="google_vertex", model="xai/grok-4.6")
+    cache_key = "aespa-stable-cache-key"
+    events: list[dict] = []
+    response = SimpleNamespace(
+        prompt_cache_key=cache_key,
+        metadata={"system_fingerprint": "fp_vertex_backend_42"},
+        usage=SimpleNamespace(
+            input_tokens=4096,
+            output_tokens=321,
+            input_tokens_details=SimpleNamespace(cached_tokens=3072),
+        ),
+    )
+    monkeypatch.setattr(llm, "_record_usage", lambda *args, **kwargs: None)
+    emit_token = llm._emit_fn_var.set(events.append)
+    call_token = llm._traffic_call_id_var.set(77)
+    operation_token = llm._traffic_operation_var.set("scanner.test_lead")
+    try:
+        telemetry = llm._record_responses_usage(
+            config,
+            response,
+            requested_prompt_cache_key=cache_key,
+        )
+    finally:
+        llm._traffic_operation_var.reset(operation_token)
+        llm._traffic_call_id_var.reset(call_token)
+        llm._emit_fn_var.reset(emit_token)
+
+    assert telemetry == {
+        "provider": "google_vertex",
+        "model": "xai/grok-4.6",
+        "call_id": 77,
+        "operation": "scanner.test_lead",
+        "requested_cache_key_fingerprint": llm._cache_key_fingerprint(cache_key),
+        "echoed_cache_key_fingerprint": llm._cache_key_fingerprint(cache_key),
+        "cache_key_echoed": True,
+        "cache_key_match": True,
+        "system_fingerprint": "fp_vertex_backend_42",
+        "input_tokens": 4096,
+        "uncached_input_tokens": 1024,
+        "output_tokens": 321,
+        "cache_read_tokens": 3072,
+        "cache_hit_percent": 75.0,
+    }
+    assert cache_key not in json.dumps(telemetry)
+    assert events == [
+        {
+            "type": "scanner_phase",
+            "phase": "llm_cache",
+            "status": "hit",
+            "message": (
+                "LLM prompt cache hit: 3,072 of 4,096 input tokens reused (75.00%)."
+            ),
+            "data": telemetry,
+            "_persist_only": True,
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("model", "expected_transport"),
     [("xai/grok-4.6", "responses"), ("gemini-2.5-flash", "google")],

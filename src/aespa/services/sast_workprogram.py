@@ -806,6 +806,58 @@ def worker_payload(worker_id: int) -> dict[str, Any]:
         }
 
 
+def discovery_worker_budget(
+    payload: dict[str, Any],
+    *,
+    security_check_count: int,
+    budget_mode: str,
+    minimum: int,
+    maximum: int,
+    is_baseline: bool = False,
+) -> tuple[int, dict[str, Any]]:
+    """Return a discovery budget and the inputs used to calculate it."""
+    work_items = list(payload.get("work_items") or [])
+    paths = {str(path) for path in payload.get("files") or [] if path}
+    paths.update(
+        str(item.get("surface", {}).get("path"))
+        for item in work_items
+        if item.get("surface", {}).get("path")
+    )
+    basis = {
+        "mode": budget_mode,
+        "minimum": minimum,
+        "maximum": maximum,
+        "work_items": len(work_items),
+        "security_checks": max(0, security_check_count),
+        "unique_files": len(paths),
+        "class_group": str(payload.get("class_group") or ""),
+        "baseline": is_baseline,
+    }
+    if budget_mode == "fixed":
+        basis["calculated"] = minimum
+        return minimum, basis
+
+    calculated = (
+        20 + 3 * len(work_items) + 2 * max(0, security_check_count) + 2 * len(paths)
+    )
+    if str(payload.get("class_group") or "") in {"access", "logic"}:
+        calculated = (calculated * 115 + 99) // 100
+    basis["calculated"] = calculated
+    return min(maximum, max(minimum, calculated)), basis
+
+
+def set_worker_budget(worker_id: int, budget: int, basis: dict[str, Any]) -> None:
+    with Session(get_engine()) as session:
+        worker = session.get(SastWorker, worker_id)
+        if worker is None:
+            return
+        worker.tool_call_budget = budget
+        worker.budget_basis_json = json.dumps(basis, sort_keys=True)
+        worker.updated_at = datetime.now(_UTC)
+        session.add(worker)
+        session.commit()
+
+
 def set_worker_status(
     worker_id: int, status: str, *, summary: str = "", error: str = ""
 ) -> None:

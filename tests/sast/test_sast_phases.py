@@ -1656,3 +1656,43 @@ def test_grep_scope_does_not_count_as_direct_file_review(tmp_path, isolated_db_e
         work_item_id, status="no_match", reasoning="No matching flow."
     )
     assert ok is True
+
+
+def test_discovery_worker_budget_scales_with_assigned_work():
+    from aespa.services.sast_workprogram import discovery_worker_budget
+
+    payload = {
+        "class_group": "access",
+        "files": ["app/routes.py"],
+        "work_items": [
+            {"surface": {"path": f"app/model_{index}.py"}} for index in range(20)
+        ],
+    }
+
+    budget, basis = discovery_worker_budget(
+        payload,
+        security_check_count=12,
+        budget_mode="adaptive",
+        minimum=60,
+        maximum=250,
+    )
+
+    assert budget == 168
+    assert basis["work_items"] == 20
+    assert basis["security_checks"] == 12
+    assert basis["unique_files"] == 21
+
+
+def test_discovery_worker_budget_keeps_fixed_mode_exact():
+    from aespa.services.sast_workprogram import discovery_worker_budget
+
+    budget, basis = discovery_worker_budget(
+        {"class_group": "sink", "work_items": [{}] * 40},
+        security_check_count=30,
+        budget_mode="fixed",
+        minimum=60,
+        maximum=250,
+    )
+
+    assert budget == 60
+    assert basis["calculated"] == 60

@@ -2586,11 +2586,33 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 if worker_id != baseline_worker_id
             ] or assignment_ids
             if threat_worker_ids:
-                for index, packet in enumerate(semantic_planning.get("workers", [])):
-                    worker_id = threat_worker_ids[index % len(threat_worker_ids)]
-                    semantic_assignments[worker_id].update(
-                        str(key) for key in packet.get("obligation_keys", [])
+                assignment_loads: dict[int, int] = {}
+                for worker_id in threat_worker_ids:
+                    worker_payload = workprogram_svc.worker_payload(worker_id)
+                    work_items = list(worker_payload.get("work_items") or [])
+                    assigned_paths = {
+                        str(item.get("surface", {}).get("path"))
+                        for item in work_items
+                        if item.get("surface", {}).get("path")
+                    }
+                    assignment_loads[worker_id] = 3 * len(work_items) + 2 * len(
+                        assigned_paths
                     )
+                obligation_keys = [
+                    str(key)
+                    for packet in semantic_planning.get("workers", [])
+                    for key in packet.get("obligation_keys", [])
+                ]
+                for obligation_key in obligation_keys:
+                    worker_id = min(
+                        threat_worker_ids,
+                        key=lambda candidate: (
+                            assignment_loads[candidate],
+                            candidate,
+                        ),
+                    )
+                    semantic_assignments[worker_id].add(obligation_key)
+                    assignment_loads[worker_id] += 2
 
             async def _run_discovery_worker(worker: SastWorker) -> str:
                 if worker.id is None:
@@ -2624,6 +2646,38 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                             ),
                         }
                     assigned_count = len(payload.get("work_items") or [])
+                    minimum_budget = (
+                        scanner_policy.sast_baseline_budget
+                        if worker.id == baseline_worker_id
+                        else scanner_policy.sast_threat_budget
+                    )
+                    calculated_budget, budget_basis = (
+                        workprogram_svc.discovery_worker_budget(
+                            payload,
+                            security_check_count=len(
+                                semantic_payload.get("obligations") or []
+                            ),
+                            budget_mode=scanner_policy.sast_budget_mode,
+                            minimum=minimum_budget,
+                            maximum=scanner_policy.sast_worker_budget_max,
+                            is_baseline=worker.id == baseline_worker_id,
+                        )
+                    )
+                    tool_call_budget = worker.tool_call_budget or calculated_budget
+                    if resume and scanner_policy.sast_budget_mode == "adaptive":
+                        saved_checkpoint = _load_checkpoint(
+                            sast_run_id,
+                            "discovery",
+                            _checkpoint_key(worker.worker_key),
+                        )
+                        used_calls = int(saved_checkpoint.get("step_count") or 0)
+                        if used_calls >= tool_call_budget:
+                            tool_call_budget = min(1000, used_calls + calculated_budget)
+                            budget_basis["resume_from_step"] = used_calls
+                            budget_basis["additional_budget"] = calculated_budget
+                    workprogram_svc.set_worker_budget(
+                        worker.id, tool_call_budget, budget_basis
+                    )
                     _emit_agent_activity(
                         sast_run_id,
                         agent_id=agent_id,
@@ -2694,11 +2748,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                             tools=SAST_TOOLS,
                             resume=resume,
                             done_check=_worker_done,
-                            max_tool_calls=(
-                                scanner_policy.sast_baseline_budget
-                                if worker.id == baseline_worker_id
-                                else scanner_policy.sast_threat_budget
-                            ),
+                            max_tool_calls=tool_call_budget,
                         )
                     except (
                         llm_svc.LLMQuotaPauseError,

@@ -241,6 +241,7 @@ def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
             entry["display_name"] = worker.worker_key
             entry["worker_key"] = worker.worker_key
             entry["class_group"] = worker.class_group
+            entry["tool_call_budget"] = worker.tool_call_budget or None
             continue
         if agent_id.startswith("sast-validator-"):
             candidate_id = agent_id.removeprefix("sast-validator-")

@@ -1036,6 +1036,13 @@ def test_llm_traffic_delimiters_identify_operation_and_pair(
     from aespa.services import llm
 
     async def fake_call_impl(config, prompt, screenshot):  # noqa: ARG001
+        llm._last_response_cache_telemetry_var.set(
+            {
+                "call_id": llm._traffic_call_id_var.get(),
+                "cache_read_tokens": 2048,
+                "system_fingerprint": "fp_test",
+            }
+        )
         return "model response"
 
     monkeypatch.setattr(llm, "_call_impl", fake_call_impl)
@@ -1059,6 +1066,9 @@ def test_llm_traffic_delimiters_identify_operation_and_pair(
     assert "END LLM operation=" in request
     assert "direction=RESPONSE" in response
     assert "model response" in response
+    assert '"cache_telemetry"' in response
+    assert '"cache_read_tokens": 2048' in response
+    assert '"system_fingerprint": "fp_test"' in response
     request_call = request.split("call=", 1)[1].split(" |", 1)[0]
     response_call = response.split("call=", 1)[1].split(" |", 1)[0]
     assert request_call == response_call
