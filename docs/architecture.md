@@ -4,7 +4,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 
 - **Web application scanning** - discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage in Quick, Standard, Full, and experimental Team modes, while SAST Validate focuses only on imported SAST leads.
 - **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
-- **SAST assistance** — a standalone agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
+- **SAST assistance** - a standalone agentic static-analysis pass over an uploaded source ZIP or an immutable repository snapshot that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
 - **Multi-repository systems** - when a product's code is split across several repositories/micro-frontends, a **System** groups them (with immutable uploaded ZIP snapshots) alongside the existing Sites/API Collections that make up the live product. An **AssessmentCampaign** coordinates ordinary SAST/web/API child runs for that system, joins compact per-repository interface facts into a cross-repository map, and proposes which live target should receive each SAST lead, subject to human review before any dynamic scan starts.
 
 ---
@@ -62,7 +62,8 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 17. [SAST Scanner & Scan Leads](#17-sast-scanner--scan-leads)
     - [Architecture overview](#architecture-overview-1) · [File tools](#file-tools-all-path-jailed-to-the-extraction-root) · [Lead lifecycle](#lead-lifecycle)
     - [ScanLead entity](#scanlead-entity-servicesscan_leadspy) · [Lead consumption (API vs web)](#lead-consumption-api-vs-web) · [Concurrency](#concurrency)
-18. [Systems & Multi-Repository Campaigns](#18-systems--multi-repository-campaigns)
+18. [Extensions](#18-extensions)
+19. [Systems & Multi-Repository Campaigns](#19-systems--multi-repository-campaigns)
     - [Data model](#data-model) · [Component facts](#component-facts-servicescomponent_factspy)
     - [Correlation](#correlation-servicescorrelationpy) · [Review gate](#review-gate) · [Campaign lifecycle](#campaign-lifecycle-servicescampaignspy)
     - [Cleanup & restart recovery](#cleanup--restart-recovery)
@@ -1749,7 +1750,7 @@ ALICE wrapper is made fully API-aware.
 
 **Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
 
-The SAST scanner is a standalone agentic static-analysis pass over an uploaded source archive that produces high-confidence vulnerability **leads**. It is created from the SAST screen with `POST /api/sast-runs` (multipart); `collection_id` is NULL and the archive is stored on the run (`source_archive_path` / `source_filename`). Users choose `analysis_mode=light` for the original lower-cost workflow or `analysis_mode=deep` for the current semantic workflow. The mode is saved on the run and used for starts, resumes, and reruns. Existing runs are migrated as Light. New API callers that omit the field use Deep. A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
+The SAST scanner is a standalone agentic static-analysis pass over an immutable source archive that produces high-confidence vulnerability **leads**. Uploads use `POST /api/sast-runs` (multipart). Extension source providers use `POST /api/sast-runs/from-source`; the run enters `preparing` while the provider resolves the source and AESPA creates the archive. In both cases `collection_id` is NULL and the final archive is stored on the run (`source_archive_path` / `source_filename`). Users choose `analysis_mode=light` for the original lower-cost workflow or `analysis_mode=deep` for the current semantic workflow. The mode is saved on the run and used for starts, resumes, and reruns. Existing runs are migrated as Light. New API callers that omit the field use Deep. A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
 
 ### Architecture overview
 
@@ -1916,7 +1917,21 @@ frequency, and pass/fail results for configured minimum or maximum thresholds.
 The navigation and APIs remain hidden from the sidebar until the persisted
 Testing Features toggle is enabled; hiding it does not delete evaluator data.
 
-## 18. Systems & Multi-Repository Campaigns
+## 18. Extensions
+
+**Files**: `src/aespa/extensions/`, `extensions/`, `src/aespa/api/extensions.py`, `src/aespa/services/sast_sources.py`
+
+AESPA loads trusted Python extensions at startup. Shipped extensions live in the repository's top-level `extensions/` directory and are included as runtime data in desktop builds. The extension manager scans that directory and the configured user extension directory for subdirectories containing `extension.toml`. Each manifest declares its ID, version, AESPA extension API version, entrypoint, and capabilities. Load failures are kept as diagnostics and do not stop other extensions or the application. Enabled state is stored in the database. Disabling an extension unloads its capabilities without importing its code, and enabling it reloads the registry immediately.
+
+Extensions register typed capabilities through `ExtensionRegistry`. They do not add FastAPI routes, frontend modules, or database models. The initial `sast.source_provider` capability describes settings fields, new-run fields, an availability check, and an asynchronous materializer. The frontend reads these descriptions from `/api/extensions` and `/api/extensions/source-providers`, so several extensions can populate the same settings and SAST source screens.
+
+`sast_sources.start_source_preparation()` owns the background lifecycle. It asks the provider for an archive, extracts it using the same SAST limits, creates a normalized archive, calculates its checksum, saves source provenance on `SastRun`, and optionally starts the ordinary scanner. Extension settings are stored separately by extension ID and may contain non-secret executable paths and options. Credentials remain in local CLI or operating-system credential stores.
+
+See `docs/extensions.md` for the extension manifest and provider contract.
+
+---
+
+## 19. Systems & Multi-Repository Campaigns
 
 **Files**: `src/aespa/services/systems.py`, `src/aespa/services/campaigns.py`, `src/aespa/services/correlation.py`, `src/aespa/services/component_facts.py`, `src/aespa/services/component_mapper.py`, `src/aespa/services/source_tools.py`, `src/aespa/api/systems.py`
 

@@ -861,6 +861,12 @@ async def start_campaign(campaign_id: int) -> None:
                     name=f"{component.name} — {campaign.name}",
                     source_archive_path=snapshot.stored_path,
                     source_filename=snapshot.filename,
+                    source_provider="component_snapshot",
+                    source_locator=snapshot.filename,
+                    source_archive_sha256=snapshot.sha256,
+                    source_metadata_json=json.dumps(
+                        {"component_snapshot_id": snapshot.id}
+                    ),
                     llm_config_id=campaign.llm_config_id,
                     llm_profile_id=campaign.llm_profile_id,
                     triggered_by_run_type="campaign",
@@ -1320,6 +1326,10 @@ async def resume_source_member(campaign_id: int, member_id: int) -> None:
                 name=f"{component.name} — {campaign.name}",
                 source_archive_path=snapshot.stored_path,
                 source_filename=snapshot.filename,
+                source_provider="component_snapshot",
+                source_locator=snapshot.filename,
+                source_archive_sha256=snapshot.sha256,
+                source_metadata_json=json.dumps({"component_snapshot_id": snapshot.id}),
                 llm_config_id=campaign.llm_config_id,
                 llm_profile_id=campaign.llm_profile_id,
                 triggered_by_run_type="campaign",

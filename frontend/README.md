@@ -15,7 +15,7 @@ npm run format
 
 Run the backend separately with `uv run aespa` from the repository root. Use the Vite URL during UI development. The backend serves the compiled bundle, so source edits appear there only after a build.
 
-`npm run build` writes directly to `../src/aespa/web/`. Commit those generated files alongside UI changes. Never edit them manually. Startup also checks source, public assets, the HTML entry, package files, and Vite configuration for changes requiring a rebuild.
+`npm run build` writes directly to `../src/aespa/web/`. This generated folder is ignored by Git. Build it locally before running the backend or creating a desktop package, and never edit it manually. Startup also checks source, public assets, the HTML entry, package files, and Vite configuration for changes requiring a rebuild.
 
 ## Finding code
 

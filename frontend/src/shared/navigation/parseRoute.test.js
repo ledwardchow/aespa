@@ -51,6 +51,7 @@ test.each([
   ["#/settings/models/7/edit", { name: "settings", tab: "models", screen: "edit", id: 7 }],
   ["#/scan-policy", { name: "scan-policy" }],
   ["#/external-integrations", { name: "external-integrations" }],
+  ["#/extensions", { name: "extensions" }],
   ["#/debug", { name: "debug" }],
   ["#/reporting-debug", { name: "reporting-debug" }],
   ["#/benchmark-lab", { name: "benchmark-lab" }],

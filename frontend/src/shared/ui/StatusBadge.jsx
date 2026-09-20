@@ -11,6 +11,7 @@ const VARIANT = {
   analyzing: "running",
   analysing: "running",
   crawling: "running",
+  preparing: "running",
   stopping: "stopping",
   failed: "danger",
   cancelled: "danger",
@@ -38,6 +39,7 @@ const LABEL_OVERRIDE = {
   awaiting_review: "awaiting review",
   dast_running: "testing live targets",
   incomplete: "incomplete — resume available",
+  preparing: "preparing source",
 };
 
 export function StatusBadge({ status, className = "" }) {

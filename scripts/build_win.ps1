@@ -54,6 +54,7 @@ if (Test-Path "dist\AESPA") { Remove-Item -Recurse -Force "dist\AESPA" }
     --icon "$RepoRoot\$Ico" `
     --add-data "$RepoRoot\src\aespa\web;aespa\web" `
     --add-data "$RepoRoot\src\aespa\services\data;aespa\services\data" `
+    --add-data "$RepoRoot\extensions;extensions" `
     --add-data "$RepoRoot\alembic.ini;." `
     --add-data "$RepoRoot\alembic;alembic" `
     --add-data "$RepoRoot\THIRD_PARTY_LICENSES.txt;." `
