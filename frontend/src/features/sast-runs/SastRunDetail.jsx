@@ -4,12 +4,7 @@ import { SastRunActionsMenu } from "./SastRunActionsMenu.jsx";
 import { ActivityView } from "./ActivityView.jsx";
 import { CoverageView } from "./CoverageView.jsx";
 import { CandidatesView } from "./CandidatesView.jsx";
-import {
-  EfficiencyView,
-  ObligationsView,
-  RepositoryModelView,
-  ThreatModelView,
-} from "./SemanticAnalysisView.jsx";
+import { EfficiencyView, RepositoryModelView, ThreatModelView } from "./SemanticAnalysisView.jsx";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -27,13 +22,13 @@ const DEEP_PHASES = [
   { key: "scope", label: "Scope", short: "Archive and inventory", view: "coverage" },
   { key: "repository_model", label: "Model", short: "Repository facts", view: "model" },
   { key: "threat_model", label: "Threats", short: "Assets and boundaries", view: "threats" },
-  { key: "planning", label: "Planning", short: "Required security checks", view: "obligations" },
+  { key: "planning", label: "Planning", short: "Required security checks", view: "threats" },
   { key: "discovery", label: "Discovery", short: "Source-to-sink candidates", view: "candidates" },
   {
     key: "reconciliation",
     label: "Reconcile",
     short: "Merge and split candidates",
-    view: "obligations",
+    view: "threats",
   },
   {
     key: "validation",
@@ -41,7 +36,7 @@ const DEEP_PHASES = [
     short: "Controls and counterevidence",
     view: "candidates",
   },
-  { key: "closure", label: "Closure", short: "Resolve security gaps", view: "obligations" },
+  { key: "closure", label: "Closure", short: "Resolve security gaps", view: "threats" },
   {
     key: "attack_path",
     label: "Attack paths",
@@ -55,26 +50,24 @@ const LIGHT_PHASES = DEEP_PHASES.filter((phase) =>
   ["scope", "discovery", "validation", "attack_path", "report"].includes(phase.key),
 );
 
-const TAB_ALIASES = { overview: "coverage", progress: "coverage", leads: "candidates" };
+const TAB_ALIASES = {
+  overview: "coverage",
+  progress: "coverage",
+  leads: "candidates",
+  obligations: "threats",
+};
 const TAB_PHASES = {
   model: "repository_model",
   threats: "threat_model",
-  obligations: "closure",
   efficiency: "report",
   candidates: "discovery",
 };
 
 function normaliseTab(tab) {
   const candidate = TAB_ALIASES[tab] || tab;
-  return [
-    "coverage",
-    "model",
-    "threats",
-    "obligations",
-    "efficiency",
-    "candidates",
-    "activity",
-  ].includes(candidate)
+  return ["coverage", "model", "threats", "efficiency", "candidates", "activity"].includes(
+    candidate,
+  )
     ? candidate
     : "coverage";
 }
@@ -497,10 +490,6 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                     key: "threats",
                     label: `Threats ${asArray(threatModel.scenarios).length}`,
                   },
-                  {
-                    key: "obligations",
-                    label: `Security checks ${asArray(planning.obligations).length}`,
-                  },
                   { key: "efficiency", label: "Execution Summary" },
                 ]
               : []),
@@ -617,10 +606,8 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             <RepositoryModelView model={repositoryModel} status={semanticStatus} />
           )}
           {tab === "threats" && (
-            <ThreatModelView threatModel={threatModel} status={semanticStatus} />
-          )}
-          {tab === "obligations" && (
-            <ObligationsView
+            <ThreatModelView
+              threatModel={threatModel}
               planning={planning}
               closure={closure}
               report={analysis.report}

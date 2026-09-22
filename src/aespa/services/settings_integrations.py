@@ -76,6 +76,9 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
         scan_mode=cfg.scan_mode,
         max_probes_per_page=cfg.max_probes_per_page,
         thinking_max_steps=cfg.thinking_max_steps,
+        dast_max_concurrent_llm_requests=getattr(
+            cfg, "dast_max_concurrent_llm_requests", 4
+        ),
         request_timeout_s=cfg.request_timeout_s,
         min_delay_s=cfg.min_delay_s,
         max_request_body_bytes=cfg.max_request_body_bytes,
@@ -102,6 +105,9 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
         sast_worker_budget_max=getattr(cfg, "sast_worker_budget_max", 250),
         sast_closure_budget=getattr(cfg, "sast_closure_budget", 40),
         sast_validator_budget=getattr(cfg, "sast_validator_budget", 50),
+        sast_max_concurrent_llm_requests=getattr(
+            cfg, "sast_max_concurrent_llm_requests", 4
+        ),
         updated_at=cfg.updated_at,
     )
 
@@ -172,6 +178,7 @@ def upsert_scanner_policy(
     cfg.scan_mode = payload.scan_mode
     cfg.max_probes_per_page = payload.max_probes_per_page
     cfg.thinking_max_steps = payload.thinking_max_steps
+    cfg.dast_max_concurrent_llm_requests = payload.dast_max_concurrent_llm_requests
     cfg.request_timeout_s = payload.request_timeout_s
     cfg.min_delay_s = payload.min_delay_s
     cfg.max_request_body_bytes = payload.max_request_body_bytes
@@ -196,6 +203,7 @@ def upsert_scanner_policy(
     cfg.sast_worker_budget_max = payload.sast_worker_budget_max
     cfg.sast_closure_budget = payload.sast_closure_budget
     cfg.sast_validator_budget = payload.sast_validator_budget
+    cfg.sast_max_concurrent_llm_requests = payload.sast_max_concurrent_llm_requests
     cfg.updated_at = _utcnow()
 
     session.add(cfg)

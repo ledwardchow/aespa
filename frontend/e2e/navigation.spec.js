@@ -8,7 +8,7 @@ const screens = [
   ["#/sites/1", "Fixture site"],
   ["#/sites/new", "New Site"],
   ["#/settings", "LLM Profiles"],
-  ["#/scan-policy", "Agent Settings"],
+  ["#/scan-policy", "Settings"],
   ["#/external-integrations", "External Integrations"],
   ["#/apis", "Fixture API"],
   ["#/apis/1", "Fixture API"],
@@ -548,23 +548,25 @@ test("multi-user crawl progress expands and collapses", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test("System Settings groups feature visibility and debug controls into tabs", async ({ page }) => {
+test("Settings groups feature visibility and debug controls under Global", async ({ page }) => {
   await installFixtures(page);
-  await page.goto("/#/debug");
+  await page.goto("/#/scan-policy");
 
   const featureTab = page.getByRole("tab", { name: "Feature Visibility", exact: true });
   const debugTab = page.getByRole("tab", { name: "Debug Settings", exact: true });
   await expect(featureTab).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("Browser", { exact: true })).toBeVisible();
   await expect(page.getByText("Reporting Lab", { exact: true })).toBeVisible();
-  await expect(page.getByText("Systems", { exact: true })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: "Systems scanning", exact: true })).toBeVisible();
   await expect(page.getByText("Sitemap Graph", { exact: true })).toHaveCount(0);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-settings-global.png") });
 
   await debugTab.click();
   await expect(debugTab).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("Sitemap Graph", { exact: true })).toBeVisible();
   await expect(page.getByText("Cloudflare Access", { exact: true })).toBeVisible();
   await expect(page.getByText("Browser", { exact: true })).toHaveCount(0);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-settings-debug.png") });
 });
 
 test("headless Linux disables browser windows and guided login", async ({ page }) => {
@@ -597,10 +599,10 @@ test("headless Linux disables browser windows and guided login", async ({ page }
   await page.screenshot({ path: path.join(tmpdir(), "aespa-headless-guided-login.png") });
 });
 
-test("Agent Settings keeps inner tabs flush with its content column", async ({ page }) => {
+test("Settings keeps inner tabs flush with its content column", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/scan-policy");
-  const outer = page.getByRole("tablist", { name: "Agent settings", exact: true });
+  const outer = page.getByRole("tablist", { name: "Settings", exact: true });
   await expect(outer).toBeVisible();
   const inner = page.locator(".coverage-sub-tab-bar");
   await expect(inner).toBeVisible();
@@ -608,12 +610,11 @@ test("Agent Settings keeps inner tabs flush with its content column", async ({ p
     b = await inner.boundingBox();
   expect(Math.abs(a.x - b.x)).toBeLessThan(1);
   expect(Math.abs(a.x + a.width - (b.x + b.width))).toBeLessThan(1);
-  await page.getByRole("tab", { name: "Crawler", exact: true }).click();
-  await expect(inner).toHaveCount(0);
-  await page.getByRole("tab", { name: "Global", exact: true }).click();
-  await expect(inner).toBeVisible();
+  await page.getByRole("tab", { name: "DAST", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Scan Behaviour", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "HTTP Headers", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Save policy", exact: true })).toBeVisible();
-  await page.screenshot({ path: path.join(tmpdir(), "aespa-agent-settings-desktop.png") });
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-settings-desktop.png") });
 });
 
 test("validator outcomes stay beside their finding titles", async ({ page }) => {
@@ -909,14 +910,7 @@ test("SAST summary cards only appear on the Coverage tab", async ({ page }) => {
   await expect(summary).toBeVisible();
   await expect(summary.locator(":scope > div")).toHaveCount(7);
 
-  for (const tabName of [
-    "Model",
-    /^Threats/,
-    /^Security checks/,
-    "Execution Summary",
-    /^Candidates/,
-    "Activity",
-  ]) {
+  for (const tabName of ["Model", /^Threats/, "Execution Summary", /^Candidates/, "Activity"]) {
     await viewTabs.getByRole("tab", { name: tabName }).click();
     await expect(summary).toHaveCount(0);
   }
@@ -927,6 +921,99 @@ test("SAST summary cards only appear on the Coverage tab", async ({ page }) => {
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(errors).toEqual([]);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-coverage-summary.png") });
+});
+
+test("SAST threats include security check progress without a duplicate tab", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.route("**/api/sast-runs/1/analysis", (route) =>
+    route.fulfill({
+      json: {
+        phases: {
+          threat_model: {
+            data: {
+              summary: "One source-backed threat scenario.",
+              assets: [{ id: "asset-1", name: "Account records" }],
+              stores: [{ id: "store-1", name: "Customer database" }],
+              files_reviewed: 12,
+              quality: { status: "full", reasons: [] },
+              scenarios: [
+                {
+                  scenario_key: "scenario-1",
+                  title: "Protect account access",
+                  status: "planned",
+                  priority: "high",
+                  confidence: 0.92,
+                  actor: "authenticated user",
+                  security_objective: "enforce account ownership",
+                  impact: "unauthorized access to another customer's records",
+                  evidence: ["src/accounts.py:12"],
+                },
+              ],
+            },
+          },
+          planning: {
+            data: {
+              obligations: [
+                {
+                  obligation_key: "obligation-1",
+                  obligation_type: "threat_scenario",
+                  source_scenario_key: "scenario-1",
+                  security_question: "Can one user read another account?",
+                  priority: "high",
+                  status: "assessed_safe",
+                  disposition: "assessed_safe",
+                  reasoning: "Ownership is checked before the account is loaded.",
+                  evidence: ["src/accounts.py:18"],
+                  open_questions: [],
+                },
+              ],
+            },
+          },
+          closure: { data: { status: "full", reasons: [] } },
+        },
+        coverage: { files: [], summary: {} },
+        work_program: {},
+        assurance: {},
+        report: { candidates: 0, reportable: 0 },
+      },
+    }),
+  );
+
+  await page.goto("/#/sast-runs/1/threats");
+
+  const viewTabs = page.getByRole("tablist", { name: "SAST run views" });
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.getByText("Fixture SAST", { exact: true })).toBeVisible();
+  await expect(viewTabs.getByRole("tab", { name: "Threats 1" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(viewTabs.getByRole("tab", { name: /Security checks/ })).toHaveCount(0);
+  await expect(page.getByText("Security check progress")).toBeVisible();
+  await expect(page.getByText("1 of 1 checks completed · 0 reportable candidates")).toBeVisible();
+
+  await page.getByText("Protect account access").click();
+  await expect(page.getByText("Can one user read another account?")).toBeVisible();
+  await expect(page.getByText("Ownership is checked before the account is loaded.")).toBeVisible();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-threats-consolidated.png") });
+
+  await page.getByText("Can one user read another account?").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-threats-check-details.png") });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByText("Protect account access")).toBeVisible();
+  await expect(page.getByText("Can one user read another account?")).toBeVisible();
+  await page.getByText("Can one user read another account?").scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: path.join(tmpdir(), "aespa-sast-threats-consolidated-mobile.png"),
+  });
 });
 
 test("light SAST phases fill the available progress row", async ({ page }) => {

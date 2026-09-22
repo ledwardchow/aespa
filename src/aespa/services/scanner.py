@@ -79,8 +79,8 @@ from aespa.services.settings import (
     get_burp_rest_api_config_model,
     get_global_http_header_config,
     get_llm_config_for_role,
-    get_reporting_debug_config,
     get_run_scanner_policy,
+    get_scanner_policy,
     get_specialist_agent_config,
     get_upstream_proxy_config,
 )
@@ -9141,13 +9141,13 @@ async def _do_thinking_scan(
                 )
 
             with Session(get_engine()) as _s:
-                reporting_cfg = get_reporting_debug_config(_s)
+                agent_policy = get_scanner_policy(_s)
             raw_findings = await llm_svc.analyse_probes(
                 llm_cfg,
                 base_url,
                 all_results,
                 on_batch_complete=_on_batch_complete,
-                max_concurrent_batches=reporting_cfg.batch_max_concurrent,
+                max_concurrent_batches=agent_policy.dast_max_concurrent_llm_requests,
             )
             # Normalise titles against existing findings so the same vulnerability
             # class gets a consistent title regardless of which step found it.

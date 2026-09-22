@@ -1,6 +1,6 @@
 import { PolicySettings } from "./ScannerPolicySettings.jsx";
 
-function BudgetField({ form, upd, field, label, hint }) {
+function BudgetField({ form, upd, field, label, hint, max = 1000 }) {
   return (
     <div className="field">
       <label htmlFor={field}>{label}</label>
@@ -8,7 +8,7 @@ function BudgetField({ form, upd, field, label, hint }) {
         id={field}
         type="number"
         min="1"
-        max="1000"
+        max={max}
         value={form[field]}
         onChange={(event) => upd({ [field]: event.target.value })}
       />
@@ -50,6 +50,14 @@ export function SastPolicyFields({ form, upd }) {
           </div>
         </div>
         <div className="form-grid two-col">
+          <BudgetField
+            form={form}
+            upd={upd}
+            field="sast_max_concurrent_llm_requests"
+            label="Concurrent LLM requests"
+            hint="Maximum LLM requests that SAST agents can have in flight. Default: 4."
+            max={100}
+          />
           <BudgetField
             form={form}
             upd={upd}

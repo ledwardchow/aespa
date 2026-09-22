@@ -36,6 +36,7 @@ const profile = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  settingsApi.discoverModelOptions.mockResolvedValue({ capabilities: {} });
 });
 
 test("edits rate limits on the selected provider and model pair", async () => {
@@ -80,4 +81,32 @@ test("edits rate limits on the selected provider and model pair", async () => {
       max_rpm: 90,
     }),
   );
+});
+
+test("loads thinking levels on the first edit when only the context window was saved", async () => {
+  settingsApi.discoverModelOptions.mockResolvedValue({
+    capabilities: {
+      "model-a": {
+        context_window_tokens: 128000,
+        supported_efforts: ["low", "medium", "high"],
+        default_effort: "medium",
+      },
+    },
+  });
+
+  render(<LLMModelForm mode="edit" profile={profile} providers={[provider]} />);
+
+  await waitFor(() => expect(settingsApi.discoverModelOptions).toHaveBeenCalledTimes(1));
+  expect(settingsApi.discoverModelOptions).toHaveBeenCalledWith(
+    expect.objectContaining({ provider_id: provider.id }),
+  );
+  const thinkingLevel = screen.getByLabelText(/Thinking level/);
+  await waitFor(() => expect(thinkingLevel.options).toHaveLength(4));
+  expect([...thinkingLevel.options].map((option) => option.value)).toEqual([
+    "",
+    "low",
+    "medium",
+    "high",
+  ]);
+  expect(thinkingLevel.options[0].textContent).toContain("medium");
 });

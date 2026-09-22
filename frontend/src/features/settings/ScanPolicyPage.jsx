@@ -2,11 +2,7 @@ import { Tabs } from "../../shared/ui/Tabs.tsx";
 import styles from "./ScanPolicyPage.module.css";
 import { useState } from "react";
 import { ValidatorSettings } from "./ValidatorSettings.jsx";
-import {
-  GlobalPolicySettings,
-  GlobalPolicySubTabs,
-  ScannerPolicySettings,
-} from "./ScannerPolicySettings.jsx";
+import { GlobalPolicySettings, ScannerPolicySettings } from "./ScannerPolicySettings.jsx";
 import { SpecialistAgentSettings } from "./SpecialistAgentSettings.jsx";
 import { ReportingSettings } from "./ReportingSettings.jsx";
 import { CrawlerSettings } from "./CrawlerSettings.jsx";
@@ -14,6 +10,7 @@ import { ComponentMapperSettings } from "./ComponentMapperSettings.jsx";
 import { CodeExecutionSettings } from "./CodeExecutionSettings.jsx";
 import { DeepScanSettings } from "./DeepScanSettings.jsx";
 import { SastSettings } from "./SastSettings.jsx";
+import { SystemSettingsPanels } from "./DebugPage.jsx";
 
 const TOP_LEVEL_TABS = [
   { key: "global", label: "Global" },
@@ -23,6 +20,8 @@ const TOP_LEVEL_TABS = [
 ];
 
 const DAST_TABS = [
+  { key: "scan-behaviour", label: "Scan Behaviour" },
+  { key: "headers", label: "HTTP Headers" },
   { key: "crawler", label: "Crawler" },
   { key: "scanner", label: "Test Lead" },
   { key: "specialists", label: "Specialist" },
@@ -32,10 +31,29 @@ const DAST_TABS = [
   { key: "deep", label: "Deep Scan" },
 ];
 
-export function ScanPolicyPage({ showDeepScan = false, showSystems = true }) {
+const GLOBAL_TABS = [
+  { key: "features", label: "Feature Visibility" },
+  { key: "debug", label: "Debug Settings" },
+];
+
+export function ScanPolicyPage({
+  showUsername,
+  setShowUsername,
+  showSystems = true,
+  setShowSystems,
+  showDeepScan = false,
+  setShowDeepScan,
+  showTeamScan,
+  setShowTeamScan,
+  username,
+  reportingDebugCfg,
+  setReportingDebugCfg,
+  benchmarkLabCfg,
+  setBenchmarkLabCfg,
+}) {
   const [tab, setTab] = useState("global");
-  const [globalTab, setGlobalTab] = useState("scan-behaviour");
-  const [dastTab, setDastTab] = useState("crawler");
+  const [globalTab, setGlobalTab] = useState("features");
+  const [dastTab, setDastTab] = useState("scan-behaviour");
   const topLevelTabs = showSystems
     ? TOP_LEVEL_TABS
     : TOP_LEVEL_TABS.filter((agentTab) => agentTab.key !== "systems");
@@ -45,11 +63,20 @@ export function ScanPolicyPage({ showDeepScan = false, showSystems = true }) {
   return (
     <>
       <div className="topbar">
-        <div className="topbar-title">Agent Settings</div>
+        <div className="topbar-title">Settings</div>
       </div>
       <div className={`content ${styles.content}`}>
-        <Tabs label="Agent settings" tabs={topLevelTabs} value={tab} onChange={setTab} />
-        {tab === "global" && <GlobalPolicySubTabs tab={globalTab} setTab={setGlobalTab} />}
+        <Tabs label="Settings" tabs={topLevelTabs} value={tab} onChange={setTab} />
+        {tab === "global" && (
+          <Tabs
+            label="Global settings"
+            tabs={GLOBAL_TABS}
+            value={globalTab}
+            onChange={setGlobalTab}
+            className={`activity-sub-tab-bar coverage-sub-tab-bar ${styles.subTabs}`}
+            buttonClassName="activity-sub-tab-btn coverage-sub-tab-btn"
+          />
+        )}
         {tab === "dast" && (
           <Tabs
             label="DAST agent settings"
@@ -61,8 +88,31 @@ export function ScanPolicyPage({ showDeepScan = false, showSystems = true }) {
           />
         )}
         <div className={`scroll-content ${styles.scroll}`}>
-          {tab === "global" && <GlobalPolicySettings tab={globalTab} />}
+          {tab === "global" && (
+            <div className={styles.systemSettingsPanels}>
+              <SystemSettingsPanels
+                tab={globalTab}
+                showUsername={showUsername}
+                setShowUsername={setShowUsername}
+                showSystems={showSystems}
+                setShowSystems={setShowSystems}
+                showDeepScan={showDeepScan}
+                setShowDeepScan={setShowDeepScan}
+                showTeamScan={showTeamScan}
+                setShowTeamScan={setShowTeamScan}
+                username={username}
+                reportingDebugCfg={reportingDebugCfg}
+                setReportingDebugCfg={setReportingDebugCfg}
+                benchmarkLabCfg={benchmarkLabCfg}
+                setBenchmarkLabCfg={setBenchmarkLabCfg}
+              />
+            </div>
+          )}
           {tab === "systems" && <ComponentMapperSettings />}
+          {tab === "dast" && dastTab === "scan-behaviour" && (
+            <GlobalPolicySettings tab="scan-behaviour" />
+          )}
+          {tab === "dast" && dastTab === "headers" && <GlobalPolicySettings tab="headers" />}
           {tab === "dast" && dastTab === "crawler" && <CrawlerSettings />}
           {tab === "dast" && dastTab === "scanner" && <ScannerPolicySettings />}
           {tab === "dast" && dastTab === "specialists" && <SpecialistAgentSettings />}

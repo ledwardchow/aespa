@@ -82,3 +82,45 @@ test("shows scanner events without reloading every SAST endpoint", async () => {
   expect(sastRunsApi.getSastTokenUsage).toHaveBeenCalledTimes(1);
   expect(sastRunsApi.getSastHandoffTargets).toHaveBeenCalledTimes(1);
 });
+
+test("opens legacy security check links in the consolidated Threats view", async () => {
+  sastRunsApi.getSastAnalysis.mockResolvedValue({
+    phases: {
+      threat_model: {
+        data: {
+          summary: "One source-backed scenario.",
+          scenarios: [
+            {
+              scenario_key: "scenario-1",
+              title: "Protect account access",
+              status: "planned",
+              priority: "high",
+              confidence: 0.8,
+            },
+          ],
+        },
+      },
+      planning: {
+        data: {
+          obligations: [
+            {
+              obligation_key: "obligation-1",
+              source_scenario_key: "scenario-1",
+              status: "pending",
+            },
+          ],
+        },
+      },
+    },
+    coverage: { files: [], summary: {} },
+    work_program: {},
+    assurance: {},
+    report: {},
+  });
+
+  render(<SastRunDetailExperience runId={249} initialTab="obligations" />);
+
+  expect(await screen.findByText("Protect account access")).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Threats 1" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.queryByRole("tab", { name: /Security checks/ })).toBeNull();
+});

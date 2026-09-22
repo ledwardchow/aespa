@@ -80,8 +80,9 @@ export function LLMModelForm({
     storedCapability.context_window_tokens || storedCapability.context_length || 0,
   );
   const hasStoredContext = storedContext >= 1024;
+  const hasStoredEfforts = Array.isArray(storedCapability.supported_efforts);
   useEffect(() => {
-    if (!selectedProvider || !form.model || hasStoredContext) {
+    if (!selectedProvider || !form.model || (hasStoredContext && hasStoredEfforts)) {
       setDiscoveredCapabilities({});
       setLoadingCapabilities(false);
       return undefined;
@@ -109,7 +110,7 @@ export function LLMModelForm({
     return () => {
       cancelled = true;
     };
-  }, [selectedProvider, models, form.model, hasStoredContext]);
+  }, [selectedProvider, models, form.model, hasStoredContext, hasStoredEfforts]);
   const capability = {
     ...(discoveredCapabilities[form.model] || {}),
     ...storedCapability,
@@ -206,10 +207,11 @@ export function LLMModelForm({
           </select>
         </div>
         <div className="field">
-          <label>
+          <label htmlFor="model-config-thinking-level">
             Thinking level <span className="field-optional">(optional)</span>
           </label>
           <select
+            id="model-config-thinking-level"
             className="select"
             value={form.reasoning_effort || ""}
             onChange={(e) => upd({ reasoning_effort: e.target.value })}

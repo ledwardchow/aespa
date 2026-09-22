@@ -1175,12 +1175,14 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
     assert data["thinking_max_steps"] == 120
+    assert data["dast_max_concurrent_llm_requests"] == 4
     assert data["min_delay_s"] == 0.05
     assert data["allowed_schemes"] == ["http", "https"]
     assert "POST" in data["methods_by_mode"]["safe_active"]
     assert data["strict_locator_enforcement"] is True
     assert data["sast_budget_mode"] == "adaptive"
     assert data["sast_worker_budget_max"] == 250
+    assert data["sast_max_concurrent_llm_requests"] == 4
 
 
 def test_upsert_scanner_policy(client: TestClient):
@@ -1195,11 +1197,13 @@ def test_upsert_scanner_policy(client: TestClient):
             "standard_coverage_percent": 72,
             "max_probes_per_page": 25,
             "thinking_max_steps": 180,
+            "dast_max_concurrent_llm_requests": 7,
             "request_timeout_s": 12.5,
             "min_delay_s": 0.1,
             "blocked_headers": ["host", "cookie", "x-admin"],
             "strict_locator_enforcement": False,
             "sast_budget_mode": "fixed",
+            "sast_max_concurrent_llm_requests": 6,
         }
     )
     r = client.put("/api/settings/scanner-policy", json=payload)
@@ -1213,9 +1217,11 @@ def test_upsert_scanner_policy(client: TestClient):
     assert data["scan_mode"] == "aggressive"
     assert data["max_probes_per_page"] == 25
     assert data["thinking_max_steps"] == 180
+    assert data["dast_max_concurrent_llm_requests"] == 7
     assert data["blocked_headers"] == ["host", "cookie", "x-admin"]
     assert data["strict_locator_enforcement"] is False
     assert data["sast_budget_mode"] == "fixed"
+    assert data["sast_max_concurrent_llm_requests"] == 6
 
     r2 = client.get("/api/settings/scanner-policy")
     assert r2.json()["request_timeout_s"] == 12.5
@@ -1226,6 +1232,21 @@ def test_upsert_scanner_policy_invalid_limit(client: TestClient):
     payload["max_probes_per_page"] = 9999
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["dast_max_concurrent_llm_requests", "sast_max_concurrent_llm_requests"],
+)
+def test_upsert_scanner_policy_rejects_invalid_llm_concurrency(
+    client: TestClient, field: str
+):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload[field] = 0
+
+    response = client.put("/api/settings/scanner-policy", json=payload)
+
+    assert response.status_code == 422
 
 
 def test_upsert_scanner_policy_rejects_adaptive_max_below_minimum(client: TestClient):

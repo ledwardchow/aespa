@@ -539,6 +539,7 @@ class ScannerPolicy(SQLModel, table=True):
     scan_mode: str = Field(default="aggressive")
     max_probes_per_page: int = Field(default=50)
     thinking_max_steps: int = Field(default=120)
+    dast_max_concurrent_llm_requests: int = Field(default=4)
     request_timeout_s: float = Field(default=10.0)
     min_delay_s: float = Field(default=0.05)
     max_request_body_bytes: int = Field(default=65536)
@@ -565,6 +566,7 @@ class ScannerPolicy(SQLModel, table=True):
     sast_worker_budget_max: int = Field(default=250)
     sast_closure_budget: int = Field(default=40)
     sast_validator_budget: int = Field(default=50)
+    sast_max_concurrent_llm_requests: int = Field(default=4)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 

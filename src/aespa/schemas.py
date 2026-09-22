@@ -848,6 +848,7 @@ class ScannerPolicyBase(BaseModel):
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)
+    dast_max_concurrent_llm_requests: int = Field(default=4, ge=1, le=100)
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=120.0)
     min_delay_s: float = Field(default=0.05, ge=0.0, le=60.0)
     max_request_body_bytes: int = Field(default=65536, ge=0, le=10 * 1024 * 1024)
@@ -878,6 +879,7 @@ class ScannerPolicyBase(BaseModel):
     sast_worker_budget_max: int = Field(default=250, ge=1, le=1000)
     sast_closure_budget: int = Field(default=40, ge=1, le=1000)
     sast_validator_budget: int = Field(default=50, ge=1, le=1000)
+    sast_max_concurrent_llm_requests: int = Field(default=4, ge=1, le=100)
 
     @field_validator("methods_by_mode", mode="before")
     @classmethod

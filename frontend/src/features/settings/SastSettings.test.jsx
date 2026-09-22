@@ -17,6 +17,7 @@ test("shows adaptive budget controls and saves fixed mode", async () => {
 
   expect((await screen.findByLabelText("Budget mode")).value).toBe("adaptive");
   expect(screen.getByLabelText("Worker maximum").value).toBe("250");
+  expect(screen.getByLabelText("Concurrent LLM requests").value).toBe("4");
 
   fireEvent.change(screen.getByLabelText("Budget mode"), {
     target: { value: "fixed" },
@@ -28,7 +29,11 @@ test("shows adaptive budget controls and saves fixed mode", async () => {
 
   await waitFor(() =>
     expect(settingsApi.upsertScannerPolicy).toHaveBeenCalledWith(
-      expect.objectContaining({ sast_budget_mode: "fixed", sast_worker_budget_max: 250 }),
+      expect.objectContaining({
+        sast_budget_mode: "fixed",
+        sast_worker_budget_max: 250,
+        sast_max_concurrent_llm_requests: 4,
+      }),
     ),
   );
 });

@@ -1,11 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { expect, test } from "vitest";
-import {
-  EfficiencyView,
-  ObligationsView,
-  RepositoryModelView,
-  ThreatModelView,
-} from "./SemanticAnalysisView.jsx";
+import { EfficiencyView, RepositoryModelView, ThreatModelView } from "./SemanticAnalysisView.jsx";
 
 test("renders repository facts and completeness warnings", () => {
   render(
@@ -39,8 +34,8 @@ test("renders repository facts and completeness warnings", () => {
   expect(screen.getByText("90%")).toBeTruthy();
 });
 
-test("renders threat scenarios and semantic closure evidence", () => {
-  const { unmount } = render(
+test("renders threat scenarios with security check progress and closure evidence", () => {
+  render(
     <ThreatModelView
       threatModel={{
         summary: "One source-backed scenario.",
@@ -60,17 +55,6 @@ test("renders threat scenarios and semantic closure evidence", () => {
           },
         ],
       }}
-    />,
-  );
-  expect(screen.getByText("Protect account access")).toBeTruthy();
-  expect(screen.getByText("Account records")).toBeTruthy();
-  expect(screen.getByText("MySQL database")).toBeTruthy();
-  expect(screen.getByText("One trust boundary remains open.")).toBeTruthy();
-  expect(screen.getByText("Partial")).toBeTruthy();
-  unmount();
-
-  render(
-    <ObligationsView
       planning={{
         obligations: [
           {
@@ -78,8 +62,11 @@ test("renders threat scenarios and semantic closure evidence", () => {
             title: "Check ownership",
             security_question: "Can one user read another account?",
             obligation_type: "threat_scenario",
+            source_scenario_key: "scenario-1",
             priority: "high",
-            status: "candidate",
+            status: "assessed_safe",
+            disposition: "assessed_safe",
+            reasoning: "Ownership is checked before the account is loaded.",
             evidence: ["src/accounts.py:12"],
           },
         ],
@@ -88,15 +75,20 @@ test("renders threat scenarios and semantic closure evidence", () => {
       report={{ candidates: 1, discovery_summary: "Threat-directed review completed." }}
     />,
   );
-  expect(screen.getByText("Check ownership")).toBeTruthy();
-  expect(screen.getByText("Required security checks")).toBeTruthy();
+  expect(screen.getByText("Protect account access")).toBeTruthy();
+  expect(screen.getByText("Account records")).toBeTruthy();
+  expect(screen.getByText("MySQL database")).toBeTruthy();
+  expect(screen.getByText("One trust boundary remains open.")).toBeTruthy();
+  expect(screen.getByText("partial")).toBeTruthy();
+  expect(screen.getAllByText("assessed safe")).toHaveLength(2);
   expect(screen.getByText("Security checks")).toBeTruthy();
-  expect(screen.getByText("1 candidates recovered")).toBeTruthy();
+  expect(screen.getByText("Security check progress")).toBeTruthy();
+  expect(screen.getByText("1 of 1 checks completed · 0 reportable candidates")).toBeTruthy();
+  expect(screen.queryByText("Check ownership")).toBeNull();
 });
 
 test.each([
-  [ThreatModelView, { threatModel: {} }, "Threat model"],
-  [ObligationsView, { planning: {}, closure: {}, report: {} }, "Security check analysis"],
+  [ThreatModelView, { threatModel: {}, planning: {}, closure: {}, report: {} }, "Threat model"],
   [RepositoryModelView, { model: {} }, "Repository model"],
 ])("renders a running empty state for %s", (View, props, label) => {
   const { unmount } = render(<View {...props} status="running" />);

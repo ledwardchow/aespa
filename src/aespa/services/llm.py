@@ -15,6 +15,7 @@ import re
 import sys
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -196,6 +197,66 @@ _run_token_seeded: set[tuple[str, int]] = set()
 
 
 LLM_PACING_NOTICE_THRESHOLD_S = 1.0
+
+
+class _RunConcurrencyGate:
+    """Bound in-flight provider calls for one run."""
+
+    def __init__(self) -> None:
+        self._active = 0
+        self._condition = asyncio.Condition()
+
+    async def acquire(self, limit: int) -> None:
+        async with self._condition:
+            while self._active >= limit:
+                await self._condition.wait()
+            self._active += 1
+
+    async def release(self) -> None:
+        async with self._condition:
+            self._active = max(0, self._active - 1)
+            self._condition.notify_all()
+
+
+_run_concurrency_gates: dict[tuple[int, str, int], _RunConcurrencyGate] = {}
+
+
+def _read_run_concurrency_limit(run_kind: str) -> int:
+    """Read the DAST or SAST LLM concurrency setting."""
+    try:
+        from sqlmodel import Session
+
+        from aespa.db import get_engine
+        from aespa.models import ScannerPolicy
+
+        with Session(get_engine()) as session:
+            policy = session.get(ScannerPolicy, 1)
+            if run_kind == "sast":
+                value = getattr(policy, "sast_max_concurrent_llm_requests", 4)
+            else:
+                value = getattr(policy, "dast_max_concurrent_llm_requests", 4)
+        return max(1, int(value or 4))
+    except Exception:
+        return 4
+
+
+@asynccontextmanager
+async def _run_concurrency_slot():
+    """Limit live provider requests for the current DAST or SAST run."""
+    run_id = _run_id_var.get()
+    run_kind = _run_kind_var.get()
+    if run_id is None or run_kind not in {"web", "api", "sast"}:
+        yield
+        return
+
+    loop = asyncio.get_running_loop()
+    key = (id(loop), run_kind, run_id)
+    gate = _run_concurrency_gates.setdefault(key, _RunConcurrencyGate())
+    await gate.acquire(_read_run_concurrency_limit(run_kind))
+    try:
+        yield
+    finally:
+        await gate.release()
 
 
 class AsyncTokenBucketLimiter:
@@ -1537,6 +1598,38 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         return raw_cleaned, [], dict(_EMPTY_CATS)
 
 
+async def _dispatch_completion(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    if config.provider == "factory_droid":
+        return await _factory_droid(config, prompt, screenshot_b64)
+    if config.provider == "github_copilot":
+        return await _github_copilot(config, prompt, screenshot_b64)
+    if config.provider == "openai_codex":
+        return await _openai_codex(config, prompt, screenshot_b64)
+    if config.provider == "google_antigravity":
+        return await _google_antigravity(config, prompt, screenshot_b64)
+    if config.provider == "anthropic":
+        return await _anthropic(config, prompt, screenshot_b64)
+    if config.provider == "google_vertex" and _uses_openai_responses(config):
+        return await _openai_responses(config, prompt, screenshot_b64)
+    if config.provider in {"google", "google_vertex"}:
+        return await _google(config, prompt, screenshot_b64)
+    if config.provider == "azure_openai":
+        return await _azure_openai(config, prompt, screenshot_b64)
+    if config.provider in ("azure_foundry", "azure_foundry_openai"):
+        return await _azure_foundry_openai(config, prompt, screenshot_b64)
+    if config.provider == "azure_foundry_anthropic":
+        return await _azure_foundry_anthropic(config, prompt, screenshot_b64)
+    if config.provider == "openrouter":
+        return await _openrouter(config, prompt, screenshot_b64)
+    if config.provider == "bedrock":
+        return await _bedrock(config, prompt, screenshot_b64)
+    if config.provider == "bedrock_mantle" or _uses_openai_responses(config):
+        return await _openai_responses(config, prompt, screenshot_b64)
+    return await _openai_compat(config, prompt, screenshot_b64)
+
+
 async def _call_impl(
     config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
 ) -> str:
@@ -1546,33 +1639,8 @@ async def _call_impl(
     _last_response_cache_telemetry_var.set(None)
     limiter = get_limiter_for_config(config)
     if limiter is None:
-        if config.provider == "factory_droid":
-            return await _factory_droid(config, prompt, screenshot_b64)
-        if config.provider == "github_copilot":
-            return await _github_copilot(config, prompt, screenshot_b64)
-        if config.provider == "openai_codex":
-            return await _openai_codex(config, prompt, screenshot_b64)
-        if config.provider == "google_antigravity":
-            return await _google_antigravity(config, prompt, screenshot_b64)
-        if config.provider == "anthropic":
-            return await _anthropic(config, prompt, screenshot_b64)
-        if config.provider == "google_vertex" and _uses_openai_responses(config):
-            return await _openai_responses(config, prompt, screenshot_b64)
-        if config.provider in {"google", "google_vertex"}:
-            return await _google(config, prompt, screenshot_b64)
-        if config.provider == "azure_openai":
-            return await _azure_openai(config, prompt, screenshot_b64)
-        if config.provider in ("azure_foundry", "azure_foundry_openai"):
-            return await _azure_foundry_openai(config, prompt, screenshot_b64)
-        if config.provider == "azure_foundry_anthropic":
-            return await _azure_foundry_anthropic(config, prompt, screenshot_b64)
-        if config.provider == "openrouter":
-            return await _openrouter(config, prompt, screenshot_b64)
-        if config.provider == "bedrock":
-            return await _bedrock(config, prompt, screenshot_b64)
-        if config.provider == "bedrock_mantle" or _uses_openai_responses(config):
-            return await _openai_responses(config, prompt, screenshot_b64)
-        return await _openai_compat(config, prompt, screenshot_b64)
+        async with _run_concurrency_slot():
+            return await _dispatch_completion(config, prompt, screenshot_b64)
 
     estimated_input = estimate_tokens(
         prompt, screenshot_b64, config.provider, model=config.model
@@ -1592,34 +1660,8 @@ async def _call_impl(
         _emit_llm_pacing_finished(config.model)
 
     try:
-        if config.provider == "factory_droid":
-            resp = await _factory_droid(config, prompt, screenshot_b64)
-        elif config.provider == "github_copilot":
-            resp = await _github_copilot(config, prompt, screenshot_b64)
-        elif config.provider == "openai_codex":
-            resp = await _openai_codex(config, prompt, screenshot_b64)
-        elif config.provider == "google_antigravity":
-            resp = await _google_antigravity(config, prompt, screenshot_b64)
-        elif config.provider == "anthropic":
-            resp = await _anthropic(config, prompt, screenshot_b64)
-        elif config.provider == "google_vertex" and _uses_openai_responses(config):
-            resp = await _openai_responses(config, prompt, screenshot_b64)
-        elif config.provider in {"google", "google_vertex"}:
-            resp = await _google(config, prompt, screenshot_b64)
-        elif config.provider == "azure_openai":
-            resp = await _azure_openai(config, prompt, screenshot_b64)
-        elif config.provider in ("azure_foundry", "azure_foundry_openai"):
-            resp = await _azure_foundry_openai(config, prompt, screenshot_b64)
-        elif config.provider == "azure_foundry_anthropic":
-            resp = await _azure_foundry_anthropic(config, prompt, screenshot_b64)
-        elif config.provider == "openrouter":
-            resp = await _openrouter(config, prompt, screenshot_b64)
-        elif config.provider == "bedrock":
-            resp = await _bedrock(config, prompt, screenshot_b64)
-        elif config.provider == "bedrock_mantle" or _uses_openai_responses(config):
-            resp = await _openai_responses(config, prompt, screenshot_b64)
-        else:
-            resp = await _openai_compat(config, prompt, screenshot_b64)
+        async with _run_concurrency_slot():
+            resp = await _dispatch_completion(config, prompt, screenshot_b64)
 
         usage = _last_call_tokens_var.get()
         if usage:
@@ -1791,11 +1833,12 @@ async def stream_chat_completion(
     )
     chunks: list[str] = []
     try:
-        async for chunk in _stream_chat_completion_impl(
-            config, system_message, messages
-        ):
-            chunks.append(chunk)
-            yield chunk
+        async with _run_concurrency_slot():
+            async for chunk in _stream_chat_completion_impl(
+                config, system_message, messages
+            ):
+                chunks.append(chunk)
+                yield chunk
     except Exception as exc:
         _log_llm_traffic(
             "FAILED",
@@ -5599,9 +5642,10 @@ async def _call_with_tools_rate_limited(
     _last_response_cache_telemetry_var.set(None)
     limiter = get_limiter_for_config(config)
     if limiter is None:
-        return await _call_with_tools_impl(
-            config, system_message, messages, tools=tools
-        )
+        async with _run_concurrency_slot():
+            return await _call_with_tools_impl(
+                config, system_message, messages, tools=tools
+            )
 
     active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
     estimated = _estimate_tools_call_tokens(
@@ -5620,9 +5664,10 @@ async def _call_with_tools_rate_limited(
     if slept:
         _emit_llm_pacing_finished(config.model)
     try:
-        result = await _call_with_tools_impl(
-            config, system_message, messages, tools=tools
-        )
+        async with _run_concurrency_slot():
+            result = await _call_with_tools_impl(
+                config, system_message, messages, tools=tools
+            )
         usage = _last_call_tokens_var.get()
         actual_total = (usage["input"] + usage["output"]) if usage else estimated
         await limiter.reconcile(estimated, actual_total)

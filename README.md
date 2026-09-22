@@ -63,7 +63,7 @@ If your API key has TPM/RPM quota caps this is configurable in the LLM Settings 
 
 ## Running (macOS/Windows)
 
-Standalone binaries for Windows and macOS are available at [GitHub releases](https://github.com/ledwardchow/aespa/releases). The macOS binaries are notarised. 
+Standalone binaries for Windows and macOS are available at [GitHub releases](https://github.com/ledwardchow/aespa/releases). 
 
 These versions run in the background in the menubar or systray - click on the icon to open the interface/quit the background process. 
 
@@ -98,16 +98,20 @@ docker compose up -d --build
 ## Running from source
 
 ### Setup
+Note, previously the built UI was committed, this is no longer the case. The frontend will build on first launch/any changes automatically, you will require node/npm/vite.
 
 Requirements:
 - Python 3.12+
 - uv: [https://docs.astral.sh/uv/getting-started/installation/](https://docs.astral.sh/uv/getting-started/installation/)
+- node 24+, npm + vite
 
 Clone or download a zip of this repository. Within a terminal with the working directory set to the root of the repo:
 
 ```bash
 # Install dependencies
 uv sync
+# Install the headless Chromium browser
+uv run playwright install chromium
 ```
 
 ### Run
@@ -117,12 +121,10 @@ uv run aespa
 ```
 
 The UI is available at `http://127.0.0.1:8000` by default.
-AESPA checks for Playwright's Chromium browser during startup and installs it
-automatically when it is missing.
 
 ### Optional agent Python sandbox
 
-AESPA can let Test Leads, A.L.I.C.E., and specialist agents run short Python programs for custom payload generation, parsing, and bounded request workflows. This capability is disabled by default and requires a local Docker daemon plus the dedicated executor image:
+AESPA can let Test Leads, A.L.I.C.E., and specialist agents run short Python programs in a sandbox for custom payload generation, parsing, and bounded request workflows. HTTP traffic is only permitted from the sandbox via AESPA function calls (which checks scope and logs the traffic as part of the test). This capability requires a local Docker daemon plus the dedicated executor image:
 
 ```bash
 docker pull ledwardchow/aespa-python-executor:0.1

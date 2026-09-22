@@ -1145,6 +1145,8 @@ All LLM SDK clients (GitHub Copilot, Anthropic, OpenAI, Azure, OpenRouter, Bedro
 
 To prevent exceeding upstream LLM API limits (which can cause active scans to fail or encounter transient errors), `llm.py` implements a model-level **Rate Limiting & Pacing** layer:
 
+- **Per-run concurrency:** DAST and SAST have separate maximum concurrent LLM request settings. The DAST limit covers web and API scan agents, including reporting. The SAST limit covers discovery and validation agents. These settings bound requests that are waiting on provider responses; provider TPM and RPM pacing still applies separately.
+
 - **Token Bucket Algorithm:** Uses an asynchronous token-bucket rate limiter (`AsyncTokenBucketLimiter`) linked to each unique provider connection and model pair.
 - **Coverage:** Pacing wraps **both** the non-agentic path (`_call` - page analysis, probe planning, reporting) **and** the agentic tool-using path (`_call_with_tools`, used by every dynamic / API / SAST / ALICE scan loop), so configured `max_tpm` / `max_rpm` values apply to every call using that provider and model pair.
 - **Estimated Pre-allocation:**
@@ -1405,6 +1407,7 @@ The phase rail exposes all ten SAST phases from scope through report and scrolls
 
 ## 14. Concurrency & State Management
 
+- **LLM requests** — each web/API run uses the DAST concurrent LLM request limit, while each SAST run uses the SAST limit. The limits are configured under DAST > Test Lead and SAST in Settings.
 - **FastAPI async handlers** — all I/O is non-blocking via `asyncio`
 - **Parallel crawl workers** — multiple Playwright browser instances share a `_CrawlShared` state object (asyncio locks around the URL frontier and seen-set)
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
@@ -1889,6 +1892,8 @@ test unless that persisted copy succeeds.
 ### Concurrency
 
 SAST scans use the same task-registry pattern as web and API scans. Stop cancels the run, while Pause waits for a safe agent-step boundary and keeps pending candidates intact. Discovery, each validator, and attack-path analysis save their LLM transcript and step count in `PhaseCheckpoint` rows after every completed tool exchange. Candidate state and file-review receipts are saved separately. Resume re-extracts the immutable source ZIP, restores those checkpoints, skips completed phases and validators, and continues the interrupted conversation without superseding existing leads.
+
+The SAST concurrent LLM request setting limits how many discovery and validation agent calls can wait on provider responses at once. Increasing it also increases the worker and validator pools, while the run-level LLM gate ensures other SAST phases share the same overall limit.
 
 Deep discovery budgets are configured on the SAST tab in Agent Settings. Fixed mode gives each baseline or threat worker the configured value. Adaptive mode starts from the configured minimum and adds capacity for assigned source items, security checks, and unique files, up to the configured allocation maximum. Access-control and business-logic workers receive a small multiplier. The selected budget and its inputs are stored on `SastWorker`. If a resumed worker already used its saved allocation, it receives another bounded allocation without resetting its checkpoint step count.
 
