@@ -22,7 +22,6 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
   const onExternalIntegrations = section === "external-integrations";
   const onExtensions = section === "extensions";
   const onSast = section === "sast";
-  const onDebug = section === "debug";
   const onReportingDebug = section === "reporting-debug";
   const onBenchmarkLab = section === "benchmark-lab";
   const onStats = section === "stats";
@@ -178,16 +177,6 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           {!collapsed && " LLM Settings"}
         </a>
         <a
-          href="#/scan-policy"
-          className={"nav-item" + (onScanPolicy ? " active" : "")}
-          title="Agent Settings"
-        >
-          <span className="nav-icon">
-            <IconShield />
-          </span>
-          {!collapsed && " Agent Settings"}
-        </a>
-        <a
           href="#/external-integrations"
           className={"nav-item" + (onExternalIntegrations ? " active" : "")}
           title="External Integrations"
@@ -208,14 +197,14 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           {!collapsed && " Extensions"}
         </a>
         <a
-          href="#/debug"
-          className={"nav-item" + (onDebug ? " active" : "")}
-          title="System Settings"
+          href="#/scan-policy"
+          className={"nav-item" + (onScanPolicy ? " active" : "")}
+          title="Settings"
         >
           <span className="nav-icon">
-            <IconBug />
+            <IconSettings />
           </span>
-          {!collapsed && " System Settings"}
+          {!collapsed && " Settings"}
         </a>
         {(reportingDebugCfg?.panel_enabled || benchmarkLabCfg?.panel_enabled) && (
           <>

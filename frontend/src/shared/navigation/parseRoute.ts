@@ -118,10 +118,9 @@ export function parseRoute(hash = "#/"): Route {
   }
   if ((m = routeHash.match(/^#\/settings\/models\/(\d+)\/edit$/)))
     return { name: "settings", tab: "models", screen: "edit", id: +m[1] };
-  if (routeHash === "#/scan-policy") return { name: "scan-policy" };
+  if (routeHash === "#/scan-policy" || routeHash === "#/debug") return { name: "scan-policy" };
   if (routeHash === "#/external-integrations") return { name: "external-integrations" };
   if (routeHash === "#/extensions") return { name: "extensions" };
-  if (routeHash === "#/debug") return { name: "debug" };
   if (routeHash === "#/reporting-debug") return { name: "reporting-debug" };
   if (routeHash === "#/benchmark-lab") return { name: "benchmark-lab" };
   if (routeHash === "#/benchmark-lab/evaluations/new") return { name: "benchmark-evaluation-new" };

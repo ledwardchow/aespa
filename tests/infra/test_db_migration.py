@@ -192,7 +192,7 @@ def test_llm_rate_limit_migration_recovers_after_partial_application():
                 for row in conn.execute(text("PRAGMA table_info(llm_provider_config)"))
             }
 
-        assert version == "f7b5c3d9e012"
+        assert version == "a4c6e8f0b2d4"
         assert limits == (120_000, 60)
         assert "max_tpm" not in provider_columns
         assert "max_rpm" not in provider_columns
@@ -1119,6 +1119,10 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
             llm_config_columns = {
                 row[1] for row in conn.execute(text("PRAGMA table_info(llm_config)"))
             }
+            scanner_policy_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(scanner_policy)"))
+            }
 
         assert "alembic_version" in tables
         assert "site" in tables
@@ -1128,8 +1132,10 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "max_concurrent_planners" in deep_config_columns
         assert "location" in provider_columns
         assert "location" in llm_config_columns
+        assert "dast_max_concurrent_llm_requests" in scanner_policy_columns
+        assert "sast_max_concurrent_llm_requests" in scanner_policy_columns
         assert was_pre_alembic is False
-        assert version == "f7b5c3d9e012"
+        assert version == "a4c6e8f0b2d4"
     finally:
         engine.dispose()
 
@@ -1171,7 +1177,7 @@ def test_deep_task_finding_timestamp_is_added_and_backfilled():
 
         assert "created_at" in columns
         assert created_at is not None
-        assert version == "f7b5c3d9e012"
+        assert version == "a4c6e8f0b2d4"
     finally:
         engine.dispose()
 
@@ -1475,7 +1481,7 @@ def test_legacy_db_with_run_identity_but_no_systems_tables_gets_new_schema():
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "f7b5c3d9e012"
+        assert version == "a4c6e8f0b2d4"
     finally:
         engine.dispose()
 
@@ -1553,7 +1559,7 @@ def test_current_db_with_systems_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "f7b5c3d9e012"
+        assert version == "a4c6e8f0b2d4"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

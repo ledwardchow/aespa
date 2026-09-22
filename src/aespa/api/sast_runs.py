@@ -686,7 +686,7 @@ async def resume_sast_scan(
     pause = run_pause_svc.get_pause("sast", run_id)
     resumable_terminal_run = bool(
         run is not None
-        and run.status in {"completed", "failed"}
+        and run.status in {"completed", "failed", "cancelled"}
         and sast_scanner.has_resumable_sast_work(run_id)
     )
     if run is None or not (

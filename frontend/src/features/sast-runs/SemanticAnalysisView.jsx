@@ -4,6 +4,7 @@ const asArray = (value) => (Array.isArray(value) ? value : []);
 const asObject = (value) => (value && typeof value === "object" ? value : {});
 const titleCase = (value) => String(value || "unknown").replaceAll("_", " ");
 const percent = (value) => `${Math.round(Number(value || 0) * 100)}%`;
+const TERMINAL_SECURITY_CHECK_STATUSES = new Set(["candidate", "assessed_safe", "not_applicable"]);
 
 function displayValue(value) {
   if (value === null || value === undefined || value === "") return "—";
@@ -215,13 +216,54 @@ export function RepositoryModelView({ model, status }) {
   );
 }
 
-export function ThreatModelView({ threatModel, status }) {
+function SecurityCheckStatus({ check, fallbackStatus }) {
+  const status = check?.status || fallbackStatus || "pending";
+  return (
+    <span
+      className={`sast-state sast-state-${TERMINAL_SECURITY_CHECK_STATUSES.has(status) || status === "resolved" ? "confirmed" : "inconclusive"}`}
+    >
+      {titleCase(status)}
+    </span>
+  );
+}
+
+function SecurityCheckDetails({ check }) {
+  if (!check) return null;
+  return (
+    <>
+      <dt>Security question</dt>
+      <dd>{check.security_question || "—"}</dd>
+      <dt>Check result</dt>
+      <dd>{titleCase(check.disposition || check.status)}</dd>
+      <dt>Reasoning</dt>
+      <dd>{check.reasoning || "—"}</dd>
+      <dt>Check evidence</dt>
+      <dd>{asArray(check.evidence).join(", ") || "—"}</dd>
+      <dt>Open questions</dt>
+      <dd>{asArray(check.open_questions).join("; ") || "—"}</dd>
+    </>
+  );
+}
+
+export function ThreatModelView({ threatModel, planning, closure, report, status }) {
   const model = asObject(threatModel);
   const scenarios = asArray(model.scenarios);
   const quality = asObject(model.quality);
-  if (!model.summary && !scenarios.length)
+  const plan = asObject(planning);
+  const obligations = asArray(plan.obligations);
+  const closureState = asObject(closure);
+  if (!model.summary && !scenarios.length && !obligations.length && !closureState.status)
     return <EmptySemanticState label="Threat model" status={status} />;
-  const statuses = countBy(scenarios, "status");
+  const checksByScenario = new Map(
+    obligations
+      .filter((item) => item.source_scenario_key)
+      .map((item) => [item.source_scenario_key, item]),
+  );
+  const additionalChecks = obligations.filter((item) => !item.source_scenario_key);
+  const resolvedChecks = obligations.filter((item) =>
+    TERMINAL_SECURITY_CHECK_STATUSES.has(item.status),
+  ).length;
+  const unresolvedChecks = obligations.length - resolvedChecks;
   return (
     <div className="sast-semantic-layout">
       <section className="sast-panel">
@@ -231,7 +273,12 @@ export function ThreatModelView({ threatModel, status }) {
           values={[
             ["Scenarios", scenarios.length],
             ["High priority", scenarios.filter((item) => item.priority === "high").length],
-            ["Resolved", statuses.resolved || 0],
+            [
+              "Security checks",
+              `${resolvedChecks}/${obligations.length}`,
+              `${unresolvedChecks} remaining`,
+            ],
+            ["Candidates", report?.candidates || 0],
             ["Open questions", asArray(model.open_questions).length],
             ["Source files reviewed", model.files_reviewed || 0],
             ["Model coverage", titleCase(quality.status || "unknown")],
@@ -254,134 +301,94 @@ export function ThreatModelView({ threatModel, status }) {
         <ChipList title="Assumptions" values={model.assumptions} />
         <ChipList title="Open questions" values={model.open_questions} />
       </div>
+      {obligations.length || closureState.status ? (
+        <section className="sast-panel">
+          <div className="sast-panel-header">
+            <div>
+              <div className="sast-panel-title">Security check progress</div>
+              <div className="sast-panel-sub">
+                {resolvedChecks} of {obligations.length} checks completed ·{" "}
+                {report?.reportable || 0} reportable candidates
+              </div>
+            </div>
+            <span
+              className={`sast-state sast-state-${closureState.status === "full" ? "confirmed" : "inconclusive"}`}
+            >
+              {closureState.status || "pending"}
+            </span>
+          </div>
+          {report?.discovery_summary ? (
+            <details className="sast-semantic-narrative">
+              <summary>Show discovery summary</summary>
+              <p>{report.discovery_summary}</p>
+            </details>
+          ) : null}
+          {asArray(closureState.reasons).length ? (
+            <ul className="sast-semantic-reasons">
+              {closureState.reasons.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          ) : (
+            <div className="subtle">No closure gaps recorded.</div>
+          )}
+        </section>
+      ) : null}
       <section className="sast-panel">
         <div className="sast-panel-title">Threat scenarios</div>
         <div className="sast-semantic-card-list">
-          {scenarios.map((scenario) => (
-            <details key={scenario.scenario_key}>
-              <summary>
-                <span
-                  className={`sast-state sast-state-${scenario.status === "resolved" ? "confirmed" : "inconclusive"}`}
-                >
-                  {titleCase(scenario.status)}
-                </span>
-                <strong>{scenario.title}</strong>
-                <small>
-                  {titleCase(scenario.priority)} priority · {percent(scenario.confidence)}
-                </small>
-              </summary>
-              <dl className="sast-semantic-details">
-                <dt>Actor</dt>
-                <dd>{displayValue(scenario.actor)}</dd>
-                <dt>Controlled input or state</dt>
-                <dd>{displayValue(scenario.controlled_input_or_state)}</dd>
-                <dt>Security objective</dt>
-                <dd>{displayValue(scenario.security_objective)}</dd>
-                <dt>Capability gain</dt>
-                <dd>{displayValue(scenario.capability_gain)}</dd>
-                <dt>Impact</dt>
-                <dd>{displayValue(scenario.impact)}</dd>
-                <dt>Evidence</dt>
-                <dd>{asArray(scenario.evidence).join(", ") || "—"}</dd>
-              </dl>
-            </details>
-          ))}
+          {scenarios.map((scenario) => {
+            const check = checksByScenario.get(scenario.scenario_key);
+            return (
+              <details key={scenario.scenario_key}>
+                <summary>
+                  <SecurityCheckStatus check={check} fallbackStatus={scenario.status} />
+                  <strong>{scenario.title}</strong>
+                  <small>
+                    {titleCase(scenario.priority)} priority · {percent(scenario.confidence)}
+                  </small>
+                </summary>
+                <dl className="sast-semantic-details">
+                  <dt>Actor</dt>
+                  <dd>{displayValue(scenario.actor)}</dd>
+                  <dt>Controlled input or state</dt>
+                  <dd>{displayValue(scenario.controlled_input_or_state)}</dd>
+                  <dt>Security objective</dt>
+                  <dd>{displayValue(scenario.security_objective)}</dd>
+                  <dt>Capability gain</dt>
+                  <dd>{displayValue(scenario.capability_gain)}</dd>
+                  <dt>Impact</dt>
+                  <dd>{displayValue(scenario.impact)}</dd>
+                  <dt>Threat evidence</dt>
+                  <dd>{asArray(scenario.evidence).join(", ") || "—"}</dd>
+                  <SecurityCheckDetails check={check} />
+                </dl>
+              </details>
+            );
+          })}
         </div>
       </section>
-    </div>
-  );
-}
-
-export function ObligationsView({ planning, closure, report, status }) {
-  const plan = asObject(planning);
-  const obligations = asArray(plan.obligations);
-  const closureState = asObject(closure);
-  if (!obligations.length && !closureState.status)
-    return <EmptySemanticState label="Security check analysis" status={status} />;
-  const statuses = countBy(obligations, "status");
-  const unresolved = obligations.filter((item) =>
-    ["pending", "in_review", "blocked", "unreviewed"].includes(item.status),
-  );
-  return (
-    <div className="sast-semantic-layout">
-      <MetricCards
-        values={[
-          ["Security checks", obligations.length, `${Object.keys(statuses).length} states`],
-          ["Unresolved", unresolved.length],
-          [
-            "Closure",
-            titleCase(closureState.status || "pending"),
-            `${closureState.closure_candidates_created || 0} candidates recovered`,
-          ],
-          [
-            "Reconciled candidates",
-            asObject(report?.semantic?.reconciliation).unique || report?.candidates || 0,
-          ],
-        ]}
-      />
-      <section className="sast-panel">
-        <div className="sast-panel-header">
-          <div>
-            <div className="sast-panel-title">Discovery and closure</div>
-            <div className="sast-panel-sub">
-              {report?.candidates || 0} candidates · {report?.reportable || 0} reportable ·{" "}
-              {unresolved.length} unresolved security checks
-            </div>
-          </div>
-          <span
-            className={`sast-state sast-state-${closureState.status === "full" ? "confirmed" : "inconclusive"}`}
-          >
-            {closureState.status || "pending"}
-          </span>
-        </div>
-        {report?.discovery_summary ? (
-          <details className="sast-semantic-narrative">
-            <summary>Show discovery summary</summary>
-            <p>{report.discovery_summary}</p>
-          </details>
-        ) : null}
-        {asArray(closureState.reasons).length ? (
-          <ul className="sast-semantic-reasons">
-            {closureState.reasons.map((reason) => (
-              <li key={reason}>{reason}</li>
+      {additionalChecks.length ? (
+        <section className="sast-panel">
+          <div className="sast-panel-title">Repository completeness checks</div>
+          <div className="sast-semantic-card-list">
+            {additionalChecks.map((item) => (
+              <details key={item.obligation_key}>
+                <summary>
+                  <SecurityCheckStatus check={item} />
+                  <strong>{item.title || item.security_question}</strong>
+                  <small>
+                    {titleCase(item.obligation_type)} · {titleCase(item.priority)} priority
+                  </small>
+                </summary>
+                <dl className="sast-semantic-details">
+                  <SecurityCheckDetails check={item} />
+                </dl>
+              </details>
             ))}
-          </ul>
-        ) : (
-          <div className="subtle">No closure gaps recorded.</div>
-        )}
-      </section>
-      <section className="sast-panel">
-        <div className="sast-panel-title">Required security checks</div>
-        <div className="sast-semantic-card-list">
-          {obligations.map((item) => (
-            <details key={item.obligation_key}>
-              <summary>
-                <span
-                  className={`sast-state sast-state-${["candidate", "assessed_safe", "not_applicable"].includes(item.status) ? "confirmed" : "inconclusive"}`}
-                >
-                  {titleCase(item.status)}
-                </span>
-                <strong>{item.title || item.security_question}</strong>
-                <small>
-                  {titleCase(item.obligation_type)} · {titleCase(item.priority)} priority
-                </small>
-              </summary>
-              <dl className="sast-semantic-details">
-                <dt>Security question</dt>
-                <dd>{item.security_question || "—"}</dd>
-                <dt>Disposition</dt>
-                <dd>{item.disposition || "—"}</dd>
-                <dt>Reasoning</dt>
-                <dd>{item.reasoning || "—"}</dd>
-                <dt>Evidence</dt>
-                <dd>{asArray(item.evidence).join(", ") || "—"}</dd>
-                <dt>Open questions</dt>
-                <dd>{asArray(item.open_questions).join("; ") || "—"}</dd>
-              </dl>
-            </details>
-          ))}
-        </div>
-      </section>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }

@@ -4,8 +4,10 @@ import { ScanPolicyPage } from "./ScanPolicyPage.jsx";
 
 vi.mock("./ScannerPolicySettings.jsx", () => ({
   GlobalPolicySettings: () => <div>Global settings</div>,
-  GlobalPolicySubTabs: () => null,
   ScannerPolicySettings: () => <div>Test Lead settings</div>,
+}));
+vi.mock("./DebugPage.jsx", () => ({
+  SystemSettingsPanels: ({ tab }) => <div>{tab} settings</div>,
 }));
 vi.mock("./ValidatorSettings.jsx", () => ({
   ValidatorSettings: () => <div>Validator settings</div>,
@@ -56,11 +58,28 @@ test("groups DAST settings under a nested tab bar", () => {
   render(<ScanPolicyPage showDeepScan />);
 
   fireEvent.click(screen.getByRole("tab", { name: "DAST" }));
+  expect(screen.getByText("Global settings")).toBeTruthy();
+  const dastTabs = screen.getByRole("tablist", { name: "DAST agent settings" });
+  expect([...dastTabs.children].slice(0, 2).map((tab) => tab.textContent)).toEqual([
+    "Scan Behaviour",
+    "HTTP Headers",
+  ]);
+
+  fireEvent.click(screen.getByRole("tab", { name: "Crawler" }));
   expect(screen.getByText("Crawler settings")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Specialist" })).toBeTruthy();
 
   fireEvent.click(screen.getByRole("tab", { name: "Validator" }));
   expect(screen.getByText("Validator settings")).toBeTruthy();
+});
+
+test("shows feature visibility and debug settings under Global", () => {
+  render(<ScanPolicyPage />);
+
+  expect(screen.getByText("features settings")).toBeTruthy();
+  fireEvent.click(screen.getByRole("tab", { name: "Debug Settings" }));
+  expect(screen.getByText("debug settings")).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Scan Behaviour" })).toBeNull();
 });
 
 test("only shows Systems and Component Mapper when Systems is enabled", () => {

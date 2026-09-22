@@ -346,6 +346,54 @@ def test_completed_run_with_failed_worker_can_resume(
     assert starts == [(sast_run_id, True)]
 
 
+def test_cancelled_run_with_unfinished_validation_can_resume(
+    client, isolated_db_engine, monkeypatch
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        run = session.get(SastRun, sast_run_id)
+        run.status = "cancelled"
+        session.add(run)
+        session.add(
+            PhaseCheckpoint(
+                run_kind="sast",
+                run_id=sast_run_id,
+                phase="state",
+                idempotency_key="candidates",
+                data_json=json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "candidate_id": 8,
+                                "confidence": 0.91,
+                                "validation_status": "inconclusive",
+                            }
+                        ]
+                    }
+                ),
+            )
+        )
+        session.commit()
+
+    starts = []
+
+    async def fake_start(run_id, *, resume=False):
+        starts.append((run_id, resume))
+
+    monkeypatch.setattr(sast_scanner, "start_sast_scan", fake_start)
+    monkeypatch.setattr(sast_scanner, "is_sast_scan_running", lambda _run_id: False)
+    monkeypatch.setattr(
+        sast_scanner,
+        "get_sast_status",
+        lambda run_id: {"run_id": run_id, "running": True},
+    )
+
+    response = client.post(f"/api/sast-runs/{sast_run_id}/scan/resume")
+
+    assert response.status_code == 200
+    assert starts == [(sast_run_id, True)]
+
+
 def test_checkpointed_agent_retries_from_last_saved_turn(
     isolated_db_engine, monkeypatch
 ):
@@ -1247,6 +1295,72 @@ def test_unscored_checkpoint_candidates_become_inconclusive(analysis_mode):
     assert candidates[0]["validation_status"] == "inconclusive"
     assert "confidence score" in candidates[0]["validation_reasoning"]
     assert scanner_module._pending_candidate_ids(candidates) == []
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_scored_inconclusive_candidates_still_require_validation(analysis_mode):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+    candidates = [
+        {
+            "candidate_id": 8,
+            "confidence": 0.91,
+            "validation_status": "inconclusive",
+            "reportable": False,
+        }
+    ]
+
+    assert scanner_module._pending_candidate_ids(candidates) == [8]
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_stopping_during_validation_checkpoints_pending_candidates(
+    analysis_mode, isolated_db_engine
+):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+    run_id, _ = _run_with_web_target(isolated_db_engine)
+    scanner_module._candidates[run_id] = [
+        {
+            "candidate_id": 8,
+            "confidence": 0.91,
+            "validation_status": "pending",
+            "reportable": False,
+        }
+    ]
+    try:
+        saved_count = scanner_module._checkpoint_stopped_validation(
+            run_id, "validation"
+        )
+    finally:
+        scanner_module._candidates.pop(run_id, None)
+
+    with Session(isolated_db_engine) as session:
+        run = session.get(SastRun, run_id)
+        pause = session.exec(
+            select(RunPause)
+            .where(RunPause.run_kind == "sast")
+            .where(RunPause.run_id == run_id)
+        ).one()
+        checkpoint = session.exec(
+            select(PhaseCheckpoint)
+            .where(PhaseCheckpoint.run_kind == "sast")
+            .where(PhaseCheckpoint.run_id == run_id)
+            .where(PhaseCheckpoint.phase == "state")
+            .where(PhaseCheckpoint.idempotency_key == "candidates")
+        ).one()
+
+    saved_candidates = json.loads(checkpoint.data_json)["candidates"]
+    assert saved_count == 1
+    assert run.status == "paused"
+    assert pause.resume_stage == "validation"
+    assert saved_candidates[0]["validation_status"] == "pending"
 
 
 def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(

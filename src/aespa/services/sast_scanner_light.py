@@ -84,7 +84,6 @@ _MAX_ARCHIVE_ENTRY_BYTES = 50 * 1024 * 1024
 _MAX_COMPRESSION_RATIO = 1_000
 _MAX_INSPECT_FILE_BYTES = 10 * 1024 * 1024
 _PHASES = ("scope", "discovery", "validation", "attack_path", "report")
-_SAST_VALIDATOR_MAX_CONCURRENT = 4
 _SAST_NETWORK_RETRY_DELAYS = (1.0, 2.0, 4.0)
 
 
@@ -1286,8 +1285,30 @@ def _pending_candidate_ids(candidates: list[dict]) -> list[int]:
     return [
         int(candidate["candidate_id"])
         for candidate in candidates
-        if candidate.get("validation_status") == "pending"
+        if candidate.get("validation_status") in {"pending", "inconclusive"}
+        and candidate.get("confidence") is not None
     ]
+
+
+def _checkpoint_stopped_validation(sast_run_id: int, current_phase: str) -> int:
+    """Save unfinished validation work and turn a stop into a resumable pause."""
+    if current_phase != "validation":
+        return 0
+    unfinished_ids = _pending_candidate_ids(_candidates.get(sast_run_id, []))
+    if not unfinished_ids:
+        return 0
+    message = (
+        f"Scan stopped with {len(unfinished_ids)} candidate(s) still requiring "
+        "validation. Resume to continue from the saved validator checkpoints."
+    )
+    _persist_candidate_state(sast_run_id)
+    _persist_paused_run(
+        sast_run_id,
+        phase=current_phase,
+        reason="user",
+        message=message,
+    )
+    return len(unfinished_ids)
 
 
 def _candidate_brief(candidates: list[dict], *, reportable_only: bool = False) -> str:
@@ -1483,6 +1504,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         sast_worker_prompt,
     )
     from aespa.services.settings import get_llm_config_for_role
+    from aespa.services.settings_integrations import get_scanner_policy
 
     _sast_stop_requested.discard(sast_run_id)
     _sast_pause_requested.discard(sast_run_id)
@@ -1544,6 +1566,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 )
                 or llm_cfg_obj
             )
+            scanner_policy = get_scanner_policy(s)
             endpoints = (
                 list(
                     s.exec(
@@ -1627,8 +1650,11 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             if _stop_check():
                 raise asyncio.CancelledError
 
-        validation_semaphore = asyncio.Semaphore(_SAST_VALIDATOR_MAX_CONCURRENT)
+        validation_semaphore = asyncio.Semaphore(
+            scanner_policy.sast_max_concurrent_llm_requests
+        )
         validation_scheduled: set[int] = set()
+        validation_restart_from_scratch: set[int] = set()
         validation_failures: list[int] = []
         validation_started = False
 
@@ -1672,7 +1698,10 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                         emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
                         stop_check=_stop_check,
                         tools=SAST_VALIDATION_TOOLS,
-                        resume=resume,
+                        resume=(
+                            resume
+                            and candidate_id not in validation_restart_from_scratch
+                        ),
                     )
                     _raise_if_stopped()
                 except asyncio.CancelledError:
@@ -1837,7 +1866,9 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 {"files_total": source_file_count},
             )
 
-            worker_semaphore = asyncio.Semaphore(4)
+            worker_semaphore = asyncio.Semaphore(
+                scanner_policy.sast_max_concurrent_llm_requests
+            )
 
             async def _run_discovery_worker(worker: SastWorker) -> str:
                 if worker.id is None:
@@ -2022,6 +2053,16 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         )
         if validation_needs_work:
             for candidate in candidates:
+                if (
+                    resume
+                    and candidate.get("validation_status") == "inconclusive"
+                    and candidate.get("confidence") is not None
+                ):
+                    candidate_id = int(candidate["candidate_id"])
+                    validation_restart_from_scratch.add(candidate_id)
+                    candidate["validation_status"] = "pending"
+                    candidate["validation_reasoning"] = ""
+                    candidate["reportable"] = False
                 if (
                     candidate.get("validation_status") == "pending"
                     and candidate.get("confidence") is not None
@@ -2319,6 +2360,20 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             )
         else:
             log.info("SAST scan cancelled: sast_run_id=%s", sast_run_id)
+            if _checkpoint_stopped_validation(sast_run_id, current_phase):
+                events_svc.emit(
+                    sast_run_id,
+                    {
+                        "type": "agent_status",
+                        "agent_id": "sast-scanner",
+                        "role": "SAST Analyst",
+                        "status": "paused",
+                        "current_task": "Validation paused",
+                        "outcome": "resumable",
+                        "_persist": True,
+                    },
+                )
+                return
             total = 0
             if run is not None:
                 for candidate in _candidates.get(sast_run_id, []):
@@ -2568,7 +2623,6 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
     if task is not None:
         _sast_stop_requested.add(sast_run_id)
         task.cancel()
-        _update_sast_run_status(sast_run_id, "cancelled")
         # This runs from an unscoped request handler; without the scope the
         # persisted agent_status row defaults to run_kind='web' and leaks into a
         # colliding web run (events.py has no id-keyed fallback any more).
@@ -2579,9 +2633,9 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
                     "type": "agent_status",
                     "agent_id": "sast-scanner",
                     "role": "SAST Analyst",
-                    "status": "idle",
-                    "current_task": "Scan stopped",
-                    "outcome": "stopped",
+                    "status": "stopping",
+                    "current_task": "Saving scan checkpoint",
+                    "outcome": None,
                     "_persist": True,
                 },
             )

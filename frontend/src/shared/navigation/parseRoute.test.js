@@ -52,7 +52,7 @@ test.each([
   ["#/scan-policy", { name: "scan-policy" }],
   ["#/external-integrations", { name: "external-integrations" }],
   ["#/extensions", { name: "extensions" }],
-  ["#/debug", { name: "debug" }],
+  ["#/debug", { name: "scan-policy" }],
   ["#/reporting-debug", { name: "reporting-debug" }],
   ["#/benchmark-lab", { name: "benchmark-lab" }],
   ["#/benchmark-lab/evaluations/new", { name: "benchmark-evaluation-new" }],

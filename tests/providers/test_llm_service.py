@@ -13,6 +13,32 @@ from aespa.services import llm
 from aespa.services.resolved_llm_config import ResolvedLLMConfig
 
 
+def test_run_concurrency_gate_limits_provider_calls(monkeypatch):
+    monkeypatch.setattr(llm, "_read_run_concurrency_limit", lambda _kind: 2)
+    llm._run_concurrency_gates.clear()
+    active = 0
+    maximum = 0
+
+    async def one_call():
+        nonlocal active, maximum
+        async with llm._run_concurrency_slot():
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+
+    async def scenario():
+        llm.set_run_context(98765, emit_fn=None, run_kind="sast")
+        try:
+            await asyncio.gather(*(one_call() for _ in range(6)))
+        finally:
+            llm.clear_run_context()
+
+    asyncio.run(scenario())
+
+    assert maximum == 2
+
+
 def test_title_normalization_cannot_introduce_unauthenticated_claim(monkeypatch):
     async def fake_call(*_args, **_kwargs):
         return json.dumps(
