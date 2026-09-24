@@ -45,9 +45,9 @@ from aespa.models import (
     TestRun,
     TrafficEntry,
 )
-from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import events as events_svc
+from aespa.services import external_scans
 from aespa.services import llm as llm_svc
 from aespa.services import recon_summary as recon_summary_svc
 from aespa.services import scanner_sessions as session_svc
@@ -76,7 +76,6 @@ from aespa.services.scan_completion import ScanCompletionPolicy
 from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import (
     get_browser_debug_config,
-    get_burp_rest_api_config_model,
     get_global_http_header_config,
     get_llm_config_for_role,
     get_run_scanner_policy,
@@ -874,7 +873,6 @@ _thinking_tasks: dict[int, asyncio.Task] = {}
 _thinking_scan_status: dict[
     int, str
 ] = {}  # run_id → idle|running|complete|stopped|failed
-_burp_active_scan_targets: set[tuple[int, str, str]] = set()
 _persist_write_locks: dict[int, asyncio.Lock] = {}
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -4317,212 +4315,36 @@ def _finding_exists(
     )
 
 
-# ── Burp REST API helpers ──────────────────────────────────────────────────────
-
-_SQLI_TITLE_KEYWORDS = frozenset(
-    ["sql injection", "sql error", "blind sql", "sqli", "sql blind"]
-)
-_XSS_TITLE_KEYWORDS = frozenset(
-    [
-        "xss",
-        "cross-site scripting",
-        "cross site scripting",
-        "reflected xss",
-        "stored xss",
-        "dom xss",
-        "dom-based xss",
-    ]
-)
-_COMMAND_INJECTION_KEYWORDS = frozenset(
-    [
-        "command injection",
-        "os command",
-        "shell injection",
-        "shell command",
-        "rce",
-        "remote code execution",
-    ]
-)
-_PATH_TRAVERSAL_KEYWORDS = frozenset(
-    [
-        "path traversal",
-        "directory traversal",
-        "file traversal",
-        "local file inclusion",
-        "remote file inclusion",
-        "lfi",
-        "rfi",
-    ]
-)
-_SSRF_KEYWORDS = frozenset(
-    [
-        "ssrf",
-        "server-side request forgery",
-        "server side request forgery",
-    ]
-)
-_XXE_KEYWORDS = frozenset(
-    [
-        "xxe",
-        "xml external entity",
-        "external entity",
-    ]
-)
-_SSTI_KEYWORDS = frozenset(
-    [
-        "ssti",
-        "server-side template injection",
-        "server side template injection",
-        "template injection",
-    ]
-)
+# ── External scanner specialist dispatch ─────────────────────────────────────
 
 
-def _finding_triggers_burp_sqli(finding: ScanFinding) -> bool:
-    title = (finding.title or "").lower()
-    cat = (finding.owasp_category or "").lower()
-    return (
-        any(kw in title for kw in _SQLI_TITLE_KEYWORDS)
-        or ("sql" in title and "inject" in title)
-        or ("sql" in title and cat.startswith("a03"))
-    )
-
-
-def _finding_triggers_burp_xss(finding: ScanFinding) -> bool:
-    title = (finding.title or "").lower()
-    desc = (finding.description or "").lower()
-    return (
-        any(kw in title for kw in _XSS_TITLE_KEYWORDS)
-        or any(kw in desc for kw in _XSS_TITLE_KEYWORDS)
-        or "cross-site" in title
-    )
-
-
-def _finding_burp_vuln_class(finding: ScanFinding) -> str | None:
-    text = " ".join(
-        [
-            finding.title or "",
-            finding.description or "",
-            finding.owasp_category or "",
-        ]
-    )
-    return _burp_vuln_class_from_text(text)
-
-
-def _burp_vuln_class_from_text(text: str) -> str | None:
-    text = (text or "").lower()
-    if any(kw in text for kw in _SQLI_TITLE_KEYWORDS) or (
-        "sql" in text and "inject" in text
-    ):
-        return "SQL Injection"
-    if any(kw in text for kw in _XSS_TITLE_KEYWORDS) or "cross-site" in text:
-        return "XSS"
-    if any(kw in text for kw in _COMMAND_INJECTION_KEYWORDS):
-        return "Command Injection"
-    if any(kw in text for kw in _PATH_TRAVERSAL_KEYWORDS):
-        return "Path Traversal"
-    if any(kw in text for kw in _SSRF_KEYWORDS):
-        return "SSRF"
-    if any(kw in text for kw in _XXE_KEYWORDS):
-        return "XXE"
-    if any(kw in text for kw in _SSTI_KEYWORDS):
-        return "SSTI"
-    return None
-
-
-def _burp_class_enabled(config, vuln_class: str) -> bool:
-    return {
-        "SQL Injection": config.scan_sqli,
-        "XSS": config.scan_xss,
-        "Command Injection": config.scan_command_injection,
-        "Path Traversal": config.scan_path_traversal,
-        "SSRF": config.scan_ssrf,
-        "XXE": config.scan_xxe,
-        "SSTI": config.scan_ssti,
-    }.get(vuln_class, False)
-
-
-def _burp_investigation_candidate(
-    tool_input: dict, note: str
-) -> tuple[str, str] | None:
-    text = " ".join(
-        str(tool_input.get(key) or "")
-        for key in ("hypothesis", "payload_purpose", "observation", "url")
-    )
-    text = f"{note or ''} {text}"
-    vuln_class = _burp_vuln_class_from_text(text)
-    if not vuln_class:
-        return None
-    title = str(
-        tool_input.get("hypothesis")
-        or tool_input.get("payload_purpose")
-        or note
-        or vuln_class
-    )
-    return vuln_class, title[:200]
-
-
-def _best_burp_auth(session_vault: dict) -> tuple[dict[str, str], dict[str, str]]:
-    """Return (cookies, extra_headers) from the first non-anonymous session found."""
-    for label, session in (session_vault or {}).items():
-        if session.get("kind") == "anonymous":
-            continue
-        cookies = dict(session.get("cookies") or {})
-        headers = dict(session.get("extra_headers") or {})
-        if cookies or headers:
-            return cookies, headers
-    return {}, {}
-
-
-# Maps Burp vuln class strings to specialist attack_class values.
-_BURP_VULN_TO_SPECIALIST_CLASS: dict[str, str] = {
-    "SQL Injection": "sqli",
-    "XSS": "xss",
-    "Command Injection": "sqli",
-    "Path Traversal": "path_traversal",
-    "SSRF": "ssrf",
-    "XXE": "sqli",
-    "SSTI": "xss",
-}
-
-
-def _maybe_trigger_specialist_for_burp(
+def _schedule_external_specialist(
     run_id: int,
     url: str,
-    vuln_class: str,
+    attack_class: str,
     session_vault: dict,
 ) -> None:
-    """If trigger_specialist_on_burp is enabled, dispatch a specialist alongside the Burp scan."""
-    with Session(get_engine()) as s:
-        specialist_cfg = get_specialist_agent_config(s)
-        if not specialist_cfg.trigger_specialist_on_burp:
+    """Dispatch a specialist requested by a web active scanner extension."""
+    with Session(get_engine()) as session:
+        specialist_cfg = get_specialist_agent_config(session)
+        if not specialist_cfg.enabled:
             return
-        run = s.get(TestRun, run_id)
-        if not run:
+        run = session.get(TestRun, run_id)
+        if run is None:
             return
-        llm_cfg = get_llm_config_for_role(s, run, "specialist")
-        scanner_policy = get_run_scanner_policy(s, run)
-        site_id: int = getattr(run, "site_id", 0) or 0
+        llm_cfg = get_llm_config_for_role(session, run, "specialist")
+        scanner_policy = get_run_scanner_policy(session, run)
+        site_id = run.site_id or 0
 
-    attack_class = _BURP_VULN_TO_SPECIALIST_CLASS.get(vuln_class, "xss")
     agent_id = _next_specialist_agent_id(run_id, attack_class)
-    log.info(
-        "debug trigger_specialist_on_burp: dispatching %s for %s url=%s",
-        agent_id,
-        vuln_class,
-        url,
-    )
     try:
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(
+        task = asyncio.get_running_loop().create_task(
             _run_specialist_agent(
                 run_id=run_id,
                 agent_id=agent_id,
                 attack_class=attack_class,
                 target_url=url,
-                rationale=(
-                    f"Debug: triggered alongside Burp active scan for {vuln_class} on {url}"
-                ),
+                rationale=f"Triggered alongside external active scan on {url}",
                 session_vault=session_vault,
                 llm_cfg=llm_cfg,
                 base_url=url,
@@ -4530,342 +4352,18 @@ def _maybe_trigger_specialist_for_burp(
                 max_steps=specialist_cfg.max_steps,
                 site_id=site_id,
             ),
-            name=f"specialist-debug-{run_id}-{agent_id}",
-        )
-        _specialist_tasks.setdefault(run_id, []).append(task)
-        task.add_done_callback(
-            lambda t, rid=run_id: (
-                _specialist_tasks.get(rid, []).remove(t)
-                if t in _specialist_tasks.get(rid, [])
-                else None
-            )
+            name=f"specialist-external-{run_id}-{agent_id}",
         )
     except RuntimeError:
-        pass
-
-
-async def _run_burp_active_scan_for_target(
-    run_id: int,
-    *,
-    url: str,
-    title: str,
-    vuln_class: str,
-    session_vault: dict,
-    finding_id: int | None = None,
-    page_id: int | None = None,
-) -> None:
-    """Fire-and-forget task: run Burp active scan on a specific candidate URL."""
-    with Session(get_engine()) as s:
-        burp_cfg = get_burp_rest_api_config_model(s)
-
-    if not burp_cfg.enabled:
         return
-
-    if not _burp_class_enabled(burp_cfg, vuln_class):
-        return
-
-    if not url.startswith(("http://", "https://")):
-        return
-    target_key = (run_id, vuln_class, url)
-    if target_key in _burp_active_scan_targets:
-        return
-    _burp_active_scan_targets.add(target_key)
-
-    log.info(
-        "burp_rest: scheduling active scan for %s url=%s",
-        vuln_class,
-        url,
+    _specialist_tasks.setdefault(run_id, []).append(task)
+    task.add_done_callback(
+        lambda completed, rid=run_id: (
+            _specialist_tasks.get(rid, []).remove(completed)
+            if completed in _specialist_tasks.get(rid, [])
+            else None
+        )
     )
-    target_label = (
-        f'finding "{title}"' if finding_id is not None else f'investigation "{title}"'
-    )
-    # Stable agent_id for this Burp scan (URL slug, truncated).
-    _burp_agent_id = "burp-" + re.sub(r"[^a-z0-9]+", "-", url.lower())[:50].strip("-")
-    events_svc.emit(
-        run_id,
-        {
-            "type": "scanner_phase",
-            "phase": "burp_active_scan",
-            "status": "start",
-            "message": (
-                f"Burp active scan triggered for {vuln_class} {target_label} — {url}"
-            ),
-            "data": {"finding_id": finding_id, "url": url, "vuln_class": vuln_class},
-        },
-    )
-    events_svc.emit(
-        run_id,
-        {
-            "type": "agent_status",
-            "agent_id": _burp_agent_id,
-            "role": "Burp",
-            "status": "active",
-            "current_task": f"Active scan: {url} ({vuln_class})",
-            "outcome": None,
-            "_persist": True,
-        },
-    )
-
-    cookies, extra_headers = _best_burp_auth(session_vault)
-
-    # Debug: if trigger_specialist_on_burp is set, dispatch a specialist alongside
-    # the Burp scan.  We fire this immediately (before the launch attempt) so the
-    # specialist still runs even when Burp is not reachable.
-    _maybe_trigger_specialist_for_burp(run_id, url, vuln_class, session_vault)
-
-    try:
-        task_id = await burp_rest_svc.launch_active_scan(
-            burp_cfg,
-            url,
-            cookies=cookies or None,
-            extra_headers=extra_headers or None,
-        )
-    except Exception as exc:
-        log.warning(
-            "burp_rest: failed to launch scan for %s %s: %s", vuln_class, url, exc
-        )
-        _burp_active_scan_targets.discard(target_key)
-        events_svc.emit(
-            run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "burp_active_scan",
-                "status": "error",
-                "message": f"Burp active scan launch failed: {exc}",
-                "data": {"finding_id": finding_id, "url": url},
-            },
-        )
-        events_svc.emit(
-            run_id,
-            {
-                "type": "agent_status",
-                "agent_id": _burp_agent_id,
-                "role": "Burp",
-                "status": "failed",
-                "current_task": "Launch failed",
-                "outcome": str(exc)[:200],
-                "_persist": True,
-            },
-        )
-        return
-
-    events_svc.emit(
-        run_id,
-        {
-            "type": "scanner_phase",
-            "phase": "burp_active_scan",
-            "status": "running",
-            "message": f'Burp active scan task {task_id} running for "{title}" — polling…',
-            "data": {"finding_id": finding_id, "task_id": task_id, "url": url},
-        },
-    )
-
-    try:
-        issues = await burp_rest_svc.wait_for_scan(burp_cfg, task_id)
-    except Exception as exc:
-        log.warning("burp_rest: scan task %d error: %s", task_id, exc)
-        events_svc.emit(
-            run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "burp_active_scan",
-                "status": "error",
-                "message": f"Burp active scan task {task_id} failed: {exc}",
-                "data": {"finding_id": finding_id, "task_id": task_id},
-            },
-        )
-        events_svc.emit(
-            run_id,
-            {
-                "type": "agent_status",
-                "agent_id": _burp_agent_id,
-                "role": "Burp",
-                "status": "failed",
-                "current_task": f"Scan task {task_id} failed",
-                "outcome": str(exc)[:200],
-                "_persist": True,
-            },
-        )
-        return
-
-    if not issues:
-        events_svc.emit(
-            run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "burp_active_scan",
-                "status": "complete",
-                "message": f"Burp active scan task {task_id} completed — no issues found.",
-                "data": {
-                    "finding_id": finding_id,
-                    "task_id": task_id,
-                    "issue_count": 0,
-                },
-            },
-        )
-        events_svc.emit(
-            run_id,
-            {
-                "type": "agent_status",
-                "agent_id": _burp_agent_id,
-                "role": "Burp",
-                "status": "complete",
-                "current_task": f"Active scan: {url}",
-                "outcome": "No issues found",
-                "_persist": True,
-            },
-        )
-        return
-
-    # Persist Burp findings as new ScanFinding rows
-    saved_count = 0
-    with Session(get_engine()) as s:
-        for issue in issues:
-            issue_url = issue.get("affected_url") or url
-            issue_title = f"[Burp] {issue.get('name') or 'Unknown issue'}"
-            owasp = "A03"  # Injection
-            severity = issue.get("severity") or "medium"
-            # Skip if already exists
-            if _finding_exists(
-                s,
-                run_id=run_id,
-                title=issue_title,
-                affected_url=issue_url,
-                owasp_category=owasp,
-            ):
-                continue
-            new_finding = ScanFinding(
-                test_run_id=run_id,
-                page_id=page_id,
-                owasp_category=owasp,
-                severity=severity,
-                title=issue_title,
-                description=issue.get("description") or "",
-                impact="",
-                likelihood=f"Confidence: {issue.get('confidence', 'unknown')}",
-                recommendation=issue.get("remediation") or "",
-                cvss_score=0.0,
-                cvss_vector="",
-                affected_url=issue_url,
-                evidence=f"Burp active scan task {task_id} identified: {issue.get('name')}",
-                request_evidence=issue.get("request_evidence") or "",
-                response_evidence=issue.get("response_evidence") or "",
-                evidence_json="[]",
-                screenshot_b64=None,
-                finding_source="burp_active_scan",
-                validation_status="confirmed",
-                validation_note=f"Confirmed by Burp active scanner (task {task_id}).",
-                created_at=_utcnow(),
-            )
-            s.add(new_finding)
-            ensure_finding_reference(s, new_finding)
-            saved_count += 1
-        if saved_count:
-            s.commit()
-
-    log.info(
-        "burp_rest: task %d saved %d finding(s) for run_id=%s url=%s",
-        task_id,
-        saved_count,
-        run_id,
-        url,
-    )
-    if saved_count:
-        _emit_scan_update(run_id)
-    events_svc.emit(
-        run_id,
-        {
-            "type": "scanner_phase",
-            "phase": "burp_active_scan",
-            "status": "complete",
-            "message": (
-                f"Burp active scan task {task_id} complete — {len(issues)} issue(s) found, {saved_count} saved."
-            ),
-            "data": {
-                "finding_id": finding_id,
-                "task_id": task_id,
-                "url": url,
-                "issue_count": len(issues),
-                "saved_count": saved_count,
-            },
-        },
-    )
-    events_svc.emit(
-        run_id,
-        {
-            "type": "agent_status",
-            "agent_id": _burp_agent_id,
-            "role": "Burp",
-            "status": "complete",
-            "current_task": f"Active scan: {url}",
-            "outcome": f"{len(issues)} issue(s), {saved_count} saved",
-            "_persist": True,
-        },
-    )
-
-
-async def _run_burp_active_scan_for_finding(
-    run_id: int,
-    finding: ScanFinding,
-    session_vault: dict,
-) -> None:
-    """Fire-and-forget task: run Burp active scan on a specific finding's URL."""
-    vuln_class = _finding_burp_vuln_class(finding)
-    if not vuln_class:
-        return
-    await _run_burp_active_scan_for_target(
-        run_id,
-        url=finding.affected_url or "",
-        title=finding.title or vuln_class,
-        vuln_class=vuln_class,
-        session_vault=session_vault,
-        finding_id=finding.id,
-        page_id=finding.page_id,
-    )
-
-
-def _schedule_burp_active_scan(
-    run_id: int,
-    finding: ScanFinding,
-    session_vault: dict,
-) -> None:
-    """Schedule a Burp active scan as a background asyncio task (non-blocking)."""
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(
-            _run_burp_active_scan_for_finding(run_id, finding, session_vault)
-        )
-    except RuntimeError:
-        # No running event loop (e.g. during tests) — silently skip
-        pass
-
-
-def _schedule_burp_active_scan_for_investigation(
-    run_id: int,
-    tool_input: dict,
-    note: str,
-    session_vault: dict,
-) -> None:
-    candidate = _burp_investigation_candidate(tool_input, note)
-    if not candidate:
-        return
-    url = str(tool_input.get("url") or "").strip()
-    if not url.startswith(("http://", "https://")):
-        return
-    vuln_class, title = candidate
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(
-            _run_burp_active_scan_for_target(
-                run_id,
-                url=url,
-                title=title,
-                vuln_class=vuln_class,
-                session_vault=session_vault,
-            )
-        )
-    except RuntimeError:
-        pass
 
 
 # ── Specialist agent dispatch ─────────────────────────────────────────────────
@@ -6330,6 +5828,7 @@ def request_thinking_stop(run_id: int) -> None:
     from aespa.services.code_execution import cancel_run_executions
 
     cancel_run_executions("web", run_id)
+    external_scans.cancel_run(run_id)
     # Cancel the main scan task immediately so it doesn't wait out a full LLM
     # round-trip or Playwright navigation before seeing the stop flag.
     task = _thinking_tasks.get(run_id)
@@ -8007,7 +7506,9 @@ async def _do_thinking_scan(
                         _emit_scan_update(run_id)
                         _emit_thinking_status(run_id)
                         if coverage_mode != "sast_validate":
-                            _schedule_burp_active_scan(run_id, saved, session_vault)
+                            external_scans.schedule_finding(
+                                run_id, saved, session_vault
+                            )
                     events_svc.emit(
                         run_id,
                         {
@@ -10374,7 +9875,7 @@ async def _do_agentic_thinking_loop(
                 _emit_scan_update(run_id)
                 _emit_thinking_status(run_id)
                 if coverage_mode != "sast_validate":
-                    _schedule_burp_active_scan(run_id, saved, session_vault)
+                    external_scans.schedule_finding(run_id, saved, session_vault)
                     from aespa.services import validator as _validator_svc
 
                     asyncio.create_task(
@@ -11784,9 +11285,7 @@ async def _do_agentic_thinking_loop(
                 },
             },
         )
-        _schedule_burp_active_scan_for_investigation(
-            run_id, tool_input, note, session_vault
-        )
+        external_scans.schedule_investigation(run_id, tool_input, note, session_vault)
         hr_resp_status = 0
         hr_resp_headers: dict = {}
         hr_resp_body = ""

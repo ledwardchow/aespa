@@ -95,14 +95,6 @@ export const getComponentMapperConfig = () => req("/api/settings/component-mappe
 export const upsertComponentMapperConfig = (b) =>
   req("/api/settings/component-mapper-config", { method: "PUT", body: b });
 
-export const getBurpRestApiConfig = () => req("/api/settings/burp-rest-api");
-
-export const upsertBurpRestApiConfig = (b) =>
-  req("/api/settings/burp-rest-api", { method: "PUT", body: b });
-
-export const testBurpConnection = () =>
-  req("/api/settings/burp-rest-api/test-connection", { method: "POST" });
-
 export const getUpstreamProxy = () => req("/api/settings/upstream-proxy");
 
 export const upsertUpstreamProxy = (b) =>

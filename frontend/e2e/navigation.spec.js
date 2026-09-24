@@ -9,7 +9,7 @@ const screens = [
   ["#/sites/new", "New Site"],
   ["#/settings", "LLM Profiles"],
   ["#/scan-policy", "Settings"],
-  ["#/external-integrations", "External Integrations"],
+  ["#/external-integrations", "Upstream Proxy"],
   ["#/apis", "Fixture API"],
   ["#/apis/1", "Fixture API"],
   ["#/apis/new", "New API"],
@@ -56,6 +56,56 @@ for (const [route, text] of screens) {
     expect(errors).toEqual([]);
   });
 }
+
+test("upstream proxy settings are under Global", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/scan-policy");
+  await expect(page.getByRole("link", { name: "External Integrations" })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Upstream Proxy" }).click();
+  await expect(page).toHaveURL(/#\/scan-policy\/global\/proxy$/);
+  await expect(page.getByText("Send target requests through an upstream proxy")).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("tab", { name: "Upstream Proxy" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  const settingsTabs = await page
+    .getByRole("tablist", { name: "Settings", exact: true })
+    .boundingBox();
+  const globalTabs = await page.getByRole("tablist", { name: "Global settings" }).boundingBox();
+  expect(globalTabs.x).toBe(settingsTabs.x);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-global-upstream-proxy.png") });
+});
+
+test("Settings tabs restore from their URLs and browser history", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/scan-policy");
+  await expect(page.getByRole("tab", { name: "Feature Visibility" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await page.getByRole("tab", { name: "DAST", exact: true }).click();
+  await expect(page).toHaveURL(/#\/scan-policy\/dast\/scan-behaviour$/);
+  await page.getByRole("tab", { name: "HTTP Headers" }).click();
+  await expect(page).toHaveURL(/#\/scan-policy\/dast\/headers$/);
+  await page.reload();
+  await expect(page.getByRole("tab", { name: "HTTP Headers" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await page.goBack();
+  await expect(page.getByRole("tab", { name: "Scan Behaviour" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await page.getByRole("tab", { name: "SAST", exact: true }).click();
+  await expect(page).toHaveURL(/#\/scan-policy\/sast$/);
+  await page.reload();
+  await expect(page.getByRole("tab", { name: "SAST", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
 
 test("settings tabs, edit cancellation, and sidebar history work", async ({ page }) => {
   await installFixtures(page);
@@ -700,7 +750,7 @@ test("empty sites and a narrow viewport remain usable", async ({ page }) => {
   await page.goto("/#/");
   await expect(page.getByText("No sites configured")).toBeVisible();
   await expect(page.locator(".sidebar--collapsed")).toBeVisible();
-  await page.getByRole("link", { name: "LLM Settings", exact: true }).click();
+  await page.getByRole("link", { name: "LLM Configuration", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Providers", exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "Providers", exact: true }).click();
   await expect(page.getByRole("button", { name: "New provider", exact: true })).toBeEnabled();

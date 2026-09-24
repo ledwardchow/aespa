@@ -1,6 +1,7 @@
 import { Tabs } from "../../shared/ui/Tabs.tsx";
 import styles from "./ScanPolicyPage.module.css";
 import { useState } from "react";
+import { nav } from "../../shared/navigation/router.js";
 import { ValidatorSettings } from "./ValidatorSettings.jsx";
 import { GlobalPolicySettings, ScannerPolicySettings } from "./ScannerPolicySettings.jsx";
 import { SpecialistAgentSettings } from "./SpecialistAgentSettings.jsx";
@@ -11,6 +12,7 @@ import { CodeExecutionSettings } from "./CodeExecutionSettings.jsx";
 import { DeepScanSettings } from "./DeepScanSettings.jsx";
 import { SastSettings } from "./SastSettings.jsx";
 import { SystemSettingsPanels } from "./DebugPage.jsx";
+import { UpstreamProxySettings } from "./UpstreamProxySettings.jsx";
 
 const TOP_LEVEL_TABS = [
   { key: "global", label: "Global" },
@@ -34,9 +36,12 @@ const DAST_TABS = [
 const GLOBAL_TABS = [
   { key: "features", label: "Feature Visibility" },
   { key: "debug", label: "Debug Settings" },
+  { key: "proxy", label: "Upstream Proxy" },
 ];
 
 export function ScanPolicyPage({
+  initialTab = "global",
+  initialSubTab,
   showUsername,
   setShowUsername,
   showSystems = true,
@@ -51,9 +56,33 @@ export function ScanPolicyPage({
   benchmarkLabCfg,
   setBenchmarkLabCfg,
 }) {
-  const [tab, setTab] = useState("global");
-  const [globalTab, setGlobalTab] = useState("features");
-  const [dastTab, setDastTab] = useState("scan-behaviour");
+  const [tab, setTab] = useState(initialTab);
+  const [globalTab, setGlobalTab] = useState(
+    initialTab === "global" ? initialSubTab || "features" : "features",
+  );
+  const [dastTab, setDastTab] = useState(
+    initialTab === "dast" ? initialSubTab || "scan-behaviour" : "scan-behaviour",
+  );
+  const selectTopTab = (next) => {
+    setTab(next);
+    if (next === "global") setGlobalTab("features");
+    if (next === "dast") setDastTab("scan-behaviour");
+    nav(
+      next === "global"
+        ? "#/scan-policy/global/features"
+        : next === "dast"
+          ? "#/scan-policy/dast/scan-behaviour"
+          : `#/scan-policy/${next}`,
+    );
+  };
+  const selectGlobalTab = (next) => {
+    setGlobalTab(next);
+    nav(`#/scan-policy/global/${next}`);
+  };
+  const selectDastTab = (next) => {
+    setDastTab(next);
+    nav(`#/scan-policy/dast/${next}`);
+  };
   const topLevelTabs = showSystems
     ? TOP_LEVEL_TABS
     : TOP_LEVEL_TABS.filter((agentTab) => agentTab.key !== "systems");
@@ -66,13 +95,13 @@ export function ScanPolicyPage({
         <div className="topbar-title">Settings</div>
       </div>
       <div className={`content ${styles.content}`}>
-        <Tabs label="Settings" tabs={topLevelTabs} value={tab} onChange={setTab} />
+        <Tabs label="Settings" tabs={topLevelTabs} value={tab} onChange={selectTopTab} />
         {tab === "global" && (
           <Tabs
             label="Global settings"
             tabs={GLOBAL_TABS}
             value={globalTab}
-            onChange={setGlobalTab}
+            onChange={selectGlobalTab}
             className={`activity-sub-tab-bar coverage-sub-tab-bar ${styles.subTabs}`}
             buttonClassName="activity-sub-tab-btn coverage-sub-tab-btn"
           />
@@ -82,13 +111,13 @@ export function ScanPolicyPage({
             label="DAST agent settings"
             tabs={dastTabs}
             value={dastTab}
-            onChange={setDastTab}
+            onChange={selectDastTab}
             className={`activity-sub-tab-bar coverage-sub-tab-bar ${styles.subTabs}`}
             buttonClassName="activity-sub-tab-btn coverage-sub-tab-btn"
           />
         )}
         <div className={`scroll-content ${styles.scroll}`}>
-          {tab === "global" && (
+          {tab === "global" && globalTab !== "proxy" && (
             <div className={styles.systemSettingsPanels}>
               <SystemSettingsPanels
                 tab={globalTab}
@@ -108,6 +137,7 @@ export function ScanPolicyPage({
               />
             </div>
           )}
+          {tab === "global" && globalTab === "proxy" && <UpstreamProxySettings />}
           {tab === "systems" && <ComponentMapperSettings />}
           {tab === "dast" && dastTab === "scan-behaviour" && (
             <GlobalPolicySettings tab="scan-behaviour" />

@@ -20,7 +20,6 @@ export function specialistAgentToForm(cfg) {
         dispatch_crypto: cfg.dispatch_crypto ?? true,
         dispatch_config: cfg.dispatch_config ?? false,
         dispatch_file_upload: cfg.dispatch_file_upload ?? true,
-        trigger_specialist_on_burp: cfg.trigger_specialist_on_burp ?? false,
       }
     : {
         ...DEFAULT_SPECIALIST_AGENT_FORM,
@@ -46,6 +45,5 @@ export function specialistAgentPayload(form) {
     dispatch_crypto: !!form.dispatch_crypto,
     dispatch_config: !!form.dispatch_config,
     dispatch_file_upload: !!form.dispatch_file_upload,
-    trigger_specialist_on_burp: !!form.trigger_specialist_on_burp,
   };
 }

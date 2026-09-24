@@ -27,9 +27,6 @@ from aespa.services.model_capabilities import (
 )
 from aespa.services.resolved_llm_config import ResolvedLLMConfig
 from aespa.services.settings_integrations import (
-    _burp_rest_api_config_from_model as _burp_rest_api_config_from_model,
-)
-from aespa.services.settings_integrations import (
     _policy_from_model as _policy_from_model,
 )
 from aespa.services.settings_integrations import (
@@ -37,12 +34,6 @@ from aespa.services.settings_integrations import (
 )
 from aespa.services.settings_integrations import (
     get_browser_debug_config as get_browser_debug_config,
-)
-from aespa.services.settings_integrations import (
-    get_burp_rest_api_config as get_burp_rest_api_config,
-)
-from aespa.services.settings_integrations import (
-    get_burp_rest_api_config_model as get_burp_rest_api_config_model,
 )
 from aespa.services.settings_integrations import (
     get_cloudflare_access_config as get_cloudflare_access_config,
@@ -82,9 +73,6 @@ from aespa.services.settings_integrations import (
 )
 from aespa.services.settings_integrations import (
     upsert_browser_debug_config as upsert_browser_debug_config,
-)
-from aespa.services.settings_integrations import (
-    upsert_burp_rest_api_config as upsert_burp_rest_api_config,
 )
 from aespa.services.settings_integrations import (
     upsert_cloudflare_access_config as upsert_cloudflare_access_config,

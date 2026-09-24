@@ -102,7 +102,6 @@ function TestRunContent({
     setActivityLog,
     agents,
     setAgents,
-    burpIntegrationEnabled,
     tokenUsage,
     setTokenUsage,
     sitePlanData,
@@ -652,7 +651,6 @@ function TestRunContent({
             thinkingStatus={thinkingStatus}
             activityLog={activityLog}
             agents={agents}
-            burpIntegrationEnabled={burpIntegrationEnabled}
             tokenUsage={tokenUsage}
             sitePlanData={sitePlanData}
             onClearLog={async () => {

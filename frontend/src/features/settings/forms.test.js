@@ -1,7 +1,6 @@
 import { expect, test } from "vitest";
 import { providerToForm, providerPayload } from "./providerForm.js";
 import { llmProfileToForm, llmPayload } from "./modelForm.js";
-import { burpRestApiToForm, burpRestApiPayload } from "./burpForm.js";
 import { scanProfileToForm } from "./scanProfileForm.js";
 
 test("editing a provider keeps a stored key unless explicitly changed or cleared", () => {
@@ -101,13 +100,6 @@ test("new profiles choose a predictable first model without mutating the provide
     max_tokens: 16384,
   });
   expect(provider.models).toEqual(["z", "a"]);
-});
-
-test("integration forms preserve key keep/replace/clear semantics", () => {
-  const form = burpRestApiToForm({ enabled: false, has_api_key: true });
-  expect(burpRestApiPayload(form).api_key).toBeNull();
-  expect(burpRestApiPayload({ ...form, api_key: " new-key " }).api_key).toBe("new-key");
-  expect(burpRestApiPayload({ ...form, clear_api_key: true }).api_key).toBe("");
 });
 
 test("scan profile drafts retain role selections as select values", () => {

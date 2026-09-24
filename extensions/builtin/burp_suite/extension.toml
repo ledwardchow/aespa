@@ -1,0 +1,9 @@
+id = "aespa.burpsuite"
+name = "Burp Suite active scanning"
+author = "aespa"
+version = "1.0.0"
+aespa_api = "1"
+entrypoint = "extension.py:create_extension"
+capabilities = ["web.active_scanner"]
+secrets_namespace = "burpsuite"
+enabled_by_default = false

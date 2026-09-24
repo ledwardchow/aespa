@@ -57,7 +57,7 @@ def normalize_repository(value: str) -> tuple[str, str]:
 
 class GitHubRepositoryProvider:
     descriptor = SourceProviderDescriptor(
-        id="github.repository",
+        id="aespa.githubrepository",
         label="GitHub repository",
         description=(
             "Create an immutable SAST snapshot from a public or private GitHub repository."

@@ -13,8 +13,6 @@ from aespa.schemas import (
     BenchmarkLabConfigOut,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
-    BurpRestApiConfigIn,
-    BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
     CodeExecutionConfigIn,
@@ -51,7 +49,6 @@ from aespa.schemas import (
     ValidatorConfigIn,
     ValidatorConfigOut,
 )
-from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import crawler as crawler_svc
 from aespa.services import settings as settings_service
 from aespa.services import settings_integrations as integration_settings
@@ -582,30 +579,6 @@ def upsert_component_mapper_config(
 ) -> ComponentMapperConfigOut:
     """Persist component-mapper budgets and attack-path trace limits."""
     return integration_settings.upsert_component_mapper_config(session, payload)
-
-
-@router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)
-def get_burp_rest_api_config(
-    session: Session = Depends(get_session),
-) -> BurpRestApiConfigOut:
-    return integration_settings.get_burp_rest_api_config(session)
-
-
-@router.put("/burp-rest-api", response_model=BurpRestApiConfigOut)
-def upsert_burp_rest_api_config(
-    payload: BurpRestApiConfigIn,
-    session: Session = Depends(get_session),
-) -> BurpRestApiConfigOut:
-    return integration_settings.upsert_burp_rest_api_config(session, payload)
-
-
-@router.post("/burp-rest-api/test-connection")
-async def test_burp_rest_api_connection(
-    session: Session = Depends(get_session),
-) -> dict:
-    cfg = integration_settings.get_burp_rest_api_config_model(session)
-    ok, message = await burp_rest_svc.test_connection(cfg)
-    return {"ok": ok, "message": message}
 
 
 @router.get("/upstream-proxy", response_model=UpstreamProxyConfigOut)

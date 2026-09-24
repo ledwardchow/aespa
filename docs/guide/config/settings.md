@@ -48,13 +48,11 @@ The **Agent Settings** page is divided into these tabs:
   Docker image, allowed agent roles, time and resource limits, output limits,
   request limits, and concurrency.
 
-## External Integrations
+## Upstream Proxy
 
-- **Burp Suite Integration**: Connects to Burp Suite Professional's REST API.
-  Configure the API URL, API key, named scan configuration, and vulnerability
-  classes. **Test connection** checks the configured endpoint.
-- **Upstream Proxy**: Sends scanner traffic, LLM traffic, or both through an
-  HTTP or HTTPS proxy.
+Open **Settings > Global > Upstream Proxy** to send scanner traffic, LLM traffic,
+or both through an HTTP or HTTPS proxy. Burp Suite settings are on the
+**Extensions** page.
 
 ## System Settings
 

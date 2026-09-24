@@ -19,7 +19,6 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
   const onActiveJobs = section === "active-jobs";
   const onSettings = section === "settings";
   const onScanPolicy = section === "scan-policy";
-  const onExternalIntegrations = section === "external-integrations";
   const onExtensions = section === "extensions";
   const onSast = section === "sast";
   const onReportingDebug = section === "reporting-debug";
@@ -169,22 +168,12 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
         <a
           href="#/settings/profiles"
           className={"nav-item" + (onSettings ? " active" : "")}
-          title="LLM Settings"
+          title="LLM Configuration"
         >
           <span className="nav-icon">
             <IconSettings />
           </span>
-          {!collapsed && " LLM Settings"}
-        </a>
-        <a
-          href="#/external-integrations"
-          className={"nav-item" + (onExternalIntegrations ? " active" : "")}
-          title="External Integrations"
-        >
-          <span className="nav-icon">
-            <IconShield />
-          </span>
-          {!collapsed && " External Integrations"}
+          {!collapsed && " LLM Configuration"}
         </a>
         <a
           href="#/extensions"

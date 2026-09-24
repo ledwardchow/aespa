@@ -1,5 +1,4 @@
 import { parseDate } from "../../shared/lib/dates.js";
-import * as settingsApi from "../../shared/api/settings.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useState, useEffect, useCallback } from "react";
 
@@ -14,7 +13,6 @@ import {
 export function useActivity(runId) {
   const [activityLog, setActivityLog] = useState([]);
   const [agents, setAgents] = useState([]);
-  const [burpIntegrationEnabled, setBurpIntegrationEnabled] = useState(null);
   const [tokenUsage, setTokenUsage] = useState(null); // {total_input, total_output, by_model}
   const [sitePlanData, setSitePlanData] = useState(null);
 
@@ -89,12 +87,8 @@ export function useActivity(runId) {
       webRunsApi.getValidateStatus(runId),
       webRunsApi.getCrawlStatus(runId).catch(() => null),
       webRunsApi.getScanLog(runId).catch(() => []),
-      settingsApi.getBurpRestApiConfig().catch(() => null),
     ])
-      .then(([entries, scanStatus, validationStatus, crawlStatus, scanEntries, burpConfig]) => {
-        setBurpIntegrationEnabled(
-          typeof burpConfig?.enabled === "boolean" ? burpConfig.enabled : null,
-        );
+      .then(([entries, scanStatus, validationStatus, crawlStatus, scanEntries]) => {
         entries = entries || [];
         const scanRunning = isDynamicScanActive(scanStatus?.status);
         const validationRunning = validationStatus?.status === "running";
@@ -263,7 +257,6 @@ export function useActivity(runId) {
     setActivityLog,
     agents,
     setAgents,
-    burpIntegrationEnabled,
     tokenUsage,
     setTokenUsage,
     sitePlanData,

@@ -10,7 +10,6 @@ from aespa.models import (
     AdversarialValidatorConfig,
     BenchmarkLabConfig,
     BrowserDebugConfig,
-    BurpRestApiConfig,
     CloudflareAccessConfig,
     CodeExecutionConfig,
     ComponentMapperConfig,
@@ -28,8 +27,6 @@ from aespa.schemas import (
     BenchmarkLabConfigOut,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
-    BurpRestApiConfigIn,
-    BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
     CodeExecutionConfigIn,
@@ -335,40 +332,6 @@ def upsert_upstream_proxy_config(
     return get_upstream_proxy_config(session)
 
 
-def _burp_rest_api_config_from_model(cfg: BurpRestApiConfig) -> BurpRestApiConfigOut:
-    return BurpRestApiConfigOut(
-        enabled=cfg.enabled,
-        api_url=cfg.api_url,
-        has_api_key=bool(cfg.api_key and cfg.api_key.strip()),
-        api_key=None,
-        scan_configuration_name=cfg.scan_configuration_name,
-        scan_sqli=cfg.scan_sqli,
-        scan_xss=cfg.scan_xss,
-        scan_command_injection=cfg.scan_command_injection,
-        scan_path_traversal=cfg.scan_path_traversal,
-        scan_ssrf=cfg.scan_ssrf,
-        scan_xxe=cfg.scan_xxe,
-        scan_ssti=cfg.scan_ssti,
-        updated_at=cfg.updated_at,
-    )
-
-
-def get_burp_rest_api_config_model(session: Session) -> BurpRestApiConfig:
-    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
-    if cfg is None:
-        return BurpRestApiConfig(id=_SINGLETON_ID)
-    return cfg
-
-
-def get_burp_rest_api_config(session: Session) -> BurpRestApiConfigOut:
-    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
-    if cfg is None:
-        return BurpRestApiConfigOut(
-            **BurpRestApiConfigIn().model_dump(), updated_at=_utcnow()
-        )
-    return _burp_rest_api_config_from_model(cfg)
-
-
 def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
     cfg = session.get(SpecialistAgentConfig, _SINGLETON_ID)
     if cfg is None:
@@ -393,7 +356,6 @@ def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
         dispatch_crypto=cfg.dispatch_crypto,
         dispatch_config=cfg.dispatch_config,
         dispatch_file_upload=cfg.dispatch_file_upload,
-        trigger_specialist_on_burp=cfg.trigger_specialist_on_burp,
         updated_at=cfg.updated_at,
     )
 
@@ -458,40 +420,11 @@ def upsert_specialist_agent_config(
     cfg.dispatch_crypto = payload.dispatch_crypto
     cfg.dispatch_config = payload.dispatch_config
     cfg.dispatch_file_upload = payload.dispatch_file_upload
-    cfg.trigger_specialist_on_burp = payload.trigger_specialist_on_burp
     cfg.updated_at = _utcnow()
     session.add(cfg)
     session.commit()
     session.refresh(cfg)
     return get_specialist_agent_config(session)
-
-
-def upsert_burp_rest_api_config(
-    session: Session, payload: BurpRestApiConfigIn
-) -> BurpRestApiConfigOut:
-    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = BurpRestApiConfig(id=_SINGLETON_ID)
-
-    cfg.enabled = payload.enabled
-    cfg.api_url = payload.api_url
-    if payload.api_key is not None:
-        key_str = payload.api_key.strip()
-        cfg.api_key = key_str if key_str else None
-    cfg.scan_configuration_name = payload.scan_configuration_name
-    cfg.scan_sqli = payload.scan_sqli
-    cfg.scan_xss = payload.scan_xss
-    cfg.scan_command_injection = payload.scan_command_injection
-    cfg.scan_path_traversal = payload.scan_path_traversal
-    cfg.scan_ssrf = payload.scan_ssrf
-    cfg.scan_xxe = payload.scan_xxe
-    cfg.scan_ssti = payload.scan_ssti
-    cfg.updated_at = _utcnow()
-
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return _burp_rest_api_config_from_model(cfg)
 
 
 def get_adversarial_validator_config(session: Session) -> ValidatorConfigOut:
