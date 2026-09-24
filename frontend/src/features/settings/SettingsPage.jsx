@@ -229,7 +229,7 @@ export function SettingsPage({
       </div>
       <div className="content scroll-content settings-content">
         <Tabs
-          label="LLM settings"
+          label="LLM configuration"
           className="tab-bar settings-tab-bar"
           tabs={SETTINGS_TABS}
           value={visibleTab}

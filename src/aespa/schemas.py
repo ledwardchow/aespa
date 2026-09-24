@@ -1062,51 +1062,6 @@ class UpstreamProxyConfigOut(UpstreamProxyConfigBase):
     updated_at: datetime
 
 
-class BurpRestApiConfigBase(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    enabled: bool = False
-    api_url: str = Field(default="http://127.0.0.1:1337", min_length=1, max_length=500)
-    api_key: str | None = None
-    scan_configuration_name: str | None = Field(
-        default="Audit checks - all except time-based detection methods",
-        max_length=200,
-    )
-    scan_sqli: bool = True
-    scan_xss: bool = True
-    scan_command_injection: bool = True
-    scan_path_traversal: bool = True
-    scan_ssrf: bool = True
-    scan_xxe: bool = True
-    scan_ssti: bool = True
-
-    @field_validator("api_url")
-    @classmethod
-    def _normalize_api_url(cls, v: str) -> str:
-        v = v.strip().rstrip("/")
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("api_url must start with http:// or https://")
-        return v
-
-    @field_validator("scan_configuration_name")
-    @classmethod
-    def _normalize_scan_configuration_name(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        v = v.strip()
-        return v or None
-
-
-class BurpRestApiConfigIn(BurpRestApiConfigBase):
-    pass
-
-
-class BurpRestApiConfigOut(BurpRestApiConfigBase):
-    has_api_key: bool = False
-    api_key: str | None = None
-    updated_at: datetime
-
-
 # ── Specialist agent config schemas ──────────────────────────────────────────
 
 
@@ -1130,7 +1085,6 @@ class SpecialistAgentConfigBase(BaseModel):
     dispatch_crypto: bool = True
     dispatch_config: bool = False
     dispatch_file_upload: bool = True
-    trigger_specialist_on_burp: bool = False
 
 
 class SpecialistAgentConfigIn(SpecialistAgentConfigBase):

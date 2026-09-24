@@ -194,7 +194,10 @@ export const routes = {
   "scan-policy": {
     section: "scan-policy",
     Component: lazyNamed(() => import("../features/settings/ScanPolicyPage.jsx"), "ScanPolicyPage"),
-    props: (_route, preferences) => ({
+    props: (route, preferences) => ({
+      key: `${route.tab || "global"}/${route.subTab || ""}`,
+      initialTab: route.tab || "global",
+      initialSubTab: route.subTab,
       showUsername: preferences.showUsername,
       setShowUsername: preferences.setShowUsername,
       showDeepScan: preferences.showDeepScan,
@@ -210,14 +213,6 @@ export const routes = {
       setBenchmarkLabCfg: preferences.setBenchmarkLabCfg,
     }),
   },
-  "external-integrations": {
-    section: "external-integrations",
-    Component: lazyNamed(
-      () => import("../features/settings/ExternalIntegrationsPage.jsx"),
-      "ExternalIntegrationsPage",
-    ),
-    props: () => ({}),
-  },
   extensions: {
     section: "extensions",
     Component: lazyNamed(
@@ -225,6 +220,14 @@ export const routes = {
       "ExtensionsPage",
     ),
     props: () => ({}),
+  },
+  "extension-settings": {
+    section: "extensions",
+    Component: lazyNamed(
+      () => import("../features/extensions/ExtensionSettingsPage.jsx"),
+      "ExtensionSettingsPage",
+    ),
+    props: (route) => ({ key: route.extensionId, extensionId: route.extensionId }),
   },
   "reporting-debug": {
     section: "reporting-debug",

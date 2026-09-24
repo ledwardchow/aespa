@@ -80,6 +80,6 @@ Click **Set as default** on a profile to make it the system-wide default.
 
 ## Importing & Exporting Configurations
 
-Use the **Export** and **Import** buttons in the top right of the LLM Settings page to transfer configurations:
+Use the **Export** and **Import** buttons in the top right of the LLM Configuration page to transfer configurations:
 - **Export**: Downloads a JSON file containing all providers, models, and scan profiles.
 - **Import**: Uploads a JSON file to restore or merge providers, models, and profiles into AESPA.

@@ -171,27 +171,19 @@ def test_openai_compatible_discovery_failure_has_clear_error(
     )
 
 
-def test_burp_rest_api_config_round_trip(client: TestClient):
-    r = client.get("/api/settings/burp-rest-api")
+def test_burp_extension_config_round_trip(client: TestClient):
+    r = client.get("/api/extensions/aespa.burpsuite")
     assert r.status_code == 200
     assert r.json()["enabled"] is False
-    assert r.json()["api_url"] == "http://127.0.0.1:1337"
-    assert (
-        r.json()["scan_configuration_name"]
-        == "Audit checks - all except time-based detection methods"
-    )
-    assert r.json()["scan_sqli"] is True
-    assert r.json()["scan_xss"] is True
-    assert r.json()["scan_command_injection"] is True
-    assert r.json()["scan_path_traversal"] is True
-    assert r.json()["scan_ssrf"] is True
-    assert r.json()["scan_xxe"] is True
-    assert r.json()["scan_ssti"] is True
+    assert r.json()["settings"] == {}
+
+    enabled = client.put("/api/extensions/aespa.burpsuite/enabled", json={"enabled": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+    assert enabled.json()["web_scanners"][0]["id"] == "aespa.burpsuite"
 
     payload = {
-        "enabled": True,
         "api_url": "http://127.0.0.1:1337",
-        "api_key": None,
         "scan_configuration_name": "Fast audit",
         "scan_sqli": False,
         "scan_xss": True,
@@ -201,10 +193,9 @@ def test_burp_rest_api_config_round_trip(client: TestClient):
         "scan_xxe": True,
         "scan_ssti": True,
     }
-    r = client.put("/api/settings/burp-rest-api", json=payload)
+    r = client.patch("/api/extensions/aespa.burpsuite/settings", json={"settings": payload})
     assert r.status_code == 200
-    data = r.json()
-    assert data["enabled"] is True
+    data = r.json()["settings"]
     assert data["api_url"] == "http://127.0.0.1:1337"
     assert data["scan_configuration_name"] == "Fast audit"
     assert data["scan_sqli"] is False
@@ -916,30 +907,19 @@ def test_write_only_api_keys_behavior(client: TestClient):
     assert clear_resp.status_code == 200
     assert clear_resp.json()["has_api_key"] is False
 
-    # 5. Burp REST API key write-only test
-    burp_put = client.put(
-        "/api/settings/burp-rest-api",
-        json={
-            "enabled": True,
-            "api_url": "http://127.0.0.1:1337",
-            "api_key": "burp-secret-key",
-            "scan_configuration_name": "Audit",
-            "scan_sqli": True,
-            "scan_xss": True,
-            "scan_command_injection": True,
-            "scan_path_traversal": True,
-            "scan_ssrf": True,
-            "scan_xxe": True,
-            "scan_ssti": True,
-        },
+    # 5. Extension secret write-only test
+    client.put("/api/extensions/aespa.burpsuite/enabled", json={"enabled": True})
+    burp_put = client.patch(
+        "/api/extensions/aespa.burpsuite/settings",
+        json={"settings": {"api_key": "burp-secret-key"}},
     )
     assert burp_put.status_code == 200
-    assert burp_put.json()["has_api_key"] is True
-    assert burp_put.json()["api_key"] is None
+    assert burp_put.json()["has_secrets"]["api_key"] is True
+    assert "burp-secret-key" not in burp_put.text
 
-    burp_get = client.get("/api/settings/burp-rest-api")
-    assert burp_get.json()["has_api_key"] is True
-    assert burp_get.json()["api_key"] is None
+    burp_get = client.get("/api/extensions/aespa.burpsuite")
+    assert burp_get.json()["has_secrets"]["api_key"] is True
+    assert "burp-secret-key" not in burp_get.text
 
 
 def test_run_llm_config_resolves_provider_fields_without_changing_session_instance():

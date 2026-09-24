@@ -19,13 +19,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import httpx
 
-from aespa.models import BurpRestApiConfig
-
 log = logging.getLogger("aespa.burp_rest")
+
+
+@dataclass(frozen=True)
+class BurpConfig:
+    api_url: str
+    api_key: str | None = None
+    scan_configuration_name: str | None = None
+
 
 # Terminal scan statuses (Burp REST API v0.1)
 _TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
@@ -45,7 +52,7 @@ class BurpRestApiError(RuntimeError):
     pass
 
 
-def _headers(config: BurpRestApiConfig) -> dict[str, str]:
+def _headers(config: BurpConfig) -> dict[str, str]:
     h: dict[str, str] = {"Content-Type": "application/json"}
     if config.api_key:
         h["Authorization"] = f"Bearer {config.api_key}"
@@ -167,7 +174,7 @@ def _normalise_issue(event: dict) -> dict | None:
 
 
 async def launch_active_scan(
-    config: BurpRestApiConfig,
+    config: BurpConfig,
     url: str,
     *,
     cookies: dict[str, str] | None = None,
@@ -224,7 +231,7 @@ async def launch_active_scan(
     return task_id
 
 
-async def get_scan_status(config: BurpRestApiConfig, task_id: int) -> dict:
+async def get_scan_status(config: BurpConfig, task_id: int) -> dict:
     """Fetch the current scan state from Burp Suite.
 
     Returns the full response dict which includes ``status`` and
@@ -240,7 +247,7 @@ async def get_scan_status(config: BurpRestApiConfig, task_id: int) -> dict:
 
 
 async def wait_for_scan(
-    config: BurpRestApiConfig,
+    config: BurpConfig,
     task_id: int,
     *,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
@@ -272,6 +279,8 @@ async def wait_for_scan(
         )
 
         if status in _TERMINAL_STATUSES:
+            if status != "succeeded":
+                raise BurpRestApiError(f"Burp active scan task {task_id} {status}")
             issues = [
                 n
                 for e in (data.get("issue_events") or [])
@@ -289,7 +298,7 @@ async def wait_for_scan(
         await asyncio.sleep(interval)
 
 
-async def test_connection(config: BurpRestApiConfig) -> tuple[bool, str]:
+async def test_connection(config: BurpConfig) -> tuple[bool, str]:
     """Probe the Burp REST API with a GET /v0.1/scan/0 and return (ok, message).
 
     Uses the same client settings as the live scan path so the result is

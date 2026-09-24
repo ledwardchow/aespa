@@ -31,6 +31,9 @@ vi.mock("./DeepScanSettings.jsx", () => ({
   DeepScanSettings: () => <div>Deep Scan settings</div>,
 }));
 vi.mock("./SastSettings.jsx", () => ({ SastSettings: () => <div>SAST settings</div> }));
+vi.mock("./UpstreamProxySettings.jsx", () => ({
+  UpstreamProxySettings: () => <div>Proxy settings form</div>,
+}));
 
 test("only shows Deep Scan settings when its feature preference is enabled", () => {
   const { rerender } = render(<ScanPolicyPage showDeepScan={false} />);
@@ -52,6 +55,7 @@ test("shows SAST settings in its own tab", () => {
   fireEvent.click(screen.getByRole("tab", { name: "SAST" }));
 
   expect(screen.getByText("SAST settings")).toBeTruthy();
+  expect(window.location.hash).toBe("#/scan-policy/sast");
 });
 
 test("groups DAST settings under a nested tab bar", () => {
@@ -67,6 +71,7 @@ test("groups DAST settings under a nested tab bar", () => {
 
   fireEvent.click(screen.getByRole("tab", { name: "Crawler" }));
   expect(screen.getByText("Crawler settings")).toBeTruthy();
+  expect(window.location.hash).toBe("#/scan-policy/dast/crawler");
   expect(screen.getByRole("tab", { name: "Specialist" })).toBeTruthy();
 
   fireEvent.click(screen.getByRole("tab", { name: "Validator" }));
@@ -79,7 +84,27 @@ test("shows feature visibility and debug settings under Global", () => {
   expect(screen.getByText("features settings")).toBeTruthy();
   fireEvent.click(screen.getByRole("tab", { name: "Debug Settings" }));
   expect(screen.getByText("debug settings")).toBeTruthy();
+  expect(window.location.hash).toBe("#/scan-policy/global/debug");
+  fireEvent.click(screen.getByRole("tab", { name: "Upstream Proxy" }));
+  expect(screen.getByText("Proxy settings form")).toBeTruthy();
+  expect(window.location.hash).toBe("#/scan-policy/global/proxy");
+  expect(screen.queryByText("debug settings")).toBeNull();
   expect(screen.queryByRole("tab", { name: "Scan Behaviour" })).toBeNull();
+});
+
+test("opens a nested tab from its URL", () => {
+  render(<ScanPolicyPage initialTab="global" initialSubTab="proxy" />);
+  expect(screen.getByRole("tab", { name: "Upstream Proxy" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
+  expect(screen.getByText("Proxy settings form")).toBeTruthy();
+});
+
+test("opens the first Global tab by default", () => {
+  render(<ScanPolicyPage />);
+  expect(
+    screen.getByRole("tab", { name: "Feature Visibility" }).getAttribute("aria-selected"),
+  ).toBe("true");
 });
 
 test("only shows Systems and Component Mapper when Systems is enabled", () => {

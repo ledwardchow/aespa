@@ -19,7 +19,6 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
    - [LLM Profiles (`LLMProfile`)](#llm-profiles-llmprofile-model)
    - [Scanner Policy](#scanner-policy-scannerpolicy-model)
    - [Python Sandbox](#python-sandbox-codeexecutionconfig-model)
-   - [Burp Suite REST API Config](#burp-suite-rest-api-config-burprestapiconfig-model)
    - [Upstream Proxy Config](#upstream-proxy-config-upstreamproxyconfig-model)
    - [Specialist Agent Config](#specialist-agent-config-specialistagentconfig-model)
    - [Adversarial Validator Config](#adversarial-validator-config-adversarialvalidatorconfig-model)
@@ -85,7 +84,7 @@ src/aespa/
 │   ├── scan.py            # /api/test-runs/{id}/thinking-scan/* and crawl
 │   ├── test_runs.py       # /api/test-runs/* — CRUD, status, site map graph
 │   ├── sites.py           # /api/sites/* — target website management
-│   ├── settings.py        # /api/settings/* — LLM, policy, Burp, proxy, specialists, headers
+│   ├── settings.py        # /api/settings/* - LLM, policy, proxy, specialists, headers
 │   ├── traffic.py         # /api/traffic/* — HTTP traffic log
 │   ├── events.py          # WebSocket event stream
 │   ├── alice.py           # /api/test-runs/{id}/alice/* — A.L.I.C.E. chat
@@ -114,7 +113,7 @@ src/aespa/
     ├── api_documents.py   # Document upload, storage, and doc_type sniffing
     ├── api_readiness.py   # LLM-driven readiness gap analysis for collections
     ├── api_scanner.py     # API scan orchestration — OWASP Top-10 coverage matrix
-    ├── burp_rest.py       # Burp Suite Professional REST API client
+    ├── external_scans.py  # Web active scanner extension tasks and finding writes
     ├── checkpoint.py      # Scan resume — persist and restore LLM conversation state
     ├── findings.py        # Finding CRUD operations & validation status management
     ├── recon_summary.py   # Structured attack-surface summary from crawl data
@@ -126,7 +125,7 @@ src/aespa/
     ├── scan_leads.py      # ScanLead CRUD and confidence-threshold filtering
     ├── scanner_sessions.py# Auth session vault (cookies, tokens)
     ├── scope.py           # Scan scope boundaries and out-of-scope filtering
-    ├── settings.py        # LLM config / profiles / policy / Burp / proxy / specialist config
+    ├── settings.py        # LLM config / profiles / policy / proxy / specialist config
     ├── tls_scan.py        # Pure stdlib + cryptography TLS/SSL security posture probe
     ├── traffic.py         # HTTP capture (Playwright intercept + httpx)
     ├── validator.py       # Adversarial validator agent (LLM-assisted finding validation)
@@ -177,7 +176,7 @@ AESPA_PORT         = 8000
 │  findings   │
 │  validator  │       ┌─────────────────────────────────────┐
 │  recon      │       │  Burp Suite Professional            │
-│  burp_rest  │──────►│  REST API  (default :1337)          │
+│  extensions│──────►│  REST API  (default :1337)          │
 │  traffic    │       └─────────────────────────────────────┘
 │  events     │
 └──────┬──────┘
@@ -189,7 +188,7 @@ AESPA_PORT         = 8000
 │  TrafficEntries · ScanFindings · ScannerSessions            │
 │  TargetIntelItems · PageOwaspTests · ScanCheckpoints        │
 │  ScanLogs · AliceChatSessions · AliceChatMessages           │
-│  BurpRestApiConfig · UpstreamProxyConfig                    │
+│  ExtensionSetting · ExtensionSecret · UpstreamProxyConfig   │
 │  ApiCollections · ApiDocuments · ApiEndpoints               │
 │  ApiCredentials · ApiTestRuns · ApiEndpointTests            │
 │  SastRuns · ScanLeads                                       │
@@ -312,24 +311,6 @@ profile and verifies that the non-root harness can write to its private tmpfs
 workspace. An incompatible Docker installation therefore fails readiness before
 an agent attempts execution.
 
-### Burp Suite REST API Config (`BurpRestApiConfig` model)
-
-Singleton row (id = 1). Configures the optional Burp Suite Professional active-scan integration.
-
-| Field | Default | Description |
-|---|---|---|
-| `enabled` | `false` | Enable Burp integration |
-| `api_url` | `http://127.0.0.1:1337` | Burp REST API base URL |
-| `api_key` | — | Bearer token for the Burp REST API (optional) |
-| `scan_configuration_name` | `Audit checks - all except time-based detection methods` | Named Burp scan config to apply |
-| `scan_sqli` | `true` | Route SQLi findings to Burp active scan |
-| `scan_xss` | `true` | Route XSS findings to Burp active scan |
-| `scan_command_injection` | `true` | Route command injection findings |
-| `scan_path_traversal` | `true` | Route path traversal findings |
-| `scan_ssrf` | `true` | Route SSRF findings |
-| `scan_xxe` | `true` | Route XXE findings |
-| `scan_ssti` | `true` | Route SSTI findings |
-
 ### Upstream Proxy Config (`UpstreamProxyConfig` model)
 
 Singleton row (id = 1). Routes scanner and/or LLM traffic through independently configured upstream HTTP proxies.
@@ -374,7 +355,6 @@ Singleton row (id = 1). Controls when and how Specialist Agents are dispatched d
 | `dispatch_crypto` | `true` | Dispatch specialists for cryptography/secrets leads |
 | `dispatch_config` | `false` | Dispatch specialists for misconfiguration leads |
 | `dispatch_file_upload` | `true` | Dispatch specialists for file upload leads |
-| `trigger_specialist_on_burp` | `false` | Also dispatch a specialist alongside each Burp active scan |
 
 ### Adversarial Validator Config (`AdversarialValidatorConfig` model)
 
@@ -431,7 +411,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `LLMConfig` | Saved LLM configuration/execution profile linked to a provider |
 | `LLMProfile` | Named per-agent-role model routing profile mapping roles to specific `LLMConfig` IDs |
 | `ScannerPolicy` | Scan behaviour policy for a test run |
-| `BurpRestApiConfig` | Singleton — Burp Suite REST API connection and routing settings |
+| `ExtensionSetting` / `ExtensionSecret` | Extension settings and namespaced secret values, including Burp Suite configuration |
 | `UpstreamProxyConfig` | Singleton — upstream HTTP proxy settings for scanner and LLM traffic |
 | `GlobalHttpHeaderConfig` | Singleton — custom HTTP header added to all scanner and crawler requests |
 | `ReportingDebugConfig` | Singleton — reporting prompt execution capture and debug settings |
@@ -982,7 +962,7 @@ A.L.I.C.E. (Interactive chat — user-directed, runs as persistent background ta
   └── Can dispatch Specialist Agents via agent_dispatch tool
   └── Can write findings directly via write_finding tool
 
-Burp active scans  (dispatched from scanner, surfaced in Agents panel)
+Burp active scans  (bundled extension, surfaced in Agents panel when active)
 Reporting agent    (post-scan LLM pre-screen pass over new findings)
 ```
 
@@ -1012,7 +992,7 @@ Test Lead calls agent_dispatch
        4. Emit specialist_step + agent_status events throughout
 ```
 
-Specialists can also be triggered alongside Burp active scans via the `trigger_specialist_on_burp` config flag.
+The Burp extension can request a specialist alongside an active scan when its specialist setting is enabled.
 
 **`SpecialistAgentConfig` fields:**
 
@@ -1161,40 +1141,13 @@ To prevent exceeding upstream LLM API limits (which can cause active scans to fa
 
 ## 10. Burp Suite Integration
 
-**File**: `src/aespa/services/burp_rest.py`
+**Files**: `extensions/builtin/burp_suite/`, `src/aespa/services/external_scans.py`
 
-When enabled, aespa can hand off targeted active scans to **Burp Suite Professional** via its REST API (default `http://127.0.0.1:1337`). This augments aespa's own probing with Burp's full active-scan engine for injection-class vulnerabilities.
+Burp Suite active scanning is a bundled extension. It is disabled by default and is configured on its Settings page, reached from the Extensions list. Existing Burp connection details, vulnerability class switches, API key, and specialist option are copied to the extension during database upgrade. The old Burp settings routes and table are removed.
 
-### Workflow
+The web scanner offers saved findings and HTTP investigation notes to registered `web.active_scanner` extensions. The Burp extension selects SQL injection, XSS, command injection, path traversal, SSRF, XXE, and SSTI candidates based on its settings. It launches a targeted Burp REST API scan, polls for issues, and returns normalized results. AESPA checks the target against the run's scope, suppresses duplicate scans, saves findings with `finding_source="burp_active_scan"`, and emits activity events. Existing authenticated cookies and headers are passed to the extension for the target scan.
 
-```
-Finding written by aespa scanner
-  └─ _finding_burp_vuln_class(finding)
-       • Maps finding to a Burp vulnerability class (sqli, xss, cmdi, etc.)
-       • Checks BurpRestApiConfig to see if that class is enabled
-  └─ _run_burp_active_scan_for_target(run_id, url, vuln_class)
-       1. burp_rest.launch_active_scan(config, url, cookies=..., extra_headers=...)
-            POST /v0.1/scan  →  returns integer task_id
-       2. burp_rest.wait_for_scan(config, task_id)
-            Polls GET /v0.1/scan/{task_id} with adaptive back-off:
-              • 0–60 s  →  every 5 s
-              • 60–180 s →  every 15 s
-              • 180–600 s → every 30 s
-            Returns when status ∈ {succeeded, failed, cancelled}
-       3. Normalised Burp issues → ScanFinding rows (finding_source = "burp_active_scan")
-```
-
-### Scope pinning
-
-Each Burp scan is scoped to the exact URL path prefix being tested so Burp does not re-crawl the whole site. Cookies and bearer tokens from the active `ScannerSession` are forwarded to Burp as custom headers so authenticated endpoints are tested with valid sessions.
-
-### Per-class routing
-
-Each vulnerability class can be toggled independently in `BurpRestApiConfig` (e.g. enable only SQLi and SSRF, skip XSS). The scanner also deduplicates Burp targets: if a `(run_id, url, vuln_class)` triple has already been dispatched in the current run, a second Burp scan is not launched.
-
-### Connection test
-
-`POST /api/settings/burp-rest-api/test-connection` probes `GET /v0.1/scan/0` and returns `{ok, message}`. A 404 from Burp counts as success (server is reachable; the scan ID just doesn't exist).
+Active scan tasks are tracked by run. Stopping a run or disabling the extension cancels in-flight polling. The extension can request a specialist scan alongside its own scan through a generic core callback. Check connection on the Burp settings page tests the REST API connection.
 
 ---
 
@@ -1259,8 +1212,6 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/settings/code-execution` | `settings.py` | Get/set Python sandbox limits and allowed roles |
 | `/api/settings/code-execution/status` | `settings.py` | Report Docker and executor-image readiness |
 | `/api/settings/specialist-agent` | `settings.py` | Get/set specialist agent config |
-| `/api/settings/burp-rest-api` | `settings.py` | Get/set Burp Suite REST API config |
-| `/api/settings/burp-rest-api/test-connection` | `settings.py` | Test connectivity to Burp REST API |
 | `/api/settings/upstream-proxy` | `settings.py` | Get/set upstream proxy config |
 | `/api/settings/global-http-header` | `settings.py` | Get/set global custom HTTP header appended to scanner requests |
 | `/api/settings/reporting-debug` | `reporting_debug.py` | Get/set reporting prompt debug capture settings |
@@ -1924,15 +1875,17 @@ Testing Features toggle is enabled; hiding it does not delete evaluator data.
 
 ## 18. Extensions
 
-**Files**: `src/aespa/extensions/`, `extensions/`, `src/aespa/api/extensions.py`, `src/aespa/services/sast_sources.py`
+**Files**: `src/aespa/extensions/`, `extensions/`, `src/aespa/api/extensions.py`, `src/aespa/services/sast_sources.py`, `src/aespa/services/external_scans.py`
 
-AESPA loads trusted Python extensions at startup. Shipped extensions live in the repository's top-level `extensions/` directory and are included as runtime data in desktop builds. The extension manager scans that directory and the configured user extension directory for subdirectories containing `extension.toml`. Each manifest declares its ID, version, AESPA extension API version, entrypoint, and capabilities. Load failures are kept as diagnostics and do not stop other extensions or the application. Enabled state is stored in the database. Disabling an extension unloads its capabilities without importing its code, and enabling it reloads the registry immediately.
+AESPA loads trusted Python extensions at startup. Shipped extensions live in the repository's top-level `extensions/` directory and are included as runtime data in desktop builds. The extension manager checks both direct child folders and `<author>/<extension>` folders under that directory and the configured user extension directory for `extension.toml`. Each manifest declares its ID, version, AESPA extension API version, entrypoint, and capabilities. Load failures are kept as diagnostics and do not stop other extensions or the application. Enabled state is stored in the database. Disabling an extension unloads its capabilities without importing its code, and enabling it reloads the registry immediately.
 
-Extensions register typed capabilities through `ExtensionRegistry`. They do not add FastAPI routes, frontend modules, or database models. The initial `sast.source_provider` capability describes settings fields, new-run fields, an availability check, and an asynchronous materializer. The frontend reads these descriptions from `/api/extensions` and `/api/extensions/source-providers`, so several extensions can populate the same settings and SAST source screens.
+Extensions register typed capabilities through `ExtensionRegistry`. They do not add FastAPI routes, frontend modules, or database models. The `sast.source_provider` capability describes settings fields, new-run fields, an availability check, and an asynchronous materializer. The `web.active_scanner` capability selects web scan candidates and returns findings from an external scanner. The frontend reads extension descriptions from `/api/extensions` and source provider descriptions from `/api/extensions/source-providers`.
 
-`sast_sources.start_source_preparation()` owns the background lifecycle. It asks the provider for an archive, extracts it using the same SAST limits, creates a normalized archive, calculates its checksum, saves source provenance on `SastRun`, and optionally starts the ordinary scanner. Extension settings are stored separately by extension ID and may contain non-secret executable paths and options. Credentials remain in local CLI or operating-system credential stores.
+Extensions may declare `author` and `secrets_namespace` in their manifest. Secret settings use a password field on each extension's settings page, are stored separately from ordinary settings under `<author>.<secrets_namespace>`, and are never returned by the settings API. Runtime contexts expose a secret store bound to that full namespace. Extensions can also declare settings without registering a SAST source provider.
 
-See `docs/extensions.md` for the extension manifest and provider contract.
+`sast_sources.start_source_preparation()` owns the background lifecycle. It asks the provider for an archive, extracts it using the same SAST limits, creates a normalized archive, calculates its checksum, saves source provenance on `SastRun`, and optionally starts the ordinary scanner. Extension settings are stored separately by extension ID. Secret fields are stored under the namespace declared by the extension and are redacted from API responses.
+
+See `docs/extensions.md` for the extension API contract and bundled implementations.
 
 ---
 

@@ -7,7 +7,9 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa.models import ScanFinding, Site, TestRun
-from aespa.services import burp_rest, scanner
+from aespa.services import scanner
+from extensions.builtin.burp_suite import client as burp_client
+from extensions.builtin.burp_suite.scanner import BurpScanner
 
 
 def test_http_request_coverage_fields_follow_request_role() -> None:
@@ -553,7 +555,7 @@ def test_finding_list_category_filter():
 
 
 def test_burp_scan_body_uses_default_configuration_when_name_blank():
-    body = burp_rest._build_scan_body(
+    body = burp_client._build_scan_body(
         "https://target.local/api/customers?search=test",
         cookies=None,
         extra_headers=None,
@@ -565,7 +567,7 @@ def test_burp_scan_body_uses_default_configuration_when_name_blank():
 
 
 def test_burp_scan_body_can_use_named_configuration():
-    body = burp_rest._build_scan_body(
+    body = burp_client._build_scan_body(
         "https://target.local/api/customers?search=test",
         cookies=None,
         extra_headers=None,
@@ -579,18 +581,20 @@ def test_burp_scan_body_can_use_named_configuration():
 
 
 def test_burp_investigation_candidate_detects_sqli_intent():
-    candidate = scanner._burp_investigation_candidate(
+    candidate = BurpScanner().candidate_from_investigation(
         {
             "url": "https://target.local/api/admin/customers?search=test'",
             "hypothesis": "Admin customers list - test SQL injection in search parameter",
             "payload_purpose": "Test SQL injection in admin customers search",
         },
         "investigating Admin customers list",
+        {},
     )
 
-    assert candidate == (
-        "SQL Injection",
-        "Admin customers list - test SQL injection in search parameter",
+    assert candidate.vulnerability_class == "SQL Injection"
+    assert (
+        candidate.title
+        == "Admin customers list - test SQL injection in search parameter"
     )
 
 
@@ -604,15 +608,16 @@ def test_burp_investigation_candidate_detects_additional_active_scan_classes():
     ]
 
     for hypothesis, expected in cases:
-        candidate = scanner._burp_investigation_candidate(
+        candidate = BurpScanner().candidate_from_investigation(
             {
                 "url": "https://target.local/api/test",
                 "hypothesis": hypothesis,
             },
             "investigating input validation",
+            {},
         )
         assert candidate is not None
-        assert candidate[0] == expected
+        assert candidate.vulnerability_class == expected
 
 
 def test_dynamic_finding_can_be_saved_without_page_assignment():
@@ -931,9 +936,7 @@ def test_unauthenticated_finding_requires_wire_level_no_auth_evidence():
             "request_evidence": "Authorization: none\nCookies: none",
         }
     }
-    assert scanner._unauthenticated_finding_rejection(
-        finding, denied_anonymous_result
-    )
+    assert scanner._unauthenticated_finding_rejection(finding, denied_anonymous_result)
 
 
 def test_finding_title_dedup_ignores_reporting_prefixes():

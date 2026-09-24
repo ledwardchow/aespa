@@ -1,8 +1,7 @@
 """Extension registry and loader.
 
-Extensions are trusted Python code. The first public capability is deliberately
-narrow: an extension may materialize source for a SAST run, while AESPA owns
-the API, background task, storage, and scan lifecycle.
+Extensions are trusted Python code. AESPA owns API routes, background tasks,
+storage, and scan lifecycle for every registered capability.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ from sqlmodel import Session
 
 from aespa.config import BUNDLED_EXTENSIONS_DIR, get_settings
 from aespa.db import get_engine
-from aespa.models import ExtensionSetting
+from aespa.models import ExtensionSecret, ExtensionSetting
 
 log = logging.getLogger(__name__)
 _UTC = timezone.utc
@@ -82,6 +81,59 @@ class ProcessResult:
     stderr: str
 
 
+@dataclass(frozen=True)
+class WebScanCandidate:
+    url: str
+    title: str
+    vulnerability_class: str
+    finding_id: int | None = None
+    page_id: int | None = None
+    specialist_attack_class: str | None = None
+
+
+@dataclass(frozen=True)
+class WebScanIssue:
+    title: str
+    affected_url: str
+    severity: str
+    description: str = ""
+    recommendation: str = ""
+    confidence: str = "unknown"
+    request_evidence: str = ""
+    response_evidence: str = ""
+    owasp_category: str = "A03"
+
+
+@dataclass(frozen=True)
+class WebScanResult:
+    task_id: str
+    issues: list[WebScanIssue]
+
+
+class WebActiveScanner(Protocol):
+    id: str
+    label: str
+    description: str
+    settings_fields: list[SourceProviderField]
+    settings_schema_version: int
+
+    def candidate_from_finding(
+        self, finding: dict[str, Any], settings: dict[str, Any]
+    ) -> WebScanCandidate | None: ...
+
+    def candidate_from_investigation(
+        self, tool_input: dict[str, Any], note: str, settings: dict[str, Any]
+    ) -> WebScanCandidate | None: ...
+
+    async def check_availability(
+        self, context: SourceProviderContext
+    ) -> ProviderAvailability: ...
+
+    async def scan(
+        self, candidate: WebScanCandidate, context: WebScanContext
+    ) -> WebScanResult: ...
+
+
 class SourceProvider(Protocol):
     descriptor: SourceProviderDescriptor
 
@@ -100,9 +152,15 @@ class SourceProvider(Protocol):
 class SourceProviderContext:
     """Bounded process and settings access for source providers."""
 
-    def __init__(self, extension_id: str, settings: dict[str, Any]):
+    def __init__(
+        self,
+        extension_id: str,
+        settings: dict[str, Any],
+        secrets: ExtensionSecretStore | None = None,
+    ):
         self.extension_id = extension_id
         self.settings = settings
+        self.secrets = secrets
 
     def find_executable(self, setting: str, names: list[str]) -> str | None:
         configured = str(self.settings.get(setting) or "").strip()
@@ -207,6 +265,23 @@ class SourceProviderContext:
         )
 
 
+class WebScanContext(SourceProviderContext):
+    def __init__(
+        self,
+        extension_id: str,
+        settings: dict[str, Any],
+        secrets: ExtensionSecretStore | None,
+        *,
+        cookies: dict[str, str],
+        extra_headers: dict[str, str],
+        on_started,
+    ):
+        super().__init__(extension_id, settings, secrets)
+        self.cookies = cookies
+        self.extra_headers = extra_headers
+        self.on_started = on_started
+
+
 @dataclass
 class ExtensionRecord:
     id: str
@@ -215,6 +290,8 @@ class ExtensionRecord:
     aespa_api: str
     capabilities: list[str]
     source: str
+    author: str | None = None
+    secrets_namespace: str | None = None
     enabled: bool = True
     status: str = "loaded"
     error: str | None = None
@@ -228,6 +305,56 @@ class RegisteredSourceProvider:
     provider: SourceProvider
 
 
+@dataclass(frozen=True)
+class RegisteredWebScanner:
+    extension_id: str
+    scanner: WebActiveScanner
+
+
+class ExtensionSecretStore:
+    """Read and write only the namespace assigned to an extension."""
+
+    def __init__(self, namespace: str):
+        if not _ID_RE.fullmatch(namespace):
+            raise ValueError("Invalid extension secrets namespace")
+        self._namespace = namespace
+
+    def get(self, key: str) -> str | None:
+        self._check_key(key)
+        with Session(get_engine()) as session:
+            row = session.get(ExtensionSecret, (self._namespace, key))
+            return row.value if row else None
+
+    def has(self, key: str) -> bool:
+        return self.get(key) is not None
+
+    def set(self, key: str, value: str) -> None:
+        self._check_key(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError("Extension secret must be non-empty text")
+        with Session(get_engine()) as session:
+            row = session.get(
+                ExtensionSecret, (self._namespace, key)
+            ) or ExtensionSecret(namespace=self._namespace, key=key, value=value)
+            row.value = value
+            row.updated_at = datetime.now(_UTC)
+            session.add(row)
+            session.commit()
+
+    def delete(self, key: str) -> None:
+        self._check_key(key)
+        with Session(get_engine()) as session:
+            row = session.get(ExtensionSecret, (self._namespace, key))
+            if row:
+                session.delete(row)
+                session.commit()
+
+    @staticmethod
+    def _check_key(key: str) -> None:
+        if not isinstance(key, str) or not _ID_RE.fullmatch(key):
+            raise ValueError("Invalid extension secret key")
+
+
 class ExtensionRegistry:
     def __init__(self, manager: ExtensionManager, extension_id: str):
         self._manager = manager
@@ -236,11 +363,28 @@ class ExtensionRegistry:
     def register_source_provider(self, provider: SourceProvider) -> None:
         self._manager._register_source_provider(self._extension_id, provider)
 
+    def register_web_active_scanner(self, scanner: WebActiveScanner) -> None:
+        self._manager._register_web_active_scanner(self._extension_id, scanner)
+
+    @property
+    def secrets(self) -> ExtensionSecretStore:
+        """Secret store bound to this extension's declared namespace."""
+        return self._manager.secret_store_for(self._extension_id)
+
+    def register_settings_fields(
+        self, fields: list[SourceProviderField], *, schema_version: int = 1
+    ) -> None:
+        """Declare settings for an extension without a source provider."""
+        self._manager._register_settings_fields(
+            self._extension_id, fields, schema_version=schema_version
+        )
+
 
 class ExtensionManager:
     def __init__(self) -> None:
         self.extensions: dict[str, ExtensionRecord] = {}
         self.source_providers: dict[str, RegisteredSourceProvider] = {}
+        self.web_scanners: dict[str, RegisteredWebScanner] = {}
         self._loaded = False
 
     def ensure_loaded(self) -> None:
@@ -250,6 +394,7 @@ class ExtensionManager:
     def load_extensions(self) -> None:
         self.extensions.clear()
         self.source_providers.clear()
+        self.web_scanners.clear()
         extension_dir = get_settings().extensions_dir
         extension_dir.mkdir(parents=True, exist_ok=True)
         roots = [BUNDLED_EXTENSIONS_DIR, extension_dir]
@@ -260,8 +405,14 @@ class ExtensionManager:
                 continue
             visited.add(resolved_root)
             for directory in sorted(root.iterdir(), key=lambda item: item.name):
-                if directory.is_dir() and (directory / "extension.toml").is_file():
+                if not directory.is_dir():
+                    continue
+                if (directory / "extension.toml").is_file():
                     self._load_directory(directory)
+                    continue
+                for child in sorted(directory.iterdir(), key=lambda item: item.name):
+                    if child.is_dir() and (child / "extension.toml").is_file():
+                        self._load_directory(child)
         self._loaded = True
 
     def _load_directory(self, directory: Path) -> None:
@@ -272,6 +423,24 @@ class ExtensionManager:
             extension_id = str(manifest.get("id") or "")
             if not _ID_RE.fullmatch(extension_id):
                 raise ValueError("manifest id is invalid")
+            default_enabled = manifest.get("enabled_by_default", True)
+            if not isinstance(default_enabled, bool):
+                raise ValueError("enabled_by_default must be true or false")
+            author = manifest.get("author")
+            if author is not None:
+                if not isinstance(author, str) or not author.strip():
+                    raise ValueError("author must be non-empty text")
+                author = author.strip()
+            namespace_value = manifest.get("secrets_namespace")
+            if namespace_value is not None:
+                if not isinstance(namespace_value, str) or not _ID_RE.fullmatch(
+                    namespace_value
+                ):
+                    raise ValueError("secrets_namespace is invalid")
+                if not author or not _ID_RE.fullmatch(author):
+                    raise ValueError(
+                        "a secrets namespace requires an author matching the extension ID pattern"
+                    )
             record = ExtensionRecord(
                 id=extension_id,
                 name=str(manifest.get("name") or extension_id),
@@ -279,7 +448,13 @@ class ExtensionManager:
                 aespa_api=str(manifest.get("aespa_api") or ""),
                 capabilities=[str(value) for value in manifest.get("capabilities", [])],
                 source=str(directory),
-                enabled=self.is_enabled(extension_id),
+                author=author,
+                secrets_namespace=(
+                    f"{author}.{namespace_value}"
+                    if namespace_value is not None
+                    else None
+                ),
+                enabled=self.is_enabled(extension_id, default_enabled),
             )
             if record.aespa_api != "1":
                 raise ValueError(
@@ -287,6 +462,16 @@ class ExtensionManager:
                 )
             if extension_id in self.extensions:
                 raise ValueError(f"extension id {extension_id!r} is already registered")
+            if record.secrets_namespace is not None:
+                if not _ID_RE.fullmatch(record.secrets_namespace):
+                    raise ValueError("qualified secrets namespace is too long")
+                if any(
+                    item.secrets_namespace == record.secrets_namespace
+                    for item in self.extensions.values()
+                ):
+                    raise ValueError(
+                        f"secrets namespace {record.secrets_namespace!r} is already registered"
+                    )
             if not record.enabled:
                 record.status = "disabled"
                 self.extensions[record.id] = record
@@ -315,16 +500,29 @@ class ExtensionManager:
             record_id = str(extension_id)
             if record_id in self.extensions:
                 record_id = f"load-error.{directory.name}"
-            self.extensions[record_id] = ExtensionRecord(
-                id=record_id,
-                name=str(extension_id),
-                version="unknown",
-                aespa_api="unknown",
-                capabilities=[],
-                source=str(directory),
-                status="failed",
-                error=str(exc),
-            )
+                suffix = 2
+                while record_id in self.extensions:
+                    record_id = f"load-error.{directory.name}.{suffix}"
+                    suffix += 1
+            failed_record = locals().get("record")
+            if (
+                isinstance(failed_record, ExtensionRecord)
+                and failed_record.id == record_id
+            ):
+                failed_record.status = "failed"
+                failed_record.error = str(exc)
+                self.extensions[record_id] = failed_record
+            else:
+                self.extensions[record_id] = ExtensionRecord(
+                    id=record_id,
+                    name=str(extension_id),
+                    version="unknown",
+                    aespa_api="unknown",
+                    capabilities=[],
+                    source=str(directory),
+                    status="failed",
+                    error=str(exc),
+                )
             log.exception("Could not load extension from %s", directory)
 
     def _load_module(
@@ -355,11 +553,28 @@ class ExtensionManager:
                 for item in self.source_providers.values()
                 if item.extension_id == record.id
             ]
-            record.settings_fields = [
-                field for provider in providers for field in provider.settings_fields
+            scanners = [
+                item.scanner
+                for item in self.web_scanners.values()
+                if item.extension_id == record.id
             ]
+            record.settings_fields = [
+                *record.settings_fields,
+                *(
+                    field
+                    for capability in [*providers, *scanners]
+                    for field in capability.settings_fields
+                ),
+            ]
+            keys = [item.key for item in record.settings_fields]
+            if len(keys) != len(set(keys)):
+                raise ValueError("Extension setting keys must be unique")
             record.settings_schema_version = max(
-                [provider.settings_schema_version for provider in providers] or [1]
+                [record.settings_schema_version]
+                + [
+                    capability.settings_schema_version
+                    for capability in [*providers, *scanners]
+                ]
             )
         except Exception as exc:
             record.status = "failed"
@@ -367,6 +582,9 @@ class ExtensionManager:
             for provider_id, registered in list(self.source_providers.items()):
                 if registered.extension_id == record.id:
                     self.source_providers.pop(provider_id, None)
+            for scanner_id, registered in list(self.web_scanners.items()):
+                if registered.extension_id == record.id:
+                    self.web_scanners.pop(scanner_id, None)
             log.exception("Could not activate extension %s", record.id)
 
     def _register_source_provider(
@@ -379,8 +597,56 @@ class ExtensionManager:
             raise ValueError(
                 f"source provider id {descriptor.id!r} is already registered"
             )
+        if any(field.type == "secret" for field in descriptor.settings_fields):
+            if not self.extensions[extension_id].secrets_namespace:
+                raise ValueError(
+                    "secret settings require secrets_namespace in extension.toml"
+                )
         self.source_providers[descriptor.id] = RegisteredSourceProvider(
             extension_id=extension_id, provider=provider
+        )
+
+    def _register_web_active_scanner(
+        self, extension_id: str, scanner: WebActiveScanner
+    ) -> None:
+        if "web.active_scanner" not in self.extensions[extension_id].capabilities:
+            raise ValueError("web.active_scanner is missing from extension.toml")
+        if not _ID_RE.fullmatch(scanner.id) or scanner.id in self.web_scanners:
+            raise ValueError(f"Invalid or duplicate web scanner id {scanner.id!r}")
+        if any(field.type == "secret" for field in scanner.settings_fields):
+            if not self.extensions[extension_id].secrets_namespace:
+                raise ValueError(
+                    "secret settings require secrets_namespace in extension.toml"
+                )
+        self.web_scanners[scanner.id] = RegisteredWebScanner(extension_id, scanner)
+
+    def _register_settings_fields(
+        self,
+        extension_id: str,
+        fields: list[SourceProviderField],
+        *,
+        schema_version: int,
+    ) -> None:
+        record = self.extensions[extension_id]
+        if schema_version < 1:
+            raise ValueError("Settings schema version must be positive")
+        if (
+            any(field.type == "secret" for field in fields)
+            and not record.secrets_namespace
+        ):
+            raise ValueError(
+                "secret settings require secrets_namespace in extension.toml"
+            )
+        existing = {field.key for field in record.settings_fields}
+        for setting_field in fields:
+            if not _ID_RE.fullmatch(setting_field.key) or setting_field.key in existing:
+                raise ValueError(
+                    f"Invalid or duplicate extension setting {setting_field.key!r}"
+                )
+            existing.add(setting_field.key)
+        record.settings_fields.extend(fields)
+        record.settings_schema_version = max(
+            record.settings_schema_version, schema_version
         )
 
     def _stored_settings(self, extension_id: str) -> dict[str, Any]:
@@ -394,14 +660,18 @@ class ExtensionManager:
                 return {}
             return value if isinstance(value, dict) else {}
 
-    def is_enabled(self, extension_id: str) -> bool:
+    def is_enabled(self, extension_id: str, default: bool = True) -> bool:
         with Session(get_engine()) as session:
             row = session.get(ExtensionSetting, extension_id)
-            return True if row is None else row.enabled
+            return default if row is None else row.enabled
 
     def set_enabled(self, extension_id: str, enabled: bool) -> None:
         if extension_id not in self.extensions:
             raise KeyError(extension_id)
+        if not enabled:
+            from aespa.services import external_scans
+
+            external_scans.cancel_extension(extension_id)
         with Session(get_engine()) as session:
             row = session.get(ExtensionSetting, extension_id) or ExtensionSetting(
                 extension_id=extension_id
@@ -417,8 +687,20 @@ class ExtensionManager:
         record = self.extensions.get(extension_id)
         if record is None:
             return {}
-        allowed = {field.key for field in record.settings_fields}
+        allowed = {
+            field.key for field in record.settings_fields if field.type != "secret"
+        }
         return {key: value for key, value in stored.items() if key in allowed}
+
+    def secret_store_for(self, extension_id: str) -> ExtensionSecretStore:
+        record = self.extensions.get(extension_id)
+        if record is None:
+            raise KeyError(extension_id)
+        if not record.enabled or record.status != "loaded":
+            raise ValueError("Extension is not enabled")
+        if not record.secrets_namespace:
+            raise ValueError("Extension has no secrets namespace")
+        return ExtensionSecretStore(record.secrets_namespace)
 
     def save_settings(
         self, extension_id: str, values: dict[str, Any]
@@ -431,9 +713,14 @@ class ExtensionManager:
         if unknown:
             raise ValueError(f"Unknown extension setting(s): {', '.join(unknown)}")
         clean: dict[str, Any] = {}
+        secret_updates: dict[str, str | None] = {}
         for key, value in values.items():
             descriptor = fields[key]
-            if descriptor.type in {"text", "path", "select"}:
+            if descriptor.type == "secret":
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(f"{descriptor.label} must be text or null")
+                secret_updates[key] = value.strip() if isinstance(value, str) else None
+            elif descriptor.type in {"text", "path", "select"}:
                 if value is not None and not isinstance(value, str):
                     raise ValueError(f"{descriptor.label} must be text")
                 clean[key] = value.strip() if isinstance(value, str) else value
@@ -449,36 +736,86 @@ class ExtensionManager:
                 raise ValueError(
                     f"Unsupported extension setting type: {descriptor.type}"
                 )
-        stored = self._stored_settings(extension_id)
-        stored.update(clean)
+        if secret_updates and (
+            not record.secrets_namespace
+            or not record.enabled
+            or record.status != "loaded"
+        ):
+            raise ValueError("Extension secrets are unavailable")
         with Session(get_engine()) as session:
             row = session.get(ExtensionSetting, extension_id) or ExtensionSetting(
                 extension_id=extension_id
             )
+            try:
+                stored = json.loads(row.settings_json or "{}")
+            except (TypeError, ValueError):
+                stored = {}
+            if not isinstance(stored, dict):
+                stored = {}
+            stored.update(clean)
             row.schema_version = record.settings_schema_version
             row.settings_json = json.dumps(stored, ensure_ascii=False)
             row.updated_at = datetime.now(_UTC)
             session.add(row)
+            for key, value in secret_updates.items():
+                if value is None:
+                    continue
+                secret_row = session.get(
+                    ExtensionSecret, (record.secrets_namespace, key)
+                )
+                if value:
+                    secret_row = secret_row or ExtensionSecret(
+                        namespace=record.secrets_namespace, key=key, value=value
+                    )
+                    secret_row.value = value
+                    secret_row.updated_at = datetime.now(_UTC)
+                    session.add(secret_row)
+                elif secret_row:
+                    session.delete(secret_row)
             session.commit()
-        return clean
+        return self.get_settings(extension_id)
 
     def context_for(self, extension_id: str) -> SourceProviderContext:
-        return SourceProviderContext(extension_id, self.get_settings(extension_id))
+        record = self.extensions.get(extension_id)
+        secrets = (
+            self.secret_store_for(extension_id)
+            if record
+            and record.secrets_namespace
+            and record.enabled
+            and record.status == "loaded"
+            else None
+        )
+        return SourceProviderContext(
+            extension_id, self.get_settings(extension_id), secrets
+        )
 
     def extension_dict(self, record: ExtensionRecord) -> dict[str, Any]:
         return {
             "id": record.id,
             "name": record.name,
+            "author": record.author,
             "version": record.version,
             "aespa_api": record.aespa_api,
             "capabilities": record.capabilities,
             "source": record.source,
+            "secrets_namespace": record.secrets_namespace,
             "enabled": record.enabled,
             "status": record.status,
             "error": record.error,
             "settings_schema_version": record.settings_schema_version,
             "settings_fields": [asdict(item) for item in record.settings_fields],
             "settings": self.get_settings(record.id),
+            "has_secrets": (
+                {
+                    field.key: self.secret_store_for(record.id).has(field.key)
+                    for field in record.settings_fields
+                    if field.type == "secret"
+                }
+                if record.enabled
+                and record.status == "loaded"
+                and record.secrets_namespace
+                else {}
+            ),
         }
 
 

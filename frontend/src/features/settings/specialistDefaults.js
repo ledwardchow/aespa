@@ -16,5 +16,4 @@ export const DEFAULT_SPECIALIST_AGENT_FORM = {
   dispatch_crypto: true,
   dispatch_config: false,
   dispatch_file_upload: true,
-  trigger_specialist_on_burp: false,
 };

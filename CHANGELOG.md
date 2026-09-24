@@ -6,25 +6,18 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **Extensions and GitHub SAST sources**: AESPA can load trusted Python extensions from the top-level `extensions` folder and the configured user extensions folder. The Extensions page lists every discovered extension, renders its settings without custom frontend code, and lets users enable or disable it. The shipped GitHub source extension creates SAST scans from public or private repositories using the local Git and GitHub CLI credentials. Each scan records the requested ref, resolved commit, source checksum, and repository provenance, then analyses an immutable archive so later branch changes do not affect the run.
+- **Extensions**: This is a WIP, adding an ability to load extensions. The Burp Suite integration has been moved to be an extension instead, and SAST now is able to load source code from a GitHub repository instead of requiring a zip upload. The extension framework is incomplete and currently only implements sufficient functionality to make those two initial extensions function.
 - **Google Vertex AI provider**: AESPA can use Google Cloud Application Default Credentials with a selected project and location. Gemini models use the native Google content API, while other serverless publisher models use Vertex AI's OpenAI-compatible Responses API so tool arguments are preserved. Grok conversations use stable, agent-specific cache routing and replay encrypted reasoning between tool steps using Vertex-compatible request fields. Each Grok call records whether the prompt cache was used, token reuse, cache-key fingerprints, and the provider system fingerprint so inconsistent cache reuse can be diagnosed. The provider supports the existing vision and thinking workflows, preserves numeric tool-schema constraints required by Vertex AI, and does not store Google credentials. Deployed endpoints and tuned model resources are excluded.
 
 ### Updates
 
-- **SAST threat review**: Threat scenarios and their security check progress now share one Threats view. Each scenario shows its current check result, reasoning, and evidence, while repository completeness checks remain available in the same view.
 - **DAST and SAST LLM concurrency**: The DAST Test Lead and SAST settings now have separate limits for concurrent LLM requests. The limits apply across each run, including DAST reporting and SAST discovery and validation agents.
-- **Settings navigation**: Agent and system controls are now available from one Settings item with a cog icon at the end of the Configuration section. Global contains feature visibility and debug settings. DAST starts with Scan Behaviour and HTTP Headers, followed by the crawler, Test Lead, specialist, validator, reporting, Python sandbox, and optional Deep Scan settings. Systems contains Component Mapper settings and follows the Systems feature visibility setting.
-- **Adaptive SAST discovery budgets**: Settings now has a separate SAST tab for finding policy and discovery budgets. Deep SAST workers can receive a tool-call budget based on their assigned source items, security checks, and files, with configurable minimums and a maximum. Fixed budgets remain available. Resuming a worker that used its allocation grants a new bounded allocation so pending discovery work can continue.
-- **Per-model LLM pacing**: TPM and RPM limits are now configured in the model editor for each provider and model pair. Existing provider limits are copied safely to saved models during upgrade, including when recovering from an interrupted upgrade, and saved configurations using the same pair share one pacing limit.
-- **Provider model setup**: Adding a model name to a saved provider now saves the provider immediately, so the model can be selected and configured without a separate provider save.
-- **LLM profile editing**: Default and per-role models are now selected by choosing a provider first, followed by one of its configured models. The profile list uses a clear Set as default action and marks the current default in place of a separate status column.
+- **Settings navigation**: Settings screens have been consolidated into one item.
+- **Per-model LLM pacing**: TPM and RPM limits have been moved to per-model instead of the previous per-provider.
 
 ### Fixes
 
 - **Model thinking levels**: Editing a model now loads available thinking levels on the first open when its saved provider data has a context window but no thinking-level list.
-- **SAST candidate validation**: Discovery now saves each candidate and its confidence score together, so reaching an agent tool limit cannot leave findings pending without a score. Older unscored candidates become inconclusive. Scored inconclusive results stay in the validation queue, stopping during validation keeps the run resumable, and reports count candidates created during reconciliation.
-- **SAST run request volume**: Live scanner events now update the activity display directly instead of reloading every SAST data endpoint for each file read, search, model response, or heartbeat.
-- **Google Vertex AI SAST threat modelling**: Deep SAST scans now recognise Google Application Default Credentials during repository and threat-model review instead of incorrectly reporting that the provider has no credentials.
 - **Traffic coverage filters**: Opening the Traffic Log from an OWASP coverage item now refreshes the table rows and closes any previously selected request, so the visible rows match the filtered count.
 - **OWASP coverage tracking**: Test Lead HTTP requests now identify whether they are setup, reconnaissance, or active security tests. Active tests require an OWASP category and are rejected with guidance when it is missing, while setup and reconnaissance requests can remain uncategorized.
 - **Visible startup failures**: When the backend cannot start, the terminal console now restores the normal prompt, prints the captured startup error, and exits with a failure status instead of hiding the cause.
@@ -32,6 +25,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
+- **Extension developer documentation**: One technical reference describes extension folders, manifests, settings, secrets, source providers, web scanners, and packaging requirements.
 - **Frontend build output**: Generated frontend files are no longer stored in Git. Frontend checks and desktop packaging continue to build the bundle from the Vite source when needed.
 
 ## [PR #272] September 18 Update - mostly UI fixes

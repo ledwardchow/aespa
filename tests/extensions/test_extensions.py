@@ -5,16 +5,62 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlmodel import Session
 
+from aespa.db import get_engine
 from aespa.extensions.runtime import (
     ExtensionManager,
+    ExtensionRegistry,
     ProcessResult,
     ProviderAvailability,
 )
-from extensions.github_repository.provider import (
+from aespa.models import ExtensionSetting
+from extensions.builtin.github_repository.provider import (
     GitHubRepositoryProvider,
     normalize_repository,
 )
+
+
+def test_extension_loader_supports_author_folders_in_both_roots(monkeypatch, tmp_path):
+    bundled = tmp_path / "bundled"
+    user = tmp_path / "user"
+
+    def create_extension(directory: Path, extension_id: str) -> None:
+        directory.mkdir(parents=True)
+        (directory / "extension.toml").write_text(
+            f'id = "{extension_id}"\naespa_api = "1"\n', encoding="utf-8"
+        )
+        (directory / "extension.py").write_text(
+            "from .helper import Extension\n\n"
+            "def create_extension():\n    return Extension()\n",
+            encoding="utf-8",
+        )
+        (directory / "helper.py").write_text(
+            "class Extension:\n    def register(self, registry):\n        pass\n",
+            encoding="utf-8",
+        )
+
+    create_extension(bundled / "legacy", "legacy.extension")
+    create_extension(bundled / "aespa" / "github", "aespa.github")
+    create_extension(user / "acme" / "github", "acme.github")
+    create_extension(user / "too" / "deep" / "hidden", "hidden.extension")
+    monkeypatch.setattr("aespa.extensions.runtime.BUNDLED_EXTENSIONS_DIR", bundled)
+    monkeypatch.setattr(
+        "aespa.extensions.runtime.get_settings",
+        lambda: SimpleNamespace(extensions_dir=user),
+    )
+
+    manager = ExtensionManager()
+    manager.load_extensions()
+
+    assert set(manager.extensions) == {
+        "legacy.extension",
+        "aespa.github",
+        "acme.github",
+    }
+    assert all(record.status == "loaded" for record in manager.extensions.values())
+    assert Path(manager.extensions["acme.github"].source) == user / "acme" / "github"
+    assert manager.extensions["acme.github"].author is None
 
 
 def test_extension_loader_discovers_multiple_extensions(monkeypatch, tmp_path):
@@ -25,6 +71,7 @@ def test_extension_loader_discovers_multiple_extensions(monkeypatch, tmp_path):
         """
 id = "example.source"
 name = "Example source"
+author = "Example Co"
 version = "1.2.3"
 aespa_api = "1"
 entrypoint = "extension.py:create_extension"
@@ -58,12 +105,20 @@ def create_extension():
     manager = ExtensionManager()
     manager.load_extensions()
 
-    assert set(manager.extensions) == {"github.repository", "example.source"}
-    assert set(manager.source_providers) == {"github.repository", "example.source"}
-    github_source = Path(manager.extensions["github.repository"].source)
+    assert set(manager.extensions) == {
+        "aespa.burpsuite",
+        "aespa.githubrepository",
+        "example.source",
+    }
+    assert set(manager.source_providers) == {"aespa.githubrepository", "example.source"}
+    assert manager.extensions["example.source"].author == "Example Co"
+    github_source = Path(manager.extensions["aespa.githubrepository"].source)
     assert (
         github_source
-        == Path(__file__).resolve().parents[2] / "extensions" / "github_repository"
+        == Path(__file__).resolve().parents[2]
+        / "extensions"
+        / "builtin"
+        / "github_repository"
     )
 
     manager.set_enabled("example.source", False)
@@ -76,6 +131,133 @@ def create_extension():
     )
     manager.load_extensions()
     assert manager.extensions["example.source"].status == "disabled"
+
+
+def test_extension_secrets_are_namespaced_and_not_returned_by_api(
+    client, monkeypatch, tmp_path
+):
+    extension_dir = tmp_path / "extensions"
+    for extension_id, author in (
+        ("example.first", "first"),
+        ("example.second", "second"),
+    ):
+        directory = extension_dir / extension_id
+        directory.mkdir(parents=True)
+        (directory / "extension.toml").write_text(
+            f'''id = "{extension_id}"
+name = "{extension_id}"
+author = "{author}"
+version = "1.0.0"
+aespa_api = "1"
+secrets_namespace = "shared"
+entrypoint = "extension.py:create_extension"
+capabilities = []
+''',
+            encoding="utf-8",
+        )
+        (directory / "extension.py").write_text(
+            """from aespa.extensions import SourceProviderField
+
+class Extension:
+    def register(self, registry):
+        registry.register_settings_fields([
+            SourceProviderField(key="api_key", label="API key", type="secret")
+        ])
+
+def create_extension():
+    return Extension()
+""",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        "aespa.extensions.runtime.get_settings",
+        lambda: SimpleNamespace(extensions_dir=extension_dir),
+    )
+    manager = ExtensionManager()
+    manager.load_extensions()
+    monkeypatch.setattr("aespa.api.extensions.get_extension_manager", lambda: manager)
+
+    response = client.patch(
+        "/api/extensions/example.first/settings",
+        json={"settings": {"api_key": "first-secret"}},
+    )
+    assert response.status_code == 200
+    assert response.json()["settings"] == {}
+    assert response.json()["has_secrets"] == {"api_key": True}
+    assert response.json()["secrets_namespace"] == "first.shared"
+    assert "first-secret" not in response.text
+    assert manager.context_for("example.first").secrets.get("api_key") == "first-secret"
+    assert manager.context_for("example.second").secrets.get("api_key") is None
+    assert manager.extensions["example.second"].secrets_namespace == "second.shared"
+    assert ExtensionRegistry(manager, "example.first").secrets.has("api_key")
+    with Session(get_engine()) as session:
+        assert (
+            "first-secret"
+            not in session.get(ExtensionSetting, "example.first").settings_json
+        )
+    manager.load_extensions()
+    assert manager.context_for("example.first").secrets.get("api_key") == "first-secret"
+
+    kept = client.patch(
+        "/api/extensions/example.first/settings",
+        json={"settings": {"api_key": None}},
+    )
+    assert kept.status_code == 200
+    assert kept.json()["has_secrets"] == {"api_key": True}
+
+    removed = client.patch(
+        "/api/extensions/example.first/settings",
+        json={"settings": {"api_key": ""}},
+    )
+    assert removed.status_code == 200
+    assert removed.json()["has_secrets"] == {"api_key": False}
+    assert manager.context_for("example.first").secrets.get("api_key") is None
+
+
+def test_extension_rejects_duplicate_secrets_namespace(monkeypatch, tmp_path):
+    extension_dir = tmp_path / "extensions"
+    for name in ("first", "second"):
+        directory = extension_dir / name
+        directory.mkdir(parents=True)
+        (directory / "extension.toml").write_text(
+            f"""id = "example.{name}"
+aespa_api = "1"
+author = "example"
+secrets_namespace = "shared"
+""",
+            encoding="utf-8",
+        )
+        (directory / "extension.py").write_text(
+            "def create_extension():\n    return type('Extension', (), {'register': lambda self, registry: None})()\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        "aespa.extensions.runtime.get_settings",
+        lambda: SimpleNamespace(extensions_dir=extension_dir),
+    )
+    manager = ExtensionManager()
+    manager.load_extensions()
+    assert manager.extensions["example.first"].status == "loaded"
+    assert manager.extensions["example.second"].status == "failed"
+    assert "already registered" in manager.extensions["example.second"].error
+
+
+def test_extension_secret_namespace_requires_author(monkeypatch, tmp_path):
+    extension_dir = tmp_path / "extensions"
+    directory = extension_dir / "example"
+    directory.mkdir(parents=True)
+    (directory / "extension.toml").write_text(
+        'id = "example.secret"\naespa_api = "1"\nsecrets_namespace = "secret"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "aespa.extensions.runtime.get_settings",
+        lambda: SimpleNamespace(extensions_dir=extension_dir),
+    )
+    manager = ExtensionManager()
+    manager.load_extensions()
+    assert manager.extensions["example.secret"].status == "failed"
+    assert "requires an author" in manager.extensions["example.secret"].error
 
 
 def test_github_repository_normalization_rejects_other_hosts():
@@ -92,7 +274,7 @@ def test_github_repository_normalization_rejects_other_hosts():
 
 
 class _FakeContext:
-    extension_id = "github.repository"
+    extension_id = "aespa.githubrepository"
     settings = {}
 
     def __init__(self):
@@ -147,35 +329,36 @@ def test_extensions_api_lists_and_updates_dynamic_settings(client, monkeypatch):
     response = client.get("/api/extensions")
     assert response.status_code == 200
     extension = next(
-        item for item in response.json() if item["id"] == "github.repository"
+        item for item in response.json() if item["id"] == "aespa.githubrepository"
     )
     assert extension["enabled"] is True
+    assert extension["author"] == "aespa"
     assert {field["key"] for field in extension["settings_fields"]} == {
         "gh_executable",
         "git_executable",
     }
 
     updated = client.patch(
-        "/api/extensions/github.repository/settings",
+        "/api/extensions/aespa.githubrepository/settings",
         json={"settings": {"git_executable": "/usr/bin/git"}},
     )
     assert updated.status_code == 200
     assert updated.json()["settings"] == {"git_executable": "/usr/bin/git"}
 
     disabled = client.put(
-        "/api/extensions/github.repository/enabled", json={"enabled": False}
+        "/api/extensions/aespa.githubrepository/enabled", json={"enabled": False}
     )
     assert disabled.status_code == 200
     assert disabled.json()["enabled"] is False
     assert disabled.json()["status"] == "disabled"
     assert disabled.json()["source_providers"] == []
     assert all(
-        provider["extension_id"] != "github.repository"
+        provider["extension_id"] != "aespa.githubrepository"
         for provider in client.get("/api/extensions/source-providers").json()
     )
 
     enabled = client.put(
-        "/api/extensions/github.repository/enabled", json={"enabled": True}
+        "/api/extensions/aespa.githubrepository/enabled", json={"enabled": True}
     )
     assert enabled.status_code == 200
     assert enabled.json()["enabled"] is True
@@ -198,7 +381,7 @@ def test_create_sast_run_from_extension_starts_preparation(client, monkeypatch):
     response = client.post(
         "/api/sast-runs/from-source",
         json={
-            "provider_id": "github.repository",
+            "provider_id": "aespa.githubrepository",
             "parameters": {"repository": "acme/payments", "ref": "main"},
             "analysis_mode": "light",
             "start_scan": True,
@@ -208,12 +391,12 @@ def test_create_sast_run_from_extension_starts_preparation(client, monkeypatch):
     assert response.status_code == 202
     body = response.json()
     assert body["status"] == "preparing"
-    assert body["source_provider"] == "github.repository"
+    assert body["source_provider"] == "aespa.githubrepository"
     assert body["source_requested_ref"] == "main"
     assert started == [
         (
             body["id"],
-            "github.repository",
+            "aespa.githubrepository",
             {"repository": "acme/payments", "ref": "main"},
             True,
         )
