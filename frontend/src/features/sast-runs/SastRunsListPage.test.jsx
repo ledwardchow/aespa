@@ -4,11 +4,13 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
+import * as extensionsApi from "../../shared/api/extensions.js";
 import { SastRunsListPage } from "./SastRunsListPage.jsx";
 
 vi.mock("../../shared/api/benchmarkLab.js");
 vi.mock("../../shared/api/sastRuns.js");
 vi.mock("../../shared/api/settings.js");
+vi.mock("../../shared/api/extensions.js");
 
 const run = {
   id: 17,
@@ -23,7 +25,7 @@ beforeEach(() => {
   sastRunsApi.listAllSastRuns.mockResolvedValue([run]);
   sastRunsApi.deleteSastRun.mockResolvedValue(undefined);
   settingsApi.listLLMProfiles.mockResolvedValue([]);
-  settingsApi.getBenchmarkLabConfig.mockResolvedValue({ panel_enabled: false });
+  extensionsApi.listExtensions.mockResolvedValue([]);
   benchmarkApi.listBenchmarkEvaluations.mockResolvedValue([]);
   vi.stubGlobal(
     "confirm",

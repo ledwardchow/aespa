@@ -4,9 +4,36 @@ import json
 import zipfile
 from datetime import datetime, timezone
 
+import pytest
 from sqlmodel import Session, select
 
 from aespa.models import LLMConfig, SastRun, ScanLead
+
+BASE = "/extension/aespa.sast-benchmarking"
+
+
+@pytest.fixture(autouse=True)
+def enabled_sast_benchmarking(client, monkeypatch, tmp_path):
+    from aespa.extensions import get_extension_manager
+
+    manager = get_extension_manager()
+    monkeypatch.setattr(
+        "aespa.extensions.runtime.get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "extensions_dir": tmp_path / "extensions",
+                "data_dir": tmp_path / "data",
+            },
+        )(),
+    )
+    manager.load_extensions()
+    response = client.put(
+        "/api/extensions/aespa.sast-benchmarking/enabled", json={"enabled": True}
+    )
+    assert response.status_code == 200
+    yield
 
 
 def _completed_run(db_engine) -> int:
@@ -29,27 +56,17 @@ def _completed_run(db_engine) -> int:
         return run.id
 
 
-def test_benchmark_lab_config_defaults_off_and_persists(client):
-    response = client.get("/api/settings/benchmark-lab")
-    assert response.status_code == 200
-    assert response.json()["panel_enabled"] is False
-
-    response = client.put(
-        "/api/settings/benchmark-lab",
-        json={
-            "panel_enabled": True,
-            "default_match_mode": "deterministic",
-            "default_repetitions": 2,
-        },
-    )
-    assert response.status_code == 200
-    assert response.json()["panel_enabled"] is True
+def test_sast_benchmarking_is_an_extension(client):
+    extension = client.get("/api/extensions/aespa.sast-benchmarking").json()
+    assert extension["enabled"] is True
+    assert extension["api_prefix"] == BASE
+    assert extension["data_namespace"] == "sast_benchmarking"
 
 
 def test_benchmark_evaluation_matches_without_mutating_sast_run(client, db_engine):
     run_id = _completed_run(db_engine)
     dataset = client.post(
-        "/api/benchmark-lab/datasets",
+        f"{BASE}/datasets",
         json={
             "name": "fixture",
             "ground_truth": {
@@ -69,7 +86,7 @@ def test_benchmark_evaluation_matches_without_mutating_sast_run(client, db_engin
     assert dataset.status_code == 201
     dataset_id = dataset.json()["id"]
     evaluation = client.post(
-        "/api/benchmark-lab/evaluations",
+        f"{BASE}/evaluations",
         json={
             "name": "run 1",
             "sast_run_id": run_id,
@@ -79,7 +96,7 @@ def test_benchmark_evaluation_matches_without_mutating_sast_run(client, db_engin
     )
     assert evaluation.status_code == 201
     evaluation_id = evaluation.json()["id"]
-    result = client.post(f"/api/benchmark-lab/evaluations/{evaluation_id}/run")
+    result = client.post(f"{BASE}/evaluations/{evaluation_id}/run")
     assert result.status_code == 200
     body = result.json()
     assert body["status"] == "completed"
@@ -87,7 +104,7 @@ def test_benchmark_evaluation_matches_without_mutating_sast_run(client, db_engin
     assert json.loads(body["metrics_json"])["full_recall"] == 1.0
     assert body["matches"][0]["disposition"] == "full"
     review = client.post(
-        f"/api/benchmark-lab/evaluations/{evaluation_id}/matches/{body['matches'][0]['id']}/review",
+        f"{BASE}/evaluations/{evaluation_id}/matches/{body['matches'][0]['id']}/review",
         json={
             "disposition": "partial",
             "review_note": "Expected evidence is only partly represented.",
@@ -96,9 +113,7 @@ def test_benchmark_evaluation_matches_without_mutating_sast_run(client, db_engin
     assert review.status_code == 200
     assert len(json.loads(review.json()["review_history_json"])) == 1
     assert (
-        client.get(
-            f"/api/benchmark-lab/evaluations/{evaluation_id}/export?format=csv"
-        ).status_code
+        client.get(f"{BASE}/evaluations/{evaluation_id}/export?format=csv").status_code
         == 200
     )
     with Session(db_engine) as session:
@@ -148,7 +163,7 @@ def test_assisted_matching_uses_bounded_completed_output_only(
 
     monkeypatch.setattr(llm, "plain_completion", fake_completion)
     dataset = client.post(
-        "/api/benchmark-lab/datasets",
+        f"{BASE}/datasets",
         json={
             "name": "assisted fixture",
             "ground_truth": {
@@ -163,7 +178,7 @@ def test_assisted_matching_uses_bounded_completed_output_only(
         },
     ).json()
     evaluation = client.post(
-        "/api/benchmark-lab/evaluations",
+        f"{BASE}/evaluations",
         json={
             "name": "assisted",
             "sast_run_id": run_id,
@@ -171,7 +186,7 @@ def test_assisted_matching_uses_bounded_completed_output_only(
             "match_mode": "assisted",
         },
     ).json()
-    result = client.post(f"/api/benchmark-lab/evaluations/{evaluation['id']}/run")
+    result = client.post(f"{BASE}/evaluations/{evaluation['id']}/run")
 
     assert result.status_code == 200, result.text
     body = result.json()
@@ -193,11 +208,11 @@ def test_benchmark_rejects_non_terminal_sast_run(client, db_engine):
         session.refresh(run)
         run_id = run.id
     dataset = client.post(
-        "/api/benchmark-lab/datasets",
+        f"{BASE}/datasets",
         json={"name": "fixture", "ground_truth": {"items": []}},
     )
     response = client.post(
-        "/api/benchmark-lab/evaluations",
+        f"{BASE}/evaluations",
         json={
             "name": "invalid",
             "sast_run_id": run_id,
@@ -226,7 +241,7 @@ def test_benchmark_marks_answer_key_inside_source_as_contaminated(
         session.refresh(run)
         run_id = run.id
     dataset = client.post(
-        "/api/benchmark-lab/datasets",
+        f"{BASE}/datasets",
         json={
             "name": "fixture",
             "ground_truth": {
@@ -235,7 +250,7 @@ def test_benchmark_marks_answer_key_inside_source_as_contaminated(
         },
     ).json()
     evaluation = client.post(
-        "/api/benchmark-lab/evaluations",
+        f"{BASE}/evaluations",
         json={
             "name": "blindness audit",
             "sast_run_id": run_id,
@@ -243,9 +258,7 @@ def test_benchmark_marks_answer_key_inside_source_as_contaminated(
             "match_mode": "deterministic",
         },
     ).json()
-    result = client.post(
-        f"/api/benchmark-lab/evaluations/{evaluation['id']}/run"
-    ).json()
+    result = client.post(f"{BASE}/evaluations/{evaluation['id']}/run").json()
     assert result["blindness_status"] == "contaminated"
     assert json.loads(result["metrics_json"])["aggregate_eligible"] is False
 
@@ -253,7 +266,7 @@ def test_benchmark_marks_answer_key_inside_source_as_contaminated(
 def test_benchmark_comparison_reports_range_frequency_and_thresholds(client, db_engine):
     run_id = _completed_run(db_engine)
     dataset = client.post(
-        "/api/benchmark-lab/datasets",
+        f"{BASE}/datasets",
         json={
             "name": "repeat fixture",
             "ground_truth": {
@@ -272,7 +285,7 @@ def test_benchmark_comparison_reports_range_frequency_and_thresholds(client, db_
     evaluation_ids = []
     for number in (1, 2):
         evaluation = client.post(
-            "/api/benchmark-lab/evaluations",
+            f"{BASE}/evaluations",
             json={
                 "name": f"repeat {number}",
                 "sast_run_id": run_id,
@@ -280,12 +293,10 @@ def test_benchmark_comparison_reports_range_frequency_and_thresholds(client, db_
                 "match_mode": "deterministic",
             },
         ).json()
-        completed = client.post(
-            f"/api/benchmark-lab/evaluations/{evaluation['id']}/run"
-        ).json()
+        completed = client.post(f"{BASE}/evaluations/{evaluation['id']}/run").json()
         evaluation_ids.append(completed["id"])
     response = client.post(
-        "/api/benchmark-lab/comparisons",
+        f"{BASE}/comparisons",
         json={
             "name": "two repeats",
             "dataset_id": dataset["id"],

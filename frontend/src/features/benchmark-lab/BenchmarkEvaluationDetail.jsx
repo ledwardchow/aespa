@@ -103,7 +103,7 @@ export function BenchmarkEvaluationDetail({ evaluationId, initialTab }) {
       <PageHeader
         title={
           <>
-            <Crumb href="#/benchmark-lab">Benchmark Lab</Crumb>
+            <Crumb href="#/sast-benchmarking">SAST Benchmarking</Crumb>
             <Sep />
             {evaluation.name || `Evaluation #${evaluation.id}`}
           </>
@@ -153,7 +153,7 @@ export function BenchmarkEvaluationDetail({ evaluationId, initialTab }) {
               className={tab === value ? "active" : ""}
               onClick={() => {
                 setTab(value);
-                nav(`#/benchmark-lab/evaluations/${evaluationId}/${value}`);
+                nav(`#/sast-benchmarking/evaluations/${evaluationId}/${value}`);
               }}
             >
               {value.replaceAll("-", " ")}

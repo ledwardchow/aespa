@@ -53,8 +53,6 @@ export function ScanPolicyPage({
   username,
   reportingDebugCfg,
   setReportingDebugCfg,
-  benchmarkLabCfg,
-  setBenchmarkLabCfg,
 }) {
   const [tab, setTab] = useState(initialTab);
   const [globalTab, setGlobalTab] = useState(
@@ -132,8 +130,6 @@ export function ScanPolicyPage({
                 username={username}
                 reportingDebugCfg={reportingDebugCfg}
                 setReportingDebugCfg={setReportingDebugCfg}
-                benchmarkLabCfg={benchmarkLabCfg}
-                setBenchmarkLabCfg={setBenchmarkLabCfg}
               />
             </div>
           )}

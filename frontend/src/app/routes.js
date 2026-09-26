@@ -209,8 +209,6 @@ export const routes = {
       username: preferences.username,
       reportingDebugCfg: preferences.reportingDebugCfg,
       setReportingDebugCfg: preferences.setReportingDebugCfg,
-      benchmarkLabCfg: preferences.benchmarkLabCfg,
-      setBenchmarkLabCfg: preferences.setBenchmarkLabCfg,
     }),
   },
   extensions: {

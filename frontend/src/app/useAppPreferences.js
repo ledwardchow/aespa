@@ -1,4 +1,5 @@
 import * as settingsApi from "../shared/api/settings.js";
+import * as extensionsApi from "../shared/api/extensions.js";
 import { useEffect, useState } from "react";
 
 export function useAppPreferences() {
@@ -49,9 +50,15 @@ export function useAppPreferences() {
       .getReportingDebugConfig()
       .then(setReportingDebugCfg)
       .catch(() => {});
-    settingsApi
-      .getBenchmarkLabConfig()
-      .then(setBenchmarkLabCfg)
+    extensionsApi
+      .listExtensions()
+      .then((extensions) =>
+        setBenchmarkLabCfg({
+          panel_enabled: extensions.some(
+            (extension) => extension.id === "aespa.sast-benchmarking" && extension.enabled && extension.status === "loaded",
+          ),
+        }),
+      )
       .catch(() => {});
   }, []);
 

@@ -1,31 +1,33 @@
 import { req } from "./request.ts";
 
-export const listBenchmarkDatasets = () => req("/api/benchmark-lab/datasets");
+const BASE = "/extension/aespa.sast-benchmarking";
+
+export const listBenchmarkDatasets = () => req(`${BASE}/datasets`);
 export const createBenchmarkDataset = (body) =>
-  req("/api/benchmark-lab/datasets", { method: "POST", body });
-export const getBenchmarkDataset = (id) => req(`/api/benchmark-lab/datasets/${id}`);
+  req(`${BASE}/datasets`, { method: "POST", body });
+export const getBenchmarkDataset = (id) => req(`${BASE}/datasets/${id}`);
 export const updateBenchmarkDataset = (id, body) =>
-  req(`/api/benchmark-lab/datasets/${id}`, { method: "PUT", body });
+  req(`${BASE}/datasets/${id}`, { method: "PUT", body });
 export const deleteBenchmarkDataset = (id) =>
-  req(`/api/benchmark-lab/datasets/${id}`, { method: "DELETE" });
-export const listBenchmarkEvaluations = () => req("/api/benchmark-lab/evaluations");
+  req(`${BASE}/datasets/${id}`, { method: "DELETE" });
+export const listBenchmarkEvaluations = () => req(`${BASE}/evaluations`);
 export const createBenchmarkEvaluation = (body) =>
-  req("/api/benchmark-lab/evaluations", { method: "POST", body });
-export const getBenchmarkEvaluation = (id) => req(`/api/benchmark-lab/evaluations/${id}`);
+  req(`${BASE}/evaluations`, { method: "POST", body });
+export const getBenchmarkEvaluation = (id) => req(`${BASE}/evaluations/${id}`);
 export const runBenchmarkEvaluation = (id) =>
-  req(`/api/benchmark-lab/evaluations/${id}/run`, { method: "POST" });
+  req(`${BASE}/evaluations/${id}/run`, { method: "POST" });
 export const reviewBenchmarkMatch = (evaluationId, matchId, body) =>
-  req(`/api/benchmark-lab/evaluations/${evaluationId}/matches/${matchId}/review`, {
+  req(`${BASE}/evaluations/${evaluationId}/matches/${matchId}/review`, {
     method: "POST",
     body,
   });
 export const getBenchmarkEvaluationExport = (id) =>
-  req(`/api/benchmark-lab/evaluations/${id}/export`);
+  req(`${BASE}/evaluations/${id}/export`);
 export const getBenchmarkEvaluationExportUrl = (id, format = "json") =>
-  `/api/benchmark-lab/evaluations/${id}/export?format=${encodeURIComponent(format)}`;
-export const listBenchmarkComparisons = () => req("/api/benchmark-lab/comparisons");
+  `${BASE}/evaluations/${id}/export?format=${encodeURIComponent(format)}`;
+export const listBenchmarkComparisons = () => req(`${BASE}/comparisons`);
 export const createBenchmarkComparison = (body) =>
-  req("/api/benchmark-lab/comparisons", { method: "POST", body });
-export const getBenchmarkComparison = (id) => req(`/api/benchmark-lab/comparisons/${id}`);
+  req(`${BASE}/comparisons`, { method: "POST", body });
+export const getBenchmarkComparison = (id) => req(`${BASE}/comparisons/${id}`);
 export const recalculateBenchmarkComparison = (id) =>
-  req(`/api/benchmark-lab/comparisons/${id}/recalculate`, { method: "POST" });
+  req(`${BASE}/comparisons/${id}/recalculate`, { method: "POST" });
