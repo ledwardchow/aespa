@@ -66,7 +66,7 @@ export function BenchmarkLabPage() {
         },
         include_contaminated: false,
       });
-      nav(`#/benchmark-lab/comparisons/${created.id}`);
+      nav(`#/sast-benchmarking/comparisons/${created.id}`);
     } catch (err) {
       setError(err.message);
     }
@@ -74,7 +74,7 @@ export function BenchmarkLabPage() {
   return (
     <>
       <PageHeader
-        title="Benchmark Lab"
+        title="SAST Benchmarking"
         actions={
           <>
             <button
@@ -85,7 +85,7 @@ export function BenchmarkLabPage() {
             </button>
             <button
               className="btn primary sm"
-              onClick={() => nav("#/benchmark-lab/evaluations/new")}
+              onClick={() => nav("#/sast-benchmarking/evaluations/new")}
             >
               New Evaluation
             </button>
@@ -173,7 +173,7 @@ export function BenchmarkLabPage() {
                     return (
                       <NavigationRow
                         key={comparison.id}
-                        href={`#/benchmark-lab/comparisons/${comparison.id}`}
+                        href={`#/sast-benchmarking/comparisons/${comparison.id}`}
                         label={`Open ${comparison.name}`}
                       >
                         <td>{comparison.name}</td>
@@ -184,7 +184,7 @@ export function BenchmarkLabPage() {
                         <td>
                           <a
                             className="btn ghost sm"
-                            href={`#/benchmark-lab/comparisons/${comparison.id}`}
+                            href={`#/sast-benchmarking/comparisons/${comparison.id}`}
                           >
                             Open →
                           </a>
@@ -221,13 +221,13 @@ export function BenchmarkLabPage() {
                   return (
                     <NavigationRow
                       key={evaluation.id}
-                      href={`#/benchmark-lab/evaluations/${evaluation.id}`}
+                      href={`#/sast-benchmarking/evaluations/${evaluation.id}`}
                       label={`Open ${evaluation.name || `Evaluation #${evaluation.id}`}`}
                     >
                       <td>
                         <a
                           className="benchmark-name"
-                          href={`#/benchmark-lab/evaluations/${evaluation.id}`}
+                          href={`#/sast-benchmarking/evaluations/${evaluation.id}`}
                         >
                           {evaluation.name || `Evaluation #${evaluation.id}`}
                         </a>
@@ -258,7 +258,7 @@ export function BenchmarkLabPage() {
                       <td>
                         <a
                           className="btn ghost sm"
-                          href={`#/benchmark-lab/evaluations/${evaluation.id}`}
+                          href={`#/sast-benchmarking/evaluations/${evaluation.id}`}
                         >
                           Open →
                         </a>

@@ -1,15 +1,17 @@
 import { renderHook } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import * as settingsApi from "../shared/api/settings.js";
+import * as extensionsApi from "../shared/api/extensions.js";
 import { useAppPreferences } from "./useAppPreferences.js";
 
 vi.mock("../shared/api/settings.js");
+vi.mock("../shared/api/extensions.js");
 
 beforeEach(() => {
   localStorage.clear();
   settingsApi.getVersion.mockResolvedValue({ version: "test" });
   settingsApi.getReportingDebugConfig.mockResolvedValue({});
-  settingsApi.getBenchmarkLabConfig.mockResolvedValue({});
+  extensionsApi.listExtensions.mockResolvedValue([]);
 });
 
 test("hides Deep Scan by default", () => {

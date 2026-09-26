@@ -1,6 +1,7 @@
 """Trusted, capability-based AESPA extension loading."""
 
 from aespa.extensions.runtime import (
+    ExtensionDataStore,
     ExtensionRegistry,
     ExtensionSecretStore,
     MaterializedSource,
@@ -17,6 +18,7 @@ from aespa.extensions.runtime import (
 
 __all__ = [
     "ExtensionRegistry",
+    "ExtensionDataStore",
     "ExtensionSecretStore",
     "MaterializedSource",
     "ProviderAvailability",

@@ -98,7 +98,7 @@ export function BenchmarkEvaluationForm() {
         dataset_id: Number(selectedDatasetId),
         policy: { severity_tolerance, location_tolerance, include_conditional, include_hardening },
       });
-      nav(`#/benchmark-lab/evaluations/${created.id}`);
+      nav(`#/sast-benchmarking/evaluations/${created.id}`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -110,7 +110,7 @@ export function BenchmarkEvaluationForm() {
       <PageHeader
         title={
           <>
-            <Crumb href="#/benchmark-lab">Benchmark Lab</Crumb>
+            <Crumb href="#/sast-benchmarking">SAST Benchmarking</Crumb>
             <Sep />
             New Evaluation
           </>
@@ -289,7 +289,7 @@ export function BenchmarkEvaluationForm() {
               />
             </label>
             <div className="form-actions">
-              <button type="button" className="btn ghost" onClick={() => nav("#/benchmark-lab")}>
+              <button type="button" className="btn ghost" onClick={() => nav("#/sast-benchmarking")}>
                 Cancel
               </button>
               <button className="btn primary" disabled={busy || loading}>

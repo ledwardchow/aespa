@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import Column, Integer, MetaData, Table
 from sqlmodel import Session
 
 from aespa.db import get_engine
@@ -108,9 +109,11 @@ def create_extension():
     assert set(manager.extensions) == {
         "aespa.burpsuite",
         "aespa.githubrepository",
+        "aespa.sast-benchmarking",
         "example.source",
     }
     assert set(manager.source_providers) == {"aespa.githubrepository", "example.source"}
+    assert manager.extensions["aespa.sast-benchmarking"].status == "disabled"
     assert manager.extensions["example.source"].author == "Example Co"
     github_source = Path(manager.extensions["aespa.githubrepository"].source)
     assert (
@@ -131,6 +134,61 @@ def create_extension():
     )
     manager.load_extensions()
     assert manager.extensions["example.source"].status == "disabled"
+
+
+def test_extension_api_routes_and_data_are_removed_cleanly_when_disabled(
+    client, monkeypatch, tmp_path
+):
+    from aespa.config import BUNDLED_EXTENSIONS_DIR
+    from aespa.extensions import get_extension_manager
+
+    manager = get_extension_manager()
+    monkeypatch.setattr(
+        "aespa.extensions.runtime.get_settings",
+        lambda: SimpleNamespace(
+            extensions_dir=tmp_path / "user-extensions",
+            data_dir=tmp_path / "data",
+        ),
+    )
+    manager.load_extensions()
+
+    enabled = client.put(
+        "/api/extensions/aespa.sast-benchmarking/enabled",
+        json={"enabled": True},
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["api_prefix"] == "/extension/aespa.sast-benchmarking"
+    assert client.get("/extension/aespa.sast-benchmarking/datasets").json() == []
+    assert (tmp_path / "data" / "extensions" / "aespa.sast-benchmarking.db").is_file()
+
+    disabled = client.put(
+        "/api/extensions/aespa.sast-benchmarking/enabled",
+        json={"enabled": False},
+    )
+    assert disabled.status_code == 200
+    assert client.get("/extension/aespa.sast-benchmarking/datasets").status_code == 404
+    assert client.get("/api/health").status_code == 200
+    assert BUNDLED_EXTENSIONS_DIR.is_dir()
+
+
+def test_extension_data_store_rejects_tables_outside_its_namespace(
+    monkeypatch, tmp_path
+):
+    manager = ExtensionManager()
+    manager.extensions["example.data"] = SimpleNamespace(
+        enabled=True,
+        status="loaded",
+        data_namespace="example_data",
+    )
+    monkeypatch.setattr(
+        "aespa.extensions.runtime.get_settings",
+        lambda: SimpleNamespace(data_dir=tmp_path),
+    )
+    metadata = MetaData()
+    Table("somebody_elses_table", metadata, Column("id", Integer, primary_key=True))
+
+    with pytest.raises(ValueError, match="example_data_"):
+        manager.data_store_for("example.data").create_all(metadata)
 
 
 def test_extension_secrets_are_namespaced_and_not_returned_by_api(

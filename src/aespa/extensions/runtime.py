@@ -21,7 +21,10 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol
 
-from sqlmodel import Session
+from fastapi import APIRouter, FastAPI
+from sqlalchemy import Engine, event
+from sqlmodel import Session, SQLModel
+from sqlmodel import create_engine as create_sqlmodel_engine
 
 from aespa.config import BUNDLED_EXTENSIONS_DIR, get_settings
 from aespa.db import get_engine
@@ -32,6 +35,7 @@ _UTC = timezone.utc
 _ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,79}$")
 _OUTPUT_LIMIT = 128 * 1024
 _DEFAULT_WORKSPACE_LIMIT = 1024 * 1024 * 1024
+_DATA_NAMESPACE_RE = re.compile(r"^[a-z][a-z0-9_]{1,62}$")
 
 
 @dataclass(frozen=True)
@@ -292,6 +296,7 @@ class ExtensionRecord:
     source: str
     author: str | None = None
     secrets_namespace: str | None = None
+    data_namespace: str | None = None
     enabled: bool = True
     status: str = "loaded"
     error: str | None = None
@@ -309,6 +314,67 @@ class RegisteredSourceProvider:
 class RegisteredWebScanner:
     extension_id: str
     scanner: WebActiveScanner
+
+
+@dataclass(frozen=True)
+class RegisteredApiApp:
+    extension_id: str
+    app: FastAPI
+
+
+class ExtensionDataStore:
+    """An extension's isolated SQLite database.
+
+    Extensions must prefix every table with their manifest ``data_namespace``.
+    The database file is retained while an extension is disabled so enabling it
+    again restores the extension exactly where it left off.
+    """
+
+    def __init__(self, extension_id: str, namespace: str, path: Path):
+        self.extension_id = extension_id
+        self.namespace = namespace
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.engine: Engine = create_sqlmodel_engine(
+            f"sqlite:///{path}",
+            connect_args={"check_same_thread": False, "timeout": 30},
+        )
+
+        @event.listens_for(self.engine, "connect")
+        def _configure(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+            finally:
+                cursor.close()
+
+    @property
+    def table_prefix(self) -> str:
+        return f"{self.namespace}_"
+
+    def create_all(self, metadata=None) -> None:
+        metadata = metadata or SQLModel.metadata
+        tables = list(metadata.tables.values())
+        invalid = sorted(
+            table.name
+            for table in tables
+            if not table.name.startswith(self.table_prefix)
+        )
+        if invalid:
+            raise ValueError(
+                f"Extension tables must start with {self.table_prefix!r}: "
+                + ", ".join(invalid)
+            )
+        metadata.create_all(self.engine)
+
+    def session(self) -> Session:
+        return Session(self.engine)
+
+    def dispose(self) -> None:
+        self.engine.dispose()
 
 
 class ExtensionSecretStore:
@@ -366,6 +432,17 @@ class ExtensionRegistry:
     def register_web_active_scanner(self, scanner: WebActiveScanner) -> None:
         self._manager._register_web_active_scanner(self._extension_id, scanner)
 
+    def register_api_router(self, router: APIRouter) -> None:
+        """Expose routes below ``/extension/<extension-id>/``."""
+        self._manager._register_api_router(self._extension_id, router)
+
+    def data_store(self, metadata=None) -> ExtensionDataStore:
+        """Return isolated storage and create the extension's validated tables."""
+        store = self._manager.data_store_for(self._extension_id)
+        if metadata is not None:
+            store.create_all(metadata)
+        return store
+
     @property
     def secrets(self) -> ExtensionSecretStore:
         """Secret store bound to this extension's declared namespace."""
@@ -385,6 +462,8 @@ class ExtensionManager:
         self.extensions: dict[str, ExtensionRecord] = {}
         self.source_providers: dict[str, RegisteredSourceProvider] = {}
         self.web_scanners: dict[str, RegisteredWebScanner] = {}
+        self.api_apps: dict[str, RegisteredApiApp] = {}
+        self.data_stores: dict[str, ExtensionDataStore] = {}
         self._loaded = False
 
     def ensure_loaded(self) -> None:
@@ -392,9 +471,13 @@ class ExtensionManager:
             self.load_extensions()
 
     def load_extensions(self) -> None:
+        for store in self.data_stores.values():
+            store.dispose()
         self.extensions.clear()
         self.source_providers.clear()
         self.web_scanners.clear()
+        self.api_apps.clear()
+        self.data_stores.clear()
         extension_dir = get_settings().extensions_dir
         extension_dir.mkdir(parents=True, exist_ok=True)
         roots = [BUNDLED_EXTENSIONS_DIR, extension_dir]
@@ -441,6 +524,12 @@ class ExtensionManager:
                     raise ValueError(
                         "a secrets namespace requires an author matching the extension ID pattern"
                     )
+            data_namespace = manifest.get("data_namespace")
+            if data_namespace is not None and (
+                not isinstance(data_namespace, str)
+                or not _DATA_NAMESPACE_RE.fullmatch(data_namespace)
+            ):
+                raise ValueError("data_namespace is invalid")
             record = ExtensionRecord(
                 id=extension_id,
                 name=str(manifest.get("name") or extension_id),
@@ -454,6 +543,7 @@ class ExtensionManager:
                     if namespace_value is not None
                     else None
                 ),
+                data_namespace=data_namespace,
                 enabled=self.is_enabled(extension_id, default_enabled),
             )
             if record.aespa_api != "1":
@@ -585,6 +675,10 @@ class ExtensionManager:
             for scanner_id, registered in list(self.web_scanners.items()):
                 if registered.extension_id == record.id:
                     self.web_scanners.pop(scanner_id, None)
+            self.api_apps.pop(record.id, None)
+            store = self.data_stores.pop(record.id, None)
+            if store is not None:
+                store.dispose()
             log.exception("Could not activate extension %s", record.id)
 
     def _register_source_provider(
@@ -619,6 +713,44 @@ class ExtensionManager:
                     "secret settings require secrets_namespace in extension.toml"
                 )
         self.web_scanners[scanner.id] = RegisteredWebScanner(extension_id, scanner)
+
+    def _register_api_router(self, extension_id: str, router: APIRouter) -> None:
+        record = self.extensions[extension_id]
+        if "api.routes" not in record.capabilities:
+            raise ValueError("api.routes is missing from extension.toml")
+        if extension_id in self.api_apps:
+            raise ValueError("An extension may register only one API router")
+        for route in router.routes:
+            if not str(getattr(route, "path", "")).startswith("/"):
+                raise ValueError("Extension API route paths must start with /")
+        app = FastAPI(
+            title=f"{record.name} extension API",
+            docs_url=None,
+            redoc_url=None,
+            openapi_url=None,
+        )
+        app.include_router(router)
+        self.api_apps[extension_id] = RegisteredApiApp(extension_id, app)
+
+    def data_store_for(self, extension_id: str) -> ExtensionDataStore:
+        record = self.extensions.get(extension_id)
+        if record is None:
+            raise KeyError(extension_id)
+        if not record.enabled or record.status != "loaded":
+            raise ValueError("Extension is not enabled")
+        if not record.data_namespace:
+            raise ValueError("Extension has no data_namespace")
+        store = self.data_stores.get(extension_id)
+        if store is None:
+            safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", extension_id)
+            path = get_settings().data_dir / "extensions" / f"{safe_id}.db"
+            store = ExtensionDataStore(extension_id, record.data_namespace, path)
+            self.data_stores[extension_id] = store
+        return store
+
+    def api_app_for(self, extension_id: str) -> FastAPI | None:
+        registered = self.api_apps.get(extension_id)
+        return registered.app if registered else None
 
     def _register_settings_fields(
         self,
@@ -799,6 +931,12 @@ class ExtensionManager:
             "capabilities": record.capabilities,
             "source": record.source,
             "secrets_namespace": record.secrets_namespace,
+            "data_namespace": record.data_namespace,
+            "api_prefix": (
+                f"/extension/{record.id}"
+                if record.id in self.api_apps and record.status == "loaded"
+                else None
+            ),
             "enabled": record.enabled,
             "status": record.status,
             "error": record.error,

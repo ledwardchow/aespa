@@ -1,6 +1,7 @@
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
+import * as extensionsApi from "../../shared/api/extensions.js";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
@@ -42,11 +43,17 @@ export function SastRunsListPage() {
       .catch((e) => setError(e.message));
   }, []);
   useEffect(() => {
-    settingsApi
-      .getBenchmarkLabConfig()
-      .then(async (config) => {
-        setBenchmarkEnabled(Boolean(config?.panel_enabled));
-        if (!config?.panel_enabled) return;
+    extensionsApi
+      .listExtensions()
+      .then(async (extensions) => {
+        const enabled = extensions.some(
+          (extension) =>
+            extension.id === "aespa.sast-benchmarking" &&
+            extension.enabled &&
+            extension.status === "loaded",
+        );
+        setBenchmarkEnabled(enabled);
+        if (!enabled) return;
         const items = await benchmarkApi.listBenchmarkEvaluations();
         setEvaluations(Array.isArray(items) ? items : items?.evaluations || items?.items || []);
       })
@@ -277,7 +284,7 @@ export function SastRunsListPage() {
                           <div style={{ marginTop: 5 }}>
                             <a
                               className="badge neutral"
-                              href={`#/benchmark-lab/evaluations/${evaluations.find((evaluation) => evaluation.sast_run_id === r.id).id}`}
+                              href={`#/sast-benchmarking/evaluations/${evaluations.find((evaluation) => evaluation.sast_run_id === r.id).id}`}
                             >
                               Evaluated
                             </a>

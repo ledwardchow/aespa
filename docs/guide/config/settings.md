@@ -57,8 +57,10 @@ or both through an HTTP or HTTPS proxy. Burp Suite settings are on the
 ## System Settings
 
 The **System Settings** page contains feature visibility, debug settings, browser
-selection, database operations, and runtime information. Optional Reporting Lab,
-Benchmark Lab, and Systems entries appear in the sidebar only when enabled.
+selection, database operations, and runtime information. Optional Reporting Lab
+and Systems entries appear in the sidebar only when enabled. Enable the optional
+SAST Benchmarking workflow from **Extensions**; its sidebar entry and
+`/extension/aespa.sast-benchmarking/` API are present only while it is enabled.
 
 The browser setting can use Playwright Chromium or installed stable Google Chrome.
 It can also make normal crawl, scan, and ALICE browser sessions visible for

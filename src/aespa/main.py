@@ -16,7 +16,6 @@ from sqlmodel import Session
 from aespa.api.alice import router as alice_router
 from aespa.api.api_collections import router as api_collections_router
 from aespa.api.api_test_runs import router as api_test_runs_router
-from aespa.api.benchmark_lab import router as benchmark_lab_router
 from aespa.api.events import router as events_router
 from aespa.api.extensions import router as extensions_router
 from aespa.api.reporting_debug import router as reporting_debug_router
@@ -30,6 +29,7 @@ from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
 from aespa.config import DEFAULT_LOG_DB_PATH, Settings, get_settings
 from aespa.db import get_session, init_db
+from aespa.extensions.api import ExtensionApiDispatcher
 from aespa.services import alice_goals as alice_goals_svc
 from aespa.services import antigravity_provider as antigravity_provider_svc
 from aespa.services import campaigns as campaigns_svc
@@ -146,7 +146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(alice_router)
     app.include_router(statistics_router)
     app.include_router(systems_router)
-    app.include_router(benchmark_lab_router)
+    app.mount("/extension", ExtensionApiDispatcher())
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

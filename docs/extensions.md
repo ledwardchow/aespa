@@ -10,8 +10,9 @@ An extension is trusted Python code loaded inside the AESPA process. API `1` sup
 | --- | --- | --- |
 | `sast.source_provider` | A source provider that prepares a ZIP of code for a SAST run | Run creation, background preparation, archive validation, storage, and scan startup |
 | `web.active_scanner` | A scanner that selects web scan candidates and returns issues | Target scope checks, scheduling, cancellation, activity events, and finding storage |
+| `api.routes` | A FastAPI router exposed below `/extension/<extension-id>/` | Stable dispatch, enable/disable isolation, and route removal |
 
-An extension may also register settings fields without either capability. Extensions do not add API routes, database tables, migrations, or frontend code through this interface. Extensions run with AESPA's process permissions, so only install code you trust.
+An extension may also register settings fields without another capability. Extensions may own API routes and data, but do not add tables or migrations to AESPA's primary database and do not inject frontend code. Extensions run with AESPA's process permissions, so only install code you trust.
 
 ## Folder and manifest
 
@@ -38,6 +39,7 @@ entrypoint = "extension.py:create_extension"
 capabilities = ["sast.source_provider"]
 secrets_namespace = "repository"
 enabled_by_default = false
+data_namespace = "acme_repository"
 ```
 
 | Key | Rule |
@@ -51,6 +53,7 @@ enabled_by_default = false
 | `capabilities` | List of capabilities the extension offers. Declare `web.active_scanner` before registering a web scanner. Declare `sast.source_provider` for a source provider. |
 | `secrets_namespace` | Required if any setting has type `secret`. Give a value matching the ID pattern above. AESPA prefixes it with `author`, so this example stores secrets in `acme.repository`. The full name must be unique across extensions. |
 | `enabled_by_default` | Boolean. Defaults to `true`. A saved enable or disable choice takes precedence. |
+| `data_namespace` | Required before an extension can request a data store. Use lowercase letters, numbers, and underscores. Every table in that database must start with `<data_namespace>_`. |
 
 The manifest ID and folder names can differ. Keep the ID, author, and secret namespace value stable when moving an extension so its saved settings and secrets remain available. Duplicate IDs or full secret namespaces produce a load error in the Extensions list. One failed extension does not stop the others.
 
@@ -73,7 +76,13 @@ def create_extension():
     return AcmeExtension()
 ```
 
-The registry supports `register_source_provider(provider)`, `register_web_active_scanner(scanner)`, and `register_settings_fields(fields, schema_version=1)`. `registry.secrets` provides the extension's declared secret namespace. A source provider or scanner can declare its own `settings_fields`; do not register the same key twice. Provider IDs must be unique among source providers, and scanner IDs among web scanners.
+The registry supports `register_source_provider(provider)`, `register_web_active_scanner(scanner)`, `register_api_router(router)`, `data_store(metadata)`, and `register_settings_fields(fields, schema_version=1)`. `registry.secrets` provides the extension's declared secret namespace. A source provider or scanner can declare its own `settings_fields`; do not register the same key twice. Provider IDs must be unique among source providers, and scanner IDs among web scanners.
+
+## Extension API routes and data
+
+Declare `api.routes` and register one FastAPI `APIRouter`. A route declared as `/datasets` by extension `acme.benchmarking` is available at `/extension/acme.benchmarking/datasets`. The core `/api` namespace is reserved for AESPA. The stable dispatcher resolves the enabled extension for every request, so disabling an extension immediately returns 404 for all of its routes without rebuilding the main application or affecting another extension.
+
+Extensions that persist data declare `data_namespace` and pass their own SQLAlchemy or SQLModel metadata to `registry.data_store(metadata)`. AESPA creates a separate SQLite file under `<data_dir>/extensions/<extension-id>.db`; it never adds those tables to `aespa.db`. Every table name is validated to begin with `<data_namespace>_` before creation. The file is retained on disable, while its engine is disposed, so re-enabling restores the extension's data cleanly. Extension schema evolution remains the extension author's responsibility and must occur only inside that isolated database.
 
 ## Settings fields and secrets
 
@@ -193,6 +202,13 @@ AESPA calls `check_availability(context)` when listing the extension. A scanner 
 The `aespa.githubrepository` source provider accepts `owner/repository` or a `github.com` URL with an optional branch, tag, or commit. It prefers an authenticated GitHub CLI and otherwise uses Git with the user's credential helper. It creates a bare filtered clone, resolves the selected ref to a commit, and archives tracked files without a normal checkout. It does not include Git submodules or Git LFS object contents. Repository preparation runs in the background. If AESPA stops during preparation, the run is marked failed on the next start instead of repeating the authenticated operation.
 
 The `aespa.burpsuite` web scanner is disabled by default. It uses the Burp Suite Professional REST API, takes its API key from the `aespa.burpsuite` secret namespace, and selects candidates by vulnerability class. AESPA migrates saved Burp connection details, scan choices, and API keys to this extension during database upgrade. Its code is in `extensions/builtin/burp_suite/`.
+
+The `aespa.sast-benchmarking` API extension is disabled by default. When enabled,
+it serves the SAST Benchmarking workflow under
+`/extension/aespa.sast-benchmarking/` and stores its tables in its own database.
+On first enable, an empty extension database imports legacy Benchmark Lab rows
+from the primary database so existing evaluations remain available. Disabling it
+removes the routes and sidebar entry but preserves that isolated database.
 
 ## Testing and packaging
 

@@ -1854,10 +1854,11 @@ The cross-process workspace lease is checked before startup recovery changes a S
 
 ---
 
-### Benchmark Lab isolation and comparisons
+### SAST Benchmarking extension isolation and comparisons
 
-Benchmark Lab is an evaluator over completed ordinary `SastRun` rows; it never
-starts or alters a scan. Ground truth is stored only in `BenchmarkDataset` and is
+SAST Benchmarking is a bundled, disabled-by-default extension that evaluates completed ordinary `SastRun` rows; it never
+starts or alters a scan. Ground truth is stored only in the extension's
+`sast_benchmarking_dataset` table and is
 not included in scanner APIs, prompts, checkpoints, evidence receipts, SAST
 exports, or lead handoffs. Evaluation performs answer-key/source digest and
 evidence-access checks before scoring. Deterministic mode uses explainable
@@ -1870,8 +1871,11 @@ until an operator records an audited override.
 dataset without executing new scans. Contaminated evaluations are excluded by
 default. The comparison stores median/range metrics, per-item detection
 frequency, and pass/fail results for configured minimum or maximum thresholds.
-The navigation and APIs remain hidden from the sidebar until the persisted
-Testing Features toggle is enabled; hiding it does not delete evaluator data.
+Its routes are served below `/extension/aespa.sast-benchmarking/`, and its datasets,
+evaluations, matches, and comparisons use an isolated extension SQLite database
+with `sast_benchmarking_` table names. Enabling the extension exposes its navigation
+and routes. Disabling it removes both cleanly, closes its database engine, and retains
+the database file for a later re-enable without affecting ordinary SAST runs.
 
 ## 18. Extensions
 
