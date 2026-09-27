@@ -8,22 +8,21 @@ function jsonValue(value, fallback) {
   }
 }
 
-function jsonListValue(value) {
+export function jsonListValue(value) {
   const parsed = jsonValue(value, []);
-  if (
-    !Array.isArray(parsed) ||
-    !parsed.length ||
-    !parsed.every((item) => typeof item === "string" && item.length <= 1)
-  ) {
-    return parsed;
+  if (!Array.isArray(parsed)) return parsed ? [parsed] : [];
+  let characterCount = 0;
+  while (typeof parsed[characterCount] === "string" && parsed[characterCount].length <= 1) {
+    characterCount += 1;
   }
+  if (characterCount < 8) return parsed;
 
-  const reconstructed = parsed.join("");
+  const reconstructed = parsed.slice(0, characterCount).join("");
   try {
     const decoded = JSON.parse(reconstructed);
-    return Array.isArray(decoded) ? decoded : [decoded];
+    return [...(Array.isArray(decoded) ? decoded : [decoded]), ...parsed.slice(characterCount)];
   } catch {
-    return reconstructed ? [reconstructed] : [];
+    return [reconstructed, ...parsed.slice(characterCount)];
   }
 }
 
@@ -33,7 +32,12 @@ function displayValue(value, fallback = "—") {
 }
 
 function TraceBlock({ label, value, empty = "Not recorded" }) {
-  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  const text =
+    typeof value === "string"
+      ? value
+      : Array.isArray(value) && value.every((item) => typeof item === "string")
+        ? value.join("\n\n")
+        : JSON.stringify(value, null, 2);
   return (
     <div className="sast-flow-step">
       <span>{label}</span>

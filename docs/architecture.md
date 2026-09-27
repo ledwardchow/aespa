@@ -1066,7 +1066,7 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 | `google` | `google-genai` with a Gemini Developer API key |
 | `google_vertex` | `google-genai` for Gemini models and the `openai` SDK for other publisher models, using Google Cloud Application Default Credentials |
 | `bedrock` | `boto3` / `anthropic` Bedrock adapter |
-| `bedrock_mantle` | `openai` SDK with Bedrock Mantle endpoint (`project_id` sent as `OpenAI-Project` header) |
+| `bedrock_mantle` | `anthropic` SDK for Claude Messages; `openai` SDK for Responses or Chat Completions, selected by model (`project_id` sent as `anthropic-workspace-id` or `OpenAI-Project`) |
 | `azure_openai` | `openai` SDK with Azure base URL |
 | `openai_compatible` | `openai` SDK with custom base URL |
 | `openrouter` | `openai` SDK with OpenRouter base URL |

@@ -12,7 +12,7 @@ function extensionStatus(extension) {
     : { label: "Setup required", className: "neutral" };
 }
 
-export function ExtensionsPage() {
+export function ExtensionsPage({ onExtensionUpdated }) {
   const [extensions, setExtensions] = useState(null);
   const [error, setError] = useState(null);
   const [pendingId, setPendingId] = useState(null);
@@ -32,6 +32,7 @@ export function ExtensionsPage() {
       setExtensions((previous) =>
         previous.map((item) => (item.id === updated.id ? updated : item)),
       );
+      onExtensionUpdated?.(updated);
     } catch (toggleError) {
       setError(toggleError.message);
     } finally {

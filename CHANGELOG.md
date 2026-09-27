@@ -7,17 +7,23 @@ All pull requests merged to `main`, in reverse chronological order.
 ### New features
 
 - **Extensions**: Extensions can now provide API routes under an isolated `/extension/<extension-id>/` prefix and maintain their own SQLite database. Manifest-declared data namespaces enforce extension-specific table prefixes, while disabling an extension removes its routes and closes its database without disrupting AESPA or other extensions.
-- **SAST Benchmarking extension**: Benchmark Lab is now the optional SAST Benchmarking extension. It evaluates completed SAST runs against separately stored ground truth, supports deterministic, model-assisted, and human-reviewed matching, and provides repeated-run comparisons without placing benchmark data in AESPA's primary database.
+- **SAST Benchmarking extension**: Benchmark Lab is now the optional SAST Benchmarking extension. It evaluates completed SAST runs against separately stored ground truth, supports deterministic, model-assisted, and human-reviewed matching, and provides repeated-run comparisons without placing benchmark data in AESPA's primary database. Enabling or disabling it updates the sidebar immediately without a page refresh.
 - **Google Vertex AI provider**: AESPA can use Google Cloud Application Default Credentials with a selected project and location. Gemini models use the native Google content API, while other serverless publisher models use Vertex AI's OpenAI-compatible Responses API so tool arguments are preserved. Grok conversations use stable, agent-specific cache routing and replay encrypted reasoning between tool steps using Vertex-compatible request fields. Each Grok call records whether the prompt cache was used, token reuse, cache-key fingerprints, and the provider system fingerprint so inconsistent cache reuse can be diagnosed. The provider supports the existing vision and thinking workflows, preserves numeric tool-schema constraints required by Vertex AI, and does not store Google credentials. Deployed endpoints and tuned model resources are excluded.
 
 ### Updates
 
+- **SAST source details layout**: The resolved source revision now appears beneath the run name in the header instead of occupying a separate row, while the source snapshot notice stays compact during preparation.
 - **DAST and SAST LLM concurrency**: The DAST Test Lead and SAST settings now have separate limits for concurrent LLM requests. The limits apply across each run, including DAST reporting and SAST discovery and validation agents.
 - **Settings navigation**: Settings screens have been consolidated into one item.
 - **Per-model LLM pacing**: TPM and RPM limits have been moved to per-model instead of the previous per-provider.
 
 ### Fixes
 
+- **SAST proof gaps**: Text returned for a proof gap now stays together when validation fails, and existing character-split gaps display as readable text with an accurate count.
+- **Windows terminal shutdown**: Ctrl+C now quits AESPA promptly when it is started with `uv run aespa` in PowerShell, including when browser event streams remain open.
+- **Resuming partial Light SAST scans**: Resume Failed Work now retries failed discovery workers even when the earlier run reached its report, then refreshes validation and the report with the recovered results.
+- **Automatic frontend builds on Windows**: Starting AESPA now launches the Windows npm command correctly when frontend files have changed. macOS and Linux builds continue to use the standard npm command.
+- **Bedrock Mantle model calls**: Claude models now use streamed Messages calls, including for large output limits, and multi-step conversations no longer send SDK-only response fields back to Mantle. OpenAI models use Responses, and supported third-party text models use Chat Completions. Model discovery shows the selected API and unrecognized model families fail before an LLM request is sent. Mantle project attribution also works for Claude calls.
 - **Model thinking levels**: Editing a model now loads available thinking levels on the first open when its saved provider data has a context window but no thinking-level list.
 - **Traffic coverage filters**: Opening the Traffic Log from an OWASP coverage item now refreshes the table rows and closes any previously selected request, so the visible rows match the filtered count.
 - **OWASP coverage tracking**: Test Lead HTTP requests now identify whether they are setup, reconnaissance, or active security tests. Active tests require an OWASP category and are rejected with guidance when it is missing, while setup and reconnaissance requests can remain uncategorized.
@@ -26,6 +32,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
+- **Frontend type checks**: The service worker recovery test now uses a complete browser storage mock, allowing frontend type checks to pass.
 - **Extension developer documentation**: One technical reference describes extension folders, manifests, settings, secrets, source providers, web scanners, and packaging requirements.
 - **Frontend build output**: Generated frontend files are no longer stored in Git. Frontend checks and desktop packaging continue to build the bundle from the Vite source when needed.
 

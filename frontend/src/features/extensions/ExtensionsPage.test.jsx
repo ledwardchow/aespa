@@ -42,6 +42,18 @@ const extensions = [
     settings_fields: [],
     source_providers: [],
   },
+  {
+    id: "aespa.sast-benchmarking",
+    name: "SAST Benchmarking",
+    version: "1.0.0",
+    aespa_api: "1",
+    capabilities: ["api.routes"],
+    enabled: false,
+    status: "disabled",
+    settings: {},
+    settings_fields: [],
+    source_providers: [],
+  },
 ];
 
 beforeEach(() => {
@@ -63,7 +75,7 @@ test("lists extensions with status, actions, and separate settings links", async
 
   const table = await screen.findByRole("table");
   const rows = within(table).getAllByRole("row");
-  expect(rows).toHaveLength(3);
+  expect(rows).toHaveLength(4);
   expect(within(rows[1]).getByText("Ready")).toBeTruthy();
   expect(within(rows[1]).getByText("aespa")).toBeTruthy();
   expect(within(rows[1]).getByRole("button", { name: "Disable" })).toBeTruthy();
@@ -80,9 +92,27 @@ test("enables and disables extensions from the table", async () => {
   const user = userEvent.setup();
   render(<ExtensionsPage />);
 
-  await user.click(await screen.findByRole("button", { name: "Enable" }));
+  const row = (await screen.findByText("Example reports")).closest("tr");
+  await user.click(within(row).getByRole("button", { name: "Enable" }));
   expect(extensionsApi.setExtensionEnabled).toHaveBeenCalledWith("example.reports", true);
   expect(await screen.findAllByRole("button", { name: "Disable" })).toHaveLength(2);
+});
+
+test("notifies the app when SAST Benchmarking is enabled", async () => {
+  const user = userEvent.setup();
+  const onExtensionUpdated = vi.fn();
+  render(<ExtensionsPage onExtensionUpdated={onExtensionUpdated} />);
+
+  const row = (await screen.findByText("SAST Benchmarking")).closest("tr");
+  await user.click(within(row).getByRole("button", { name: "Enable" }));
+
+  expect(onExtensionUpdated).toHaveBeenCalledWith(
+    expect.objectContaining({
+      id: "aespa.sast-benchmarking",
+      enabled: true,
+      status: "loaded",
+    }),
+  );
 });
 
 test("settings page edits only the selected extension", async () => {

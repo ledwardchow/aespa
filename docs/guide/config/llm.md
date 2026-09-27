@@ -27,7 +27,7 @@ Pre-filled or managed endpoints:
 Endpoints requiring a Base URL or custom configuration:
 - **OpenAI-compatible API** (for local models via LM Studio, Ollama, etc.)
 - **Amazon Bedrock Runtime** (`https://bedrock-runtime.REGIONNAME.amazonaws.com`)
-- **Amazon Bedrock Mantle** (OpenAI-compatible; leave Base URL blank to default to `us-east-2`)
+- **Amazon Bedrock Mantle** (model-specific Messages, Responses, or Chat Completions API; leave Base URL blank to default to `us-east-2`)
 - **Azure OpenAI** (`https://RESOURCENAME.openai.azure.com`)
 - **Azure AI Foundry (OpenAI API)** (`https://RESOURCENAME.services.ai.azure.com/openai/v1`)
 - **Azure AI Foundry (Anthropic API)** (`https://RESOURCENAME.services.ai.azure.com/anthropic/v1`)
@@ -36,6 +36,8 @@ Endpoints requiring a Base URL or custom configuration:
 
 Click **Load models from API** to fetch available model names dynamically for supported providers (e.g. GitHub Copilot, Factory Droid). Alternatively, enter model names manually (one per line) or leave the field blank to use default placeholders.
 
+For Bedrock Mantle, the model list establishes availability on the endpoint, not support for every inference API. AESPA shows the API it will use next to each discovered model: Anthropic Messages for Claude, Responses for OpenAI models, and Chat Completions for supported third-party text models. Unrecognized model families show **API support unknown** and fail with a clear error before a scan sends an inference request. AWS documents endpoint-specific support on each model card.
+
 ### Authentication & Parameters
 
 - **Factory Droid**: Uses credentials from Droid CLI. No API key input needed.
@@ -43,7 +45,7 @@ Click **Load models from API** to fetch available model names dynamically for su
 - Codex's own upstream TPM window is separate from AESPA's provider TPM/RPM pacing. AESPA retries short upstream rate-limit disconnects and pauses the run if the limit persists.
 - **GitHub Copilot**: Leave username and token blank to use Copilot CLI's default account, or enter a login from `/user` to select an account. Enter an explicit GitHub user token for headless setups.
 - **Amazon Bedrock Runtime**: Leave API key blank to use `boto3` / `AWS_PROFILE` / IAM instance role credentials.
-- **Amazon Bedrock Mantle**: Provide an Amazon Bedrock API key or leave blank for AWS IAM credentials. You can optionally enter a **Project ID** (`proj_...`) to attach an `OpenAI-Project` header for cost tracking.
+- **Amazon Bedrock Mantle**: Provide an Amazon Bedrock API key or leave blank for AWS IAM credentials. You can optionally enter a **Project ID** (`proj_...`) for cost tracking; OpenAI-compatible calls send it as `OpenAI-Project`, while Claude Messages calls send it as `anthropic-workspace-id`.
 ---
 
 ## Configuring Models & Profiles

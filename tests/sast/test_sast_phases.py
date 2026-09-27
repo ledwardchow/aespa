@@ -136,10 +136,10 @@ def test_agent_log_recovers_fixed_agent_state_from_phase_history(
     assert threat["current_task"] == "Threat model ready."
 
 
-@pytest.mark.parametrize("scanner_module", [sast_scanner, pytest.param(None, id="light")])
-def test_running_phase_updates_sast_analyst_status(
-    isolated_db_engine, scanner_module
-):
+@pytest.mark.parametrize(
+    "scanner_module", [sast_scanner, pytest.param(None, id="light")]
+)
+def test_running_phase_updates_sast_analyst_status(isolated_db_engine, scanner_module):
     if scanner_module is None:
         from aespa.services import sast_scanner_light
 
@@ -344,6 +344,72 @@ def test_completed_run_with_failed_worker_can_resume(
     assert response.status_code == 200
     assert response.json()["running"] is True
     assert starts == [(sast_run_id, True)]
+
+
+def test_light_resume_retries_failed_workers_after_discovery_was_marked_complete(
+    isolated_db_engine, tmp_path, monkeypatch
+):
+    from aespa.services import sast_scanner_light
+
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.py", "print('ok')\n")
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="partial light review",
+            status="completed",
+            analysis_mode="light",
+            source_archive_path=str(archive),
+            source_filename="source.zip",
+            llm_config_id=config.id,
+            phase_state_json=json.dumps(
+                {
+                    phase: {"status": "complete"}
+                    for phase in (
+                        "scope",
+                        "discovery",
+                        "validation",
+                        "attack_path",
+                        "report",
+                    )
+                }
+            ),
+            report_json=json.dumps({"discovery_summary": "stale"}),
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        worker = SastWorker(
+            sast_run_id=run.id,
+            worker_key="sink-audit:resume",
+            class_group="sink",
+            status="failed",
+        )
+        session.add(worker)
+        session.commit()
+        run_id, worker_id = run.id, worker.id
+
+    calls = []
+
+    async def fake_agent(**kwargs):
+        calls.append(kwargs["worker_key"])
+        return "Recovered discovery work"
+
+    monkeypatch.setattr(sast_scanner_light, "_run_checkpointed_agent", fake_agent)
+    asyncio.run(sast_scanner_light._sast_scan_task(run_id, resume=True))
+
+    with Session(isolated_db_engine) as session:
+        saved_run = session.get(SastRun, run_id)
+        saved_worker = session.get(SastWorker, worker_id)
+        report = json.loads(saved_run.report_json)
+    assert calls == ["sink-audit:resume"]
+    assert saved_worker.status == "complete"
+    assert report["discovery_summary"] == "Recovered discovery work"
 
 
 def test_cancelled_run_with_unfinished_validation_can_resume(
@@ -1228,6 +1294,72 @@ def test_discovery_candidates_are_persisted_before_validation(
 
 
 @pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_legacy_character_proof_gaps_are_restored(analysis_mode):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+
+    gap = "Confirm the input reaches the query."
+    legacy = [*gap, "Validator failed before closing this candidate."]
+    assert scanner_module._normalize_tool_list(legacy) == [
+        gap,
+        "Validator failed before closing this candidate.",
+    ]
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_write_lead_normalizes_text_proof_gaps(
+    analysis_mode, tmp_path, isolated_db_engine
+):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+
+    root = tmp_path / analysis_mode
+    root.mkdir()
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name=f"{analysis_mode} proof gaps", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    executor = scanner_module._make_tool_executor(run_id, root, None)
+    asyncio.run(
+        executor(
+            "write_lead",
+            {
+                "title": "SQL injection",
+                "category": "A03",
+                "severity": "high",
+                "location": "app.py:1",
+                "description": "Request input reaches SQL execution.",
+                "evidence": "db.execute(request.args['id'])",
+                "confidence": 0.81,
+                "confidence_reasoning": "A request parameter reaches the SQL sink.",
+                "controls": "Authentication middleware",
+                "proof_gaps": "Confirm whether the query is parameterized.",
+            },
+            1,
+        )
+    )
+
+    candidate = scanner_module._candidates[run_id][0]
+    assert candidate["controls"] == ["Authentication middleware"]
+    assert candidate["proof_gaps"] == ["Confirm whether the query is parameterized."]
+    with Session(isolated_db_engine) as session:
+        lead = session.exec(
+            select(ScanLead).where(ScanLead.producer_run_id == run_id)
+        ).one()
+        assert json.loads(lead.proof_gaps_json) == candidate["proof_gaps"]
+    scanner_module._candidates.pop(run_id, None)
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
 def test_write_lead_requires_atomic_confidence(
     analysis_mode, tmp_path, isolated_db_engine
 ):
@@ -1286,7 +1418,7 @@ def test_unscored_checkpoint_candidates_become_inconclusive(analysis_mode):
             "candidate_id": 7,
             "confidence": None,
             "validation_status": "pending",
-            "proof_gaps": [],
+            "proof_gaps": "Unverified source to sink path.",
             "reportable": False,
         }
     ]
@@ -1294,6 +1426,10 @@ def test_unscored_checkpoint_candidates_become_inconclusive(analysis_mode):
     assert scanner_module._close_unscored_candidates(candidates) == 1
     assert candidates[0]["validation_status"] == "inconclusive"
     assert "confidence score" in candidates[0]["validation_reasoning"]
+    assert candidates[0]["proof_gaps"] == [
+        "Unverified source to sink path.",
+        "Discovery ended before a confidence score was recorded.",
+    ]
     assert scanner_module._pending_candidate_ids(candidates) == []
 
 

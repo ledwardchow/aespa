@@ -23,6 +23,28 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+test("shows Mantle's selected API for a discovered model", () => {
+  render(
+    <LLMProviderForm
+      mode="edit"
+      provider={{
+        ...provider,
+        api_format: "bedrock_mantle",
+        models: ["anthropic.claude-sonnet-5"],
+        model_capabilities: {
+          "anthropic.claude-sonnet-5": { inference_api: "messages" },
+        },
+      }}
+      models={[]}
+      profiles={[]}
+      onProviderUpdated={vi.fn()}
+      onConfigureModel={vi.fn()}
+    />,
+  );
+
+  expect(screen.getByText("Anthropic Messages API")).toBeTruthy();
+});
+
 test("saves an edited provider before exposing an added model link", async () => {
   const user = userEvent.setup();
   const savedProvider = { ...provider, models: ["existing-model", "new-model"] };

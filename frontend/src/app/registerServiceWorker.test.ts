@@ -26,10 +26,20 @@ test("production registers the existing worker after the document loads", () => 
 
 test("a failed lazy route reloads once to pick up the current entry script", () => {
   const storage = new Map<string, string>();
-  const sessionStorage = {
-    getItem: (key: string) => storage.get(key) ?? null,
-    setItem: (key: string, value: string) => storage.set(key, value),
-  } as Storage;
+  const sessionStorage: Storage = {
+    get length() {
+      return storage.size;
+    },
+    clear: () => storage.clear(),
+    getItem: (key) => storage.get(key) ?? null,
+    key: (index) => Array.from(storage.keys())[index] ?? null,
+    removeItem: (key) => {
+      storage.delete(key);
+    },
+    setItem: (key, value) => {
+      storage.set(key, value);
+    },
+  };
   const reload = vi.fn();
   const firstEvent = new Event("vite:preloadError", { cancelable: true });
 

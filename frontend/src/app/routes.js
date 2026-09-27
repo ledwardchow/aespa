@@ -217,7 +217,14 @@ export const routes = {
       () => import("../features/extensions/ExtensionsPage.jsx"),
       "ExtensionsPage",
     ),
-    props: () => ({}),
+    props: (_route, preferences) => ({
+      onExtensionUpdated: (extension) => {
+        if (extension.id !== "aespa.sast-benchmarking") return;
+        preferences.setBenchmarkLabCfg({
+          panel_enabled: extension.enabled && extension.status === "loaded",
+        });
+      },
+    }),
   },
   "extension-settings": {
     section: "extensions",

@@ -1049,9 +1049,9 @@ def _make_tool_executor(
                 "evidence": str(tool_input.get("evidence", "")),
                 "suggested_endpoint": str(tool_input.get("suggested_endpoint", "")),
                 "source_trace": tool_input.get("source_trace") or {},
-                "controls": tool_input.get("controls") or [],
+                "controls": _normalize_tool_list(tool_input.get("controls")),
                 "sink_trace": tool_input.get("sink_trace") or {},
-                "proof_gaps": tool_input.get("proof_gaps") or [],
+                "proof_gaps": _normalize_tool_list(tool_input.get("proof_gaps")),
                 "confidence": confidence,
                 "filter_reasoning": confidence_reasoning,
                 "validation_status": "pending",
@@ -1250,6 +1250,23 @@ def _normalize_tool_list(value: object) -> list:
     if value is None or value == "":
         return []
     if isinstance(value, list):
+        character_count = 0
+        while (
+            character_count < len(value)
+            and isinstance(value[character_count], str)
+            and len(value[character_count]) <= 1
+        ):
+            character_count += 1
+        if character_count >= 8:
+            text = "".join(value[:character_count])
+            try:
+                decoded = json.loads(text)
+            except json.JSONDecodeError:
+                decoded = text
+            return [
+                *(decoded if isinstance(decoded, list) else [decoded]),
+                *value[character_count:],
+            ]
         return value
     if isinstance(value, str):
         try:
@@ -1274,7 +1291,9 @@ def _close_unscored_candidates(candidates: list[dict]) -> int:
             candidate["validation_status"] = "inconclusive"
             candidate["validation_reasoning"] = proof_gap
             candidate["proof_gaps"] = list(
-                dict.fromkeys([*candidate.get("proof_gaps", []), proof_gap])
+                dict.fromkeys(
+                    [*_normalize_tool_list(candidate.get("proof_gaps")), proof_gap]
+                )
             )
             candidate["reportable"] = False
             closed += 1
@@ -1746,7 +1765,9 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                                     "validation_status": "inconclusive",
                                     "validation_reasoning": f"Validator failed: {exc}",
                                     "proof_gaps": [
-                                        *candidate.get("proof_gaps", []),
+                                        *_normalize_tool_list(
+                                            candidate.get("proof_gaps")
+                                        ),
                                         "Independent validator failed before closing this candidate.",
                                     ],
                                     "reportable": False,
@@ -1779,7 +1800,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                             "validation_status": "inconclusive",
                             "validation_reasoning": "Validator returned no explicit verdict.",
                             "proof_gaps": [
-                                *candidate.get("proof_gaps", []),
+                                *_normalize_tool_list(candidate.get("proof_gaps")),
                                 "Independent validator did not close this candidate.",
                             ],
                             "reportable": False,
@@ -1846,6 +1867,10 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             saved_phases = json.loads(run.phase_state_json or "{}") if resume else {}
         except (TypeError, ValueError):
             saved_phases = {}
+        retry_failed_discovery = resume and any(
+            worker.status == "failed"
+            for worker in workprogram_svc.worker_rows(sast_run_id)
+        )
 
         def _phase_was_complete(phase: str) -> bool:
             entry = saved_phases.get(phase, {})
@@ -1853,6 +1878,10 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 isinstance(entry, dict)
                 and entry.get("status") == "complete"
                 and not (phase == "discovery" and work_program_built)
+                and not (
+                    retry_failed_discovery
+                    and phase in {"discovery", "validation", "attack_path", "report"}
+                )
             )
 
         current_phase = "discovery"

@@ -519,6 +519,26 @@ def test_console_legends_call_ctrl_c_quit() -> None:
     assert all("[Ctrl+C] Stop" not in legend for legend in legends)
 
 
+def test_windows_ctrl_c_key_requests_server_shutdown() -> None:
+    quit_requests = []
+
+    def request_quit() -> None:
+        quit_requests.append(True)
+
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=io.StringIO(),
+        on_quit=request_quit,
+    )
+
+    console._handle_windows_key("c", 0x43, 0)
+    assert quit_requests == []
+
+    console._handle_windows_key("\x00", 0x43, 0x8)
+
+    assert quit_requests == [True]
+
+
 def test_page_up_and_page_down_navigate_fixed_viewport(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output)
