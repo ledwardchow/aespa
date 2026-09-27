@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -109,11 +110,11 @@ def create_extension():
     assert set(manager.extensions) == {
         "aespa.burpsuite",
         "aespa.githubrepository",
-        "aespa.sast-benchmarking",
+        "aespa.benchmarking",
         "example.source",
     }
     assert set(manager.source_providers) == {"aespa.githubrepository", "example.source"}
-    assert manager.extensions["aespa.sast-benchmarking"].status == "disabled"
+    assert manager.extensions["aespa.benchmarking"].status == "disabled"
     assert manager.extensions["example.source"].author == "Example Co"
     github_source = Path(manager.extensions["aespa.githubrepository"].source)
     assert (
@@ -153,22 +154,85 @@ def test_extension_api_routes_and_data_are_removed_cleanly_when_disabled(
     manager.load_extensions()
 
     enabled = client.put(
-        "/api/extensions/aespa.sast-benchmarking/enabled",
+        "/api/extensions/aespa.benchmarking/enabled",
         json={"enabled": True},
     )
     assert enabled.status_code == 200
-    assert enabled.json()["api_prefix"] == "/extension/aespa.sast-benchmarking"
-    assert client.get("/extension/aespa.sast-benchmarking/datasets").json() == []
-    assert (tmp_path / "data" / "extensions" / "aespa.sast-benchmarking.db").is_file()
+    assert enabled.json()["api_prefix"] == "/extension/aespa.benchmarking"
+    assert client.get("/extension/aespa.benchmarking/datasets").json() == []
+    assert (tmp_path / "data" / "extensions" / "aespa.benchmarking.db").is_file()
 
     disabled = client.put(
-        "/api/extensions/aespa.sast-benchmarking/enabled",
+        "/api/extensions/aespa.benchmarking/enabled",
         json={"enabled": False},
     )
     assert disabled.status_code == 200
-    assert client.get("/extension/aespa.sast-benchmarking/datasets").status_code == 404
+    assert client.get("/extension/aespa.benchmarking/datasets").status_code == 404
     assert client.get("/api/health").status_code == 200
     assert BUNDLED_EXTENSIONS_DIR.is_dir()
+
+
+def test_benchmarking_rename_keeps_enabled_state_and_saved_data(
+    client, monkeypatch, tmp_path
+):
+    from aespa.extensions import get_extension_manager
+
+    data_dir = tmp_path / "data"
+    old_path = data_dir / "extensions" / "aespa.sast-benchmarking.db"
+    old_path.parent.mkdir(parents=True)
+    with sqlite3.connect(old_path) as source:
+        source.execute(
+            "CREATE TABLE sast_benchmarking_dataset ("
+            "id INTEGER PRIMARY KEY, name TEXT NOT NULL, schema_version INTEGER NOT NULL, "
+            "source_digest TEXT, ground_truth_digest TEXT NOT NULL, "
+            "ground_truth_json TEXT NOT NULL, created_at TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL)"
+        )
+        source.execute(
+            "INSERT INTO sast_benchmarking_dataset VALUES "
+            "(7, 'Saved ground truth', 1, NULL, 'digest', '{\"items\": []}', "
+            "'2026-09-27 00:00:00', '2026-09-27 00:00:00')"
+        )
+        source.execute(
+            "CREATE TABLE sast_benchmarking_scan_result ("
+            "id INTEGER PRIMARY KEY, run_kind TEXT NOT NULL, run_id INTEGER NOT NULL, "
+            "target_kind TEXT, target_id INTEGER, dataset_id INTEGER NOT NULL, "
+            "run_name TEXT NOT NULL, target_name TEXT NOT NULL, "
+            "ground_truth_json TEXT NOT NULL, findings_json TEXT NOT NULL, "
+            "rows_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        source.execute(
+            "INSERT INTO sast_benchmarking_scan_result VALUES "
+            "(9, 'sast', 3, NULL, NULL, 7, 'Saved scan', '', '{\"items\": []}', "
+            "'[]', '{\"rows\": []}', '2026-09-27 00:00:00', '2026-09-27 00:00:00')"
+        )
+    with Session(get_engine()) as session:
+        session.add(
+            ExtensionSetting(extension_id="aespa.sast-benchmarking", enabled=True)
+        )
+        session.commit()
+
+    manager = get_extension_manager()
+    monkeypatch.setattr(
+        "aespa.extensions.runtime.get_settings",
+        lambda: SimpleNamespace(
+            extensions_dir=tmp_path / "user-extensions", data_dir=data_dir
+        ),
+    )
+    manager.load_extensions()
+    assert manager.extensions["aespa.benchmarking"].status == "loaded"
+    response = client.get("/extension/aespa.benchmarking/datasets")
+    assert response.status_code == 200
+    assert [(item["id"], item["name"]) for item in response.json()] == [
+        (7, "Saved ground truth")
+    ]
+    saved_result = client.get("/extension/aespa.benchmarking/results/9")
+    assert saved_result.status_code == 200
+    assert saved_result.json()["run_name"] == "Saved scan"
+    manager.load_extensions()
+    assert len(client.get("/extension/aespa.benchmarking/datasets").json()) == 1
+    assert old_path.is_file()
+    assert (data_dir / "extensions" / "aespa.benchmarking.db").is_file()
 
 
 def test_extension_data_store_rejects_tables_outside_its_namespace(

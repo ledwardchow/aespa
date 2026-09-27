@@ -219,7 +219,7 @@ export const routes = {
     ),
     props: (_route, preferences) => ({
       onExtensionUpdated: (extension) => {
-        if (extension.id !== "aespa.sast-benchmarking") return;
+        if (extension.id !== "aespa.benchmarking") return;
         preferences.setBenchmarkLabCfg({
           panel_enabled: extension.enabled && extension.status === "loaded",
         });

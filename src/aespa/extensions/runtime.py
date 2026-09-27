@@ -795,6 +795,8 @@ class ExtensionManager:
     def is_enabled(self, extension_id: str, default: bool = True) -> bool:
         with Session(get_engine()) as session:
             row = session.get(ExtensionSetting, extension_id)
+            if row is None and extension_id == "aespa.benchmarking":
+                row = session.get(ExtensionSetting, "aespa.sast-benchmarking")
             return default if row is None else row.enabled
 
     def set_enabled(self, extension_id: str, enabled: bool) -> None:

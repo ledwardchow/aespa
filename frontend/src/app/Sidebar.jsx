@@ -221,14 +221,14 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
             )}
             {benchmarkLabCfg?.panel_enabled && (
               <a
-                href="#/sast-benchmarking"
+                href="#/benchmark-lab"
                 className={"nav-item" + (onBenchmarkLab ? " active" : "")}
-                title="SAST Benchmarking"
+                title="Benchmark Lab"
               >
                 <span className="nav-icon">
                   <IconChart />
                 </span>
-                {!collapsed && " SAST Benchmarking"}
+                {!collapsed && " Benchmark Lab"}
               </a>
             )}
           </>

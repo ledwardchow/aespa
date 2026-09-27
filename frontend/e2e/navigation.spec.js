@@ -77,23 +77,60 @@ test("upstream proxy settings are under Global", async ({ page }) => {
   await page.screenshot({ path: path.join(tmpdir(), "aespa-global-upstream-proxy.png") });
 });
 
-test("enabling SAST Benchmarking updates the sidebar without a refresh", async ({ page }) => {
+test("enabling Benchmark Lab updates the sidebar without a refresh", async ({ page }) => {
   await installFixtures(page);
 
   await page.goto("/#/extensions");
   const sidebarLink = page.locator(".sidebar").getByRole("link", {
-    name: "SAST Benchmarking",
+    name: "Benchmark Lab",
     exact: true,
   });
   await expect(sidebarLink).toHaveCount(0);
-  const row = page.getByText("SAST Benchmarking", { exact: true }).locator("xpath=ancestor::tr");
+  const row = page.getByText("Benchmark Lab", { exact: true }).locator("xpath=ancestor::tr");
   await row.getByRole("button", { name: "Enable" }).click();
 
   await expect(sidebarLink).toBeVisible();
   await expect(row.getByRole("button", { name: "Disable" })).toBeVisible();
   await page.screenshot({
-    path: path.join(tmpdir(), "aespa-sast-benchmarking-sidebar-enabled.png"),
+    path: path.join(tmpdir(), "aespa-benchmarking-sidebar-enabled.png"),
   });
+});
+
+test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await installFixtures(page);
+  await page.goto("/#/benchmark-lab");
+  await expect(page).toHaveTitle("AESPA");
+  await expect(page.getByRole("tab", { name: "Sites" })).toBeVisible();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  await page.getByRole("combobox", { name: "Site" }).selectOption("1");
+  await page.getByRole("combobox", { name: "Completed scan" }).selectOption("1");
+  await expect(
+    page.getByRole("option", { name: "Scan's Test Lead model: Fixture model" }),
+  ).toHaveCount(1);
+  await page.getByRole("combobox", { name: "Saved results" }).selectOption("1");
+  await expect(page.getByText("Compared by Fixture model")).toBeVisible();
+  await expect(page.getByText("Test Lead model: Fixture Test Lead (fixture-model)")).toBeVisible();
+  await expect(page.getByText("GT-2 - Missing audit logs")).toBeVisible();
+  const panel = await page.locator("main").boundingBox();
+  const tabs = await page.getByRole("tablist", { name: "Scan type" }).boundingBox();
+  expect(tabs.x).toBe(panel.x);
+  expect(tabs.width).toBe(panel.width);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-benchmark-lab.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("tab", { name: "SAST" })).toBeVisible();
+  const card = await page.locator(".benchmark-setup").boundingBox();
+  const replace = await page.getByText("Replace file").boundingBox();
+  expect(replace.x + replace.width).toBeLessThanOrEqual(card.x + card.width);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-benchmark-lab-mobile.png") });
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Delete result" }).click();
+  await expect(page.getByRole("combobox", { name: "Saved results" })).toHaveCount(0);
+  expect(errors).toEqual([]);
 });
 
 test("Settings tabs restore from their URLs and browser history", async ({ page }) => {

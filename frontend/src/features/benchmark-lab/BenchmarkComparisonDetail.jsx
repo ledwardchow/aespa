@@ -44,7 +44,7 @@ export function BenchmarkComparisonDetail({ comparisonId }) {
       <PageHeader
         title={
           <>
-            <Crumb href="#/sast-benchmarking">SAST Benchmarking</Crumb>
+            <Crumb href="#/benchmark-lab">Benchmark Lab</Crumb>
             <Sep />
             {comparison.name}
           </>

@@ -1854,28 +1854,37 @@ The cross-process workspace lease is checked before startup recovery changes a S
 
 ---
 
-### SAST Benchmarking extension isolation and comparisons
+### Benchmark Lab extension
 
-SAST Benchmarking is a bundled, disabled-by-default extension that evaluates completed ordinary `SastRun` rows; it never
-starts or alters a scan. Ground truth is stored only in the extension's
-`sast_benchmarking_dataset` table and is
-not included in scanner APIs, prompts, checkpoints, evidence receipts, SAST
-exports, or lead handoffs. Evaluation performs answer-key/source digest and
-evidence-access checks before scoring. Deterministic mode uses explainable
-location/category/root-cause similarity. Assisted mode gives the evaluator model
-only canonical ground truth, completed lead output, and deterministic proposals;
-it has no repository tools. Human-reviewed mode leaves every proposal unreviewed
-until an operator records an audited override.
+Benchmark Lab is a bundled, disabled-by-default extension. It compares completed
+Site, API, and SAST scans with uploaded ground truth and never starts or changes a
+scan. A Site or API retains one active ground truth file for later scans. SAST
+comparisons use a new upload or a file saved for a Site or API. Each result saves
+copies of the ground truth and scan findings it compared, so later changes do
+not alter it. The result lists every expected finding as full, partial, or
+missing. The user can select the scan's Test Lead model or another saved model.
+The model must return one valid decision for every expected finding. If the model
+is unavailable or returns an incomplete answer, no result is saved. Users can
+review, correct, and delete saved results. New runs of the older SAST evaluation
+workflow also require a model; existing evaluations remain readable.
+Each result also saves the Test Lead model for a Site or API scan, and the SAST
+model for a SAST scan. If a Site or API scan imported SAST leads, the result
+lists the model for each source SAST run. Imported leads are matched by run type
+and ID so Site and API runs with the same numeric ID stay separate.
 
-`BenchmarkComparison` groups two or more completed evaluations of the same
-dataset without executing new scans. Contaminated evaluations are excluded by
-default. The comparison stores median/range metrics, per-item detection
-frequency, and pass/fail results for configured minimum or maximum thresholds.
-Its routes are served below `/extension/aespa.sast-benchmarking/`, and its datasets,
-evaluations, matches, and comparisons use an isolated extension SQLite database
-with `sast_benchmarking_` table names. Enabling the extension exposes its navigation
+Ground truth and comparison results stay in the extension database. They are not
+included in scanner prompts, checkpoints, evidence receipts, SAST exports, or
+lead handoffs. The older SAST evaluation and repeated-run comparison routes
+remain available for saved work. Its routes are served below
+`/extension/aespa.benchmarking/`, and its datasets, results, evaluations,
+matches, and comparisons use an isolated extension SQLite database
+with `benchmarking_` table names. Enabling the extension exposes its navigation
 and routes. Disabling it removes both cleanly, closes its database engine, and retains
 the database file for a later re-enable without affecting ordinary SAST runs.
+On first enable after the rename, the extension copies data from the old
+`aespa.sast-benchmarking.db` file into `aespa.benchmarking.db` and keeps the old
+file. Its previous enabled setting is also used until the new extension setting
+is saved.
 
 ## 18. Extensions
 

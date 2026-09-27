@@ -12,8 +12,11 @@ def test_macos_pyinstaller_inputs_are_rooted_when_spec_is_written_to_build() -> 
     ]
 
     assert "--specpath build" in script
-    assert len(data_arguments) == 7
     assert all('--add-data "$REPO_ROOT/' in argument for argument in data_arguments)
+    assert any('"$REPO_ROOT/alembic.ini:."' in argument for argument in data_arguments)
+    assert any(
+        '"$REPO_ROOT/alembic:alembic"' in argument for argument in data_arguments
+    )
     assert '--icon "$REPO_ROOT/$ICNS"' in script
     assert '"$REPO_ROOT/src/aespa/desktop.py"' in script
 
@@ -25,8 +28,11 @@ def test_windows_pyinstaller_inputs_are_rooted_and_failure_is_checked() -> None:
     ]
 
     assert "--specpath build" in script
-    assert len(data_arguments) == 7
     assert all('--add-data "$RepoRoot\\' in argument for argument in data_arguments)
+    assert any('"$RepoRoot\\alembic.ini;."' in argument for argument in data_arguments)
+    assert any(
+        '"$RepoRoot\\alembic;alembic"' in argument for argument in data_arguments
+    )
     assert '--icon "$RepoRoot\\$Ico"' in script
     assert '"$RepoRoot\\src\\aespa\\desktop_win.py"' in script
     assert 'throw "PyInstaller failed with exit code $LASTEXITCODE"' in script

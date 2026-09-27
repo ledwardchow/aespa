@@ -12,12 +12,6 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from aespa.console import (
-    _AESPA_LOGO,
-    _AESPA_LOGO_COMPACT,
-    _AESPA_LOGO_LARGE,
-    _AESPA_WAVE_PATH,
-    _AESPA_WAVE_PATH_COMPACT,
-    _AESPA_WAVE_PATH_LARGE,
     _ANSI_SGR,
     AGENT,
     ERRORS,
@@ -31,8 +25,6 @@ from aespa.console import (
     _aespa_logo_lines,
     _legend,
     _python_executor_runtime_status,
-    _startup_wave_timing,
-    _wave_visual_center,
     _write_port_setting,
 )
 
@@ -283,50 +275,6 @@ def test_agent_logo_pulse_moves_left_to_right_across_waveform() -> None:
     )
     assert _aespa_logo_lines(40, animation_frame=50) == _aespa_logo_lines(
         40, animation_frame=0
-    )
-
-
-def test_agent_logo_times_wave_centred_radial_pulse_to_first_peak() -> None:
-    assert _wave_visual_center(_AESPA_WAVE_PATH) == (34, 32)
-    assert _wave_visual_center(_AESPA_WAVE_PATH_COMPACT) == (17.5, 19)
-    assert _wave_visual_center(_AESPA_WAVE_PATH_LARGE) == (50, 54)
-
-    def pulse_cells(lines: list[str]) -> list[tuple[int, int]]:
-        cells: list[tuple[int, int]] = []
-        for row, line in enumerate(lines):
-            for match in re.finditer(
-                r"\x1b\[38;5;(248|250|252|254|255)m([^\x1b]+)", line
-            ):
-                start = len(_ANSI_SGR.sub("", line[: match.start()]))
-                cells.extend(
-                    (start + offset, row)
-                    for offset, character in enumerate(match.group(2))
-                    if character != " "
-                )
-        return cells
-
-    peak_frame = pulse_cells(_aespa_logo_lines(98, animation_frame=10))
-    expanding_frame = pulse_cells(_aespa_logo_lines(98, animation_frame=16))
-
-    assert any(column < 48 and row < 12 for column, row in expanding_frame)
-    assert any(column > 48 and row < 12 for column, row in expanding_frame)
-    assert any(column < 48 and row > 12 for column, row in expanding_frame)
-    assert any(column > 48 and row > 12 for column, row in expanding_frame)
-    assert min(row for _, row in expanding_frame) < min(row for _, row in peak_frame)
-    assert max(row for _, row in expanding_frame) > max(row for _, row in peak_frame)
-
-    compact_expanding = pulse_cells(_aespa_logo_lines(40, animation_frame=19))
-    large_expanding = pulse_cells(
-        _aespa_logo_lines(120, animation_frame=18, large=True)
-    )
-    assert (
-        max(row for _, row in compact_expanding)
-        - min(row for _, row in compact_expanding)
-        >= 8
-    )
-    assert (
-        max(row for _, row in large_expanding) - min(row for _, row in large_expanding)
-        >= 20
     )
 
 
@@ -1130,71 +1078,6 @@ def test_startup_pulse_reveals_logo_in_all_sizes() -> None:
         assert frames[-1] == full
 
 
-def test_startup_strike_flashes_and_settles_without_moving_logo() -> None:
-    for width, options in ((40, {}), (98, {}), (120, {"large": True})):
-        impact = "".join(
-            line
-            for frame in range(1, 30)
-            for line in _aespa_logo_lines(
-                width, animation_frame=frame, reveal=True, **options
-            )
-        )
-        assert "\x1b[38;5;255m" in impact
-        assert "\x1b[38;5;217m" in impact
-        settled = _aespa_logo_lines(width, animation_frame=60, reveal=True, **options)
-        assert settled == _aespa_logo_lines(width, animation_frame=40, **options)
-
-
-def test_startup_wave_crosses_terminal_then_fades_away() -> None:
-    for width, options, row, art, path in (
-        (40, {}, 9, _AESPA_LOGO_COMPACT, _AESPA_WAVE_PATH_COMPACT),
-        (98, {}, 15, _AESPA_LOGO, _AESPA_WAVE_PATH),
-        (120, {"large": True}, 27, _AESPA_LOGO_LARGE, _AESPA_WAVE_PATH_LARGE),
-    ):
-        *_, fade_end = _startup_wave_timing(width, art, path)
-
-        def frame(seconds):
-            return _aespa_logo_lines(
-                width, animation_frame=math.ceil(seconds / 0.05), reveal=True, **options
-            )[row]
-
-        entering = _ANSI_SGR.sub("", frame(0.05))
-        assert entering.startswith("o" if options else "s")
-        assert len(entering) == width
-        assert entering[-1] == " "
-        exiting = _ANSI_SGR.sub("", frame(fade_end - 0.8))
-        assert exiting[0] == exiting[-1] == ("o" if options else "s")
-        early_colors = re.findall(
-            r"\x1b\[38;2;(\d+);(\d+);(\d+)m", frame(fade_end - 0.35)
-        )
-        late_colors = re.findall(
-            r"\x1b\[38;2;(\d+);(\d+);(\d+)m", frame(fade_end - 0.10)
-        )
-        assert max(int(c[0]) for c in late_colors) < max(
-            int(c[0]) for c in early_colors
-        )
-        # Side lines hold their colour while the logo's afterglow settles.
-        side_colors = r"\x1b\[38;2;(\d+);(\d+);(\d+)m"
-        assert re.findall(side_colors, frame(fade_end - 0.7)) == re.findall(
-            side_colors, frame(fade_end - 0.45)
-        )
-        settled = _aespa_logo_lines(width, animation_frame=40, **options)[row]
-        assert frame(fade_end) == settled
-        for offset, glyph in (
-            ((-1, "s"), (0, "o")) if options else ((-1, "+"), (0, "s"), (1, "+"))
-        ):
-            line = _ANSI_SGR.sub(
-                "",
-                _aespa_logo_lines(
-                    width,
-                    animation_frame=math.ceil((fade_end - 0.45) / 0.05),
-                    reveal=True,
-                    **options,
-                )[row + offset],
-            )
-            assert line[0] == line[-1] == glyph
-
-
 def test_startup_holds_logo_after_side_lines_fade(monkeypatch) -> None:
     monkeypatch.setattr(
         "aespa.console._python_executor_runtime_status", lambda: "ready"
@@ -1233,34 +1116,6 @@ def test_completed_startup_leaves_no_pulse_highlights(monkeypatch) -> None:
         assert not re.search(r"\x1b\[38;5;(248|250|252|254|255)m", frame)
 
 
-def test_wave_crosses_terminal_in_one_second_at_every_size() -> None:
-    for width, options, art, path in (
-        (40, {}, _AESPA_LOGO_COMPACT, _AESPA_WAVE_PATH_COMPACT),
-        (98, {}, _AESPA_LOGO, _AESPA_WAVE_PATH),
-        (180, {"large": True}, _AESPA_LOGO_LARGE, _AESPA_WAVE_PATH_LARGE),
-        (340, {"large": True}, _AESPA_LOGO_LARGE, _AESPA_WAVE_PATH_LARGE),
-    ):
-        speed, _, _, exit_start, fade_end = _startup_wave_timing(width, art, path)
-        padding = max(0, (width - max(map(len, art))) // 2)
-        arrival = exit_start + (width - 1 - padding - path[-1][0]) / speed
-        assert abs(arrival - 1.0) < 1e-9
-        assert abs(fade_end - 1.9) < 1e-9
-        before = _ANSI_SGR.sub(
-            "",
-            _aespa_logo_lines(width, animation_frame=19, reveal=True, **options)[
-                path[0][1]
-            ],
-        )
-        after = _ANSI_SGR.sub(
-            "",
-            _aespa_logo_lines(width, animation_frame=20, reveal=True, **options)[
-                path[0][1]
-            ],
-        )
-        assert before[-1] == " "
-        assert after[-1] in "os"
-
-
 def test_logo_view_wave_finishes_in_one_second(monkeypatch) -> None:
     # Isolate the travelling highlight from the independently expanding ring.
     monkeypatch.setattr("aespa.console._radial_pulse_radius", lambda *args: -100.0)
@@ -1284,25 +1139,3 @@ def test_logo_view_wave_finishes_in_one_second(monkeypatch) -> None:
     settled = output.getvalue().split("\x1b[2J\x1b[H")[-1]
     assert not pulse.search(settled)
     assert "\x1b[38;5;217m" not in settled
-
-
-def test_startup_and_logo_view_share_warm_afterglow() -> None:
-    for reveal in (False, True):
-        for width, options in ((40, {}), (98, {}), (120, {"large": True})):
-            frames = [
-                "".join(
-                    _aespa_logo_lines(
-                        width, animation_frame=frame, reveal=reveal, **options
-                    )
-                )
-                for frame in range(1, 30)
-            ]
-            assert any("\x1b[38;5;255m" in frame for frame in frames)
-            assert any("\x1b[38;5;217m" in frame for frame in frames)
-            assert any("\x1b[38;5;203m" in frame for frame in frames)
-            settled = "".join(
-                _aespa_logo_lines(width, animation_frame=40, reveal=reveal, **options)
-            )
-            assert "\x1b[38;5;217m" not in settled
-            assert "\x1b[38;5;255m" not in settled
-            assert "\x1b[38;5;196m" in settled

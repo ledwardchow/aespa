@@ -48,7 +48,7 @@ export function SastRunsListPage() {
       .then(async (extensions) => {
         const enabled = extensions.some(
           (extension) =>
-            extension.id === "aespa.sast-benchmarking" &&
+            extension.id === "aespa.benchmarking" &&
             extension.enabled &&
             extension.status === "loaded",
         );
@@ -284,7 +284,7 @@ export function SastRunsListPage() {
                           <div style={{ marginTop: 5 }}>
                             <a
                               className="badge neutral"
-                              href={`#/sast-benchmarking/evaluations/${evaluations.find((evaluation) => evaluation.sast_run_id === r.id).id}`}
+                              href={`#/benchmark-lab/evaluations/${evaluations.find((evaluation) => evaluation.sast_run_id === r.id).id}`}
                             >
                               Evaluated
                             </a>

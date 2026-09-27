@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import * as sastApi from "../../shared/api/sastRuns.js";
+import * as settingsApi from "../../shared/api/settings.js";
 import { nav } from "../../shared/navigation/router.js";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { parseGroundTruthText } from "./groundTruthImport.js";
@@ -12,6 +13,8 @@ const asArray = (value, key) =>
 export function BenchmarkEvaluationForm() {
   const [runs, setRuns] = useState([]);
   const [datasets, setDatasets] = useState([]);
+  const [profiles, setProfiles] = useState([]);
+  const [llmProfileId, setLlmProfileId] = useState("");
   const [runId, setRunId] = useState("");
   const [datasetId, setDatasetId] = useState("");
   const [runDetails, setRunDetails] = useState(null);
@@ -22,8 +25,6 @@ export function BenchmarkEvaluationForm() {
     name: "",
     notes: "",
     match_mode: "assisted",
-    severity_tolerance: "same_or_higher",
-    location_tolerance: "file_and_line",
     include_conditional: true,
     include_hardening: false,
   });
@@ -31,10 +32,15 @@ export function BenchmarkEvaluationForm() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   useEffect(() => {
-    Promise.all([sastApi.listAllSastRuns(), benchmarkApi.listBenchmarkDatasets()])
-      .then(([runResult, datasetResult]) => {
+    Promise.all([
+      sastApi.listAllSastRuns(),
+      benchmarkApi.listBenchmarkDatasets(),
+      settingsApi.listLLMProfiles(),
+    ])
+      .then(([runResult, datasetResult, profileResult]) => {
         setRuns(asArray(runResult, "runs").filter((run) => TERMINAL.has(run.status)));
         setDatasets(asArray(datasetResult, "datasets"));
+        setProfiles(asArray(profileResult, "profiles"));
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -86,8 +92,6 @@ export function BenchmarkEvaluationForm() {
       if (!runId || !selectedDatasetId)
         throw new Error("Choose a completed SAST run and a ground-truth dataset.");
       const {
-        severity_tolerance,
-        location_tolerance,
         include_conditional,
         include_hardening,
         ...evaluationForm
@@ -96,9 +100,10 @@ export function BenchmarkEvaluationForm() {
         ...evaluationForm,
         sast_run_id: Number(runId),
         dataset_id: Number(selectedDatasetId),
-        policy: { severity_tolerance, location_tolerance, include_conditional, include_hardening },
+        llm_profile_id: llmProfileId ? Number(llmProfileId) : null,
+        policy: { include_conditional, include_hardening },
       });
-      nav(`#/sast-benchmarking/evaluations/${created.id}`);
+      nav(`#/benchmark-lab/evaluations/${created.id}`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -110,7 +115,7 @@ export function BenchmarkEvaluationForm() {
       <PageHeader
         title={
           <>
-            <Crumb href="#/sast-benchmarking">SAST Benchmarking</Crumb>
+            <Crumb href="#/benchmark-lab">Benchmark Lab</Crumb>
             <Sep />
             New Evaluation
           </>
@@ -214,7 +219,7 @@ export function BenchmarkEvaluationForm() {
             )}
           </section>
           <section className="card">
-            <h2>Matching policy</h2>
+            <h2>Evaluation</h2>
             <div className="form-grid two">
               <label className="form-label">
                 Evaluation name
@@ -226,39 +231,20 @@ export function BenchmarkEvaluationForm() {
                 />
               </label>
               <label className="form-label">
-                Match mode
+                Evaluation LLM profile
                 <select
                   className="form-input"
-                  value={form.match_mode}
-                  onChange={(event) => setForm({ ...form, match_mode: event.target.value })}
+                  value={llmProfileId}
+                  onChange={(event) => setLlmProfileId(event.target.value)}
                 >
-                  <option value="deterministic">Deterministic only</option>
-                  <option value="assisted">Assisted</option>
-                  <option value="human_reviewed">Human reviewed</option>
+                  <option value="">Use the SAST run's profile (or active profile)</option>
+                  {profiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name}
+                    </option>
+                  ))}
                 </select>
-              </label>
-              <label className="form-label">
-                Severity tolerance
-                <select
-                  className="form-input"
-                  value={form.severity_tolerance}
-                  onChange={(event) => setForm({ ...form, severity_tolerance: event.target.value })}
-                >
-                  <option value="same_or_higher">Same or higher</option>
-                  <option value="exact">Exact</option>
-                </select>
-              </label>
-              <label className="form-label">
-                Location tolerance
-                <select
-                  className="form-input"
-                  value={form.location_tolerance}
-                  onChange={(event) => setForm({ ...form, location_tolerance: event.target.value })}
-                >
-                  <option value="file_and_line">File and line</option>
-                  <option value="file">File</option>
-                  <option value="operation">Operation</option>
-                </select>
+                <span className="field-hint">Matching uses the profile's Test Lead model.</span>
               </label>
             </div>
             <label className="checkbox-row">
@@ -289,7 +275,7 @@ export function BenchmarkEvaluationForm() {
               />
             </label>
             <div className="form-actions">
-              <button type="button" className="btn ghost" onClick={() => nav("#/sast-benchmarking")}>
+              <button type="button" className="btn ghost" onClick={() => nav("#/benchmark-lab")}>
                 Cancel
               </button>
               <button className="btn primary" disabled={busy || loading}>

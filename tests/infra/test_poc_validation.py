@@ -175,24 +175,19 @@ def test_build_and_verify_poc_drops_when_verification_fails(monkeypatch):
     assert result is None
 
 
-def test_build_and_verify_poc_rejects_state_changing_method(monkeypatch):
+def test_build_and_verify_poc_rejects_unsafe_requests(monkeypatch):
     monkeypatch.setattr(validator, "_run_and_assert_curl", lambda *a: True)
-    done = _done(
-        poc_request={"method": "DELETE", "url": "https://target.local/api/users/2"}
-    )
-    result = asyncio.run(
-        validator._build_and_verify_poc(_finding(), done, {}, _Policy())
-    )
-    assert result is None
-
-
-def test_build_and_verify_poc_rejects_out_of_scope_url(monkeypatch):
-    monkeypatch.setattr(validator, "_run_and_assert_curl", lambda *a: True)
-    done = _done(poc_request={"method": "GET", "url": "https://evil.example/steal"})
-    result = asyncio.run(
-        validator._build_and_verify_poc(_finding(), done, {}, _Policy())
-    )
-    assert result is None
+    requests = [
+        {"method": method, "url": "https://target.local/api/users/2"}
+        for method in ("DELETE", "PUT", "PATCH")
+    ]
+    requests.append({"method": "GET", "url": "https://evil.example/steal"})
+    for request in requests:
+        done = _done(poc_request=request)
+        result = asyncio.run(
+            validator._build_and_verify_poc(_finding(), done, {}, _Policy())
+        )
+        assert result is None, request
 
 
 def test_build_and_verify_poc_requires_session_for_auth(monkeypatch):
@@ -257,28 +252,6 @@ def test_post_method_is_accepted(monkeypatch):
     command, _ = result
     assert "-X POST" in command
     assert "https://target.local/api/login" in command
-
-
-def test_put_method_still_suppressed(monkeypatch):
-    monkeypatch.setattr(validator, "_run_and_assert_curl", lambda *a: True)
-    done = _done(
-        poc_request={"method": "PUT", "url": "https://target.local/api/users/2"}
-    )
-    result = asyncio.run(
-        validator._build_and_verify_poc(_finding(), done, {}, _Policy())
-    )
-    assert result is None
-
-
-def test_patch_method_still_suppressed(monkeypatch):
-    monkeypatch.setattr(validator, "_run_and_assert_curl", lambda *a: True)
-    done = _done(
-        poc_request={"method": "PATCH", "url": "https://target.local/api/users/2"}
-    )
-    result = asyncio.run(
-        validator._build_and_verify_poc(_finding(), done, {}, _Policy())
-    )
-    assert result is None
 
 
 def test_build_curl_command_serialises_string_body():

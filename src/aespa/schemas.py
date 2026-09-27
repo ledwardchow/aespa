@@ -1305,6 +1305,7 @@ class BenchmarkEvaluationIn(BaseModel):
     sast_run_id: int = Field(gt=0)
     dataset_id: int = Field(gt=0)
     match_mode: Literal["deterministic", "assisted", "human_reviewed"] = "assisted"
+    llm_profile_id: int | None = Field(default=None, gt=0)
     policy: dict = Field(default_factory=dict)
     notes: str = Field(default="", max_length=10000)
 

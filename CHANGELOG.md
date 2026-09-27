@@ -7,7 +7,7 @@ All pull requests merged to `main`, in reverse chronological order.
 ### New features
 
 - **Extensions**: Extensions can now provide API routes under an isolated `/extension/<extension-id>/` prefix and maintain their own SQLite database. Manifest-declared data namespaces enforce extension-specific table prefixes, while disabling an extension removes its routes and closes its database without disrupting AESPA or other extensions.
-- **SAST Benchmarking extension**: Benchmark Lab is now the optional SAST Benchmarking extension. It evaluates completed SAST runs against separately stored ground truth, supports deterministic, model-assisted, and human-reviewed matching, and provides repeated-run comparisons without placing benchmark data in AESPA's primary database. Enabling or disabling it updates the sidebar immediately without a page refresh.
+- **Benchmark Lab**: Upload ground truth for each Site or API and compare it with a completed scan. Results show every expected finding as full, partial, or missing, with matching scan findings and a summary count. Comparisons use the scan's Test Lead model or another saved model. A missing or failed model stops the comparison without saving a result. SAST comparisons can use an uploaded file or ground truth saved for a Site or API. Results show the scan's Test Lead model and any SAST models that produced leads for it. SAST scan results show their SAST model. Results can be deleted, and manual reviews are saved without changing the scan. The page uses the same tabs, controls, and spacing as other target pages. New runs of earlier SAST evaluations also use model matching, while saved evaluations remain available. The extension uses the `aespa.benchmarking` ID and keeps existing data and enabled settings from `aespa.sast-benchmarking`. Enabling or disabling the extension updates the sidebar immediately without a page refresh.
 - **Google Vertex AI provider**: AESPA can use Google Cloud Application Default Credentials with a selected project and location. Gemini models use the native Google content API, while other serverless publisher models use Vertex AI's OpenAI-compatible Responses API so tool arguments are preserved. Grok conversations use stable, agent-specific cache routing and replay encrypted reasoning between tool steps using Vertex-compatible request fields. Each Grok call records whether the prompt cache was used, token reuse, cache-key fingerprints, and the provider system fingerprint so inconsistent cache reuse can be diagnosed. The provider supports the existing vision and thinking workflows, preserves numeric tool-schema constraints required by Vertex AI, and does not store Google credentials. Deployed endpoints and tuned model resources are excluded.
 
 ### Updates
@@ -32,8 +32,9 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
+- **Test suite cleanup**: Repeated coverage, specialist dispatch, scan mode, and proof-of-concept checks now share test cases. Redundant and overly specific console animation checks have been removed.
 - **Frontend type checks**: The service worker recovery test now uses a complete browser storage mock, allowing frontend type checks to pass.
-- **Extension developer documentation**: One technical reference describes extension folders, manifests, settings, secrets, source providers, web scanners, and packaging requirements.
+- **Extension developer documentation**: One technical reference describes extension folders, manifests, settings, secrets, source providers, web scanners, packaging requirements, and the rule that extension code can only read the main database.
 - **Frontend build output**: Generated frontend files are no longer stored in Git. Frontend checks and desktop packaging continue to build the bundle from the Vite source when needed.
 
 ## [PR #272] September 18 Update - mostly UI fixes
