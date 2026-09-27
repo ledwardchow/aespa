@@ -130,8 +130,8 @@
   .topbar-actions .btn {
     padding: 6px 8px;
   }
-  .sast-header-title > a,
-  .sast-header-title .breadcrumb-sep {
+  .sast-header-main > a,
+  .sast-header-main > .breadcrumb-sep {
     display: none;
   }
 }

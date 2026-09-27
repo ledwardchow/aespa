@@ -855,6 +855,7 @@ def _record_usage(
     copilot_quota: dict[str, Any] | None = None,
     codex_quota: dict[str, Any] | None = None,
     thinking_tokens: int = 0,
+    input_includes_cache: bool | None = None,
     **kwargs: Any,
 ) -> None:
     """Accumulate provider usage for a run and the independent monthly ledger."""
@@ -887,7 +888,9 @@ def _record_usage(
         "google_antigravity",
     }
     normalized_input = max(0, input_tokens)
-    if usage_provider in inclusive_input_providers:
+    if input_includes_cache is True or (
+        input_includes_cache is None and usage_provider in inclusive_input_providers
+    ):
         normalized_input = max(0, input_tokens - cache_read_tokens - cache_write_tokens)
     usage_rates: dict[str, Any] = {}
     try:
@@ -1625,7 +1628,14 @@ async def _dispatch_completion(
         return await _openrouter(config, prompt, screenshot_b64)
     if config.provider == "bedrock":
         return await _bedrock(config, prompt, screenshot_b64)
-    if config.provider == "bedrock_mantle" or _uses_openai_responses(config):
+    if config.provider == "bedrock_mantle":
+        mantle_api = _bedrock_mantle_model_api(config.model)
+        if mantle_api == "messages":
+            return await _anthropic(config, prompt, screenshot_b64)
+        if mantle_api == "chat_completions":
+            return await _openai_compat(config, prompt, screenshot_b64)
+        return await _openai_responses(config, prompt, screenshot_b64)
+    if _uses_openai_responses(config):
         return await _openai_responses(config, prompt, screenshot_b64)
     return await _openai_compat(config, prompt, screenshot_b64)
 
@@ -1895,10 +1905,17 @@ async def _stream_chat_completion_impl(
             yield await _openai_codex(config, combined, None)
         else:
             yield await _google_antigravity(config, combined, None)
-    elif config.provider == "anthropic":
+    elif config.provider == "anthropic" or (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "messages"
+    ):
         import anthropic as _ant
 
-        client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        client = (
+            _make_bedrock_mantle_anthropic_client(config)
+            if config.provider == "bedrock_mantle"
+            else _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        )
         formatted_messages = []
         for m in messages:
             if m.get("role") in ("user", "assistant"):
@@ -2037,7 +2054,10 @@ async def _stream_chat_completion_impl(
                 elif item_type == "error":
                     raise RuntimeError(f"Bedrock SDK stream failed: {val}") from val
 
-    elif config.provider == "bedrock_mantle" or _uses_openai_responses(config):
+    elif (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "responses"
+    ) or _uses_openai_responses(config):
         client = _make_responses_client(config)
         r_input = [
             {"type": "message", "role": m["role"], "content": m["content"]}
@@ -2070,7 +2090,11 @@ async def _stream_chat_completion_impl(
                 base += "/v1"
             kwargs["base_url"] = base
         kwargs.update(_llm_client_kwargs())
-        client = AsyncOpenAI(**kwargs)
+        client = (
+            _make_bedrock_mantle_client(config)
+            if config.provider == "bedrock_mantle"
+            else AsyncOpenAI(**kwargs)
+        )
 
         formatted_messages = [{"role": "system", "content": system_message}]
         for m in messages:
@@ -2470,7 +2494,11 @@ async def _anthropic(
 ) -> str:
     import anthropic as _ant
 
-    client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+    client = (
+        _make_bedrock_mantle_anthropic_client(config)
+        if config.provider == "bedrock_mantle"
+        else _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+    )
     content: list = []
     if screenshot_b64:
         content.append(
@@ -2484,7 +2512,7 @@ async def _anthropic(
             }
         )
     content.append({"type": "text", "text": prompt})
-    resp = await client.messages.create(
+    async with client.messages.stream(
         model=config.model,
         max_tokens=config.max_tokens,
         **_anthropic_reasoning_kwargs(config),
@@ -2494,13 +2522,15 @@ async def _anthropic(
             else {}
         ),
         messages=[{"role": "user", "content": content}],
-    )
+    ) as stream:
+        resp = await stream.get_final_message()
     _record_usage(
         config.model,
         getattr(resp.usage, "input_tokens", 0),
         getattr(resp.usage, "output_tokens", 0),
-        cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
-        cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0),
+        cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
+        cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0) or 0,
+        input_includes_cache=False,
     )
     return "".join(_content_part_text(block) for block in (resp.content or [])).strip()
 
@@ -2762,7 +2792,11 @@ async def _openai_compat(
             base += "/v1"
         kwargs["base_url"] = base
     kwargs.update(_llm_client_kwargs())
-    client = AsyncOpenAI(**kwargs)
+    client = (
+        _make_bedrock_mantle_client(config)
+        if config.provider == "bedrock_mantle"
+        else AsyncOpenAI(**kwargs)
+    )
 
     if screenshot_b64:
         msg_content: object = [
@@ -2798,9 +2832,39 @@ async def _openai_compat(
     return _extract_first_choice_text(resp)
 
 
-# ── Bedrock Mantle (OpenAI Responses API) ─────────────────────────────────────
-# Mantle's frontier OpenAI models (gpt-5.x) are served only via the Responses
-# API (/v1/responses), not Chat Completions, so all Mantle traffic uses Responses.
+# ── Bedrock Mantle (model-specific inference APIs) ───────────────────────────
+
+
+def _bedrock_mantle_model_api(model: str) -> str:
+    """Select the Mantle API supported by a model family.
+
+    Mantle's model catalog lists available IDs, but an available model does not
+    necessarily support every Mantle inference API. Claude uses Anthropic
+    Messages, OpenAI models use Responses, and the other text families exposed
+    by Mantle use Chat Completions.
+    """
+    family = (model or "").split(".", 1)[0].lower()
+    if family == "anthropic":
+        return "messages"
+    if family == "openai":
+        return "responses"
+    if family in {
+        "deepseek",
+        "google",
+        "minimax",
+        "mistral",
+        "moonshotai",
+        "nvidia",
+        "qwen",
+        "writer",
+        "xai",
+        "zai",
+    }:
+        return "chat_completions"
+    raise ValueError(
+        f"No Bedrock Mantle inference API is known for model '{model}'. "
+        "Check the model's endpoint-specific API support before using it."
+    )
 
 
 def _ant_tools_to_responses(tools: list[dict]) -> list[dict]:
@@ -3639,36 +3703,39 @@ def _bedrock_mantle_region() -> str:
     )
 
 
-def _bedrock_mantle_is_frontier_model(model: str) -> bool:
-    """Frontier OpenAI models (gpt-5.x) are served on Mantle's ``/openai/v1`` path.
+def _bedrock_mantle_uses_openai_path(model: str) -> bool:
+    """Models served on Mantle's ``/openai/v1`` path.
 
-    The gpt-oss and other models use the plain ``/v1`` path instead — confirmed by
-    the AWS launch blog and the OpenAI Bedrock cookbook.
+    Frontier GPT models and Gemma 4 use this path; GPT OSS and older
+    third-party text models use plain ``/v1``.
     """
-    return "gpt-5" in (model or "").lower()
+    name = (model or "").lower()
+    return name.startswith(
+        ("openai.gpt-5", "openai.gpt-6", "google.gemma-4", "xai.grok-4")
+    )
+
+
+def _bedrock_mantle_root(config: LLMConfig) -> str:
+    base = (config.base_url or "").rstrip("/")
+    if not base:
+        base = f"https://bedrock-mantle.{_bedrock_mantle_region()}.api.aws"
+    for suffix in ("/anthropic/v1/messages", "/anthropic", "/openai/v1", "/v1"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return base
 
 
 def _bedrock_mantle_base_url(config: LLMConfig) -> str:
-    """Resolve the OpenAI Responses base URL for a Bedrock Mantle config.
+    """Resolve the OpenAI-compatible base URL for a Bedrock Mantle model.
 
-    The path is model-dependent: frontier ``openai.gpt-5.x`` models use
-    ``/openai/v1`` while gpt-oss and others use ``/v1`` — so a single provider can
-    serve both. An explicit ``base_url`` keeps its host (and region) but the path
-    suffix is normalised to match the selected model. When blank, the region comes
+    The path is model-dependent. An explicit ``base_url`` keeps its host (and
+    region) but the path suffix is normalised to match the selected model.
+    When blank, the region comes
     from ``BEDROCK_MANTLE_REGION``/``AWS_REGION``/``AWS_DEFAULT_REGION`` (default
     ``us-east-2``).
     """
-    suffix = "/openai/v1" if _bedrock_mantle_is_frontier_model(config.model) else "/v1"
-    if config.base_url:
-        base = config.base_url.rstrip("/")
-        # Drop any path suffix the user supplied, then re-apply the one this model
-        # needs, so switching models on the same provider routes correctly.
-        for known in ("/openai/v1", "/v1"):
-            if base.endswith(known):
-                base = base[: -len(known)]
-                break
-        return f"{base}{suffix}"
-    return f"https://bedrock-mantle.{_bedrock_mantle_region()}.api.aws{suffix}"
+    suffix = "/openai/v1" if _bedrock_mantle_uses_openai_path(config.model) else "/v1"
+    return f"{_bedrock_mantle_root(config)}{suffix}"
 
 
 def _bedrock_mantle_region_from_url(base_url: str) -> str:
@@ -3719,6 +3786,9 @@ class _BedrockMantleSigV4Auth(httpx.Auth):
         from botocore.awsrequest import AWSRequest
 
         frozen = self._resolve_credentials().get_frozen_credentials()
+        # Anthropic's SDK requires an API key before its httpx auth hook runs.
+        # Remove that placeholder so AWS sees only the SigV4 credential.
+        request.headers.pop("x-api-key", None)
         aws_request = AWSRequest(
             method=request.method,
             url=str(request.url),
@@ -3784,6 +3854,40 @@ def _make_bedrock_mantle_client(config: LLMConfig):
         base_url=base_url,
         http_client=http_client,
         **project_kwargs,
+    )
+
+
+def _make_bedrock_mantle_anthropic_client(config: LLMConfig):
+    """Build an Anthropic Messages client for Claude on Bedrock Mantle."""
+    import anthropic
+
+    base_url = f"{_bedrock_mantle_root(config)}/anthropic"
+    project_id = getattr(config, "project_id", None) or None
+    headers = {"anthropic-workspace-id": project_id} if project_id else None
+    if config.api_key:
+        return anthropic.AsyncAnthropic(
+            api_key=config.api_key,
+            base_url=base_url,
+            default_headers=headers,
+            **_llm_client_kwargs(),
+        )
+
+    proxy = _llm_proxy_var.get()
+    signer = _BedrockMantleSigV4Auth(
+        region=_bedrock_mantle_region_from_url(base_url),
+        profile=os.getenv("AWS_PROFILE"),
+    )
+    http_client = httpx.AsyncClient(
+        verify=proxy is None,
+        headers=_LLM_HEADERS,
+        auth=signer,
+        **({"proxy": proxy} if proxy else {}),
+    )
+    return anthropic.AsyncAnthropic(
+        api_key="not-needed",
+        base_url=base_url,
+        default_headers=headers,
+        http_client=http_client,
     )
 
 
@@ -5335,6 +5439,16 @@ AGENTIC_LOOP_PROVIDERS = frozenset(
 )
 
 
+def _anthropic_history_block(block: Any) -> dict[str, Any]:
+    """Keep SDK parsing metadata out of subsequent Messages requests."""
+    canonical = _canonical_content_block(block)
+    if not isinstance(canonical, dict):
+        raise TypeError("Anthropic message content block could not be serialized")
+    wire_block = dict(canonical)
+    wire_block.pop("parsed_output", None)
+    return wire_block
+
+
 def _with_anthropic_cache(
     messages: list[dict],
     tools: list[dict] | None,
@@ -5342,7 +5456,14 @@ def _with_anthropic_cache(
     """Helper to copy messages and tools, and attach ephemeral cache points
     to the last item of each, avoiding in-place mutation of the caller's lists.
     """
-    cached_messages = [dict(m) for m in messages]
+    cached_messages = []
+    for message in messages:
+        copied = dict(message)
+        if isinstance(copied.get("content"), list):
+            copied["content"] = [
+                _anthropic_history_block(block) for block in copied["content"]
+            ]
+        cached_messages.append(copied)
     if cached_messages:
         last_msg = dict(cached_messages[-1])
         content = last_msg.get("content")
@@ -5887,10 +6008,17 @@ async def _call_with_tools_impl(
                 str(exc), reset_at=exc.reset_at, snapshot=exc.snapshot
             ) from exc
     # ── Anthropic (direct) ────────────────────────────────────────────────────
-    if config.provider == "anthropic":
+    if config.provider == "anthropic" or (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "messages"
+    ):
         import anthropic as _ant
 
-        client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        client = (
+            _make_bedrock_mantle_anthropic_client(config)
+            if config.provider == "bedrock_mantle"
+            else _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        )
         cached_messages, cached_tools = _with_anthropic_cache(messages, _active_tools)
         request_kwargs = dict(
             model=config.model,
@@ -5912,13 +6040,11 @@ async def _call_with_tools_impl(
             messages=cached_messages,
         )
         on_text_delta = _tool_text_delta_var.get()
-        if on_text_delta is None:
-            resp = await client.messages.create(**request_kwargs)
-        else:
-            async with client.messages.stream(**request_kwargs) as stream:
+        async with client.messages.stream(**request_kwargs) as stream:
+            if on_text_delta is not None:
                 async for text_delta in stream.text_stream:
                     await on_text_delta(text_delta)
-                resp = await stream.get_final_message()
+            resp = await stream.get_final_message()
         blocks = [
             {
                 "type": b.type,
@@ -5934,10 +6060,16 @@ async def _call_with_tools_impl(
             config.model,
             getattr(resp.usage, "input_tokens", 0),
             getattr(resp.usage, "output_tokens", 0),
-            cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
-            cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0),
+            cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
+            cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0)
+            or 0,
+            input_includes_cache=False,
         )
-        return blocks, resp.stop_reason or "end_turn", resp.content
+        return (
+            blocks,
+            resp.stop_reason or "end_turn",
+            [_anthropic_history_block(block) for block in (resp.content or [])],
+        )
 
     # ── Azure AI Foundry (Anthropic endpoint) ─────────────────────────────────
     if config.provider == "azure_foundry_anthropic":
@@ -6274,7 +6406,10 @@ async def _call_with_tools_impl(
         return blocks, str(stop_reason_raw), raw_content_ant
 
     # ── OpenAI Responses API with function tools ──────────────────────────────
-    if config.provider == "bedrock_mantle" or _uses_openai_responses(config):
+    if (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "responses"
+    ) or _uses_openai_responses(config):
         client = _make_responses_client(config)
         r_kwargs = _responses_request_kwargs(
             config,
@@ -6464,6 +6599,7 @@ async def _call_with_tools_impl(
         "azure_openai",
         "azure_foundry",
         "azure_foundry_openai",
+        "bedrock_mantle",
     ):
         from openai import AsyncOpenAI
 
@@ -6487,7 +6623,11 @@ async def _call_with_tools_impl(
                 base += "/v1"
             client_kwargs["base_url"] = base
         client_kwargs.update(_llm_client_kwargs())
-        oai_client = AsyncOpenAI(**client_kwargs)
+        oai_client = (
+            _make_bedrock_mantle_client(config)
+            if config.provider == "bedrock_mantle"
+            else AsyncOpenAI(**client_kwargs)
+        )
         oai_tools = _ant_tools_to_openai()
         oai_messages = _ant_messages_to_openai(messages)
         call_kwargs = _chat_completion_kwargs(

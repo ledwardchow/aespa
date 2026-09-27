@@ -541,6 +541,15 @@ async def discover_model_options_for_format(
                         merged.setdefault(key, capability[key])
                 native[model] = merged
     capabilities = await enrich_model_options(api_format, discovered, native)
+    if api_format == "bedrock_mantle":
+        from aespa.services.llm import _bedrock_mantle_model_api
+
+        for model in discovered:
+            try:
+                inference_api = _bedrock_mantle_model_api(model)
+            except ValueError:
+                inference_api = "unknown"
+            capabilities.setdefault(model, {})["inference_api"] = inference_api
     return {"models": discovered, "capabilities": capabilities}
 
 

@@ -4,7 +4,7 @@ import importlib
 import os
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -19,7 +19,13 @@ import pytest
         "index.html",
     ],
 )
-def test_frontend_rebuilds_when_any_build_input_changes(tmp_path, monkeypatch, changed):
+@pytest.mark.parametrize(
+    ("platform", "npm"),
+    [("win32", "npm.cmd"), ("linux", "npm"), ("darwin", "npm")],
+)
+def test_frontend_rebuilds_when_any_build_input_changes(
+    tmp_path, monkeypatch, changed, platform, npm
+):
     main = importlib.import_module("aespa.main")
     frontend = tmp_path / "frontend"
     built = tmp_path / "web"
@@ -47,5 +53,6 @@ def test_frontend_rebuilds_when_any_build_input_changes(tmp_path, monkeypatch, c
     build.assert_not_called()
 
     os.utime(frontend / changed, (300, 300))
-    main._build_frontend_if_stale()
-    build.assert_called_once_with(["npm", "run", "build"], cwd=frontend, check=True)
+    with patch.object(main.sys, "platform", platform):
+        main._build_frontend_if_stale()
+    build.assert_called_once_with([npm, "run", "build"], cwd=frontend, check=True)

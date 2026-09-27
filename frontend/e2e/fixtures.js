@@ -79,6 +79,20 @@ export const campaign = {
 
 export async function installFixtures(page, { empty = false } = {}) {
   const writes = [];
+  const sastBenchmarkingExtension = {
+    id: "aespa.sast-benchmarking",
+    name: "SAST Benchmarking",
+    author: "aespa",
+    version: "1.0.0",
+    aespa_api: "1",
+    capabilities: ["api.routes"],
+    enabled: false,
+    status: "disabled",
+    settings: {},
+    settings_fields: [],
+    source_providers: [],
+    web_scanners: [],
+  };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -86,6 +100,13 @@ export async function installFixtures(page, { empty = false } = {}) {
     if (!path.startsWith("/api/")) return route.continue();
     if (request.method() !== "GET") {
       writes.push({ path, method: request.method(), body: request.postDataJSON() });
+      if (path === "/api/extensions/aespa.sast-benchmarking/enabled") {
+        sastBenchmarkingExtension.enabled = request.postDataJSON()?.enabled ?? false;
+        sastBenchmarkingExtension.status = sastBenchmarkingExtension.enabled
+          ? "loaded"
+          : "disabled";
+        return route.fulfill({ json: sastBenchmarkingExtension });
+      }
       return route.fulfill({ json: request.postDataJSON() || {} });
     }
     const tables = {
@@ -127,6 +148,7 @@ export async function installFixtures(page, { empty = false } = {}) {
         panel_enabled: false,
       },
       "/api/settings/cloudflare-access": { audience: null },
+      "/api/extensions": [sastBenchmarkingExtension],
       "/api/settings/code-execution": {
         enabled: true,
         image_ref: "ledwardchow/aespa-python-executor:0.1",

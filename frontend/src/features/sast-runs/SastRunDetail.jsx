@@ -17,6 +17,7 @@ import { usePolling } from "../../shared/hooks/usePolling.js";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { DismissibleAlert } from "../../shared/ui/DismissibleAlert.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
+import { jsonListValue } from "../../shared/ui/SastLeadDetails.jsx";
 
 const DEEP_PHASES = [
   { key: "scope", label: "Scope", short: "Archive and inventory", view: "coverage" },
@@ -70,15 +71,6 @@ function normaliseTab(tab) {
   )
     ? candidate
     : "coverage";
-}
-
-function jsonValue(value, fallback) {
-  if (value && typeof value === "object") return value;
-  try {
-    return JSON.parse(value || "");
-  } catch {
-    return fallback;
-  }
 }
 
 function asArray(value) {
@@ -220,7 +212,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   );
   const reportableCount = leads.filter((lead) => lead.reportable).length;
   const proofGapCount = leads.reduce(
-    (count, lead) => count + jsonValue(lead.proof_gaps_json, []).length,
+    (count, lead) => count + jsonListValue(lead.proof_gaps_json).length,
     0,
   );
   const workItemSummary = analysis.work_program?.work_items || {};
@@ -371,13 +363,24 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         className="sast-run-topbar"
         title={
           <span className="sast-header-title">
-            <Crumb href="#/sast-runs">SAST</Crumb>
-            <Sep />
-            <span className="sast-header-name">{run.name}</span>
-            <span className="badge neutral">
-              {run.analysis_mode === "light" ? "Light" : "Deep"}
+            <span className="sast-header-main">
+              <Crumb href="#/sast-runs">SAST</Crumb>
+              <Sep />
+              <span className="sast-header-name">{run.name}</span>
+              <span className="badge neutral">
+                {run.analysis_mode === "light" ? "Light" : "Deep"}
+              </span>
+              <StatusBadge status={scanRunning ? "scanning" : run.status} />
             </span>
-            <StatusBadge status={scanRunning ? "scanning" : run.status} />
+            {run.source_provider !== "upload" && run.source_revision ? (
+              <span
+                className="sast-header-source"
+                title={`Source: ${run.source_locator || run.source_provider} · ${run.source_revision}`}
+              >
+                Source: {run.source_locator || run.source_provider} ·{" "}
+                {run.source_revision.slice(0, 12)}
+              </span>
+            ) : null}
           </span>
         }
         actions={
@@ -422,7 +425,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         }
       />
       {run.status === "preparing" ? (
-        <div className="content" style={{ paddingBottom: 0 }}>
+        <div className="content sast-run-preparing">
           <div className="card" style={{ maxWidth: 760 }}>
             <div className="form-section-title">Preparing source snapshot</div>
             <p className="subtle" style={{ margin: "6px 0 0" }}>
@@ -435,13 +438,6 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                 {run.source_requested_ref ? ` · ${run.source_requested_ref}` : " · default branch"}
               </div>
             ) : null}
-          </div>
-        </div>
-      ) : null}
-      {run.source_provider !== "upload" && run.source_revision ? (
-        <div className="content" style={{ paddingBottom: 0 }}>
-          <div className="subtle" style={{ fontSize: 12 }}>
-            Source: {run.source_locator || run.source_provider} · {run.source_revision.slice(0, 12)}
           </div>
         </div>
       ) : null}

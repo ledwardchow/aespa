@@ -2773,6 +2773,229 @@ def test_bedrock_mantle_uses_responses_api_with_us_east_2_default(monkeypatch):
     assert captured["responses"]["input"] == "hello"
 
 
+def test_bedrock_mantle_claude_uses_messages_for_plain_and_tool_calls(monkeypatch):
+    import httpx
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        payload = json.loads(request.content)
+        content = (
+            [{"type": "text", "text": "hello"}]
+            if not payload.get("tools")
+            else [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "read_file",
+                    "input": {"path": "app.py"},
+                }
+            ]
+        )
+
+        def event(name, data):
+            return f"event: {name}\ndata: {json.dumps(data)}\n\n"
+
+        message = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "anthropic.claude-sonnet-5",
+            "content": [],
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 0},
+        }
+        body = "".join(
+            [
+                event("message_start", {"type": "message_start", "message": message}),
+                event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": content[0],
+                    },
+                ),
+                event("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                event(
+                    "message_delta",
+                    {
+                        "type": "message_delta",
+                        "delta": {
+                            "stop_reason": "tool_use"
+                            if payload.get("tools")
+                            else "end_turn",
+                            "stop_sequence": None,
+                        },
+                        "usage": {"output_tokens": 3},
+                    },
+                ),
+                event("message_stop", {"type": "message_stop"}),
+            ]
+        )
+        return httpx.Response(
+            200, text=body, headers={"content-type": "text/event-stream"}
+        )
+
+    monkeypatch.setattr(
+        llm,
+        "_llm_client_kwargs",
+        lambda: {
+            "http_client": httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        },
+    )
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="test-key",
+        base_url="https://bedrock-mantle.us-east-1.api.aws/v1",
+        project_id="proj_test",
+        model="anthropic.claude-sonnet-5",
+        max_tokens=64_000,
+    )
+
+    assert asyncio.run(llm._call(config, "hello", None)) == "hello"
+    blocks, stop_reason, _ = asyncio.run(
+        llm._call_with_tools(
+            config,
+            "system",
+            [{"role": "user", "content": "inspect app.py"}],
+            [{"name": "read_file", "input_schema": {"type": "object"}}],
+        )
+    )
+    asyncio.run(
+        llm._call_with_tools(
+            config,
+            "system",
+            [
+                {"role": "user", "content": "inspect app.py"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Checking it.", "parsed_output": None}
+                    ],
+                },
+                {"role": "user", "content": "Continue."},
+            ],
+            [{"name": "read_file", "input_schema": {"type": "object"}}],
+        )
+    )
+
+    assert len(requests) == 3
+    assert all(json.loads(r.content)["stream"] is True for r in requests)
+    assert all(r.url.path == "/anthropic/v1/messages" for r in requests)
+    assert all(r.headers["x-api-key"] == "test-key" for r in requests)
+    assert all(r.headers["anthropic-workspace-id"] == "proj_test" for r in requests)
+    assert json.loads(requests[-1].content)["messages"][1]["content"] == [
+        {"type": "text", "text": "Checking it."}
+    ]
+    assert blocks[0]["type"] == "tool_use"
+    assert blocks[0]["input"] == {"path": "app.py"}
+    assert stop_reason == "tool_use"
+
+
+def test_anthropic_stream_history_does_not_replay_sdk_parsed_output():
+    class ParsedText:
+        def model_dump(self, **_kwargs):
+            return {"type": "text", "text": "Checking the lead.", "parsed_output": None}
+
+    raw_block = llm._anthropic_history_block(ParsedText())
+    assert raw_block == {"type": "text", "text": "Checking the lead."}
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Earlier turn", "parsed_output": None},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "read_file",
+                    "input": {"path": "app.py"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "done"}
+            ],
+        },
+    ]
+    cached_messages, _ = llm._with_anthropic_cache(messages, None)
+    assert cached_messages[0]["content"][0] == {
+        "type": "text",
+        "text": "Earlier turn",
+    }
+    assert cached_messages[0]["content"][1]["input"] == {"path": "app.py"}
+    assert cached_messages[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert "parsed_output" in messages[0]["content"][0]
+
+
+def test_bedrock_mantle_non_openai_text_model_uses_chat_completions(monkeypatch):
+    captured = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="hello", tool_calls=[]),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="test-key",
+        base_url="https://bedrock-mantle.us-east-1.api.aws",
+        model="deepseek.v3.2",
+        max_tokens=1024,
+    )
+
+    assert asyncio.run(llm._call(config, "hello", None)) == "hello"
+    assert captured["client"]["base_url"].endswith("/v1")
+    assert captured["request"]["model"] == "deepseek.v3.2"
+    assert "messages" in captured["request"]
+
+
+def test_bedrock_mantle_rejects_unknown_model_api_before_request():
+    with pytest.raises(ValueError, match="No Bedrock Mantle inference API"):
+        llm._bedrock_mantle_model_api("unknown.future-model")
+
+
+@pytest.mark.parametrize(
+    ("model", "api", "suffix"),
+    [
+        ("anthropic.claude-sonnet-5", "messages", "/v1"),
+        ("openai.gpt-5.6-luna", "responses", "/openai/v1"),
+        ("openai.gpt-6-luna", "responses", "/openai/v1"),
+        ("openai.gpt-oss-120b", "responses", "/v1"),
+        ("google.gemma-4-31b", "chat_completions", "/openai/v1"),
+        ("xai.grok-4.6", "chat_completions", "/openai/v1"),
+        ("zai.glm-5", "chat_completions", "/v1"),
+    ],
+)
+def test_bedrock_mantle_model_route(model, api, suffix):
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        base_url="https://bedrock-mantle.us-east-1.api.aws/anthropic",
+        model=model,
+    )
+    assert llm._bedrock_mantle_model_api(model) == api
+    assert llm._bedrock_mantle_base_url(config).endswith(suffix)
+
+
 def test_bedrock_mantle_honours_explicit_base_url_and_region_env(monkeypatch):
     """An explicit base_url wins; otherwise the region env var selects the endpoint."""
     captured: dict[str, object] = {}
@@ -3591,6 +3814,7 @@ def test_bedrock_mantle_sigv4_signs_with_bedrock_service(monkeypatch):
     request = httpx.Request(
         "POST",
         "https://bedrock-mantle.us-east-2.api.aws/v1/chat/completions",
+        headers={"x-api-key": "not-needed"},
         json={"model": "openai.gpt-oss-120b", "messages": []},
     )
     # Drive the sync auth flow so the request is signed in place.
@@ -3603,6 +3827,7 @@ def test_bedrock_mantle_sigv4_signs_with_bedrock_service(monkeypatch):
     assert "x-amz-date" in request.headers
     # Temporary (role/STS) credentials must carry the session token.
     assert request.headers["x-amz-security-token"] == "session-token"
+    assert "x-api-key" not in request.headers
 
 
 def test_bedrock_mantle_sigv4_errors_without_credentials(monkeypatch):
@@ -4773,9 +4998,9 @@ def test_anthropic_caching_in_call_with_tools(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakeMessages:
-        async def create(self, **kwargs):
+        def stream(self, **kwargs):
             captured["create_kwargs"] = kwargs
-            return SimpleNamespace(
+            response = SimpleNamespace(
                 content=[
                     SimpleNamespace(
                         type="text",
@@ -4793,6 +5018,18 @@ def test_anthropic_caching_in_call_with_tools(monkeypatch):
                     cache_creation_input_tokens=2,
                 ),
             )
+
+            class FakeStream:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_):
+                    pass
+
+                async def get_final_message(self):
+                    return response
+
+            return FakeStream()
 
     class FakeAsyncAnthropic:
         def __init__(self, **kwargs):

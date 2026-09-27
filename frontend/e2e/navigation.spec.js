@@ -77,6 +77,25 @@ test("upstream proxy settings are under Global", async ({ page }) => {
   await page.screenshot({ path: path.join(tmpdir(), "aespa-global-upstream-proxy.png") });
 });
 
+test("enabling SAST Benchmarking updates the sidebar without a refresh", async ({ page }) => {
+  await installFixtures(page);
+
+  await page.goto("/#/extensions");
+  const sidebarLink = page.locator(".sidebar").getByRole("link", {
+    name: "SAST Benchmarking",
+    exact: true,
+  });
+  await expect(sidebarLink).toHaveCount(0);
+  const row = page.getByText("SAST Benchmarking", { exact: true }).locator("xpath=ancestor::tr");
+  await row.getByRole("button", { name: "Enable" }).click();
+
+  await expect(sidebarLink).toBeVisible();
+  await expect(row.getByRole("button", { name: "Disable" })).toBeVisible();
+  await page.screenshot({
+    path: path.join(tmpdir(), "aespa-sast-benchmarking-sidebar-enabled.png"),
+  });
+});
+
 test("Settings tabs restore from their URLs and browser history", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/scan-policy");

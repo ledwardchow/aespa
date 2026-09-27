@@ -255,7 +255,8 @@ def _build_frontend_if_stale() -> None:
     if built.exists() and built.stat().st_mtime >= newest_src:
         return
     print("[aespa] frontend changed — running npm run build...")
-    subprocess.run(["npm", "run", "build"], cwd=frontend, check=True)
+    npm = "npm.cmd" if sys.platform == "win32" else "npm"
+    subprocess.run([npm, "run", "build"], cwd=frontend, check=True)
 
 
 def _ensure_port_available(host: str, port: int) -> None:
@@ -315,10 +316,21 @@ def main() -> None:
     _ensure_port_available(settings.host, settings.port)
     _build_frontend_if_stale()
     ensure_chromium()
-    restart: dict[str, object | None] = {"port": None, "server": None}
+    restart: dict[str, object | None] = {"port": None, "server": None, "quit": False}
 
     def change_port(port: int) -> None:
         restart["port"] = port
+        server = restart["server"]
+        if server is not None:
+            server.should_exit = True
+
+    def request_quit() -> None:
+        if restart["quit"]:
+            server = restart["server"]
+            if server is not None:
+                server.force_exit = True
+            return
+        restart["quit"] = True
         server = restart["server"]
         if server is not None:
             server.should_exit = True
@@ -329,6 +341,7 @@ def main() -> None:
             host=settings.host,
             env_path=Path.cwd() / ".env",
             on_port_change=change_port,
+            on_quit=request_quit,
             log_db_path=DEFAULT_LOG_DB_PATH,
         )
         if interactive_console_available()
@@ -348,6 +361,8 @@ def main() -> None:
     try:
         port = settings.port
         while True:
+            if restart["quit"]:
+                break
             _ensure_port_available(settings.host, port)
             server = uvicorn.Server(
                 uvicorn.Config(
@@ -355,13 +370,18 @@ def main() -> None:
                     host=settings.host,
                     port=port,
                     reload=False,
+                    timeout_graceful_shutdown=0.25 if sys.platform == "win32" else None,
                     log_config=None if console else uvicorn.config.LOGGING_CONFIG,
                 )
             )
             restart["server"] = server
+            if restart["quit"]:
+                break
             if console:
                 console.handler.set_runtime_port(port)
             if not _run_server(server):
+                break
+            if restart["quit"]:
                 break
             startup_failure = _server_startup_failure_message(server, console)
             if startup_failure is not None:

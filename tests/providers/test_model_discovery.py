@@ -138,6 +138,38 @@ def test_provider_model_discovery_sorts_and_deduplicates_all_formats(monkeypatch
     assert result["models"] == ["alpha", "Zulu"]
 
 
+def test_mantle_discovery_exposes_each_models_inference_api(monkeypatch):
+    async def fake_discovery(**kwargs):
+        return [
+            {"id": "anthropic.claude-sonnet-5"},
+            {"id": "openai.gpt-5.6-luna"},
+            {"id": "deepseek.v3.2"},
+            {"id": "unknown.future-model"},
+        ]
+
+    async def fake_enrichment(api_format, models, native):
+        return {}
+
+    monkeypatch.setattr(
+        model_discovery, "discover_bedrock_mantle_model_options", fake_discovery
+    )
+    monkeypatch.setattr(settings, "enrich_model_options", fake_enrichment)
+
+    result = asyncio.run(
+        settings.discover_model_options_for_format(api_format="bedrock_mantle")
+    )
+
+    assert {
+        model: metadata["inference_api"]
+        for model, metadata in result["capabilities"].items()
+    } == {
+        "anthropic.claude-sonnet-5": "messages",
+        "openai.gpt-5.6-luna": "responses",
+        "deepseek.v3.2": "chat_completions",
+        "unknown.future-model": "unknown",
+    }
+
+
 def test_discover_anthropic_models():
     mock_response = MagicMock()
     mock_response.json.return_value = {

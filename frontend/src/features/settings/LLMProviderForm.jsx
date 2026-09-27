@@ -834,9 +834,11 @@ export function LLMProviderForm({
             )}
             {form.api_format === "bedrock_mantle" && (
               <div className="field-hint">
-                With a key, Mantle authenticates via Bearer token. Leave blank to sign requests with
-                AWS credentials (SigV4) from AWS_PROFILE, environment variables, SSO, or an IAM role
-                — the same fallback as the Bedrock Runtime provider.
+                Mantle uses each model&apos;s supported API: Anthropic Messages for Claude,
+                Responses for OpenAI models, and Chat Completions for other supported text models.
+                With a key, Mantle authenticates via the API&apos;s key header. Leave blank to sign
+                requests with AWS credentials (SigV4) from AWS_PROFILE, environment variables, SSO,
+                or an IAM role.
               </div>
             )}
             {form.api_format === "github_copilot" && (
@@ -899,6 +901,10 @@ export function LLMProviderForm({
                       )
                     : [];
                   const removeBlocked = usingProfiles.length > 0;
+                  const mantleApi =
+                    form.api_format === "bedrock_mantle"
+                      ? form.model_capabilities?.[modelName]?.inference_api
+                      : null;
                   return (
                     <tr key={modelName}>
                       <td className="mono">
@@ -916,6 +922,17 @@ export function LLMProviderForm({
                       </td>
                       <td>
                         <div>{configuredModel ? configuredModel.name : "Not configured"}</div>
+                        {mantleApi && (
+                          <div className="provider-model-usage">
+                            {mantleApi === "messages"
+                              ? "Anthropic Messages API"
+                              : mantleApi === "responses"
+                                ? "OpenAI Responses API"
+                                : mantleApi === "chat_completions"
+                                  ? "Chat Completions API"
+                                  : "API support unknown"}
+                          </div>
+                        )}
                         {removeBlocked && (
                           <div className="provider-model-usage">
                             Used by: {usingProfiles.join(", ")}

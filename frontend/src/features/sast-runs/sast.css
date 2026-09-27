@@ -4,15 +4,32 @@
 }
 .sast-header-title {
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.sast-header-main {
+  display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 0;
   max-width: 100%;
   overflow: hidden;
 }
 .sast-header-name {
   min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sast-header-source {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -101,6 +118,10 @@
   flex-direction: column;
   overflow: hidden;
   background: var(--bg);
+}
+.sast-run-preparing {
+  flex: 0 0 auto;
+  padding-bottom: 16px;
 }
 .sast-phase-rail {
   display: grid;
