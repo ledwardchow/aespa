@@ -48,49 +48,22 @@ class _SpecialistConfig:
 # ---------------------------------------------------------------------------
 
 
-def test_should_dispatch_returns_false_when_disabled():
-    cfg = _SpecialistConfig(enabled=False)
-    assert _should_dispatch_specialist("idor", 10, cfg) is False
-
-
-def test_should_dispatch_returns_false_when_class_disabled():
-    cfg = _SpecialistConfig(dispatch_idor=False)
-    assert _should_dispatch_specialist("idor", 10, cfg) is False
-
-
-def test_should_dispatch_returns_false_for_cors_when_disabled_by_default():
-    cfg = _SpecialistConfig()  # dispatch_cors defaults to False
-    assert _should_dispatch_specialist("cors", 10, cfg) is False
-
-
-def test_should_dispatch_returns_false_priority_too_low():
-    cfg = _SpecialistConfig(min_priority=7)
-    assert _should_dispatch_specialist("idor", 5, cfg) is False
-
-
-def test_should_dispatch_returns_false_priority_equal_to_min():
-    cfg = _SpecialistConfig(min_priority=7)
-    # priority == min_priority should be allowed (>=)
-    assert _should_dispatch_specialist("idor", 7, cfg) is True
-
-
-def test_should_dispatch_returns_true_for_enabled_class():
-    cfg = _SpecialistConfig()
-    assert _should_dispatch_specialist("xss", 8, cfg) is True
-
-
-def test_should_dispatch_returns_false_unknown_class():
-    cfg = _SpecialistConfig()
-    assert _should_dispatch_specialist("not_a_class", 10, cfg) is False
-
-
-def test_should_dispatch_returns_false_when_max_concurrent_zero():
-    cfg = _SpecialistConfig(max_concurrent=0)
-    assert _should_dispatch_specialist("idor", 10, cfg) is False
-
-
-def test_should_dispatch_returns_false_none_config():
-    assert _should_dispatch_specialist("idor", 10, None) is False
+def test_should_dispatch_checks_config_class_and_priority():
+    cases = [
+        ("disabled", "idor", 10, _SpecialistConfig(enabled=False), False),
+        ("class disabled", "idor", 10, _SpecialistConfig(dispatch_idor=False), False),
+        ("default CORS", "cors", 10, _SpecialistConfig(), False),
+        ("low priority", "idor", 5, _SpecialistConfig(min_priority=7), False),
+        ("priority boundary", "idor", 7, _SpecialistConfig(min_priority=7), True),
+        ("enabled class", "xss", 8, _SpecialistConfig(), True),
+        ("unknown class", "not_a_class", 10, _SpecialistConfig(), False),
+        ("zero capacity", "idor", 10, _SpecialistConfig(max_concurrent=0), False),
+        ("missing config", "idor", 10, None, False),
+    ]
+    for label, attack_class, priority, config, expected in cases:
+        assert (
+            _should_dispatch_specialist(attack_class, priority, config) is expected
+        ), label
 
 
 # ---------------------------------------------------------------------------
@@ -98,29 +71,16 @@ def test_should_dispatch_returns_false_none_config():
 # ---------------------------------------------------------------------------
 
 
-def test_at_capacity_false_when_none_running(tmp_path):
+def test_at_capacity_handles_empty_below_and_at_limit():
     run_id = 99991
     _specialist_running.pop(run_id, None)
     cfg = _SpecialistConfig(max_concurrent=5)
-    assert _specialist_at_capacity(run_id, cfg) is False
-
-
-def test_at_capacity_true_when_at_limit():
-    run_id = 99992
-    cfg = _SpecialistConfig(max_concurrent=2)
-    _specialist_running[run_id] = 2
-    try:
-        assert _specialist_at_capacity(run_id, cfg) is True
-    finally:
-        _specialist_running.pop(run_id, None)
-
-
-def test_at_capacity_false_below_limit():
-    run_id = 99993
-    cfg = _SpecialistConfig(max_concurrent=5)
-    _specialist_running[run_id] = 3
     try:
         assert _specialist_at_capacity(run_id, cfg) is False
+        _specialist_running[run_id] = 3
+        assert _specialist_at_capacity(run_id, cfg) is False
+        _specialist_running[run_id] = 5
+        assert _specialist_at_capacity(run_id, cfg) is True
     finally:
         _specialist_running.pop(run_id, None)
 
@@ -133,19 +93,14 @@ def test_at_capacity_false_below_limit():
 def test_next_specialist_agent_id_increments():
     run_id = 99994
     _specialist_seq.pop(run_id, None)
-    id1 = _next_specialist_agent_id(run_id, "idor")
-    id2 = _next_specialist_agent_id(run_id, "xss")
-    assert id1 == "specialist-idor-1"
-    assert id2 == "specialist-xss-2"
-    _specialist_seq.pop(run_id, None)
-
-
-def test_next_specialist_agent_id_format():
-    run_id = 99995
-    _specialist_seq.pop(run_id, None)
-    agent_id = _next_specialist_agent_id(run_id, "auth_bypass")
-    assert agent_id == "specialist-auth_bypass-1"
-    _specialist_seq.pop(run_id, None)
+    try:
+        assert (
+            _next_specialist_agent_id(run_id, "auth_bypass")
+            == "specialist-auth_bypass-1"
+        )
+        assert _next_specialist_agent_id(run_id, "xss") == "specialist-xss-2"
+    finally:
+        _specialist_seq.pop(run_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -219,16 +174,10 @@ def test_specialist_config_api_put_persists(client):
     assert resp2.json()["max_concurrent"] == 3
 
 
-def test_specialist_config_api_put_validates_max_concurrent(client):
-    payload = {"max_concurrent": 25}  # above max of 20
-    resp = client.put("/api/settings/specialist-agent-config", json=payload)
-    assert resp.status_code == 422
-
-
-def test_specialist_config_api_put_validates_min_priority(client):
-    payload = {"min_priority": 0}  # below min of 1
-    resp = client.put("/api/settings/specialist-agent-config", json=payload)
-    assert resp.status_code == 422
+def test_specialist_config_api_rejects_invalid_limits(client):
+    for payload in ({"max_concurrent": 25}, {"min_priority": 0}):
+        resp = client.put("/api/settings/specialist-agent-config", json=payload)
+        assert resp.status_code == 422, payload
 
 
 # ---------------------------------------------------------------------------

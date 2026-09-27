@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
+from datetime import datetime
 
+from sqlalchemy import DateTime, insert
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
@@ -15,6 +19,51 @@ from aespa.models import (
 
 from . import models
 from .router import build_router
+
+
+def _migrate_renamed_database(store) -> None:
+    """Copy the former extension database once, keeping its original file intact."""
+    old_path = store.path.with_name("aespa.sast-benchmarking.db")
+    if not old_path.is_file():
+        return
+    tables = (
+        models.Dataset.__table__,
+        models.Evaluation.__table__,
+        models.Match.__table__,
+        models.Comparison.__table__,
+        models.GroundTruthBinding.__table__,
+        models.ScanResult.__table__,
+    )
+    with store.engine.begin() as target:
+        if any(target.execute(select(table).limit(1)).first() for table in tables):
+            return
+        with closing(
+            sqlite3.connect(f"{old_path.as_uri()}?mode=ro", uri=True)
+        ) as source:
+            source.row_factory = sqlite3.Row
+            old_tables = {
+                row[0]
+                for row in source.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            for table in tables:
+                old_name = f"sast_{table.name}"
+                if old_name not in old_tables:
+                    continue
+                rows = []
+                for row in source.execute(f'SELECT * FROM "{old_name}"'):
+                    values = {}
+                    for key, value in dict(row).items():
+                        column = table.columns.get(key)
+                        if column is None:
+                            continue
+                        if isinstance(column.type, DateTime) and isinstance(value, str):
+                            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                        values[key] = value
+                    rows.append(values)
+                if rows:
+                    target.execute(insert(table), rows)
 
 
 def _migrate_legacy_data(store) -> None:
@@ -55,12 +104,13 @@ def _migrate_legacy_data(store) -> None:
         target.commit()
 
 
-class SastBenchmarkingExtension:
+class BenchmarkingExtension:
     def register(self, registry) -> None:
         store = registry.data_store(models.metadata)
+        _migrate_renamed_database(store)
         _migrate_legacy_data(store)
         registry.register_api_router(build_router(store))
 
 
 def create_extension():
-    return SastBenchmarkingExtension()
+    return BenchmarkingExtension()

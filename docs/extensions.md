@@ -12,7 +12,7 @@ An extension is trusted Python code loaded inside the AESPA process. API `1` sup
 | `web.active_scanner` | A scanner that selects web scan candidates and returns issues | Target scope checks, scheduling, cancellation, activity events, and finding storage |
 | `api.routes` | A FastAPI router exposed below `/extension/<extension-id>/` | Stable dispatch, enable/disable isolation, and route removal |
 
-An extension may also register settings fields without another capability. Extensions may own API routes and data, but do not add tables or migrations to AESPA's primary database and do not inject frontend code. Extensions run with AESPA's process permissions, so only install code you trust.
+An extension may also register settings fields without another capability. Extension code may read AESPA's primary database but must not write to or change it, directly or through a core service that changes core records. Store extension-owned data in the separate extension database. AESPA core handles changes to scan records, extension settings and secrets, and usage records. Calls through AESPA's LLM service may record usage in the primary database. Extensions do not add tables or migrations to the primary database and do not inject frontend code. Extensions run with AESPA's process permissions, so only install code you trust. This is a code rule, not a process-level security boundary.
 
 ## Folder and manifest
 
@@ -106,7 +106,7 @@ SourceProviderField(
 
 The Extensions UI uses field metadata to render controls. Non-secret settings are stored by extension ID and returned through `context.settings`. A field's `default` is display metadata; extension code should also supply a fallback when it reads an unset setting, for example `context.settings.get("enabled", True)`. `settings_schema_version` and `schema_version` are stored with settings, but API `1` does not run an extension settings migration. Unknown saved keys remain in storage but are not passed through `context.settings`.
 
-Secret fields require `author` and `secrets_namespace` in the manifest. AESPA uses `<author>.<secrets_namespace>` as the full storage namespace and returns that name in the extension API. Read a secret with `context.secrets.get("api_key")`; `registry.secrets` offers the same namespace during registration. Both stores support `get`, `has`, `set`, and `delete`. Secret keys use the same ID pattern. The API returns only `has_secrets` flags, not secret values. A null secret update keeps its existing value; an empty string removes it. Stored secrets are in AESPA's local database without encryption at rest. Never include credentials in ordinary settings, request parameters, results, metadata, errors, or logs.
+Secret fields require `author` and `secrets_namespace` in the manifest. AESPA uses `<author>.<secrets_namespace>` as the full storage namespace and returns that name in the extension API. Read a secret with `context.secrets.get("api_key")`; `registry.secrets` offers the same namespace during registration. Extension code should use only `get` and `has`. The stores also expose `set` and `delete`, but extension code must not call them because they write to the primary database. AESPA's settings API handles secret changes. Secret keys use the same ID pattern. The API returns only `has_secrets` flags, not secret values. A null secret update keeps its existing value; an empty string removes it. Stored secrets are in AESPA's local database without encryption at rest. Never include credentials in ordinary settings, request parameters, results, metadata, errors, or logs.
 
 ## SAST source provider contract
 
@@ -203,12 +203,15 @@ The `aespa.githubrepository` source provider accepts `owner/repository` or a `gi
 
 The `aespa.burpsuite` web scanner is disabled by default. It uses the Burp Suite Professional REST API, takes its API key from the `aespa.burpsuite` secret namespace, and selects candidates by vulnerability class. AESPA migrates saved Burp connection details, scan choices, and API keys to this extension during database upgrade. Its code is in `extensions/builtin/burp_suite/`.
 
-The `aespa.sast-benchmarking` API extension is disabled by default. When enabled,
-it serves the SAST Benchmarking workflow under
-`/extension/aespa.sast-benchmarking/` and stores its tables in its own database.
+The `aespa.benchmarking` API extension is disabled by default. When enabled,
+it serves the Benchmark Lab workflow under
+`/extension/aespa.benchmarking/` and stores its tables in its own database.
 On first enable, an empty extension database imports legacy Benchmark Lab rows
-from the primary database so existing evaluations remain available. Disabling it
-removes the routes and sidebar entry but preserves that isolated database.
+from the primary database so existing evaluations remain available. Installations
+that used `aespa.sast-benchmarking` keep their enabled setting, and the saved
+extension database is copied into `aespa.benchmarking.db` once. The old file is
+left in place. Disabling the extension removes its routes and sidebar entry but
+preserves the database.
 
 ## Testing and packaging
 

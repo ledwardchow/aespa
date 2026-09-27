@@ -43,8 +43,8 @@ const extensions = [
     source_providers: [],
   },
   {
-    id: "aespa.sast-benchmarking",
-    name: "SAST Benchmarking",
+    id: "aespa.benchmarking",
+    name: "Benchmark Lab",
     version: "1.0.0",
     aespa_api: "1",
     capabilities: ["api.routes"],
@@ -98,17 +98,17 @@ test("enables and disables extensions from the table", async () => {
   expect(await screen.findAllByRole("button", { name: "Disable" })).toHaveLength(2);
 });
 
-test("notifies the app when SAST Benchmarking is enabled", async () => {
+test("notifies the app when Benchmark Lab is enabled", async () => {
   const user = userEvent.setup();
   const onExtensionUpdated = vi.fn();
   render(<ExtensionsPage onExtensionUpdated={onExtensionUpdated} />);
 
-  const row = (await screen.findByText("SAST Benchmarking")).closest("tr");
+  const row = (await screen.findByText("Benchmark Lab")).closest("tr");
   await user.click(within(row).getByRole("button", { name: "Enable" }));
 
   expect(onExtensionUpdated).toHaveBeenCalledWith(
     expect.objectContaining({
-      id: "aespa.sast-benchmarking",
+      id: "aespa.benchmarking",
       enabled: true,
       status: "loaded",
     }),
