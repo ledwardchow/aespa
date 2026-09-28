@@ -137,20 +137,122 @@ _TITLE_STOPWORDS = {
 }
 _SOURCE_PATH_RE = re.compile(r"[A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,6}")
 _ROUTE_RE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE|HEAD)\s+(/[^\s,;]+)", re.I)
+_LOCATION_LINE_RE = re.compile(r"^\s*([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,6}):(\d+)")
+
+# Plain-language wording that agents use instead of scanner jargon. These only
+# decide which leads may be compared; they are not used for the combined-issue
+# markers, so a title that names two of them is not split.
+_PLAIN_LANGUAGE_FAMILIES = (
+    (
+        "second_factor_bruteforce",
+        r"\b(?:totp|2fa|two.factor|second factor|otp)\b.*"
+        r"\b(?:brute|attempt limit|attempts?|throttl|rate.limit)",
+    ),
+    (
+        "second_factor",
+        r"\b(?:totp|2fa|two.factor|second factor|mfa)\b.*"
+        r"\b(?:bypass|skip|omit|ignor|never|not (?:enforced|checked|required))"
+        r"|\b(?:bypass|skip|omit|ignor)\w*\b.*\b(?:totp|2fa|two.factor|mfa)\b",
+    ),
+    (
+        "default_credentials",
+        r"\bdefault\b.*\b(?:password|credential)s?\b"
+        r"|\b(?:seeded|fixed|published)\b.*\b(?:admin|administrator)?\s*password\b",
+    ),
+    (
+        "jwt_validation",
+        r"\b(?:jwt|bearer token|token)s?\b.*\b(?:signature|unsigned|unverified|forg)"
+        r"|\b(?:unsigned|forged|unverified)\b.*\b(?:jwt|token)s?\b"
+        r"|\bsignature\b.*\b(?:never|not)\b.*\bverif",
+    ),
+    (
+        "rate_limit",
+        r"\battempt limit|\bthrottl|\brate.limit|\bbrute.?forc|\blockout\b",
+    ),
+    (
+        "user_enumeration",
+        r"\b(?:reveal|disclos|expos|leak)\w*\b.*\b(?:registered|whether|exist)"
+        r"|\bemail (?:exists|is registered)\b",
+    ),
+    (
+        "stack_trace",
+        r"\bstack.?traces?\b|\b(?:error|exception) details\b|\bserver (?:error|paths)\b",
+    ),
+    ("audit_logging", r"\baudit(?:ed| trail| log)\b|\bnot audited\b"),
+    ("password_hashing", r"\bmd5\b|\bunsalted\b|\bweak(?:ly)? hash|\bsha1\b"),
+    (
+        "password_policy",
+        r"\b(?:one|single|1).character passwords?\b|\bweak password policy\b",
+    ),
+    (
+        "unauthenticated_export",
+        r"\b(?:unauthenticated|public|unauthori[sz]ed|anonymous)\b.*\bexport",
+    ),
+    (
+        "sql_injection",
+        r"\b(?:interpolat|concatenat)\w*\b.*\b(?:sql|query)\b"
+        r"|\b(?:sql|query)\b.*\b(?:interpolat|concatenat)",
+    ),
+    (
+        "xss",
+        r"\binject(?:s|ed)? script\b|\bhtml injection\b|\bscript injection\b",
+    ),
+    (
+        "ssrf",
+        r"\burl fetch\b|\bfetch\w*\b.*\burls?\b|\b(?:arbitrary|internal|attacker.\w+) urls?\b"
+        r"|\bread\w* local files\b",
+    ),
+    (
+        "race_condition",
+        r"\bconcurrent\b|\brace condition\b|\bsame balance twice\b|\bdouble.spend",
+    ),
+    ("cvv_verification", r"\bcvv\b.*\b(?:omit|skip|verif|missing)"),
+    (
+        "balance_enforcement",
+        r"\boverdra\w*|\bno (?:source )?balance check\b|\buncapped\b"
+        r"|\bunlimited (?:credit|loan|overdraft)|\bunbounded credit\b"
+        r"|\bwithout underwriting\b|\bself.approve\b|\bcredit.card limit\b",
+    ),
+    (
+        "authorization",
+        r"\banother (?:user|customer|account)'?s?\b|\bother (?:users|customers)'?\b"
+        r"|\bacross accounts\b|\bexposed by id\b|\b(?:check|without)\b.*\bownership\b"
+        r"|\bownership check\b",
+    ),
+    (
+        "secret_disclosure",
+        r"\b(?:leak|disclos|expos|return|include)\w*\b.*"
+        r"\b(?:secret|credential|password hash|cvv|signing|configuration)",
+    ),
+)
 
 
-def _candidate_family(candidate: dict[str, Any]) -> str:
-    title = str(candidate.get("title") or "").casefold()
+def _plain_language_family(text: str) -> str:
+    return next(
+        (
+            name
+            for name, pattern in _PLAIN_LANGUAGE_FAMILIES
+            if re.search(pattern, text)
+        ),
+        "",
+    )
+
+
+def _title_family(title: str) -> str:
     if "cors" in title:
         if "wildcard" in title or "permissive" in title:
             return "cors_wildcard"
         if "reflect" in title or "allow-credentials" in title:
             return "cors_reflection"
-    if "hardcoded" in title or ("fallback" in title and "secret" in title):
+    if "hardcoded" in title or (
+        re.search(r"\b(?:fallback|published|shipped|known|default)\b", title)
+        and re.search(r"\b(?:secret|key|token)s?\b", title)
+        and not re.search(r"\b(?:password|credential)s?\b", title)
+    ):
         assets = [
             name
             for name, pattern in (
-                ("jwt", r"\bjwt\b"),
+                ("jwt", r"\bjwts?\b"),
                 ("sso", r"\bsso\b|\binsurance\b"),
                 ("machine", r"\bmachine\b|\bm2m\b"),
             )
@@ -166,7 +268,133 @@ def _candidate_family(candidate: dict[str, Any]) -> str:
     return next(
         (name for name, pattern in _WEAKNESS_FAMILIES if re.search(pattern, title)),
         "",
-    )
+    ) or _plain_language_family(title)
+
+
+def _candidate_family(candidate: dict[str, Any]) -> str:
+    """Name the kind of weakness so only like-for-like leads are compared.
+
+    Agents write plain-language titles, so the title is checked first and the
+    sink operation and description are used only when the title names no
+    recognised weakness.
+    """
+
+    family = _title_family(str(candidate.get("title") or "").casefold())
+    if family:
+        return family
+    sink = candidate.get("sink_trace") or {}
+    operation = str(sink.get("operation") or "") if isinstance(sink, dict) else ""
+    for text in (operation, str(candidate.get("description") or "")):
+        family = next(
+            (
+                name
+                for name, pattern in _WEAKNESS_FAMILIES
+                if re.search(pattern, text.casefold())
+            ),
+            "",
+        ) or _plain_language_family(text.casefold())
+        if family:
+            return family
+    return ""
+
+
+def _location_line(candidate: dict[str, Any]) -> tuple[str, int] | None:
+    match = _LOCATION_LINE_RE.match(str(candidate.get("location") or ""))
+    if match is None:
+        return None
+    path = match.group(1).replace("\\", "/").removeprefix("./").casefold()
+    return path, int(match.group(2))
+
+
+# Sink-style weaknesses often appear several times in one file, so nearby
+# reports of these are only joined when they are almost on the same line.
+_SINK_FAMILIES = {
+    "sql_injection",
+    "command_injection",
+    "path_traversal",
+    "xss",
+    "open_redirect",
+    "deserialization",
+}
+
+
+# For these the reported line is where the fix goes (a stored secret, a
+# default password, a hash call, an error handler), so callers and sinks
+# named by different workers do not make them different issues.
+_LOCATION_ANCHORED_FAMILIES = {
+    "default_credentials",
+    "password_hashing",
+    "password_policy",
+    "stack_trace",
+}
+
+
+def _singular_words(value: object) -> set[str]:
+    words = _tokens(value) - _TITLE_STOPWORDS
+    return words | {
+        word[:-1] for word in words if word.endswith("s") and not word.endswith("ss")
+    }
+
+
+def _same_nearby_location(
+    first: dict[str, Any], second: dict[str, Any], family: str
+) -> bool:
+    """Join same-weakness leads reported a few lines apart in one file."""
+
+    first_location = _location_line(first)
+    second_location = _location_line(second)
+    if first_location is None or second_location is None:
+        return False
+    if first_location[0] != second_location[0]:
+        return False
+    distance = abs(first_location[1] - second_location[1])
+    limit = 3 if family in _SINK_FAMILIES else 12
+    if distance > limit:
+        return False
+    if family in _LOCATION_ANCHORED_FAMILIES or family.startswith("hardcoded_secret"):
+        return True
+    first_routes = _candidate_routes(first)
+    second_routes = _candidate_routes(second)
+    if first_routes and second_routes and not first_routes & second_routes:
+        first_paths = {route.split(" ", 1)[1] for route in first_routes}
+        second_paths = {route.split(" ", 1)[1] for route in second_routes}
+        # Same path with a different method is a different operation.
+        if first_paths & second_paths:
+            return False
+        if family in _SINK_FAMILIES:
+            return False
+    if first_routes and first_routes == second_routes:
+        # One route can expose several objects; keep reports about a
+        # different object apart.
+        route_subjects = _route_subject_tokens(first_routes)
+        first_words = _singular_words(first.get("title"))
+        second_words = _singular_words(second.get("title"))
+        if bool(first_words & route_subjects) != bool(second_words & route_subjects):
+            return False
+    first_sink = first.get("sink_trace") or {}
+    second_sink = second.get("sink_trace") or {}
+    if isinstance(first_sink, dict) and isinstance(second_sink, dict):
+        first_file = str(first_sink.get("path") or first_sink.get("file") or "")
+        second_file = str(second_sink.get("path") or second_sink.get("file") or "")
+        if first_file and first_file.casefold() == second_file.casefold():
+            try:
+                sink_distance = abs(
+                    int(first_sink.get("line")) - int(second_sink.get("line"))
+                )
+            except (TypeError, ValueError):
+                sink_distance = 0
+            if sink_distance > limit:
+                return False
+            first_symbol = first_sink.get("symbol")
+            second_symbol = second_sink.get("symbol")
+            if (
+                family in _SINK_FAMILIES
+                and first_symbol
+                and second_symbol
+                and first_symbol != second_symbol
+            ):
+                return False
+    return True
 
 
 def _title_issue_markers(candidate: dict[str, Any]) -> set[str]:
@@ -335,12 +563,45 @@ def _same_sink_location(first: dict[str, Any], second: dict[str, Any]) -> bool:
     )
 
 
+def _same_unlabelled_issue(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    """Join near-identical leads whose wording names no known weakness."""
+
+    if _candidate_family(first) or _candidate_family(second):
+        return False
+    first_roots = {str(r).strip().casefold() for r in first.get("root_causes") or []}
+    second_roots = {str(r).strip().casefold() for r in second.get("root_causes") or []}
+    if first_roots != second_roots or len(first_roots) > 1:
+        return False
+    first_params = _candidate_query_parameters(first)
+    second_params = _candidate_query_parameters(second)
+    if (first_params or second_params) and not first_params & second_params:
+        return False
+    first_location = _location_line(first)
+    second_location = _location_line(second)
+    if first_location is None or second_location is None:
+        return False
+    if first_location[0] != second_location[0]:
+        return False
+    if abs(first_location[1] - second_location[1]) > 3:
+        return False
+    first_routes = _candidate_routes(first)
+    second_routes = _candidate_routes(second)
+    if first_routes and second_routes and not first_routes & second_routes:
+        return False
+    first_words = _tokens(first.get("title")) - _TITLE_STOPWORDS
+    second_words = _tokens(second.get("title")) - _TITLE_STOPWORDS
+    if not first_words or not second_words:
+        return False
+    overlap = len(first_words & second_words) / min(len(first_words), len(second_words))
+    return overlap >= 0.5
+
+
 def _same_candidate_issue(first: dict[str, Any], second: dict[str, Any]) -> bool:
     """Use overlapping source locations and weakness details for prose variants."""
 
     family = _candidate_family(first)
     if not family or family != _candidate_family(second):
-        return False
+        return _same_unlabelled_issue(first, second)
     first_roots = {
         str(root).strip().casefold() for root in first.get("root_causes") or []
     }
@@ -361,6 +622,8 @@ def _same_candidate_issue(first: dict[str, Any], second: dict[str, Any]) -> bool
     if not shared_files:
         return False
     if _same_nearby_route_sink(first, second) or _same_sink_location(first, second):
+        return True
+    if _same_nearby_location(first, second, family):
         return True
     if len(shared_files) >= 2 and _candidate_routes(first) & _candidate_routes(second):
         first_params = _candidate_query_parameters(first)
@@ -523,12 +786,12 @@ def find_existing_candidate(
         str(root).strip().casefold() for root in observation.get("root_causes") or []
     }
     for candidate in candidates:
+        # Leads with an inconclusive or confirmed result still absorb new
+        # copies so repeat reports do not become new leads. A dismissed lead
+        # does not, because new evidence deserves its own validation.
         if candidate.get("reconciled_duplicate"):
             continue
-        if candidate.get("validation_status") in {"dismissed", "inconclusive"} or (
-            candidate.get("validation_status") == "confirmed"
-            and not candidate.get("reportable")
-        ):
+        if candidate.get("validation_status") == "dismissed":
             continue
         candidate_roots = {
             str(root).strip().casefold() for root in candidate.get("root_causes") or []
@@ -748,16 +1011,21 @@ def reconcile_candidate_ledger(candidates: list[dict[str, Any]]) -> dict[str, in
     for candidate in candidates:
 
         def can_merge(current: dict[str, Any]) -> bool:
+            # Unvalidated copies may join an inconclusive or confirmed lead,
+            # but not a dismissed one: new evidence deserves its own review.
+            # A confirmed, reportable lead is never hidden inside one that
+            # was not confirmed.
+            if current.get("reconciled_duplicate"):
+                return True
+            status = candidate.get("validation_status")
+            current_status = current.get("validation_status")
+            if status == "pending" and current_status == "dismissed":
+                return False
             return not (
-                candidate.get("validation_status") == "pending"
-                and (
-                    current.get("validation_status") in {"dismissed", "inconclusive"}
-                    or (
-                        current.get("validation_status") == "confirmed"
-                        and not current.get("reportable")
-                    )
-                )
-                and not current.get("reconciled_duplicate")
+                status == "confirmed"
+                and candidate.get("reportable")
+                and current_status not in {"pending", None}
+                and not (current_status == "confirmed" and current.get("reportable"))
             )
 
         key = candidate_reconciliation_key(candidate)
@@ -840,7 +1108,11 @@ def _uncertain_duplicate_pairs(
                 second_input = str(
                     second_source.get("input") or second_source.get("parameter") or ""
                 ).casefold()
-                if first_input and second_input and first_input != second_input:
+                if (
+                    first_input
+                    and second_input
+                    and not (_tokens(first_input) & _tokens(second_input))
+                ):
                     continue
             else:
                 first_source = second_source = {}
