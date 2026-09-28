@@ -247,8 +247,8 @@ export function SastRunForm() {
             </select>
             <div className="subtle" style={{ marginTop: 6, fontSize: 13 }}>
               {analysisMode === "light"
-                ? "Uses source inventory, discovery, validation, and attack-path analysis."
-                : "Adds repository modeling, threat scenarios, coverage planning, candidate reconciliation, and semantic closure."}
+                ? "Lists the source files, looks for possible issues, confirms them, and checks how they could be reached."
+                : "Also maps the application, builds threat scenarios, plans security checks, merges duplicate findings, and reviews areas that may have been missed."}
             </div>
           </div>
 

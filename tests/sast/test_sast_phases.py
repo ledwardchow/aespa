@@ -1453,6 +1453,152 @@ def test_scored_inconclusive_candidates_still_require_validation(analysis_mode):
 
 
 @pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_reconciled_duplicate_does_not_schedule_another_validator(analysis_mode):
+    from aespa.services import sast_scanner_light
+    from aespa.services.sast_semantic import reconcile_candidate_ledger
+
+    scanner_module = sast_scanner_light if analysis_mode == "light" else sast_scanner
+    candidates = [
+        {
+            "candidate_id": 3,
+            "category": "A03",
+            "title": "SQL injection in lookup",
+            "location": "app.py:10",
+            "confidence": 0.8,
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 8,
+            "category": "A03",
+            "title": "Unsafe SQL query in lookup",
+            "location": "app.py:10",
+            "confidence": 0.9,
+            "validation_status": "pending",
+        },
+    ]
+
+    reconcile_candidate_ledger(candidates)
+    assert scanner_module._pending_candidate_ids(candidates) == [3]
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_reconciled_lead_keeps_locations_in_saved_evidence(
+    analysis_mode, isolated_db_engine
+):
+    from aespa.services import sast_scanner_light
+    from aespa.services.sast_semantic import reconcile_candidate_ledger
+
+    scanner_module = sast_scanner_light if analysis_mode == "light" else sast_scanner
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name=f"{analysis_mode} merged leads", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+    candidates = [
+        {
+            "candidate_id": 3,
+            "category": "A03",
+            "title": "SQL injection in lookup",
+            "location": "app.py:10",
+            "description": "User input reaches SQL.",
+            "evidence": "First trace",
+            "source_trace": {"file": "app.py", "symbol": "lookup"},
+            "sink_trace": {"file": "app.py", "symbol": "execute"},
+            "confidence": 0.8,
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 8,
+            "category": "A03",
+            "title": "Unsafe SQL query in lookup",
+            "location": "app.py:12",
+            "description": "The lookup changes query syntax.",
+            "evidence": "Second trace",
+            "source_trace": {"file": "app.py", "symbol": "lookup"},
+            "sink_trace": {"file": "app.py", "symbol": "execute"},
+            "confidence": 0.9,
+            "validation_status": "pending",
+        },
+    ]
+    reconcile_candidate_ledger(candidates)
+    candidates[0]["validation_status"] = "confirmed"
+    candidates[0]["reportable"] = True
+    scanner_module._candidates[run_id] = candidates
+    try:
+        assert scanner_module._sync_candidates_to_db(run_id, None) == (2, 1)
+        with Session(isolated_db_engine) as session:
+            leads = session.exec(
+                select(ScanLead).where(ScanLead.producer_run_id == run_id)
+            ).all()
+        assert len([lead for lead in leads if lead.reportable]) == 1
+        saved = next(lead for lead in leads if lead.reportable)
+        assert "First trace" in saved.evidence
+        assert "Second trace" in saved.evidence
+        assert "app.py:12" in saved.evidence
+    finally:
+        scanner_module._candidates.pop(run_id, None)
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_discovery_workers_add_matching_evidence_to_one_lead(
+    analysis_mode, tmp_path, isolated_db_engine
+):
+    from aespa.services import sast_scanner_light
+
+    scanner_module = sast_scanner_light if analysis_mode == "light" else sast_scanner
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name=f"{analysis_mode} online merge", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+    executor = scanner_module._make_tool_executor(run_id, tmp_path, None, coverage={})
+    proposal = {
+        "work_item_id": -1,
+        "title": "SQL injection in customer search",
+        "category": "A03",
+        "severity": "high",
+        "location": "app.py:10",
+        "description": "Request input reaches a raw query.",
+        "evidence": "first trace",
+        "suggested_endpoint": "GET /customers?sort=",
+        "source_trace": {"file": "app.py", "symbol": "search"},
+        "sink_trace": {"file": "app.py", "symbol": "execute"},
+        "confidence": 0.8,
+        "confidence_reasoning": "Source and sink are shown.",
+    }
+    try:
+        first = asyncio.run(executor("write_lead", proposal, 1))
+        second = asyncio.run(
+            executor(
+                "write_lead",
+                {
+                    **proposal,
+                    "title": "Unsafe SQL query in customer search",
+                    "location": "app.py:12",
+                    "evidence": "second trace",
+                    "confidence": 0.9,
+                },
+                2,
+            )
+        )
+        assert "recorded" in first
+        assert "already recorded" in second
+        assert len(scanner_module._candidates[run_id]) == 1
+        assert scanner_module._candidates[run_id][0]["observation_count"] == 2
+        with Session(isolated_db_engine) as session:
+            leads = session.exec(
+                select(ScanLead).where(ScanLead.producer_run_id == run_id)
+            ).all()
+        assert len(leads) == 1
+        assert "second trace" in leads[0].evidence
+        assert "app.py:12" in leads[0].evidence
+    finally:
+        scanner_module._candidates.pop(run_id, None)
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
 def test_stopping_during_validation_checkpoints_pending_candidates(
     analysis_mode, isolated_db_engine
 ):
@@ -1527,6 +1673,7 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
         run_id = run.id
 
     calls: list[str] = []
+    discovery_groups: list[str] = []
 
     async def fake_loop(_config, **kwargs):
         prompt = kwargs["system_message"]
@@ -1564,15 +1711,19 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
         else:
             calls.append("discovery")
             payload = json.loads(await execute("get_work_program", {}, 0))
+            discovery_groups.append(payload["class_group"])
             work_items = payload["work_items"]
             await execute(
                 "read_file", {"path": "app.py", "start_line": 1, "end_line": 3}, 1
             )
-            if "assigned focus is injection" in prompt:
+            injection_items = [
+                item for item in work_items if item["class_group"] == "injection"
+            ]
+            if injection_items:
                 await execute(
                     "write_lead",
                     {
-                        "work_item_id": work_items[0]["work_item_id"],
+                        "work_item_id": injection_items[0]["work_item_id"],
                         "title": "SQL injection in item",
                         "category": "A03",
                         "severity": "high",
@@ -1594,7 +1745,11 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
                     {"lead_id": 0, "confidence": 0.88, "reasoning": "Concrete path"},
                     2,
                 )
-                work_items = work_items[1:]
+                work_items = [
+                    item
+                    for item in work_items
+                    if item["work_item_id"] != injection_items[0]["work_item_id"]
+                ]
             for item in work_items:
                 await execute(
                     "record_disposition",
@@ -1616,8 +1771,9 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
     with events_svc.run_kind_scope("sast"):
         asyncio.run(sast_scanner._sast_scan_task(run_id))
 
-    # Four discovery workers plus the semantic closure worker.
-    assert calls.count("discovery") == 5
+    # The route worker owns the local sink; closure is the other discovery call.
+    assert calls.count("discovery") == 2
+    assert discovery_groups == ["review"]
     assert calls.count("validation") == 1
     assert calls[-1] == "attack_path"
     with Session(isolated_db_engine) as session:
@@ -1769,7 +1925,10 @@ def test_sast_validation_starts_after_discovery_reconciliation(
             await execute(
                 "read_file", {"path": "app.py", "start_line": 1, "end_line": 3}, 1
             )
-            if "assigned focus is injection" not in prompt:
+            injection_items = [
+                item for item in work_items if item["class_group"] == "injection"
+            ]
+            if not injection_items:
                 for item in work_items:
                     await execute(
                         "record_disposition",
@@ -1785,7 +1944,7 @@ def test_sast_validation_starts_after_discovery_reconciliation(
                 await execute(
                     "write_lead",
                     {
-                        "work_item_id": work_items[0]["work_item_id"],
+                        "work_item_id": injection_items[0]["work_item_id"],
                         "title": f"SQL injection in item {candidate_id}",
                         "category": "A03",
                         "severity": "high",
@@ -1815,6 +1974,18 @@ def test_sast_validation_starts_after_discovery_reconciliation(
                 if candidate_id == 0:
                     await asyncio.sleep(0)
                     discovery_observed_validator.append(bool(validator_started))
+            for item in work_items:
+                if item["work_item_id"] == injection_items[0]["work_item_id"]:
+                    continue
+                await execute(
+                    "record_disposition",
+                    {
+                        "work_item_id": item["work_item_id"],
+                        "status": "no_match",
+                        "reasoning": "No issue in this assigned class.",
+                    },
+                    3,
+                )
         return "phase complete"
 
     from aespa.services import llm
@@ -1868,6 +2039,24 @@ def test_grep_scope_does_not_count_as_direct_file_review(tmp_path, isolated_db_e
     from aespa.services import sast_workprogram
 
     sast_workprogram.build_source_atlas(run_id, source_root)
+    workers = sast_workprogram.worker_rows(run_id)
+    route_workers = [worker for worker in workers if worker.class_group == "review"]
+    assert route_workers
+    assert not any(
+        worker.class_group in {"injection", "access", "logic"} for worker in workers
+    )
+    for worker in route_workers:
+        items = sast_workprogram.worker_payload(worker.id)["work_items"]
+        by_surface = {}
+        for item in items:
+            by_surface.setdefault(item["surface"]["path"], set()).add(
+                item["class_group"]
+            )
+        assert all(
+            {"injection", "access", "logic"} <= groups
+            and groups <= {"injection", "access", "logic", "sink"}
+            for groups in by_surface.values()
+        )
     result = sast_scanner._run_read_tool(
         run_id,
         source_root,

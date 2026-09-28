@@ -44,6 +44,12 @@ When making UI changes:
 2. Do not edit files directly in `src/aespa/web/`; these are generated build artifacts.
 3. After completing UI changes, run `npm run build` inside `frontend/`. This rebuild places compiled assets in `src/aespa/web/` so they are served by `uv run aespa`.
 
+### Interface wording
+
+- Use plain, direct language across every interface. Keep labels short and describe actions and results in words users already know.
+- Avoid jargon, abstract labels, and polished or AI-generated sounding explanations. For example, use "Findings", "Finding details", and "Missing evidence" instead of "Candidate ledger", "Evidence chain", and "Proof gaps".
+- Check headings, buttons, empty states, status text, and help text when adding or changing a screen. Use technical terms only when they help users make a decision or understand a result.
+
 Frontend refactoring notes:
 
 - Do not trust Vite builds to catch undefined variables. Bundlers may ignore undefined variable references.

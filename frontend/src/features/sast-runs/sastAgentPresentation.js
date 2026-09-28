@@ -18,21 +18,32 @@ const FIXED_AGENTS = [
 
 const GROUPS = [
   {
+    id: "sast-review-workers",
+    name: "Review Workers",
+    classGroup: "review",
+    task: "No route review queued",
+  },
+  // Older runs used one worker per vulnerability class; they are shown only
+  // when a run actually has workers of that kind.
+  {
     id: "sast-injection-workers",
     name: "Injection Workers",
     classGroup: "injection",
+    legacy: true,
     task: "No injection analysis queued",
   },
   {
     id: "sast-access-workers",
     name: "Access Control Workers",
     classGroup: "access",
+    legacy: true,
     task: "No access-control analysis queued",
   },
   {
     id: "sast-logic-workers",
     name: "Logic Workers",
     classGroup: "logic",
+    legacy: true,
     task: "No business-logic analysis queued",
   },
   {
@@ -43,23 +54,23 @@ const GROUPS = [
   },
   {
     id: "sast-validators",
-    name: "Candidate Validators",
+    name: "Finding Validators",
     classGroup: "validator",
-    task: "No candidate validation queued",
+    task: "No finding validation queued",
   },
 ];
 
 const FINAL_AGENTS = [
   {
     id: "sast-closure-analyst",
-    name: "Closure Analyst",
-    task: "Waiting for closure review",
+    name: "Gap Reviewer",
+    task: "Waiting to review coverage gaps",
     deepOnly: true,
   },
   {
     id: "sast-attack-path",
     name: "Attack Path Analyst",
-    task: "Waiting for validated candidates",
+    task: "Waiting for confirmed findings",
   },
 ];
 
@@ -79,7 +90,11 @@ function inferClassGroup(row) {
   }
   if (row.class_group) return row.class_group;
   const role = String(row.role || "").toLowerCase();
-  return ["injection", "access", "logic", "sink"].find((group) => role.includes(`${group} worker`));
+  return ["review", "injection", "access", "logic", "sink"].find((group) => role.includes(`${group} worker`));
+}
+
+export function sastGroupHasAgents(rows, classGroup) {
+  return (rows || []).some((row) => inferClassGroup(row) === classGroup);
 }
 
 export function sastGroupHasActiveAgent(rows, classGroup) {
@@ -97,7 +112,7 @@ function inferredWorkerName(row) {
   );
   if (workerMatch) return workerMatch[1];
   const candidate = String(row.agent_id || "").match(/^sast-validator-(\d+)$/)?.[1];
-  return candidate ? `Candidate ${candidate}` : row.role || row.agent_id || "Worker";
+  return candidate ? `Finding ${candidate}` : row.role || row.agent_id || "Worker";
 }
 
 function buildAgents(rows) {
@@ -152,6 +167,21 @@ function aggregateStatus(children, parent) {
   return "idle";
 }
 
+// Group lists scroll after a few rows, so unfinished workers are listed first
+// to keep them visible; creation order is kept within each status.
+const CHILD_STATUS_ORDER = ["active", "paused", "queued", "failed", "idle", "complete"];
+
+function orderChildren(children) {
+  const rank = (child) => {
+    const index = CHILD_STATUS_ORDER.indexOf(normaliseAgentStatus(child.status));
+    return index === -1 ? CHILD_STATUS_ORDER.length : index;
+  };
+  return children
+    .map((child, index) => ({ child, index }))
+    .sort((a, b) => rank(a.child) - rank(b.child) || a.index - b.index)
+    .map(({ child }) => child);
+}
+
 function groupTask(children, emptyTask) {
   if (!children.length) return emptyTask;
   const counts = new Map();
@@ -182,17 +212,22 @@ export function buildSastAgentRoster(rows, analysisMode = "deep", scanRunning = 
       };
     },
   );
-  const groups = GROUPS.map((group) => {
-    const children = [...agents.values()].filter(
-      (agent) => agent.id !== "sast-validator" && agent.classGroup === group.classGroup,
+  const groups = GROUPS.flatMap((group) => {
+    const children = orderChildren(
+      [...agents.values()].filter(
+        (agent) => agent.id !== "sast-validator" && agent.classGroup === group.classGroup,
+      ),
     );
+    if (group.legacy && !children.length) return [];
     const parent = group.classGroup === "validator" ? agents.get("sast-validator") : null;
-    return {
-      ...group,
-      status: aggregateStatus(children, parent),
-      task: groupTask(children, parent?.task || group.task),
-      children,
-    };
+    return [
+      {
+        ...group,
+        status: aggregateStatus(children, parent),
+        task: groupTask(children, parent?.task || group.task),
+        children,
+      },
+    ];
   });
   const final = FINAL_AGENTS.filter((agent) => analysisMode === "deep" || !agent.deepOnly).map(
     (placeholder) => {

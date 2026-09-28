@@ -105,11 +105,11 @@ export function sastCandidatesToMarkdown(leads, meta = {}) {
   const lines = [`# SAST Report${meta.runName ? `: ${markdownText(meta.runName)}` : ""}`, ""];
   if (meta.generatedAt) lines.push(`- Exported: ${meta.generatedAt.toLocaleString()}`);
   lines.push(`- Total issues: ${issues.length}`, "", "## Issue Summary", "");
-  lines.push("| # | Severity | Candidate | Confidence | Validation | Reportable | Location |");
+  lines.push("| # | Severity | Finding | Confidence | Validation | Reportable | Location |");
   lines.push("|---:|---|---|---:|---|---|---|");
   issues.forEach((lead, index) => {
     lines.push(
-      `| ${index + 1} | ${markdownTableValue((lead.severity || "medium").toUpperCase())} | ${markdownTableValue(lead.title || "Untitled candidate")} | ${Math.round((lead.confidence || 0) * 100)}% | ${markdownTableValue(lead.validation_status || "pending")} | ${lead.reportable ? "Yes" : "No"} | ${markdownTableValue(lead.location || "Location not provided")} |`,
+      `| ${index + 1} | ${markdownTableValue((lead.severity || "medium").toUpperCase())} | ${markdownTableValue(lead.title || "Untitled finding")} | ${Math.round((lead.confidence || 0) * 100)}% | ${markdownTableValue(lead.validation_status || "pending")} | ${lead.reportable ? "Yes" : "No"} | ${markdownTableValue(lead.location || "Location not provided")} |`,
     );
   });
   if (!issues.length) lines.push("| — | — | No issues | — | — | — | — |");
@@ -118,7 +118,7 @@ export function sastCandidatesToMarkdown(leads, meta = {}) {
   issues.forEach((lead, index) => {
     const sourceTrace = sastTraceValue(lead.source_trace_json, "");
     lines.push(
-      `## ${index + 1}. ${markdownListValue(lead.title || "Untitled candidate")}`,
+      `## ${index + 1}. ${markdownListValue(lead.title || "Untitled finding")}`,
       "",
       `- Lead reference: ${markdownListValue(lead.reference || "—")}`,
       ...(lead.origin_reference
@@ -132,7 +132,7 @@ export function sastCandidatesToMarkdown(leads, meta = {}) {
       `- Location: ${markdownListValue(lead.location || "Location not provided")}`,
       `- Fingerprint: ${markdownListValue(lead.fingerprint)}`,
       "",
-      "### Evidence Chain",
+      "### Details",
       "",
     );
     appendSastTrace(
@@ -145,17 +145,12 @@ export function sastCandidatesToMarkdown(leads, meta = {}) {
     appendSastTrace(lines, "Sink", lead.sink_trace_json, "Not recorded");
     appendSastTrace(
       lines,
-      "Counterevidence",
+      "Evidence against",
       lead.counterevidence_json,
-      "No counterevidence recorded",
+      "No evidence against recorded",
     );
-    appendSastTrace(lines, "Proof gaps", lead.proof_gaps_json, "No unresolved static proof gaps");
-    appendSastTrace(
-      lines,
-      "Attack path",
-      lead.attack_path_json,
-      "Not available for this candidate",
-    );
+    appendSastTrace(lines, "Missing evidence", lead.proof_gaps_json, "No missing evidence");
+    appendSastTrace(lines, "Attack path", lead.attack_path_json, "Not available for this finding");
     if (lead.validation_reasoning)
       lines.push("#### Validator reasoning", "", markdownText(lead.validation_reasoning), "");
     if (lead.evidence) lines.push("#### Code evidence", "", markdownCodeBlock(lead.evidence), "");

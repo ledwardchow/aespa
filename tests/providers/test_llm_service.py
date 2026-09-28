@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import sys
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ from anthropic.types import TextBlock, ThinkingBlock, ToolUseBlock
 from pydantic import ValidationError
 from sqlmodel import Session, select
 
-from aespa.models import LLMConfig, LLMUsageMonth
+from aespa.models import LLMConfig, LLMUsageMonth, Site, TestRun
 from aespa.services import llm
 from aespa.services.resolved_llm_config import ResolvedLLMConfig
 
@@ -1502,6 +1503,70 @@ def test_usage_reconciliation_accumulates_multiple_provider_events():
         "gpt-5.6-sol", input_tokens=25, output_tokens=5, cache_read_tokens=15
     )
     assert llm._last_call_tokens_var.get() == {"input": 140, "output": 15}
+
+
+def test_bedrock_usage_includes_cached_input_in_run_total(isolated_db_engine):
+    run_id = 888892
+    events = []
+    llm.set_run_context(run_id, emit_fn=events.append, run_kind="web")
+    llm._last_call_tokens_var.set(None)
+    try:
+        llm._record_usage(
+            "anthropic.claude-test",
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_tokens=300,
+            cache_write_tokens=50,
+            provider="bedrock",
+        )
+        usage = llm.get_run_token_usage(run_id)
+    finally:
+        llm.clear_run_context()
+        llm._run_token_usage.pop(("web", run_id), None)
+
+    assert usage["total_input"] == 450
+    assert usage["total_cache_read"] == 300
+    assert usage["total_cache_write"] == 50
+    assert events[-1]["input_tokens"] == 450
+    assert llm._last_call_tokens_var.get() == {"input": 150, "output": 20}
+    with Session(isolated_db_engine) as session:
+        global_usage = session.exec(select(LLMUsageMonth)).one()
+        assert global_usage.provider == "bedrock"
+        assert global_usage.input_tokens == 100
+        assert global_usage.cache_read_tokens == 300
+        assert global_usage.cache_write_tokens == 50
+
+
+def test_saved_bedrock_usage_adds_cached_input_once(isolated_db_engine):
+    model = "anthropic.claude-test"
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Bedrock usage site", base_url="https://example.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(
+            site_id=site.id,
+            name="Bedrock usage run",
+            token_usage_json=json.dumps(
+                {
+                    model: {
+                        "provider": "bedrock",
+                        "input": 100,
+                        "output": 20,
+                        "cache_read": 300,
+                        "cache_write": 50,
+                    }
+                }
+            ),
+        )
+        session.add(run)
+        session.commit()
+        run_id = run.id
+
+    first = llm._load_bucket_from_db(run_id)
+    second = llm._load_bucket_from_db(run_id)
+    assert first[model]["input"] == 450
+    assert second[model]["input"] == 450
+    assert second[model]["bedrock_input_inclusive"] is True
 
 
 def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
@@ -5756,3 +5821,92 @@ def test_small_output_profile_agentic_loop_remains_valid(monkeypatch):
     assert summary == "Complete."
     assert captured[0].max_tokens == 200
     assert config.max_tokens == 200
+
+
+def test_agentic_loop_repairs_tool_call_cut_off_by_output_limit(monkeypatch):
+    config = LLMConfig(
+        provider="bedrock",
+        model="global.anthropic.claude-sonnet-5",
+        max_tokens=2048,
+    )
+    calls: list[list[dict]] = []
+    executed: list[tuple[str, dict]] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        calls.append(copy.deepcopy(messages))
+        if len(calls) == 1:
+            blocks = [
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "record_attack_path",
+                    "input": {"candidate_id": 20},
+                    "text": None,
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_2",
+                    "name": "record_attack_path",
+                    "input": '{"candidate_id": 21',
+                    "text": None,
+                },
+            ]
+            return blocks, "max_tokens", blocks
+        block = {
+            "type": "tool_use",
+            "id": "call_3",
+            "name": "done",
+            "input": {"summary": "Complete."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        executed.append((name, tool_input))
+        return "recorded"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+        )
+    )
+
+    assert summary == "Complete."
+    assert executed == [("record_attack_path", {"candidate_id": 20})]
+    assistant = next(msg for msg in calls[1] if msg["role"] == "assistant")
+    assert [block["input"] for block in assistant["content"]] == [
+        {"candidate_id": 20},
+        {},
+    ]
+    results = calls[1][-1]["content"]
+    cut_off = next(item for item in results if item["tool_use_id"] == "call_2")
+    assert "output token limit" in cut_off["content"]
+
+
+def test_repair_tool_use_inputs_fixes_saved_history():
+    messages = [
+        {"role": "user", "content": "start"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "a", "name": "t", "input": {"x": 1}},
+                {"type": "tool_use", "id": "b", "name": "t", "input": '{"x": 2}'},
+                {"type": "tool_use", "id": "c", "name": "t", "input": '{"x": '},
+            ],
+        },
+    ]
+
+    repaired = llm._repair_tool_use_inputs(messages)
+
+    assert [block["input"] for block in repaired[1]["content"]] == [
+        {"x": 1},
+        {"x": 2},
+        {},
+    ]
+    assert messages[1]["content"][2]["input"] == '{"x": '
+    assert llm._repair_tool_use_inputs(repaired) is repaired

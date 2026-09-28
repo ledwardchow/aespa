@@ -74,7 +74,7 @@ test("resolved source revision appears in the SAST run header", async ({ page })
   await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-resolved-source-layout.png") });
 
   const candidates = page.getByRole("tablist", { name: "SAST run views" }).getByRole("tab", {
-    name: "Candidates 0",
+    name: "Findings 0",
   });
   await candidates.click();
   await expect(candidates).toHaveAttribute("aria-selected", "true");

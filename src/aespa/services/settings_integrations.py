@@ -89,7 +89,7 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
         strict_locator_enforcement=getattr(cfg, "strict_locator_enforcement", True),
         sast_rate_limit_findings=getattr(cfg, "sast_rate_limit_findings", True),
         sast_race_condition_findings=getattr(cfg, "sast_race_condition_findings", True),
-        sast_audit_logging_findings=getattr(cfg, "sast_audit_logging_findings", False),
+        sast_audit_logging_findings=getattr(cfg, "sast_audit_logging_findings", True),
         sast_defense_in_depth_findings=getattr(
             cfg, "sast_defense_in_depth_findings", False
         ),

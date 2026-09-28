@@ -568,6 +568,16 @@ def _load_bucket_from_db(
                         changed = True
                     if not provider:
                         continue
+                    if provider == "bedrock" and not counts.get(
+                        "bedrock_input_inclusive"
+                    ):
+                        counts["input"] = (
+                            counts.get("input", 0)
+                            + counts.get("cache_read", 0)
+                            + counts.get("cache_write", 0)
+                        )
+                        counts["bedrock_input_inclusive"] = True
+                        changed = True
                     rates = statistics_service._rates_for(s, provider, model)
                     cost = statistics_service.estimate_usage_cost(
                         provider,
@@ -717,6 +727,8 @@ def set_run_context(run_id: int, emit_fn: Any, run_kind: str = "web") -> None:
                 for k in ("provider", "copilot_quota"):
                     if counts.get(k) is not None:
                         bucket[model][k] = counts[k]
+                if counts.get("bedrock_input_inclusive"):
+                    bucket[model]["bedrock_input_inclusive"] = True
         _run_token_seeded.add(key)
 
 
@@ -863,18 +875,29 @@ def _record_usage(
     # this as its cumulative ``thread/tokenUsage/updated`` stream advances).
     # Keep a per-call total so the limiter reconciles the whole turn rather than
     # only the final notification.
-    previous_call_usage = _last_call_tokens_var.get() or {"input": 0, "output": 0}
-    _last_call_tokens_var.set(
-        {
-            "input": previous_call_usage.get("input", 0)
-            + input_tokens
-            + cache_read_tokens,
-            "output": previous_call_usage.get("output", 0) + output_tokens,
-        }
-    )
     context = usage_context or _capture_usage_context()
     usage_provider = provider or _provider_var.get() or "unknown"
     usage_base_url = base_url if base_url is not None else _base_url_var.get()
+    # Bedrock Converse reports only uncached tokens in inputTokens. Keep the
+    # run's input total inclusive while retaining separate cache counters.
+    reported_input = (
+        input_tokens + cache_read_tokens + cache_write_tokens
+        if usage_provider == "bedrock"
+        else input_tokens
+    )
+    # Bedrock's token quota counts cache writes, but not cache reads.
+    limiter_input = (
+        input_tokens + cache_write_tokens
+        if usage_provider == "bedrock"
+        else input_tokens + cache_read_tokens
+    )
+    previous_call_usage = _last_call_tokens_var.get() or {"input": 0, "output": 0}
+    _last_call_tokens_var.set(
+        {
+            "input": previous_call_usage.get("input", 0) + limiter_input,
+            "output": previous_call_usage.get("output", 0) + output_tokens,
+        }
+    )
     inclusive_input_providers = {
         "openai",
         "openai_compatible",
@@ -882,16 +905,19 @@ def _record_usage(
         "azure_foundry",
         "azure_foundry_openai",
         "bedrock_mantle",
+        "bedrock",
         "google",
         "google_vertex",
         "openai_codex",
         "google_antigravity",
     }
-    normalized_input = max(0, input_tokens)
+    normalized_input = max(0, reported_input)
     if input_includes_cache is True or (
         input_includes_cache is None and usage_provider in inclusive_input_providers
     ):
-        normalized_input = max(0, input_tokens - cache_read_tokens - cache_write_tokens)
+        normalized_input = max(
+            0, reported_input - cache_read_tokens - cache_write_tokens
+        )
     usage_rates: dict[str, Any] = {}
     try:
         from aespa.services import statistics as statistics_service
@@ -920,7 +946,7 @@ def _record_usage(
     entry = bucket.setdefault(
         model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     )
-    entry["input"] += input_tokens
+    entry["input"] += reported_input
     entry["output"] += output_tokens
     entry["cache_read"] += cache_read_tokens
     entry["cache_write"] += cache_write_tokens
@@ -929,6 +955,8 @@ def _record_usage(
     entry["factory_credits"] = entry.get("factory_credits", 0) + factory_credits
     entry["premium_requests"] = entry.get("premium_requests", 0) + premium_requests
     entry["requests"] = entry.get("requests", 0) + requests
+    if usage_provider == "bedrock":
+        entry["bedrock_input_inclusive"] = True
     try:
         from aespa.services import statistics as statistics_service
 
@@ -958,7 +986,7 @@ def _record_usage(
                 {
                     "type": "token_usage_update",
                     "model": model,
-                    "input_tokens": input_tokens,
+                    "input_tokens": reported_input,
                     "output_tokens": output_tokens,
                     "cache_read_tokens": cache_read_tokens,
                     "cache_write_tokens": cache_write_tokens,
@@ -5809,6 +5837,7 @@ async def _call_with_tools(
     operation = _operation_var.get() or _infer_llm_operation()
     call_id = next(_traffic_call_ids)
     active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    messages = _repair_tool_use_inputs(messages)
     request = {
         "system": system_message,
         "messages": messages,
@@ -6967,6 +6996,56 @@ async def _call_with_tools_impl(
     raise ValueError(f"Provider {config.provider!r} does not support native tool use")
 
 
+def _history_tool_input(value: Any) -> dict[str, Any]:
+    """Return a tool-call input that every provider accepts in conversation history."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _repair_tool_use_inputs(messages: list[dict]) -> list[dict]:
+    """Replace tool-call inputs that are not JSON objects in *messages*.
+
+    A reply cut off by the output token limit can end with a partial tool call
+    whose arguments are an unparsed string. Providers reject that in later
+    requests, so the history keeps the call and its id with empty arguments.
+    """
+    repaired: list[dict] | None = None
+    for index, message in enumerate(messages):
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        new_content: list[Any] | None = None
+        for block_index, block in enumerate(content):
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and "input" in block
+                and not isinstance(block.get("input"), dict)
+            ):
+                if new_content is None:
+                    new_content = list(content)
+                new_content[block_index] = {
+                    **block,
+                    "input": _history_tool_input(block.get("input")),
+                }
+        if new_content is not None:
+            if repaired is None:
+                repaired = list(messages)
+            repaired[index] = {**message, "content": new_content}
+    return repaired if repaired is not None else messages
+
+
+_OUTPUT_LIMIT_STOP_REASONS = {"max_tokens", "length", "max_output_tokens"}
+
+
 def _normalize_agentic_tool_input(value: Any) -> tuple[dict[str, Any], str | None]:
     """Normalize provider tool arguments to the mapping expected by executors."""
     if value is None:
@@ -7434,7 +7513,16 @@ async def thinking_agentic_loop(
             # non-empty marker when a provider returns no usable blocks so the
             # checkpoint itself remains valid for every messages API on resume.
             assistant_content = (
-                [_canonical_content_block(block) for block in raw_content]
+                _repair_tool_use_inputs(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": [
+                                _canonical_content_block(block) for block in raw_content
+                            ],
+                        }
+                    ]
+                )[0]["content"]
                 if isinstance(raw_content, list) and raw_content
                 else [
                     {
@@ -7546,6 +7634,12 @@ async def thinking_agentic_loop(
                     break
 
                 if tool_input_error:
+                    if str(stop_reason or "").lower() in _OUTPUT_LIMIT_STOP_REASONS:
+                        tool_input_error = (
+                            "This tool call was cut off because the response reached "
+                            "the output token limit, so it was not run. Call it again, "
+                            "and make fewer or shorter tool calls in each response."
+                        )
                     log.warning(
                         "thinking_agentic_loop: invalid input for tool %r: %s",
                         tool_name,
