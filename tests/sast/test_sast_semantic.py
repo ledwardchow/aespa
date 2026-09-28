@@ -1181,3 +1181,133 @@ def test_dependency_analysis_matches_only_resolved_affected_versions(tmp_path):
         },
     )
     assert [match["advisory_id"] for match in analysis["matches"]] == ["ADV-1"]
+
+
+def test_candidate_ledger_merges_plain_language_variants_across_categories():
+    """Workers describe one issue in plain words and pick different categories."""
+
+    candidates = [
+        {
+            "candidate_id": 1,
+            "category": "A01",
+            "title": "Profile update lets a user change another customer's data",
+            "location": "src/Controllers/ProfileController.php:47",
+            "suggested_endpoint": "PUT /api/profile",
+            "source_trace": {"file": "src/Controllers/ProfileController.php"},
+            "sink_trace": {"file": "src/Models/User.php", "line": 90},
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 2,
+            "category": "API1",
+            "title": "Profile update accepts another user's ID",
+            "location": "src/Controllers/ProfileController.php:53",
+            "suggested_endpoint": "PUT /api/profile",
+            "source_trace": {"file": "src/Controllers/ProfileController.php"},
+            "sink_trace": {
+                "file": "src/Controllers/ProfileController.php",
+                "line": 60,
+            },
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 3,
+            "category": "A07",
+            "title": "Customer JWTs are accepted without signature verification",
+            "location": "src/Services/AuthService.php:50",
+            "suggested_endpoint": "GET /api/profile",
+            "sink_trace": {"file": "src/Middleware/AuthMiddleware.php", "line": 22},
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 4,
+            "category": "A01",
+            "title": "Forged bearer tokens bypass customer authentication",
+            "location": "src/Services/AuthService.php:58",
+            "suggested_endpoint": "GET /api/accounts",
+            "sink_trace": {"file": "src/Middleware/AuthMiddleware.php", "line": 32},
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 5,
+            "category": "A05",
+            "title": "Global API error handler returns stack traces to callers",
+            "location": "public/index.php:28",
+            "suggested_endpoint": "POST /api/login",
+            "sink_trace": {"file": "public/index.php", "line": 28},
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 6,
+            "category": "A05",
+            "title": "Malformed FX account input reveals server error details",
+            "location": "public/index.php:26",
+            "suggested_endpoint": "POST /api/fx/convert",
+            "sink_trace": {"file": "src/Controllers/FxController.php", "line": 40},
+            "validation_status": "pending",
+        },
+    ]
+
+    stats = reconcile_candidate_ledger(candidates)
+    assert stats == {"input": 6, "unique": 3, "merged": 3}
+    assert candidates[1]["reconciled_into_candidate_id"] == 1
+    assert candidates[3]["reconciled_into_candidate_id"] == 3
+    assert candidates[5]["reconciled_into_candidate_id"] == 5
+
+
+def test_candidate_ledger_keeps_plain_language_issues_apart_when_distant():
+    candidates = [
+        {
+            "candidate_id": 1,
+            "category": "A07",
+            "title": "Login responses reveal whether an email is registered",
+            "location": "src/Controllers/AuthController.php:60",
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 2,
+            "category": "A07",
+            "title": "Public login has no failed-attempt throttling",
+            "location": "src/Controllers/AuthController.php:60",
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 3,
+            "category": "A01",
+            "title": "External transfer can debit another customer's account",
+            "location": "src/Services/TransferService.php:174",
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 4,
+            "category": "A01",
+            "title": "Profile update accepts another user's ID",
+            "location": "src/Controllers/ProfileController.php:53",
+            "validation_status": "pending",
+        },
+    ]
+
+    assert reconcile_candidate_ledger(candidates)["unique"] == 4
+
+
+def test_new_copy_joins_an_inconclusive_or_confirmed_lead():
+    previous = {
+        "candidate_id": 1,
+        "category": "A10",
+        "title": "Avatar proxy fetches attacker-selected URLs",
+        "location": "src/Controllers/ProfileController.php:78",
+        "suggested_endpoint": "POST /api/profile/avatar",
+        "sink_trace": {"file": "src/Controllers/ProfileController.php", "line": 79},
+        "validation_status": "inconclusive",
+        "reportable": False,
+    }
+    later = {
+        **previous,
+        "candidate_id": 2,
+        "title": "SSRF through avatar import",
+        "location": "src/Controllers/ProfileController.php:79",
+        "validation_status": "pending",
+    }
+    assert find_existing_candidate([previous], later) is previous
+    confirmed = {**previous, "validation_status": "confirmed", "reportable": False}
+    assert find_existing_candidate([confirmed], later) is confirmed
