@@ -278,7 +278,7 @@ export function ThreatModelView({ threatModel, planning, closure, report, status
               `${resolvedChecks}/${obligations.length}`,
               `${unresolvedChecks} remaining`,
             ],
-            ["Candidates", report?.candidates || 0],
+            ["Findings", report?.candidates || 0],
             ["Open questions", asArray(model.open_questions).length],
             ["Source files reviewed", model.files_reviewed || 0],
             ["Model coverage", titleCase(quality.status || "unknown")],
@@ -308,7 +308,7 @@ export function ThreatModelView({ threatModel, planning, closure, report, status
               <div className="sast-panel-title">Security check progress</div>
               <div className="sast-panel-sub">
                 {resolvedChecks} of {obligations.length} checks completed ·{" "}
-                {report?.reportable || 0} reportable candidates
+                {report?.reportable || 0} reportable findings
               </div>
             </div>
             <span
@@ -319,7 +319,7 @@ export function ThreatModelView({ threatModel, planning, closure, report, status
           </div>
           {report?.discovery_summary ? (
             <details className="sast-semantic-narrative">
-              <summary>Show discovery summary</summary>
+              <summary>Show analysis summary</summary>
               <p>{report.discovery_summary}</p>
             </details>
           ) : null}
@@ -330,7 +330,7 @@ export function ThreatModelView({ threatModel, planning, closure, report, status
               ))}
             </ul>
           ) : (
-            <div className="subtle">No closure gaps recorded.</div>
+            <div className="subtle">No coverage gaps recorded.</div>
           )}
         </section>
       ) : null}
@@ -455,13 +455,13 @@ function phaseWork(row) {
     case "planning":
       return [`${row.obligations_created || 0} security checks planned`];
     case "discovery":
-      return [reads, `${row.candidates_emitted || 0} candidates found`].filter(Boolean);
+      return [reads, `${row.candidates_emitted || 0} findings found`].filter(Boolean);
     case "reconciliation": {
       const merged = Number(row.candidates_merged || 0);
       const split = Number(row.candidates_split || 0);
       return merged || split
         ? [`${merged} merged`, `${split} split`]
-        : ["No duplicate candidates needed changes"];
+        : ["No duplicate findings needed changes"];
     }
     case "validation": {
       const confirmed = Number(row.candidates_confirmed || 0);
@@ -470,7 +470,7 @@ function phaseWork(row) {
         reads,
         confirmed || dismissed
           ? `${confirmed} confirmed, ${dismissed} dismissed`
-          : "No candidates required a decision",
+          : "No findings required a decision",
       ].filter(Boolean);
     }
     case "closure":
@@ -481,9 +481,9 @@ function phaseWork(row) {
           : "Coverage gaps reviewed",
       ].filter(Boolean);
     case "attack_path":
-      return [reads, "Reportable candidates checked for reachability"].filter(Boolean);
+      return [reads, "Reportable findings checked for reachability"].filter(Boolean);
     case "report":
-      return ["Final candidate and coverage report assembled"];
+      return ["Final findings and coverage report assembled"];
     default:
       return [reads || "Phase completed"];
   }
@@ -576,7 +576,7 @@ export function EfficiencyView({ telemetry, report, status, phaseState = {} }) {
           ],
           ["Files reviewed", totals.files_read, "Counted once in each phase"],
           ["Source spans reviewed", totals.unique_spans_read, "Counted once in each phase"],
-          ["Candidates found", totals.candidates_emitted, `${report?.reportable || 0} reportable`],
+          ["Findings", totals.candidates_emitted, `${report?.reportable || 0} reportable`],
         ]}
       />
       <section className="sast-panel">

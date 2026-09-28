@@ -83,7 +83,7 @@ test("renders threat scenarios with security check progress and closure evidence
   expect(screen.getAllByText("assessed safe")).toHaveLength(2);
   expect(screen.getByText("Security checks")).toBeTruthy();
   expect(screen.getByText("Security check progress")).toBeTruthy();
-  expect(screen.getByText("1 of 1 checks completed · 0 reportable candidates")).toBeTruthy();
+  expect(screen.getByText("1 of 1 checks completed · 0 reportable findings")).toBeTruthy();
   expect(screen.queryByText("Check ownership")).toBeNull();
 });
 
@@ -155,7 +155,7 @@ test("renders per-phase efficiency telemetry", () => {
   expect(timeline.querySelectorAll("span")).toHaveLength(2);
   expect(screen.getByText("Strategy: threat directed")).toBeTruthy();
   expect(screen.getByText("3 files, 4 spans")).toBeTruthy();
-  expect(screen.getByText("2 candidates found")).toBeTruthy();
+  expect(screen.getByText("2 findings found")).toBeTruthy();
   expect(screen.queryByText("Security checks")).toBeNull();
   expect(screen.queryByText("Limits")).toBeNull();
 });

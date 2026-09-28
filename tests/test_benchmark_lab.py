@@ -49,6 +49,14 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
             )
         )
         run.llm_config_id = scan_model.id
+        run.token_usage_json = json.dumps(
+            {
+                "scan-model": {
+                    "estimated_cost_available": True,
+                    "estimated_total_cost_usd": 0.42,
+                }
+            }
+        )
         if kind == "site":
             run.execution_snapshot_json = json.dumps(
                 {"model": {"provider": "openai", "model": "scanned-model"}}
@@ -148,6 +156,7 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
     assert response.status_code == 201, response.text
     result = response.json()
     assert result["comparison"]["method"] == "model"
+    assert result["scan_cost_usd"] == 0.42
     assert result["scan_models"]["test_lead"] == {
         "id": scan_model_id,
         "name": "Test Lead",
@@ -190,6 +199,8 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
     )
     saved = client.get(f"{BASE}/results/{result['id']}").json()
     assert saved["ground_truth"]["items"][0]["external_id"] == "GT-1"
+    assert saved["scan_cost_usd"] == 0.42
+    assert client.get(f"{BASE}/results").json()[0]["scan_cost_usd"] == 0.42
 
 
 def test_sast_can_compare_with_saved_site_ground_truth(client, db_engine, monkeypatch):
@@ -258,6 +269,8 @@ def test_sast_can_compare_with_saved_site_ground_truth(client, db_engine, monkey
     )
     assert result.status_code == 201, result.text
     assert result.json()["run_kind"] == "sast"
+    assert result.json()["target_kind"] == "site"
+    assert result.json()["target_id"] == site_id
     assert len(result.json()["rows"]) == 1
     assert result.json()["comparison"]["method"] == "model"
     assert result.json()["scan_models"] == {

@@ -85,6 +85,7 @@ _INCLUSIVE_INPUT_PROVIDERS = {
     "azure_foundry",
     "azure_foundry_openai",
     "bedrock_mantle",
+    "bedrock",
     "google",
     "google_vertex",
     "openai_codex",
@@ -305,6 +306,8 @@ def _cost(row: LLMUsageMonth) -> tuple[float, float, float]:
         + row.cache_read_tokens * (row.cache_read_price_usd_per_million or 0)
         + row.cache_write_tokens * (row.cache_write_price_usd_per_million or 0)
     ) / 1_000_000
+    if row.provider == "github_copilot":
+        token_cost = 0.0
     credit_count = (
         row.ai_credits if row.provider == "github_copilot" else row.factory_credits
     )
@@ -334,6 +337,16 @@ def estimate_usage_cost(
         }
 
     rates = rates or {}
+    if provider == "github_copilot":
+        credit_rate = rates.get("credit_price_usd_per_million")
+        credit_count = max(0.0, float(ai_credits))
+        credit_cost = credit_count * (credit_rate or 0) / 1_000_000
+        return {
+            "estimated_token_cost_usd": 0.0,
+            "estimated_credit_cost_usd": credit_cost,
+            "estimated_total_cost_usd": credit_cost,
+            "estimated_cost_available": credit_count > 0 and credit_rate is not None,
+        }
     billable_input = max(0, int(input_tokens))
     if provider in _INCLUSIVE_INPUT_PROVIDERS:
         billable_input = max(
@@ -382,7 +395,7 @@ def estimate_usage_cost(
 
 def _row_dict(row: LLMUsageMonth) -> dict[str, Any]:
     token_cost, credit_cost, total = _cost(row)
-    has_price = any(
+    has_token_price = any(
         rate is not None
         for rate in (
             row.input_price_usd_per_million,
@@ -390,9 +403,14 @@ def _row_dict(row: LLMUsageMonth) -> dict[str, Any]:
             row.cache_read_price_usd_per_million,
             row.cache_write_price_usd_per_million,
         )
-    ) or (
-        row.credit_price_usd_per_million is not None
-        and (row.ai_credits > 0 or row.factory_credits > 0)
+    )
+    has_credit_price = row.credit_price_usd_per_million is not None and (
+        row.ai_credits > 0 or row.factory_credits > 0
+    )
+    has_price = (
+        has_credit_price
+        if row.provider == "github_copilot"
+        else (has_token_price or has_credit_price)
     )
     return {
         "month": row.month,

@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
 from sqlmodel import Session
 
 from aespa.models import LLMConfig, LLMPriceCatalog, LLMUsageMonth, Site, TestRun
@@ -146,6 +147,62 @@ def test_bedrock_input_is_not_subtracted(isolated_db_engine):
     with Session(isolated_db_engine) as session:
         row = session.query(LLMUsageMonth).one()
         assert row.input_tokens == 1000
+
+
+def test_bedrock_run_cost_uses_uncached_input():
+    cost = statistics.estimate_usage_cost(
+        "bedrock",
+        input_tokens=450,
+        cache_read_tokens=300,
+        cache_write_tokens=50,
+        rates={
+            "input_price_usd_per_million": 1.0,
+            "cache_read_price_usd_per_million": 0.1,
+            "cache_write_price_usd_per_million": 2.0,
+        },
+    )
+    assert cost["estimated_token_cost_usd"] == pytest.approx(230 / 1_000_000)
+
+
+def test_copilot_cost_uses_credits_even_when_model_has_token_prices(
+    client, isolated_db_engine, monkeypatch
+):
+    monkeypatch.setattr(
+        statistics,
+        "_feed",
+        lambda session: {
+            "gpt-test": {
+                "input_cost_per_token": 0.000002,
+                "output_cost_per_token": 0.000004,
+            }
+        },
+    )
+    rates = statistics.record_usage(
+        "github_copilot",
+        "gpt-test",
+        input_tokens=1_000_000,
+        output_tokens=500_000,
+        ai_credits=2.5,
+        month="2026-08",
+    )
+
+    assert rates["credit_price_usd_per_million"] == 10_000
+    run_cost = statistics.estimate_usage_cost(
+        "github_copilot",
+        input_tokens=1_000_000,
+        output_tokens=500_000,
+        ai_credits=2.5,
+        rates=rates,
+    )
+    assert run_cost["estimated_token_cost_usd"] == 0
+    assert run_cost["estimated_credit_cost_usd"] == 0.025
+    assert run_cost["estimated_total_cost_usd"] == 0.025
+
+    stats = client.get("/api/statistics/llm?month=2026-08").json()
+    assert stats["rows"][0]["estimated_token_cost_usd"] == 0
+    assert stats["rows"][0]["estimated_total_cost_usd"] == 0.025
+    assert stats["totals"]["estimated_total_cost_usd"] == 0.025
+    assert stats["lifetime"]["estimated_total_cost_usd"] == 0.025
 
 
 def test_usage_keeps_first_observed_base_url(isolated_db_engine):

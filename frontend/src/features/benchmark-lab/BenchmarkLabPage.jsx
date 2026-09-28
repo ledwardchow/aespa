@@ -3,6 +3,7 @@ import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import * as settingsApi from "../../shared/api/settings.js";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { parseGroundTruthText } from "./groundTruthImport.js";
+import { SiteSummary, modelName, money } from "./SiteSummary.jsx";
 
 const EMPTY = { sites: [], apis: [], sast_runs: [] };
 const modelLabel = (model) => {
@@ -14,6 +15,7 @@ const modelLabel = (model) => {
 
 export function BenchmarkLabPage() {
   const [tab, setTab] = useState("site");
+  const [siteTab, setSiteTab] = useState("summary");
   const [targets, setTargets] = useState(EMPTY);
   const [datasets, setDatasets] = useState([]);
   const [results, setResults] = useState([]);
@@ -60,11 +62,20 @@ export function BenchmarkLabPage() {
   const selectedResult = results.find((item) => item.id === selectedResultId);
   const relevantResults = useMemo(
     () =>
-      results.filter(
-        (item) =>
-          item.run_kind === tab && (tab === "sast" || String(item.target_id) === String(targetId)),
+      results.filter((item) =>
+        tab === "site"
+          ? (item.target_kind === "site" && String(item.target_id) === String(targetId)) ||
+            (item.run_kind === "sast" &&
+              item.target_id == null &&
+              target?.dataset?.id != null &&
+              item.dataset_id === target?.dataset?.id &&
+              [...targets.sites, ...targets.apis].filter(
+                (entry) => entry.dataset?.id === item.dataset_id,
+              ).length === 1)
+          : item.run_kind === tab &&
+            (tab === "sast" || String(item.target_id) === String(targetId)),
       ),
-    [results, tab, targetId],
+    [results, tab, targetId, target, targets],
   );
   const findingsById = new Map((selectedResult?.findings || []).map((item) => [item.id, item]));
   const savedDatasetIds = new Set(
@@ -117,6 +128,7 @@ export function BenchmarkLabPage() {
       await load();
       setResults((current) => [result, ...current.filter((item) => item.id !== result.id)]);
       setSelectedResultId(result.id);
+      if (tab === "site") setSiteTab("analyses");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -124,7 +136,8 @@ export function BenchmarkLabPage() {
     }
   };
   const deleteResult = async () => {
-    if (!selectedResult || !confirm(`Delete the saved result for "${selectedResult.run_name}"?`)) return;
+    if (!selectedResult || !confirm(`Delete the saved result for "${selectedResult.run_name}"?`))
+      return;
     setBusy(true);
     setError(null);
     try {
@@ -183,148 +196,264 @@ export function BenchmarkLabPage() {
           </button>
         ))}
       </div>
+      {tab === "site" && (
+        <div
+          className="tab-bar benchmark-site-tabs"
+          role="tablist"
+          aria-label="Site benchmark views"
+        >
+          {[
+            ["summary", "Summary"],
+            ["analyses", "Analyses"],
+            ["new", "New"],
+          ].map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={siteTab === key}
+              className={`tab-btn${siteTab === key ? " active" : ""}`}
+              onClick={() => {
+                setSiteTab(key);
+                setSelectedResultId(null);
+                setEdit(null);
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="content scroll-content benchmark-page benchmark-simple">
         {error && <div className="alert error">{error}</div>}
-        <section className="card benchmark-setup">
-          <label>
-            {tab === "site" ? "Site" : tab === "api" ? "API" : "Completed SAST scan"}
+        {tab === "site" && (
+          <label className="benchmark-site-picker">
+            Site
             <select
               className="select"
               value={targetId}
               onChange={(event) => {
                 setTargetId(event.target.value);
-                setRunId(tab === "sast" ? event.target.value : "");
+                setRunId("");
                 setEvaluationModel("");
                 setSelectedResultId(null);
               }}
             >
-              <option value="">Select {tab === "sast" ? "a scan" : "an application"}...</option>
-              {entries.map((item) => (
+              <option value="">Select an application...</option>
+              {targets.sites.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.name}
                 </option>
               ))}
             </select>
           </label>
-          {target && (
-            <>
-              {tab !== "sast" ? (
-                <>
-                  <div className="benchmark-ground-truth-choice">
-                    <div>
-                      <strong>Ground truth</strong>
-                      <div className="subtle">
-                        {target.dataset
-                          ? `${target.dataset.name} - ${target.dataset.item_count} findings`
-                          : "No file uploaded"}
+        )}
+        {tab === "site" && target && siteTab === "summary" && (
+          <SiteSummary
+            results={relevantResults}
+            onOpen={(id) => {
+              setSelectedResultId(id);
+              setSiteTab("analyses");
+            }}
+          />
+        )}
+        {tab === "site" && target && siteTab === "analyses" && (
+          <section className="card benchmark-analyses">
+            <h2>Saved analyses</h2>
+            {relevantResults.length ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Scan</th>
+                      <th>Type</th>
+                      <th>Model</th>
+                      <th>Scan cost</th>
+                      <th>Full + partial</th>
+                      <th>Created</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {relevantResults.map((result) => (
+                      <tr key={result.id}>
+                        <td>{result.run_name}</td>
+                        <td>{result.run_kind === "sast" ? "SAST" : "DAST"}</td>
+                        <td>{modelName(result)}</td>
+                        <td>{money(result.scan_cost_usd)}</td>
+                        <td>{result.summary.full + result.summary.partial}</td>
+                        <td>{new Date(result.created_at).toLocaleString()}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn ghost sm"
+                            onClick={() => {
+                              setSelectedResultId(result.id);
+                              setExpanded(null);
+                              setEdit(null);
+                            }}
+                          >
+                            Open {result.run_name}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="subtle">No analyses have been saved for this Site.</p>
+            )}
+          </section>
+        )}
+        {(tab !== "site" || siteTab === "new") && (
+          <section className="card benchmark-setup">
+            {tab !== "site" && (
+              <>
+                <label>
+                  {tab === "site" ? "Site" : tab === "api" ? "API" : "Completed SAST scan"}
+                  <select
+                    className="select"
+                    value={targetId}
+                    onChange={(event) => {
+                      setTargetId(event.target.value);
+                      setRunId(tab === "sast" ? event.target.value : "");
+                      setEvaluationModel("");
+                      setSelectedResultId(null);
+                    }}
+                  >
+                    <option value="">
+                      Select {tab === "sast" ? "a scan" : "an application"}...
+                    </option>
+                    {entries.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </>
+            )}
+            {target && (
+              <>
+                {tab !== "sast" ? (
+                  <>
+                    <div className="benchmark-ground-truth-choice">
+                      <div>
+                        <strong>Ground truth</strong>
+                        <div className="subtle">
+                          {target.dataset
+                            ? `${target.dataset.name} - ${target.dataset.item_count} findings`
+                            : "No file uploaded"}
+                        </div>
                       </div>
+                      <label className="btn secondary" htmlFor="benchmark-ground-truth-file">
+                        {target.dataset ? "Replace file" : "Upload file"}
+                      </label>
+                      <input
+                        id="benchmark-ground-truth-file"
+                        type="file"
+                        accept=".json,.md,.markdown"
+                        onChange={(event) => {
+                          upload(event.target.files?.[0]);
+                          event.target.value = "";
+                        }}
+                      />
                     </div>
-                    <label className="btn secondary" htmlFor="benchmark-ground-truth-file">
-                      {target.dataset ? "Replace file" : "Upload file"}
-                    </label>
-                    <input
-                      id="benchmark-ground-truth-file"
-                      type="file"
-                      accept=".json,.md,.markdown"
-                      onChange={(event) => {
-                        upload(event.target.files?.[0]);
-                        event.target.value = "";
-                      }}
-                    />
-                  </div>
-                  <label>
-                    Completed scan
-                    <select
-                      className="select"
-                      value={runId}
-                      onChange={(event) => {
-                        setRunId(event.target.value);
-                        setEvaluationModel("");
-                      }}
-                    >
-                      <option value="">Select a scan...</option>
-                      {target.runs.map((run) => (
-                        <option key={run.id} value={run.id}>
-                          {run.name} ({run.status})
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </>
-              ) : (
-                <>
-                  <div className="benchmark-sast-ground-truth">
                     <label>
-                      Ground truth
+                      Completed scan
                       <select
                         className="select"
-                        value={datasetId}
-                        onChange={(event) => setDatasetId(event.target.value)}
+                        value={runId}
+                        onChange={(event) => {
+                          setRunId(event.target.value);
+                          setEvaluationModel("");
+                        }}
                       >
-                        <option value="">Select a saved file...</option>
-                        {datasets
-                          .filter(
-                            (dataset) =>
-                              savedDatasetIds.has(dataset.id) || dataset.id === uploadedDatasetId,
-                          )
-                          .map((dataset) => (
-                            <option key={dataset.id} value={dataset.id}>
-                              {dataset.name} ({dataset.item_count} findings)
-                            </option>
-                          ))}
+                        <option value="">Select a scan...</option>
+                        {target.runs.map((run) => (
+                          <option key={run.id} value={run.id}>
+                            {run.name} ({run.status})
+                          </option>
+                        ))}
                       </select>
                     </label>
-                    <label className="btn secondary" htmlFor="benchmark-sast-file">
-                      Upload another file
-                    </label>
-                    <input
-                      id="benchmark-sast-file"
-                      type="file"
-                      accept=".json,.md,.markdown"
-                      onChange={(event) => {
-                        upload(event.target.files?.[0]);
-                        event.target.value = "";
-                      }}
-                    />
-                  </div>
-                </>
-              )}
-              <label>
-                Evaluation model
-                <select
-                  className="select"
-                  value={evaluationModel}
-                  onChange={(event) => setEvaluationModel(event.target.value)}
-                >
-                  <option value="">
-                    {selectedRun?.default_evaluation_model
-                      ? `Scan's Test Lead model: ${selectedRun.default_evaluation_model.name}`
-                      : "Choose a model..."}
-                  </option>
-                  {models.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.name}
+                  </>
+                ) : (
+                  <>
+                    <div className="benchmark-sast-ground-truth">
+                      <label>
+                        Ground truth
+                        <select
+                          className="select"
+                          value={datasetId}
+                          onChange={(event) => setDatasetId(event.target.value)}
+                        >
+                          <option value="">Select a saved file...</option>
+                          {datasets
+                            .filter(
+                              (dataset) =>
+                                savedDatasetIds.has(dataset.id) || dataset.id === uploadedDatasetId,
+                            )
+                            .map((dataset) => (
+                              <option key={dataset.id} value={dataset.id}>
+                                {dataset.name} ({dataset.item_count} findings)
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <label className="btn secondary" htmlFor="benchmark-sast-file">
+                        Upload another file
+                      </label>
+                      <input
+                        id="benchmark-sast-file"
+                        type="file"
+                        accept=".json,.md,.markdown"
+                        onChange={(event) => {
+                          upload(event.target.files?.[0]);
+                          event.target.value = "";
+                        }}
+                      />
+                    </div>
+                  </>
+                )}
+                <label>
+                  Evaluation model
+                  <select
+                    className="select"
+                    value={evaluationModel}
+                    onChange={(event) => setEvaluationModel(event.target.value)}
+                  >
+                    <option value="">
+                      {selectedRun?.default_evaluation_model
+                        ? `Scan's Test Lead model: ${selectedRun.default_evaluation_model.name}`
+                        : "Choose a model..."}
                     </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                className="btn primary benchmark-compare-button"
-                type="button"
-                onClick={compare}
-                disabled={
-                  busy ||
-                  !runId ||
-                  (!evaluationModel && !selectedRun?.default_evaluation_model) ||
-                  (tab === "sast" ? !datasetId : !target.dataset)
-                }
-              >
-                {busy ? "Working..." : "Compare scan"}
-              </button>
-            </>
-          )}
-        </section>
-        {relevantResults.length > 0 && (
+                    {models.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="btn primary benchmark-compare-button"
+                  type="button"
+                  onClick={compare}
+                  disabled={
+                    busy ||
+                    !runId ||
+                    (!evaluationModel && !selectedRun?.default_evaluation_model) ||
+                    (tab === "sast" ? !datasetId : !target.dataset)
+                  }
+                >
+                  {busy ? "Working..." : "Compare scan"}
+                </button>
+              </>
+            )}
+          </section>
+        )}
+        {tab !== "site" && relevantResults.length > 0 && (
           <label className="benchmark-result-picker">
             Saved results
             <select
@@ -341,11 +470,16 @@ export function BenchmarkLabPage() {
             </select>
           </label>
         )}
-        {selectedResult && (
+        {selectedResult && (tab !== "site" || siteTab === "analyses") && (
           <section className="benchmark-results">
             <div className="benchmark-result-heading">
               <h2>{selectedResult.run_name}</h2>
-              <button className="btn secondary" type="button" onClick={deleteResult} disabled={busy}>
+              <button
+                className="btn secondary"
+                type="button"
+                onClick={deleteResult}
+                disabled={busy}
+              >
                 Delete result
               </button>
             </div>

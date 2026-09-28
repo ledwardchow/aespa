@@ -80,7 +80,7 @@ export function SastLeadDetails({ lead, showSummary = true, findingHref }) {
           <div className="sast-evidence-kicker">
             {lead.category || "Unclassified"} · {(lead.severity || "medium").toUpperCase()}
           </div>
-          <h3>{lead.title || "Untitled candidate"}</h3>
+          <h3>{lead.title || "Untitled finding"}</h3>
           <div className="sast-lead-meta-grid">
             <MetaItem label="Lead" value={lead.reference || null} />
             {lead.origin_reference && (
@@ -122,11 +122,11 @@ export function SastLeadDetails({ lead, showSummary = true, findingHref }) {
       <TraceBlock label="Controls encountered" value={controls} empty="No controls recorded" />
       <TraceBlock label="Sink" value={sink} />
       <TraceBlock
-        label="Counterevidence"
+        label="Evidence against"
         value={counterevidence}
-        empty="No counterevidence recorded"
+        empty="No evidence against recorded"
       />
-      <TraceBlock label="Proof gaps" value={proofGaps} empty="No unresolved static proof gaps" />
+      <TraceBlock label="Missing evidence" value={proofGaps} empty="No missing evidence" />
       {attackPath.perspective === "frontend" ? (
         <>
           <PathSection
@@ -162,7 +162,7 @@ export function SastLeadDetails({ lead, showSummary = true, findingHref }) {
             }
           />
           <PathSection
-            label="Proof gaps"
+            label="Missing evidence"
             value={attackPath.approved_pre_crawl_path?.proof_gaps || attackPath.proof_gaps}
           />
           <PathSection
@@ -172,11 +172,7 @@ export function SastLeadDetails({ lead, showSummary = true, findingHref }) {
           />
         </>
       ) : (
-        <TraceBlock
-          label="Attack path"
-          value={attackPath}
-          empty="Not available for this candidate"
-        />
+        <TraceBlock label="Attack path" value={attackPath} empty="Not available for this finding" />
       )}
       {lead.validation_reasoning && (
         <div className="sast-evidence-callout">

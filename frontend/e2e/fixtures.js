@@ -130,6 +130,7 @@ export async function installFixtures(page, { empty = false } = {}) {
           target_kind: "site",
           target_id: 1,
           run_name: "Fixture scan",
+          scan_cost_usd: 0.42,
           comparison: { method: "model", model: { id: 1, name: "Fixture model" } },
           scan_models: {
             test_lead: { id: 1, name: "Fixture Test Lead", model: "fixture-model" },

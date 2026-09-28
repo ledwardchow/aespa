@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import zipfile
 from statistics import median
 from typing import Any
@@ -75,11 +76,32 @@ class ScanResultReviewIn(BaseModel):
     note: str = Field(default="", max_length=10000)
 
 
-def result_out(row: ScanResult) -> dict[str, Any]:
+def scan_cost(run: TestRun | ApiTestRun | SastRun | None) -> float | None:
+    usage = loads(run.token_usage_json, {}) if run else {}
+    if not isinstance(usage, dict) or not usage:
+        return None
+    values = [
+        entry.get("estimated_total_cost_usd")
+        for entry in usage.values()
+        if isinstance(entry, dict) and entry.get("estimated_cost_available")
+    ]
+    if not values or any(
+        not isinstance(value, (int, float)) or not math.isfinite(value)
+        for value in values
+    ):
+        return None
+    return round(sum(values), 8)
+
+
+def result_out(row: ScanResult, core: Session | None = None) -> dict[str, Any]:
     saved = loads(row.rows_json, [])
     items = saved.get("rows", []) if isinstance(saved, dict) else saved
     comparison = saved.get("comparison", {}) if isinstance(saved, dict) else {}
     scan_models = saved.get("scan_models") if isinstance(saved, dict) else None
+    cost = saved.get("scan_cost_usd") if isinstance(saved, dict) else None
+    if cost is None and core is not None:
+        model = {"site": TestRun, "api": ApiTestRun, "sast": SastRun}.get(row.run_kind)
+        cost = scan_cost(core.get(model, row.run_id)) if model else None
     return {
         "id": row.id,
         "run_kind": row.run_kind,
@@ -94,6 +116,7 @@ def result_out(row: ScanResult) -> dict[str, Any]:
         "rows": items,
         "comparison": comparison,
         "scan_models": scan_models,
+        "scan_cost_usd": cost,
         "summary": {
             key: sum(item["disposition"] == key for item in items)
             for key in ("full", "partial", "missing")
@@ -621,17 +644,17 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
 
     @router.get("/results")
     def list_scan_results() -> list[dict[str, Any]]:
-        with store.session() as session:
+        with store.session() as session, Session(get_engine()) as core:
             rows = list(session.exec(select(ScanResult).order_by(ScanResult.id.desc())))
-            return [result_out(row) for row in rows]
+            return [result_out(row, core) for row in rows]
 
     @router.get("/results/{result_id}")
     def get_scan_result(result_id: int) -> dict[str, Any]:
-        with store.session() as session:
+        with store.session() as session, Session(get_engine()) as core:
             row = session.get(ScanResult, result_id)
             if row is None:
                 raise HTTPException(404, "Benchmark result not found")
-            return result_out(row)
+            return result_out(row, core)
 
     @router.delete("/results/{result_id}", status_code=204)
     def delete_scan_result(result_id: int) -> None:
@@ -703,6 +726,7 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             run_name = run.name
             target_name = target.name if target else ""
             scan_models = scan_models_snapshot(core, payload.run_kind, run)
+            cost = scan_cost(run)
             with store.session() as session:
                 if target_id is not None:
                     binding = session.exec(
@@ -721,6 +745,20 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                 dataset = session.get(Dataset, dataset_id) if dataset_id else None
                 if dataset is None:
                     raise HTTPException(404, "Ground truth not found")
+                if payload.run_kind == "sast":
+                    bindings = list(
+                        session.exec(
+                            select(GroundTruthBinding).where(
+                                GroundTruthBinding.dataset_id == dataset.id
+                            )
+                        )
+                    )
+                    if len(bindings) == 1:
+                        target_kind = bindings[0].target_kind
+                        target_id = bindings[0].target_id
+                        target_model = Site if target_kind == "site" else ApiCollection
+                        linked_target = core.get(target_model, target_id)
+                        target_name = linked_target.name if linked_target else ""
                 ground_truth = BenchmarkGroundTruth.model_validate(
                     loads(dataset.ground_truth_json, {})
                 ).model_dump(mode="json")
@@ -774,6 +812,7 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                             "rows": rows,
                             "comparison": comparison,
                             "scan_models": scan_models,
+                            "scan_cost_usd": cost,
                         }
                     ),
                 )
@@ -788,7 +827,7 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
     ) -> dict[str, Any]:
         if payload.disposition not in {"full", "partial", "missing"}:
             raise HTTPException(400, "Choose full, partial, or missing")
-        with store.session() as session:
+        with store.session() as session, Session(get_engine()) as core:
             result = session.get(ScanResult, result_id)
             if result is None:
                 raise HTTPException(404, "Benchmark result not found")
@@ -824,7 +863,7 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             session.add(result)
             session.commit()
             session.refresh(result)
-            return result_out(result)
+            return result_out(result, core)
 
     @router.get("/datasets")
     def list_datasets() -> list[dict[str, Any]]:

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, update
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
@@ -42,8 +42,9 @@ TERMINAL_WORK_STATUSES = {
 }
 _MAX_ATLAS_FILE_BYTES = 1_000_000
 _MAX_SURFACE_ITEMS = 12_000
-_PARTITION_INPUT_LIMIT = 20
+_PARTITION_INPUT_LIMIT = 12
 _SINK_WORK_LIMIT = 40
+_HELPER_SINK_CLAIM_LIMIT = 12
 
 _LANGUAGE_BY_SUFFIX = {
     ".py": "Python",
@@ -158,6 +159,14 @@ _PATTERNS = (
     _Pattern(
         "entrypoint",
         "http",
+        "HTTP route registration",
+        _rx(
+            r"(?:\baddRoute\s*\(|\bRoute::(?:get|post|put|patch|delete|any|match|resource)\s*\(|^\s*(?:path|re_path)\s*\()"
+        ),
+    ),
+    _Pattern(
+        "entrypoint",
+        "http",
         "HTTP route",
         _rx(
             r"(?:@\w+\.(?:get|post|put|patch|delete|route)|\b(?:app|router|server)\.(?:get|post|put|patch|delete|use)\s*\()"
@@ -233,6 +242,14 @@ _PATTERNS = (
         "Request value",
         _rx(
             r"\b(?:req\.(?:params|query|body|headers|cookies)|request\.(?:args|form|json|headers|cookies|files)|r\.(?:URL\.Query|FormValue|Header\.Get)|RequestParam|PathVariable|RequestBody)\b"
+        ),
+    ),
+    _Pattern(
+        "input",
+        "request",
+        "PHP request value",
+        _rx(
+            r"(?:\$_(?:GET|POST|REQUEST|FILES|COOKIE|SERVER)\b|php://input|\bRequest::(?:input|all|query|post|header)\s*\()"
         ),
     ),
     _Pattern(
@@ -333,6 +350,14 @@ _PATTERNS = (
     ),
     _Pattern(
         "sink",
+        "access",
+        "Response serialization",
+        _rx(
+            r"\b(?:toPublic|toJSON|to_dict|as_dict|serialize|jsonify|JsonResponse|Response::success|res\.json)\s*\("
+        ),
+    ),
+    _Pattern(
+        "sink",
         "logic",
         "Deserialization",
         _rx(
@@ -413,6 +438,28 @@ def _file_classification(path: Path, rel: str) -> tuple[str, bool, str]:
 def _fingerprint(*parts: object) -> str:
     value = "|".join(str(part or "").strip().casefold() for part in parts)
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _handler_scope(path: str) -> bool:
+    """Find likely request handlers even when a framework's route syntax is unknown."""
+    parts = [part.casefold() for part in Path(path).parts]
+    stem = Path(path).stem.casefold()
+    if set(parts[:-1]) & {
+        "controllers",
+        "controller",
+        "handlers",
+        "handler",
+        "routes",
+        "endpoints",
+    }:
+        return True
+    if stem.endswith(("controller", "handler", "router", "routes", "endpoint")):
+        return True
+    if stem in {"views", "urls"} and Path(path).suffix.casefold() == ".py":
+        return True
+    return stem in {"index", "app", "server", "main"} and (
+        len(parts) == 1 or bool(set(parts[:-1]) & {"public", "api", "server"})
+    )
 
 
 def _partition_base(path: str) -> str:
@@ -500,6 +547,7 @@ def build_source_atlas(sast_run_id: int, root: Path) -> dict[str, Any]:
                 lines = raw.decode("utf-8", errors="replace").splitlines()
             except OSError:
                 continue
+            file_surface_start = len(surface_rows)
             for line_number, line in enumerate(lines, start=1):
                 for pattern in _PATTERNS:
                     match = pattern.regex.search(line)
@@ -530,6 +578,52 @@ def build_source_atlas(sast_run_id: int, root: Path) -> dict[str, Any]:
                         break
                 if len(surface_rows) >= _MAX_SURFACE_ITEMS:
                     break
+            if len(surface_rows) >= _MAX_SURFACE_ITEMS:
+                continue
+            file_entrypoints = [
+                item
+                for item in surface_rows[file_surface_start:]
+                if item.kind == "entrypoint"
+            ]
+            handler_scope = row.language in _SOURCE_LANGUAGES - {
+                "HTML",
+                "Vue",
+                "Svelte",
+            } and _handler_scope(row.path)
+            if not file_entrypoints and handler_scope:
+                surface_rows.append(
+                    SastSurfaceItem(
+                        sast_run_id=sast_run_id,
+                        source_file_id=row.id,
+                        kind="entrypoint",
+                        category="inferred_handler",
+                        name="Likely request handler",
+                        path=row.path,
+                        line=1,
+                        symbol="Review this handler and find its callers or route registration.",
+                        provenance="path_heuristic",
+                        fingerprint=_fingerprint("inferred-handler", row.path),
+                    )
+                )
+            if file_entrypoints or handler_scope:
+                surface_rows.append(
+                    SastSurfaceItem(
+                        sast_run_id=sast_run_id,
+                        source_file_id=row.id,
+                        kind="input",
+                        category="handler_review",
+                        name="Route and handler security review",
+                        path=row.path,
+                        line=file_entrypoints[0].line if file_entrypoints else 1,
+                        symbol=(
+                            "Trace registered routes to handlers; review authentication, "
+                            "validation, response data, errors, rate limits, sensitive "
+                            "state changes, and audit events."
+                        ),
+                        provenance="scope_review",
+                        fingerprint=_fingerprint("handler-review", row.path),
+                    )
+                )
         session.add_all(surface_rows)
         session.commit()
 
@@ -619,19 +713,37 @@ def build_source_atlas(sast_run_id: int, root: Path) -> dict[str, Any]:
             for path in json.loads(partition.file_paths_json):
                 partition_for_path.setdefault(path, partition)
 
-        workers: dict[tuple[int | None, str], SastWorker] = {}
+        workers: dict[int, SastWorker] = {}
         for partition in partitions:
-            for class_group in CLASS_GROUPS:
-                worker = SastWorker(
-                    sast_run_id=sast_run_id,
-                    partition_id=partition.id,
-                    worker_key=f"{partition.partition_key}:{class_group}",
-                    class_group=class_group,
-                )
-                session.add(worker)
-                workers[(partition.id, class_group)] = worker
+            worker = SastWorker(
+                sast_run_id=sast_run_id,
+                partition_id=partition.id,
+                worker_key=f"{partition.partition_key}:review",
+                class_group="review",
+            )
+            session.add(worker)
+            workers[partition.id] = worker
+        # A route reviewer can close local sink checks while the file is open.
+        # Shared/helper sinks and excess work remain for the later sink pass.
+        route_paths = {
+            item.path for item in inputs if item.category == "handler_review"
+        }
+        local_sink_counts: dict[int, int] = defaultdict(int)
+        local_sinks: list[tuple[SastSurfaceItem, SastPartition]] = []
+        residual_sinks: list[SastSurfaceItem] = []
+        for sink in sinks:
+            partition = partition_for_path.get(sink.path)
+            if (
+                sink.path in route_paths
+                and partition is not None
+                and local_sink_counts[partition.id] < _PARTITION_INPUT_LIMIT
+            ):
+                local_sinks.append((sink, partition))
+                local_sink_counts[partition.id] += 1
+            else:
+                residual_sinks.append(sink)
         sink_workers: list[SastWorker] = []
-        for offset in range(0, len(sinks), _SINK_WORK_LIMIT):
+        for offset in range(0, len(residual_sinks), _SINK_WORK_LIMIT):
             sink_worker = SastWorker(
                 sast_run_id=sast_run_id,
                 partition_id=None,
@@ -647,7 +759,7 @@ def build_source_atlas(sast_run_id: int, root: Path) -> dict[str, Any]:
             if partition is None:
                 continue
             for class_group in CLASS_GROUPS:
-                worker = workers[(partition.id, class_group)]
+                worker = workers[partition.id]
                 session.add(
                     SastWorkItem(
                         sast_run_id=sast_run_id,
@@ -659,9 +771,21 @@ def build_source_atlas(sast_run_id: int, root: Path) -> dict[str, Any]:
                         class_group=class_group,
                     )
                 )
-        for offset in range(0, len(sinks), _SINK_WORK_LIMIT):
+        for sink, partition in local_sinks:
+            session.add(
+                SastWorkItem(
+                    sast_run_id=sast_run_id,
+                    partition_id=partition.id,
+                    surface_item_id=sink.id,
+                    worker_id=workers[partition.id].id,
+                    work_key=f"sink:{sink.id}",
+                    work_type="sink",
+                    class_group="sink",
+                )
+            )
+        for offset in range(0, len(residual_sinks), _SINK_WORK_LIMIT):
             worker = sink_workers[offset // _SINK_WORK_LIMIT]
-            for sink in sinks[offset : offset + _SINK_WORK_LIMIT]:
+            for sink in residual_sinks[offset : offset + _SINK_WORK_LIMIT]:
                 session.add(
                     SastWorkItem(
                         sast_run_id=sast_run_id,
@@ -714,6 +838,20 @@ def work_program_summary(sast_run_id: int) -> dict[str, Any]:
     worker_counts: dict[str, int] = defaultdict(int)
     for worker in workers:
         worker_counts[worker.status] += 1
+    surface_by_id = {item.id: item for item in surfaces}
+    worker_by_id = {worker.id: worker for worker in workers}
+    partition_paths = {
+        partition.id: set(json.loads(partition.file_paths_json))
+        for partition in partitions
+    }
+    claimed_helper_sinks = sum(
+        item.work_type == "sink"
+        and (worker := worker_by_id.get(item.worker_id)) is not None
+        and worker.class_group == "review"
+        and (surface := surface_by_id.get(item.surface_item_id)) is not None
+        and surface.path not in partition_paths.get(worker.partition_id, set())
+        for item in work_items
+    )
     direct_paths = {
         receipt.path for receipt in receipts if receipt.tool_name == "read_file"
     }
@@ -747,6 +885,7 @@ def work_program_summary(sast_run_id: int) -> dict[str, Any]:
             "total": len(work_items),
             "resolved": len(work_items) - unresolved,
             "unresolved": unresolved,
+            "claimed_helper_sinks": claimed_helper_sinks,
             "statuses": dict(work_counts),
         },
         "evidence": {
@@ -906,6 +1045,118 @@ def unresolved_for_worker(worker_id: int) -> list[int]:
     return [row.id for row in rows if row.status not in TERMINAL_WORK_STATUSES]
 
 
+def claim_traced_sinks(worker_id: int, path: str, line: int) -> tuple[list[int], str]:
+    """Assign a directly read helper sink to the route worker that traced it."""
+
+    with Session(get_engine()) as session:
+        worker = session.get(SastWorker, worker_id)
+        if worker is None or worker.class_group != "review":
+            return [], "Only a route review worker can claim a traced sink."
+        if line < 1 or not path:
+            return [], "Give the exact source file and sink line."
+        receipt = session.exec(
+            select(SastEvidenceReceipt.id)
+            .where(SastEvidenceReceipt.worker_id == worker_id)
+            .where(SastEvidenceReceipt.tool_name == "read_file")
+            .where(SastEvidenceReceipt.path == path)
+            .where(
+                (SastEvidenceReceipt.start_line == None)  # noqa: E711
+                | (SastEvidenceReceipt.start_line <= line)
+            )
+            .where(
+                (SastEvidenceReceipt.end_line == None)  # noqa: E711
+                | (SastEvidenceReceipt.end_line >= line)
+            )
+        ).first()
+        if receipt is None:
+            return [], f"Open {path}:{line} with read_file before claiming it."
+        route_items = session.exec(
+            select(SastWorkItem)
+            .where(SastWorkItem.worker_id == worker_id)
+            .where(SastWorkItem.work_type == "input")
+        ).all()
+        route_paths = {
+            surface.path
+            for item in route_items
+            if item.surface_item_id
+            if (surface := session.get(SastSurfaceItem, item.surface_item_id))
+            is not None
+        }
+        route_read = session.exec(
+            select(SastEvidenceReceipt.id)
+            .where(SastEvidenceReceipt.worker_id == worker_id)
+            .where(SastEvidenceReceipt.tool_name == "read_file")
+            .where(SastEvidenceReceipt.path.in_(route_paths))
+        ).first()
+        if route_read is None:
+            return [], "Open an assigned route or handler before claiming its sink."
+        claimed_count = sum(
+            item.work_type == "sink"
+            and (surface := session.get(SastSurfaceItem, item.surface_item_id))
+            is not None
+            and surface.path not in route_paths
+            for item in session.exec(
+                select(SastWorkItem).where(SastWorkItem.worker_id == worker_id)
+            ).all()
+        )
+        if claimed_count >= _HELPER_SINK_CLAIM_LIMIT:
+            return (
+                [],
+                "Helper sink claim limit reached; remaining sinks stay in later review.",
+            )
+        surfaces = session.exec(
+            select(SastSurfaceItem)
+            .where(SastSurfaceItem.sast_run_id == worker.sast_run_id)
+            .where(SastSurfaceItem.kind == "sink")
+            .where(SastSurfaceItem.path == path)
+            .where(SastSurfaceItem.line == line)
+        ).all()
+        if not surfaces:
+            return [], f"No inventoried sink exists at {path}:{line}."
+        claimed: list[int] = []
+        for surface in surfaces:
+            if claimed_count >= _HELPER_SINK_CLAIM_LIMIT:
+                break
+            item = session.exec(
+                select(SastWorkItem)
+                .where(SastWorkItem.sast_run_id == worker.sast_run_id)
+                .where(SastWorkItem.surface_item_id == surface.id)
+                .where(SastWorkItem.work_type == "sink")
+            ).first()
+            if item is None or item.status in TERMINAL_WORK_STATUSES:
+                continue
+            if item.worker_id == worker_id:
+                claimed.append(item.id)
+            elif item.worker_id is not None:
+                owner = session.get(SastWorker, item.worker_id)
+                if (
+                    owner is not None
+                    and owner.class_group == "sink"
+                    and owner.status == "pending"
+                ):
+                    changed = session.execute(
+                        update(SastWorkItem)
+                        .where(SastWorkItem.id == item.id)
+                        .where(SastWorkItem.worker_id == owner.id)
+                        .where(SastWorkItem.status == "pending")
+                        .values(
+                            worker_id=worker_id,
+                            partition_id=worker.partition_id,
+                            updated_at=datetime.now(_UTC),
+                        )
+                    )
+                    if changed.rowcount:
+                        claimed.append(item.id)
+                        claimed_count += 1
+        session.commit()
+    if not claimed:
+        return (
+            [],
+            "Sink is already assigned or resolved; later review remains scheduled.",
+        )
+    return claimed, "Claimed sink work item(s): " + ", ".join(map(str, claimed))
+
+
 def record_disposition(
     work_item_id: int,
     *,
@@ -991,7 +1242,14 @@ def record_evidence_receipt(receipt: SastEvidenceReceipt) -> None:
 def completion_decision(sast_run_id: int) -> tuple[str, list[str], dict[str, Any]]:
     summary = work_program_summary(sast_run_id)
     reasons: list[str] = []
-    if summary["files"]["production"] and not summary["surface"].get("entrypoint"):
+    with Session(get_engine()) as session:
+        concrete_entrypoint = session.exec(
+            select(SastSurfaceItem.id)
+            .where(SastSurfaceItem.sast_run_id == sast_run_id)
+            .where(SastSurfaceItem.kind == "entrypoint")
+            .where(SastSurfaceItem.category != "inferred_handler")
+        ).first()
+    if summary["files"]["production"] and concrete_entrypoint is None:
         reasons.append("No production entry point was identified for reconciliation.")
     if summary["files"]["production"] and not summary["surface"].get("sink"):
         reasons.append("No security-sensitive sink was identified for the sink pass.")

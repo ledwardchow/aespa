@@ -555,7 +555,7 @@ class ScannerPolicy(SQLModel, table=True):
     strict_locator_enforcement: bool = Field(default=True)
     sast_rate_limit_findings: bool = Field(default=True)
     sast_race_condition_findings: bool = Field(default=True)
-    sast_audit_logging_findings: bool = Field(default=False)
+    sast_audit_logging_findings: bool = Field(default=True)
     sast_defense_in_depth_findings: bool = Field(default=False)
     sast_dependency_findings: bool = Field(default=True)
     sast_min_severity: str = Field(default="low")

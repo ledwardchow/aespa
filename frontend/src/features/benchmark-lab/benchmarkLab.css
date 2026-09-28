@@ -9,6 +9,105 @@
 .tab-bar.benchmark-top-tabs {
   margin: 0;
 }
+.tab-bar.benchmark-site-tabs {
+  margin: 0;
+}
+.benchmark-site-picker {
+  display: grid;
+  gap: 6px;
+  width: min(100%, 520px);
+}
+.benchmark-chart-card,
+.benchmark-analyses {
+  padding: 18px 20px;
+}
+.benchmark-chart-card h2,
+.benchmark-analyses h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+.benchmark-chart-header p {
+  margin: 0;
+}
+.benchmark-chart-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 32px;
+  margin: 18px 0 10px;
+}
+.benchmark-chart-filters fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.benchmark-chart-filters legend {
+  margin-bottom: 8px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+.benchmark-chart-filters label {
+  white-space: nowrap;
+}
+.benchmark-chart-scroll {
+  overflow-x: auto;
+}
+.benchmark-chart {
+  display: block;
+  width: 100%;
+  min-width: 580px;
+  height: auto;
+}
+.benchmark-chart text {
+  fill: var(--muted);
+  font-size: 12px;
+}
+.benchmark-chart-grid {
+  stroke: var(--border);
+  stroke-dasharray: 3 4;
+}
+.benchmark-chart-axis {
+  stroke: var(--text-2);
+}
+.benchmark-chart-point {
+  cursor: pointer;
+}
+.benchmark-chart-point:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.benchmark-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 8px;
+}
+.benchmark-chart-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.benchmark-shape {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  background: var(--accent);
+}
+.benchmark-shape-0 {
+  border-radius: 50%;
+}
+.benchmark-shape-1 {
+  border-radius: 2px;
+}
+.benchmark-shape-2 {
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.benchmark-shape-3 {
+  transform: rotate(45deg) scale(0.8);
+}
 .benchmark-setup {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

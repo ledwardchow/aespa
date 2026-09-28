@@ -108,11 +108,17 @@ test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
   await expect(page.getByRole("tab", { name: "Sites" })).toBeVisible();
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   await page.getByRole("combobox", { name: "Site" }).selectOption("1");
+  await expect(
+    page.getByRole("button", { name: /Fixture scan, DAST, Fixture Test Lead/ }),
+  ).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-benchmark-lab-summary.png") });
+  await page.getByRole("tab", { name: "New" }).click();
   await page.getByRole("combobox", { name: "Completed scan" }).selectOption("1");
   await expect(
     page.getByRole("option", { name: "Scan's Test Lead model: Fixture model" }),
   ).toHaveCount(1);
-  await page.getByRole("combobox", { name: "Saved results" }).selectOption("1");
+  await page.getByRole("tab", { name: "Analyses" }).click();
+  await page.getByRole("button", { name: "Open Fixture scan" }).click();
   await expect(page.getByText("Compared by Fixture model")).toBeVisible();
   await expect(page.getByText("Test Lead model: Fixture Test Lead (fixture-model)")).toBeVisible();
   await expect(page.getByText("GT-2 - Missing audit logs")).toBeVisible();
@@ -120,16 +126,22 @@ test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
   const tabs = await page.getByRole("tablist", { name: "Scan type" }).boundingBox();
   expect(tabs.x).toBe(panel.x);
   expect(tabs.width).toBe(panel.width);
+  const siteTabs = await page.getByRole("tablist", { name: "Site benchmark views" }).boundingBox();
+  expect(siteTabs.x).toBe(panel.x);
+  expect(siteTabs.width).toBe(panel.width);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-benchmark-lab.png") });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("tab", { name: "SAST" })).toBeVisible();
+  await page.getByRole("tab", { name: "New" }).click();
   const card = await page.locator(".benchmark-setup").boundingBox();
   const replace = await page.getByText("Replace file").boundingBox();
   expect(replace.x + replace.width).toBeLessThanOrEqual(card.x + card.width);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-benchmark-lab-mobile.png") });
+  await page.getByRole("tab", { name: "Analyses" }).click();
+  await page.getByRole("button", { name: "Open Fixture scan" }).click();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Delete result" }).click();
-  await expect(page.getByRole("combobox", { name: "Saved results" })).toHaveCount(0);
+  await expect(page.getByText("No analyses have been saved for this Site.")).toBeVisible();
   expect(errors).toEqual([]);
 });
 

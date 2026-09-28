@@ -14,7 +14,7 @@ test("restores proof gaps split into characters before a validator failure", () 
     />,
   );
 
-  const proofGaps = screen.getByText("Proof gaps").parentElement;
+  const proofGaps = screen.getByText("Missing evidence").parentElement;
   expect(proofGaps.querySelector("pre").textContent).toBe(`${originalGap}\n\n${failureGap}`);
   expect(jsonListValue(JSON.stringify([...originalGap, failureGap]))).toHaveLength(2);
 });
@@ -26,7 +26,7 @@ test("keeps ordinary proof gap lists intact", () => {
     />,
   );
 
-  expect(screen.getByText("Proof gaps").parentElement.querySelector("pre").textContent).toBe(
+  expect(screen.getByText("Missing evidence").parentElement.querySelector("pre").textContent).toBe(
     "Missing route proof\n\nNo live test",
   );
 });

@@ -24,24 +24,24 @@ const DEEP_PHASES = [
   { key: "repository_model", label: "Model", short: "Repository facts", view: "model" },
   { key: "threat_model", label: "Threats", short: "Assets and boundaries", view: "threats" },
   { key: "planning", label: "Planning", short: "Required security checks", view: "threats" },
-  { key: "discovery", label: "Discovery", short: "Source-to-sink candidates", view: "candidates" },
+  { key: "discovery", label: "Discovery", short: "Find possible issues", view: "candidates" },
   {
     key: "reconciliation",
-    label: "Reconcile",
-    short: "Merge and split candidates",
+    label: "Deduplicate",
+    short: "Merge duplicate findings",
     view: "threats",
   },
   {
     key: "validation",
     label: "Validation",
-    short: "Controls and counterevidence",
+    short: "Confirm or dismiss findings",
     view: "candidates",
   },
-  { key: "closure", label: "Closure", short: "Resolve security gaps", view: "threats" },
+  { key: "closure", label: "Gap review", short: "Check for missed areas", view: "threats" },
   {
     key: "attack_path",
     label: "Attack paths",
-    short: "Reachability and severity",
+    short: "Check reachability and severity",
     view: "candidates",
   },
   { key: "report", label: "Report", short: "Findings and coverage", view: "coverage" },
@@ -489,7 +489,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                   { key: "efficiency", label: "Execution Summary" },
                 ]
               : []),
-            { key: "candidates", label: `Candidates ${leads.length}` },
+            { key: "candidates", label: `Findings ${leads.length}` },
             { key: "activity", label: "Activity" },
           ].map((item) => (
             <button
@@ -552,19 +552,19 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                 <small>files returned</small>
               </div>
               <div>
-                <span>Candidates</span>
+                <span>Findings</span>
                 <strong>{leads.length}</strong>
-                <small>persisted hypotheses</small>
+                <small>possible issues found</small>
               </div>
               <div>
                 <span>Reportable</span>
                 <strong>{reportableCount}</strong>
-                <small>independently confirmed</small>
+                <small>confirmed by validation</small>
               </div>
               <div>
-                <span>Proof gaps</span>
+                <span>Missing evidence</span>
                 <strong>{proofGapCount}</strong>
-                <small>unresolved evidence</small>
+                <small>open questions on findings</small>
               </div>
             </div>
           ) : null}
@@ -583,7 +583,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           {tab === "coverage" && (
             <div className="sast-assurance-note">
               <span>
-                <strong>Coverage assurance:</strong>{" "}
+                <strong>Coverage:</strong>{" "}
                 {analysis.assurance?.reasons?.length
                   ? analysis.assurance.reasons.join(" ")
                   : "Every generated source and sink security check was completed."}

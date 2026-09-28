@@ -1710,6 +1710,8 @@ The SAST scanner is a standalone agentic static-analysis pass over an immutable 
 
 Light runs inventory the archive, build the original source work program, run discovery workers, independently validate candidates, and trace attack paths. Deep runs add the repository model, threat model, semantic coverage plan, reconciliation, and closure phases shown below.
 
+The shared source work program looks for route registrations and request inputs, then assigns a review to each route or likely handler file. Likely handlers are selected by common file names and directories when route syntax is unfamiliar. These inferred handlers still leave the run with partial coverage until a concrete entry point is found. Response serialization calls also receive a separate review so sensitive fields are not missed by a scan focused on database and authorization calls.
+
 ```
 start_sast_scan(sast_run_id)
   └─ _sast_scan_task(sast_run_id)
@@ -1758,6 +1760,7 @@ start_sast_scan(sast_run_id)
 | `read_file` | Read a file by path; optional `start_line`/`end_line`; capped at 20,000 chars |
 | `grep` | Regex or literal search across files; capped at 200 results. The receipt records the search scope and returned matches. Files in the search scope do not count as directly opened. |
 | `get_work_program` | Return the current worker's assigned source or sink items |
+| `claim_traced_sink` | Move an inventoried helper sink to a route worker after it opens the route and exact sink line; the claimed sink still needs its own disposition |
 | `record_disposition` | Close one assigned item with a result, reason, trace, controls, and evidence |
 | `record_semantic_disposition` | Resolve one threat-scenario or repository-model security obligation |
 | `write_lead` | Record a source-backed discovery candidate together with its confidence score and reasoning |
@@ -1783,10 +1786,16 @@ where `reviewed` means the file was opened with `read_file`.
 ```
 Discovery calls write_lead(...) with confidence and reasoning
   └─ Candidate remains a hypothesis regardless of discovery self-score
+  └─ Matching worker observations add evidence to the same lead
+Reconciliation groups remaining candidates before validation
+An optional bounded model pass checks uncertain source-related pairs and only
+merges them when it names one shared fix in the cited files
 Independent validator calls validate_candidate(...)
   ├─ confirmed + confidence ≥ 0.7 → reportable
   ├─ dismissed → retained with counterevidence, not reportable
   └─ inconclusive → retained with explicit proof gaps, not reportable
+Confirmed leads receive a final duplicate check using validated root causes and
+fix locations where available. Merged leads keep both validator notes.
 Attack-path analyst calls record_attack_path(...) for reportable candidates
   └─ Ordered nodes, impact, severity reasoning, and dynamic-test objective persisted
 Final sync upserts candidates by stable fingerprint, preventing rerun duplicates
@@ -1797,6 +1806,14 @@ checkpoints from older versions may contain unscored candidates; these are close
 as inconclusive instead of being left pending. Validation cannot complete while
 any scored candidate still has a pending verdict. Reconciliation totals are
 calculated after candidates are split by root cause.
+New scans assign injection, access, and logic checks for each route partition to
+one worker. That worker also reviews a bounded number of sinks in its route
+files. While tracing a route, it can claim a helper sink after opening both
+the route file and the sink line. The claimed sink needs its own result. Sink
+workers start afterward for unclaimed sinks and any excess local sinks. Each
+security check still gets its own work item and disposition. Reconciliation
+records why each candidate was joined. Resumed scans keep their existing worker
+assignments.
 
 ### ScanLead entity (`services/scan_leads.py`)
 
@@ -1846,7 +1863,7 @@ SAST scans use the same task-registry pattern as web and API scans. Stop cancels
 
 The SAST concurrent LLM request setting limits how many discovery and validation agent calls can wait on provider responses at once. Increasing it also increases the worker and validator pools, while the run-level LLM gate ensures other SAST phases share the same overall limit.
 
-Deep discovery budgets are configured on the SAST tab in Agent Settings. Fixed mode gives each baseline or threat worker the configured value. Adaptive mode starts from the configured minimum and adds capacity for assigned source items, security checks, and unique files, up to the configured allocation maximum. Access-control and business-logic workers receive a small multiplier. The selected budget and its inputs are stored on `SastWorker`. If a resumed worker already used its saved allocation, it receives another bounded allocation without resetting its checkpoint step count.
+Deep discovery budgets are configured on the SAST tab in Agent Settings. Fixed mode gives each baseline or threat worker the configured value. Adaptive mode starts from the configured minimum and adds capacity for assigned source items, security checks, and unique files, up to the configured allocation maximum. The selected budget and its inputs are stored on `SastWorker`. If a resumed worker already used its saved allocation, it receives another bounded allocation without resetting its checkpoint step count.
 
 Temporary provider connection failures are retried with bounded backoff. If the provider remains unavailable, the run is paused with reason `network` instead of failed. A process restart also changes an orphaned `scanning` run to a resumable `paused` run after removing its disposable extraction directory. Browser or SSE disconnection does not affect the server-side scan task.
 
@@ -1867,6 +1884,11 @@ The model must return one valid decision for every expected finding. If the mode
 is unavailable or returns an incomplete answer, no result is saved. Users can
 review, correct, and delete saved results. New runs of the older SAST evaluation
 workflow also require a model; existing evaluations remain readable.
+The Site view has a Summary chart, an Analyses table, and a New comparison form.
+The chart plots scan cost against the number of full and partial findings, with
+filters for scan type and model. New results save the run's recorded cost. Older
+results use the current run cost when the run is still available. A SAST result
+using ground truth saved for one Site or API is linked to that target.
 Each result also saves the Test Lead model for a Site or API scan, and the SAST
 model for a SAST scan. If a Site or API scan imported SAST leads, the result
 lists the model for each source SAST run. Imported leads are matched by run type

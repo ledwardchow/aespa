@@ -868,7 +868,7 @@ class ScannerPolicyBase(BaseModel):
     strict_locator_enforcement: bool = True
     sast_rate_limit_findings: bool = True
     sast_race_condition_findings: bool = True
-    sast_audit_logging_findings: bool = False
+    sast_audit_logging_findings: bool = True
     sast_defense_in_depth_findings: bool = False
     sast_dependency_findings: bool = True
     sast_min_severity: Literal["low", "medium", "high", "critical"] = "low"
