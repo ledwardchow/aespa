@@ -44,6 +44,8 @@ _SOURCE_SUFFIXES = {
     ".rb",
     ".php",
     ".cs",
+    ".cshtml",
+    ".razor",
     ".sql",
     ".xml",
     ".yml",
@@ -255,6 +257,310 @@ def _spring_route_facts(text: str, relative_path: str) -> list[dict]:
                         }
                     )
     return routes
+
+
+_ASPNET_ATTRIBUTE = re.compile(r"\[(?P<body>[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*)\]")
+_ASPNET_VERB = re.compile(
+    r"^\s*(?:Http(?P<verb>Get|Post|Put|Patch|Delete|Head|Options))(?:Attribute)?\s*(?:\((?P<args>.*)\))?\s*$",
+    re.DOTALL,
+)
+_ASPNET_ROUTE = re.compile(r"^\s*Route(?:Attribute)?\s*\((?P<args>.*)\)\s*$", re.DOTALL)
+_ASPNET_CLASS = re.compile(
+    r"\bclass\s+(?P<name>[A-Za-z_]\w*)(?:\s*<[^>]*>)?\s*(?::\s*(?P<bases>[^{]+))?"
+)
+_ASPNET_METHOD = re.compile(
+    r"\b(?P<access>public|protected|internal|private)\b[^=;{}()]*?\b(?P<name>[A-Za-z_]\w*)\s*(?:<[^>()]*>)?\s*\("
+)
+_ASPNET_MINIMAL = re.compile(
+    r"\.Map(?P<verb>Get|Post|Put|Patch|Delete|Methods|Fallback)\s*\(\s*(?:pattern:\s*)?@?\"(?P<path>[^\"]*)\""
+)
+_RAZOR_HANDLER = re.compile(
+    r"\bpublic\s+(?:async\s+)?[\w<>\[\],?\s]*?(?<![.\w])On(?P<verb>Get|Post|Put|Patch|Delete)(?P<handler>\w*?)(?:Async)?\s*\("
+)
+_ASPNET_NON_ACTIONS = {
+    "Dispose",
+    "OnActionExecuting",
+    "OnActionExecuted",
+    "OnActionExecutionAsync",
+}
+
+
+def _aspnet_template(args: str) -> str | None:
+    match = re.search(r"(?:template\s*:\s*)?@?\"([^\"]*)\"", args or "")
+    return match.group(1) if match else None
+
+
+def _aspnet_join(
+    prefix: str, template: str | None, controller: str, action: str
+) -> str:
+    if template is not None and template.startswith(("/", "~/")):
+        joined = template.lstrip("~")
+    else:
+        joined = "/".join(
+            part.strip("/")
+            for part in (prefix, template or "")
+            if part and part.strip("/")
+        )
+    joined = re.sub(r"\[controller\]", controller, joined, flags=re.I)
+    joined = re.sub(r"\[action\]", action, joined, flags=re.I)
+    return "/" + joined.strip("/") if joined.strip("/") else "/"
+
+
+def _razor_page_path(relative_path: str) -> str | None:
+    parts = relative_path.split("/")
+    lowered = [part.casefold() for part in parts]
+    if "pages" not in lowered[:-1]:
+        return None
+    name = parts[-1]
+    for suffix in (".cshtml.cs", ".cshtml"):
+        if name.casefold().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    else:
+        return None
+    route_parts = parts[lowered.index("pages") + 1 : -1]
+    if name.casefold() != "index":
+        route_parts.append(name)
+    return "/" + "/".join(route_parts)
+
+
+def _aspnet_route_facts(text: str, relative_path: str) -> list[dict]:
+    """Extract ASP.NET Core controller, minimal API, and Razor Pages routes.
+
+    Attribute routes combine the controller's ``[Route]`` prefix with each
+    action's ``[HttpGet]``/``[Route]`` template. Public actions on an MVC
+    controller without a verb attribute use the conventional
+    ``/{controller}/{action}`` route.
+    """
+
+    routes: list[dict] = []
+    seen: set[tuple[str | None, str, int]] = set()
+
+    def _emit(method: str | None, path: str, line: int, **detail: object) -> None:
+        identity = (method, path, line)
+        if identity in seen:
+            return
+        seen.add(identity)
+        routes.append(
+            {
+                "fact_type": "route",
+                "method": method,
+                "path": path,
+                "host": None,
+                "name": None,
+                "detail": {"request_role": "server_ingress", **detail},
+                "evidence_location": f"{relative_path}:{line}",
+            }
+        )
+
+    page_path = _razor_page_path(relative_path)
+    if relative_path.casefold().endswith(".cshtml"):
+        for line_no, line in enumerate(text.splitlines(), 1):
+            directive = re.match(r"\s*@page\b\s*(?:\"([^\"]*)\")?", line)
+            if directive:
+                template = directive.group(1)
+                path = (
+                    template
+                    if template and template.startswith("/")
+                    else _aspnet_join(page_path or "/", template, "", "")
+                )
+                _emit("GET", path, line_no, route_kind="razor_page")
+                break
+        return routes
+    if relative_path.casefold().endswith(".razor"):
+        for line_no, line in enumerate(text.splitlines(), 1):
+            directive = re.match(r"\s*@page\s+\"([^\"]*)\"", line)
+            if directive:
+                _emit(
+                    "GET", directive.group(1) or "/", line_no, route_kind="blazor_page"
+                )
+        return routes
+
+    pending: list[str] = []
+    class_name = ""
+    controller = ""
+    class_prefix = ""
+    is_controller = False
+    is_page_model = False
+    for line_no, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        for match in _ASPNET_MINIMAL.finditer(line):
+            verb = match.group("verb")
+            method = None if verb in {"Methods", "Fallback"} else verb.upper()
+            path = match.group("path")
+            _emit(
+                method,
+                path if path.startswith("/") else "/" + path,
+                line_no,
+                route_kind="minimal_api",
+            )
+        remainder = stripped
+        attributes: list[str] = []
+        while remainder.startswith("["):
+            attribute = _ASPNET_ATTRIBUTE.match(remainder)
+            if attribute is None:
+                break
+            attributes.extend(
+                part
+                for part in re.split(r",\s*(?![^()]*\))", attribute.group("body"))
+                if part
+            )
+            remainder = remainder[attribute.end() :].strip()
+        pending.extend(attributes)
+        if not remainder:
+            continue
+        class_match = _ASPNET_CLASS.search(remainder)
+        if class_match:
+            class_name = class_match.group("name")
+            bases = class_match.group("bases") or ""
+            controller = re.sub(r"Controller$", "", class_name)
+            is_controller = (
+                class_name.endswith("Controller")
+                or bool(re.search(r"\bController(?:Base)?\b", bases))
+                or any(re.match(r"\s*ApiController\b", item) for item in pending)
+            )
+            is_page_model = bool(re.search(r"\bPageModel\b", bases))
+            class_prefix = ""
+            for item in pending:
+                route = _ASPNET_ROUTE.match(item)
+                if route:
+                    class_prefix = _aspnet_template(route.group("args")) or ""
+                    break
+            pending = []
+            continue
+        method_match = _ASPNET_METHOD.search(remainder)
+        if not method_match:
+            if not remainder.startswith(("[", "#")):
+                pending = []
+            continue
+        action = method_match.group("name")
+        attrs = pending
+        pending = []
+        if is_page_model:
+            handler = _RAZOR_HANDLER.search(remainder)
+            if handler and page_path is not None:
+                path = page_path
+                if handler.group("handler"):
+                    path = f"{page_path}?handler={handler.group('handler')}"
+                _emit(
+                    handler.group("verb").upper(),
+                    path,
+                    line_no,
+                    route_kind="razor_page_handler",
+                    symbol=action,
+                )
+            continue
+        if not is_controller or action == class_name:
+            continue
+        verbs: list[tuple[str | None, str | None]] = []
+        templates: list[str | None] = []
+        non_action = False
+        for item in attrs:
+            if re.match(r"\s*NonAction\b", item):
+                non_action = True
+            verb = _ASPNET_VERB.match(item)
+            if verb:
+                verbs.append(
+                    (
+                        verb.group("verb").upper(),
+                        _aspnet_template(verb.group("args") or ""),
+                    )
+                )
+                continue
+            route = _ASPNET_ROUTE.match(item)
+            if route:
+                templates.append(_aspnet_template(route.group("args")))
+        if non_action:
+            continue
+        name = action[:-5] if action.endswith("Async") else action
+        if verbs:
+            for method, template in verbs:
+                for route_template in (
+                    [template] if template is not None or not templates else templates
+                ):
+                    _emit(
+                        method,
+                        _aspnet_join(class_prefix, route_template, controller, name),
+                        line_no,
+                        route_kind="aspnet_attribute",
+                        symbol=action,
+                        controller=class_name,
+                    )
+        elif templates:
+            for template in templates:
+                _emit(
+                    None,
+                    _aspnet_join(class_prefix, template, controller, name),
+                    line_no,
+                    route_kind="aspnet_attribute",
+                    symbol=action,
+                    controller=class_name,
+                )
+        elif (
+            method_match.group("access") == "public"
+            and not class_prefix
+            and action not in _ASPNET_NON_ACTIONS
+            and not re.search(
+                r"\b(?:static|override|abstract)\b", remainder[: method_match.end()]
+            )
+        ):
+            _emit(
+                None,
+                "/" + "/".join(part for part in (controller, name) if part),
+                line_no,
+                route_kind="aspnet_conventional",
+                symbol=action,
+                controller=class_name,
+            )
+    return routes
+
+
+def _detect_dotnet_framework_facts(root: Path) -> list[dict]:
+    facts: list[dict] = []
+    projects = sorted(
+        path
+        for pattern in (
+            "*.csproj",
+            "*/*.csproj",
+            "*/*/*.csproj",
+            "*.vbproj",
+            "*/*.vbproj",
+        )
+        for path in root.glob(pattern)
+    )[:50]
+    markers = (
+        ("microsoft.net.sdk.web", "ASP.NET Core"),
+        ("microsoft.aspnetcore", "ASP.NET Core"),
+        ("microsoft.entityframeworkcore", "Entity Framework Core"),
+        ("microsoft.net.sdk.blazorwebassembly", "Blazor"),
+        ("microsoft.azure.functions", "Azure Functions"),
+        ("microsoft.net.sdk.functions", "Azure Functions"),
+        ("grpc.aspnetcore", "gRPC"),
+    )
+    seen: set[str] = set()
+    for project in projects:
+        try:
+            lowered = project.read_text("utf-8", errors="ignore").lower()
+        except OSError:
+            continue
+        relative = project.relative_to(root).as_posix()
+        for keyword, framework in markers:
+            if keyword in lowered and framework not in seen:
+                seen.add(framework)
+                facts.append(
+                    {
+                        "fact_type": "framework",
+                        "method": None,
+                        "path": None,
+                        "host": None,
+                        "name": framework,
+                        "detail": {"marker_file": relative},
+                        "evidence_location": relative,
+                    }
+                )
+    return facts
 
 
 # ── Outbound HTTP calls ───────────────────────────────────────────────────────
@@ -602,7 +908,8 @@ def _extract_semantic_frontend_repository_facts(
 
 _AUTH_MARKERS = re.compile(
     r"login_required|requires?_auth|authenticate|verify_jwt|Depends\("
-    r"\s*get_current_user|passport\.authenticate|@PreAuthorize|IsAuthenticated",
+    r"\s*get_current_user|passport\.authenticate|@PreAuthorize|IsAuthenticated"
+    r"|\[\s*Authorize\b|\bRequireAuthorization\s*\(",
     re.IGNORECASE,
 )
 _SPRING_SECURITY_MATCHER = re.compile(
@@ -784,6 +1091,7 @@ def extract_component_facts(root: Path) -> list[dict]:
     / ``component_id`` / ``fingerprint`` before persisting.
     """
     facts: list[dict] = list(_detect_framework_facts(root))
+    facts.extend(_detect_dotnet_framework_facts(root))
     seen_fingerprints: set[str] = {
         interface_fact_fingerprint(
             fact_type=f["fact_type"],
@@ -868,6 +1176,11 @@ def extract_component_facts(root: Path) -> list[dict]:
             if len(facts) >= _MAX_FACTS:
                 break
             _add(spring_route)
+        if path.suffix.lower() in {".cs", ".cshtml", ".razor"}:
+            for aspnet_route in _aspnet_route_facts(text, rel):
+                if len(facts) >= _MAX_FACTS:
+                    break
+                _add(aspnet_route)
 
         # The semantic pass follows calls through wrappers and UI bindings.
         # Keep the line-oriented extractors below as a small compatibility

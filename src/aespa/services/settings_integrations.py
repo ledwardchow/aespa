@@ -95,7 +95,6 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
         ),
         sast_dependency_findings=getattr(cfg, "sast_dependency_findings", True),
         sast_min_severity=getattr(cfg, "sast_min_severity", "low"),
-        sast_min_confidence=getattr(cfg, "sast_min_confidence", 0.35),
         sast_budget_mode=getattr(cfg, "sast_budget_mode", "adaptive"),
         sast_baseline_budget=getattr(cfg, "sast_baseline_budget", 80),
         sast_threat_budget=getattr(cfg, "sast_threat_budget", 60),
@@ -193,7 +192,6 @@ def upsert_scanner_policy(
     cfg.sast_defense_in_depth_findings = payload.sast_defense_in_depth_findings
     cfg.sast_dependency_findings = payload.sast_dependency_findings
     cfg.sast_min_severity = payload.sast_min_severity
-    cfg.sast_min_confidence = payload.sast_min_confidence
     cfg.sast_budget_mode = payload.sast_budget_mode
     cfg.sast_baseline_budget = payload.sast_baseline_budget
     cfg.sast_threat_budget = payload.sast_threat_budget

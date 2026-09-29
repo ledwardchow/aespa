@@ -12,11 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, func, update
+from sqlalchemy import delete, func, insert, update
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
 from aespa.models import (
+    SastCodeCall,
+    SastCodeSymbol,
     SastCoverageObligation,
     SastDiscoveryTelemetry,
     SastEvidenceReceipt,
@@ -30,6 +32,7 @@ from aespa.models import (
     SastWorker,
     SastWorkItem,
 )
+from aespa.services import sast_codegraph
 
 _UTC = timezone.utc
 CLASS_GROUPS = ("injection", "access", "logic")
@@ -61,6 +64,13 @@ _LANGUAGE_BY_SUFFIX = {
     ".rb": "Ruby",
     ".php": "PHP",
     ".cs": "C#",
+    ".vb": "Visual Basic",
+    ".cshtml": "Razor",
+    ".razor": "Razor",
+    ".aspx": "ASP.NET Web Forms",
+    ".ascx": "ASP.NET Web Forms",
+    ".ashx": "ASP.NET Web Forms",
+    ".asmx": "ASP.NET Web Forms",
     ".c": "C/C++",
     ".cc": "C/C++",
     ".cpp": "C/C++",
@@ -81,6 +91,9 @@ _LANGUAGE_BY_SUFFIX = {
     ".json": "Configuration",
     ".toml": "Configuration",
     ".xml": "Configuration",
+    ".config": "Configuration",
+    ".csproj": "Configuration",
+    ".props": "Configuration",
 }
 _SOURCE_LANGUAGES = {
     "Python",
@@ -92,6 +105,9 @@ _SOURCE_LANGUAGES = {
     "Ruby",
     "PHP",
     "C#",
+    "Visual Basic",
+    "Razor",
+    "ASP.NET Web Forms",
     "C/C++",
     "Rust",
     "Swift",
@@ -141,6 +157,26 @@ _ASSET_SUFFIXES = {
     ".min.css",
 }
 _DOC_SUFFIXES = {".md", ".rst", ".txt", ".adoc"}
+# Sinks that are function calls. In files the parser understands, these only
+# count when the match is inside a real call, not in a comment or plain string.
+# Serialization and deserialization stay line-based: definitions such as
+# `toPublic()` or Java's `readObject()` are review points too.
+_CALL_SINKS = {
+    "Database query",
+    "Command execution",
+    "Filesystem operation",
+    "Outbound request",
+    "Code or template evaluation",
+    "Sensitive logging",
+}
+# Scope-review items that are not tied to a line of code.
+_SYNTHETIC_CATEGORIES = {
+    "handler_review",
+    "inferred_handler",
+    "repository_surface",
+    "no_input_entrypoint",
+}
+_CODE_GRAPH_BATCH = 5_000
 
 
 @dataclass(frozen=True)
@@ -153,6 +189,16 @@ class _Pattern:
 
 def _rx(value: str) -> re.Pattern[str]:
     return re.compile(value, re.IGNORECASE)
+
+
+def _rx_exact(value: str) -> re.Pattern[str]:
+    """Match case-sensitively, for call names whose case identifies the API."""
+    return re.compile(value)
+
+
+# Excludes method calls such as `$stmt->fetch(`, `regex.exec(` and
+# `el.classList.remove(`, which share names with dangerous free functions.
+_FREE_CALL = r"(?<![\w.$>:])"
 
 
 _PATTERNS = (
@@ -170,6 +216,7 @@ _PATTERNS = (
         "HTTP route",
         _rx(
             r"(?:@\w+\.(?:get|post|put|patch|delete|route)|\b(?:app|router|server)\.(?:get|post|put|patch|delete|use)\s*\()"
+            r"|\.Map(?:Get|Post|Put|Patch|Delete|Methods|Fallback|Hub|Grpc(?:Service)?)\b\s*(?:<[^>]*>)?\s*\("
         ),
     ),
     _Pattern(
@@ -178,6 +225,7 @@ _PATTERNS = (
         "Annotated HTTP handler",
         _rx(
             r"@(?:RequestMapping|GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|Path)\b"
+            r"|\[\s*(?:Http(?:Get|Post|Put|Patch|Delete|Head|Options)|Route|AcceptVerbs|WebMethod)\b"
         ),
     ),
     _Pattern(
@@ -186,6 +234,15 @@ _PATTERNS = (
         "HTTP handler registration",
         _rx(
             r"\b(?:HandleFunc|handle\s*\(|add_route|register_route|register_rest_route)\b"
+        ),
+    ),
+    _Pattern(
+        "entrypoint",
+        "http",
+        "Razor page handler",
+        _rx_exact(
+            r"\bpublic\s+(?:async\s+)?[\w<>\[\],?\s]*?(?<![.\w])On(?:Get|Post|Put|Patch|Delete)\w*\s*\("
+            r"|^\s*@page\b"
         ),
     ),
     _Pattern(
@@ -199,14 +256,14 @@ _PATTERNS = (
         "queue",
         "Message consumer",
         _rx(
-            r"\b(?:consumer|subscribe|on_message|message_handler|KafkaListener|SqsListener|RabbitListener)\b"
+            r"\b(?:consumer|subscribe|on_message|message_handler|KafkaListener|SqsListener|RabbitListener|IConsumer|ServiceBusProcessor)\b"
         ),
     ),
     _Pattern(
         "entrypoint",
         "websocket",
         "WebSocket handler",
-        _rx(r"\b(?:websocket|WebSocket|socket\.on|onmessage)\b"),
+        _rx(r"\b(?:websocket|WebSocket|socket\.on|onmessage)\b|:\s*Hub\b"),
     ),
     _Pattern(
         "entrypoint",
@@ -221,7 +278,7 @@ _PATTERNS = (
         "serverless",
         "Serverless handler",
         _rx(
-            r"\b(?:lambda_handler|APIGatewayProxyHandler|CloudFunction|FunctionsFramework|event\.Records)\b"
+            r"\b(?:lambda_handler|APIGatewayProxyHandler|CloudFunction|FunctionsFramework|event\.Records|HttpTrigger|ServiceBusTrigger|QueueTrigger|FunctionName)\b"
         ),
     ),
     _Pattern(
@@ -242,6 +299,16 @@ _PATTERNS = (
         "Request value",
         _rx(
             r"\b(?:req\.(?:params|query|body|headers|cookies)|request\.(?:args|form|json|headers|cookies|files)|r\.(?:URL\.Query|FormValue|Header\.Get)|RequestParam|PathVariable|RequestBody)\b"
+        ),
+    ),
+    _Pattern(
+        "input",
+        "request",
+        ".NET request value",
+        _rx_exact(
+            r"\[\s*From(?:Body|Query|Route|Form|Header)\b|\[\s*BindProperty\b"
+            r"|\bRequest\.(?:Query|QueryString|Form|Headers|Cookies|Body|BodyReader|RouteValues|Params|Path|Files|InputStream|ServerVariables)\b"
+            r"|\bRequest\s*\[|\bIFormFile\b|\bIFormCollection\b|\bHttpPostedFile\w*\b"
         ),
     ),
     _Pattern(
@@ -273,7 +340,7 @@ _PATTERNS = (
         "config",
         "Runtime configuration",
         _rx(
-            r"\b(?:getenv|environ\[|process\.env|System\.getenv|Environment\.GetEnvironmentVariable)\b"
+            r"\b(?:getenv|environ\[|process\.env|System\.getenv|Environment\.GetEnvironmentVariable|GetConnectionString)\b"
         ),
     ),
     _Pattern(
@@ -290,38 +357,73 @@ _PATTERNS = (
         "Database query",
         _rx(
             r"\b(?:execute|executemany|rawQuery|createQuery|query|prepareStatement|\$wpdb->query)\s*\("
+            r"|->exec\s*\("
+            r"|\b(?:Sql|OleDb|Odbc|Npgsql|MySql|Sqlite|Oracle)Command\b"
+            r"|\bExecute(?:Reader|NonQuery|Scalar)(?:Async)?\s*\("
+            r"|\b(?:FromSql(?:Raw|Interpolated)?|ExecuteSql(?:Raw|Interpolated)?(?:Async)?|SqlQuery(?:Raw)?)\s*(?:<[^>]*>)?\s*\("
+            r"|\b(?:Query|Execute)(?:Async|First\w*|Single\w*|Multiple\w*)?\s*<[^>]*>\s*\("
+            r"|\b(?:Query|Execute)(?:Async|First\w*|Single\w*|Multiple\w*)\s*\("
         ),
     ),
     _Pattern(
         "sink",
         "injection",
         "Command execution",
-        _rx(
-            r"\b(?:system|popen|exec|spawn|subprocess\.|ProcessBuilder|Runtime\.getRuntime\(\)\.exec|Command::new)\b"
+        _rx_exact(
+            _FREE_CALL
+            + r"(?:system|popen|proc_open|shell_exec|passthru|exec|execFile|execFileSync|execSync|spawn|spawnSync|pcntl_exec)\s*\("
+            r"|\b(?:os\.(?:system|popen|exec\w*|spawn\w*)|child_process\.\w+)\s*\("
+            r"|\bsubprocess\.\w+|\brequire\(\s*['\"](?:node:)?child_process['\"]\s*\)"
+            r"|\bProcessBuilder\b|\bRuntime\.getRuntime\(\)\.exec|\bCommand::new\b|\bexec\.Command(?:Context)?\s*\("
+            r"|\bProcess\.Start\s*\(|\bProcessStartInfo\b"
         ),
     ),
     _Pattern(
         "sink",
         "injection",
         "Filesystem operation",
-        _rx(
-            r"\b(?:open|readFile|writeFile|unlink|remove|FileInputStream|FileOutputStream|Path\.of|fs\.)\s*\("
+        _rx_exact(
+            _FREE_CALL
+            + r"(?:open|fopen|file_get_contents|file_put_contents|readfile|unlink|rmdir|mkdir|rename|copy|move_uploaded_file|tempnam|sendFile|send_file)\s*\("
+            r"(?!\s*['\"]php://input)"
+            r"|\b(?:include|require)(?:_once)?\s*\(?\s*\$"
+            r"|\bfs(?:\.promises)?\.\w+\s*\(|\b(?:os|shutil)\.(?:remove|unlink|rename|rmdir|removedirs|makedirs|mkdir|rmtree|copy\w*|move)\s*\("
+            r"|\bos\.(?:Open|OpenFile|Create|ReadFile|WriteFile|Remove|RemoveAll)\s*\(|\bioutil\.\w*File\s*\("
+            r"|\bFile(?:InputStream|OutputStream|Reader|Writer)\b|\b(?:Path\.of|Paths\.get|Files\.\w+)\s*\("
+            r"|\bFile\.(?:Open|ReadAll\w*|WriteAll\w*|Delete|Copy|Move)\w*\s*\(|\bres\.(?:sendFile|download)\s*\("
+            r"|\bStorage::\w+\s*\("
+            r"|\bFile\.(?:Create|Append\w*|ReadLines|Exists)\w*\s*\(|\bDirectory\.\w+\s*\(|\bnew\s+(?:FileStream|StreamReader|StreamWriter|FileInfo|DirectoryInfo)\s*\("
+            r"|\bPath\.Combine\s*\(|\b(?:PhysicalFile|VirtualFile)\s*\(|\bServer\.MapPath\s*\(|\bZipFile\.ExtractToDirectory\s*\(|\.ExtractToFile\s*\("
         ),
     ),
     _Pattern(
         "sink",
         "injection",
         "Outbound request",
-        _rx(
-            r"\b(?:fetch|axios|requests\.(?:get|post|put|patch|delete|request)|httpx\.|HttpClient|RestTemplate|WebClient|wp_remote_)\b"
+        _rx_exact(
+            _FREE_CALL + r"fetch\s*\(|\b(?:window|globalThis)\.fetch\s*\(|\baxios\b"
+            r"|\brequests\.(?:get|post|put|patch|delete|head|request)\s*\(|\bhttpx\.|\burllib\.request\b|\burlopen\s*\("
+            r"|\bcurl_(?:init|exec|setopt)\s*\(|\bhttps?\.(?:request|get)\s*\(|\bhttp\.(?:Get|Post|PostForm|Head|NewRequest\w*)\s*\("
+            r"|\b(?:HttpClient|RestTemplate|WebClient|OkHttpClient|XMLHttpRequest|GuzzleHttp|Guzzle)\b|\bwp_remote_\w+\s*\("
+            r"|\bHttp::(?:get|post|put|patch|delete|send)\s*\("
+            r"|\bfile_get_contents\s*\(\s*\$|\bfsockopen\s*\("
+            r"|\b(?:WebRequest|HttpWebRequest)\.Create\w*\s*\(|\bRestClient\b|\bIHttpClientFactory\b"
+            r"|\.(?:GetAsync|PostAsync|PutAsync|PatchAsync|DeleteAsync|SendAsync|GetStringAsync|GetStreamAsync|GetByteArrayAsync|PostAsJsonAsync|PutAsJsonAsync|GetFromJsonAsync|DownloadString\w*|DownloadData\w*|DownloadFile\w*|UploadString\w*)\s*\("
         ),
     ),
     _Pattern(
         "sink",
         "injection",
         "Code or template evaluation",
-        _rx(
-            r"\b(?:eval|Function|exec|compile|render_template_string|Template\(|ScriptingEngine)\s*\("
+        _rx_exact(
+            _FREE_CALL
+            + r"(?:eval|exec|compile|create_function|assert)\s*\(|\bnew\s+Function\s*\(|"
+            + _FREE_CALL
+            + r"Function\s*\(|\b(?:setTimeout|setInterval)\s*\(\s*['\"`]"
+            r"|\bvm\.(?:runIn\w*Context|Script)\b|\brender_template_string\s*\(|\bTemplate\s*\("
+            r"|\b(?:ScriptEngine\w*|ScriptingEngine|SpelExpressionParser|OgnlUtil)\b|\bpreg_replace\s*\(\s*['\"].*/e['\"]"
+            r"|\bCSharpScript\.\w+\s*\(|\bCSharpCodeProvider\b|\bCompileAssemblyFrom\w+\s*\(|\bRazor(?:Engine)?\.(?:Parse|Compile\w*|RunCompile)\s*\("
+            r"|\bEngine\.Razor\.\w+\s*\(|\bAssembly\.Load(?:From|File)?\s*\(|\bActivator\.CreateInstance\s*\(|\bType\.GetType\s*\(|\bDynamicExpressionParser\b"
         ),
     ),
     _Pattern(
@@ -330,6 +432,7 @@ _PATTERNS = (
         "HTML output",
         _rx(
             r"\b(?:innerHTML|outerHTML|dangerouslySetInnerHTML|document\.write|v-html|render\(|html\(|echo\s)\b"
+            r"|\bHtml\.Raw\s*\(|\bnew\s+(?:HtmlString|MarkupString)\s*\(|\(\s*MarkupString\s*\)|\bResponse\.Write\s*\(|<%=|\bContent\s*\([^)]*text/html"
         ),
     ),
     _Pattern(
@@ -338,6 +441,7 @@ _PATTERNS = (
         "Redirect or navigation",
         _rx(
             r"\b(?:redirect|sendRedirect|Location|window\.location|location\.(?:href|assign|replace)|window\.open)\b"
+            r"|\bRedirect(?:Permanent\w*|PreserveMethod)?\s*\(|\bResponse\.Redirect\s*\("
         ),
     ),
     _Pattern(
@@ -346,6 +450,7 @@ _PATTERNS = (
         "Authorization decision",
         _rx(
             r"\b(?:authorize|permission|isAllowed|hasRole|hasPermission|checkAccess|ownership|owner_id|tenant_id)\b"
+            r"|\b(?:AuthorizeAsync|IsInRole|HasClaim|FindFirst(?:Value)?)\s*\("
         ),
     ),
     _Pattern(
@@ -354,6 +459,9 @@ _PATTERNS = (
         "Response serialization",
         _rx(
             r"\b(?:toPublic|toJSON|to_dict|as_dict|serialize|jsonify|JsonResponse|Response::success|res\.json)\s*\("
+            r"|\bSerializeObject\s*\("
+            # ASP.NET action results that write an object into the response.
+            r"|(?-i:\breturn\s+(?:Ok|Json|Created\w*|Accepted\w*|(?:Typed)?Results\.(?:Ok|Json|Created\w*))\s*(?:<[^>]*>)?\s*\(\s*[^)\s])"
         ),
     ),
     _Pattern(
@@ -362,21 +470,38 @@ _PATTERNS = (
         "Deserialization",
         _rx(
             r"\b(?:pickle\.loads|yaml\.load|ObjectInputStream|unserialize|BinaryFormatter|readObject)\b"
+            r"|\bTypeNameHandling\.(?:All|Auto|Objects|Arrays)\b|\b(?:LosFormatter|ObjectStateFormatter|SoapFormatter|NetDataContractSerializer|JavaScriptSerializer|XmlSerializer|DataContractSerializer)\b"
+            r"|\bSimpleTypeResolver\b"
         ),
     ),
     _Pattern(
         "sink",
         "logic",
         "Cryptographic operation",
-        _rx(
-            r"\b(?:md5|sha1|DES|RC4|Cipher|getInstance|createCipher|sign|verify|encrypt|decrypt|Math\.random|random\.)\b"
+        _rx_exact(
+            r"\b(?:md5|sha1|crc32|MD5|SHA1)(?:_file)?\s*\(|\bhashlib\.(?:md5|sha1|new)\b"
+            r"|\b(?:Cipher|MessageDigest|KeyGenerator|SecureRandom|Signature|Mac|SecretKeyFactory)\.getInstance\s*\("
+            r"|\bcrypto\.(?:createCipher\w*|createDecipher\w*|createHash|createHmac|createSign|createVerify|randomBytes|pbkdf2\w*|scrypt\w*|subtle)\b"
+            r"|\b(?:openssl|sodium|mcrypt)_\w+\s*\(|\bpassword_(?:hash|verify)\s*\(|\bhash(?:_hmac|_equals)?\s*\("
+            r"|\b(?:jwt|jsonwebtoken|jose)\.(?:sign|verify|decode)\s*\(|\bJWT::(?:encode|decode)\s*\("
+            r"|\bMath\.random\s*\(|"
+            + _FREE_CALL
+            + r"(?:mt_)?rand\s*\(|\brandom\.(?:random|randint|choice|randrange|getrandbits)\s*\("
+            r"|\buniqid\s*\(|\b(?:DES|3DES|RC4|ECB)\b|\bbcrypt\b|\b(?:encrypt|decrypt)\w*\s*\("
+            r"|\b(?:MD5|SHA1|DES|TripleDES|RC2|Aes|Rijndael|RSA|ECDsa|HMAC\w*)\.Create\s*\(|\bnew\s+(?:Random|MD5CryptoServiceProvider|SHA1Managed|RijndaelManaged|DESCryptoServiceProvider|HMACMD5|HMACSHA1)\s*\("
+            r"|\bRfc2898DeriveBytes\b|\bRandomNumberGenerator\b|\b(?:Encrypt|Decrypt|ComputeHash|SignData|VerifyData)\s*\("
+            r"|\b(?:JwtSecurityTokenHandler|TokenValidationParameters)\b"
         ),
     ),
     _Pattern(
         "sink",
         "logic",
         "Sensitive logging",
-        _rx(r"\b(?:log|logger|console)\.(?:debug|info|warn|error|log)\s*\("),
+        _rx(
+            r"\b(?:log|logger|console)\.(?:debug|info|warn|error|log)\s*\("
+            r"|\.Log(?:Trace|Debug|Information|Warning|Error|Critical)\s*\("
+            r"|\bLog\.(?:Verbose|Debug|Information|Warning|Error|Fatal)\s*\("
+        ),
     ),
     _Pattern(
         "sink",
@@ -384,6 +509,7 @@ _PATTERNS = (
         "Concurrent state operation",
         _rx(
             r"\b(?:create_task|executor\.submit|CompletableFuture|go\s+func|setImmediate|ThreadPoolExecutor)\b"
+            r"|\bTask\.Run\s*\(|\bParallel\.For(?:Each)?(?:Async)?\s*\(|\bThreadPool\.QueueUserWorkItem\b|\bnew\s+Thread\s*\("
         ),
     ),
     _Pattern(
@@ -392,6 +518,7 @@ _PATTERNS = (
         "Authentication control",
         _rx(
             r"\b(?:authenticate|login_required|requireAuth|verify_jwt|verifyToken|get_current_user|PreAuthorize)\b"
+            r"|\[\s*AllowAnonymous\b|\b(?:SignInAsync|PasswordSignInAsync|AddAuthentication|AddJwtBearer|UseAuthentication|ValidateToken)\s*\("
         ),
     ),
     _Pattern(
@@ -400,6 +527,7 @@ _PATTERNS = (
         "Authorization control",
         _rx(
             r"\b(?:authorize|checkAccess|hasPermission|hasRole|current_user_can|ownership|owner_id\s*==|tenant_id\s*==)\b"
+            r"|\b(?:RequireAuthorization|AddAuthorization|UseAuthorization|RequireRole|RequireClaim)\s*\("
         ),
     ),
     _Pattern(
@@ -408,6 +536,7 @@ _PATTERNS = (
         "Input validation",
         _rx(
             r"\b(?:validate|validator|schema\.parse|safeParse|isValid|sanitize|escape|parameterized|prepareStatement|nonce|csrf)\b"
+            r"|\bModelState\.IsValid\b|\[\s*(?:ValidateAntiForgeryToken|AutoValidateAntiforgeryToken|IgnoreAntiforgeryToken)\b|\bSqlParameter\b|\.Parameters\.Add\w*\s*\("
         ),
     ),
 )
@@ -451,9 +580,15 @@ def _handler_scope(path: str) -> bool:
         "handler",
         "routes",
         "endpoints",
+        "hubs",
     }:
         return True
-    if stem.endswith(("controller", "handler", "router", "routes", "endpoint")):
+    if stem.endswith(
+        ("controller", "handler", "router", "routes", "endpoint", "endpoints", "hub")
+    ):
+        return True
+    # Razor Pages code-behind, e.g. Pages/Account/Login.cshtml.cs.
+    if path.casefold().endswith((".cshtml.cs", ".aspx.cs", ".ashx.cs", ".asmx.cs")):
         return True
     if stem in {"views", "urls"} and Path(path).suffix.casefold() == ".py":
         return True
@@ -489,6 +624,8 @@ def reset_work_program(sast_run_id: int) -> None:
             SastPartition,
             SastSurfaceItem,
             SastSourceFile,
+            SastCodeCall,
+            SastCodeSymbol,
         ):
             session.exec(delete(model).where(model.sast_run_id == sast_run_id))
         session.commit()
@@ -533,6 +670,12 @@ def build_source_atlas(sast_run_id: int, root: Path) -> dict[str, Any]:
         persisted_files = session.exec(
             select(SastSourceFile).where(SastSourceFile.sast_run_id == sast_run_id)
         ).all()
+        graph = sast_codegraph.build_code_graph(
+            (row.path, path_to_disk[row.path])
+            for row in persisted_files
+            if row.production_relevant and row.size <= _MAX_ATLAS_FILE_BYTES
+        )
+        sinks_outside_calls = 0
         surface_rows: list[SastSurfaceItem] = []
         for row in persisted_files:
             if not row.production_relevant or len(surface_rows) >= _MAX_SURFACE_ITEMS:
@@ -548,10 +691,22 @@ def build_source_atlas(sast_run_id: int, root: Path) -> dict[str, Any]:
             except OSError:
                 continue
             file_surface_start = len(surface_rows)
+            parsed = graph.is_parsed(row.path)
             for line_number, line in enumerate(lines, start=1):
                 for pattern in _PATTERNS:
                     match = pattern.regex.search(line)
                     if not match:
+                        continue
+                    if (
+                        parsed
+                        and pattern.kind == "sink"
+                        and pattern.name in _CALL_SINKS
+                        and not any(
+                            call.kind != "ref" and pattern.regex.search(call.text)
+                            for call in graph.calls_on_line(row.path, line_number)
+                        )
+                    ):
+                        sinks_outside_calls += 1
                         continue
                     snippet = line.strip()[:500]
                     surface_rows.append(
@@ -624,8 +779,10 @@ def build_source_atlas(sast_run_id: int, root: Path) -> dict[str, Any]:
                         fingerprint=_fingerprint("handler-review", row.path),
                     )
                 )
+        _annotate_reachability(graph, surface_rows)
         session.add_all(surface_rows)
         session.commit()
+        _persist_code_graph(session, sast_run_id, graph)
 
         surfaces = session.exec(
             select(SastSurfaceItem).where(SastSurfaceItem.sast_run_id == sast_run_id)
@@ -803,7 +960,95 @@ def build_source_atlas(sast_run_id: int, root: Path) -> dict[str, Any]:
                 )
         session.commit()
 
-    return work_program_summary(sast_run_id)
+    summary = work_program_summary(sast_run_id)
+    summary["code_graph"] = {
+        **summary.get("code_graph", {}),
+        "sink_matches_outside_calls": sinks_outside_calls,
+        "warnings": graph.warnings[:20],
+    }
+    return summary
+
+
+def _annotate_reachability(
+    graph: sast_codegraph.CodeGraph, surface_rows: list[SastSurfaceItem]
+) -> None:
+    """Mark each surface item with its function and whether an entry point reaches it.
+
+    Roots are every file's top level, every function holding a detected route
+    or request input, and every function in a likely handler file.
+    """
+    roots = {graph.module_key(path) for path in graph.parsed_files}
+    for item in surface_rows:
+        if (
+            item.kind in {"entrypoint", "input"}
+            and item.category not in _SYNTHETIC_CATEGORIES
+            and item.line
+        ):
+            enclosing = graph.enclosing_def(item.path, item.line)
+            if enclosing is not None:
+                roots.add(enclosing.key)
+    for path in graph.parsed_files:
+        if _handler_scope(path):
+            roots.update(item.key for item in graph.defs_in_file(path))
+    graph.compute_reachability(roots)
+    for item in surface_rows:
+        if item.category in _SYNTHETIC_CATEGORIES or not item.line:
+            continue
+        status, enclosing = graph.status_for(item.path, item.line)
+        if enclosing is None:
+            continue
+        details = json.loads(item.details_json or "{}")
+        details["function"] = enclosing.label
+        details["reachability"] = status
+        if status == sast_codegraph.REACHABLE:
+            chain = graph.path_to(enclosing.key)
+            if len(chain) > 1:
+                details["reached_from"] = [
+                    graph.defs[key].label for key in chain if key in graph.defs
+                ]
+        item.details_json = json.dumps(details)
+
+
+def _persist_code_graph(
+    session: Session, sast_run_id: int, graph: sast_codegraph.CodeGraph
+) -> None:
+    symbol_rows = [
+        {
+            "sast_run_id": sast_run_id,
+            "symbol_key": item.key,
+            "path": item.path,
+            "language": item.language,
+            "name": item.name,
+            "qualname": item.qualname,
+            "kind": item.kind,
+            "start_line": item.start_line,
+            "end_line": item.end_line,
+            "reachability": graph.reachability.get(item.key, sast_codegraph.UNKNOWN),
+            "is_root": item.key in graph.roots,
+        }
+        for item in graph.defs.values()
+    ]
+    call_rows = [
+        {
+            "sast_run_id": sast_run_id,
+            "path": call.path,
+            "line": call.line,
+            "caller_key": call.caller_key,
+            "callee_name": call.callee_name,
+            "receiver": call.receiver,
+            "kind": call.kind,
+            "text": call.text,
+            "targets_json": json.dumps(call.targets),
+        }
+        for call in graph.calls
+    ]
+    connection = session.connection()
+    for model, rows in ((SastCodeSymbol, symbol_rows), (SastCodeCall, call_rows)):
+        for offset in range(0, len(rows), _CODE_GRAPH_BATCH):
+            connection.execute(
+                insert(model.__table__), rows[offset : offset + _CODE_GRAPH_BATCH]
+            )
+    session.commit()
 
 
 def work_program_summary(sast_run_id: int) -> dict[str, Any]:
@@ -868,6 +1113,11 @@ def work_program_summary(sast_run_id: int) -> dict[str, Any]:
         for status, count in work_counts.items()
         if status not in TERMINAL_WORK_STATUSES
     )
+    sink_reachability: dict[str, int] = defaultdict(int)
+    for item in surfaces:
+        if item.kind == "sink":
+            status = _code_context(item).get("reachability", sast_codegraph.UNKNOWN)
+            sink_reachability[status] += 1
     return {
         "files": {
             "total": len(files),
@@ -895,6 +1145,67 @@ def work_program_summary(sast_run_id: int) -> dict[str, Any]:
             "characters_returned": sum(r.characters_returned for r in receipts),
             "truncated": sum(r.truncated for r in receipts),
         },
+        "code_graph": {
+            **_code_graph_counts(sast_run_id),
+            "sink_reachability": dict(sink_reachability),
+        },
+    }
+
+
+def _code_graph_counts(sast_run_id: int) -> dict[str, Any]:
+    with Session(get_engine()) as session:
+        languages = {
+            str(language): int(count)
+            for language, count in session.exec(
+                select(SastCodeSymbol.language, func.count())
+                .where(
+                    SastCodeSymbol.sast_run_id == sast_run_id,
+                    SastCodeSymbol.kind == "module",
+                )
+                .group_by(SastCodeSymbol.language)
+            ).all()
+        }
+        function_reachability = {
+            str(status): int(count)
+            for status, count in session.exec(
+                select(SastCodeSymbol.reachability, func.count())
+                .where(
+                    SastCodeSymbol.sast_run_id == sast_run_id,
+                    SastCodeSymbol.kind != "module",
+                )
+                .group_by(SastCodeSymbol.reachability)
+            ).all()
+        }
+        files = sum(languages.values())
+        functions = session.exec(
+            select(func.count())
+            .select_from(SastCodeSymbol)
+            .where(
+                SastCodeSymbol.sast_run_id == sast_run_id,
+                SastCodeSymbol.kind != "module",
+            )
+        ).one()
+        calls = session.exec(
+            select(func.count())
+            .select_from(SastCodeCall)
+            .where(SastCodeCall.sast_run_id == sast_run_id, SastCodeCall.kind != "ref")
+        ).one()
+        resolved = session.exec(
+            select(func.count())
+            .select_from(SastCodeCall)
+            .where(
+                SastCodeCall.sast_run_id == sast_run_id,
+                SastCodeCall.kind != "ref",
+                SastCodeCall.targets_json != "[]",
+            )
+        ).one()
+    return {
+        "files_parsed": int(files),
+        "languages": dict(sorted(languages.items())),
+        "functions": int(functions),
+        "function_reachability": function_reachability,
+        "calls": int(calls),
+        "resolved_calls": int(resolved),
     }
 
 
@@ -932,6 +1243,7 @@ def worker_payload(worker_id: int) -> dict[str, Any]:
                         "line": surface.line,
                         "symbol": surface.symbol,
                         "trust_level": surface.trust_level,
+                        **_code_context(surface),
                     },
                 }
             )
@@ -943,6 +1255,90 @@ def worker_payload(worker_id: int) -> dict[str, Any]:
             "files": json.loads(partition.file_paths_json) if partition else [],
             "work_items": result,
         }
+
+
+def _code_context(surface: SastSurfaceItem) -> dict[str, Any]:
+    try:
+        details = json.loads(surface.details_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(details, dict):
+        return {}
+    return {
+        key: details[key]
+        for key in ("function", "reachability", "reached_from")
+        if details.get(key)
+    }
+
+
+def work_program_view(worker_id: int) -> dict[str, Any]:
+    """Return a worker's program for the model, with open items listed first.
+
+    Finished items are reduced to their id and status so a large program still
+    shows every open item in full.
+    """
+    payload = worker_payload(worker_id)
+    if not payload:
+        return payload
+    items = list(payload.get("work_items") or [])
+    open_items = [
+        item for item in items if item.get("status") not in TERMINAL_WORK_STATUSES
+    ]
+    finished = [
+        {"work_item_id": item["work_item_id"], "status": item.get("status")}
+        for item in items
+        if item.get("status") in TERMINAL_WORK_STATUSES
+    ]
+    return {
+        **{key: value for key, value in payload.items() if key != "work_items"},
+        "open_count": len(open_items),
+        "finished_count": len(finished),
+        "work_items": open_items,
+        "finished_items": finished,
+    }
+
+
+def unresolved_items_message(worker_id: int, limit: int = 50) -> str:
+    """Describe a worker's open items so the model can act on them directly."""
+    open_ids = set(unresolved_for_worker(worker_id))
+    if not open_ids:
+        return ""
+    items = [
+        item
+        for item in worker_payload(worker_id).get("work_items") or []
+        if item.get("work_item_id") in open_ids
+    ]
+    lines = []
+    for item in items[:limit]:
+        surface = item.get("surface") or {}
+        location = str(surface.get("path") or "unknown file")
+        if surface.get("line"):
+            location += f":{surface['line']}"
+        detail = " ".join(
+            str(part)
+            for part in (
+                item.get("work_type"),
+                surface.get("category"),
+                surface.get("name"),
+            )
+            if part
+        )
+        symbol = str(surface.get("symbol") or "").strip()
+        if len(symbol) > 160:
+            symbol = symbol[:157] + "..."
+        line = f"- {item['work_item_id']}: {detail} at {location}"
+        if symbol:
+            line += f" — {symbol}"
+        lines.append(line)
+    found_ids = {item["work_item_id"] for item in items}
+    for missing_id in sorted(open_ids - found_ids):
+        if len(lines) >= limit:
+            break
+        lines.append(f"- {missing_id}: no source location recorded")
+    extra = len(open_ids) - len(lines)
+    if extra > 0:
+        lines.append(f"- ...and {extra} more; call get_work_program to see them.")
+    return "Resolve these assigned work items before done:\n" + "\n".join(lines)
 
 
 def discovery_worker_budget(

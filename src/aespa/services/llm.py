@@ -4932,8 +4932,17 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 
 # ── Continuous agentic session (Anthropic native tool use) ────────────────────
 
-TOOL_RESULT_CHAR_LIMIT = 8_000
-CONTEXT_TOOL_RESULT_CHAR_LIMIT = 12_000
+TOOL_RESULT_CHAR_LIMIT = 24_000
+CONTEXT_TOOL_RESULT_CHAR_LIMIT = 30_000
+
+
+def _tool_result_omitted_note(omitted: int) -> str:
+    return (
+        f"\n[{omitted} chars omitted — request a narrower range, fewer results, "
+        "or a more specific query to see the rest]"
+    )
+
+
 CONTEXT_JOURNAL_CHAR_LIMIT = 16_000
 _COMPACTION_SUFFIX_COUNTS = (32, 16, 8, 4, 2, 0)
 # A tool call needs room for a JSON action and its arguments. Keep this much
@@ -7166,7 +7175,7 @@ async def thinking_agentic_loop(
                         "type": "text",
                         "text": (
                             "The previous model turn ended without a completed tool "
-                            "exchange. Resume the assessment by calling exactly one tool."
+                            "exchange. Resume the assessment by calling a tool."
                         ),
                     }
                 ]
@@ -7596,7 +7605,7 @@ async def thinking_agentic_loop(
                                     text_only_repair_message
                                     or (
                                         "Your previous response did not call a tool, so no scan action "
-                                        "was executed. Continue by calling exactly one tool now. Use "
+                                        "was executed. Continue by calling a tool now. Use "
                                         "http_request, browser, context_tool, write_finding, forge_jwt, "
                                         "decode_jwt, credential_check, or register_account for the next "
                                         "assessment step. Call done only if the assessment is genuinely "
@@ -7762,16 +7771,31 @@ async def thinking_agentic_loop(
                 )
                 if len(result_str) > limit:
                     omitted = len(result_str) - limit
-                    result_str = (
-                        result_str[:limit]
-                        + f"\n[{omitted} chars omitted — use context_tool/history_search for details]"
-                    )
+                    result_str = result_str[:limit] + _tool_result_omitted_note(omitted)
 
                 tool_results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
                         "content": result_str,
+                    }
+                )
+
+            # Providers require a result for every tool call in a response, so
+            # calls skipped after `done` or a stop request still get one.
+            answered_ids = {r.get("tool_use_id") for r in tool_results}
+            for block in tool_use_blocks:
+                skipped_id = block.get("id") or ""
+                if skipped_id in answered_ids:
+                    continue
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": skipped_id,
+                        "content": (
+                            "Not run: an earlier call in this response ended the "
+                            "step. Call this tool again if you still need it."
+                        ),
                     }
                 )
 

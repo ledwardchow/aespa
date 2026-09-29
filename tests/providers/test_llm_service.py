@@ -608,6 +608,94 @@ def test_agentic_loop_normalizes_json_string_tool_input(monkeypatch):
     assert received == [{"verdict": "confirmed", "reasoning": "Reproduced."}]
 
 
+def test_agentic_loop_answers_calls_skipped_after_rejected_done(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    seen_messages = []
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        seen_messages.append([dict(m) for m in messages])
+        if calls == 1:
+            blocks = [
+                {"type": "tool_use", "id": "d1", "name": "done", "input": {}},
+                {"type": "tool_use", "id": "r1", "name": "read_file", "input": {}},
+            ]
+        else:
+            blocks = [{"type": "tool_use", "id": "d2", "name": "done", "input": {}}]
+        return blocks, "tool_use", blocks
+
+    async def fake_tool_executor(name, tool_input, step):
+        return "ok"
+
+    def done_check(tool_input, step):
+        return (step > 2), "Not finished yet."
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+            done_check=done_check,
+        )
+    )
+
+    results = seen_messages[1][-1]["content"]
+    by_id = {r["tool_use_id"]: r["content"] for r in results}
+    assert by_id["d1"] == "Not finished yet."
+    assert by_id["r1"].startswith("Not run:")
+
+
+def test_agentic_loop_keeps_tool_output_up_to_shared_limit(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    seen_messages = []
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        seen_messages.append([dict(m) for m in messages])
+        name = "read_file" if calls == 1 else "done"
+        blocks = [{"type": "tool_use", "id": f"c{calls}", "name": name, "input": {}}]
+        return blocks, "tool_use", blocks
+
+    big = "x" * 20_000 + "TAIL" + "y" * (llm.TOOL_RESULT_CHAR_LIMIT)
+
+    async def fake_tool_executor(name, tool_input, step):
+        return big
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+        )
+    )
+
+    content = seen_messages[1][-1]["content"][0]["content"]
+    assert llm.TOOL_RESULT_CHAR_LIMIT >= 20_000
+    assert "TAIL" in content
+    assert "chars omitted" in content
+    assert "context_tool/history_search" not in content
+
+
 def test_agentic_loop_rejects_malformed_string_tool_input(monkeypatch):
     config = LLMConfig(
         provider="azure_foundry_openai",

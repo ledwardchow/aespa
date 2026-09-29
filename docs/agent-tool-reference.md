@@ -144,8 +144,9 @@ These tools are in `SAST_TOOLS` with the read-only file tools.
 | `claim_traced_sink` | Assigns a helper sink to a route worker after it reads the route file and sink line; the worker must record a separate result for the sink |
 | `record_disposition` | Records the evidence-backed result for one assigned work item |
 | `record_semantic_disposition` | Resolves a threat-scenario or repository-model obligation as assessed, a candidate, not applicable, or blocked |
-| `write_lead` | Records a candidate with its classification, root causes, location, source and sink traces, controls, proof gaps, confidence score, and confidence reasoning |
+| `write_lead` | Records a candidate with its classification, root causes, location, source and sink traces, controls, proof gaps, confidence score, and confidence reasoning. Source and sink traces, a `fix_location`, and a `root_cause` are required |
 | `filter_lead` | Revises the confidence score and reasoning of an existing candidate |
+| `merge_lead` | Merges a pending lead into another pending lead when one code change fixes both |
 | `done` | Signals that the assigned SAST phase is complete |
 
 ### Threat-model tools
