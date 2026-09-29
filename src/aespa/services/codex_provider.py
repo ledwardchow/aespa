@@ -807,7 +807,7 @@ def _required_tool_repair_prompt(tools: list[dict[str, Any]]) -> str:
     available = ", ".join(names)
     return (
         "Your previous response ended without calling an AESPA dynamic tool, so "
-        "no scan action was executed. Call exactly one AESPA dynamic tool now and "
+        "no scan action was executed. Call an AESPA dynamic tool now and "
         "do not respond with prose alone. Available tools: "
         f"{available}."
     )
@@ -896,8 +896,11 @@ async def _start_thread(
 ) -> _Conversation:
     tool_rule = (
         "Call only the dynamic tools supplied by AESPA. Every response must "
-        "call exactly one of those dynamic tools. Never end a response with "
-        "prose alone; call the supplied completion tool when the work is done."
+        "call at least one of those dynamic tools. When several calls do not "
+        "depend on each other's results, such as reading several files, make "
+        "them all in the same response. Never end a response with prose "
+        "alone; call the supplied completion tool on its own when the work is "
+        "done."
         if tools
         else "Do not call any tool."
     )

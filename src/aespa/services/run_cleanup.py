@@ -57,6 +57,8 @@ from aespa.models import (
     ProbeExecution,
     RunIdentity,
     RunPause,
+    SastCodeCall,
+    SastCodeSymbol,
     SastCoverageObligation,
     SastDiscoveryTelemetry,
     SastEvidenceReceipt,
@@ -539,6 +541,8 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         SastPartition,
         SastSurfaceItem,
         SastSourceFile,
+        SastCodeCall,
+        SastCodeSymbol,
     ):
         session.execute(delete(model).where(model.sast_run_id == run_id))
 

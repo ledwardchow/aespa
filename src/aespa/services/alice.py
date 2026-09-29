@@ -2863,7 +2863,7 @@ async def run_alice_turn_stream(
                     result_str = f"Tool execution error: {exc}"
 
                 # Cap result length to avoid blowing up context
-                limit = 30000 if tool_name == "context_tool" else 16000
+                limit = 30000 if tool_name == "context_tool" else 24000
                 if len(result_str) > limit:
                     omitted = len(result_str) - limit
                     result_str = result_str[:limit] + f"\n[{omitted} chars omitted]"
@@ -4194,7 +4194,7 @@ async def run_api_alice_turn_stream(
                     )
                     result_str = f"Tool execution error: {exc}"
 
-                limit = 30000 if tool_name == "context_tool" else 16000
+                limit = 30000 if tool_name == "context_tool" else 24000
                 if len(result_str) > limit:
                     omitted = len(result_str) - limit
                     result_str = result_str[:limit] + f"\n[{omitted} chars omitted]"

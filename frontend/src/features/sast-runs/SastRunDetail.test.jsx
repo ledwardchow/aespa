@@ -124,3 +124,24 @@ test("opens legacy security check links in the consolidated Threats view", async
   expect(screen.getByRole("tab", { name: "Threats 1" }).getAttribute("aria-selected")).toBe("true");
   expect(screen.queryByRole("tab", { name: /Security checks/ })).toBeNull();
 });
+
+test("shows a source failure and resumes preparation on the same run", async () => {
+  const user = userEvent.setup();
+  const failedRun = {
+    ...run,
+    status: "failed",
+    source_provider: "aespa.githubrepository",
+    source_archive_path: null,
+    error_message: "GitHub authentication expired. Sign in, then resume source preparation.",
+  };
+  sastRunsApi.getSastRun.mockResolvedValue(failedRun);
+  sastRunsApi.getSastScanStatus.mockResolvedValue({ running: false });
+  sastRunsApi.resumeSastSource.mockResolvedValue({ ...failedRun, status: "preparing" });
+
+  render(<SastRunDetailExperience runId={249} initialTab="coverage" />);
+
+  expect(await screen.findByText(/GitHub authentication expired/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Start SAST Scan" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Resume source preparation" }));
+  expect(sastRunsApi.resumeSastSource).toHaveBeenCalledWith(249);
+});

@@ -28,6 +28,9 @@ export const stopSastScan = (id) => req(`/api/sast-runs/${id}/scan/stop`, { meth
 
 export const resumeSastScan = (id) => req(`/api/sast-runs/${id}/scan/resume`, { method: "POST" });
 
+export const resumeSastSource = (id) =>
+  req(`/api/sast-runs/${id}/source/resume`, { method: "POST" });
+
 export const getSastScanStatus = (id) => req(`/api/sast-runs/${id}/scan/status`);
 
 export const getSastAgentLog = (id) => req(`/api/sast-runs/${id}/agent-log`);

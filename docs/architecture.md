@@ -1712,6 +1712,19 @@ Light runs inventory the archive, build the original source work program, run di
 
 The shared source work program looks for route registrations and request inputs, then assigns a review to each route or likely handler file. Likely handlers are selected by common file names and directories when route syntax is unfamiliar. These inferred handlers still leave the run with partial coverage until a concrete entry point is found. Response serialization calls also receive a separate review so sensitive fields are not missed by a scan focused on database and authorization calls.
 
+Before matching sinks, `services/sast_codegraph.py` parses PHP, JavaScript, TypeScript/TSX, Python, Java, Go, C#, and Ruby with tree-sitter. Grammars ship as Python wheels, so parsing needs no network. The parser records each function and method, each call site, and function names passed as values, such as a route callback or a JSX `onClick={handler}`. Calls resolve by name within the same language family. The resolver prefers the caller's own class for `this`/`self`, the named class for static calls and `new`, then the same file, then the nearest directories, keeping at most three targets. There is no type information, so resolution is approximate.
+
+The code graph is used in two ways:
+
+- Call-shaped sinks (database query, command execution, file access, outbound request, code evaluation, logging) count in a parsed file only when the matching text is inside a real call on that line. Matches in comments or plain strings are dropped. Serialization and deserialization stay line-based because definitions such as `toPublic()` or Java's `readObject()` are review points too. Unparsed files, including HTML, keep line matching.
+- Reachability starts from every file's top level, every function holding a detected route or request input, and every function in a likely handler file. Each surface item records its enclosing function and one of `reachable` (with the shortest `reached_from` chain), `no_callers` (nothing calls it directly, so it may be called dynamically), or `not_reached`. Workers see these hints in `get_work_program`. They affect ordering only; every item still needs a disposition.
+
+Deep mode's repository model uses the same parser through `sast_parsers.TreeSitterAdapter`. It emits `route` facts for registration calls with a literal path (Express, Laravel, Slim, Go `HandleFunc`/gin/echo/chi, Rails `get`/`resources`, ASP.NET `MapGet`) and for declared routes (Spring mappings, ASP.NET attribute and conventional routes, Razor Page handlers, PHP `#[Route]`). Calls on HTTP client objects such as `this.http.get()` are not routes. It also emits `sensitive_operation` and `auth_boundary` facts for calls matching the work-program sink and control patterns, and `callable` facts for every function. Each fact carries its enclosing function and reachability. Facts are ordered routes, access checks, sensitive calls, dependencies, then callables, so the model's node cap drops plain functions first. Vendor, build, `bin/`, `obj/`, and `wwwroot/lib/` folders are skipped.
+
+.NET is handled like the other supported stacks. `component_facts._aspnet_route_facts` combines a controller's `[Route]` prefix with action `[HttpGet]`/`[Route]` templates, replaces `[controller]` and `[action]`, and falls back to `/{controller}/{action}` for public actions without attributes. Razor Pages routes come from the file path under `Pages/`, and Blazor routes from `@page`. `.cshtml`, `.razor`, and Web Forms files are source; `*.cshtml.cs` code-behind files, `Hubs/` folders, and files ending in `Hub` or `Endpoints` count as likely handlers. The manifest adapter reads NuGet `PackageReference`/`PackageVersion` items and `packages.config`.
+
+The graph is stored in `SastCodeSymbol` and `SastCodeCall`. Calls refer to symbols by `path::qualname@line` key rather than by row id, so the rows are exported and imported unchanged. The scope phase data and `work_program_summary` report files parsed per language, functions and their reachability, calls, resolved calls, sink reachability, and sink matches dropped because they were outside a call. The SAST Coverage tab shows these in a Code map panel.
+
 ```
 start_sast_scan(sast_run_id)
   └─ _sast_scan_task(sast_run_id)
@@ -1722,8 +1735,9 @@ start_sast_scan(sast_run_id)
           a cross-process workspace lease while the directory is live. A
           startup sweep (`db._cleanup_orphaned_sast_extractions`) skips leased
           workspaces and reconciles only dirs leaked by a previous hard crash.
-       3. Build a normalized repository graph using Python AST, ECMAScript
-          structure, manifest, component-fact, and pattern adapters. An LLM
+       3. Build a normalized repository graph using Python AST, tree-sitter
+          (PHP, JavaScript/TypeScript, Java, Go, C#, Ruby; regex ECMAScript
+          fallback), manifest, component-fact, and pattern adapters. An LLM
           reconciliation pass is used only to resolve source-backed model gaps.
        4. Run a dedicated threat-analysis pass. Persist actors, assets,
           boundaries, scenarios, and semantic coverage obligations before any
@@ -1763,8 +1777,9 @@ start_sast_scan(sast_run_id)
 | `claim_traced_sink` | Move an inventoried helper sink to a route worker after it opens the route and exact sink line; the claimed sink still needs its own disposition |
 | `record_disposition` | Close one assigned item with a result, reason, trace, controls, and evidence |
 | `record_semantic_disposition` | Resolve one threat-scenario or repository-model security obligation |
-| `write_lead` | Record a source-backed discovery candidate together with its confidence score and reasoning |
+| `write_lead` | Record a source-backed discovery candidate with its confidence score and reasoning. Requires a source trace (file), a sink trace (file and line), a `fix_location` (`file:line`, checked against the archive), and a one-sentence `root_cause`. The reply lists other open leads that cite the same files |
 | `filter_lead` | Revise the confidence score of an existing candidate before independent validation |
+| `merge_lead` | Merge a pending lead into another pending lead when one code change closes both; the leads must cite a common file and the worker must give the reason |
 
 Threat-model workers replace the discovery tools with `record_model_fact`,
 `record_threat_scenario`, and `finalize_threat_model`. Candidate validators use
@@ -1774,7 +1789,7 @@ own `done` schema. See [Agent Tool Reference](agent-tool-reference.md) for the c
 phase-by-phase list.
 
 The normalized work program is stored in `SastSourceFile`, `SastSurfaceItem`,
-`SastSurfaceEdge`, `SastPartition`, `SastWorker`, `SastWorkItem`,
+`SastCodeSymbol`, `SastCodeCall`, `SastSurfaceEdge`, `SastPartition`, `SastWorker`, `SastWorkItem`,
 `SastThreatModel`, `SastThreatScenario`, `SastCoverageObligation`,
 `SastObligationLead`, `SastDiscoveryTelemetry`, and `SastEvidenceReceipt`.
 Checkpoint JSON remains the resume projection; relational rows are the auditable
@@ -1784,18 +1799,26 @@ where `reviewed` means the file was opened with `read_file`.
 ### Lead lifecycle
 
 ```
-Discovery calls write_lead(...) with confidence and reasoning
+Discovery calls write_lead(...) with confidence, reasoning, traces, fix
+location, and root cause
   └─ Candidate remains a hypothesis regardless of discovery self-score
   └─ Matching worker observations add evidence to the same lead
+  └─ The worker sees related open leads and may call merge_lead(...)
 Reconciliation groups remaining candidates before validation
 An optional bounded model pass checks uncertain source-related pairs and only
 merges them when it names one shared fix in the cited files
+A fix-grouping model pass then reviews leads that share any cited file and
+merges groups that one code change fixes. The named fix file and line must
+exist and be cited by every member.
 Independent validator calls validate_candidate(...)
-  ├─ confirmed + confidence ≥ 0.7 → reportable
+  ├─ confirmed → reportable (confidence is recorded but does not filter)
   ├─ dismissed → retained with counterevidence, not reportable
   └─ inconclusive → retained with explicit proof gaps, not reportable
-Confirmed leads receive a final duplicate check using validated root causes and
-fix locations where available. Merged leads keep both validator notes.
+Confirmed leads receive a final duplicate check. Two leads whose validator fix
+locations name the same file and function (or lines within five of each other)
+merge even across categories when their root causes agree. A second
+fix-grouping model pass then reviews confirmed leads. Merged leads keep both
+validator notes.
 Attack-path analyst calls record_attack_path(...) for reportable candidates
   └─ Ordered nodes, impact, severity reasoning, and dynamic-test objective persisted
 Final sync upserts candidates by stable fingerprint, preventing rerun duplicates
@@ -1826,7 +1849,7 @@ assignments.
 | `title` / `description` | Human-readable vulnerability description |
 | `category` | OWASP category slug (e.g. `"API1"` or `"A03"`) |
 | `severity` | `critical` · `high` · `medium` · `low` |
-| `confidence` | 0.0–1.0; the SAST policy controls the reportable minimum |
+| `confidence` | 0.0–1.0; recorded for review, does not decide whether a lead is reportable |
 | `classification` / `discovery_strategy` | Exploitability class and baseline, threat, sink, deterministic, dependency, or closure provenance |
 | `location` | Source file path and line reference |
 | `evidence` | Code snippet or supporting text |

@@ -63,7 +63,7 @@ function ProviderField({ field, value, onChange }) {
   );
 }
 
-export function SastRunForm() {
+export function SastRunForm({ showSastDeepScan = false }) {
   const [file, setFile] = useState(null);
   const [name, setName] = useState("");
   const [llmProfileId, setLlmProfileId] = useState("");
@@ -85,6 +85,7 @@ export function SastRunForm() {
       .catch((loadError) => setError(loadError.message));
   }, []);
 
+  const effectiveAnalysisMode = showSastDeepScan ? analysisMode : "light";
   const provider = providers.find((item) => item.id === providerId);
   const providerAvailable = provider?.availability?.available !== false;
   const sourceReady =
@@ -115,7 +116,7 @@ export function SastRunForm() {
           file,
           name.trim() || null,
           llmProfileId ? +llmProfileId : null,
-          analysisMode,
+          effectiveAnalysisMode,
         );
         await sastRunsApi.startSastScan(run.id);
       } else {
@@ -124,7 +125,7 @@ export function SastRunForm() {
           parameters: providerValues,
           name: name.trim() || null,
           llm_profile_id: llmProfileId ? +llmProfileId : null,
-          analysis_mode: analysisMode,
+          analysis_mode: effectiveAnalysisMode,
         });
       }
       nav(`#/sast-runs/${run.id}/progress`);
@@ -234,23 +235,25 @@ export function SastRunForm() {
             />
           </div>
 
-          <div className="field">
-            <label htmlFor="sast-analysis-mode">Analysis mode</label>
-            <select
-              id="sast-analysis-mode"
-              className="select"
-              value={analysisMode}
-              onChange={(event) => setAnalysisMode(event.target.value)}
-            >
-              <option value="light">Light - lower-cost source analysis</option>
-              <option value="deep">Deep - full threat-directed analysis</option>
-            </select>
-            <div className="subtle" style={{ marginTop: 6, fontSize: 13 }}>
-              {analysisMode === "light"
-                ? "Lists the source files, looks for possible issues, confirms them, and checks how they could be reached."
-                : "Also maps the application, builds threat scenarios, plans security checks, merges duplicate findings, and reviews areas that may have been missed."}
+          {showSastDeepScan && (
+            <div className="field">
+              <label htmlFor="sast-analysis-mode">Analysis mode</label>
+              <select
+                id="sast-analysis-mode"
+                className="select"
+                value={analysisMode}
+                onChange={(event) => setAnalysisMode(event.target.value)}
+              >
+                <option value="light">Light - lower-cost source analysis</option>
+                <option value="deep">Deep - full threat-directed analysis</option>
+              </select>
+              <div className="subtle" style={{ marginTop: 6, fontSize: 13 }}>
+                {analysisMode === "light"
+                  ? "Lists the source files, looks for possible issues, confirms them, and checks how they could be reached."
+                  : "Also maps the application, builds threat scenarios, plans security checks, merges duplicate findings, and reviews areas that may have been missed."}
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="field">
             <label htmlFor="sast-llm-profile">

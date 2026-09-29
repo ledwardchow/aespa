@@ -36,6 +36,27 @@ _COMMON_GH = [
 ]
 
 
+def _archive_error(detail: str) -> str:
+    """Turn lazy-fetch authentication failures into actionable guidance."""
+    lowered = detail.lower()
+    authentication_failure = any(
+        marker in lowered
+        for marker in (
+            "authentication failed",
+            "could not read username",
+            "terminal prompts disabled",
+            "repository not found",
+        )
+    )
+    if authentication_failure and "promisor remote" in lowered:
+        return (
+            "GitHub authentication expired or was unavailable while downloading "
+            "repository files. Sign in with GitHub CLI using 'gh auth login', configure "
+            "Git using 'gh auth setup-git', then resume source preparation."
+        )
+    return detail
+
+
 def normalize_repository(value: str) -> tuple[str, str]:
     raw = value.strip()
     if raw.startswith("git@github.com:"):
@@ -240,7 +261,7 @@ class GitHubRepositoryProvider:
             detail = (
                 archived.stderr or archived.stdout or "Could not build source archive"
             )
-            raise RuntimeError(detail)
+            raise RuntimeError(_archive_error(detail))
 
         return MaterializedSource(
             archive_path=archive_path,
