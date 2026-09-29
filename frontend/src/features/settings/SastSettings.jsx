@@ -124,18 +124,6 @@ export function SastPolicyFields({ form, upd }) {
               <option value="critical">Critical</option>
             </select>
           </div>
-          <div className="field">
-            <label htmlFor="sast-min-confidence">Minimum confidence</label>
-            <input
-              id="sast-min-confidence"
-              type="number"
-              min="0"
-              max="1"
-              step="0.05"
-              value={form.sast_min_confidence}
-              onChange={(event) => upd({ sast_min_confidence: event.target.value })}
-            />
-          </div>
         </div>
       </section>
     </>

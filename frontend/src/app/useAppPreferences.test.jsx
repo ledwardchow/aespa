@@ -37,3 +37,13 @@ test("hides Team Scan by default and restores its experimental preference", () =
   const enabled = renderHook(() => useAppPreferences());
   expect(enabled.result.current.showTeamScan).toBe(true);
 });
+
+test("hides SAST Deep mode by default and restores its experimental preference", () => {
+  const hidden = renderHook(() => useAppPreferences());
+  expect(hidden.result.current.showSastDeepScan).toBe(false);
+  hidden.unmount();
+
+  localStorage.setItem("aespa_show_sast_deep_scan", "true");
+  const enabled = renderHook(() => useAppPreferences());
+  expect(enabled.result.current.showSastDeepScan).toBe(true);
+});

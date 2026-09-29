@@ -37,6 +37,7 @@ def is_source_preparation_running(run_id: int) -> bool:
 
 
 def _emit(run_id: int, status: str, message: str, **details: Any) -> None:
+    """Stream source progress and retain it in the run's Activity log."""
     events_svc.emit(
         run_id,
         {
@@ -45,6 +46,17 @@ def _emit(run_id: int, status: str, message: str, **details: Any) -> None:
             "status": status,
             "message": message,
             **details,
+        },
+    )
+    events_svc.emit(
+        run_id,
+        {
+            "_run_kind": "sast",
+            "type": "scanner_phase",
+            "phase": "source",
+            "status": status,
+            "message": message,
+            "data": details or None,
         },
     )
 
@@ -223,6 +235,82 @@ def start_source_preparation(
         _prepare_source(run_id, provider_id, parameters, auto_start=auto_start),
         name=f"sast-source-{run_id}",
     )
+
+
+async def resume_source_preparation(run_id: int, *, auto_start: bool = True) -> None:
+    """Retry a failed extension source preparation on the existing SAST run."""
+    if is_source_preparation_running(run_id):
+        raise RuntimeError("Source preparation is already running")
+
+    with Session(get_engine()) as session:
+        run = session.get(SastRun, run_id)
+        if run is None:
+            raise ValueError("SAST run not found")
+        if run.source_provider == "upload":
+            raise ValueError("Uploaded source archives cannot be prepared again")
+        if run.source_archive_path:
+            raise ValueError("This SAST run already has a prepared source snapshot")
+        if run.status not in {"failed", "cancelled"}:
+            raise ValueError(
+                "Source preparation can only resume after it fails or is cancelled"
+            )
+        try:
+            metadata = json.loads(run.source_metadata_json or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError("Saved source preparation details are invalid") from exc
+        parameters = metadata.get("request")
+        if not isinstance(parameters, dict):
+            raise ValueError("Saved source preparation details are missing")
+        provider_id = run.source_provider
+
+    manager = get_extension_manager()
+    manager.ensure_loaded()
+    registered = manager.source_providers.get(provider_id)
+    if registered is None:
+        raise RuntimeError(f"SAST source provider {provider_id!r} is not available")
+    availability = await registered.provider.check_availability(
+        manager.context_for(registered.extension_id)
+    )
+    if not availability.available:
+        raise RuntimeError(availability.message)
+    if is_source_preparation_running(run_id):
+        raise RuntimeError("Source preparation is already running")
+
+    with Session(get_engine()) as session:
+        run = session.get(SastRun, run_id)
+        if run is None:
+            raise ValueError("SAST run not found")
+        if run.status not in {"failed", "cancelled"} or run.source_archive_path:
+            raise ValueError(
+                "The source preparation state changed; reload the run and try again"
+            )
+        run.status = "preparing"
+        run.error_message = None
+        run.completed_at = None
+        run.updated_at = datetime.now(_UTC)
+        session.add(run)
+        session.commit()
+
+    _emit(run_id, "running", "Retrying source preparation with current credentials.")
+    try:
+        start_source_preparation(
+            run_id,
+            provider_id,
+            parameters,
+            auto_start=auto_start,
+        )
+    except Exception as exc:
+        message = str(exc) or type(exc).__name__
+        with Session(get_engine()) as session:
+            run = session.get(SastRun, run_id)
+            if run is not None:
+                run.status = "failed"
+                run.error_message = message
+                run.updated_at = datetime.now(_UTC)
+                session.add(run)
+                session.commit()
+        _emit(run_id, "failed", message)
+        raise
 
 
 async def stop_source_preparation_and_wait(run_id: int) -> bool:

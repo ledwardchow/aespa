@@ -283,6 +283,19 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       setStartBusy(false);
     }
   };
+  const onResumeSource = async () => {
+    setStartBusy(true);
+    setError(null);
+    try {
+      const updated = await sastRunsApi.resumeSastSource(runId);
+      setRun(updated);
+      await loadData();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setStartBusy(false);
+    }
+  };
   const onDelete = async () => {
     if (!confirm("Delete this SAST run and all its leads?")) return;
     try {
@@ -341,10 +354,17 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     !scanRunning &&
     (run.status === "paused" ||
       (["completed", "failed"].includes(run.status) && resumableFailedWorkers > 0));
+  const canResumeSource =
+    run &&
+    !scanRunning &&
+    ["failed", "cancelled"].includes(run.status) &&
+    run.source_provider !== "upload" &&
+    !run.source_archive_path;
   const canStart =
     run &&
     !scanRunning &&
     !canResume &&
+    !canResumeSource &&
     ["pending", "completed", "failed", "cancelled"].includes(run.status);
 
   if (!run)
@@ -404,6 +424,11 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                   : run.status === "paused"
                     ? "Resume SAST Scan"
                     : "Resume Failed Work"}
+              </button>
+            )}
+            {canResumeSource && (
+              <button className="btn" disabled={startBusy} onClick={onResumeSource}>
+                {startBusy ? "Resuming…" : "Resume source preparation"}
               </button>
             )}
             {scanRunning && (
@@ -510,6 +535,9 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             <DismissibleAlert variant="error" onDismiss={() => setError(null)}>
               {error}
             </DismissibleAlert>
+          ) : null}
+          {run.error_message && ["failed", "cancelled"].includes(run.status) ? (
+            <div className="alert error">{run.error_message}</div>
           ) : null}
           {notice ? (
             <DismissibleAlert

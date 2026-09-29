@@ -872,7 +872,6 @@ class ScannerPolicyBase(BaseModel):
     sast_defense_in_depth_findings: bool = False
     sast_dependency_findings: bool = True
     sast_min_severity: Literal["low", "medium", "high", "critical"] = "low"
-    sast_min_confidence: float = Field(default=0.35, ge=0, le=1)
     sast_budget_mode: Literal["adaptive", "fixed"] = "adaptive"
     sast_baseline_budget: int = Field(default=80, ge=1, le=1000)
     sast_threat_budget: int = Field(default=60, ge=1, le=1000)

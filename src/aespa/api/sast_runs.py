@@ -637,10 +637,38 @@ async def start_sast_scan(
             status_code=409,
             detail="The source snapshot is still being prepared.",
         )
+    if not run.source_archive_path and run.source_provider != "upload":
+        raise HTTPException(
+            status_code=409,
+            detail="The source snapshot is not ready. Resume source preparation first.",
+        )
     from aespa.services import sast_scanner
 
     await sast_scanner.start_sast_scan(run_id)
     return {"ok": True}
+
+
+@router.post(
+    "/api/sast-runs/{run_id}/source/resume",
+    response_model=SastRunSummary,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def resume_sast_source_preparation(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> SastRunSummary:
+    """Retry extension source preparation without replacing the SAST run."""
+    _get_run_or_404(session, run_id)
+    from aespa.services import sast_sources
+
+    try:
+        await sast_sources.resume_source_preparation(run_id, auto_start=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session.expire_all()
+    return _to_summary(_get_run_or_404(session, run_id))
 
 
 @router.post("/api/sast-runs/{run_id}/scan/stop")

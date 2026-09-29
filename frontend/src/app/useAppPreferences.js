@@ -36,6 +36,13 @@ export function useAppPreferences() {
       return false;
     }
   });
+  const [showSastDeepScan, setShowSastDeepScan] = useState(() => {
+    try {
+      return localStorage.getItem("aespa_show_sast_deep_scan") === "true";
+    } catch {
+      return false;
+    }
+  });
   const [reportingDebugCfg, setReportingDebugCfg] = useState(null);
   const [benchmarkLabCfg, setBenchmarkLabCfg] = useState(null);
   useEffect(() => {
@@ -73,6 +80,8 @@ export function useAppPreferences() {
     setShowDeepScan,
     showTeamScan,
     setShowTeamScan,
+    showSastDeepScan,
+    setShowSastDeepScan,
     reportingDebugCfg,
     setReportingDebugCfg,
     benchmarkLabCfg,
