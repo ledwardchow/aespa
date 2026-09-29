@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, Table
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from aespa.db import get_engine
 from aespa.extensions.runtime import (
@@ -16,7 +16,8 @@ from aespa.extensions.runtime import (
     ProcessResult,
     ProviderAvailability,
 )
-from aespa.models import ExtensionSetting
+from aespa.models import ExtensionSetting, SastRun, ScanLog
+from aespa.services import sast_sources
 from extensions.builtin.github_repository.provider import (
     GitHubRepositoryProvider,
     normalize_repository,
@@ -442,6 +443,47 @@ async def test_github_provider_uses_gh_auth_and_freezes_resolved_commit(tmp_path
     assert any("archive" in command for command in context.commands)
 
 
+@pytest.mark.anyio
+async def test_github_provider_explains_promisor_authentication_failure(tmp_path):
+    class FailingArchiveContext(_FakeContext):
+        async def run_process(self, argv, **kwargs):
+            if "archive" in argv:
+                return ProcessResult(
+                    128,
+                    "",
+                    "fatal: could not read Username for 'https://github.com': "
+                    "terminal prompts disabled\n"
+                    "fatal: could not fetch deadbeef from promisor remote",
+                )
+            return await super().run_process(argv, **kwargs)
+
+    with pytest.raises(RuntimeError, match="gh auth setup-git"):
+        await GitHubRepositoryProvider().materialize(
+            {"repository": "acme/private"}, tmp_path, FailingArchiveContext()
+        )
+
+
+def test_source_preparation_events_are_retained_in_activity_log():
+    with Session(get_engine()) as session:
+        run = SastRun(name="source activity", status="preparing")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    sast_sources._emit(run_id, "failed", "Sign in to GitHub, then resume.")
+
+    with Session(get_engine()) as session:
+        event = session.exec(
+            select(ScanLog)
+            .where(ScanLog.test_run_id == run_id)
+            .where(ScanLog.run_kind == "sast")
+        ).one()
+        assert event.phase == "source"
+        assert event.status == "failed"
+        assert event.message == "Sign in to GitHub, then resume."
+
+
 def test_extensions_api_lists_and_updates_dynamic_settings(client, monkeypatch):
     async def available(self, context):
         return ProviderAvailability(True, "ready", "Ready", {"authenticated": True})
@@ -520,6 +562,48 @@ def test_create_sast_run_from_extension_starts_preparation(client, monkeypatch):
             body["id"],
             "aespa.githubrepository",
             {"repository": "acme/payments", "ref": "main"},
+            True,
+        )
+    ]
+
+
+def test_failed_extension_source_can_resume_on_the_same_run(client, monkeypatch):
+    async def available(self, context):
+        return ProviderAvailability(True, "ready", "Ready")
+
+    started = []
+    monkeypatch.setattr(GitHubRepositoryProvider, "check_availability", available)
+    monkeypatch.setattr(
+        "aespa.services.sast_sources.start_source_preparation",
+        lambda run_id, provider_id, parameters, auto_start: started.append(
+            (run_id, provider_id, parameters, auto_start)
+        ),
+    )
+    with Session(get_engine()) as session:
+        run = SastRun(
+            name="retry source",
+            status="failed",
+            source_provider="aespa.githubrepository",
+            source_locator="acme/private",
+            source_metadata_json='{"request": {"repository": "acme/private"}}',
+            error_message="GitHub authentication expired.",
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    response = client.post(f"/api/sast-runs/{run_id}/source/resume")
+
+    assert response.status_code == 202
+    assert response.json()["id"] == run_id
+    assert response.json()["status"] == "preparing"
+    assert response.json()["error_message"] is None
+    assert started == [
+        (
+            run_id,
+            "aespa.githubrepository",
+            {"repository": "acme/private"},
             True,
         )
     ]

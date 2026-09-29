@@ -1,6 +1,6 @@
 [project]
 name = "aespa"
-version = "0.7.20260928.17"
+version = "0.7.20260929.11"
 description = "AI-Enabled Security Pentesting Agent"
 authors = [
     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
@@ -26,6 +26,15 @@ dependencies = [
     "github-copilot-sdk>=1.0.7",
     "droid-sdk>=0.1.2",
     "tiktoken>=0.12.0",
+    "tree-sitter>=0.26,<0.27",
+    "tree-sitter-php>=0.24.1,<0.25",
+    "tree-sitter-javascript>=0.25.0,<0.26",
+    "tree-sitter-typescript>=0.23.2,<0.24",
+    "tree-sitter-python>=0.25.0,<0.26",
+    "tree-sitter-java>=0.23.5,<0.24",
+    "tree-sitter-go>=0.25.0,<0.26",
+    "tree-sitter-c-sharp>=0.23.5,<0.24",
+    "tree-sitter-ruby>=0.23.1,<0.24",
 ]
 
 [project.scripts]

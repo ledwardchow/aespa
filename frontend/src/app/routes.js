@@ -93,7 +93,10 @@ export const routes = {
   "sast-run-new": {
     section: "sast",
     Component: lazyNamed(() => import("../features/sast-runs/SastRunForm.jsx"), "SastRunForm"),
-    props: () => ({ key: "sast-new" }),
+    props: (_route, preferences) => ({
+      key: "sast-new",
+      showSastDeepScan: preferences.showSastDeepScan,
+    }),
   },
   "sast-run-detail": {
     section: "sast",
@@ -206,6 +209,8 @@ export const routes = {
       setShowSystems: preferences.setShowSystems,
       showTeamScan: preferences.showTeamScan,
       setShowTeamScan: preferences.setShowTeamScan,
+      showSastDeepScan: preferences.showSastDeepScan,
+      setShowSastDeepScan: preferences.setShowSastDeepScan,
       username: preferences.username,
       reportingDebugCfg: preferences.reportingDebugCfg,
       setReportingDebugCfg: preferences.setReportingDebugCfg,

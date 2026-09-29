@@ -559,7 +559,6 @@ class ScannerPolicy(SQLModel, table=True):
     sast_defense_in_depth_findings: bool = Field(default=False)
     sast_dependency_findings: bool = Field(default=True)
     sast_min_severity: str = Field(default="low")
-    sast_min_confidence: float = Field(default=0.35)
     sast_budget_mode: str = Field(default="adaptive")
     sast_baseline_budget: int = Field(default=80)
     sast_threat_budget: int = Field(default=60)
@@ -1582,6 +1581,60 @@ class SastSurfaceItem(SQLModel, table=True):
     component_key: str = Field(default="", index=True)
     fingerprint: str = Field(index=True)
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+class SastCodeSymbol(SQLModel, table=True):
+    """A function, method, or file top level found by the tree-sitter parser.
+
+    ``symbol_key`` is ``path::qualname@line`` and is what call rows refer to,
+    so rows stay valid when a run is exported and imported with new ids.
+    """
+
+    __tablename__ = "sast_code_symbol"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    symbol_key: str = Field(index=True)
+    path: str = Field(default="", index=True)
+    language: str = Field(default="")
+    name: str = Field(default="")
+    qualname: str = Field(default="")
+    kind: str = Field(default="function")  # function | method | module
+    start_line: int = Field(default=1)
+    end_line: int = Field(default=1)
+    reachability: str = Field(default="unknown", index=True)
+    is_root: bool = Field(default=False)
+
+
+class SastCodeCall(SQLModel, table=True):
+    """A call site or function reference, with the symbols it may resolve to."""
+
+    __tablename__ = "sast_code_call"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    path: str = Field(default="", index=True)
+    line: int = Field(default=1)
+    caller_key: str = Field(default="", index=True)
+    callee_name: str = Field(default="")
+    receiver: str = Field(default="")
+    kind: str = Field(default="call")  # call | new | include | ref
+    text: str = Field(default="")
+    targets_json: str = Field(default="[]")
 
 
 class SastPartition(SQLModel, table=True):

@@ -25,6 +25,8 @@ from aespa.main import create_app
 from aespa.models import (
     AgentLog,
     ComponentFact,
+    SastCodeCall,
+    SastCodeSymbol,
     SastRun,
     SastSourceFile,
     SastWorkItem,
@@ -330,6 +332,17 @@ def test_sast_run_export_import_round_trip_preserves_run_state_and_archive(
         ).all()
         assert len(restored_files) == original_work_program["files"]["total"]
         assert len(restored_work_items) == original_work_program["work_items"]["total"]
+        restored_symbols = session.exec(
+            select(SastCodeSymbol).where(SastCodeSymbol.sast_run_id == imported_id)
+        ).all()
+        restored_calls = session.exec(
+            select(SastCodeCall).where(SastCodeCall.sast_run_id == imported_id)
+        ).all()
+        assert sorted(symbol.name for symbol in restored_symbols) == [
+            "<module>",
+            "handler",
+        ]
+        assert {call.callee_name for call in restored_calls} == {"query"}
         assert (
             len(
                 session.exec(

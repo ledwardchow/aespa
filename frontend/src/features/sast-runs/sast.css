@@ -794,6 +794,15 @@
   gap: 10px;
   align-items: start;
 }
+.sast-coverage-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.sast-coverage-summary .sast-coverage-grid > .sast-coverage-name {
+  font-weight: 600;
+}
 .sast-assurance-note {
   display: flex;
   align-items: center;

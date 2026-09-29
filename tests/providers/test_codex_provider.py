@@ -1027,3 +1027,30 @@ def test_codex_thread_uses_app_server_sandbox_wire_value():
     assert conversation.thread_id == "thread-1"
     assert calls[0][0] == "thread/start"
     assert calls[0][1]["sandbox"] == "read-only"
+
+
+def test_codex_thread_allows_several_tool_calls_per_response():
+    calls = []
+
+    class FakeClient:
+        def __init__(self):
+            self._conversations = {}
+
+        async def request(self, method, params):
+            calls.append((method, params))
+            return {"thread": {"id": "thread-1"}}
+
+    asyncio.run(
+        codex_provider._start_thread(
+            FakeClient(),
+            SimpleNamespace(model="auto"),
+            "system",
+            [{"role": "user", "content": "hello"}],
+            [{"name": "read_file", "input_schema": {"type": "object"}}],
+        )
+    )
+
+    instructions = calls[0][1]["baseInstructions"]
+    assert "exactly one" not in instructions
+    assert "at least one" in instructions
+    assert "same response" in instructions

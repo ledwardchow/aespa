@@ -18,6 +18,8 @@ export function SystemSettingsPanels({
   setShowDeepScan,
   showTeamScan,
   setShowTeamScan,
+  showSastDeepScan,
+  setShowSastDeepScan,
   username,
   reportingDebugCfg,
   setReportingDebugCfg,
@@ -335,6 +337,23 @@ export function SystemSettingsPanels({
           </label>
           <div className="field-hint" style={{ marginTop: 6 }}>
             Show the experimental Team mode for web DAST runs.
+          </div>
+          <label className="toggle-row" style={{ marginTop: 16 }}>
+            <input
+              type="checkbox"
+              checked={showSastDeepScan ?? false}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                setShowSastDeepScan(checked);
+                try {
+                  localStorage.setItem("aespa_show_sast_deep_scan", String(checked));
+                } catch {}
+              }}
+            />
+            <span>SAST Deep Mode</span>
+          </label>
+          <div className="field-hint" style={{ marginTop: 6 }}>
+            Show Deep mode when creating a SAST scan. Light mode is used otherwise.
           </div>
         </div>
       )}

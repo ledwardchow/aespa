@@ -50,6 +50,8 @@ export function ScanPolicyPage({
   setShowDeepScan,
   showTeamScan,
   setShowTeamScan,
+  showSastDeepScan = false,
+  setShowSastDeepScan,
   username,
   reportingDebugCfg,
   setReportingDebugCfg,
@@ -127,6 +129,8 @@ export function ScanPolicyPage({
                 setShowDeepScan={setShowDeepScan}
                 showTeamScan={showTeamScan}
                 setShowTeamScan={setShowTeamScan}
+                showSastDeepScan={showSastDeepScan}
+                setShowSastDeepScan={setShowSastDeepScan}
                 username={username}
                 reportingDebugCfg={reportingDebugCfg}
                 setReportingDebugCfg={setReportingDebugCfg}

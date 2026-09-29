@@ -26,6 +26,8 @@ from aespa.models import (
     ApiDocument,
     ComponentFact,
     LLMProfile,
+    SastCodeCall,
+    SastCodeSymbol,
     SastCoverageObligation,
     SastDiscoveryTelemetry,
     SastEvidenceReceipt,
@@ -144,6 +146,8 @@ def export_sast_run(session: Session, run_id: int) -> dict[str, Any]:
         SastWorker,
         SastWorkItem,
         SastEvidenceReceipt,
+        SastCodeSymbol,
+        SastCodeCall,
     )
     work_program = {
         model.__tablename__: [
@@ -305,6 +309,8 @@ def import_sast_run(session: Session, bundle: Any) -> SastRun:
         "scenario": {},
         "obligation": {},
         "lead": {},
+        "code_symbol": {},
+        "code_call": {},
     }
     pending_work_leads: dict[int, int] = {}
 
@@ -375,6 +381,12 @@ def import_sast_run(session: Session, bundle: Any) -> SastRun:
         "receipt",
         _receipt_transform,
     )
+
+    # Code graph rows refer to each other by symbol key, not id.
+    _import_rows(
+        "sast_code_symbol", SastCodeSymbol, "code_symbol", lambda _d, _i: None
+    )
+    _import_rows("sast_code_call", SastCodeCall, "code_call", lambda _d, _i: None)
 
     for item in bundle.get("scan_leads", []):
         if not isinstance(item, dict):
