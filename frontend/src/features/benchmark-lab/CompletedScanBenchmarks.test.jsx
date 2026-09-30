@@ -26,7 +26,7 @@ const props = {
   results: [{ id: 8, run_kind: "site", run_id: 2 }],
   legacy: [],
   datasets: [{ id: 4, name: "Shop truth", item_count: 1 }],
-  models: [{ id: 6, name: "Evaluator" }],
+  defaultModel: { id: 6, name: "Evaluator" },
   onChange: vi.fn().mockResolvedValue(undefined),
   onOpen: vi.fn(),
 };
@@ -40,15 +40,16 @@ test("lists completed scans and benchmarks only missing results with selected gr
   render(<CompletedScanBenchmarks {...props} />);
   expect(screen.getByText("Completed shop scan")).toBeTruthy();
   expect(screen.queryByText("Stopped shop scan")).toBeNull();
-  const button = screen.getByRole("button", { name: "Benchmark 1 unbenchmarked scans" });
+  const button = screen.getByRole("button", { name: "Benchmark 0 selected scans" });
   expect(button.disabled).toBe(true);
   await user.selectOptions(screen.getByLabelText("Ground truth for bulk benchmarks"), "4");
-  await user.selectOptions(screen.getByLabelText("Bulk evaluation model"), "6");
+  expect(screen.queryByLabelText("Bulk evaluation model")).toBeNull();
+  await user.click(screen.getByRole("checkbox", { name: "Select Completed shop scan" }));
   await user.click(button);
   expect(benchmarkUnbenchmarked).toHaveBeenCalledWith({
     run_kind: "site",
+    run_ids: [1],
     dataset_id: 4,
-    evaluation_model_id: 6,
   });
   expect((await screen.findByRole("status")).textContent).toContain("Benchmarked 1 scans");
   expect(props.onChange).toHaveBeenCalled();
@@ -70,7 +71,65 @@ test("counts completed legacy SAST evaluations as benchmarked", () => {
   expect(screen.getByRole("link", { name: "Open benchmark" }).getAttribute("href")).toBe(
     "#/benchmark-lab/evaluations/3",
   );
-  expect(screen.getByRole("button", { name: "Benchmark 0 unbenchmarked scans" }).disabled).toBe(
-    true,
-  );
+  expect(screen.getByRole("button", { name: "Benchmark 0 selected scans" }).disabled).toBe(true);
 });
+
+for (const category of ["site", "api"]) {
+  test(`${category} allows individual, all, and application selection`, async () => {
+    const user = userEvent.setup();
+    const applications = [
+      ...props.targets.sites,
+      {
+        id: 2,
+        name: "Forum",
+        runs: [
+          { id: 4, name: "Forum one", status: "complete" },
+          { id: 5, name: "Forum two", status: "complete" },
+        ],
+      },
+    ];
+    render(
+      <CompletedScanBenchmarks
+        {...props}
+        category={category}
+        targets={{ sites: applications, apis: applications, sast_runs: [] }}
+        results={[{ id: 8, run_kind: category, run_id: 2 }]}
+      />,
+    );
+    const all = screen.getByRole("checkbox", { name: "Select all unbenchmarked scans" });
+    const shop = screen.getByRole("checkbox", { name: "Select all scans from Shop" });
+    const forum = screen.getByRole("checkbox", { name: "Select all scans from Forum" });
+    expect(screen.getByRole("checkbox", { name: "Select Benchmarked shop scan" }).disabled).toBe(
+      true,
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Select Forum one" }));
+    expect(all.indeterminate).toBe(true);
+    expect(forum.indeterminate).toBe(true);
+    expect(shop.checked).toBe(false);
+    await user.click(forum);
+    expect(forum.checked).toBe(true);
+    await user.click(all);
+    expect(shop.checked).toBe(true);
+    expect(all.checked).toBe(true);
+    await user.click(all);
+    expect(all.checked).toBe(false);
+    expect(forum.checked).toBe(false);
+    await user.click(forum);
+    await user.selectOptions(screen.getByLabelText("Ground truth for bulk benchmarks"), "4");
+    benchmarkUnbenchmarked.mockResolvedValue({
+      completed: [4],
+      skipped: [],
+      failures: [{ run_id: 5, error: "Try again" }],
+    });
+    await user.click(screen.getByRole("button", { name: "Benchmark 2 selected scans" }));
+    expect(benchmarkUnbenchmarked).toHaveBeenCalledWith({
+      run_kind: category,
+      run_ids: [4, 5],
+      dataset_id: 4,
+    });
+    await screen.findByRole("status");
+    expect(screen.getByRole("checkbox", { name: "Select Forum one" }).checked).toBe(false);
+    expect(screen.getByRole("checkbox", { name: "Select Forum two" }).checked).toBe(true);
+    expect(screen.getByRole("button", { name: "Benchmark 1 selected scans" })).toBeTruthy();
+  });
+}

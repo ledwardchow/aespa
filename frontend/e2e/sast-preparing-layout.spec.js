@@ -84,3 +84,38 @@ test("resolved source revision appears in the SAST run header", async ({ page })
   await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-resolved-source-mobile.png") });
   expect(errors).toEqual([]);
 });
+
+test("SAST usage shows uncached input with separate cache counts", async ({ page }) => {
+  await installFixtures(page);
+  await page.route("**/api/sast-runs/1/token-usage", (route) =>
+    route.fulfill({
+      json: {
+        total_input: 450,
+        total_uncached_input: 100,
+        total_output: 20,
+        total_cache_read: 300,
+        total_cache_write: 50,
+        estimated_cost_available: true,
+        estimated_total_cost_usd: 1.25,
+        by_model: {
+          "global.xai.grok-4.7": {
+            provider: "bedrock",
+            input: 450,
+            uncached_input: 100,
+            output: 20,
+            cache_read: 300,
+            cache_write: 50,
+          },
+        },
+      },
+    }),
+  );
+  await page.goto("/#/sast-runs/1/activity");
+  await expect(page.getByText("↑100 in", { exact: true })).toBeVisible();
+  await expect(page.getByText("⚡300 cached", { exact: true })).toBeVisible();
+  await expect(page.getByText("✎50 written", { exact: true })).toBeVisible();
+  await expect(page.getByText("≈$1.25 est. cost", { exact: true })).toBeVisible();
+  await page.locator(".activity-token-bar").click();
+  await expect(page.locator(".token-breakdown").getByText("↑100", { exact: true })).toBeVisible();
+  await expect(page.getByText("↑450 in", { exact: true })).toHaveCount(0);
+});

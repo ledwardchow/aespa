@@ -763,6 +763,32 @@ def _cost_total(bucket: dict[str, dict[str, Any]], key: str) -> float | None:
     return sum(values) if values else None
 
 
+def _uncached_run_input(model: str, counts: dict[str, Any]) -> int:
+    """Convert recorded input to the uncached count used for display."""
+    provider = counts.get("provider")
+    includes_cache = provider in {
+        "openai",
+        "openai_compatible",
+        "openrouter",
+        "azure_openai",
+        "azure_foundry",
+        "azure_foundry_openai",
+        "google",
+        "google_vertex",
+        "openai_codex",
+        "google_antigravity",
+    }
+    if provider == "bedrock":
+        includes_cache = bool(counts.get("bedrock_input_inclusive"))
+    elif provider == "bedrock_mantle":
+        # Mantle Claude uses Messages, whose input count excludes cache tokens.
+        includes_cache = not model.lower().startswith(("anthropic.", "claude-"))
+    input_tokens = counts.get("input", 0)
+    if includes_cache:
+        input_tokens -= counts.get("cache_read", 0) + counts.get("cache_write", 0)
+    return max(0, input_tokens)
+
+
 def _usage_totals(
     bucket: dict[str, dict[str, Any]],
     pending_calls: dict[int, dict[str, Any]] | None = None,
@@ -776,7 +802,12 @@ def _usage_totals(
         )
 
     pending = pending_calls or {}
+    by_model = {
+        model: {**counts, "uncached_input": _uncached_run_input(model, counts)}
+        for model, counts in bucket.items()
+    }
     return {
+        "total_uncached_input": sum(v["uncached_input"] for v in by_model.values()),
         "total_input": sum(v.get("input", 0) for v in bucket.values()),
         "total_output": sum(v.get("output", 0) for v in bucket.values()),
         "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
@@ -801,7 +832,7 @@ def _usage_totals(
         ),
         "copilot_quota": latest_quota("copilot_quota"),
         "codex_quota": latest_quota("codex_quota"),
-        "by_model": {m: dict(v) for m, v in bucket.items()},
+        "by_model": by_model,
     }
 
 
@@ -3618,6 +3649,22 @@ def _bedrock_region(config: LLMConfig) -> str:
     )
 
 
+def _bedrock_reasoning_content(
+    content: dict[str, Any], *, for_sdk: bool = False
+) -> dict[str, Any]:
+    """Keep encrypted reasoning JSON-safe in history and binary for the SDK."""
+    if "redactedContent" not in content:
+        return copy.deepcopy(content)
+    redacted = content["redactedContent"]
+    if for_sdk and isinstance(redacted, str):
+        redacted = base64.b64decode(redacted, validate=True)
+    elif not for_sdk and isinstance(redacted, (bytes, bytearray)):
+        redacted = base64.b64encode(redacted).decode("ascii")
+    # Older histories can also contain an empty reasoningText object here.
+    # Bedrock accepts only one member of this union.
+    return {"redactedContent": redacted}
+
+
 def _consume_bedrock_converse_stream(
     response: dict[str, Any], on_text_delta: Callable[[str], None] | None = None
 ) -> dict[str, Any]:
@@ -3666,7 +3713,8 @@ def _consume_bedrock_converse_stream(
                 if isinstance(reasoning_delta, dict):
                     block = content.setdefault(index, {"reasoningContent": {}})
                     native = block.setdefault("reasoningContent", {})
-                    reasoning_text = native.setdefault("reasoningText", {})
+                    if "text" in reasoning_delta or "signature" in reasoning_delta:
+                        reasoning_text = native.setdefault("reasoningText", {})
                     if "text" in reasoning_delta:
                         reasoning_text["text"] = str(
                             reasoning_text.get("text") or ""
@@ -3674,7 +3722,10 @@ def _consume_bedrock_converse_stream(
                     if "signature" in reasoning_delta:
                         reasoning_text["signature"] = reasoning_delta["signature"]
                     if "redactedContent" in reasoning_delta:
-                        native["redactedContent"] = reasoning_delta["redactedContent"]
+                        native["redactedContent"] = (
+                            native.get("redactedContent", b"")
+                            + reasoning_delta["redactedContent"]
+                        )
 
             stopped = event.get("messageStop")
             if isinstance(stopped, dict):
@@ -3719,6 +3770,55 @@ def _consume_bedrock_converse_stream(
 # service name — NOT "bedrock-mantle".  Confirmed by the AWS SigV4 curl example
 # (`--aws-sigv4 "aws:amz:<region>:bedrock"`) and litellm's Bedrock signer.
 _BEDROCK_MANTLE_SIGV4_SERVICE = "bedrock"
+
+
+# Converse cachePoint support, not caching through other Bedrock APIs.
+# Unknown models default to no markers. Keep this list in sync with:
+# https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+_BEDROCK_CONVERSE_CACHE_MODELS = {
+    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "anthropic.claude-3-7-sonnet",
+    "anthropic.claude-haiku-4-5",
+    "anthropic.claude-sonnet-4",
+    "anthropic.claude-sonnet-4-5",
+    "anthropic.claude-sonnet-4-6",
+    "anthropic.claude-sonnet-5",
+    "anthropic.claude-sonnet-5-5",
+    "anthropic.claude-opus-4",
+    "anthropic.claude-opus-4-1",
+    "anthropic.claude-opus-4-5",
+    "anthropic.claude-opus-4-6",
+    "anthropic.claude-opus-4-7",
+    "anthropic.claude-opus-4-8",
+    "anthropic.claude-opus-5",
+    "anthropic.claude-opus-5-5",
+    "anthropic.claude-fable-5",
+    "anthropic.claude-fable-5-1",
+    "anthropic.claude-mythos-5",
+    "anthropic.claude-mythos-5-1",
+    "amazon.nova-micro-v1:0",
+    "amazon.nova-lite-v1:0",
+    "amazon.nova-pro-v1:0",
+    "amazon.nova-premier-v1:0",
+    "amazon.nova-2-lite-v1:0",
+}
+
+
+def _bedrock_supports_cache_points(model: str) -> bool:
+    """Whether the model supports explicit cache markers in Converse requests."""
+    name = (model or "").lower()
+    # Foundation-model and geographic inference-profile ARNs include the ID.
+    if name.startswith("arn:"):
+        name = name.rsplit("/", 1)[-1]
+    for prefix in ("global.", "us.", "eu.", "apac.", "jp.", "au."):
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    if name in _BEDROCK_CONVERSE_CACHE_MODELS:
+        return True
+    # Claude IDs may include a release date and Bedrock revision.
+    name = re.sub(r"(?:-\d{8})?(?:-v\d+(?::\d+)?)?$", "", name)
+    return name in _BEDROCK_CONVERSE_CACHE_MODELS
 
 
 def _bedrock_mantle_region() -> str:
@@ -6252,7 +6352,13 @@ async def _call_with_tools_impl(
                     if isinstance(reasoning_content, dict) and reasoning_content:
                         # Bedrock requires reasoning text/signatures to be replayed
                         # byte-for-byte in subsequent multi-turn requests.
-                        cvt.append({"reasoningContent": reasoning_content})
+                        cvt.append(
+                            {
+                                "reasoningContent": _bedrock_reasoning_content(
+                                    reasoning_content, for_sdk=not config.api_key
+                                )
+                            }
+                        )
             if not cvt:
                 # Legacy checkpoints can contain an empty assistant turn when a
                 # model returned reasoning-only or otherwise unsupported content.
@@ -6261,31 +6367,32 @@ async def _call_with_tools_impl(
             return {"role": role, "content": cvt}
 
         converse_messages = [_ant_msg_to_converse(m) for m in messages]
-        system_list = [
-            {"text": system_message},
-            {"cachePoint": {"type": "default"}},
-        ]
+        system_list = [{"text": system_message}]
+        if _bedrock_supports_cache_points(config.model):
+            system_list.append({"cachePoint": {"type": "default"}})
 
-        # Cache the static initial user message (crawl context + WSTG blocks).
-        # It is messages[0] and never changes during the scan, so it qualifies
-        # as a stable prefix.  The cachePoint is re-sent on every turn, which
-        # is correct — Bedrock resets the TTL on each cache hit.
-        if converse_messages and converse_messages[0].get("role") == "user":
-            first_content = list(converse_messages[0].get("content") or [])
-            if not any("cachePoint" in blk for blk in first_content):
-                first_content = first_content + [{"cachePoint": {"type": "default"}}]
-            converse_messages = [
-                {**converse_messages[0], "content": first_content},
-                *converse_messages[1:],
-            ]
+            # Cache the static initial user message (crawl context + WSTG blocks).
+            # It is messages[0] and never changes during the scan, so it qualifies
+            # as a stable prefix.  The cachePoint is re-sent on every turn, which
+            # is correct — Bedrock resets the TTL on each cache hit.
+            if converse_messages and converse_messages[0].get("role") == "user":
+                first_content = list(converse_messages[0].get("content") or [])
+                if not any("cachePoint" in blk for blk in first_content):
+                    first_content = first_content + [
+                        {"cachePoint": {"type": "default"}}
+                    ]
+                converse_messages = [
+                    {**converse_messages[0], "content": first_content},
+                    *converse_messages[1:],
+                ]
 
-        # Cache the latest turn of the conversation history to enable prefix extension caching.
-        if len(converse_messages) > 1:
-            last_msg = converse_messages[-1]
-            last_content = list(last_msg.get("content") or [])
-            if not any("cachePoint" in blk for blk in last_content):
-                last_content = last_content + [{"cachePoint": {"type": "default"}}]
-            converse_messages[-1] = {**last_msg, "content": last_content}
+            # Cache the latest turn of the conversation history to enable prefix extension caching.
+            if len(converse_messages) > 1:
+                last_msg = converse_messages[-1]
+                last_content = list(last_msg.get("content") or [])
+                if not any("cachePoint" in blk for blk in last_content):
+                    last_content = last_content + [{"cachePoint": {"type": "default"}}]
+                converse_messages[-1] = {**last_msg, "content": last_content}
 
         bedrock_transport: dict[str, Any] = {}
         if config.api_key:
@@ -6382,7 +6489,9 @@ async def _call_with_tools_impl(
                 raw_content_ant.append(
                     {
                         "type": "bedrock_reasoning",
-                        "reasoning_content": blk["reasoningContent"],
+                        "reasoning_content": _bedrock_reasoning_content(
+                            blk["reasoningContent"]
+                        ),
                     }
                 )
             if "text" in blk:

@@ -29,30 +29,6 @@
 .benchmark-chart-header p {
   margin: 0;
 }
-.benchmark-chart-filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px 32px;
-  margin: 18px 0 10px;
-}
-.benchmark-chart-filters fieldset {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-.benchmark-chart-filters legend {
-  margin-bottom: 8px;
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 600;
-}
-.benchmark-chart-filters label {
-  white-space: nowrap;
-}
 .benchmark-chart-scroll {
   overflow-x: auto;
 }
@@ -589,4 +565,8 @@
   .benchmark-detail-content {
     padding-inline: 16px;
   }
+}
+
+.content.benchmark-summary-page {
+  overflow: hidden;
 }

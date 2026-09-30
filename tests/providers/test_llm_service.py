@@ -1593,6 +1593,71 @@ def test_usage_reconciliation_accumulates_multiple_provider_events():
     assert llm._last_call_tokens_var.get() == {"input": 140, "output": 15}
 
 
+@pytest.mark.parametrize(
+    ("provider", "model", "input_tokens", "extra"),
+    [
+        ("bedrock", "global.xai.grok-4.7", 450, {"bedrock_input_inclusive": True}),
+        ("bedrock", "anthropic.claude-sonnet-5", 100, {}),
+        ("anthropic", "claude-sonnet-5", 100, {}),
+        ("azure_foundry_anthropic", "claude-sonnet-5", 100, {}),
+        ("bedrock_mantle", "anthropic.claude-sonnet-5", 100, {}),
+        ("bedrock_mantle", "openai.gpt-6-sol", 450, {}),
+        ("openai", "gpt-6-sol", 450, {}),
+        ("openai_compatible", "grok-4.7", 450, {}),
+        ("openrouter", "x-ai/grok-4.7", 450, {}),
+        ("google", "gemini-test", 450, {}),
+        ("google_vertex", "xai/grok-4.7", 450, {}),
+        ("openai_codex", "gpt-6-sol", 450, {}),
+    ],
+)
+def test_usage_display_excludes_cache_without_changing_recorded_usage(
+    provider, model, input_tokens, extra
+):
+    bucket = {
+        model: {
+            "provider": provider,
+            "input": input_tokens,
+            "output": 20,
+            "cache_read": 300,
+            "cache_write": 50,
+            "estimated_cost_available": True,
+            "estimated_total_cost_usd": 1.25,
+            **extra,
+        }
+    }
+    original = copy.deepcopy(bucket)
+    totals = llm._usage_totals(bucket)
+    assert totals["total_uncached_input"] == 100
+    assert totals["by_model"][model]["uncached_input"] == 100
+    assert totals["total_input"] == input_tokens
+    assert totals["total_cache_read"] == 300
+    assert totals["total_cache_write"] == 50
+    assert totals["estimated_total_cost_usd"] == 1.25
+    assert bucket == original
+
+
+def test_usage_display_sums_mixed_providers_and_clamps_cached_only_input():
+    totals = llm._usage_totals(
+        {
+            "grok": {
+                "provider": "bedrock",
+                "bedrock_input_inclusive": True,
+                "input": 300,
+                "cache_read": 300,
+            },
+            "claude": {"provider": "anthropic", "input": 100, "cache_read": 300},
+            "gpt": {
+                "provider": "openai",
+                "input": 450,
+                "cache_read": 300,
+                "cache_write": 50,
+            },
+        }
+    )
+    assert totals["total_uncached_input"] == 200
+    assert totals["by_model"]["grok"]["uncached_input"] == 0
+
+
 def test_bedrock_usage_includes_cached_input_in_run_total(isolated_db_engine):
     run_id = 888892
     events = []
@@ -1613,6 +1678,8 @@ def test_bedrock_usage_includes_cached_input_in_run_total(isolated_db_engine):
         llm._run_token_usage.pop(("web", run_id), None)
 
     assert usage["total_input"] == 450
+    assert usage["total_uncached_input"] == 100
+    assert events[-1]["totals"]["total_uncached_input"] == 100
     assert usage["total_cache_read"] == 300
     assert usage["total_cache_write"] == 50
     assert events[-1]["input_tokens"] == 450
@@ -5240,7 +5307,34 @@ def test_anthropic_caching_in_call_with_tools(monkeypatch):
     assert "cache_control" not in tools[-1]
 
 
-def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
+@pytest.mark.parametrize("auth", ["sdk", "bearer"])
+@pytest.mark.parametrize(
+    ("model", "supports_cache"),
+    [
+        ("anthropic.claude-3-7-sonnet-20250219-v1:0", True),
+        ("global.anthropic.claude-sonnet-5-5", True),
+        ("us.anthropic.claude-sonnet-4-20250514-v1:0", True),
+        ("eu.amazon.nova-pro-v1:0", True),
+        ("global.amazon.nova-2-lite-v1:0", True),
+        (
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/"
+            "global.anthropic.claude-sonnet-4-6",
+            True,
+        ),
+        ("global.xai.grok-4.7", False),
+        ("us.xai.grok-4.6", False),
+        ("openai.gpt-5.6-sol", False),
+        ("meta.llama3-70b-instruct-v1:0", False),
+        ("anthropic.claude-3-sonnet-20240229-v1:0", False),
+        ("anthropic.claude-3-5-sonnet-20240620-v1:0", False),
+        ("amazon.nova-sonic-v1:0", False),
+        ("anthropic.claude-sonnet-99", False),
+        ("unknown.model-v1:0", False),
+    ],
+)
+def test_bedrock_caching_multiple_messages_in_call_with_tools(
+    monkeypatch, auth, model, supports_cache
+):
     captured: dict[str, object] = {}
 
     class FakeBedrockClient:
@@ -5278,11 +5372,37 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
     fake_boto3 = SimpleNamespace(Session=FakeSession)
     monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
 
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "output": {"message": {"content": [{"text": "ok"}]}},
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 2000, "outputTokens": 250},
+            }
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, **kwargs):
+            captured["converse_kwargs"] = kwargs["json"]
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        llm, "_make_llm_http_client", lambda **kwargs: FakeAsyncClient()
+    )
+
     config = LLMConfig(
         provider="bedrock",
-        api_key=None,
+        api_key="test-key" if auth == "bearer" else None,
         base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
-        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        model=model,
         max_tokens=2048,
         temperature=0.0,
     )
@@ -5293,6 +5413,7 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
         {"role": "user", "content": "how are you?"},
     ]
 
+    original_messages = copy.deepcopy(messages)
     blocks, stop_reason, raw_content = asyncio.run(
         llm._call_with_tools(
             config,
@@ -5305,10 +5426,31 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
     converse_kwargs = captured["converse_kwargs"]
     converse_messages = converse_kwargs["messages"]
 
-    # Verify first user message has cachePoint
-    assert converse_messages[0]["content"][-1] == {"cachePoint": {"type": "default"}}
-    # Verify last user message has cachePoint
-    assert converse_messages[-1]["content"][-1] == {"cachePoint": {"type": "default"}}
+    assert messages == original_messages
+    assert blocks[0]["text"] == "ok"
+    assert stop_reason == "end_turn"
+    assert converse_messages[1] == {
+        "role": "assistant",
+        "content": [{"text": "hi there"}],
+    }
+    if supports_cache:
+        assert converse_kwargs["system"] == [
+            {"text": "system prompt"},
+            {"cachePoint": {"type": "default"}},
+        ]
+        assert converse_messages[0]["content"] == [
+            {"text": "hello"},
+            {"cachePoint": {"type": "default"}},
+        ]
+        assert converse_messages[-1]["content"] == [
+            {"text": "how are you?"},
+            {"cachePoint": {"type": "default"}},
+        ]
+    else:
+        assert "cachePoint" not in json.dumps(converse_kwargs)
+        assert converse_kwargs["system"] == [{"text": "system prompt"}]
+        assert converse_messages[0]["content"] == [{"text": "hello"}]
+        assert converse_messages[-1]["content"] == [{"text": "how are you?"}]
 
 
 def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
@@ -5428,6 +5570,168 @@ def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
     assert raw_content[0] == {
         "type": "bedrock_reasoning",
         "reasoning_content": reasoning,
+    }
+
+
+@pytest.mark.parametrize("auth", ["sdk", "bearer"])
+def test_bedrock_encrypted_reasoning_survives_tool_call_and_saved_history(
+    monkeypatch, auth
+):
+    from botocore.session import get_session
+    from botocore.validate import validate_parameters
+
+    encrypted = b"\x00encrypted\xff-reasoning"
+    encoded = "AGVuY3J5cHRlZP8tcmVhc29uaW5n"
+    requests = []
+    input_shape = (
+        get_session()
+        .get_service_model("bedrock-runtime")
+        .operation_model("ConverseStream")
+        .input_shape
+    )
+
+    class FakeBedrockClient:
+        def converse_stream(self, **kwargs):
+            validate_parameters(kwargs, input_shape)
+            requests.append(kwargs)
+            return {
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {"reasoningContent": {"redactedContent": chunk}},
+                        }
+                    }
+                    for chunk in (encrypted[:7], encrypted[7:])
+                ]
+                + [
+                    {
+                        "contentBlockStart": {
+                            "contentBlockIndex": 1,
+                            "start": {
+                                "toolUse": {"toolUseId": "read-1", "name": "read_file"}
+                            },
+                        }
+                    },
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 1,
+                            "delta": {"toolUse": {"input": '{"path":"app.py"}'}},
+                        }
+                    },
+                    {"messageStop": {"stopReason": "tool_use"}},
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, *args, **kwargs):
+            return FakeBedrockClient()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "output": {
+                    "message": {
+                        "content": [
+                            {"reasoningContent": {"redactedContent": encoded}},
+                            {
+                                "toolUse": {
+                                    "toolUseId": "read-1",
+                                    "name": "read_file",
+                                    "input": {"path": "app.py"},
+                                }
+                            },
+                        ]
+                    }
+                },
+                "stopReason": "tool_use",
+            }
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, **kwargs):
+            # Verify that the bearer request can actually be serialized as JSON.
+            requests.append(json.loads(json.dumps(kwargs["json"])))
+            return FakeResponse()
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(Session=FakeSession))
+    monkeypatch.setattr(
+        llm, "_make_llm_http_client", lambda **kwargs: FakeAsyncClient()
+    )
+    config = LLMConfig(
+        provider="bedrock",
+        model="global.xai.grok-4.7",
+        api_key="test-key" if auth == "bearer" else None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        max_tokens=2048,
+    )
+    messages = [{"role": "user", "content": "review app.py"}]
+    tools = [
+        {
+            "name": "read_file",
+            "description": "Read source",
+            "input_schema": {"type": "object"},
+        }
+    ]
+    _, stop_reason, raw = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="Review source",
+            messages=messages,
+            tools=tools,
+        )
+    )
+    assert stop_reason == "tool_use"
+    assert raw[0] == {
+        "type": "bedrock_reasoning",
+        "reasoning_content": {"redactedContent": encoded},
+    }
+    assert raw[1]["input"] == {"path": "app.py"}
+    messages.extend(
+        [
+            {"role": "assistant", "content": raw},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "read-1",
+                        "content": "source",
+                    }
+                ],
+            },
+        ]
+    )
+    # Check the same JSON round trip used by persisted agent checkpoints.
+    saved_messages = json.loads(json.dumps(messages))
+    # Also repair the empty field produced by the previous stream handler.
+    saved_messages[1]["content"][0]["reasoning_content"]["reasoningText"] = {}
+    original = copy.deepcopy(saved_messages)
+    asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="Review source",
+            messages=saved_messages,
+            tools=tools,
+        )
+    )
+    assert saved_messages == original
+    assert requests[1]["messages"][1]["content"][0] == {
+        "reasoningContent": {"redactedContent": encrypted if auth == "sdk" else encoded}
+    }
+    assert requests[1]["messages"][1]["content"][1]["toolUse"]["input"] == {
+        "path": "app.py"
     }
 
 

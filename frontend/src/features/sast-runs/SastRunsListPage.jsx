@@ -1,7 +1,7 @@
+import { useBenchmarkLinks } from "../../shared/hooks/useBenchmarkLinks.js";
+import { BenchmarkBadge } from "../../shared/ui/BenchmarkBadge.jsx";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
-import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
-import * as extensionsApi from "../../shared/api/extensions.js";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
@@ -20,8 +20,7 @@ export function SastRunsListPage() {
   const importInputRef = useRef(null);
   const [sortField, setSortField] = useState("started_at");
   const [sortDir, setSortDir] = useState("desc");
-  const [evaluations, setEvaluations] = useState([]);
-  const [benchmarkEnabled, setBenchmarkEnabled] = useState(false);
+  const benchmarkLinks = useBenchmarkLinks();
   const [deletingRunId, setDeletingRunId] = useState(null);
 
   const loadRuns = useCallback(async () => {
@@ -41,23 +40,6 @@ export function SastRunsListPage() {
       .listLLMProfiles()
       .then((p) => setProfiles(p || []))
       .catch((e) => setError(e.message));
-  }, []);
-  useEffect(() => {
-    extensionsApi
-      .listExtensions()
-      .then(async (extensions) => {
-        const enabled = extensions.some(
-          (extension) =>
-            extension.id === "aespa.benchmarking" &&
-            extension.enabled &&
-            extension.status === "loaded",
-        );
-        setBenchmarkEnabled(enabled);
-        if (!enabled) return;
-        const items = await benchmarkApi.listBenchmarkEvaluations();
-        setEvaluations(Array.isArray(items) ? items : items?.evaluations || items?.items || []);
-      })
-      .catch(() => {});
   }, []);
 
   const onImport = async (event) => {
@@ -279,17 +261,7 @@ export function SastRunsListPage() {
                           }
                         </div>
                       )}
-                      {benchmarkEnabled &&
-                        evaluations.some((evaluation) => evaluation.sast_run_id === r.id) && (
-                          <div style={{ marginTop: 5 }}>
-                            <a
-                              className="badge neutral"
-                              href={`#/benchmark-lab/evaluations/${evaluations.find((evaluation) => evaluation.sast_run_id === r.id).id}`}
-                            >
-                              Evaluated
-                            </a>
-                          </div>
-                        )}
+                      <BenchmarkBadge href={benchmarkLinks[`sast:${r.id}`]} />
                     </td>
                     <td>
                       <StatusBadge status={r.status} />

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import importlib
 import json
 import zipfile
 from datetime import datetime, timezone
@@ -23,8 +25,9 @@ BASE = "/extension/aespa.benchmarking"
 
 
 @pytest.mark.parametrize("kind", ["site", "api"])
+@pytest.mark.parametrize("has_start_time", [True, False])
 def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
-    client, db_engine, monkeypatch, kind
+    client, db_engine, monkeypatch, kind, has_start_time
 ):
     with Session(db_engine) as session:
         model = LLMConfig(name="Benchmark evaluator", model="test-model")
@@ -32,7 +35,6 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
         session.add_all([model, scan_model])
         session.commit()
         model_id = model.id
-        scan_model_id = scan_model.id
         target = (
             Site(name="Fixture site", base_url="https://example.test")
             if kind == "site"
@@ -48,13 +50,20 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
                 collection_id=target.id, name="API scan", status="completed"
             )
         )
+        run.created_at = datetime(2026, 9, 30, 7, 0, tzinfo=timezone.utc)
+        if has_start_time:
+            run.started_at = datetime(2026, 9, 30, 8, 0, tzinfo=timezone.utc)
         run.llm_config_id = scan_model.id
         run.token_usage_json = json.dumps(
             {
                 "scan-model": {
+                    "input": 100,
+                    "output": 200,
+                    "provider": "anthropic",
                     "estimated_cost_available": True,
                     "estimated_total_cost_usd": 0.42,
-                }
+                },
+                "other-model": {"input": 250, "output": 1, "requests": 100},
             }
         )
         if kind == "site":
@@ -140,7 +149,6 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
         ).status_code
         == 200
     )
-    assert client.delete(f"{BASE}/datasets/{dataset['id']}").status_code == 409
     targets = client.get(f"{BASE}/targets").json()
     key = "sites" if kind == "site" else "apis"
     assert targets[key][0]["dataset"]["item_count"] == 3
@@ -154,14 +162,17 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
         },
     )
     assert response.status_code == 201, response.text
+    assert client.delete(f"{BASE}/datasets/{dataset['id']}").status_code == 409
     result = response.json()
     assert result["comparison"]["method"] == "model"
+    expected_hour = "08" if has_start_time else "07"
+    assert result["scan_started_at"] == f"2026-09-30T{expected_hour}:00:00+00:00"
     assert result["scan_cost_usd"] == 0.42
-    assert result["scan_models"]["test_lead"] == {
-        "id": scan_model_id,
-        "name": "Test Lead",
-        "model": "scanned-model" if kind == "site" else "scan-model",
-        "provider": "openai" if kind == "site" else "anthropic",
+    assert result["scan_models"]["primary"] == {
+        "id": None,
+        "name": "scan-model",
+        "model": "scan-model",
+        "provider": "anthropic",
     }
     assert result["scan_models"]["sast"] == []
     assert len(calls) == 1
@@ -211,9 +222,11 @@ def test_sast_can_compare_with_saved_site_ground_truth(client, db_engine, monkey
         session.add_all([model, sast_model])
         session.commit()
         model_id = model.id
-        sast_model_id = sast_model.id
         source_run = session.get(SastRun, run_id)
         source_run.llm_config_id = sast_model.id
+        source_run.token_usage_json = json.dumps(
+            {"sast-model": {"input": 100, "output": 10, "provider": "anthropic"}}
+        )
         session.add(source_run)
         session.commit()
         site = Site(name="Source target", base_url="https://example.test")
@@ -274,14 +287,19 @@ def test_sast_can_compare_with_saved_site_ground_truth(client, db_engine, monkey
     assert len(result.json()["rows"]) == 1
     assert result.json()["comparison"]["method"] == "model"
     assert result.json()["scan_models"] == {
-        "test_lead": None,
+        "primary": {
+            "id": None,
+            "name": "sast-model",
+            "model": "sast-model",
+            "provider": "anthropic",
+        },
         "sast": [
             {
                 "run_id": run_id,
                 "run_name": "benchmark fixture",
                 "model": {
-                    "id": sast_model_id,
-                    "name": "SAST agent",
+                    "id": None,
+                    "name": "sast-model",
                     "model": "sast-model",
                     "provider": "anthropic",
                 },
@@ -330,6 +348,13 @@ def test_dast_result_lists_sast_models_from_leads_for_the_right_run_kind(
         api_source = SastRun(
             name="API source", status="completed", llm_config_id=api_sast_model_id
         )
+        for scan, model in [
+            (web_run, "web-model"),
+            (api_run, "api-model"),
+            (web_source, "web-sast-model"),
+            (api_source, "api-sast-model"),
+        ]:
+            scan.token_usage_json = json.dumps({model: {"input": 10, "output": 5}})
         session.add_all([web_run, api_run, web_source, api_source])
         session.commit()
         session.add_all(
@@ -378,7 +403,15 @@ def test_dast_result_lists_sast_models_from_leads_for_the_right_run_kind(
         f"{BASE}/datasets",
         json={"name": "Fixture", "ground_truth": {"items": []}},
     ).json()
+    listed = client.get(f"{BASE}/targets").json()
     for kind, target_id, run_id, source_name, source_model in targets:
+        key = "sites" if kind == "site" else "apis"
+        listed_run = next(row for row in listed[key][0]["runs"] if row["id"] == run_id)
+        assert listed_run["scan_models"]["primary"]["model"] == (
+            "web-model" if kind == "site" else "api-model"
+        )
+        assert len(listed_run["scan_models"]["sast"]) == 1
+        assert listed_run["scan_models"]["sast"][0]["model"]["model"] == source_model
         assert (
             client.put(
                 f"{BASE}/ground-truth/{kind}/{target_id}",
@@ -1149,17 +1182,26 @@ def test_bulk_completed_benchmarks_skip_existing_and_retry_failures(
         runs = [
             make_run("First scan", done),
             make_run("Second scan", done),
+            make_run("Unselected scan", done),
             make_run("Unfinished scan", "running"),
         ]
         session.add_all(runs)
         session.commit()
         run_ids = [run.id for run in runs[:2]]
+        unselected_id = runs[2].id
+        unfinished_id = runs[3].id
     calls = []
     fail = True
+    started = asyncio.Event()
 
     async def answer(*args, **kwargs):
         calls.append(args)
-        if fail and len(calls) == 1:
+        call_number = len(calls)
+        if fail:
+            if call_number == 2:
+                started.set()
+            await asyncio.wait_for(started.wait(), timeout=2)
+        if fail and call_number == 1:
             raise ValueError("fixture model failure")
         return json.dumps(
             {
@@ -1184,7 +1226,40 @@ def test_bulk_completed_benchmarks_skip_existing_and_retry_failures(
             },
         },
     ).json()
-    body = {"run_kind": kind, "dataset_id": dataset["id"]}
+    assert client.get(f"{BASE}/settings").json() == {"default_model_id": None}
+    assert (
+        client.put(f"{BASE}/settings", json={"default_model_id": 999999}).status_code
+        == 404
+    )
+    assert (
+        client.put(f"{BASE}/settings", json={"default_model_id": model_id}).status_code
+        == 200
+    )
+    assert client.get(f"{BASE}/settings").json() == {"default_model_id": model_id}
+    body = {
+        "evaluation_model_id": 999999,
+        "run_kind": kind,
+        "dataset_id": dataset["id"],
+        "run_ids": run_ids,
+    }
+    for invalid_ids in ([unfinished_id], [999999], [run_ids[0], unfinished_id]):
+        invalid = client.post(
+            f"{BASE}/results/benchmark-unbenchmarked",
+            json={**body, "run_ids": invalid_ids},
+        )
+        assert invalid.status_code == 400
+    for invalid_ids in ([], [0], [-1]):
+        invalid = client.post(
+            f"{BASE}/results/benchmark-unbenchmarked",
+            json={**body, "run_ids": invalid_ids},
+        )
+        assert invalid.status_code == 422
+    missing = client.post(
+        f"{BASE}/results/benchmark-unbenchmarked",
+        json={"run_kind": kind, "dataset_id": dataset["id"]},
+    )
+    assert missing.status_code == 422
+    assert calls == []
     response = client.post(f"{BASE}/results/benchmark-unbenchmarked", json=body)
     assert response.status_code == 200, response.text
     result = response.json()
@@ -1203,4 +1278,165 @@ def test_bulk_completed_benchmarks_skip_existing_and_retry_failures(
     skipped = client.post(f"{BASE}/results/benchmark-unbenchmarked", json=body).json()
     assert set(skipped["skipped"]) == set(run_ids)
     assert skipped["completed"] == []
+    assert all(call[0].id == model_id for call in calls)
     assert len(calls) == 3
+    assert unselected_id not in {
+        item["run_id"] for item in client.get(f"{BASE}/results").json()
+    }
+    duplicate = client.post(
+        f"{BASE}/results/benchmark-unbenchmarked",
+        json={**body, "run_ids": [unselected_id, unselected_id]},
+    ).json()
+    assert duplicate["completed"] == [unselected_id]
+    assert len(calls) == 4
+
+
+def test_manage_dataset_labels_assignments_and_delete(client, db_engine):
+    with Session(db_engine) as session:
+        site = Site(name="App", base_url="http://app.test")
+        api = ApiCollection(name="API", base_url="http://api.test")
+        session.add_all([site, api])
+        session.commit()
+        site_id, api_id = site.id, api.id
+    dataset = client.post(
+        f"{BASE}/datasets", json={"name": "truth.json", "ground_truth": {"items": []}}
+    ).json()
+    dataset_id = dataset["id"]
+    original_digest = dataset["ground_truth_digest"]
+    url = f"{BASE}/datasets/{dataset_id}/details"
+    response = client.patch(
+        url, json={"label": " Bank of Ed ", "target_kind": "site", "target_id": site_id}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["label"] == "Bank of Ed"
+    saved = client.get(f"{BASE}/datasets").json()[0]
+    assert saved["name"] == "truth.json"
+    assert saved["ground_truth_digest"] == original_digest
+    assert saved["assignments"] == [{"target_kind": "site", "target_id": site_id}]
+    assert (
+        client.patch(url, json={"target_kind": "api", "target_id": 99999}).status_code
+        == 404
+    )
+    assert client.patch(url, json={"target_kind": "api"}).status_code == 422
+    response = client.patch(
+        url, json={"label": "API truth", "target_kind": "api", "target_id": api_id}
+    )
+    assert response.status_code == 200
+    targets = client.get(f"{BASE}/targets").json()
+    assert targets["sites"][0]["dataset"] is None
+    assert targets["apis"][0]["dataset"]["id"] == dataset_id
+    assert client.delete(f"{BASE}/datasets/{dataset_id}").status_code == 204
+    assert client.get(f"{BASE}/datasets").json() == []
+    assert client.get(f"{BASE}/targets").json()["apis"][0]["dataset"] is None
+
+
+def test_dataset_assignment_replaces_target_dataset(client, db_engine):
+    with Session(db_engine) as session:
+        site = Site(name="App", base_url="http://app.test")
+        session.add(site)
+        session.commit()
+        site_id = site.id
+    ids = [
+        client.post(
+            f"{BASE}/datasets", json={"name": name, "ground_truth": {"items": []}}
+        ).json()["id"]
+        for name in ("first.json", "second.json")
+    ]
+    for dataset_id in ids:
+        assert (
+            client.patch(
+                f"{BASE}/datasets/{dataset_id}/details",
+                json={"target_kind": "site", "target_id": site_id},
+            ).status_code
+            == 200
+        )
+    saved = {row["id"]: row for row in client.get(f"{BASE}/datasets").json()}
+    assert saved[ids[0]]["assignments"] == []
+    assert saved[ids[1]]["assignments"] == [
+        {"target_kind": "site", "target_id": site_id}
+    ]
+    assert (
+        client.patch(
+            f"{BASE}/datasets/{ids[1]}/details", json={"label": "Custom"}
+        ).status_code
+        == 200
+    )
+    assert client.get(f"{BASE}/targets").json()["sites"][0]["dataset"] is None
+
+
+@pytest.mark.parametrize("run_class", [TestRun, ApiTestRun, SastRun])
+@pytest.mark.parametrize(
+    "usage, expected",
+    [
+        (
+            {
+                "lead": {"input": 100, "output": 1},
+                "worker": {"input": 20, "output": 200},
+            },
+            "worker",
+        ),
+        (
+            {
+                "lead": {"input": 100, "output": 1, "cache_read": 1000},
+                "worker": {"input": 102},
+            },
+            "worker",
+        ),
+        ({"z-model": {"input": 10}, "a-model": {"output": 10}}, "a-model"),
+        ({"lead": {"input": 0, "output": 0}}, None),
+        ({"bad": {"input": "100"}, "broken": [], "valid": {"output": 10}}, "valid"),
+        ([], None),
+        (None, None),
+    ],
+)
+def test_scan_model_uses_recorded_total_tokens(run_class, usage, expected):
+    router = importlib.import_module("aespa_external_aespa_benchmarking.router")
+    run = run_class(token_usage_json=json.dumps(usage), llm_config_id=999)
+    selected = router.usage_model(run)
+    assert (selected["model"] if selected else None) == expected
+
+
+@pytest.mark.parametrize("kind", ["site", "api", "sast"])
+@pytest.mark.parametrize("saved_date", [{}, {"scan_started_at": None}])
+def test_older_saved_metadata_is_read_from_run(db_engine, kind, saved_date):
+    router = importlib.import_module("aespa_external_aespa_benchmarking.router")
+    with Session(db_engine) as core:
+        model = {"site": TestRun, "api": ApiTestRun, "sast": SastRun}[kind]
+        target_fields = {}
+        if kind != "sast":
+            target_class = Site if kind == "site" else ApiCollection
+            target = target_class(name="Older target", base_url="https://example.test")
+            core.add(target)
+            core.commit()
+            target_fields["site_id" if kind == "site" else "collection_id"] = target.id
+        run = model(
+            **target_fields,
+            name="Older scan",
+            created_at=datetime(2026, 9, 30, 7, 0, tzinfo=timezone.utc),
+            token_usage_json=json.dumps({"most-used": {"input": 10, "output": 20}}),
+        )
+        core.add(run)
+        core.commit()
+        row = router.ScanResult(
+            run_kind=kind,
+            run_id=run.id,
+            run_name=run.name,
+            rows_json=json.dumps(
+                {
+                    **saved_date,
+                    "rows": [],
+                    "scan_models": {"test_lead": {"model": "old-profile"}, "sast": []},
+                }
+            ),
+        )
+        original = row.rows_json
+        assert (
+            router.result_out(row, core)["scan_models"]["primary"]["model"]
+            == "most-used"
+        )
+        assert (
+            router.result_out(row, core)["scan_started_at"]
+            == "2026-09-30T07:00:00+00:00"
+        )
+        assert run.started_at is None
+        assert row.rows_json == original

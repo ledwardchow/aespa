@@ -20,7 +20,12 @@ export function fmtUsd(n) {
 }
 
 export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
-  const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
+  const hasTokens =
+    tokenUsage &&
+    (tokenUsage.total_input > 0 ||
+      tokenUsage.total_output > 0 ||
+      tokenUsage.total_cache_read > 0 ||
+      tokenUsage.total_cache_write > 0);
   const pendingInputTokens = Number(tokenUsage?.pending_input_tokens || 0);
   const pendingRequests = Number(tokenUsage?.pending_requests || 0);
   const hasPendingUsage = pendingRequests > 0 || pendingInputTokens > 0;
@@ -98,8 +103,11 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
             {hasTokens ? (
               <>
                 {hasProviderUsage ? <span className="token-bar-sep">·</span> : null}
-                <span className="token-bar-in" title="Input tokens">
-                  ↑{fmtTok(tokenUsage.total_input)} in
+                <span
+                  className="token-bar-in"
+                  title="Input tokens excluding cache reads and writes"
+                >
+                  ↑{fmtTok(tokenUsage.total_uncached_input ?? tokenUsage.total_input)} in
                 </span>
                 <span className="token-bar-sep">·</span>
                 <span className="token-bar-out" title="Output tokens">
@@ -186,7 +194,11 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
               {v.requests > 0 ? (
                 <span className="token-out">{fmtTok(v.requests)} calls</span>
               ) : null}
-              {v.input > 0 ? <span className="token-in">↑{fmtTok(v.input)}</span> : null}
+              {v.input > 0 || v.cache_read > 0 || v.cache_write > 0 ? (
+                <span className="token-in" title="Input tokens excluding cache reads and writes">
+                  ↑{fmtTok(v.uncached_input ?? v.input)}
+                </span>
+              ) : null}
               {v.output > 0 ? <span className="token-out">↓{fmtTok(v.output)}</span> : null}
               {v.cache_read > 0 || v.cache_write > 0 ? (
                 <>

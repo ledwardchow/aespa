@@ -59,7 +59,10 @@ test.each([
   ["#/scan-policy/dast/headers", { name: "scan-policy", tab: "dast", subTab: "headers" }],
   ["#/scan-policy/dast/validator", { name: "scan-policy", tab: "dast", subTab: "validator" }],
   ["#/extensions", { name: "extensions" }],
-  ["#/extensions/aespa.burpsuite/settings", { name: "extension-settings", extensionId: "aespa.burpsuite" }],
+  [
+    "#/extensions/aespa.burpsuite/settings",
+    { name: "extension-settings", extensionId: "aespa.burpsuite" },
+  ],
   ["#/debug", { name: "scan-policy" }],
   ["#/reporting-debug", { name: "reporting-debug" }],
   ["#/benchmark-lab", { name: "benchmark-lab" }],
@@ -97,4 +100,8 @@ test("run links round-trip run kind and encoded references", async () => {
     tab: "traffic",
     trafficCoverage: { cellIds: [12, 13], category: "A03", testClass: "sqli" },
   });
+});
+
+test("opens saved benchmark results", () => {
+  expect(parseRoute("#/benchmark-lab/results/42")).toEqual({ name: "benchmark-lab", id: 42 });
 });

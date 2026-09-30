@@ -1,3 +1,4 @@
+import { scanType, scanModelLabel } from "./scanPresentation.js";
 import { useState } from "react";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import { benchmarkUnbenchmarked } from "../../shared/api/benchmarkBulk.ts";
@@ -5,18 +6,34 @@ import { runHref } from "../../shared/navigation/links.ts";
 import { parseGroundTruthText } from "./groundTruthImport.js";
 import styles from "./CompletedScanBenchmarks.module.css";
 
+function ScanSelection({ ids, selectedIds, onToggle, disabled, label }) {
+  const count = ids.filter((id) => selectedIds.has(id)).length;
+  return (
+    <input
+      type="checkbox"
+      aria-label={label}
+      checked={ids.length > 0 && count === ids.length}
+      ref={(element) => {
+        if (element) element.indeterminate = count > 0 && count < ids.length;
+      }}
+      disabled={disabled || !ids.length}
+      onChange={(event) => onToggle(ids, event.target.checked)}
+    />
+  );
+}
+
 export function CompletedScanBenchmarks({
   category,
   targets,
   results,
   legacy,
   datasets,
-  models,
+  defaultModel,
   onChange,
   onOpen,
 }) {
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [datasetId, setDatasetId] = useState("");
-  const [modelId, setModelId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [outcome, setOutcome] = useState(null);
@@ -25,7 +42,7 @@ export function CompletedScanBenchmarks({
     category === "sast"
       ? targets.sast_runs.map((run) => ({ ...run, targetName: "Source scan" }))
       : targets[category === "site" ? "sites" : "apis"].flatMap((target) =>
-          target.runs.map((run) => ({ ...run, targetName: target.name })),
+          target.runs.map((run) => ({ ...run, targetId: target.id, targetName: target.name })),
         )
   )
     .filter((run) => ["complete", "completed"].includes(run.status))
@@ -41,6 +58,15 @@ export function CompletedScanBenchmarks({
           : null,
     }));
   const pending = runs.filter((run) => !run.result && !run.evaluation);
+  const selectedRuns = pending.filter((run) => selectedIds.has(run.id));
+  const applications = category === "sast" ? [] : targets[category === "site" ? "sites" : "apis"];
+  const toggle = (ids, checked) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      ids.forEach((id) => (checked ? next.add(id) : next.delete(id)));
+      return next;
+    });
+  };
   const upload = async (file) => {
     if (!file) return;
     setBusy(true);
@@ -66,16 +92,18 @@ export function CompletedScanBenchmarks({
   };
   const apply = async (event) => {
     event.preventDefault();
+    if (busy || !defaultModel || !datasetId || !selectedRuns.length) return;
     setBusy(true);
     setError(null);
     setOutcome(null);
     try {
       const result = await benchmarkUnbenchmarked({
         run_kind: category,
+        run_ids: selectedRuns.map((run) => run.id),
         dataset_id: Number(datasetId),
-        ...(modelId ? { evaluation_model_id: Number(modelId) } : {}),
       });
       setOutcome(result);
+      toggle([...result.completed, ...result.skipped], false);
       await onChange();
     } catch (err) {
       setError(err.message);
@@ -88,7 +116,7 @@ export function CompletedScanBenchmarks({
       <h2>{label} completed scans</h2>
       <p className="subtle">
         {runs.length} completed scans · {pending.length} unbenchmarked. The selected ground truth
-        applies to every unbenchmarked scan in this category.
+        applies to the selected scans.
       </p>
       <form className={`card ${styles.controls}`} onSubmit={apply}>
         <label>
@@ -103,7 +131,8 @@ export function CompletedScanBenchmarks({
             <option value="">Select a saved file...</option>
             {datasets.map((dataset) => (
               <option key={dataset.id} value={dataset.id}>
-                {dataset.name} ({dataset.item_count} findings)
+                {dataset.label ? `${dataset.label} (${dataset.name})` : dataset.name} (
+                {dataset.item_count} findings)
               </option>
             ))}
           </select>
@@ -121,25 +150,16 @@ export function CompletedScanBenchmarks({
             }}
           />
         </label>
-        <label>
-          Bulk evaluation model
-          <select
-            className="select"
-            aria-label="Bulk evaluation model"
-            value={modelId}
-            disabled={busy}
-            onChange={(event) => setModelId(event.target.value)}
-          >
-            <option value="">Each scan's Test Lead model</option>
-            {models.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button className="btn primary" disabled={busy || !datasetId || !pending.length}>
-          {busy ? "Working..." : `Benchmark ${pending.length} unbenchmarked scans`}
+        <p className="subtle">
+          {defaultModel
+            ? `Benchmark model: ${defaultModel.name}`
+            : "Choose a default benchmark model in Settings first."}
+        </p>
+        <button
+          className="btn primary"
+          disabled={busy || !defaultModel || !datasetId || !selectedRuns.length}
+        >
+          {busy ? "Working..." : `Benchmark ${selectedRuns.length} selected scans`}
         </button>
       </form>
       {error && (
@@ -158,6 +178,23 @@ export function CompletedScanBenchmarks({
           ))}
         </div>
       )}
+      {applications.length > 0 && (
+        <fieldset className={styles.applications}>
+          <legend>Select by application</legend>
+          {applications.map((application) => (
+            <label key={application.id}>
+              <ScanSelection
+                ids={pending.filter((run) => run.targetId === application.id).map((run) => run.id)}
+                selectedIds={selectedIds}
+                onToggle={toggle}
+                disabled={busy}
+                label={`Select all scans from ${application.name}`}
+              />
+              {application.name}
+            </label>
+          ))}
+        </fieldset>
+      )}
       {!runs.length ? (
         <p className="subtle">No completed scans in this category.</p>
       ) : (
@@ -165,7 +202,18 @@ export function CompletedScanBenchmarks({
           <table className={styles.table}>
             <thead>
               <tr>
+                <th scope="col">
+                  <ScanSelection
+                    ids={pending.map((run) => run.id)}
+                    selectedIds={selectedIds}
+                    onToggle={toggle}
+                    disabled={busy}
+                    label="Select all unbenchmarked scans"
+                  />
+                </th>
                 <th>Scan</th>
+                <th>Type</th>
+                <th>Scan model</th>
                 <th>Target</th>
                 <th>Completed</th>
                 <th>Benchmark</th>
@@ -174,6 +222,15 @@ export function CompletedScanBenchmarks({
             <tbody>
               {runs.map((run) => (
                 <tr key={run.id}>
+                  <td>
+                    <ScanSelection
+                      ids={run.result || run.evaluation ? [] : [run.id]}
+                      selectedIds={selectedIds}
+                      onToggle={toggle}
+                      disabled={busy}
+                      label={`Select ${run.name}`}
+                    />
+                  </td>
                   <td>
                     <a
                       href={runHref({
@@ -184,6 +241,8 @@ export function CompletedScanBenchmarks({
                       {run.name}
                     </a>
                   </td>
+                  <td>{scanType(category, run.scan_models || run.result?.scan_models)}</td>
+                  <td>{scanModelLabel(category, run.result?.scan_models || run.scan_models)}</td>
                   <td>{run.targetName}</td>
                   <td>{run.completed_at ? new Date(run.completed_at).toLocaleString() : "—"}</td>
                   <td>

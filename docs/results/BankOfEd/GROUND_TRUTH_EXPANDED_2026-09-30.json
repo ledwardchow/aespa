@@ -1,0 +1,910 @@
+{
+  "schema_version": 1,
+  "name": "BankOfEd - Expanded ground truth (2026-09-30)",
+  "items": [
+    {
+      "affected_operation": "GET /api/transactions/1",
+      "category": "A01: Broken Access Control",
+      "classification": "exploitable",
+      "description": "Removed user ownership verification. Any authenticated user can view any transaction by its ID.",
+      "expected_evidence": [
+        "`GET /api/transactions/1` returns transaction details regardless of who owns it."
+      ],
+      "external_id": "GT-1",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Controllers/TransactionController.php"
+        }
+      ],
+      "root_cause": "Removed user ownership verification. Any authenticated user can view any transaction by its ID.",
+      "severity": "medium",
+      "title": "IDOR in Transaction Detail"
+    },
+    {
+      "affected_operation": "PUT /api/profile",
+      "category": "A01: Broken Access Control",
+      "classification": "exploitable",
+      "description": "Accepts a `user_id` field in the request body, allowing any authenticated user to modify another user's profile.",
+      "expected_evidence": [
+        "`PUT /api/profile` with body `{\"user_id\": 2, \"email\": \"attacker@evil.com\"}` overwrites user 2's email."
+      ],
+      "external_id": "GT-2",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Controllers/ProfileController.php"
+        }
+      ],
+      "root_cause": "Accepts a `user_id` field in the request body, allowing any authenticated user to modify another user's profile.",
+      "severity": "medium",
+      "title": "IDOR via Mass Assignment in Profile Update"
+    },
+    {
+      "affected_operation": "POST /api/transfers/external",
+      "category": "A01: Broken Access Control",
+      "classification": "exploitable",
+      "description": "The `from_account_id` parameter is resolved with `Account::findById()` instead of `Account::findByIdAndUser()`. There is no ownership check, so any authenticated user can reference any account in the bank as the source of an external transfer, draining funds from accounts they do not own.",
+      "expected_evidence": [
+        "`POST /api/transfers/external` with body `{\"from_account_id\": 5, \"to_bsb\": \"110-001\", \"to_account_number\": \"99999999\", \"amount\": \"500.00\"}` — debits account 5 regardless of who owns it."
+      ],
+      "external_id": "GT-23",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Services/TransferService.php"
+        }
+      ],
+      "root_cause": "The `from_account_id` parameter is resolved with `Account::findById()` instead of `Account::findByIdAndUser()`. There is no ownership check, so any authenticated user can reference any account in the bank as the source of an external transfer, draining funds from accounts they do not own.",
+      "severity": "medium",
+      "title": "IDOR on Source Account in Pay Anyone (External Transfer)"
+    },
+    {
+      "affected_operation": "",
+      "category": "A02: Cryptographic Failures",
+      "classification": "exploitable",
+      "description": "Replaced bcrypt with MD5. MD5 is fast and trivially reversible via rainbow tables.",
+      "expected_evidence": [
+        "Obtain a password hash from the API (see #4), then crack it instantly with any MD5 lookup table."
+      ],
+      "external_id": "GT-3",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Services/AuthService.php"
+        }
+      ],
+      "root_cause": "Replaced bcrypt with MD5. MD5 is fast and trivially reversible via rainbow tables.",
+      "severity": "medium",
+      "title": "MD5 Password Hashing"
+    },
+    {
+      "affected_operation": "GET /api/profile",
+      "category": "A02: Cryptographic Failures",
+      "classification": "exploitable",
+      "description": "`password_hash` and `totp_secret` are included in every API response that returns user data (login, register, profile).",
+      "expected_evidence": [
+        "`GET /api/profile` returns the user's password hash and TOTP secret in plaintext."
+      ],
+      "external_id": "GT-4",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Models/User.php"
+        }
+      ],
+      "root_cause": "`password_hash` and `totp_secret` are included in every API response that returns user data (login, register, profile).",
+      "severity": "medium",
+      "title": "Sensitive Data Exposure in API Responses"
+    },
+    {
+      "affected_operation": "GET /api/admin/customers?search=",
+      "category": "A03: Injection",
+      "classification": "exploitable",
+      "description": "The `$_GET['search']` parameter is directly concatenated into SQL without parameterization.",
+      "expected_evidence": [
+        "`GET /api/admin/customers?search=' UNION SELECT 1,password_hash,3,4,5,6,7 FROM admin_users--`"
+      ],
+      "external_id": "GT-5",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Controllers/AdminUserController.php"
+        }
+      ],
+      "root_cause": "The `$_GET['search']` parameter is directly concatenated into SQL without parameterization.",
+      "severity": "medium",
+      "title": "SQL Injection in Admin Customer Search"
+    },
+    {
+      "affected_operation": "",
+      "category": "A03: Injection",
+      "classification": "exploitable",
+      "description": "Transaction description rendered as raw HTML via `innerHTML` without `escapeHtml()`.",
+      "expected_evidence": [
+        "Send a transfer with `description: \"<img src=x onerror=alert(document.cookie)>\"` — executes when victim views dashboard."
+      ],
+      "external_id": "GT-6",
+      "locations": [
+        {
+          "line": null,
+          "path": "public/banking/js/pages/dashboard.js"
+        }
+      ],
+      "root_cause": "Transaction description rendered as raw HTML via `innerHTML` without `escapeHtml()`.",
+      "severity": "medium",
+      "title": "Stored XSS in Dashboard Transaction List"
+    },
+    {
+      "affected_operation": "",
+      "category": "A03: Injection",
+      "classification": "exploitable",
+      "description": "Same as #6 but in the account detail view's transaction table.",
+      "expected_evidence": [],
+      "external_id": "GT-7",
+      "locations": [
+        {
+          "line": null,
+          "path": "public/banking/js/pages/accounts.js"
+        }
+      ],
+      "root_cause": "Same as #6 but in the account detail view's transaction table.",
+      "severity": "medium",
+      "title": "Stored XSS in Account Detail Transaction Table"
+    },
+    {
+      "affected_operation": "GET /api/transactions?sort=created_at",
+      "category": "A03: Injection",
+      "classification": "exploitable",
+      "description": "The `sort` query parameter from `GET /api/transactions` is concatenated directly into the `ORDER BY` clause without sanitization or whitelist validation.",
+      "expected_evidence": [
+        "`GET /api/transactions?sort=created_at DESC; SELECT SLEEP(5)--` for time-based blind SQLi, or `GET /api/transactions?sort=(SELECT password_hash FROM users LIMIT 1)` for data extraction via error messages."
+      ],
+      "external_id": "GT-22",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Models/Transaction.php"
+        },
+        {
+          "line": null,
+          "path": "src/Controllers/TransactionController.php"
+        }
+      ],
+      "root_cause": "The `sort` query parameter from `GET /api/transactions` is concatenated directly into the `ORDER BY` clause without sanitization or whitelist validation.",
+      "severity": "medium",
+      "title": "SQL Injection in Transaction Listing (Customer-Facing)"
+    },
+    {
+      "affected_operation": "POST /api/transfers/external",
+      "category": "A04: Insecure Design",
+      "classification": "exploitable",
+      "description": "If TOTP is required but the user hasn't configured it, the transfer proceeds anyway. Additionally, if TOTP is configured but the code is simply omitted from the request, the transfer still goes through.",
+      "expected_evidence": [
+        "Send `POST /api/transfers/external` without a `totp_code` field — transfer completes without 2FA."
+      ],
+      "external_id": "GT-8",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Services/TransferService.php"
+        }
+      ],
+      "root_cause": "If TOTP is required but the user hasn't configured it, the transfer proceeds anyway. Additionally, if TOTP is configured but the code is simply omitted from the request, the transfer still goes through.",
+      "severity": "medium",
+      "title": "TOTP Bypass on External Transfers"
+    },
+    {
+      "affected_operation": "",
+      "category": "A04: Insecure Design",
+      "classification": "exploitable",
+      "description": "The insufficient funds check was removed for external transfers, allowing unlimited overdraft.",
+      "expected_evidence": [
+        "Transfer $1,000,000 from an account with $0 balance — it succeeds."
+      ],
+      "external_id": "GT-9",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Services/TransferService.php"
+        }
+      ],
+      "root_cause": "The insufficient funds check was removed for external transfers, allowing unlimited overdraft.",
+      "severity": "medium",
+      "title": "No Balance Check on External Transfers"
+    },
+    {
+      "affected_operation": "",
+      "category": "A05: Security Misconfiguration",
+      "classification": "exploitable",
+      "description": "Full file paths, line numbers, and stack traces are exposed in 500 error responses.",
+      "expected_evidence": [
+        "Trigger any server error to see internal file structure and code paths."
+      ],
+      "external_id": "GT-10",
+      "locations": [
+        {
+          "line": null,
+          "path": "public/index.php"
+        }
+      ],
+      "root_cause": "Full file paths, line numbers, and stack traces are exposed in 500 error responses.",
+      "severity": "medium",
+      "title": "Stack Trace Leakage in Error Responses"
+    },
+    {
+      "affected_operation": "",
+      "category": "A05: Security Misconfiguration",
+      "classification": "exploitable",
+      "description": "Reflects any `Origin` header, allows credentials, and permits all headers. Enables cross-origin attacks from any domain.",
+      "expected_evidence": [
+        "A malicious site can make authenticated API requests on behalf of a logged-in user."
+      ],
+      "external_id": "GT-11",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Middleware/CorsMiddleware.php"
+        }
+      ],
+      "root_cause": "Reflects any `Origin` header, allows credentials, and permits all headers. Enables cross-origin attacks from any domain.",
+      "severity": "medium",
+      "title": "Overly Permissive CORS"
+    },
+    {
+      "affected_operation": "GET /api/health",
+      "category": "A05: Security Misconfiguration",
+      "classification": "exploitable",
+      "description": "`GET /api/health` is unauthenticated and exposes database credentials, JWT secret, PHP version, and server software.",
+      "expected_evidence": [
+        "`GET /api/health` returns `jwt_secret`, `db_host`, `db_user`, `db_name` in plaintext."
+      ],
+      "external_id": "GT-12",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Router.php"
+        }
+      ],
+      "root_cause": "`GET /api/health` is unauthenticated and exposes database credentials, JWT secret, PHP version, and server software.",
+      "severity": "medium",
+      "title": "Unauthenticated Config/Secret Leakage"
+    },
+    {
+      "affected_operation": "",
+      "category": "A06: Vulnerable and Outdated Components",
+      "classification": "exploitable",
+      "description": "Loads `moment@2.29.1`, which has known vulnerabilities: CVE-2022-24785 (path traversal via crafted locale) and CVE-2022-31129 (ReDoS via long date strings). Fixed in 2.29.4.",
+      "expected_evidence": [
+        "View source / network tab shows `moment@2.29.1/moment.min.js`. Retire.js flags it immediately. The library is exercised whenever any date is rendered (dashboard, transactions, accounts)."
+      ],
+      "external_id": "GT-13",
+      "locations": [
+        {
+          "line": null,
+          "path": "public/banking/index.html"
+        },
+        {
+          "line": null,
+          "path": "public/banking/js/utils.js"
+        }
+      ],
+      "root_cause": "Loads `moment@2.29.1`, which has known vulnerabilities: CVE-2022-24785 (path traversal via crafted locale) and CVE-2022-31129 (ReDoS via long date strings). Fixed in 2.29.4.",
+      "severity": "medium",
+      "title": "Outdated moment.js"
+    },
+    {
+      "affected_operation": "",
+      "category": "A06: Vulnerable and Outdated Components",
+      "classification": "exploitable",
+      "description": "Loads `jquery@3.3.1`, which has known vulnerabilities: CVE-2019-11358 (prototype pollution via `$.extend`) and CVE-2020-11022 / CVE-2020-11023 (XSS via `jQuery.htmlPrefilter` when passing untrusted HTML to DOM-manipulation methods like `.html()`). Fixed in 3.5.0.",
+      "expected_evidence": [
+        "View source / network tab shows `jquery@3.3.1/jquery.min.js`. Retire.js flags it immediately. It is exercised by the \"Import profile photo from URL\" feature on the Profile page, where the server-controlled response is passed into jQuery `.html()`."
+      ],
+      "external_id": "GT-14",
+      "locations": [
+        {
+          "line": null,
+          "path": "public/banking/index.html"
+        },
+        {
+          "line": null,
+          "path": "public/banking/js/pages/profile.js"
+        }
+      ],
+      "root_cause": "Loads `jquery@3.3.1`, which has known vulnerabilities: CVE-2019-11358 (prototype pollution via `$.extend`) and CVE-2020-11022 / CVE-2020-11023 (XSS via `jQuery.htmlPrefilter` when passing untrusted HTML to DOM-manipulation methods like `.html()`). Fixed in 3.5.0.",
+      "severity": "medium",
+      "title": "Outdated jQuery"
+    },
+    {
+      "affected_operation": "POST /api/auth/login",
+      "category": "A07: Identification and Authentication Failures",
+      "classification": "exploitable",
+      "description": "Returns different error codes for \"email not found\" (`USER_NOT_FOUND`) vs \"wrong password\" (`WRONG_PASSWORD`), allowing attackers to enumerate valid accounts.",
+      "expected_evidence": [
+        "`POST /api/auth/login` with various emails — a `USER_NOT_FOUND` response confirms the email doesn't exist; `WRONG_PASSWORD` confirms it does."
+      ],
+      "external_id": "GT-15",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Controllers/AuthController.php"
+        }
+      ],
+      "root_cause": "Returns different error codes for \"email not found\" (`USER_NOT_FOUND`) vs \"wrong password\" (`WRONG_PASSWORD`), allowing attackers to enumerate valid accounts.",
+      "severity": "medium",
+      "title": "User Enumeration on Login"
+    },
+    {
+      "affected_operation": "",
+      "category": "A07: Identification and Authentication Failures",
+      "classification": "exploitable",
+      "description": "Minimum password length reduced from 8 to 1 character.",
+      "expected_evidence": [
+        "Register with password `a` — it succeeds."
+      ],
+      "external_id": "GT-16",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Controllers/AuthController.php"
+        }
+      ],
+      "root_cause": "Minimum password length reduced from 8 to 1 character.",
+      "severity": "medium",
+      "title": "Weak Password Policy"
+    },
+    {
+      "affected_operation": "",
+      "category": "A07: Identification and Authentication Failures",
+      "classification": "exploitable",
+      "description": "No rate limiting on login, registration, or TOTP verification endpoints.",
+      "expected_evidence": [
+        "Automated credential stuffing or TOTP brute-forcing with no throttling."
+      ],
+      "external_id": "GT-17",
+      "locations": [],
+      "root_cause": "No rate limiting on login, registration, or TOTP verification endpoints.",
+      "severity": "medium",
+      "title": "No Brute-Force Protection"
+    },
+    {
+      "affected_operation": "",
+      "category": "A08: Software and Data Integrity Failures",
+      "classification": "exploitable",
+      "description": "Replaced proper JWT verification with manual base64 decode. Only checks token expiration — completely ignores the cryptographic signature.",
+      "expected_evidence": [
+        "Forge a token: base64-encode `{\"sub\": 1, \"exp\": 9999999999}` as the payload, use any signature — it will be accepted as valid."
+      ],
+      "external_id": "GT-18",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Services/AuthService.php"
+        }
+      ],
+      "root_cause": "Replaced proper JWT verification with manual base64 decode. Only checks token expiration — completely ignores the cryptographic signature.",
+      "severity": "medium",
+      "title": "JWT Signature Bypass"
+    },
+    {
+      "affected_operation": "GET /api/admin/export/users",
+      "category": "A09: Security Logging and Monitoring Failures",
+      "classification": "exploitable",
+      "description": "`GET /api/admin/export/users` dumps ALL users (including password hashes and TOTP secrets), all accounts, and all transactions — without requiring any authentication.",
+      "expected_evidence": [
+        "`GET /api/admin/export/users` — returns the entire database contents."
+      ],
+      "external_id": "GT-19",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Controllers/AdminUserController.php"
+        },
+        {
+          "line": null,
+          "path": "src/AdminRouter.php"
+        }
+      ],
+      "root_cause": "`GET /api/admin/export/users` dumps ALL users (including password hashes and TOTP secrets), all accounts, and all transactions — without requiring any authentication.",
+      "severity": "medium",
+      "title": "Unauthenticated Full Data Export"
+    },
+    {
+      "affected_operation": "",
+      "category": "A09: Security Logging and Monitoring Failures",
+      "classification": "exploitable",
+      "description": "The application has zero logging for security-relevant events: failed logins, transfers, admin actions, password resets, TOTP changes, etc. There is no way to detect or investigate a breach.",
+      "expected_evidence": [],
+      "external_id": "GT-20",
+      "locations": [],
+      "root_cause": "The application has zero logging for security-relevant events: failed logins, transfers, admin actions, password resets, TOTP changes, etc. There is no way to detect or investigate a breach.",
+      "severity": "medium",
+      "title": "No Audit Logging"
+    },
+    {
+      "affected_operation": "POST /api/profile/avatar",
+      "category": "A10: Server-Side Request Forgery (SSRF)",
+      "classification": "exploitable",
+      "description": "`POST /api/profile/avatar` accepts an arbitrary `url` parameter and fetches it server-side with `file_get_contents()`. No URL validation, no scheme restriction, no SSRF protections. The submitted URL is persisted to `users.avatar_url` and re-fetched server-side every time the Profile page loads, so the SSRF fires repeatedly, not just on the initial import.",
+      "expected_evidence": [
+        "`POST /api/profile/avatar` with body `{\"url\": \"file:///etc/passwd\"}` reads local files. `{\"url\": \"http://169.254.169.254/latest/meta-data/\"}` reads cloud instance metadata.",
+        "The feature is reachable from the normal UI, so the `POST /api/profile/avatar {\"url\": ...}` request appears in any intercepting proxy (Burp/ZAP) during normal use — a tester sees the server fetching a user-supplied URL and tries SSRF payloads.",
+        "Profile page → \"Profile Photo\" card → \"Import from URL\" (`public/banking/index.html`, wired in `public/banking/js/pages/profile.js` — `importAvatar()`, calls `Api.importAvatar()` in `public/banking/js/api.js`)."
+      ],
+      "external_id": "GT-21",
+      "locations": [
+        {
+          "line": null,
+          "path": "src/Controllers/ProfileController.php"
+        },
+        {
+          "line": null,
+          "path": "src/Router.php"
+        }
+      ],
+      "root_cause": "`POST /api/profile/avatar` accepts an arbitrary `url` parameter and fetches it server-side with `file_get_contents()`. No URL validation, no scheme restriction, no SSRF protections. The submitted URL is persisted to `users.avatar_url` and re-fetched server-side every time the Profile page loads, so the SSRF fires repeatedly, not just on the initial import.",
+      "severity": "medium",
+      "title": "Avatar Proxy Fetches Arbitrary URLs"
+    },
+    {
+      "external_id": "GT-24",
+      "title": "Active default administrator credentials",
+      "category": "A07: Identification and Authentication Failures",
+      "severity": "critical",
+      "affected_operation": "POST /api/admin/auth/login",
+      "description": "The shipped admin account accepts admin / admin123 and issues a working administrator token. Anyone who can reach the deployed admin login can gain administrator access while these credentials remain active.",
+      "root_cause": "The installer seeds a publicly documented administrator password without requiring replacement.",
+      "locations": [
+        {
+          "path": "install/admin_schema.sql",
+          "line": 24
+        },
+        {
+          "path": "install/seed.sql",
+          "line": 233
+        },
+        {
+          "path": "src/Controllers/AdminAuthController.php",
+          "line": 15
+        }
+      ],
+      "expected_evidence": [
+        "An anonymous, cookie-free login using admin / admin123 returns an administrator token.",
+        "The same username with an incorrect password is rejected.",
+        "The issued token can read a protected administrator endpoint that rejects anonymous requests."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-25",
+      "title": "Active shared default customer password",
+      "category": "A07: Identification and Authentication Failures",
+      "severity": "high",
+      "affected_operation": "POST /api/auth/login",
+      "description": "Multiple seeded customer accounts accept the publicly documented password password. An attacker who knows a seeded email can obtain that customer's banking session.",
+      "root_cause": "Seed data gives multiple customers the same known password and does not require a first-login change.",
+      "locations": [
+        {
+          "path": "install/seed.sql",
+          "line": 16
+        },
+        {
+          "path": "src/Controllers/AuthController.php",
+          "line": 47
+        }
+      ],
+      "expected_evidence": [
+        "Anonymous login with password password succeeds for at least two distinct seeded customers.",
+        "An incorrect password is rejected for each customer.",
+        "The responses identify different customers and issue usable session credentials."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-26",
+      "title": "Known default signing key permits administrator token forgery",
+      "category": "A02: Cryptographic Failures",
+      "severity": "critical",
+      "affected_operation": "GET /api/admin/customers; GET /api/admin/system/settings",
+      "description": "When ADMIN_JWT_SECRET is unset or unchanged, administrator JWTs are signed and verified with a key published in the source. An attacker can sign a token for an existing administrator without knowing the administrator password.",
+      "root_cause": "Administrator JWT configuration falls back to a fixed public HMAC key that the admin middleware trusts.",
+      "locations": [
+        {
+          "path": "config/admin.php",
+          "line": 21
+        },
+        {
+          "path": "src/Middleware/AdminAuthMiddleware.php",
+          "line": 27
+        },
+        {
+          "path": "src/Controllers/AdminAuthController.php",
+          "line": 38
+        }
+      ],
+      "expected_evidence": [
+        "A token independently signed with the published default key and a valid administrator subject and issuer is accepted by protected admin APIs.",
+        "An unsigned or incorrectly signed admin token is rejected, showing that the defect is the known key rather than missing signature verification.",
+        "The supplied deployment has not replaced ADMIN_JWT_SECRET."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-27",
+      "title": "Public default machine token grants access to payment APIs",
+      "category": "A07: Identification and Authentication Failures",
+      "severity": "critical",
+      "affected_operation": "POST /api/payments/transfer; POST /api/payments/process",
+      "description": "A fixed machine credential is published in configuration, seed data and the shipped admin HTML. The credential is accepted by the machine-authenticated payment APIs, including transfers from the FACE Insurance settlement account.",
+      "root_cause": "Machine authentication accepts a publicly known seeded/configured credential; the static admin page also embeds it before admin login.",
+      "locations": [
+        {
+          "path": "config/app.php",
+          "line": 35
+        },
+        {
+          "path": "src/Models/MachineToken.php",
+          "line": 23
+        },
+        {
+          "path": "public/admin/index.html",
+          "line": 219
+        },
+        {
+          "path": "src/Middleware/MachineAuthMiddleware.php",
+          "line": 21
+        },
+        {
+          "path": "src/Controllers/PaymentController.php",
+          "line": 139
+        }
+      ],
+      "expected_evidence": [
+        "An anonymous response for the shipped admin HTML contains the actual machine token, or the default configuration and seed credential are shown to be active.",
+        "Missing or incorrect machine credentials are rejected.",
+        "Using the published token, with no customer or admin session, completes a payment or a transfer from an authorized settlement account."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-28",
+      "title": "Active insurance SSO signing key is published in source",
+      "category": "A02: Cryptographic Failures",
+      "severity": "high",
+      "affected_operation": "GET /api/insurance/sso; GET /api/insurance/sso-redirect",
+      "description": "Insurance SSO assertions are signed with a fixed key published in the application when INSURANCE_SSO_SECRET is not replaced. The recorded scan verified a real issued assertion using that key, so anyone who knows it can create cryptographically valid assertions with chosen identity claims.",
+      "root_cause": "Insurance SSO configuration uses a known default shared HMAC key without requiring a private deployment key.",
+      "locations": [
+        {
+          "path": "config/app.php",
+          "line": 33
+        },
+        {
+          "path": "src/Services/InsuranceService.php",
+          "line": 23
+        },
+        {
+          "path": "src/Services/InsuranceService.php",
+          "line": 39
+        }
+      ],
+      "expected_evidence": [
+        "A real SSO assertion issued by BankOfEd verifies with the published default HMAC key.",
+        "The source signs user identity claims with that key when INSURANCE_SSO_SECRET is unset.",
+        "For a claim of downstream account takeover, additionally show that the receiving insurance application accepts a forged identity assertion."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-29",
+      "title": "Persistent storage and routine disclosure of card CVV and full card details",
+      "category": "A02: Cryptographic Failures",
+      "severity": "high",
+      "affected_operation": "GET /api/accounts; GET /api/accounts/{id}; POST /api/accounts",
+      "description": "Credit-card records retain the CVV in a normal database column. The account serializer returns the stored CVV, full card number and expiry in routine customer account responses and account-creation responses.",
+      "root_cause": "Account creation/seed data persist card security codes, and Account::toPublic includes them rather than excluding them from ordinary account data.",
+      "locations": [
+        {
+          "path": "install/schema.sql",
+          "line": 32
+        },
+        {
+          "path": "src/Models/Account.php",
+          "line": 111
+        },
+        {
+          "path": "src/Controllers/AccountController.php",
+          "line": 18
+        }
+      ],
+      "expected_evidence": [
+        "An ordinary authenticated account response contains the full card number, expiry and stored CVV.",
+        "Source inspection shows the CVV is persistently stored and returned by Account::toPublic.",
+        "Separate customers or newly created cards return their own values, ruling out a single placeholder."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-30",
+      "title": "Customers can originate uncapped loans with immediate cash disbursement",
+      "category": "A04: Insecure Design",
+      "severity": "critical",
+      "affected_operation": "POST /api/accounts",
+      "description": "An ordinary customer can choose a positive loan amount and immediately receive the proceeds in an owned transaction account. There is no server-side borrowing cap or approval stage before the cash is posted.",
+      "root_cause": "AccountController::store validates loan amounts only as positive decimal values and disburses them directly.",
+      "locations": [
+        {
+          "path": "src/Controllers/AccountController.php",
+          "line": 88
+        },
+        {
+          "path": "src/Controllers/AccountController.php",
+          "line": 143
+        }
+      ],
+      "expected_evidence": [
+        "A regular customer requests a loan amount well beyond normal product limits and receives an active loan.",
+        "A follow-up read shows the completed disbursement transaction and the corresponding increase in the destination account balance.",
+        "The request requires no prior approval and source inspection shows no borrowing cap."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-31",
+      "title": "Customers can choose an uncapped spendable credit-card limit",
+      "category": "A04: Insecure Design",
+      "severity": "critical",
+      "affected_operation": "POST /api/accounts",
+      "description": "Customers can supply their own positive credit_limit when opening a credit card. The application uses that value as both the product limit and available balance without a server-side cap or approval stage.",
+      "root_cause": "Credit-card creation validates only a positive numeric credit_limit and directly assigns it to the new account's balance.",
+      "locations": [
+        {
+          "path": "src/Controllers/AccountController.php",
+          "line": 40
+        },
+        {
+          "path": "src/Controllers/AccountController.php",
+          "line": 61
+        },
+        {
+          "path": "src/Controllers/AccountController.php",
+          "line": 127
+        }
+      ],
+      "expected_evidence": [
+        "A regular or newly registered customer creates a card with an unusually large chosen limit.",
+        "The server persists the requested credit_limit and an equal available balance.",
+        "Source inspection shows the chosen value directly funds the card and no product cap/approval step intervenes."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-32",
+      "title": "Own-account transfers ignore credit-card available funds and limits",
+      "category": "A04: Insecure Design",
+      "severity": "high",
+      "affected_operation": "POST /api/transfers/own",
+      "description": "A customer can transfer from an owned credit card to another owned account even when the transfer exceeds available credit. A completed transfer can leave the card well beyond its stated limit while crediting spendable funds elsewhere.",
+      "root_cause": "TransferService::transferOwn checks available funds only for transaction and FX accounts, excluding credit cards.",
+      "locations": [
+        {
+          "path": "src/Services/TransferService.php",
+          "line": 104
+        },
+        {
+          "path": "src/Services/TransferService.php",
+          "line": 111
+        }
+      ],
+      "expected_evidence": [
+        "A customer uses a credit-card source and another account belonging to the same customer.",
+        "The requested amount exceeds available credit and the endpoint still completes the debit/credit.",
+        "A follow-up transfer succeeds even after the card balance is already beyond its credit_limit."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-33",
+      "title": "Stored XSS through customer names in administrator Delete controls",
+      "category": "A03: Injection",
+      "severity": "high",
+      "affected_operation": "POST /api/auth/register; PUT /api/profile; admin customer detail Delete button",
+      "description": "A customer can store a crafted first or last name that becomes executable JavaScript in the administrator customer-detail Delete button. Execution occurs when an administrator clicks that button.",
+      "root_cause": "Customer names are HTML-escaped then inserted into a JavaScript string inside an inline onclick attribute. HTML parsing restores encoded apostrophes before JavaScript is compiled.",
+      "locations": [
+        {
+          "path": "src/Controllers/AuthController.php",
+          "line": 19
+        },
+        {
+          "path": "public/admin/js/pages/customers.js",
+          "line": 106
+        },
+        {
+          "path": "public/admin/js/pages/customers.js",
+          "line": 161
+        }
+      ],
+      "expected_evidence": [
+        "An unprivileged customer stores a short crafted name through registration or profile update.",
+        "The admin detail renderer produces an onclick string that contains the decoded JavaScript breakout.",
+        "Clicking Delete in an authenticated admin browser executes a harmless DOM marker in the admin origin."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-34",
+      "title": "Stored XSS through account names in administrator Edit Balance controls",
+      "category": "A03: Injection",
+      "severity": "high",
+      "affected_operation": "POST /api/accounts; admin accounts Edit Balance button",
+      "description": "A customer can store a crafted account name that executes JavaScript in the administrator origin when an administrator clicks Edit Balance for that account.",
+      "root_cause": "The admin accounts renderer uses HTML escaping inside an inline JavaScript string; entity decoding restores the attacker's quote before the handler runs.",
+      "locations": [
+        {
+          "path": "src/Controllers/AccountController.php",
+          "line": 26
+        },
+        {
+          "path": "public/admin/js/pages/accounts.js",
+          "line": 50
+        },
+        {
+          "path": "public/admin/js/pages/accounts.js",
+          "line": 54
+        }
+      ],
+      "expected_evidence": [
+        "A regular customer creates an account with a crafted name accepted by the length validation.",
+        "The admin accounts page loads that persisted name and constructs the vulnerable inline handler.",
+        "Clicking Edit Balance executes a harmless DOM marker in the admin browser."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-35",
+      "title": "Stored XSS through address-book nicknames in Delete controls",
+      "category": "A03: Injection",
+      "severity": "low",
+      "affected_operation": "POST /api/address-book; PUT /api/address-book/{id}; address-book Delete button",
+      "description": "A crafted nickname stored in an account's address book executes JavaScript when that account's user clicks Delete. A victim must be induced to enter/store the nickname; an attacker cannot directly write another user's address book through this finding.",
+      "root_cause": "AddressBookPage.renderList HTML-escapes a nickname and then places it in an inline JavaScript string, where HTML entity decoding restores the quote.",
+      "locations": [
+        {
+          "path": "src/Controllers/AddressBookController.php",
+          "line": 26
+        },
+        {
+          "path": "public/banking/js/pages/addressbook.js",
+          "line": 64
+        },
+        {
+          "path": "public/banking/js/pages/addressbook.js",
+          "line": 70
+        }
+      ],
+      "expected_evidence": [
+        "The nickname is stored in the acting user's address book and retrieved unchanged.",
+        "HTML parsing turns the encoded quote into a JavaScript-string breakout in the Delete handler.",
+        "Clicking Delete in that user's browser executes a harmless DOM marker."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-36",
+      "title": "Avatar import parses untrusted URL and Content-Type as page HTML",
+      "category": "A03: Injection",
+      "severity": "medium",
+      "affected_operation": "POST /api/profile/avatar; banking profile/avatar rendering",
+      "description": "The avatar UI inserts the returned source URL and avatar data URL into HTML strings. A URL fragment containing markup can execute in the importing user's profile. A malicious avatar server can also put quote/handler characters in its Content-Type, which is copied into avatar_data and parsed in the profile/sidebar image HTML.",
+      "root_cause": "The server trusts the supplied URL and remote Content-Type; the client uses .html()/innerHTML without context-safe construction for those returned values.",
+      "locations": [
+        {
+          "path": "src/Controllers/ProfileController.php",
+          "line": 86
+        },
+        {
+          "path": "src/Controllers/ProfileController.php",
+          "line": 95
+        },
+        {
+          "path": "src/Controllers/ProfileController.php",
+          "line": 102
+        },
+        {
+          "path": "public/banking/js/pages/profile.js",
+          "line": 138
+        },
+        {
+          "path": "public/banking/js/pages/profile.js",
+          "line": 142
+        },
+        {
+          "path": "public/banking/js/app.js",
+          "line": 72
+        }
+      ],
+      "expected_evidence": [
+        "A successful import preserves a raw HTML payload in source_url and persists it in avatar_url.",
+        "Reloading the profile parses the payload and executes a harmless DOM marker.",
+        "For the Content-Type variant, trace the unfiltered response header into avatar_data and into the image HTML sink; base64 encoding of the body does not encode the MIME prefix."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-37",
+      "title": "Concurrent payments and own-account transfers can spend the same balance twice",
+      "category": "A04: Insecure Design",
+      "severity": "high",
+      "affected_operation": "POST /api/payments/process; POST /api/payments/transfer; POST /api/transfers/own",
+      "description": "These handlers check a fetched balance before starting the debit transaction. Concurrent requests can both pass that check and later commit unconditional debits, overdrawing a card, settlement account, or owned transaction/FX account.",
+      "root_cause": "Sufficient-funds checks use non-locking reads outside the transaction, while Account::updateBalance has no remaining-balance predicate or recheck.",
+      "locations": [
+        {
+          "path": "src/Controllers/PaymentController.php",
+          "line": 91
+        },
+        {
+          "path": "src/Controllers/PaymentController.php",
+          "line": 197
+        },
+        {
+          "path": "src/Services/TransferService.php",
+          "line": 104
+        },
+        {
+          "path": "src/Models/Account.php",
+          "line": 94
+        },
+        {
+          "path": "install/schema.sql",
+          "line": 31
+        }
+      ],
+      "expected_evidence": [
+        "Trace each reachable handler from account lookup and funds comparison to a later transaction and unconditional balance update.",
+        "Confirm that schema/transaction helpers provide no balance floor, row lock or conditional debit.",
+        "For dynamic confirmation, arrange overlapping requests with starting balance B and two debits A where A <= B < 2A; show both committed transactions and the negative final balance."
+      ],
+      "classification": "exploitable"
+    },
+    {
+      "external_id": "GT-38",
+      "title": "Administrator password resets leave existing customer sessions valid",
+      "category": "A07: Identification and Authentication Failures",
+      "severity": "medium",
+      "affected_operation": "POST /api/admin/customers/{id}/reset-password; subsequent protected customer request",
+      "description": "Resetting a customer password changes only password_hash. Previously issued, unexpired, non-revoked customer JWTs continue to authorize that customer's requests, including a stolen session the reset was intended to recover from.",
+      "root_cause": "Password reset does not invalidate sessions, and customer authentication does not compare token issuance with a password-change marker or token version.",
+      "locations": [
+        {
+          "path": "src/Controllers/AdminUserController.php",
+          "line": 145
+        },
+        {
+          "path": "src/Controllers/AdminUserController.php",
+          "line": 165
+        },
+        {
+          "path": "src/Middleware/AuthMiddleware.php",
+          "line": 23
+        },
+        {
+          "path": "src/Services/AuthService.php",
+          "line": 35
+        },
+        {
+          "path": "config/app.php",
+          "line": 25
+        }
+      ],
+      "expected_evidence": [
+        "Trace resetPassword to its password_hash-only UPDATE and verify there is no user session invalidation.",
+        "Trace customer authentication and confirm it checks expiration, token-specific revocation and user existence, with no password-change cutoff.",
+        "For dynamic confirmation, log in before an admin reset; after the reset verify the old password fails but the original unexpired token still accesses a protected endpoint."
+      ],
+      "classification": "exploitable"
+    }
+  ]
+}

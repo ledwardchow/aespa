@@ -3,8 +3,13 @@ import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import * as settingsApi from "../../shared/api/settings.js";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { parseGroundTruthText } from "./groundTruthImport.js";
+import { BenchmarkModelSettings } from "./BenchmarkModelSettings.jsx";
+import { GroundTruthDatasets } from "./GroundTruthDatasets.jsx";
 import { CompletedScanBenchmarks } from "./CompletedScanBenchmarks.jsx";
 import { SiteSummary, modelName, money } from "./SiteSummary.jsx";
+
+import styles from "./BenchmarkSettings.module.css";
+import { scanType } from "./scanPresentation.js";
 
 const EMPTY = { sites: [], apis: [], sast_runs: [] };
 const modelLabel = (model) => {
@@ -14,7 +19,7 @@ const modelLabel = (model) => {
   return model.model || model.name || "Unavailable";
 };
 
-export function BenchmarkLabPage() {
+export function BenchmarkLabPage({ initialResultId }) {
   const [tab, setTab] = useState("site");
   const [siteTab, setSiteTab] = useState("summary");
   const [targets, setTargets] = useState(EMPTY);
@@ -24,9 +29,7 @@ export function BenchmarkLabPage() {
   const [models, setModels] = useState([]);
   const [targetId, setTargetId] = useState("");
   const [runId, setRunId] = useState("");
-  const [datasetId, setDatasetId] = useState("");
-  const [uploadedDatasetId, setUploadedDatasetId] = useState(null);
-  const [evaluationModel, setEvaluationModel] = useState("");
+  const [benchmarkSettings, setBenchmarkSettings] = useState({ default_model_id: null });
   const [selectedResultId, setSelectedResultId] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [edit, setEdit] = useState(null);
@@ -35,31 +38,40 @@ export function BenchmarkLabPage() {
 
   const load = useCallback(async () => {
     try {
-      const [targetData, datasetData, resultData, oldData, modelData] = await Promise.all([
-        benchmarkApi.listBenchmarkTargets(),
-        benchmarkApi.listBenchmarkDatasets(),
-        benchmarkApi.listBenchmarkResults(),
-        benchmarkApi.listBenchmarkEvaluations(),
-        settingsApi.listLLMModels(),
-      ]);
+      const [targetData, datasetData, resultData, oldData, modelData, savedSettings] =
+        await Promise.all([
+          benchmarkApi.listBenchmarkTargets(),
+          benchmarkApi.listBenchmarkDatasets(),
+          benchmarkApi.listBenchmarkResults(),
+          benchmarkApi.listBenchmarkEvaluations(),
+          settingsApi.listLLMModels(),
+          benchmarkApi.getBenchmarkSettings(),
+        ]);
       setTargets(targetData);
       setDatasets(datasetData);
       setResults(resultData);
+      const linkedResult = resultData.find((item) => item.id === initialResultId);
+      if (linkedResult) {
+        setTab(linkedResult.run_kind);
+        setSiteTab("analyses");
+        setTargetId(String(linkedResult.target_id || ""));
+        setSelectedResultId(linkedResult.id);
+      }
+      setBenchmarkSettings(savedSettings);
       setLegacy(oldData);
       setModels(Array.isArray(modelData) ? modelData : []);
       setError(null);
     } catch (err) {
       setError(err.message);
     }
-  }, []);
+  }, [initialResultId]);
   useEffect(() => {
     load();
   }, [load]);
 
-  const entries = tab === "site" ? targets.sites : tab === "api" ? targets.apis : targets.sast_runs;
-  const target = entries.find((item) => String(item.id) === String(targetId));
-  const selectedRun =
-    tab === "sast" ? target : target?.runs.find((item) => String(item.id) === String(runId));
+  const category = tab === "dast" ? "site" : tab;
+  const target = targets.sites.find((item) => String(item.id) === String(targetId));
+  const defaultModel = models.find((item) => item.id === benchmarkSettings?.default_model_id);
   const selectedResult = results.find((item) => item.id === selectedResultId);
   const relevantResults = useMemo(
     () =>
@@ -73,23 +85,15 @@ export function BenchmarkLabPage() {
               [...targets.sites, ...targets.apis].filter(
                 (entry) => entry.dataset?.id === item.dataset_id,
               ).length === 1)
-          : item.run_kind === tab &&
-            (tab === "sast" || String(item.target_id) === String(targetId)),
+          : item.run_kind === category,
       ),
-    [results, tab, targetId, target, targets],
+    [results, tab, category, targetId, target, targets],
   );
   const findingsById = new Map((selectedResult?.findings || []).map((item) => [item.id, item]));
-  const savedDatasetIds = new Set(
-    [...targets.sites, ...targets.apis].map((item) => item.dataset?.id).filter(Boolean),
-  );
-
   const changeTab = (next) => {
     setTab(next);
     setTargetId("");
     setRunId("");
-    setDatasetId("");
-    setUploadedDatasetId(null);
-    setEvaluationModel("");
     setSelectedResultId(null);
     setEdit(null);
     setError(null);
@@ -104,10 +108,7 @@ export function BenchmarkLabPage() {
         name: parsed.name || file.name,
         ground_truth: parsed,
       });
-      if (tab === "sast") {
-        setUploadedDatasetId(dataset.id);
-        setDatasetId(String(dataset.id));
-      } else await benchmarkApi.saveBenchmarkGroundTruth(tab, Number(targetId), dataset.id);
+      await benchmarkApi.saveBenchmarkGroundTruth("site", Number(targetId), dataset.id);
       await load();
     } catch (err) {
       setError(err.message);
@@ -121,10 +122,8 @@ export function BenchmarkLabPage() {
     setError(null);
     try {
       const result = await benchmarkApi.createBenchmarkResult({
-        run_kind: tab,
+        run_kind: "site",
         run_id: Number(runId),
-        ...(tab === "sast" ? { dataset_id: Number(datasetId) } : {}),
-        ...(evaluationModel ? { evaluation_model_id: Number(evaluationModel) } : {}),
       });
       await load();
       setResults((current) => [result, ...current.filter((item) => item.id !== result.id)]);
@@ -176,14 +175,39 @@ export function BenchmarkLabPage() {
     }
   };
 
+  const siteSelector = (
+    <label className="benchmark-site-picker">
+      Site
+      <select
+        aria-label="Site"
+        className="select"
+        value={targetId}
+        onChange={(event) => {
+          setTargetId(event.target.value);
+          setRunId("");
+          setSelectedResultId(null);
+        }}
+      >
+        <option value="">Select an application...</option>
+        {targets.sites.map((item) => (
+          <option key={item.id} value={item.id}>
+            {item.name}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
   return (
     <>
       <PageHeader title="Benchmark Lab" />
       <div className="tab-bar benchmark-top-tabs" role="tablist" aria-label="Scan type">
         {[
-          ["site", "Sites"],
+          ["site", "Results"],
+          ["dast", "DAST"],
           ["api", "APIs"],
           ["sast", "SAST"],
+          ["datasets", "Settings"],
         ].map(([key, label]) => (
           <button
             key={key}
@@ -225,48 +249,40 @@ export function BenchmarkLabPage() {
           ))}
         </div>
       )}
-      <div className="content scroll-content benchmark-page benchmark-simple">
-        <CompletedScanBenchmarks
-          key={tab}
-          category={tab}
-          targets={targets}
-          results={results}
-          legacy={legacy}
-          datasets={datasets}
-          models={models}
-          onChange={load}
-          onOpen={(id) => {
-            const result = results.find((item) => item.id === id);
-            if (result) setTargetId(String(result.target_id ?? result.run_id));
-            setSelectedResultId(id);
-            if (tab === "site") setSiteTab("analyses");
-          }}
-        />
-        {error && <div className="alert error">{error}</div>}
-        {tab === "site" && (
-          <label className="benchmark-site-picker">
-            Site
-            <select
-              className="select"
-              value={targetId}
-              onChange={(event) => {
-                setTargetId(event.target.value);
-                setRunId("");
-                setEvaluationModel("");
-                setSelectedResultId(null);
-              }}
-            >
-              <option value="">Select an application...</option>
-              {targets.sites.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          </label>
+      <div
+        className={`content scroll-content benchmark-page benchmark-simple${tab === "site" && siteTab === "summary" ? " benchmark-summary-page" : ""}`}
+      >
+        {tab !== "site" && tab !== "datasets" && (
+          <CompletedScanBenchmarks
+            key={tab}
+            category={category}
+            targets={targets}
+            results={results}
+            legacy={legacy}
+            datasets={datasets}
+            defaultModel={defaultModel}
+            onChange={load}
+            onOpen={(id) => {
+              const result = results.find((item) => item.id === id);
+              if (result) setTargetId(String(result.target_id ?? result.run_id));
+              setSelectedResultId(id);
+              setExpanded(null);
+              setEdit(null);
+            }}
+          />
         )}
-        {tab === "site" && target && siteTab === "summary" && (
+        {tab === "datasets" && (
+          <div className={styles.settings}>
+            <BenchmarkModelSettings models={models} settings={benchmarkSettings} onChange={load} />
+            <GroundTruthDatasets datasets={datasets} targets={targets} onChange={load} />
+          </div>
+        )}
+        {error && <div className="alert error">{error}</div>}
+        {tab === "site" && siteTab !== "summary" && siteSelector}
+        {tab === "site" && siteTab === "summary" && (
           <SiteSummary
+            siteSelector={siteSelector}
+            showChart={Boolean(target)}
             results={relevantResults}
             onOpen={(id) => {
               const result = results.find((item) => item.id === id);
@@ -297,7 +313,7 @@ export function BenchmarkLabPage() {
                     {relevantResults.map((result) => (
                       <tr key={result.id}>
                         <td>{result.run_name}</td>
-                        <td>{result.run_kind === "sast" ? "SAST" : "DAST"}</td>
+                        <td>{scanType(result.run_kind, result.scan_models)}</td>
                         <td>{modelName(result)}</td>
                         <td>{money(result.scan_cost_usd)}</td>
                         <td>{result.summary.full + result.summary.partial}</td>
@@ -325,146 +341,61 @@ export function BenchmarkLabPage() {
             )}
           </section>
         )}
-        {(tab !== "site" || siteTab === "new") && (
+        {tab === "site" && siteTab === "new" && (
           <section className="card benchmark-setup">
-            {tab !== "site" && (
-              <>
-                <label>
-                  {tab === "site" ? "Site" : tab === "api" ? "API" : "Completed SAST scan"}
-                  <select
-                    className="select"
-                    value={targetId}
-                    onChange={(event) => {
-                      setTargetId(event.target.value);
-                      setRunId(tab === "sast" ? event.target.value : "");
-                      setEvaluationModel("");
-                      setSelectedResultId(null);
-                    }}
-                  >
-                    <option value="">
-                      Select {tab === "sast" ? "a scan" : "an application"}...
-                    </option>
-                    {entries.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </>
-            )}
             {target && (
               <>
-                {tab !== "sast" ? (
-                  <>
-                    <div className="benchmark-ground-truth-choice">
-                      <div>
-                        <strong>Ground truth</strong>
-                        <div className="subtle">
-                          {target.dataset
-                            ? `${target.dataset.name} - ${target.dataset.item_count} findings`
-                            : "No file uploaded"}
-                        </div>
+                <>
+                  <div className="benchmark-ground-truth-choice">
+                    <div>
+                      <strong>Ground truth</strong>
+                      <div className="subtle">
+                        {target.dataset
+                          ? `${target.dataset.name} - ${target.dataset.item_count} findings`
+                          : "No file uploaded"}
                       </div>
-                      <label className="btn secondary" htmlFor="benchmark-ground-truth-file">
-                        {target.dataset ? "Replace file" : "Upload file"}
-                      </label>
-                      <input
-                        id="benchmark-ground-truth-file"
-                        type="file"
-                        accept=".json,.md,.markdown"
-                        onChange={(event) => {
-                          upload(event.target.files?.[0]);
-                          event.target.value = "";
-                        }}
-                      />
                     </div>
-                    <label>
-                      Completed scan
-                      <select
-                        className="select"
-                        value={runId}
-                        onChange={(event) => {
-                          setRunId(event.target.value);
-                          setEvaluationModel("");
-                        }}
-                      >
-                        <option value="">Select a scan...</option>
-                        {target.runs.map((run) => (
-                          <option key={run.id} value={run.id}>
-                            {run.name} ({run.status})
-                          </option>
-                        ))}
-                      </select>
+                    <label className="btn secondary" htmlFor="benchmark-ground-truth-file">
+                      {target.dataset ? "Replace file" : "Upload file"}
                     </label>
-                  </>
-                ) : (
-                  <>
-                    <div className="benchmark-sast-ground-truth">
-                      <label>
-                        Ground truth
-                        <select
-                          className="select"
-                          value={datasetId}
-                          onChange={(event) => setDatasetId(event.target.value)}
-                        >
-                          <option value="">Select a saved file...</option>
-                          {datasets
-                            .filter(
-                              (dataset) =>
-                                savedDatasetIds.has(dataset.id) || dataset.id === uploadedDatasetId,
-                            )
-                            .map((dataset) => (
-                              <option key={dataset.id} value={dataset.id}>
-                                {dataset.name} ({dataset.item_count} findings)
-                              </option>
-                            ))}
-                        </select>
-                      </label>
-                      <label className="btn secondary" htmlFor="benchmark-sast-file">
-                        Upload another file
-                      </label>
-                      <input
-                        id="benchmark-sast-file"
-                        type="file"
-                        accept=".json,.md,.markdown"
-                        onChange={(event) => {
-                          upload(event.target.files?.[0]);
-                          event.target.value = "";
-                        }}
-                      />
-                    </div>
-                  </>
-                )}
-                <label>
-                  Evaluation model
-                  <select
-                    className="select"
-                    value={evaluationModel}
-                    onChange={(event) => setEvaluationModel(event.target.value)}
-                  >
-                    <option value="">
-                      {selectedRun?.default_evaluation_model
-                        ? `Scan's Test Lead model: ${selectedRun.default_evaluation_model.name}`
-                        : "Choose a model..."}
-                    </option>
-                    {models.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    <input
+                      id="benchmark-ground-truth-file"
+                      type="file"
+                      accept=".json,.md,.markdown"
+                      onChange={(event) => {
+                        upload(event.target.files?.[0]);
+                        event.target.value = "";
+                      }}
+                    />
+                  </div>
+                  <label>
+                    Completed scan
+                    <select
+                      className="select"
+                      value={runId}
+                      onChange={(event) => {
+                        setRunId(event.target.value);
+                      }}
+                    >
+                      <option value="">Select a scan...</option>
+                      {target.runs.map((run) => (
+                        <option key={run.id} value={run.id}>
+                          {run.name} ({run.status})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+                <p className="subtle">
+                  {defaultModel
+                    ? `Benchmark model: ${defaultModel.name}`
+                    : "Choose a default benchmark model in Settings first."}
+                </p>
                 <button
                   className="btn primary benchmark-compare-button"
                   type="button"
                   onClick={compare}
-                  disabled={
-                    busy ||
-                    !runId ||
-                    (!evaluationModel && !selectedRun?.default_evaluation_model) ||
-                    (tab === "sast" ? !datasetId : !target.dataset)
-                  }
+                  disabled={busy || !runId || !defaultModel || !target.dataset}
                 >
                   {busy ? "Working..." : "Compare scan"}
                 </button>
@@ -519,7 +450,7 @@ export function BenchmarkLabPage() {
               <div className="benchmark-scan-models">
                 {selectedResult.run_kind !== "sast" && (
                   <p className="subtle">
-                    Test Lead model: {modelLabel(selectedResult.scan_models.test_lead)}
+                    Scan model: {modelLabel(selectedResult.scan_models.primary)}
                   </p>
                 )}
                 {(selectedResult.scan_models.sast || []).map((source) => (
