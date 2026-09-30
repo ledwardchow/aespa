@@ -1,0 +1,29 @@
+.section {
+  min-width: 0;
+}
+.section form.controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  max-width: none;
+  margin: 16px 0;
+}
+.controls label {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.controls input {
+  max-width: 100%;
+}
+.controls button {
+  align-self: end;
+}
+.table {
+  min-width: 640px;
+}
+@media (max-width: 700px) {
+  .section form.controls {
+    grid-template-columns: 1fr;
+  }
+}

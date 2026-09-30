@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import io
@@ -7,7 +8,7 @@ import json
 import math
 import zipfile
 from statistics import median
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
@@ -67,6 +68,12 @@ class ScanResultIn(BaseModel):
     dataset_id: int | None = Field(default=None, gt=0)
     evaluation_model_id: int | None = Field(default=None, gt=0)
     rules_only: bool = False
+
+
+class BulkBenchmarkIn(BaseModel):
+    run_kind: Literal["site", "api", "sast"]
+    dataset_id: int = Field(gt=0)
+    evaluation_model_id: int | None = Field(default=None, gt=0)
 
 
 class ScanResultReviewIn(BaseModel):
@@ -544,6 +551,7 @@ def blindness_checks(run: SastRun, dataset: Dataset) -> tuple[dict[str, Any], st
 
 def build_router(store: ExtensionDataStore) -> APIRouter:
     router = APIRouter(tags=["benchmarking"])
+    bulk_locks = {kind: asyncio.Lock() for kind in ("site", "api", "sast")}
 
     @router.get("/targets")
     def list_targets() -> dict[str, Any]:
@@ -728,7 +736,9 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             scan_models = scan_models_snapshot(core, payload.run_kind, run)
             cost = scan_cost(run)
             with store.session() as session:
-                if target_id is not None:
+                if payload.dataset_id is not None:
+                    dataset_id = payload.dataset_id
+                elif target_id is not None:
                     binding = session.exec(
                         select(GroundTruthBinding).where(
                             GroundTruthBinding.target_kind == target_kind,
@@ -820,6 +830,67 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                 session.commit()
                 session.refresh(result)
                 return result_out(result)
+
+    @router.post("/results/benchmark-unbenchmarked")
+    async def benchmark_unbenchmarked(payload: BulkBenchmarkIn) -> dict[str, Any]:
+        lock = bulk_locks[payload.run_kind]
+        if lock.locked():
+            raise HTTPException(409, "This category is already being benchmarked")
+        with store.session() as session:
+            if session.get(Dataset, payload.dataset_id) is None:
+                raise HTTPException(404, "Ground truth not found")
+        async with lock:
+            targets = list_targets()
+            runs = (
+                targets["sast_runs"]
+                if payload.run_kind == "sast"
+                else [
+                    run
+                    for target in targets[
+                        "sites" if payload.run_kind == "site" else "apis"
+                    ]
+                    for run in target["runs"]
+                ]
+            )
+            outcome: dict[str, Any] = {"completed": [], "skipped": [], "failures": []}
+            for run in runs:
+                if run["status"] not in {"complete", "completed"}:
+                    continue
+                with store.session() as session:
+                    existing = session.exec(
+                        select(ScanResult).where(
+                            ScanResult.run_kind == payload.run_kind,
+                            ScanResult.run_id == run["id"],
+                        )
+                    ).first()
+                    legacy = (
+                        payload.run_kind == "sast"
+                        and session.exec(
+                            select(Evaluation).where(
+                                Evaluation.sast_run_id == run["id"],
+                                Evaluation.status == "completed",
+                            )
+                        ).first()
+                    )
+                if existing or legacy:
+                    outcome["skipped"].append(run["id"])
+                    continue
+                try:
+                    result = await create_scan_result(
+                        ScanResultIn(
+                            run_kind=payload.run_kind,
+                            run_id=run["id"],
+                            dataset_id=payload.dataset_id,
+                            evaluation_model_id=payload.evaluation_model_id,
+                        )
+                    )
+                    outcome["completed"].append(result["run_id"])
+                except Exception as exc:
+                    reason = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                    outcome["failures"].append(
+                        {"run_id": run["id"], "error": str(reason)[:1000]}
+                    )
+            return outcome
 
     @router.put("/results/{result_id}/review")
     def review_scan_result(
