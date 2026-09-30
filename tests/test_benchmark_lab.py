@@ -1111,3 +1111,96 @@ def test_benchmark_comparison_reports_range_frequency_and_thresholds(
         "values": [1.0, 1.0],
     }
     assert metrics["detection_frequency"]["GT-1"]["frequency"] == 1.0
+
+
+@pytest.mark.parametrize("kind", ["site", "api", "sast"])
+def test_bulk_completed_benchmarks_skip_existing_and_retry_failures(
+    client, db_engine, monkeypatch, kind
+):
+    with Session(db_engine) as session:
+        model = LLMConfig(name="Bulk evaluator", model="test-model")
+        session.add(model)
+        target = None
+        if kind != "sast":
+            target = (
+                Site(name="Bulk site", base_url="https://example.test")
+                if kind == "site"
+                else ApiCollection(name="Bulk API", base_url="https://example.test")
+            )
+            session.add(target)
+        session.commit()
+        model_id = model.id
+
+        def make_run(name, status):
+            if kind == "site":
+                return TestRun(
+                    site_id=target.id, name=name, status=status, llm_config_id=model_id
+                )
+            if kind == "api":
+                return ApiTestRun(
+                    collection_id=target.id,
+                    name=name,
+                    status=status,
+                    llm_config_id=model_id,
+                )
+            return SastRun(name=name, status=status, llm_config_id=model_id)
+
+        done = "complete" if kind == "site" else "completed"
+        runs = [
+            make_run("First scan", done),
+            make_run("Second scan", done),
+            make_run("Unfinished scan", "running"),
+        ]
+        session.add_all(runs)
+        session.commit()
+        run_ids = [run.id for run in runs[:2]]
+    calls = []
+    fail = True
+
+    async def answer(*args, **kwargs):
+        calls.append(args)
+        if fail and len(calls) == 1:
+            raise ValueError("fixture model failure")
+        return json.dumps(
+            {
+                "decisions": [
+                    {
+                        "ground_truth_external_id": "GT-1",
+                        "disposition": "missing",
+                        "finding_ids": [],
+                        "reason": "No findings",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("aespa.services.llm.plain_completion", answer)
+    dataset = client.post(
+        f"{BASE}/datasets",
+        json={
+            "name": "Bulk truth",
+            "ground_truth": {
+                "items": [{"external_id": "GT-1", "title": "SQL injection"}]
+            },
+        },
+    ).json()
+    body = {"run_kind": kind, "dataset_id": dataset["id"]}
+    response = client.post(f"{BASE}/results/benchmark-unbenchmarked", json=body)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert len(result["completed"]) == 1
+    assert len(result["failures"]) == 1
+    assert set(
+        result["completed"] + [item["run_id"] for item in result["failures"]]
+    ) == set(run_ids)
+    assert len(client.get(f"{BASE}/results").json()) == 1
+    fail = False
+    retry = client.post(f"{BASE}/results/benchmark-unbenchmarked", json=body).json()
+    assert retry["completed"] == [result["failures"][0]["run_id"]]
+    assert retry["skipped"] == result["completed"]
+    assert retry["failures"] == []
+    assert len(client.get(f"{BASE}/results").json()) == 2
+    skipped = client.post(f"{BASE}/results/benchmark-unbenchmarked", json=body).json()
+    assert set(skipped["skipped"]) == set(run_ids)
+    assert skipped["completed"] == []
+    assert len(calls) == 3

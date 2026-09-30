@@ -3,6 +3,7 @@ import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import * as settingsApi from "../../shared/api/settings.js";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { parseGroundTruthText } from "./groundTruthImport.js";
+import { CompletedScanBenchmarks } from "./CompletedScanBenchmarks.jsx";
 import { SiteSummary, modelName, money } from "./SiteSummary.jsx";
 
 const EMPTY = { sites: [], apis: [], sast_runs: [] };
@@ -225,6 +226,22 @@ export function BenchmarkLabPage() {
         </div>
       )}
       <div className="content scroll-content benchmark-page benchmark-simple">
+        <CompletedScanBenchmarks
+          key={tab}
+          category={tab}
+          targets={targets}
+          results={results}
+          legacy={legacy}
+          datasets={datasets}
+          models={models}
+          onChange={load}
+          onOpen={(id) => {
+            const result = results.find((item) => item.id === id);
+            if (result) setTargetId(String(result.target_id ?? result.run_id));
+            setSelectedResultId(id);
+            if (tab === "site") setSiteTab("analyses");
+          }}
+        />
         {error && <div className="alert error">{error}</div>}
         {tab === "site" && (
           <label className="benchmark-site-picker">
@@ -252,6 +269,8 @@ export function BenchmarkLabPage() {
           <SiteSummary
             results={relevantResults}
             onOpen={(id) => {
+              const result = results.find((item) => item.id === id);
+              if (result) setTargetId(String(result.target_id ?? result.run_id));
               setSelectedResultId(id);
               setSiteTab("analyses");
             }}
