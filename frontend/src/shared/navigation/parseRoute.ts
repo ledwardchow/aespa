@@ -137,9 +137,17 @@ export function parseRoute(hash = "#/"): Route {
   if ((m = routeHash.match(/^#\/extensions\/([a-z0-9_.-]+)\/settings$/)))
     return { name: "extension-settings", extensionId: m[1] };
   if (routeHash === "#/reporting-debug") return { name: "reporting-debug" };
-  if (routeHash === "#/benchmark-lab" || routeHash === "#/sast-benchmarking") return { name: "benchmark-lab" };
-  if (["#/benchmark-lab/evaluations/new", "#/sast-benchmarking/evaluations/new"].includes(routeHash)) return { name: "benchmark-evaluation-new" };
-  if ((m = routeHash.match(/^#\/(?:sast-benchmarking|benchmark-lab)\/evaluations\/(\d+)\/([a-z-]+)$/)))
+  if ((m = routeHash.match(/^#\/benchmark-lab\/results\/(\d+)$/)))
+    return { name: "benchmark-lab", id: +m[1] };
+  if (routeHash === "#/benchmark-lab" || routeHash === "#/sast-benchmarking")
+    return { name: "benchmark-lab" };
+  if (
+    ["#/benchmark-lab/evaluations/new", "#/sast-benchmarking/evaluations/new"].includes(routeHash)
+  )
+    return { name: "benchmark-evaluation-new" };
+  if (
+    (m = routeHash.match(/^#\/(?:sast-benchmarking|benchmark-lab)\/evaluations\/(\d+)\/([a-z-]+)$/))
+  )
     return { name: "benchmark-evaluation-detail", id: +m[1], tab: m[2] };
   if ((m = routeHash.match(/^#\/(?:sast-benchmarking|benchmark-lab)\/evaluations\/(\d+)$/)))
     return { name: "benchmark-evaluation-detail", id: +m[1] };

@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PositiveInt
 from sqlalchemy import and_, or_
 from sqlmodel import Session, select
 
@@ -38,8 +38,10 @@ from aespa.schemas import (
 )
 
 from .models import (
+    BenchmarkSettings,
     Comparison,
     Dataset,
+    DatasetLabel,
     Evaluation,
     GroundTruthBinding,
     Match,
@@ -58,8 +60,18 @@ _DISPOSITIONS = {
 }
 
 
+class BenchmarkSettingsIn(BaseModel):
+    default_model_id: PositiveInt
+
+
 class BindingIn(BaseModel):
     dataset_id: int = Field(gt=0)
+
+
+class DatasetDetailsIn(BaseModel):
+    label: str = Field(default="", max_length=200)
+    target_kind: Literal["site", "api"] | None = None
+    target_id: PositiveInt | None = None
 
 
 class ScanResultIn(BaseModel):
@@ -71,6 +83,7 @@ class ScanResultIn(BaseModel):
 
 
 class BulkBenchmarkIn(BaseModel):
+    run_ids: list[PositiveInt] = Field(min_length=1)
     run_kind: Literal["site", "api", "sast"]
     dataset_id: int = Field(gt=0)
     evaluation_model_id: int | None = Field(default=None, gt=0)
@@ -100,15 +113,30 @@ def scan_cost(run: TestRun | ApiTestRun | SastRun | None) -> float | None:
     return round(sum(values), 8)
 
 
+def scan_start_time(run: TestRun | ApiTestRun | SastRun | None) -> str | None:
+    if run is None:
+        return None
+    timestamp = run.started_at or run.created_at
+    return timestamp.isoformat() + ("" if timestamp.tzinfo else "+00:00")
+
+
 def result_out(row: ScanResult, core: Session | None = None) -> dict[str, Any]:
     saved = loads(row.rows_json, [])
     items = saved.get("rows", []) if isinstance(saved, dict) else saved
     comparison = saved.get("comparison", {}) if isinstance(saved, dict) else {}
     scan_models = saved.get("scan_models") if isinstance(saved, dict) else None
     cost = saved.get("scan_cost_usd") if isinstance(saved, dict) else None
-    if cost is None and core is not None:
+    started_at = saved.get("scan_started_at") if isinstance(saved, dict) else None
+    if core is not None:
         model = {"site": TestRun, "api": ApiTestRun, "sast": SastRun}.get(row.run_kind)
-        cost = scan_cost(core.get(model, row.run_id)) if model else None
+        run = core.get(model, row.run_id) if model else None
+        if cost is None:
+            cost = scan_cost(run)
+        if started_at is None:
+            started_at = scan_start_time(run)
+        # Older results saved profile assignments rather than measured usage.
+        if not isinstance(scan_models, dict) or "primary" not in scan_models:
+            scan_models = scan_models_snapshot(core, row.run_kind, run) if run else None
     return {
         "id": row.id,
         "run_kind": row.run_kind,
@@ -124,6 +152,7 @@ def result_out(row: ScanResult, core: Session | None = None) -> dict[str, Any]:
         "comparison": comparison,
         "scan_models": scan_models,
         "scan_cost_usd": cost,
+        "scan_started_at": started_at,
         "summary": {
             key: sum(item["disposition"] == key for item in items)
             for key in ("full", "partial", "missing")
@@ -155,36 +184,46 @@ def finding_snapshot(finding: ScanFinding | ScanLead) -> dict[str, Any]:
     }
 
 
+def usage_model(run: TestRun | ApiTestRun | SastRun) -> dict[str, Any] | None:
+    usage = loads(run.token_usage_json, {})
+    if not isinstance(usage, dict):
+        return None
+    candidates = []
+    for model, counts in usage.items():
+        if not model or not isinstance(counts, dict):
+            continue
+        values = [counts.get(key, 0) for key in ("input", "output")]
+        if any(
+            not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0
+            for value in values
+        ):
+            continue
+        total = sum(values)
+        if total > 0:
+            candidates.append((total, model, counts))
+    if not candidates:
+        return None
+    # Use the model name to break ties consistently, regardless of JSON ordering.
+    _, model, counts = min(candidates, key=lambda item: (-item[0], item[1]))
+    return {
+        "id": None,
+        "name": model,
+        "model": model,
+        "provider": counts.get("provider"),
+    }
+
+
 def scan_models_snapshot(
     core: Session, run_kind: str, run: TestRun | ApiTestRun | SastRun
 ) -> dict[str, Any]:
-    from aespa.services.settings import get_llm_config_for_role
-
-    def model_details(scan: TestRun | ApiTestRun | SastRun, role: str) -> dict | None:
-        config = get_llm_config_for_role(core, scan, role)
-        actual = {}
-        if isinstance(scan, TestRun):
-            snapshot = loads(scan.execution_snapshot_json, {})
-            actual = snapshot.get("model", {}) if isinstance(snapshot, dict) else {}
-            if not isinstance(actual, dict):
-                actual = {}
-        if config is None and not actual.get("model"):
-            return None
-        return {
-            "id": config.id if config else None,
-            "name": config.name if config else None,
-            "model": actual.get("model") or (config.model if config else None),
-            "provider": actual.get("provider") or (config.provider if config else None),
-        }
-
     if run_kind == "sast":
         return {
-            "test_lead": None,
+            "primary": usage_model(run),
             "sast": [
                 {
                     "run_id": run.id,
                     "run_name": run.name,
-                    "model": model_details(run, "sast"),
+                    "model": usage_model(run),
                 }
             ],
         }
@@ -213,10 +252,10 @@ def scan_models_snapshot(
             {
                 "run_id": source_id,
                 "run_name": source.name if source else None,
-                "model": model_details(source, "sast") if source else None,
+                "model": usage_model(source) if source else None,
             }
         )
-    return {"test_lead": model_details(run, "test_lead"), "sast": sast_models}
+    return {"primary": usage_model(run), "sast": sast_models}
 
 
 async def assist_scan_result(
@@ -371,14 +410,23 @@ async def assist_matches(
     leads: list[ScanLead],
     llm_profile_id: int | None,
     evaluation_id: int,
+    default_model_id: int | None = None,
 ) -> list[Match]:
     from aespa.services import llm as llm_service
     from aespa.services.settings import (
         _model_for_profile_role,
         get_llm_config_for_role,
+        resolve_llm_config,
     )
 
-    if llm_profile_id is not None:
+    if default_model_id is not None:
+        chosen = core.get(LLMConfig, default_model_id)
+        if chosen is None:
+            raise ValueError(
+                "Default benchmark model is unavailable. Choose a model in Settings."
+            )
+        config = resolve_llm_config(core, chosen)
+    elif llm_profile_id is not None:
         profile = core.get(LLMProfile, llm_profile_id)
         config = (
             _model_for_profile_role(core, profile, "test_lead")
@@ -553,6 +601,24 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
     router = APIRouter(tags=["benchmarking"])
     bulk_locks = {kind: asyncio.Lock() for kind in ("site", "api", "sast")}
 
+    @router.get("/settings")
+    def get_settings() -> dict[str, Any]:
+        with store.session() as session:
+            settings = session.get(BenchmarkSettings, 1)
+            return {"default_model_id": settings.default_model_id if settings else None}
+
+    @router.put("/settings")
+    def save_settings(payload: BenchmarkSettingsIn) -> dict[str, Any]:
+        with Session(get_engine()) as core:
+            if core.get(LLMConfig, payload.default_model_id) is None:
+                raise HTTPException(404, "Benchmark model not found")
+        with store.session() as session:
+            settings = session.get(BenchmarkSettings, 1) or BenchmarkSettings()
+            settings.default_model_id = payload.default_model_id
+            session.add(settings)
+            session.commit()
+        return {"default_model_id": payload.default_model_id}
+
     @router.get("/targets")
     def list_targets() -> dict[str, Any]:
         from aespa.services.settings import get_llm_config_for_role
@@ -574,6 +640,14 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             def run_out(run: TestRun | ApiTestRun | SastRun) -> dict[str, Any]:
                 with Session(get_engine()) as lookup:
                     model = get_llm_config_for_role(lookup, run, "test_lead")
+                    kind = (
+                        "sast"
+                        if isinstance(run, SastRun)
+                        else "api"
+                        if isinstance(run, ApiTestRun)
+                        else "site"
+                    )
+                    scan_models = scan_models_snapshot(lookup, kind, run)
                 return {
                     "id": run.id,
                     "name": run.name,
@@ -582,6 +656,7 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                     "default_evaluation_model": (
                         {"id": model.id, "name": model.name} if model else None
                     ),
+                    "scan_models": scan_models,
                 }
 
         def target(kind: str, item: Site | ApiCollection, runs: list) -> dict[str, Any]:
@@ -786,8 +861,11 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                     resolve_llm_config,
                 )
 
-                if payload.evaluation_model_id is not None:
-                    chosen = core.get(LLMConfig, payload.evaluation_model_id)
+                model_id = (
+                    get_settings()["default_model_id"] or payload.evaluation_model_id
+                )
+                if model_id is not None:
+                    chosen = core.get(LLMConfig, model_id)
                     if chosen is None:
                         raise HTTPException(404, "Evaluation model not found")
                     config = resolve_llm_config(core, chosen)
@@ -823,6 +901,7 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                             "comparison": comparison,
                             "scan_models": scan_models,
                             "scan_cost_usd": cost,
+                            "scan_started_at": scan_start_time(run),
                         }
                     ),
                 )
@@ -852,10 +931,16 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                     for run in target["runs"]
                 ]
             )
+            selected_ids = set(payload.run_ids)
+            completed_ids = {
+                run["id"] for run in runs if run["status"] in {"complete", "completed"}
+            }
+            if selected_ids - completed_ids:
+                raise HTTPException(400, "Select completed scans from this category")
+            runs = [run for run in runs if run["id"] in selected_ids]
             outcome: dict[str, Any] = {"completed": [], "skipped": [], "failures": []}
-            for run in runs:
-                if run["status"] not in {"complete", "completed"}:
-                    continue
+
+            async def benchmark_run(run):
                 with store.session() as session:
                     existing = session.exec(
                         select(ScanResult).where(
@@ -874,7 +959,7 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                     )
                 if existing or legacy:
                     outcome["skipped"].append(run["id"])
-                    continue
+                    return
                 try:
                     result = await create_scan_result(
                         ScanResultIn(
@@ -890,6 +975,8 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                     outcome["failures"].append(
                         {"run_id": run["id"], "error": str(reason)[:1000]}
                     )
+
+            await asyncio.gather(*(benchmark_run(run) for run in runs))
             return outcome
 
     @router.put("/results/{result_id}/review")
@@ -940,7 +1027,24 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
     def list_datasets() -> list[dict[str, Any]]:
         with store.session() as session:
             return [
-                dataset_out(row)
+                {
+                    **dataset_out(row),
+                    "label": (
+                        session.get(DatasetLabel, row.id)
+                        or DatasetLabel(dataset_id=row.id)
+                    ).label,
+                    "assignments": [
+                        {
+                            "target_kind": binding.target_kind,
+                            "target_id": binding.target_id,
+                        }
+                        for binding in session.exec(
+                            select(GroundTruthBinding).where(
+                                GroundTruthBinding.dataset_id == row.id
+                            )
+                        )
+                    ],
+                }
                 for row in session.exec(select(Dataset).order_by(Dataset.id.desc()))
             ]
 
@@ -1011,6 +1115,58 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             session.refresh(row)
             return dataset_out(row)
 
+    @router.patch("/datasets/{dataset_id}/details")
+    def update_dataset_details(
+        dataset_id: int, payload: DatasetDetailsIn
+    ) -> dict[str, Any]:
+        if (payload.target_kind is None) != (payload.target_id is None):
+            raise HTTPException(422, "Select both a target type and an app or API")
+        if payload.target_kind:
+            with Session(get_engine()) as core:
+                model = Site if payload.target_kind == "site" else ApiCollection
+                if core.get(model, payload.target_id) is None:
+                    raise HTTPException(404, "App or API not found")
+        with store.session() as session:
+            row = session.get(Dataset, dataset_id)
+            if row is None:
+                raise HTTPException(404, "Ground truth dataset not found")
+            bindings = list(
+                session.exec(
+                    select(GroundTruthBinding).where(
+                        GroundTruthBinding.dataset_id == dataset_id
+                    )
+                )
+            )
+            for binding in bindings:
+                session.delete(binding)
+            session.flush()
+            if payload.target_kind:
+                binding = session.exec(
+                    select(GroundTruthBinding).where(
+                        GroundTruthBinding.target_kind == payload.target_kind,
+                        GroundTruthBinding.target_id == payload.target_id,
+                    )
+                ).first()
+                if binding is None:
+                    binding = GroundTruthBinding(
+                        target_kind=payload.target_kind,
+                        target_id=payload.target_id,
+                        dataset_id=dataset_id,
+                    )
+                binding.dataset_id = dataset_id
+                binding.updated_at = now()
+                session.add(binding)
+            label = session.get(DatasetLabel, dataset_id) or DatasetLabel(
+                dataset_id=dataset_id
+            )
+            label.label = payload.label.strip()
+            session.add(label)
+            row.updated_at = now()
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return {**dataset_out(row), "label": label.label}
+
     @router.delete("/datasets/{dataset_id}", status_code=204)
     def delete_dataset(dataset_id: int) -> None:
         with store.session() as session:
@@ -1022,17 +1178,26 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                     select(Evaluation).where(Evaluation.dataset_id == dataset_id)
                 ).first()
                 or session.exec(
-                    select(GroundTruthBinding).where(
-                        GroundTruthBinding.dataset_id == dataset_id
-                    )
+                    select(ScanResult).where(ScanResult.dataset_id == dataset_id)
                 ).first()
                 or session.exec(
-                    select(ScanResult).where(ScanResult.dataset_id == dataset_id)
+                    select(Comparison).where(Comparison.dataset_id == dataset_id)
                 ).first()
             ):
                 raise HTTPException(
-                    409, "Ground truth is used by a saved result or target"
+                    409,
+                    "Delete saved benchmarks and comparisons that use this dataset first",
                 )
+            for binding in session.exec(
+                select(GroundTruthBinding).where(
+                    GroundTruthBinding.dataset_id == dataset_id
+                )
+            ).all():
+                session.delete(binding)
+            label = session.get(DatasetLabel, dataset_id)
+            if label:
+                session.delete(label)
+            session.flush()
             session.delete(row)
             session.commit()
 
@@ -1184,10 +1349,15 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
         try:
             with Session(get_engine()) as core:
                 profile_id = policy.get("llm_profile_id")
-                if profile_id is not None and core.get(LLMProfile, profile_id) is None:
+                default_model_id = get_settings()["default_model_id"]
+                if (
+                    default_model_id is None
+                    and profile_id is not None
+                    and core.get(LLMProfile, profile_id) is None
+                ):
                     raise ValueError("Selected LLM profile is unavailable")
                 created = await assist_matches(
-                    core, run, items, leads, profile_id, evaluation_id
+                    core, run, items, leads, profile_id, evaluation_id, default_model_id
                 )
         except ValueError as exc:
             raise HTTPException(502, str(exc)[:300]) from exc

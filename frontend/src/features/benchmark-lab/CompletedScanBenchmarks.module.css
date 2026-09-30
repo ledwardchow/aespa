@@ -27,3 +27,26 @@
     grid-template-columns: 1fr;
   }
 }
+
+.applications {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin: 16px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.section .applications label {
+  width: auto;
+  flex-direction: row;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.table th:first-child,
+.table td:first-child {
+  width: 52px;
+  padding: 12px 16px;
+}

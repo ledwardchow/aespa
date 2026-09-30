@@ -44,3 +44,9 @@ export const deleteBenchmarkComparison = (id) =>
   req(`${BASE}/comparisons/${id}`, { method: "DELETE" });
 export const recalculateBenchmarkComparison = (id) =>
   req(`${BASE}/comparisons/${id}/recalculate`, { method: "POST" });
+
+export const updateBenchmarkDatasetDetails = (id, body) =>
+  req(`${BASE}/datasets/${id}/details`, { method: "PATCH", body });
+
+export const getBenchmarkSettings = () => req(`${BASE}/settings`);
+export const saveBenchmarkSettings = (body) => req(`${BASE}/settings`, { method: "PUT", body });

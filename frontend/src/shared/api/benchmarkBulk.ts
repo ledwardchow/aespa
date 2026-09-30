@@ -8,6 +8,7 @@ export type BulkBenchmarkOutcome = {
 };
 export const benchmarkUnbenchmarked = (body: {
   run_kind: BenchmarkCategory;
+  run_ids: number[];
   dataset_id: number;
   evaluation_model_id?: number;
 }) =>

@@ -253,7 +253,7 @@ export const routes = {
       () => import("../features/benchmark-lab/BenchmarkLabPage.jsx"),
       "BenchmarkLabPage",
     ),
-    props: () => ({}),
+    props: (route) => ({ initialResultId: route.id }),
   },
   "benchmark-evaluation-new": {
     section: "benchmark-lab",

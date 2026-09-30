@@ -1,3 +1,5 @@
+import { useBenchmarkLinks } from "../../shared/hooks/useBenchmarkLinks.js";
+import { BenchmarkBadge } from "../../shared/ui/BenchmarkBadge.jsx";
 import * as apiCollectionsApi from "../../shared/api/apiCollections.js";
 import { useState, useEffect, useCallback, useMemo } from "react";
 
@@ -23,6 +25,7 @@ const API_COLLECTION_TABS = [
 ];
 
 export function ApiCollectionDetail({ collectionId, initialTab }) {
+  const benchmarkLinks = useBenchmarkLinks();
   const activeTab = API_COLLECTION_TABS.some((tab) => tab.key === initialTab) ? initialTab : "runs";
   const [collection, setCollection] = useState(null);
   const [endpoints, setEndpoints] = useState(null);
@@ -871,6 +874,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                                 >
                                   {r.name}
                                 </a>
+                                <BenchmarkBadge href={benchmarkLinks[`api:${r.id}`]} />
                               </td>
                               <td>
                                 <StatusBadge status={r.status} />

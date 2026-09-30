@@ -105,3 +105,15 @@ class ScanResult(ExtensionModel, table=True):
     rows_json: str
     created_at: datetime = Field(default_factory=now)
     updated_at: datetime = Field(default_factory=now)
+
+
+class DatasetLabel(ExtensionModel, table=True):
+    __tablename__ = "benchmarking_dataset_label"
+    dataset_id: int = Field(primary_key=True, foreign_key="benchmarking_dataset.id")
+    label: str = ""
+
+
+class BenchmarkSettings(ExtensionModel, table=True):
+    __tablename__ = "benchmarking_settings"
+    id: int = Field(default=1, primary_key=True)
+    default_model_id: int | None = None
