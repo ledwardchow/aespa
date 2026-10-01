@@ -2063,7 +2063,7 @@ async def _stream_chat_completion_impl(
                 import boto3
 
                 region = _bedrock_region(config)
-                profile = os.getenv("AWS_PROFILE")
+                profile = config.aws_profile or os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
                 _boto_cfg = _bedrock_botocore_config(_proxy_url)
@@ -3969,7 +3969,7 @@ def _make_bedrock_mantle_client(config: LLMConfig):
     proxy = _llm_proxy_var.get()
     signer = _BedrockMantleSigV4Auth(
         region=_bedrock_mantle_region_from_url(base_url),
-        profile=os.getenv("AWS_PROFILE"),
+        profile=config.aws_profile or os.getenv("AWS_PROFILE"),
     )
     http_client = httpx.AsyncClient(
         verify=proxy is None,
@@ -4003,7 +4003,7 @@ def _make_bedrock_mantle_anthropic_client(config: LLMConfig):
     proxy = _llm_proxy_var.get()
     signer = _BedrockMantleSigV4Auth(
         region=_bedrock_mantle_region_from_url(base_url),
-        profile=os.getenv("AWS_PROFILE"),
+        profile=config.aws_profile or os.getenv("AWS_PROFILE"),
     )
     http_client = httpx.AsyncClient(
         verify=proxy is None,
@@ -4053,7 +4053,7 @@ async def _bedrock(
         import boto3
 
         region = _bedrock_region(config)
-        profile = os.getenv("AWS_PROFILE")
+        profile = config.aws_profile or os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
         _model = config.model
         _messages = payload["messages"]
@@ -6445,7 +6445,7 @@ async def _call_with_tools_impl(
                 import boto3
 
                 region = _bedrock_region(config)
-                profile = os.getenv("AWS_PROFILE")
+                profile = config.aws_profile or os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
                 _boto_cfg = _bedrock_botocore_config(_proxy_url)

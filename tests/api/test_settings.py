@@ -147,6 +147,32 @@ def test_discover_llm_models_endpoint(client: TestClient, monkeypatch):
     assert r.json() == ["custom-openrouter-model-1", "custom-openrouter-model-2"]
 
 
+def test_bedrock_model_discovery_uses_saved_profile(client: TestClient, monkeypatch):
+    provider = _make_provider(
+        client,
+        name="Bedrock discovery",
+        api_format="bedrock",
+        models=["global.anthropic.claude-sonnet-4-6"],
+        aws_profile="scan-operator",
+    ).json()
+    captured = {}
+
+    async def fake_discover(**kwargs):
+        captured.update(kwargs)
+        return {"models": ["global.anthropic.claude-sonnet-4-6"], "capabilities": {}}
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_model_options_for_format", fake_discover
+    )
+    response = client.post(
+        "/api/settings/llm/discover-model-options",
+        json={"api_format": "bedrock", "provider_id": provider["id"]},
+    )
+
+    assert response.status_code == 200
+    assert captured["aws_profile"] == "scan-operator"
+
+
 def test_openai_compatible_discovery_failure_has_clear_error(
     client: TestClient, monkeypatch
 ):
@@ -177,7 +203,9 @@ def test_burp_extension_config_round_trip(client: TestClient):
     assert r.json()["enabled"] is False
     assert r.json()["settings"] == {}
 
-    enabled = client.put("/api/extensions/aespa.burpsuite/enabled", json={"enabled": True})
+    enabled = client.put(
+        "/api/extensions/aespa.burpsuite/enabled", json={"enabled": True}
+    )
     assert enabled.status_code == 200
     assert enabled.json()["enabled"] is True
     assert enabled.json()["web_scanners"][0]["id"] == "aespa.burpsuite"
@@ -193,7 +221,9 @@ def test_burp_extension_config_round_trip(client: TestClient):
         "scan_xxe": True,
         "scan_ssti": True,
     }
-    r = client.patch("/api/extensions/aespa.burpsuite/settings", json={"settings": payload})
+    r = client.patch(
+        "/api/extensions/aespa.burpsuite/settings", json={"settings": payload}
+    )
     assert r.status_code == 200
     data = r.json()["settings"]
     assert data["api_url"] == "http://127.0.0.1:1337"
@@ -687,12 +717,14 @@ def test_create_bedrock_provider_with_blank_api_key(client: TestClient):
         base_url=None,
         models=["global.anthropic.claude-sonnet-4-6"],
         api_key=None,
+        aws_profile="scan-operator",
     )
     assert provider_r.status_code == 200
     provider = provider_r.json()
     assert provider["api_format"] == "bedrock"
     assert provider["api_key"] is None
     assert provider["base_url"] is None
+    assert provider["aws_profile"] == "scan-operator"
 
     profile_r = _make_profile(
         client,
@@ -704,6 +736,7 @@ def test_create_bedrock_provider_with_blank_api_key(client: TestClient):
     assert active["provider"] == "bedrock"
     assert active["api_key"] is None
     assert active["base_url"] is None
+    assert active["aws_profile"] == "scan-operator"
 
 
 def test_create_github_copilot_provider_without_token(client: TestClient):
@@ -738,11 +771,13 @@ def test_bedrock_mantle_project_id_round_trips(client: TestClient):
         project_id="proj_5d5ykleja6cwpirysbb7",
         models=["openai.gpt-oss-120b"],
         api_key="bedrock-key",
+        aws_profile="mantle-operator",
     )
     assert provider_r.status_code == 200
     provider = provider_r.json()
     assert provider["api_format"] == "bedrock_mantle"
     assert provider["project_id"] == "proj_5d5ykleja6cwpirysbb7"
+    assert provider["aws_profile"] == "mantle-operator"
 
     profile_r = _make_profile(client, provider["id"], model="openai.gpt-oss-120b")
     assert profile_r.status_code == 200
@@ -750,6 +785,7 @@ def test_bedrock_mantle_project_id_round_trips(client: TestClient):
     active = client.get("/api/settings/llm").json()
     assert active["provider"] == "bedrock_mantle"
     assert active["project_id"] == "proj_5d5ykleja6cwpirysbb7"
+    assert active["aws_profile"] == "mantle-operator"
 
 
 def test_google_vertex_provider_uses_adc_settings(client: TestClient):

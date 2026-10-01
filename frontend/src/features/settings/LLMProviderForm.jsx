@@ -500,6 +500,7 @@ export function LLMProviderForm({
           : form.base_url,
         username: form.username,
         project_id: form.project_id,
+        aws_profile: form.aws_profile,
         location: form.location,
       });
       if (fetched?.models?.length > 0) {
@@ -769,6 +770,24 @@ export function LLMProviderForm({
               Sent as the OpenAI-Project header to attribute usage/cost to a Bedrock Mantle project.
               Use the project id (proj_…) from the Bedrock console, not its name. Leave blank for
               the account default project.
+            </div>
+          </div>
+        )}
+        {isBedrockProvider(form.api_format) && (
+          <div className="field">
+            <label htmlFor="provider-aws-profile">
+              AWS profile <span className="field-optional">(optional)</span>
+            </label>
+            <input
+              id="provider-aws-profile"
+              type="text"
+              value={form.aws_profile}
+              placeholder="default"
+              onChange={(e) => upd({ aws_profile: e.target.value })}
+            />
+            <div className="field-hint">
+              Name of a profile in your AWS credentials or config file. Used when the API key is
+              blank. Leave blank to use AWS_PROFILE or the default AWS credentials.
             </div>
           </div>
         )}

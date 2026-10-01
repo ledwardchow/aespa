@@ -287,6 +287,7 @@ def _apply_llm_config(
     cfg.base_url = provider.base_url
     cfg.username = provider.username
     cfg.project_id = provider.project_id
+    cfg.aws_profile = provider.aws_profile
     cfg.location = provider.location
     cfg.model = payload.model
     cfg.max_tpm = payload.max_tpm

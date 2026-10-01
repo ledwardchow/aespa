@@ -24,6 +24,7 @@ export const DEFAULT_PROVIDER_FORM = {
   region: "",
   username: "",
   project_id: "",
+  aws_profile: "",
   location: "",
   models: "",
   model_capabilities: {},
