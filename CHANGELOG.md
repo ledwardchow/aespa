@@ -16,6 +16,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **AWS profiles for Bedrock**: Bedrock Runtime and Mantle providers can save a named AWS profile for model loading and scan requests. Leave the field blank to use the existing AWS credential settings.
+
 - **Consistent input token counts**: Scan and campaign usage now show input tokens excluding cache reads and writes for every provider, including the per-model breakdown. Cache counts remain separate, and recorded usage and cost estimates are preserved.
 
 - **Bulk Benchmark Lab comparisons**: The parent DAST, APIs, and SAST tabs now list all completed scans and whether each has a saved benchmark. Select saved ground truth or upload JSON or Markdown, then select individual scans with checkboxes or select all unbenchmarked scans. DAST and API scans can also be selected together by application. All selected scans start their benchmark comparisons at once. Existing results are skipped, individual failures are reported, and retries process only the remaining scans. Site, API, and SAST scan lists show an Evaluated tag for saved benchmarks, including earlier completed SAST evaluations, with a link to the result. The Results tab keeps the Summary, Analyses, and New screens. The completed-scan tables label each scan with the model that used the most input and output tokens. DAST scans with linked SAST leads are labelled SAST+DAST in the tables and saved analyses.
@@ -34,6 +36,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Unfinished SAST validation**: Light and Deep scans now pause when a validator fails or stops without giving a verdict, and resuming the scan checks those leads again. Leads the validator marks inconclusive are kept as final results and are not checked again.
 
 ### Fixes
+
+- **Codex scans**: If a Codex model tries to call one of its own tools during a scan, AESPA retries the turn in a fresh session. Repeated attempts still stop the scan.
 
 - **Bedrock model compatibility**: Scans now send explicit prompt-cache markers only to models known to support them. Grok and other unsupported models no longer receive cache markers that can cause Bedrock to reject the request. Encrypted reasoning is preserved across streamed replies, tool calls, and saved conversations without adding conflicting reasoning fields.
 

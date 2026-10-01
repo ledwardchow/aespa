@@ -83,6 +83,7 @@ def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
         base_url=provider.base_url,
         username=provider.username,
         project_id=provider.project_id,
+        aws_profile=provider.aws_profile,
         location=provider.location,
         models=_provider_models(provider),
         model_capabilities=_provider_capabilities(provider),
@@ -161,6 +162,11 @@ def _apply_llm_provider(
         None
         if payload.api_format in {"factory_droid", "openai_codex"}
         else payload.project_id
+    )
+    provider.aws_profile = (
+        (payload.aws_profile or "").strip() or None
+        if payload.api_format in {"bedrock", "bedrock_mantle"}
+        else None
     )
     provider.location = (
         payload.location if payload.api_format == "google_vertex" else None

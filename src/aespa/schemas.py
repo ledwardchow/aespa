@@ -616,6 +616,7 @@ class LLMProviderConfigIn(BaseModel):
     base_url: str | None = None
     username: str | None = Field(default=None, max_length=255)
     project_id: str | None = Field(default=None, max_length=120)
+    aws_profile: str | None = Field(default=None, max_length=255)
     location: str | None = Field(default=None, max_length=120)
     models: list[str] = Field(default_factory=list, min_length=1)
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -694,6 +695,7 @@ class LLMProviderConfigOut(BaseModel):
     base_url: str | None
     username: str | None = None
     project_id: str | None = None
+    aws_profile: str | None = None
     location: str | None = None
     models: list[str] = Field(default_factory=list)
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -712,6 +714,7 @@ class LLMModelDiscoveryRequest(BaseModel):
     base_url: str | None = None
     username: str | None = None
     project_id: str | None = None
+    aws_profile: str | None = None
     location: str | None = None
 
 
@@ -786,6 +789,7 @@ class LLMConfigOut(BaseModel):
     base_url: str | None
     username: str | None = None
     project_id: str | None = None
+    aws_profile: str | None = None
     location: str | None = None
     model: str
     max_tpm: int | None = None
@@ -1443,6 +1447,7 @@ class LLMExportProviderItem(BaseModel):
     base_url: str | None = None
     username: str | None = None
     project_id: str | None = None
+    aws_profile: str | None = None
     location: str | None = None
     models: list[str]
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)

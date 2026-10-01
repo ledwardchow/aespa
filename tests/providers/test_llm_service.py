@@ -2841,6 +2841,7 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
     config = LLMConfig(
         provider="bedrock",
         api_key=None,
+        aws_profile="bedrock-selected",
         base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
         model="anthropic.claude-3-7-sonnet-20250219-v1:0",
         max_tokens=2048,
@@ -2850,7 +2851,7 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert captured["session"] == {"profile_name": "bedrock-dev"}
+    assert captured["session"] == {"profile_name": "bedrock-selected"}
     assert {
         "service_name": "bedrock-runtime",
         "region_name": "us-east-1",
@@ -2991,6 +2992,28 @@ def test_bedrock_mantle_uses_responses_api_with_us_east_2_default(monkeypatch):
     # Responses API uses `input`, not `messages`.
     assert captured["responses"]["model"] == "openai.gpt-oss-120b"
     assert captured["responses"]["input"] == "hello"
+
+
+def test_bedrock_mantle_uses_selected_aws_profile_for_signing(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("AWS_PROFILE", "ambient-profile")
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+
+    def fake_signer(**kwargs):
+        captured["signer"] = kwargs
+        return None
+
+    monkeypatch.setattr(llm, "_BedrockMantleSigV4Auth", fake_signer)
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        aws_profile="selected-profile",
+        base_url="https://bedrock-mantle.us-east-2.api.aws/v1",
+        model="openai.gpt-oss-120b",
+    )
+
+    llm._make_bedrock_mantle_client(config)
+
+    assert captured["signer"] == {"region": "us-east-2", "profile": "selected-profile"}
 
 
 def test_bedrock_mantle_claude_uses_messages_for_plain_and_tool_calls(monkeypatch):

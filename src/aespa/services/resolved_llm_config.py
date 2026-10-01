@@ -21,6 +21,7 @@ class ResolvedLLMConfig(BaseModel):
     base_url: str | None
     username: str | None
     project_id: str | None
+    aws_profile: str | None = None
     location: str | None = None
     model: str
     max_tpm: int | None = None

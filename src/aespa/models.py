@@ -355,6 +355,8 @@ class LLMProviderConfig(SQLModel, table=True):
     # Provider-specific project. Bedrock Mantle uses a proj_… id for cost
     # attribution; Google Vertex AI uses the Google Cloud project id.
     project_id: Optional[str] = Field(default=None)
+    # Named AWS credentials profile for Bedrock Runtime and Mantle.
+    aws_profile: Optional[str] = Field(default=None)
     # Google Vertex AI location. Other providers ignore this value.
     location: Optional[str] = Field(default=None)
     models_json: str = Field(default="[]")
@@ -478,6 +480,7 @@ class LLMConfig(SQLModel, table=True):
     username: Optional[str] = Field(default=None)
     # Denormalized from the provider (see LLMProviderConfig.project_id/location).
     project_id: Optional[str] = Field(default=None)
+    aws_profile: Optional[str] = Field(default=None)
     location: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")
     # Shared pacing limits for this provider/model pair. Saving one duplicate

@@ -17,6 +17,7 @@ export function providerToForm(provider) {
           : "",
         username: provider.username || "",
         project_id: provider.project_id || "",
+        aws_profile: provider.aws_profile || "",
         location: provider.location || "",
         models: (provider.models || []).join("\n"),
         model_capabilities: provider.model_capabilities || {},
@@ -64,6 +65,7 @@ export function providerPayload(form) {
     project_id: ["bedrock_mantle", "google_vertex"].includes(form.api_format)
       ? form.project_id.trim() || null
       : null,
+    aws_profile: isBedrockProvider(form.api_format) ? form.aws_profile.trim() || null : null,
     location: form.api_format === "google_vertex" ? form.location.trim() || "global" : null,
     models: modelText
       .split(/\r?\n|,/)

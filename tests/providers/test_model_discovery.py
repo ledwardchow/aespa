@@ -108,10 +108,11 @@ def test_discover_bedrock_mantle_models_uses_sigv4_without_api_key(monkeypatch):
         asyncio.run(
             model_discovery.discover_bedrock_mantle_model_options(
                 base_url="https://bedrock-mantle.eu-west-1.api.aws",
+                profile="mantle-selected",
             )
         )
 
-    assert captured["signer"] == {"region": "eu-west-1", "profile": "mantle-dev"}
+    assert captured["signer"] == {"region": "eu-west-1", "profile": "mantle-selected"}
     assert captured["client"]["auth"] is signer
 
 
@@ -136,6 +137,22 @@ def test_provider_model_discovery_sorts_and_deduplicates_all_formats(monkeypatch
     )
 
     assert result["models"] == ["alpha", "Zulu"]
+
+
+def test_bedrock_model_discovery_uses_selected_profile(monkeypatch):
+    captured = {}
+
+    async def fake_discovery(**kwargs):
+        captured.update(kwargs)
+        return ["global.anthropic.claude-sonnet-4-6"]
+
+    monkeypatch.setattr(model_discovery, "discover_bedrock_models", fake_discovery)
+    asyncio.run(
+        settings.discover_models_for_format(
+            api_format="bedrock", aws_profile="scan-operator"
+        )
+    )
+    assert captured["profile"] == "scan-operator"
 
 
 def test_mantle_discovery_exposes_each_models_inference_api(monkeypatch):

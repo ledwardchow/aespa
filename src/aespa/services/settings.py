@@ -240,6 +240,7 @@ def resolve_llm_config(
             "base_url": provider.base_url,
             "username": provider.username,
             "project_id": provider.project_id,
+            "aws_profile": provider.aws_profile,
             "location": provider.location,
         }
     )
@@ -265,6 +266,7 @@ def llm_profile_out_model(
         base_url=resolved.base_url,
         username=resolved.username,
         project_id=resolved.project_id,
+        aws_profile=resolved.aws_profile,
         location=resolved.location,
         model=resolved.model,
         max_tpm=resolved.max_tpm,
@@ -361,6 +363,7 @@ async def discover_models_for_format(
     username: str | None = None,
     project_id: str | None = None,
     location: str | None = None,
+    aws_profile: str | None = None,
 ) -> list[str]:
     options = await discover_model_options_for_format(
         api_format=api_format,
@@ -369,6 +372,7 @@ async def discover_models_for_format(
         username=username,
         project_id=project_id,
         location=location,
+        aws_profile=aws_profile,
     )
     return list(options["models"])
 
@@ -380,6 +384,7 @@ async def discover_model_options_for_format(
     username: str | None = None,
     project_id: str | None = None,
     location: str | None = None,
+    aws_profile: str | None = None,
 ) -> dict[str, object]:
     """Discover model names and per-model reasoning capability metadata."""
     native: dict[str, object] = {}
@@ -503,7 +508,9 @@ async def discover_model_options_for_format(
     elif api_format == "bedrock":
         from aespa.services import model_discovery
 
-        discovered = await model_discovery.discover_bedrock_models(region_name=base_url)
+        discovered = await model_discovery.discover_bedrock_models(
+            region_name=base_url, profile=aws_profile
+        )
         native = {
             model: capability
             for model in discovered
@@ -515,6 +522,7 @@ async def discover_model_options_for_format(
         raw = await model_discovery.discover_bedrock_mantle_model_options(
             api_key=api_key,
             base_url=base_url,
+            profile=aws_profile,
         )
         discovered = [item["id"] for item in raw]
         native = {item["id"]: item for item in raw}
@@ -601,6 +609,7 @@ def export_llm_config(
             base_url=p.base_url,
             username=p.username,
             project_id=p.project_id,
+            aws_profile=p.aws_profile,
             location=p.location,
             models=_provider_models(p),
             model_capabilities=_provider_capabilities(p),
@@ -696,6 +705,11 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             username or None if item.api_format == "github_copilot" else None
         )
         provider.project_id = item.project_id
+        provider.aws_profile = (
+            item.aws_profile
+            if item.api_format in {"bedrock", "bedrock_mantle"}
+            else None
+        )
         provider.location = (
             (item.location or "global") if item.api_format == "google_vertex" else None
         )
@@ -762,6 +776,10 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         cfg.provider = provider.api_format
         cfg.api_key = provider.api_key
         cfg.base_url = provider.base_url
+        cfg.username = provider.username
+        cfg.project_id = provider.project_id
+        cfg.aws_profile = provider.aws_profile
+        cfg.location = provider.location
         cfg.model = item.model
         legacy_tpm, legacy_rpm = legacy_provider_limits.get(provider_key, (None, None))
         pair_limits = (

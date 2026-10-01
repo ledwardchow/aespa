@@ -45,6 +45,30 @@ test("shows Mantle's selected API for a discovered model", () => {
   expect(screen.getByText("Anthropic Messages API")).toBeTruthy();
 });
 
+test("saves the selected AWS profile for Bedrock", async () => {
+  const user = userEvent.setup();
+  settingsApi.updateLLMProvider.mockResolvedValue({
+    ...provider,
+    api_format: "bedrock",
+    aws_profile: "scan-operator",
+  });
+  render(
+    <LLMProviderForm
+      mode="edit"
+      provider={{ ...provider, api_format: "bedrock" }}
+      models={[]}
+      profiles={[]}
+      onProviderUpdated={vi.fn()}
+      onConfigureModel={vi.fn()}
+    />,
+  );
+
+  await user.type(screen.getByLabelText("AWS profile (optional)"), "scan-operator");
+  await user.click(screen.getByRole("button", { name: "Save provider" }));
+  await waitFor(() => expect(settingsApi.updateLLMProvider).toHaveBeenCalledTimes(1));
+  expect(settingsApi.updateLLMProvider.mock.calls[0][1].aws_profile).toBe("scan-operator");
+});
+
 test("saves an edited provider before exposing an added model link", async () => {
   const user = userEvent.setup();
   const savedProvider = { ...provider, models: ["existing-model", "new-model"] };

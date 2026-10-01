@@ -54,6 +54,7 @@ async def discover_bedrock_mantle_model_options(
     api_key: str | None = None,
     base_url: str | None = None,
     proxy_url: str | None = None,
+    profile: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return models exposed by Mantle's OpenAI-compatible Models API."""
     root = (base_url or "https://bedrock-mantle.us-east-2.api.aws").rstrip("/")
@@ -74,7 +75,7 @@ async def discover_bedrock_mantle_model_options(
 
         client_kwargs["auth"] = _BedrockMantleSigV4Auth(
             region=_bedrock_mantle_region_from_url(root),
-            profile=os.getenv("AWS_PROFILE"),
+            profile=profile or os.getenv("AWS_PROFILE"),
         )
     if proxy_url:
         client_kwargs["proxy"] = proxy_url
@@ -289,6 +290,7 @@ async def discover_google_vertex_model_options(
 
 async def discover_bedrock_models(
     region_name: str | None = None,
+    profile: str | None = None,
 ) -> list[str]:
     """Return foundation model IDs and system-defined inference profile IDs available from AWS Bedrock."""
 
@@ -327,7 +329,8 @@ async def discover_bedrock_models(
             else:
                 client_kwargs["endpoint_url"] = endpoint_url
 
-        client = boto3.client("bedrock", **client_kwargs)
+        session_kwargs = {"profile_name": profile} if profile else {}
+        client = boto3.Session(**session_kwargs).client("bedrock", **client_kwargs)
 
         # 1. System-defined inference profiles (includes global.*, us.*, eu.*, apac.*)
         profiles: list[str] = []

@@ -344,6 +344,7 @@ async def default_models(
         username = p.username if p else None
         project_id = p.project_id if p else None
         location = p.location if p else None
+        aws_profile = p.aws_profile if p else None
         try:
             discovery_kwargs = dict(
                 api_format=fmt,
@@ -353,6 +354,8 @@ async def default_models(
             )
             if fmt == "google_vertex":
                 discovery_kwargs.update(project_id=project_id, location=location)
+            if fmt in {"bedrock", "bedrock_mantle"}:
+                discovery_kwargs["aws_profile"] = aws_profile
             discovered = await settings_service.discover_models_for_format(
                 **discovery_kwargs
             )
@@ -376,6 +379,7 @@ async def discover_llm_models(
     username = payload.username
     project_id = payload.project_id
     location = payload.location
+    aws_profile = payload.aws_profile
 
     if not api_key or api_key.startswith("••"):
         db_prov = (
@@ -397,6 +401,8 @@ async def discover_llm_models(
                 project_id = db_prov.project_id
             if not location:
                 location = db_prov.location
+            if aws_profile is None:
+                aws_profile = db_prov.aws_profile
 
     try:
         discovery_kwargs = dict(
@@ -407,6 +413,8 @@ async def discover_llm_models(
         )
         if api_format == "google_vertex":
             discovery_kwargs.update(project_id=project_id, location=location)
+        if api_format in {"bedrock", "bedrock_mantle"}:
+            discovery_kwargs["aws_profile"] = aws_profile
         discovered = await settings_service.discover_models_for_format(
             **discovery_kwargs
         )
@@ -437,6 +445,7 @@ async def discover_llm_model_options(
     username = payload.username
     project_id = payload.project_id
     location = payload.location
+    aws_profile = payload.aws_profile
     if not api_key or api_key.startswith("••"):
         db_prov = (
             session.get(LLMProviderConfig, payload.provider_id)
@@ -453,6 +462,8 @@ async def discover_llm_model_options(
             username = username or db_prov.username
             project_id = project_id or db_prov.project_id
             location = location or db_prov.location
+            if aws_profile is None:
+                aws_profile = db_prov.aws_profile
     try:
         discovery_kwargs = dict(
             api_format=api_format,
@@ -462,6 +473,8 @@ async def discover_llm_model_options(
         )
         if api_format == "google_vertex":
             discovery_kwargs.update(project_id=project_id, location=location)
+        if api_format in {"bedrock", "bedrock_mantle"}:
+            discovery_kwargs["aws_profile"] = aws_profile
         result = await settings_service.discover_model_options_for_format(
             **discovery_kwargs
         )

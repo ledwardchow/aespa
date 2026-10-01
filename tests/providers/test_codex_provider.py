@@ -416,7 +416,7 @@ def test_codex_retryable_stream_errors_are_bounded(monkeypatch):
 
 
 def test_codex_internal_wait_fails_immediately_instead_of_hanging(monkeypatch):
-    with pytest.raises(codex_provider.CodexUnavailableError) as raised:
+    with pytest.raises(codex_provider.CodexInternalToolError) as raised:
         _run_codex_completion_events(
             monkeypatch,
             [
@@ -433,7 +433,45 @@ def test_codex_internal_wait_fails_immediately_instead_of_hanging(monkeypatch):
         )
 
     assert "internal 'wait' tool" in str(raised.value)
-    assert "AESPA stopped the turn" in str(raised.value)
+    assert "Only AESPA dynamic tools" in str(raised.value)
+
+
+@pytest.mark.parametrize("failures", [1, codex_provider.MAX_INTERNAL_TOOL_RETRIES + 1])
+def test_codex_internal_tool_retries_in_fresh_threads_are_bounded(
+    monkeypatch, failures
+):
+    calls = []
+
+    async def fake_completion(*args, **kwargs):  # noqa: ARG001
+        calls.append("completion")
+        if calls.count("completion") <= failures:
+            raise codex_provider.CodexInternalToolError("internal 'js' tool")
+        return ([{"type": "text", "text": "recovered"}], "end_turn", [])
+
+    async def fake_abandon(messages, *, delete_thread=True):  # noqa: ARG001
+        calls.append(("abandon", delete_thread))
+
+    monkeypatch.setattr(codex_provider, "_completion_with_tools_once", fake_completion)
+    monkeypatch.setattr(codex_provider, "_abandon_conversation", fake_abandon)
+
+    request = (
+        SimpleNamespace(model="auto"),
+        "system",
+        [{"role": "user", "content": "hello"}],
+        [{"name": "context_tool"}],
+        lambda *args, **kwargs: None,
+    )
+    if failures > codex_provider.MAX_INTERNAL_TOOL_RETRIES:
+        with pytest.raises(codex_provider.CodexInternalToolError):
+            asyncio.run(codex_provider.completion_with_tools(*request))
+    else:
+        result = asyncio.run(codex_provider.completion_with_tools(*request))
+        assert result[0][0]["text"] == "recovered"
+
+    assert calls.count("completion") == min(
+        failures + 1, codex_provider.MAX_INTERNAL_TOOL_RETRIES + 1
+    )
+    assert calls.count(("abandon", True)) == failures
 
 
 def test_codex_turn_timeout_has_a_useful_error(monkeypatch):
