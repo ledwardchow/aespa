@@ -200,6 +200,29 @@
   cursor: default;
   color: var(--muted);
 }
+.typeTrends {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.typeTrends > span {
+  color: var(--muted);
+  font-weight: 600;
+}
+.typeTrends label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+.typeTrendLine {
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+}
 .trend {
   pointer-events: none;
 }

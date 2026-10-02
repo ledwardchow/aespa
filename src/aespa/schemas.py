@@ -820,9 +820,11 @@ class LLMProfileOut(BaseModel):
     id: int
     name: str
     is_active: bool
-    default_model_id: int | None = None
+    extension_id: str | None = None
+    extension_name: str | None = None
+    default_model_id: int | str | None = None
     default_model_name: str | None = None
-    role_models: dict[str, int] = Field(default_factory=dict)
+    role_models: dict[str, int | str] = Field(default_factory=dict)
     role_model_names: dict[str, str | None] = Field(default_factory=dict)
     updated_at: datetime
 

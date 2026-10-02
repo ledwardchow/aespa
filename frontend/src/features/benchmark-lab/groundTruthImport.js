@@ -1,8 +1,9 @@
 const FIELD_RE = /^-\s+\*\*([^*]+):\*\*\s*(.*)$/;
-const CATEGORY_RE = /^##\s+(A\d{2}\s*:\s*.+)$/i;
+const CATEGORY_RE = /^##\s+((?:A\d{2}|API(?:10|[1-9]))\s*:\s*.+)$/i;
 const ITEM_RE = /^###\s+(\d+)\.\s+(.+)$/;
 const CODE_RE = /`([^`]+)`/g;
-const SOURCE_PATH_RE = /(?:^|\/)[^\s`]+\.(?:php|py|js|jsx|ts|tsx|java|go|rb|rs|cs|cpp|c|h|html|vue|svelte)$/i;
+const SOURCE_PATH_RE =
+  /^(.+\.(?:php|py|js|jsx|ts|tsx|java|go|rb|rs|cs|cpp|c|h|html|vue|svelte|properties))(?::([1-9]\d*))?$/i;
 const HTTP_OPERATION_RE = /\b(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(\/[^\s`"'}]+)/i;
 
 function cleanMarkdown(value = "") {
@@ -20,13 +21,15 @@ function codeValues(value = "") {
 function locationsFrom(value = "") {
   const seen = new Set();
   return codeValues(value)
-    .filter((candidate) => SOURCE_PATH_RE.test(candidate))
-    .filter((path) => {
-      if (seen.has(path)) return false;
-      seen.add(path);
+    .map((candidate) => candidate.match(SOURCE_PATH_RE))
+    .filter(Boolean)
+    .filter((match) => {
+      const key = `${match[1]}:${match[2] || ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     })
-    .map((path) => ({ path }));
+    .map((match) => ({ path: match[1], ...(match[2] ? { line: Number(match[2]) } : {}) }));
 }
 
 function operationFrom(fields) {
@@ -40,26 +43,29 @@ function finishItem(item, category) {
   const fields = Object.fromEntries(
     Object.entries(item.fields).map(([key, value]) => [key, cleanMarkdown(value)]),
   );
-  const expectedEvidence = [fields.exploit, fields.discovery, fields["ui entry point"]].filter(
-    Boolean,
-  );
+  const expectedEvidence = item.evidence.length
+    ? item.evidence.map(cleanMarkdown)
+    : [fields.exploit, fields.discovery, fields["ui entry point"]].filter(Boolean);
   return {
-    external_id: `GT-${item.number}`,
+    external_id: fields["external id"] || `GT-${item.number}`,
     title: cleanMarkdown(item.title),
     description: fields.description || "",
     category: category || "",
-    severity: "medium",
+    severity: fields.severity?.toLowerCase() || "medium",
     locations: locationsFrom(item.fields.file),
-    root_cause: fields.description || "",
-    affected_operation: operationFrom(fields),
+    root_cause: fields["root cause"] || fields.description || "",
+    affected_operation: fields["affected operation"] || operationFrom(fields),
     expected_evidence: expectedEvidence,
-    classification: "exploitable",
+    classification: fields.classification || "exploitable",
   };
 }
 
 export function parseMarkdownGroundTruth(text, filename = "ground-truth.md") {
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  const title = lines.find((line) => /^#\s+/.test(line))?.replace(/^#\s+/, "").trim();
+  const title = lines
+    .find((line) => /^#\s+/.test(line))
+    ?.replace(/^#\s+/, "")
+    .trim();
   const items = [];
   let category = "";
   let item = null;
@@ -87,18 +93,27 @@ export function parseMarkdownGroundTruth(text, filename = "ground-truth.md") {
     const itemMatch = line.match(ITEM_RE);
     if (itemMatch) {
       flush();
-      item = { number: itemMatch[1], title: itemMatch[2], fields: {} };
+      item = { number: itemMatch[1], title: itemMatch[2], fields: {}, evidence: [] };
       continue;
     }
     if (!item) continue;
     const fieldMatch = line.match(FIELD_RE);
     if (fieldMatch) {
       activeField = fieldMatch[1].trim().toLowerCase();
-      item.fields[activeField] = fieldMatch[2].trim();
+      if (activeField === "expected evidence") {
+        item.evidence.push(fieldMatch[2].trim());
+      } else {
+        item.fields[activeField] = fieldMatch[2].trim();
+      }
       continue;
     }
     if (activeField && line.trim() && !/^---+$/.test(line.trim())) {
-      item.fields[activeField] = `${item.fields[activeField]} ${line.trim()}`.trim();
+      if (activeField === "expected evidence") {
+        const last = item.evidence.length - 1;
+        item.evidence[last] = `${item.evidence[last]} ${line.trim()}`.trim();
+      } else {
+        item.fields[activeField] = `${item.fields[activeField]} ${line.trim()}`.trim();
+      }
     }
   }
   flush();
@@ -109,7 +124,7 @@ export function parseMarkdownGroundTruth(text, filename = "ground-truth.md") {
     );
   }
   const ids = new Set(items.map((entry) => entry.external_id));
-  if (ids.size !== items.length) throw new Error("Vulnerability numbers must be unique.");
+  if (ids.size !== items.length) throw new Error("Vulnerability IDs must be unique.");
   return {
     schema_version: 1,
     name: title || filename.replace(/\.(?:md|markdown)$/i, ""),
@@ -119,10 +134,7 @@ export function parseMarkdownGroundTruth(text, filename = "ground-truth.md") {
 
 export function parseGroundTruthText(text, filename = "ground-truth.json") {
   const trimmed = text.trimStart();
-  if (
-    /\.md(?:own)?$/i.test(filename) ||
-    (!trimmed.startsWith("[") && !trimmed.startsWith("{"))
-  ) {
+  if (/\.md(?:own)?$/i.test(filename) || (!trimmed.startsWith("[") && !trimmed.startsWith("{"))) {
     return parseMarkdownGroundTruth(text, filename);
   }
   let parsed;

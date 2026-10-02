@@ -162,7 +162,7 @@ test("Site summary plots saved DAST and SAST analyses and filters both", async (
   render(<BenchmarkLabPage />);
   await user.selectOptions(await screen.findByLabelText("Site"), "1");
   expect(
-    screen.getByRole("button", { name: /Shop scan, SAST\+DAST, Scan Test Lead/ }),
+    screen.getByRole("button", { name: /Shop scan, DAST with SAST Leads, Scan Test Lead/ }),
   ).toBeTruthy();
   expect(screen.getByRole("button", { name: /Source scan, SAST, SAST agent/ })).toBeTruthy();
   await user.click(screen.getByLabelText("Scan type", { selector: "summary" }));
@@ -202,7 +202,7 @@ test("completed scans use parent tabs while Sites keeps its existing views", asy
   render(<BenchmarkLabPage />);
   await user.selectOptions(await screen.findByLabelText("Site"), "1");
   expect(screen.queryByLabelText("Ground truth for bulk benchmarks")).toBeNull();
-  expect(screen.getByRole("button", { name: /Shop scan, SAST\+DAST/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Shop scan, DAST with SAST Leads/ })).toBeTruthy();
   await user.click(screen.getByRole("tab", { name: "Analyses" }));
   expect(screen.getByRole("button", { name: "Open Shop scan" })).toBeTruthy();
   expect(screen.queryByLabelText("Ground truth for bulk benchmarks")).toBeNull();

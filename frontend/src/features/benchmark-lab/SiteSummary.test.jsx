@@ -42,7 +42,7 @@ test("separates scan types with independent filters and shapes for the same mode
   expect(point("Combined scan")).toBeTruthy();
   expect(point("Source scan")).toBeTruthy();
   await user.click(screen.getByRole("checkbox", { name: "DAST", exact: true }));
-  await user.click(screen.getByRole("checkbox", { name: "SAST+DAST", exact: true }));
+  await user.click(screen.getByRole("checkbox", { name: "DAST with SAST Leads", exact: true }));
   expect(point("DAST only")).toBeTruthy();
   expect(point("Combined scan")).toBeNull();
   await user.click(point("DAST only"));
@@ -87,7 +87,7 @@ test("shows immediate point details on hover and keyboard focus", async () => {
   await user.hover(point);
   expect(screen.getByRole("tooltip").textContent).toContain("Combined scan");
   expect(screen.getByRole("tooltip").textContent).toContain("Shared model");
-  expect(screen.getByRole("tooltip").textContent).toContain("SAST+DAST");
+  expect(screen.getByRole("tooltip").textContent).toContain("DAST with SAST Leads");
   await user.unhover(point);
   expect(screen.queryByRole("tooltip")).toBeNull();
   point.focus();
@@ -181,4 +181,33 @@ test("legend toggles labeled fits and recalculates when filtering or changing ax
   expect(legend.getAttribute("aria-pressed")).toBe("false");
   await user.click(legend);
   expect(screen.getByRole("img", { name: "Shared model linear trend" })).toBeTruthy();
+});
+
+test("scan type trendlines start off and fit only visible scans of each type", async () => {
+  const user = userEvent.setup();
+  const repeated = results.flatMap((result) => [
+    result,
+    {
+      ...result,
+      id: result.id + 10,
+      run_name: `${result.run_name} again`,
+      scan_cost_usd: result.scan_cost_usd + 0.1,
+      summary: { full: result.summary.full + 1, partial: 0 },
+    },
+  ]);
+  render(<SiteSummary results={repeated} onOpen={vi.fn()} />);
+  const types = ["DAST", "DAST with SAST Leads", "SAST"];
+  const controls = within(screen.getByRole("group", { name: "Scan type trendlines" }));
+  for (const type of types) {
+    expect(controls.getByRole("checkbox", { name: `${type} trendline` }).checked).toBe(false);
+    expect(screen.queryByRole("img", { name: `${type} linear trend` })).toBeNull();
+    await user.click(controls.getByRole("checkbox", { name: `${type} trendline` }));
+    expect(screen.getByRole("img", { name: `${type} linear trend` })).toBeTruthy();
+  }
+  await user.click(screen.getByLabelText("Scan type", { selector: "summary" }));
+  await user.click(screen.getByRole("checkbox", { name: "DAST", exact: true }));
+  expect(screen.queryByRole("img", { name: "DAST linear trend" })).toBeNull();
+  expect(screen.getByRole("img", { name: "DAST with SAST Leads linear trend" })).toBeTruthy();
+  await user.click(controls.getByRole("checkbox", { name: "SAST trendline" }));
+  expect(screen.queryByRole("img", { name: "SAST linear trend" })).toBeNull();
 });

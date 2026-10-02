@@ -519,6 +519,9 @@ class LLMProfile(SQLModel, table=True):
     __tablename__ = "llm_profile"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    # Core-owned identity for an extension-stored profile. All model settings
+    # remain in the extension database; this row lets existing run FKs select it.
+    extension_ref: Optional[str] = Field(default=None, index=True, unique=True)
     name: str = Field(default="Default", index=True)
     is_active: bool = Field(default=False, index=True)
     # The Model used for any role without an explicit override.

@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
@@ -324,10 +325,12 @@ def create_campaign(
         if session.get(LLMConfig, payload.llm_config_id) is None:
             raise InvalidCampaignState("LLM model not found")
     if payload.llm_profile_id is not None:
-        from aespa.models import LLMProfile
+        from aespa.services.settings_profiles import get_scan_profile
 
-        if session.get(LLMProfile, payload.llm_profile_id) is None:
-            raise InvalidCampaignState("Scan profile not found")
+        try:
+            get_scan_profile(session, payload.llm_profile_id)
+        except HTTPException as exc:
+            raise InvalidCampaignState(str(exc.detail)) from exc
 
     mapper_config = session.get(ComponentMapperConfig, 1)
     campaign = AssessmentCampaign(

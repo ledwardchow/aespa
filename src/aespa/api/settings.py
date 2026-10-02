@@ -302,6 +302,14 @@ def list_llm_providers(
     return provider_settings.list_llm_providers(session)
 
 
+@router.get("/llm/extension-catalog")
+def list_extension_llm_catalog() -> dict[str, list[dict]]:
+    """Read extension-owned LLM settings for display in the settings screen."""
+    from aespa.extensions import get_extension_manager
+
+    return get_extension_manager().llm_catalog_items()
+
+
 @router.post("/llm/providers", response_model=LLMProviderConfigOut)
 def create_llm_provider(
     payload: LLMProviderConfigIn,

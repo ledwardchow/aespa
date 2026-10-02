@@ -78,6 +78,11 @@ export function ProvidersList({ visible, providers, models, busyId, onEdit, onDe
         <div className="settings-list-row" key={p.id}>
           <div>
             <strong>{p.name}</strong>
+            {p.extension_id && (
+              <span className="settings-extension-label" title={`Stored in ${p.extension_name}`}>
+                Extension storage
+              </span>
+            )}
           </div>
           <div>{API_FORMAT_LABELS[p.api_format] || p.api_format}</div>
           <div className="mono">
@@ -85,16 +90,24 @@ export function ProvidersList({ visible, providers, models, busyId, onEdit, onDe
           </div>
           <div>{configuredModelCounts.get(p.id) || 0}</div>
           <div className="row settings-list-actions">
-            <button className="btn sm" disabled={busyId === p.id} onClick={() => onEdit(p)}>
-              Edit
-            </button>
-            <button
-              className="btn danger-outline sm"
-              disabled={busyId === p.id}
-              onClick={() => onDeleteProvider(p)}
-            >
-              Delete
-            </button>
+            {p.extension_id ? (
+              <span className="subtle" title="Manage this provider in its extension">
+                Managed by extension
+              </span>
+            ) : (
+              <>
+                <button className="btn sm" disabled={busyId === p.id} onClick={() => onEdit(p)}>
+                  Edit
+                </button>
+                <button
+                  className="btn danger-outline sm"
+                  disabled={busyId === p.id}
+                  onClick={() => onDeleteProvider(p)}
+                >
+                  Delete
+                </button>
+              </>
+            )}
           </div>
         </div>
       ))}

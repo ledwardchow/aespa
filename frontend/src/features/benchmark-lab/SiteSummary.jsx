@@ -26,7 +26,8 @@ const modelName = (result) => shortModelName(result.scan_models?.primary);
 
 const money = (value) =>
   value == null ? "Cost unavailable" : `$${value.toFixed(value > 0 && value < 0.01 ? 4 : 2)}`;
-const SCAN_TYPES = ["DAST", "SAST+DAST", "SAST"];
+const SCAN_TYPES = ["DAST", "DAST with SAST Leads", "SAST"];
+const TYPE_TREND_COLORS = ["#56b4a9", "#e4a35c", "#b89be7"];
 const MODEL_COLORS = [
   "#5b8def",
   "#d8894a",
@@ -79,6 +80,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
   const tooltipId = useId();
   const plotClipId = useId();
   const [excludedTrendModels, setExcludedTrendModels] = useState([]);
+  const [enabledTrendTypes, setEnabledTrendTypes] = useState([]);
   const [hovered, setHovered] = useState(null);
   const showDetails = (event, result) => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -89,7 +91,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
     });
   };
   const [excludedModels, setExcludedModels] = useState([]);
-  const [kinds, setKinds] = useState({ DAST: true, "SAST+DAST": true, SAST: true });
+  const [kinds, setKinds] = useState({ DAST: true, "DAST with SAST Leads": true, SAST: true });
   const graphResults = useMemo(
     () => results.filter((result) => result.summary.full + result.summary.partial > 0),
     [results],
@@ -116,6 +118,19 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
       linearFit(
         plotted
           .filter((result) => modelName(result) === name)
+          .map((result) => ({
+            x: axisValue(result),
+            y: result.summary.full + result.summary.partial,
+          })),
+      ),
+    ]),
+  );
+  const typeFits = new Map(
+    SCAN_TYPES.map((type) => [
+      type,
+      linearFit(
+        plotted
+          .filter((result) => scanType(result.run_kind, result.scan_models) === type)
           .map((result) => ({
             x: axisValue(result),
             y: result.summary.full + result.summary.partial,
@@ -152,18 +167,34 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
   const x = (value) =>
     plot.left + ((value - minValue) / (maxValue - minValue)) * (plot.right - plot.left);
   const y = (count) => plot.bottom - (count / maxFindings) * (plot.bottom - plot.top);
-  const trends = trendModels.flatMap((name) => {
-    const fit = fits.get(name);
-    return fit
-      ? [
-          {
-            name,
-            start: { x: x(fit.start.x), y: y(fit.start.y) },
-            end: { x: x(fit.end.x), y: y(fit.end.y) },
-          },
-        ]
-      : [];
-  });
+  const trends = trendModels
+    .flatMap((name) => {
+      const fit = fits.get(name);
+      return fit
+        ? [
+            {
+              name,
+              start: { x: x(fit.start.x), y: y(fit.start.y) },
+              end: { x: x(fit.end.x), y: y(fit.end.y) },
+            },
+          ]
+        : [];
+    })
+    .concat(
+      enabledTrendTypes.flatMap((type) => {
+        const fit = typeFits.get(type);
+        return fit
+          ? [
+              {
+                name: `type:${type}`,
+                label: type,
+                start: { x: x(fit.start.x), y: y(fit.start.y) },
+                end: { x: x(fit.end.x), y: y(fit.end.y) },
+              },
+            ]
+          : [];
+      }),
+    );
   const trendLabels = placeTrendLabels(
     trends,
     plotted.map((result) => ({
@@ -315,6 +346,35 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                         </g>
                       );
                     })}
+                    {enabledTrendTypes.map((type) => {
+                      const fit = typeFits.get(type);
+                      if (!fit) return null;
+                      const color = TYPE_TREND_COLORS[SCAN_TYPES.indexOf(type)];
+                      const label = trendLabels.get(`type:${type}`);
+                      return (
+                        <g
+                          key={type}
+                          role="img"
+                          aria-label={`${type} linear trend`}
+                          className={styles.trend}
+                        >
+                          <line
+                            x1={x(fit.start.x)}
+                            y1={y(fit.start.y)}
+                            x2={x(fit.end.x)}
+                            y2={y(fit.end.y)}
+                            stroke={color}
+                            strokeWidth="3"
+                            clipPath={`url(#${plotClipId})`}
+                          />
+                          {label && (
+                            <text x={label.x} y={label.y} style={{ fill: color }}>
+                              {type}
+                            </text>
+                          )}
+                        </g>
+                      );
+                    })}
                     {plotted.map((result) => (
                       <Point
                         key={result.id}
@@ -358,6 +418,30 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                   </span>
                 ))}
               </div>
+              <div className={styles.typeTrends} role="group" aria-label="Scan type trendlines">
+                <span>Trendlines</span>
+                {SCAN_TYPES.map((type, index) => (
+                  <label key={type}>
+                    <input
+                      type="checkbox"
+                      aria-label={`${type} trendline`}
+                      checked={enabledTrendTypes.includes(type)}
+                      onChange={(event) =>
+                        setEnabledTrendTypes((current) =>
+                          event.target.checked
+                            ? [...current, type]
+                            : current.filter((item) => item !== type),
+                        )
+                      }
+                    />
+                    <span
+                      className={styles.typeTrendLine}
+                      style={{ backgroundColor: TYPE_TREND_COLORS[index] }}
+                    />
+                    {type}
+                  </label>
+                ))}
+              </div>
               <div className="benchmark-chart-legend" aria-label="Model legend">
                 {models
                   .filter((name) => !excludedModels.includes(name))
@@ -393,7 +477,8 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
           )}
         </section>
       )}
-      {showChart && hovered &&
+      {showChart &&
+        hovered &&
         visible.some((result) => result.id === hovered.result.id) &&
         createPortal(
           <div

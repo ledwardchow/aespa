@@ -349,6 +349,18 @@
   color: var(--text);
 }
 
+.settings-extension-label {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+
 .settings-list-row > div {
   min-width: 0;
   overflow: hidden;
