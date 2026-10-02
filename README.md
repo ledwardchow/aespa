@@ -31,16 +31,16 @@ You will need to provide:
 
 ## Performance
 
-Here's are [two](docs/results/juice-shop-results.md) [comparisons](docs/results/results-comparison.md) of this scanner, run against the [Bank of Ed](https://github.com/ledwardchow/BankOfEd/tree/vulnerable-version):
+Here are comparisons of this scanner against [Juice Shop](https://github.com/ledwardchow/vulnerable-app-info/blob/main/JuiceShop/juice-shop-results.md) and [Bank of Ed](https://github.com/ledwardchow/vulnerable-app-info/blob/main/BankOfEd/results-comparison.md):
 
 - AESPA + Sonnet 4.6 
 - Claude Code + Sonnet 4.6
 - Codex + GPT 5.5 
 - Claude Code + Qwen3.6-35b-A3b
 
-And a [comparison](docs/results/vuln-scanner-comparison.md) of a single (specialist agents turned off) vs multi-agent scan. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
+The [single-agent versus multi-agent comparison](https://github.com/ledwardchow/vulnerable-app-info/blob/main/BankOfEd/vuln-scanner-comparison.md) covers Bank of Ed. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
 
-Also, scan results for [VAmPI](docs/results/vampi/vampi.md).
+Also, scan results for [VAmPI](https://github.com/ledwardchow/vulnerable-app-info/blob/main/VAmPI/vampi.md).
 
 ## Documentation
 
