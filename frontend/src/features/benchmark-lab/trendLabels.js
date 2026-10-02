@@ -34,7 +34,7 @@ export function placeTrendLabels(trends, points, plot) {
   const labels = new Map();
   for (const trend of trends) {
     // Leave room for the text stroke and use a generous estimate of glyph width.
-    const width = trend.name.length * 7 + 8;
+    const width = (trend.label || trend.name).length * 7 + 8;
     const height = 20;
     const candidates = [];
     for (let top = plot.top + 4; top + height <= plot.bottom - 4; top += 12) {

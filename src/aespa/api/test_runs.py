@@ -202,10 +202,9 @@ def create_test_run(
         if session.get(LLMConfig, payload.llm_config_id) is None:
             raise HTTPException(status_code=404, detail="LLM model not found")
     if payload.llm_profile_id is not None:
-        from aespa.models import LLMProfile
+        from aespa.services.settings_profiles import get_scan_profile
 
-        if session.get(LLMProfile, payload.llm_profile_id) is None:
-            raise HTTPException(status_code=404, detail="Scan profile not found")
+        get_scan_profile(session, payload.llm_profile_id)
     name = payload.name or _auto_name(session, site_id)
     policy = settings_service.get_scanner_policy(session)
     run = TestRun(
@@ -453,10 +452,9 @@ def update_test_run(
         if session.get(LLMConfig, payload.llm_config_id) is None:
             raise HTTPException(status_code=404, detail="LLM model not found")
     if payload.llm_profile_id is not None:
-        from aespa.models import LLMProfile
+        from aespa.services.settings_profiles import get_scan_profile
 
-        if session.get(LLMProfile, payload.llm_profile_id) is None:
-            raise HTTPException(status_code=404, detail="Scan profile not found")
+        get_scan_profile(session, payload.llm_profile_id)
     run.llm_config_id = payload.llm_config_id
     run.llm_profile_id = payload.llm_profile_id
     session.add(run)

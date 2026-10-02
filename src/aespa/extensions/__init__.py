@@ -15,8 +15,20 @@ from aespa.extensions.runtime import (
     WebScanResult,
     get_extension_manager,
 )
+from aespa.services.extension_llm_catalog import (
+    ExtensionLLMCatalog,
+    ExtensionLLMModel,
+    ExtensionLLMProfile,
+    ExtensionLLMProvider,
+    ExtensionLLMSnapshot,
+)
 
 __all__ = [
+    "ExtensionLLMCatalog",
+    "ExtensionLLMModel",
+    "ExtensionLLMProfile",
+    "ExtensionLLMProvider",
+    "ExtensionLLMSnapshot",
     "ExtensionRegistry",
     "ExtensionDataStore",
     "ExtensionSecretStore",

@@ -38,14 +38,15 @@ export function SettingsPage({
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [profItems, modelItems, providerItems] = await Promise.all([
+      const [profItems, modelItems, providerItems, extensionItems] = await Promise.all([
         settingsApi.listLLMProfiles(),
         settingsApi.listLLMModels(),
         settingsApi.listLLMProviders(),
+        settingsApi.listExtensionLLMCatalog(),
       ]);
       setProfiles(profItems);
-      setModels(modelItems);
-      setProviders(providerItems);
+      setModels([...modelItems, ...extensionItems.models]);
+      setProviders([...providerItems, ...extensionItems.providers]);
     } catch (e) {
       setError(e.message);
     }
@@ -54,6 +55,7 @@ export function SettingsPage({
     load();
   }, [load]);
   const loaded = profiles && models && providers;
+  const savedModels = (models || []).filter((item) => !item.extension_id);
   const editing = loaded
     ? section === "profiles"
       ? profiles.find((item) => item.id === itemId)
@@ -196,7 +198,7 @@ export function SettingsPage({
   const noun = TAB_NOUN[section];
   const title =
     screen === "new" ? `New LLM ${noun}` : screen === "edit" ? `Edit LLM ${noun}` : `LLM ${noun}s`;
-  const canCreateProfile = (models || []).length > 0;
+  const canCreateProfile = savedModels.length > 0;
   const newDisabled = section === "profiles" && !canCreateProfile;
   const visibleTab = section === "models" ? "providers" : section;
   const missingItem = loaded && screen === "edit" && !editing;
@@ -264,7 +266,7 @@ export function SettingsPage({
         {loaded && section === "profiles" && screen === "new" && (
           <ScanProfileForm
             mode="new"
-            models={models}
+            models={savedModels}
             onSaved={onSaved}
             onCancel={profiles.length ? onCancel : null}
           />
@@ -273,7 +275,7 @@ export function SettingsPage({
           <ScanProfileForm
             mode="edit"
             profile={editing}
-            models={models}
+            models={savedModels}
             onSaved={onSaved}
             onCancel={onCancel}
           />
@@ -281,8 +283,8 @@ export function SettingsPage({
         {loaded && section === "models" && screen === "new" && (
           <LLMModelForm
             mode="new"
-            providers={providers}
-            modelConfigs={models}
+            providers={providers.filter((item) => !item.extension_id)}
+            modelConfigs={savedModels}
             initialProviderId={initialProviderId}
             initialModel={initialModel}
             onSaved={onSaved}
@@ -293,8 +295,8 @@ export function SettingsPage({
           <LLMModelForm
             mode="edit"
             profile={editing}
-            providers={providers}
-            modelConfigs={models}
+            providers={providers.filter((item) => !item.extension_id)}
+            modelConfigs={savedModels}
             onSaved={onSaved}
             onCancel={onCancel}
           />
@@ -302,8 +304,8 @@ export function SettingsPage({
         {loaded && section === "providers" && screen === "new" && (
           <LLMProviderForm
             mode="new"
-            models={models}
-            profiles={profiles}
+            models={savedModels}
+            profiles={profiles.filter((item) => !item.extension_id)}
             onSaved={onSaved}
             onCancel={providers.length ? onCancel : null}
           />
@@ -312,8 +314,8 @@ export function SettingsPage({
           <LLMProviderForm
             mode="edit"
             provider={editing}
-            models={models}
-            profiles={profiles}
+            models={savedModels}
+            profiles={profiles.filter((item) => !item.extension_id)}
             onConfigureModel={(modelName, configuredModel) =>
               onConfigureProviderModel(editing, modelName, configuredModel)
             }

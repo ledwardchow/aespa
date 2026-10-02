@@ -29,6 +29,12 @@ from sqlmodel import create_engine as create_sqlmodel_engine
 from aespa.config import BUNDLED_EXTENSIONS_DIR, get_settings
 from aespa.db import get_engine
 from aespa.models import ExtensionSecret, ExtensionSetting
+from aespa.services.extension_llm_catalog import (
+    ExtensionLLMCatalog,
+    resolve_model,
+    snapshot_out,
+    validate_snapshot,
+)
 
 log = logging.getLogger(__name__)
 _UTC = timezone.utc
@@ -429,6 +435,16 @@ class ExtensionRegistry:
     def register_source_provider(self, provider: SourceProvider) -> None:
         self._manager._register_source_provider(self._extension_id, provider)
 
+    def register_llm_catalog(self, catalog: ExtensionLLMCatalog) -> None:
+        """Publish LLM settings read from this extension's isolated storage."""
+        self._manager._register_llm_catalog(self._extension_id, catalog)
+
+    def resolve_llm_profile(self, profile_key: str, role: str | None = None):
+        """Resolve an extension profile for a call through AESPA's LLM service."""
+        return self._manager.resolve_extension_llm_profile(
+            self._extension_id, profile_key, role
+        )
+
     def register_web_active_scanner(self, scanner: WebActiveScanner) -> None:
         self._manager._register_web_active_scanner(self._extension_id, scanner)
 
@@ -461,6 +477,7 @@ class ExtensionManager:
     def __init__(self) -> None:
         self.extensions: dict[str, ExtensionRecord] = {}
         self.source_providers: dict[str, RegisteredSourceProvider] = {}
+        self.llm_catalogs: dict[str, ExtensionLLMCatalog] = {}
         self.web_scanners: dict[str, RegisteredWebScanner] = {}
         self.api_apps: dict[str, RegisteredApiApp] = {}
         self.data_stores: dict[str, ExtensionDataStore] = {}
@@ -475,6 +492,7 @@ class ExtensionManager:
             store.dispose()
         self.extensions.clear()
         self.source_providers.clear()
+        self.llm_catalogs.clear()
         self.web_scanners.clear()
         self.api_apps.clear()
         self.data_stores.clear()
@@ -676,6 +694,7 @@ class ExtensionManager:
                 if registered.extension_id == record.id:
                     self.web_scanners.pop(scanner_id, None)
             self.api_apps.pop(record.id, None)
+            self.llm_catalogs.pop(record.id, None)
             store = self.data_stores.pop(record.id, None)
             if store is not None:
                 store.dispose()
@@ -699,6 +718,56 @@ class ExtensionManager:
         self.source_providers[descriptor.id] = RegisteredSourceProvider(
             extension_id=extension_id, provider=provider
         )
+
+    def _register_llm_catalog(
+        self, extension_id: str, catalog: ExtensionLLMCatalog
+    ) -> None:
+        record = self.extensions[extension_id]
+        if "llm.catalog" not in record.capabilities:
+            raise ValueError("llm.catalog is missing from extension.toml")
+        if not record.data_namespace:
+            raise ValueError("llm.catalog requires data_namespace in extension.toml")
+        if extension_id in self.llm_catalogs:
+            raise ValueError("An extension may register only one LLM catalog")
+        validate_snapshot(extension_id, catalog.snapshot())
+        self.llm_catalogs[extension_id] = catalog
+
+    def llm_catalog_items(self) -> dict[str, list[dict]]:
+        self.ensure_loaded()
+        result: dict[str, list[dict]] = {"providers": [], "models": [], "profiles": []}
+        for extension_id, catalog in self.llm_catalogs.items():
+            try:
+                record = self.extensions[extension_id]
+                items = snapshot_out(extension_id, record.name, catalog.snapshot())
+                for kind in result:
+                    result[kind].extend(items[kind])
+            except Exception:
+                log.exception("Could not read LLM catalog for %s", extension_id)
+        return result
+
+    def resolve_extension_llm_model(self, extension_id: str, model_key: str):
+        """Return a validated LLM config for an extension-owned model."""
+        self.ensure_loaded()
+        catalog = self.llm_catalogs[extension_id]
+        snapshot = catalog.snapshot()
+        validate_snapshot(extension_id, snapshot)
+        return resolve_model(snapshot, model_key)
+
+    def resolve_extension_llm_profile(
+        self, extension_id: str, profile_key: str, role: str | None = None
+    ):
+        self.ensure_loaded()
+        snapshot = self.llm_catalogs[extension_id].snapshot()
+        validate_snapshot(extension_id, snapshot)
+        profile = next(
+            (item for item in snapshot.profiles if item.key == profile_key), None
+        )
+        if profile is None:
+            raise KeyError(profile_key)
+        model_key = profile.role_models.get(role or "")
+        if model_key is None and role == "mentor":
+            model_key = profile.role_models.get("test_lead")
+        return resolve_model(snapshot, model_key or profile.default_model_key)
 
     def _register_web_active_scanner(
         self, extension_id: str, scanner: WebActiveScanner

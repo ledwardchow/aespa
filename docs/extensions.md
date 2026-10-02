@@ -11,6 +11,7 @@ An extension is trusted Python code loaded inside the AESPA process. API `1` sup
 | `sast.source_provider` | A source provider that prepares a ZIP of code for a SAST run | Run creation, background preparation, archive validation, storage, and scan startup |
 | `web.active_scanner` | A scanner that selects web scan candidates and returns issues | Target scope checks, scheduling, cancellation, activity events, and finding storage |
 | `api.routes` | A FastAPI router exposed below `/extension/<extension-id>/` | Stable dispatch, enable/disable isolation, and route removal |
+| `llm.catalog` | CLI or SDK based LLM providers, models, and profiles read from the extension's own database | Validation, read-only display in LLM Settings, and resolution to an AESPA LLM config for extension calls |
 
 An extension may also register settings fields without another capability. Extension code may read AESPA's primary database but must not write to or change it, directly or through a core service that changes core records. Store extension-owned data in the separate extension database. AESPA core handles changes to scan records, extension settings and secrets, and usage records. Calls through AESPA's LLM service may record usage in the primary database. Extensions do not add tables or migrations to the primary database and do not inject frontend code. Extensions run with AESPA's process permissions, so only install code you trust. This is a code rule, not a process-level security boundary.
 
@@ -50,7 +51,7 @@ data_namespace = "acme_repository"
 | `author` | Optional author name shown in the Extensions table and settings page. If the extension uses secrets, it is required and must match the ID pattern above. It does not have to match the author folder name. |
 | `version` | Extension version shown in the UI. Defaults to `0.0.0`. |
 | `entrypoint` | `file.py:callable` within the extension directory. Defaults to `extension.py:create_extension`. |
-| `capabilities` | List of capabilities the extension offers. Declare `web.active_scanner` before registering a web scanner. Declare `sast.source_provider` for a source provider. |
+| `capabilities` | List of capabilities the extension offers. Declare `web.active_scanner` before registering a web scanner, `sast.source_provider` for a source provider, or `llm.catalog` for an LLM catalog. |
 | `secrets_namespace` | Required if any setting has type `secret`. Give a value matching the ID pattern above. AESPA prefixes it with `author`, so this example stores secrets in `acme.repository`. The full name must be unique across extensions. |
 | `enabled_by_default` | Boolean. Defaults to `true`. A saved enable or disable choice takes precedence. |
 | `data_namespace` | Required before an extension can request a data store. Use lowercase letters, numbers, and underscores. Every table in that database must start with `<data_namespace>_`. |
@@ -76,7 +77,17 @@ def create_extension():
     return AcmeExtension()
 ```
 
-The registry supports `register_source_provider(provider)`, `register_web_active_scanner(scanner)`, `register_api_router(router)`, `data_store(metadata)`, and `register_settings_fields(fields, schema_version=1)`. `registry.secrets` provides the extension's declared secret namespace. A source provider or scanner can declare its own `settings_fields`; do not register the same key twice. Provider IDs must be unique among source providers, and scanner IDs among web scanners.
+The registry supports `register_source_provider(provider)`, `register_web_active_scanner(scanner)`, `register_api_router(router)`, `register_llm_catalog(catalog)`, `data_store(metadata)`, and `register_settings_fields(fields, schema_version=1)`. `registry.secrets` provides the extension's declared secret namespace. A source provider or scanner can declare its own `settings_fields`; do not register the same key twice. Provider IDs must be unique among source providers, and scanner IDs among web scanners.
+
+## Extension LLM catalogs
+
+Declare `llm.catalog` and `data_namespace` in `extension.toml`. Create tables in the extension database with `registry.data_store(metadata)`, then register an object with a synchronous `snapshot()` method. The snapshot must return `ExtensionLLMSnapshot` containing `ExtensionLLMProvider`, `ExtensionLLMModel`, and `ExtensionLLMProfile` values, imported from `aespa.extensions`. Read those values from the extension database each time `snapshot()` is called so changes appear without restarting AESPA. Keep each `key` stable within its kind; profiles refer to model keys and models refer to provider keys.
+
+Only `bedrock`, `bedrock_mantle`, `openai_codex`, `github_copilot`, `factory_droid`, `google_vertex`, and `google_antigravity` can appear in an extension catalog. The catalog types have no API-key field. CLI login, SDK credentials, and cloud application credentials stay with their respective tools and environments. A Google Vertex provider must specify its project ID. AESPA validates model names, references, and token limits before exposing or resolving a snapshot.
+
+The catalog appears in Settings → LLM Profiles and Providers with an Extension storage label. AESPA assigns each extension profile a stable core identity so it can be selected for web, API, SAST, and campaign scans. Profile definitions and model settings remain in extension storage. Users can set an extension profile as the global default, but edit or delete it only through its extension. If the extension is disabled or removes a selected profile, starting or resuming a scan with that profile fails with an availability error. The ordinary `/api/settings/llm/profiles` endpoint includes available extension profiles; `/api/settings/llm/extension-catalog` supplies extension providers and models for display. Disabling an extension removes its entries from the lists while retaining its database and existing run references.
+
+Extension code can call `registry.resolve_llm_profile(profile_key, role)` after registration to obtain a `ResolvedLLMConfig` for AESPA's LLM service. Role overrides take precedence over the profile default; Mentor inherits the Test Lead override. Resolution reads the latest extension snapshot and does not write to AESPA's main database. LLM service calls may still record normal usage there.
 
 ## Extension API routes and data
 

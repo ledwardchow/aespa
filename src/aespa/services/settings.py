@@ -297,6 +297,20 @@ def _model_for_profile_role(
     session: Session, prof: LLMProfile, role: str | None
 ) -> ResolvedLLMConfig | None:
     """Resolve a role model, with Mentor inheriting Test Lead before default."""
+    if prof.extension_ref:
+        from aespa.extensions import get_extension_manager
+
+        _, extension_id, kind, profile_key = prof.extension_ref.split(":", 3)
+        if kind != "profile":
+            raise RuntimeError("Extension scan profile reference is invalid")
+        try:
+            return get_extension_manager().resolve_extension_llm_profile(
+                extension_id, profile_key, role
+            )
+        except (KeyError, ValueError) as exc:
+            raise RuntimeError(
+                f"Extension scan profile '{prof.name}' is unavailable. Enable or repair its extension before scanning."
+            ) from exc
     model_id: int | None = None
     role_models = _json_loads(prof.role_models_json, {})
     if role is not None:

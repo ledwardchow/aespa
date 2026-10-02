@@ -352,10 +352,9 @@ async def create_standalone_sast_run(
     from aespa.services import sast_scanner
 
     if llm_profile_id is not None:
-        from aespa.models import LLMProfile
+        from aespa.services.settings_profiles import get_scan_profile
 
-        if session.get(LLMProfile, llm_profile_id) is None:
-            raise HTTPException(status_code=404, detail="Scan profile not found")
+        get_scan_profile(session, llm_profile_id)
 
     run = sast_scanner.create_sast_run(
         collection_id=None,
@@ -388,10 +387,9 @@ async def create_sast_run_from_source(
             detail="Analysis mode must be either 'light' or 'deep'.",
         )
     if payload.llm_profile_id is not None:
-        from aespa.models import LLMProfile
+        from aespa.services.settings_profiles import get_scan_profile
 
-        if session.get(LLMProfile, payload.llm_profile_id) is None:
-            raise HTTPException(status_code=404, detail="Scan profile not found")
+        get_scan_profile(session, payload.llm_profile_id)
 
     from aespa.extensions import get_extension_manager
     from aespa.services import sast_scanner, sast_sources
@@ -542,10 +540,9 @@ def update_sast_run(
             detail="Cannot change the model profile while the SAST scan is running",
         )
     if payload.llm_profile_id is not None:
-        from aespa.models import LLMProfile
+        from aespa.services.settings_profiles import get_scan_profile
 
-        if session.get(LLMProfile, payload.llm_profile_id) is None:
-            raise HTTPException(status_code=404, detail="Scan profile not found")
+        get_scan_profile(session, payload.llm_profile_id)
     run.llm_profile_id = payload.llm_profile_id
     run.updated_at = datetime.now(_UTC)
     session.add(run)

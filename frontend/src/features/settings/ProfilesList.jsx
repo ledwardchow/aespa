@@ -67,6 +67,11 @@ export function ProfilesList({ visible, profiles, models, busyId, onActivate, on
           <div className="settings-list-row" key={p.id}>
             <div>
               <strong>{p.name}</strong>
+              {p.extension_id && (
+                <span className="settings-extension-label" title={`Stored in ${p.extension_name}`}>
+                  Extension storage
+                </span>
+              )}
             </div>
             <div className="mono">
               {p.default_model_name || (p.default_model_id ? `#${p.default_model_id}` : "—")}
@@ -82,16 +87,24 @@ export function ProfilesList({ visible, profiles, models, busyId, onActivate, on
               >
                 {p.is_active ? "Is currently default" : "Set as default"}
               </button>
-              <button className="btn sm" disabled={busyId === p.id} onClick={() => onEdit(p)}>
-                Edit
-              </button>
-              <button
-                className="btn danger-outline sm"
-                disabled={busyId === p.id}
-                onClick={() => onDelete(p)}
-              >
-                Delete
-              </button>
+              {p.extension_id ? (
+                <span className="subtle" title="Edit this profile in its extension">
+                  Managed by extension
+                </span>
+              ) : (
+                <>
+                  <button className="btn sm" disabled={busyId === p.id} onClick={() => onEdit(p)}>
+                    Edit
+                  </button>
+                  <button
+                    className="btn danger-outline sm"
+                    disabled={busyId === p.id}
+                    onClick={() => onDelete(p)}
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
             </div>
           </div>
         ))}

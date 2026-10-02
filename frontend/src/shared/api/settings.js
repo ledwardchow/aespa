@@ -31,6 +31,8 @@ export const deleteLLMProfile = (id) =>
 
 export const listLLMProviders = () => req("/api/settings/llm/providers");
 
+export const listExtensionLLMCatalog = () => req("/api/settings/llm/extension-catalog");
+
 export const createLLMProvider = (b) =>
   req("/api/settings/llm/providers", { method: "POST", body: b });
 

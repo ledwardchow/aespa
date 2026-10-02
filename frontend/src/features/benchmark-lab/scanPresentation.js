@@ -1,6 +1,6 @@
 export function scanType(runKind, scanModels) {
   if (runKind === "sast") return "SAST";
-  return scanModels?.sast?.length ? "SAST+DAST" : "DAST";
+  return scanModels?.sast?.length ? "DAST with SAST Leads" : "DAST";
 }
 
 export function scanModelLabel(runKind, scanModels) {
