@@ -68,6 +68,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
+- **Dependency updates**: Updated AnyIO to 4.14.2 and PyJWT to 2.14.0, matching the Dependabot updates already merged into main.
+
 - **Scan reference documents**: Scan reports, comparisons, and ground-truth files now live in the vulnerable-app-info repository. Links from the README and project site point to their new locations.
 - **Bank of Ed ground truth**: Added an expanded 38-finding benchmark dataset, preserving the original 23 IDs and adding 15 findings supported by saved scan evidence and source review. Companion notes explain the evidence, source-only confirmations, and claims excluded from the dataset.
 - **Test suite cleanup**: Repeated coverage, specialist dispatch, scan mode, and proof-of-concept checks now share test cases. Redundant and overly specific console animation checks have been removed.
