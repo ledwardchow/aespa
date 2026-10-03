@@ -32,6 +32,7 @@ def test_resolving_and_serializing_does_not_change_saved_profile(db_session: Ses
         base_url="https://provider.example/v1",
         username="provider-user",
         project_id="provider-project",
+        location="provider-location",
     )
     db_session.add(provider)
     db_session.flush()
@@ -42,6 +43,7 @@ def test_resolving_and_serializing_does_not_change_saved_profile(db_session: Ses
         base_url="https://stored.example",
         username="stored-user",
         project_id="stored-project",
+        location="stored-location",
         model="test-model",
         is_active=True,
     )
@@ -59,6 +61,7 @@ def test_resolving_and_serializing_does_not_change_saved_profile(db_session: Ses
     assert resolved.base_url == "https://provider.example/v1"
     assert resolved.username == "provider-user"
     assert resolved.project_id == "provider-project"
+    assert resolved.location == "provider-location"
     assert profile.model_dump() == before
     assert profile not in db_session.dirty
     assert response.api_key is None

@@ -31,6 +31,8 @@ export const deleteLLMProfile = (id) =>
 
 export const listLLMProviders = () => req("/api/settings/llm/providers");
 
+export const listExtensionLLMCatalog = () => req("/api/settings/llm/extension-catalog");
+
 export const createLLMProvider = (b) =>
   req("/api/settings/llm/providers", { method: "POST", body: b });
 
@@ -94,14 +96,6 @@ export const getComponentMapperConfig = () => req("/api/settings/component-mappe
 
 export const upsertComponentMapperConfig = (b) =>
   req("/api/settings/component-mapper-config", { method: "PUT", body: b });
-
-export const getBurpRestApiConfig = () => req("/api/settings/burp-rest-api");
-
-export const upsertBurpRestApiConfig = (b) =>
-  req("/api/settings/burp-rest-api", { method: "PUT", body: b });
-
-export const testBurpConnection = () =>
-  req("/api/settings/burp-rest-api/test-connection", { method: "POST" });
 
 export const getUpstreamProxy = () => req("/api/settings/upstream-proxy");
 

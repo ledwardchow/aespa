@@ -10,6 +10,7 @@ export function LLMModelForm({
   mode,
   profile,
   providers,
+  modelConfigs = [],
   initialProviderId,
   initialModel,
   onSaved,
@@ -59,6 +60,15 @@ export function LLMModelForm({
     }
   };
   const selectedProvider = providers.find((p) => p.id === Number(form.provider_id));
+  const limitsForModel = (providerId, modelName) => {
+    const configured = modelConfigs.find(
+      (item) => item.provider_id === Number(providerId) && item.model === modelName,
+    );
+    return {
+      max_tpm: configured?.max_tpm ?? "",
+      max_rpm: configured?.max_rpm ?? "",
+    };
+  };
   const models = useMemo(
     () => sortModelNames(selectedProvider?.models),
     [selectedProvider?.models],
@@ -70,8 +80,9 @@ export function LLMModelForm({
     storedCapability.context_window_tokens || storedCapability.context_length || 0,
   );
   const hasStoredContext = storedContext >= 1024;
+  const hasStoredEfforts = Array.isArray(storedCapability.supported_efforts);
   useEffect(() => {
-    if (!selectedProvider || !form.model || hasStoredContext) {
+    if (!selectedProvider || !form.model || (hasStoredContext && hasStoredEfforts)) {
       setDiscoveredCapabilities({});
       setLoadingCapabilities(false);
       return undefined;
@@ -99,7 +110,7 @@ export function LLMModelForm({
     return () => {
       cancelled = true;
     };
-  }, [selectedProvider, models, form.model, hasStoredContext]);
+  }, [selectedProvider, models, form.model, hasStoredContext, hasStoredEfforts]);
   const capability = {
     ...(discoveredCapabilities[form.model] || {}),
     ...storedCapability,
@@ -150,6 +161,7 @@ export function LLMModelForm({
                 provider_id: newProviderId,
                 model: newModel,
                 reasoning_effort: "",
+                ...limitsForModel(newProviderId, newModel),
               };
               if (!nameTouched || !form.name.trim()) {
                 updates.name =
@@ -177,6 +189,7 @@ export function LLMModelForm({
               const updates = {
                 model: newModel,
                 reasoning_effort: "",
+                ...limitsForModel(form.provider_id, newModel),
               };
               if (!nameTouched || !form.name.trim()) {
                 const provider = providers.find((p) => p.id === Number(form.provider_id));
@@ -194,10 +207,11 @@ export function LLMModelForm({
           </select>
         </div>
         <div className="field">
-          <label>
+          <label htmlFor="model-config-thinking-level">
             Thinking level <span className="field-optional">(optional)</span>
           </label>
           <select
+            id="model-config-thinking-level"
             className="select"
             value={form.reasoning_effort || ""}
             onChange={(e) => upd({ reasoning_effort: e.target.value })}
@@ -321,6 +335,38 @@ export function LLMModelForm({
                   temperature: e.target.value,
                 })
               }
+            />
+          </div>
+        </div>
+        <div className="divider" />
+        <div className="form-section-title">
+          Rate Limits <span className="field-optional">(optional)</span>
+        </div>
+        <div className="field-hint">
+          Pace requests for this provider and model pair. Saved configurations using the same pair
+          share these limits.
+        </div>
+        <div className="two-col">
+          <div className="field">
+            <label htmlFor="model-max-tpm">Max Tokens Per Minute (TPM)</label>
+            <input
+              id="model-max-tpm"
+              type="number"
+              min="1"
+              placeholder="Unlimited"
+              value={form.max_tpm}
+              onChange={(e) => upd({ max_tpm: e.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="model-max-rpm">Max Requests Per Minute (RPM)</label>
+            <input
+              id="model-max-rpm"
+              type="number"
+              min="1"
+              placeholder="Unlimited"
+              value={form.max_rpm}
+              onChange={(e) => upd({ max_rpm: e.target.value })}
             />
           </div>
         </div>

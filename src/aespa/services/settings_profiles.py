@@ -127,29 +127,84 @@ def delete_llm_profile(session: Session, profile_id: int) -> None:
 
 
 def list_scan_profiles(session: Session) -> list[LLMProfile]:
+    available = _sync_extension_profiles(session)
     return list(
-        session.exec(select(LLMProfile).order_by(LLMProfile.updated_at.desc())).all()
+        profile
+        for profile in session.exec(
+            select(LLMProfile).order_by(LLMProfile.updated_at.desc())
+        ).all()
+        if profile.extension_ref is None or profile.extension_ref in available
     )
+
+
+def _extension_profile_items() -> dict[str, dict]:
+    from aespa.extensions import get_extension_manager
+
+    return {
+        item["id"]: item
+        for item in get_extension_manager().llm_catalog_items()["profiles"]
+    }
+
+
+def _sync_extension_profiles(session: Session) -> dict[str, dict]:
+    """Keep only stable core identity rows; definitions stay in extension storage."""
+    items = _extension_profile_items()
+    existing = {
+        profile.extension_ref: profile
+        for profile in session.exec(
+            select(LLMProfile).where(LLMProfile.extension_ref != None)  # noqa: E711
+        ).all()
+    }
+    changed = False
+    for ref, item in items.items():
+        profile = existing.get(ref)
+        if profile is None:
+            profile = LLMProfile(extension_ref=ref, name=item["name"])
+            session.add(profile)
+            changed = True
+        elif profile.name != item["name"]:
+            profile.name = item["name"]
+            profile.updated_at = _utcnow()
+            session.add(profile)
+            changed = True
+    if changed:
+        session.commit()
+    return items
 
 
 def get_scan_profile(session: Session, profile_id: int) -> LLMProfile:
     prof = session.get(LLMProfile, profile_id)
     if prof is None:
         raise HTTPException(status_code=404, detail="Scan profile not found")
+    if prof.extension_ref and prof.extension_ref not in _extension_profile_items():
+        raise HTTPException(
+            status_code=409, detail="Extension scan profile is unavailable"
+        )
     return prof
 
 
 def create_scan_profile(session: Session, payload: LLMProfileIn) -> LLMProfile:
     prof = LLMProfile()
     return _apply_scan_profile(
-        session, prof, payload, activate=(len(list_scan_profiles(session)) == 0)
+        session, prof, payload, activate=(get_active_profile_id(session) is None)
     )
+
+
+def get_active_profile_id(session: Session) -> int | None:
+    active = session.exec(
+        select(LLMProfile).where(LLMProfile.is_active == True)  # noqa: E712
+    ).first()
+    return active.id if active else None
 
 
 def update_scan_profile(
     session: Session, profile_id: int, payload: LLMProfileIn
 ) -> LLMProfile:
     prof = get_scan_profile(session, profile_id)
+    if prof.extension_ref:
+        raise HTTPException(
+            status_code=409, detail="Manage this profile in its extension"
+        )
     return _apply_scan_profile(session, prof, payload, activate=prof.is_active)
 
 
@@ -165,6 +220,10 @@ def activate_scan_profile(session: Session, profile_id: int) -> LLMProfile:
 
 def delete_scan_profile(session: Session, profile_id: int) -> None:
     prof = get_scan_profile(session, profile_id)
+    if prof.extension_ref:
+        raise HTTPException(
+            status_code=409, detail="Manage this profile in its extension"
+        )
     was_active = prof.is_active
 
     # A profile can be selected explicitly on any run type (or campaign). The
@@ -180,9 +239,7 @@ def delete_scan_profile(session: Session, profile_id: int) -> None:
     session.delete(prof)
     session.commit()
     if was_active:
-        replacement = session.exec(
-            select(LLMProfile).order_by(LLMProfile.updated_at.desc())
-        ).first()
+        replacement = next(iter(list_scan_profiles(session)), None)
         if replacement is not None:
             activate_scan_profile(session, replacement.id)
 
@@ -232,13 +289,35 @@ def _ensure_unique_scan_profile_name(
 ) -> None:
     normalized = name.strip().casefold()
     for p in session.exec(select(LLMProfile)).all():
-        if p.id != current_id and p.name.strip().casefold() == normalized:
+        if (
+            p.extension_ref is None
+            and p.id != current_id
+            and p.name.strip().casefold() == normalized
+        ):
             raise HTTPException(
                 status_code=409, detail="A profile with that name already exists"
             )
 
 
 def llm_profile_out(session: Session, prof: LLMProfile) -> LLMProfileOut:
+    if prof.extension_ref:
+        item = _extension_profile_items().get(prof.extension_ref)
+        if item is None:
+            raise HTTPException(
+                status_code=409, detail="Extension scan profile is unavailable"
+            )
+        return LLMProfileOut(
+            id=prof.id,
+            name=item["name"],
+            is_active=prof.is_active,
+            extension_id=item["extension_id"],
+            extension_name=item["extension_name"],
+            default_model_id=item["default_model_id"],
+            default_model_name=item["default_model_name"],
+            role_models=item["role_models"],
+            role_model_names=item["role_model_names"],
+            updated_at=prof.updated_at,
+        )
     role_models = {
         k: int(v)
         for k, v in _json_loads(prof.role_models_json, {}).items()
@@ -287,7 +366,11 @@ def _apply_llm_config(
     cfg.base_url = provider.base_url
     cfg.username = provider.username
     cfg.project_id = provider.project_id
+    cfg.aws_profile = provider.aws_profile
+    cfg.location = provider.location
     cfg.model = payload.model
+    cfg.max_tpm = payload.max_tpm
+    cfg.max_rpm = payload.max_rpm
     cfg.max_tokens = payload.max_tokens
     if payload.max_context_tokens is None:
         cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
@@ -316,6 +399,22 @@ def _apply_llm_config(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     cfg.updated_at = _utcnow()
+
+    # Limits belong to the provider/model pair. Duplicate saved configurations
+    # share one limiter, so keep their persisted values consistent as well.
+    peer_models = session.exec(
+        select(LLMConfig).where(
+            LLMConfig.provider_id == payload.provider_id,
+            LLMConfig.model == payload.model,
+        )
+    ).all()
+    for peer in peer_models:
+        if peer.id == cfg.id:
+            continue
+        peer.max_tpm = payload.max_tpm
+        peer.max_rpm = payload.max_rpm
+        peer.updated_at = cfg.updated_at
+        session.add(peer)
 
     if cfg.is_active:
         for profile in session.exec(select(LLMConfig)).all():

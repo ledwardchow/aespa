@@ -72,7 +72,7 @@ _sast_stop_requested: set[int] = set()
 _sast_pause_requested: set[int] = set()
 
 # Candidates accumulated by write_lead within a single scan task.
-# sast_run_id → list of candidate dicts (awaiting filter_lead scoring).
+# sast_run_id → list of scored candidate dicts awaiting independent validation.
 _candidates: dict[int, list[dict]] = {}
 
 # Max characters in a single read_file response.
@@ -98,7 +98,6 @@ _PHASES = (
     "attack_path",
     "report",
 )
-_SAST_VALIDATOR_MAX_CONCURRENT = 4
 _SAST_NETWORK_RETRY_DELAYS = (1.0, 2.0, 4.0)
 _SESSION_AUTHENTICATED_LLM_PROVIDERS = {
     "codex",
@@ -106,6 +105,7 @@ _SESSION_AUTHENTICATED_LLM_PROVIDERS = {
     "github_copilot",
     "factory_droid",
     "google_antigravity",
+    "google_vertex",
     "bedrock",
     "bedrock_mantle",
     "azure_openai",
@@ -284,8 +284,11 @@ def _incomplete_discovery_workers(sast_run_id: int) -> list[SastWorker]:
 
 
 def has_resumable_sast_work(sast_run_id: int) -> bool:
-    """Return whether a terminal Deep run has failed durable workers."""
-    return bool(_incomplete_discovery_workers(sast_run_id))
+    """Return whether a terminal Deep run has durable unfinished work."""
+    candidates = _restore_candidate_state(sast_run_id)
+    return bool(
+        _incomplete_discovery_workers(sast_run_id) or _pending_candidate_ids(candidates)
+    )
 
 
 async def _run_checkpointed_agent(
@@ -862,6 +865,10 @@ _LANGUAGE_BY_SUFFIX = {
     ".rb": "Ruby",
     ".php": "PHP",
     ".cs": "C#",
+    ".vb": "Visual Basic",
+    ".cshtml": "Razor",
+    ".razor": "Razor",
+    ".aspx": "ASP.NET Web Forms",
     ".c": "C/C++",
     ".cc": "C/C++",
     ".cpp": "C/C++",
@@ -1023,6 +1030,20 @@ def _run_read_tool(
 # ── Tool executor factory ─────────────────────────────────────────────────────
 
 
+def _related_leads_hint(sast_run_id: int, candidate: dict) -> str:
+    related = semantic_svc.related_candidate_summary(
+        _candidates.get(sast_run_id, []), candidate
+    )
+    if not related:
+        return ""
+    return (
+        "\nOther open leads cite the same files:\n"
+        + related
+        + "\nIf one change at the same fix location closes this lead and one of "
+        "these, call merge_lead. Keep leads separate when each needs its own fix."
+    )
+
+
 def _make_tool_executor(
     sast_run_id: int,
     root: Path,
@@ -1034,13 +1055,12 @@ def _make_tool_executor(
     semantic_planning: dict[str, Any] | None = None,
     semantic_obligation_keys: set[str] | None = None,
     discovery_strategy: str = "threat_directed",
-    min_confidence: float = CONFIDENCE_THRESHOLD,
 ):
     """Return an async tool_executor closure for the SAST agentic loop.
 
     Handles: list_files / glob / read_file / grep / write_lead / filter_lead / done.
-    Candidates are stored in _candidates[sast_run_id]; filter_lead records the
-    discovery agent's confidence before independent validation.
+    Candidates are stored in _candidates[sast_run_id]. write_lead records the
+    discovery score atomically; filter_lead can revise it before validation.
     """
     if initial_candidates is not None or sast_run_id not in _candidates:
         _candidates[sast_run_id] = list(initial_candidates or [])
@@ -1077,9 +1097,22 @@ def _make_tool_executor(
             if assigned_worker_id is None:
                 return "Error: this agent has no assigned work program."
             return json.dumps(
-                workprogram_svc.worker_payload(assigned_worker_id),
+                workprogram_svc.work_program_view(assigned_worker_id),
                 ensure_ascii=False,
             )
+
+        if tool_name == "claim_traced_sink":
+            if assigned_worker_id is None:
+                return "Error: this agent cannot claim sink work."
+            try:
+                line = int(tool_input.get("line"))
+            except (TypeError, ValueError):
+                return "Error: give the exact sink line number."
+            claimed, message = workprogram_svc.claim_traced_sinks(
+                assigned_worker_id, str(tool_input.get("path") or ""), line
+            )
+            assigned_items.update(claimed)
+            return message if claimed else f"Error: {message}"
 
         if tool_name == "record_disposition":
             work_item_id = int(tool_input.get("work_item_id", -1))
@@ -1125,6 +1158,22 @@ def _make_tool_executor(
                 return (
                     "Error: write_lead requires a work_item_id assigned to this worker."
                 )
+            try:
+                confidence = float(tool_input["confidence"])
+            except (KeyError, TypeError, ValueError):
+                return (
+                    "Error: write_lead requires a numeric confidence from 0.0 to 1.0."
+                )
+            confidence_reasoning = str(
+                tool_input.get("confidence_reasoning") or ""
+            ).strip()
+            if not 0.0 <= confidence <= 1.0:
+                return "Error: write_lead confidence must be between 0.0 and 1.0."
+            if not confidence_reasoning:
+                return "Error: write_lead requires confidence_reasoning."
+            anchor_error = semantic_svc.lead_anchor_error(tool_input, root=root)
+            if anchor_error:
+                return f"Error: {anchor_error}"
             if assigned_worker_id is not None:
                 disposition_ok, disposition_message = (
                     workprogram_svc.record_disposition(
@@ -1133,7 +1182,12 @@ def _make_tool_executor(
                         reasoning=str(
                             tool_input.get("description", "Candidate recorded.")
                         ),
-                        trace=[tool_input.get("source_trace") or {}],
+                        trace=[
+                            {
+                                "source": tool_input.get("source_trace") or {},
+                                "sink": tool_input.get("sink_trace") or {},
+                            }
+                        ],
                         controls=_normalize_tool_list(tool_input.get("controls")),
                         evidence=[str(tool_input.get("evidence", ""))],
                         candidate_from_lead=True,
@@ -1151,56 +1205,53 @@ def _make_tool_executor(
             )
             source_trace = tool_input.get("source_trace") or {}
             sink_trace = tool_input.get("sink_trace") or {}
-            reconciliation_key = semantic_svc.fingerprint(
-                category,
-                source_trace.get("path") or location,
-                sink_trace.get("path") or location,
-                " ".join(
-                    sorted(semantic_svc._tokens(tool_input.get("description", "")))
-                ),
+            reconciliation_key = semantic_svc.candidate_reconciliation_key(
+                {**tool_input, "source_trace": source_trace, "sink_trace": sink_trace}
             )
-            existing = next(
-                (
-                    item
-                    for item in _candidates[sast_run_id]
-                    if item.get("fingerprint") == fingerprint
-                    or item.get("reconciliation_key") == reconciliation_key
-                    or (
-                        item.get("title") == title
-                        and item.get("category") == category
-                        and item.get("location") == location
-                    )
-                ),
-                None,
+            fix_hint = str(tool_input.get("fix_location") or "").strip()
+            root_cause_hint = str(tool_input.get("root_cause") or "").strip()
+            observation = {
+                **{
+                    key: value
+                    for key, value in tool_input.items()
+                    if key not in {"fix_location", "root_cause"}
+                },
+                "discovery_fix_location": fix_hint,
+                "discovery_root_cause": root_cause_hint,
+                "fingerprint": fingerprint,
+                "source_trace": source_trace,
+                "sink_trace": sink_trace,
+                "root_causes": _normalize_tool_list(tool_input.get("root_causes")),
+                "proof_gaps": _normalize_tool_list(tool_input.get("proof_gaps")),
+                "controls": _normalize_tool_list(tool_input.get("controls")),
+                "confidence": confidence,
+                "provenance": [assigned_worker_id] if assigned_worker_id else [],
+                "locations": [location] if location else [],
+                "source_work_item_ids": [work_item_id] if work_item_id >= 0 else [],
+                "semantic_obligation_keys": [
+                    str(key)
+                    for key in _normalize_tool_list(tool_input.get("obligation_keys"))
+                    if str(key) in assigned_semantic
+                ],
+            }
+            existing = semantic_svc.find_existing_candidate(
+                _candidates[sast_run_id], observation
             )
             if existing is not None:
-                existing["evidence"] = "\n\n".join(
-                    dict.fromkeys(
-                        filter(
-                            None,
-                            [existing.get("evidence"), tool_input.get("evidence")],
-                        )
-                    )
-                )[:12000]
-                existing["locations"] = list(
-                    dict.fromkeys(
-                        existing.get("locations", []) + ([location] if location else [])
-                    )
-                )[:20]
-                existing["provenance"] = list(
-                    dict.fromkeys(
-                        existing.get("provenance", [])
-                        + ([assigned_worker_id] if assigned_worker_id else [])
-                    )
+                semantic_svc.absorb_candidate_observation(existing, observation)
+                existing.setdefault("merge_decisions", []).append(
+                    {
+                        "work_item_id": work_item_id,
+                        "stage": "discovery",
+                        "reason": "Same weakness and structured source-to-sink operation as an existing lead.",
+                        "location": location,
+                    }
                 )
-                existing["proof_gaps"] = list(
-                    dict.fromkeys(
-                        existing.get("proof_gaps", [])
-                        + _normalize_tool_list(tool_input.get("proof_gaps"))
-                    )
-                )[:20]
+                if not existing.get("filter_reasoning"):
+                    existing["filter_reasoning"] = confidence_reasoning
                 if work_item_id >= 0 and existing.get("lead_id"):
                     workprogram_svc.attach_lead(work_item_id, int(existing["lead_id"]))
+                _sync_candidate_to_db(sast_run_id, collection_id, existing)
                 _persist_candidate_state(sast_run_id)
                 reference = existing.get("reference") or f"#{existing['candidate_id']}"
                 return (
@@ -1220,6 +1271,8 @@ def _make_tool_executor(
             candidate = {
                 "candidate_id": cid,
                 "source_work_item_id": work_item_id if work_item_id >= 0 else None,
+                "source_work_item_ids": [work_item_id] if work_item_id >= 0 else [],
+                "observation_count": 1,
                 "semantic_obligation_keys": [
                     str(key)
                     for key in _normalize_tool_list(tool_input.get("obligation_keys"))
@@ -1237,13 +1290,16 @@ def _make_tool_executor(
                 "evidence": str(tool_input.get("evidence", "")),
                 "suggested_endpoint": str(tool_input.get("suggested_endpoint", "")),
                 "source_trace": source_trace,
-                "controls": tool_input.get("controls") or [],
+                "controls": _normalize_tool_list(tool_input.get("controls")),
                 "sink_trace": sink_trace,
-                "proof_gaps": tool_input.get("proof_gaps") or [],
+                "proof_gaps": _normalize_tool_list(tool_input.get("proof_gaps")),
+                "discovery_fix_location": fix_hint,
+                "discovery_root_cause": root_cause_hint,
                 "reconciliation_key": reconciliation_key,
                 "provenance": [assigned_worker_id] if assigned_worker_id else [],
                 "locations": [location] if location else [],
-                "confidence": None,  # set by filter_lead
+                "confidence": confidence,
+                "filter_reasoning": confidence_reasoning,
                 "validation_status": "pending",
                 "validation_reasoning": "",
                 "counterevidence": [],
@@ -1266,7 +1322,47 @@ def _make_tool_executor(
                 },
             )
             reference = candidate.get("reference") or f"#{cid}"
-            return f"Lead {reference} recorded. Now call filter_lead with lead_reference={reference}."
+            kept = confidence >= CONFIDENCE_THRESHOLD
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "sast_filter",
+                    "status": "running",
+                    "message": (
+                        f"Discovery {'SUPPORTED' if kept else 'LOW CONFIDENCE'} lead "
+                        f"{reference}: {candidate['title']} (confidence={confidence:.0%})"
+                    ),
+                },
+            )
+            if on_candidate_ready is not None:
+                on_candidate_ready(candidate)
+            return f"Lead {reference} recorded with confidence={confidence:.0%}." + (
+                _related_leads_hint(sast_run_id, candidate)
+            )
+
+        if tool_name == "merge_lead":
+            ok, message, canonical, duplicate = semantic_svc.merge_candidate_by_worker(
+                _candidates.get(sast_run_id, []),
+                lead_reference=tool_input.get("lead_reference"),
+                into_reference=tool_input.get("into_lead_reference"),
+                reason=tool_input.get("reason"),
+            )
+            if not ok or canonical is None or duplicate is None:
+                return f"Error: {message}"
+            _sync_candidate_to_db(sast_run_id, collection_id, canonical)
+            _sync_candidate_to_db(sast_run_id, collection_id, duplicate)
+            _persist_candidate_state(sast_run_id)
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "sast_filter",
+                    "status": "running",
+                    "message": message,
+                },
+            )
+            return message
 
         if tool_name == "filter_lead":
             lead_reference = str(tool_input.get("lead_reference") or "").strip()
@@ -1292,7 +1388,7 @@ def _make_tool_executor(
             match["filter_reasoning"] = reasoning
             _sync_candidates_to_db(sast_run_id, collection_id)
             _persist_candidate_state(sast_run_id)
-            kept = confidence >= min_confidence
+            kept = confidence >= CONFIDENCE_THRESHOLD
             events_svc.emit(
                 sast_run_id,
                 {
@@ -1397,9 +1493,9 @@ def _reconcile_candidate_ledger(sast_run_id: int) -> dict[str, int]:
     """Annotate candidates with semantic clusters while preserving IDs.
 
     Validator checkpoints and legacy exports refer to candidate IDs, so the
-    reconciliation receipt deliberately keeps those IDs stable. Duplicate
-    suppression occurs at creation; this pass retains every contributing
-    location/provenance for reporting and closure.
+    reconciliation receipt deliberately keeps those IDs stable. This pass
+    catches duplicates that discovery did not match at creation and retains
+    their locations and evidence for validation and reporting.
     """
 
     candidates = _candidates.get(sast_run_id, [])
@@ -1437,52 +1533,15 @@ def _reconcile_candidate_ledger(sast_run_id: int) -> dict[str, int]:
                 split.get("category"), split.get("location"), root_cause
             )
             candidates.append(split)
-    reconciled, stats = semantic_svc.reconcile_candidates(candidates)
+    stats = semantic_svc.reconcile_candidate_ledger(candidates)
+    stats["online_merged"] = sum(
+        max(0, int(candidate.get("observation_count") or 1) - 1)
+        for candidate in candidates
+    )
     stats["split"] = sum(
         bool(candidate.get("split_from_candidate_id") is not None)
         for candidate in candidates
     )
-    clusters = {
-        item.get("reconciliation_key"): item
-        for item in reconciled
-        if item.get("reconciliation_key")
-    }
-    canonical_by_key: dict[str, dict] = {}
-    for candidate in candidates:
-        trace = candidate.get("source_trace") or {}
-        sink = candidate.get("sink_trace") or {}
-        key = semantic_svc.fingerprint(
-            candidate.get("category"),
-            trace.get("path") or candidate.get("location"),
-            sink.get("path") or candidate.get("location"),
-            " ".join(sorted(semantic_svc._tokens(candidate.get("description")))),
-        )
-        cluster = clusters.get(key)
-        candidate["reconciliation_key"] = key
-        if cluster is not None:
-            candidate["provenance"] = cluster.get("provenance", [])
-            candidate["locations"] = cluster.get("locations", [])
-            candidate["merged_candidate_ids"] = cluster.get("merged_candidate_ids", [])
-        canonical = canonical_by_key.get(key)
-        if canonical is None:
-            canonical_by_key[key] = candidate
-        else:
-            candidate.update(
-                {
-                    "reconciled_duplicate": True,
-                    "reconciled_into_candidate_id": canonical.get("candidate_id"),
-                    "validation_status": "dismissed",
-                    "validation_reasoning": (
-                        "Merged into an equivalent root-cause hypothesis before validation."
-                    ),
-                    "reportable": False,
-                }
-            )
-            canonical["evidence"] = "\n\n".join(
-                dict.fromkeys(
-                    filter(None, [canonical.get("evidence"), candidate.get("evidence")])
-                )
-            )[:12000]
     _persist_candidate_state(sast_run_id)
     return {key: int(value) for key, value in stats.items()}
 
@@ -1494,7 +1553,6 @@ def _make_review_executor(
     phase: str,
     collection_id: int | None = None,
     assigned_candidate_id: int | None = None,
-    min_confidence: float = CONFIDENCE_THRESHOLD,
 ):
     async def tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         if sast_run_id in _sast_stop_requested:
@@ -1565,10 +1623,14 @@ def _make_review_executor(
                         tool_input.get("counterevidence")
                     ),
                     "proof_gaps": _normalize_tool_list(tool_input.get("proof_gaps")),
-                    "reportable": verdict == "confirmed"
-                    and confidence >= min_confidence,
+                    "validated_root_cause": str(
+                        tool_input.get("validated_root_cause") or ""
+                    ).strip(),
+                    "fix_location": str(tool_input.get("fix_location") or "").strip(),
+                    "reportable": verdict == "confirmed",
                 }
             )
+            candidate.pop("validation_retry_pending", None)
             # A verdict completes the validator's research for this candidate.
             # Persist and announce it now instead of waiting for the validator's
             # entire agentic loop to finish so the UI can show progressive results.
@@ -1605,10 +1667,6 @@ def _apply_sast_policy(candidate: dict[str, Any], policy: Any) -> None:
         str(candidate.get("severity") or "low"), 1
     ) < severity_rank.get(policy.sast_min_severity, 1):
         reasons.append(f"severity is below policy minimum {policy.sast_min_severity}")
-    if float(candidate.get("confidence") or 0) < policy.sast_min_confidence:
-        reasons.append(
-            f"confidence is below policy minimum {policy.sast_min_confidence:.2f}"
-        )
     classification = str(candidate.get("classification") or "exploitable").casefold()
     if (
         classification in {"defense_in_depth", "defence_in_depth"}
@@ -1649,6 +1707,23 @@ def _normalize_tool_list(value: object) -> list:
     if value is None or value == "":
         return []
     if isinstance(value, list):
+        character_count = 0
+        while (
+            character_count < len(value)
+            and isinstance(value[character_count], str)
+            and len(value[character_count]) <= 1
+        ):
+            character_count += 1
+        if character_count >= 8:
+            text = "".join(value[:character_count])
+            try:
+                decoded = json.loads(text)
+            except json.JSONDecodeError:
+                decoded = text
+            return [
+                *(decoded if isinstance(decoded, list) else [decoded]),
+                *value[character_count:],
+            ]
         return value
     if isinstance(value, str):
         try:
@@ -1659,6 +1734,93 @@ def _normalize_tool_list(value: object) -> list:
     if isinstance(value, tuple):
         return list(value)
     return [value]
+
+
+def _close_unscored_candidates(candidates: list[dict]) -> int:
+    """Give legacy candidates without an atomic discovery score a final state."""
+    closed = 0
+    proof_gap = "Discovery ended before a confidence score was recorded."
+    for candidate in candidates:
+        if (
+            candidate.get("validation_status") == "pending"
+            and candidate.get("confidence") is None
+        ):
+            candidate["validation_status"] = "inconclusive"
+            candidate["validation_reasoning"] = proof_gap
+            candidate["proof_gaps"] = list(
+                dict.fromkeys(
+                    [*_normalize_tool_list(candidate.get("proof_gaps")), proof_gap]
+                )
+            )
+            candidate["reportable"] = False
+            closed += 1
+    return closed
+
+
+_VALIDATION_FAILED_GAPS = {
+    "Independent validator failed before closing this candidate.",
+    "Independent validator did not close this candidate.",
+}
+
+
+def _validation_incomplete(candidate: dict) -> bool:
+    """Tell unfinished validation apart from a validator's inconclusive verdict."""
+    if candidate.get("validation_status") != "inconclusive":
+        return False
+    if candidate.get("validation_retry_pending"):
+        return True
+    # Candidates saved before the retry flag existed.
+    reasoning = str(candidate.get("validation_reasoning") or "")
+    return reasoning.startswith("Validator failed:") or reasoning in {
+        "Validator returned no explicit verdict.",
+        "Scan stopped before validation completed.",
+    }
+
+
+def _reset_incomplete_validation(candidate: dict) -> None:
+    candidate.pop("validation_retry_pending", None)
+    candidate["validation_status"] = "pending"
+    candidate["validation_reasoning"] = ""
+    candidate["reportable"] = False
+    candidate["proof_gaps"] = [
+        gap
+        for gap in _normalize_tool_list(candidate.get("proof_gaps"))
+        if gap not in _VALIDATION_FAILED_GAPS
+    ]
+
+
+def _pending_candidate_ids(candidates: list[dict]) -> list[int]:
+    return [
+        int(candidate["candidate_id"])
+        for candidate in candidates
+        if (
+            candidate.get("validation_status") == "pending"
+            or _validation_incomplete(candidate)
+        )
+        and candidate.get("confidence") is not None
+        and not candidate.get("reconciled_duplicate")
+    ]
+
+
+def _checkpoint_stopped_validation(sast_run_id: int, current_phase: str) -> int:
+    """Save unfinished validation work and turn a stop into a resumable pause."""
+    if current_phase != "validation":
+        return 0
+    unfinished_ids = _pending_candidate_ids(_candidates.get(sast_run_id, []))
+    if not unfinished_ids:
+        return 0
+    message = (
+        f"Scan stopped with {len(unfinished_ids)} candidate(s) still requiring "
+        "validation. Resume to continue from the saved validator checkpoints."
+    )
+    _persist_candidate_state(sast_run_id)
+    _persist_paused_run(
+        sast_run_id,
+        phase=current_phase,
+        reason="user",
+        message=message,
+    )
+    return len(unfinished_ids)
 
 
 def _candidate_brief(candidates: list[dict], *, reportable_only: bool = False) -> str:
@@ -1762,7 +1924,7 @@ def _sync_candidate_to_db(
         severity=candidate.get("severity", "medium"),
         confidence=float(candidate.get("confidence") or 0.0),
         location=location,
-        evidence=candidate.get("evidence", ""),
+        evidence=semantic_svc.candidate_evidence(candidate),
         source="sast",
         fingerprint=lead_fingerprint(
             category=category,
@@ -1880,7 +2042,7 @@ def _build_initial_message(
     lines.append("")
     lines.append(
         "Begin with Phase 1 (project structure), then Phase 2 (trace each entry point), "
-        "then Phase 3 (write_lead + filter_lead for each candidate). "
+        "then Phase 3 (write_lead with confidence for each candidate). "
         "Call done when finished."
     )
     return "\n".join(lines)
@@ -2056,6 +2218,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "production_files": atlas_summary["files"]["production"],
                 "surface": atlas_summary["surface"],
                 "work_items": atlas_summary["work_items"]["total"],
+                "code_graph": atlas_summary.get("code_graph", {}),
             },
         )
 
@@ -2285,10 +2448,39 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             if _stop_check():
                 raise asyncio.CancelledError
 
-        validation_semaphore = asyncio.Semaphore(_SAST_VALIDATOR_MAX_CONCURRENT)
+        validation_semaphore = asyncio.Semaphore(
+            scanner_policy.sast_max_concurrent_llm_requests
+        )
         validation_scheduled: set[int] = set()
+        validation_restart_from_scratch: set[int] = set()
         validation_failures: list[int] = []
         validation_started = False
+        validation_finished: set[int] = set()
+        validation_progress_open = False
+
+        def _report_validation_progress() -> None:
+            if not validation_progress_open:
+                return
+            total = len(validation_scheduled)
+            done = len(validation_finished & validation_scheduled)
+            _set_phase(
+                sast_run_id,
+                "validation",
+                "running",
+                f"Validating reconciled candidates: {done} of {total} complete.",
+                {"candidates": total, "completed": done},
+            )
+
+        async def _validate_and_report(candidate_id: int) -> None:
+            nonlocal validation_progress_open
+            try:
+                await _validate_candidate(candidate_id)
+            except BaseException:
+                # A paused or stopped run owns the phase status from here on.
+                validation_progress_open = False
+                raise
+            validation_finished.add(candidate_id)
+            _report_validation_progress()
 
         async def _validate_candidate(candidate_id: int) -> None:
             agent_id = f"sast-validator-{candidate_id}"
@@ -2326,12 +2518,14 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                             "validation",
                             collection_id=run.collection_id,
                             assigned_candidate_id=candidate_id,
-                            min_confidence=scanner_policy.sast_min_confidence,
                         ),
                         emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
                         stop_check=_stop_check,
                         tools=SAST_VALIDATION_TOOLS,
-                        resume=resume,
+                        resume=(
+                            resume
+                            and candidate_id not in validation_restart_from_scratch
+                        ),
                         max_tool_calls=scanner_policy.sast_validator_budget,
                     )
                     _raise_if_stopped()
@@ -2378,7 +2572,9 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                                     "validation_retry_pending": True,
                                     "validation_reasoning": f"Validator failed: {exc}",
                                     "proof_gaps": [
-                                        *candidate.get("proof_gaps", []),
+                                        *_normalize_tool_list(
+                                            candidate.get("proof_gaps")
+                                        ),
                                         "Independent validator failed before closing this candidate.",
                                     ],
                                     "reportable": False,
@@ -2409,9 +2605,10 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     candidate.update(
                         {
                             "validation_status": "inconclusive",
+                            "validation_retry_pending": True,
                             "validation_reasoning": "Validator returned no explicit verdict.",
                             "proof_gaps": [
-                                *candidate.get("proof_gaps", []),
+                                *_normalize_tool_list(candidate.get("proof_gaps")),
                                 "Independent validator did not close this candidate.",
                             ],
                             "reportable": False,
@@ -2430,7 +2627,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 )
 
         def _schedule_candidate_validation(candidate: dict) -> None:
-            nonlocal validation_started
+            nonlocal validation_started, validation_progress_open
             candidate_id = int(candidate["candidate_id"])
             if candidate_id in validation_scheduled:
                 return
@@ -2444,13 +2641,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             )
             if not validation_started:
                 validation_started = True
-                _set_phase(
-                    sast_run_id,
-                    "validation",
-                    "running",
-                    "Validating reconciled candidates.",
-                    {"candidates": 1, "completed": 0},
-                )
+                validation_progress_open = True
                 events_svc.emit(
                     sast_run_id,
                     {
@@ -2465,10 +2656,11 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 )
             validation_tasks.append(
                 asyncio.create_task(
-                    _validate_candidate(candidate_id),
+                    _validate_and_report(candidate_id),
                     name=f"sast-validator-{sast_run_id}-{candidate_id}",
                 )
             )
+            _report_validation_progress()
 
         _candidates[sast_run_id] = (
             _restore_candidate_state(sast_run_id) if resume else []
@@ -2509,7 +2701,9 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 {"files_total": source_file_count},
             )
 
-            worker_semaphore = asyncio.Semaphore(4)
+            worker_semaphore = asyncio.Semaphore(
+                scanner_policy.sast_max_concurrent_llm_requests
+            )
             discovery_workers = workprogram_svc.worker_rows(sast_run_id)
             semantic_assignments: dict[int, set[str]] = {
                 int(worker.id): set()
@@ -2524,17 +2718,49 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 if worker_id != baseline_worker_id
             ] or assignment_ids
             if threat_worker_ids:
-                for index, packet in enumerate(semantic_planning.get("workers", [])):
-                    worker_id = threat_worker_ids[index % len(threat_worker_ids)]
-                    semantic_assignments[worker_id].update(
-                        str(key) for key in packet.get("obligation_keys", [])
+                assignment_loads: dict[int, int] = {}
+                for worker_id in threat_worker_ids:
+                    worker_payload = workprogram_svc.worker_payload(worker_id)
+                    work_items = list(worker_payload.get("work_items") or [])
+                    assigned_paths = {
+                        str(item.get("surface", {}).get("path"))
+                        for item in work_items
+                        if item.get("surface", {}).get("path")
+                    }
+                    assignment_loads[worker_id] = 3 * len(work_items) + 2 * len(
+                        assigned_paths
                     )
+                obligation_keys = [
+                    str(key)
+                    for packet in semantic_planning.get("workers", [])
+                    for key in packet.get("obligation_keys", [])
+                ]
+                for obligation_key in obligation_keys:
+                    worker_id = min(
+                        threat_worker_ids,
+                        key=lambda candidate: (
+                            assignment_loads[candidate],
+                            candidate,
+                        ),
+                    )
+                    semantic_assignments[worker_id].add(obligation_key)
+                    assignment_loads[worker_id] += 2
 
             async def _run_discovery_worker(worker: SastWorker) -> str:
                 if worker.id is None:
                     return "Worker has no persisted id."
                 if resume and worker.status == "complete":
                     return worker.summary or f"{worker.worker_key} already complete."
+                if (
+                    worker.class_group == "sink"
+                    and worker.status == "pending"
+                    and not workprogram_svc.unresolved_for_worker(worker.id)
+                ):
+                    summary = "All assigned sinks were reviewed by route workers."
+                    workprogram_svc.set_worker_status(
+                        worker.id, "complete", summary=summary
+                    )
+                    return summary
                 agent_id = f"sast-worker-{worker.id}"
                 role = f"SAST {worker.class_group.replace('_', ' ').title()} Worker"
                 _emit_agent_activity(
@@ -2562,6 +2788,38 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                             ),
                         }
                     assigned_count = len(payload.get("work_items") or [])
+                    minimum_budget = (
+                        scanner_policy.sast_baseline_budget
+                        if worker.id == baseline_worker_id
+                        else scanner_policy.sast_threat_budget
+                    )
+                    calculated_budget, budget_basis = (
+                        workprogram_svc.discovery_worker_budget(
+                            payload,
+                            security_check_count=len(
+                                semantic_payload.get("obligations") or []
+                            ),
+                            budget_mode=scanner_policy.sast_budget_mode,
+                            minimum=minimum_budget,
+                            maximum=scanner_policy.sast_worker_budget_max,
+                            is_baseline=worker.id == baseline_worker_id,
+                        )
+                    )
+                    tool_call_budget = worker.tool_call_budget or calculated_budget
+                    if resume and scanner_policy.sast_budget_mode == "adaptive":
+                        saved_checkpoint = _load_checkpoint(
+                            sast_run_id,
+                            "discovery",
+                            _checkpoint_key(worker.worker_key),
+                        )
+                        used_calls = int(saved_checkpoint.get("step_count") or 0)
+                        if used_calls >= tool_call_budget:
+                            tool_call_budget = min(1000, used_calls + calculated_budget)
+                            budget_basis["resume_from_step"] = used_calls
+                            budget_basis["additional_budget"] = calculated_budget
+                    workprogram_svc.set_worker_budget(
+                        worker.id, tool_call_budget, budget_basis
+                    )
                     _emit_agent_activity(
                         sast_run_id,
                         agent_id=agent_id,
@@ -2574,13 +2832,11 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     )
 
                     def _worker_done(_tool_input: dict, _calls: int):
-                        unresolved = workprogram_svc.unresolved_for_worker(worker.id)
-                        if unresolved:
-                            return (
-                                False,
-                                "Resolve these assigned work items before done: "
-                                + ", ".join(str(item) for item in unresolved[:50]),
-                            )
+                        unresolved_message = workprogram_svc.unresolved_items_message(
+                            worker.id
+                        )
+                        if unresolved_message:
+                            return False, unresolved_message
                         unresolved_semantic = [
                             item.get("obligation_key", "")
                             for item in semantic_payload.get("obligations", [])
@@ -2625,18 +2881,13 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                                     semantic_payload.get("strategy")
                                     or "threat_directed"
                                 ),
-                                min_confidence=scanner_policy.sast_min_confidence,
                             ),
                             emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
                             stop_check=_stop_check,
                             tools=SAST_TOOLS,
                             resume=resume,
                             done_check=_worker_done,
-                            max_tool_calls=(
-                                scanner_policy.sast_baseline_budget
-                                if worker.id == baseline_worker_id
-                                else scanner_policy.sast_threat_budget
-                            ),
+                            max_tool_calls=tool_call_budget,
                         )
                     except (
                         llm_svc.LLMQuotaPauseError,
@@ -2714,8 +2965,22 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     )
                     return summary
 
-            worker_summaries = await asyncio.gather(
-                *(_run_discovery_worker(worker) for worker in discovery_workers)
+            route_workers = [
+                worker for worker in discovery_workers if worker.class_group != "sink"
+            ]
+            sink_workers = [
+                worker for worker in discovery_workers if worker.class_group == "sink"
+            ]
+            worker_summaries = list(
+                await asyncio.gather(
+                    *(_run_discovery_worker(worker) for worker in route_workers)
+                )
+            )
+            _raise_if_stopped()
+            worker_summaries.extend(
+                await asyncio.gather(
+                    *(_run_discovery_worker(worker) for worker in sink_workers)
+                )
             )
             discovery_summary = "\n".join(worker_summaries)
             _raise_if_stopped()
@@ -2809,6 +3074,34 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             {"candidates": candidate_count},
         )
         reconciliation_stats = _reconcile_candidate_ledger(sast_run_id)
+        if not _phase_was_complete("reconciliation"):
+            semantic_result = await semantic_svc.reconcile_ambiguous_candidates(
+                candidates, llm_svc, llm_cfg_obj, root=root
+            )
+            reconciliation_stats["semantic_prevalidation"] = semantic_result
+            reconciliation_stats["merged"] += semantic_result["merged"]
+            reconciliation_stats["unique"] -= semantic_result["merged"]
+            fix_groups = await semantic_svc.group_candidates_by_fix(
+                candidates, llm_svc, llm_cfg_obj, root=root
+            )
+            reconciliation_stats["fix_groups"] = fix_groups
+            reconciliation_stats["merged"] += fix_groups["merged"]
+            reconciliation_stats["unique"] -= fix_groups["merged"]
+        else:
+            saved = saved_phases.get("reconciliation", {}).get("data", {})
+            if isinstance(saved, dict) and "fix_groups" in saved:
+                reconciliation_stats["fix_groups"] = saved["fix_groups"]
+            if isinstance(saved, dict) and "semantic_prevalidation" in saved:
+                reconciliation_stats["semantic_prevalidation"] = saved[
+                    "semantic_prevalidation"
+                ]
+        candidate_count = len(candidates)
+        unscored_count = _close_unscored_candidates(candidates)
+        if unscored_count:
+            completion_status = "partial"
+            completion_reasons.append(
+                f"{unscored_count} candidate(s) had no discovery confidence score"
+            )
         _sync_candidates_to_db(sast_run_id, run.collection_id)
         _persist_candidate_state(sast_run_id)
         _set_phase(
@@ -2825,17 +3118,20 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             raise RuntimeError(
                 "SAST source workspace disappeared before independent validation."
             )
-        if not _phase_was_complete("validation"):
+        validation_needs_work = not _phase_was_complete("validation") or bool(
+            _pending_candidate_ids(candidates)
+        )
+        if validation_needs_work:
             for candidate in candidates:
-                if candidate.pop("validation_retry_pending", False):
-                    candidate["validation_status"] = "pending"
-                    candidate["validation_reasoning"] = ""
-                    candidate["proof_gaps"] = [
-                        gap
-                        for gap in candidate.get("proof_gaps", [])
-                        if gap
-                        != "Independent validator failed before closing this candidate."
-                    ]
+                if _validation_incomplete(candidate):
+                    # A crashed validator resumes from its checkpoint; one that
+                    # ended without a verdict starts again from scratch.
+                    reasoning = str(candidate.get("validation_reasoning") or "")
+                    if not reasoning.startswith("Validator failed:"):
+                        validation_restart_from_scratch.add(
+                            int(candidate["candidate_id"])
+                        )
+                    _reset_incomplete_validation(candidate)
                 if (
                     candidate.get("validation_status") == "pending"
                     and candidate.get("confidence") is not None
@@ -2861,9 +3157,18 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 validated_count = sum(c.get("reportable", False) for c in candidates)
                 validation_summary = "No candidates required validation."
 
+            pending_candidate_ids = _pending_candidate_ids(candidates)
+            if pending_candidate_ids:
+                _persist_candidate_state(sast_run_id)
+                raise SastWorkerPause(
+                    f"{len(pending_candidate_ids)} candidate(s) still require validation. "
+                    "Resume the scan to continue them from their saved checkpoints."
+                )
+
             _sync_candidates_to_db(sast_run_id, run.collection_id)
             _persist_candidate_state(sast_run_id)
             _persist_coverage(sast_run_id, coverage)
+            validation_progress_open = False
             _set_phase(
                 sast_run_id,
                 "validation",
@@ -2951,7 +3256,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     initial_user_message=(
                         "Review the bounded closure queue below. Use source tools to verify it. "
                         "Call record_semantic_disposition for every security check. If source evidence "
-                        "supports a new distinct vulnerability, call write_lead then filter_lead; "
+                        "supports a new distinct vulnerability, call write_lead with confidence and "
+                        "confidence reasoning; "
                         "it will be independently validated. Do not call get_work_program.\n\n"
                         + json.dumps(closure_payload, ensure_ascii=False)
                     ),
@@ -2964,7 +3270,6 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                         semantic_planning=semantic_planning,
                         semantic_obligation_keys=unresolved_closure_keys,
                         discovery_strategy="closure",
-                        min_confidence=scanner_policy.sast_min_confidence,
                     ),
                     emit_fn=lambda evt: events_svc.emit(sast_run_id, evt),
                     stop_check=_stop_check,
@@ -3010,6 +3315,12 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
 
         if len(candidates) > candidates_before_closure:
             closure_reconciliation = _reconcile_candidate_ledger(sast_run_id)
+            unscored_count = _close_unscored_candidates(candidates)
+            if unscored_count:
+                completion_status = "partial"
+                completion_reasons.append(
+                    f"{unscored_count} closure candidate(s) had no discovery confidence score"
+                )
             for candidate in candidates:
                 if candidate.get(
                     "validation_status"
@@ -3018,6 +3329,12 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     _schedule_candidate_validation(candidate)
             if validation_tasks:
                 await asyncio.gather(*validation_tasks)
+                if validation_failures:
+                    _persist_candidate_state(sast_run_id)
+                    raise SastWorkerPause(
+                        f"{len(validation_failures)} candidate validator(s) failed. "
+                        "Resume the scan to continue them from their saved checkpoints."
+                    )
         else:
             closure_reconciliation = {
                 "input": len(candidates),
@@ -3025,6 +3342,16 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "merged": 0,
                 "split": 0,
             }
+
+        pending_candidate_ids = _pending_candidate_ids(candidates)
+        if pending_candidate_ids:
+            _persist_candidate_state(sast_run_id)
+            raise SastWorkerPause(
+                f"{len(pending_candidate_ids)} candidate(s) still require validation. "
+                "Resume the scan to continue them from their saved checkpoints."
+            )
+        candidate_count = len(candidates)
+        validated_count = sum(c.get("reportable", False) for c in candidates)
 
         resolved_model_warning_keys = {
             question
@@ -3051,6 +3378,17 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         )
         for candidate in candidates:
             _apply_sast_policy(candidate, scanner_policy)
+        final_merges = semantic_svc.reconcile_validated_candidates(candidates)
+        if not _phase_was_complete("attack_path"):
+            post_fix_groups = await semantic_svc.group_candidates_by_fix(
+                candidates, llm_svc, llm_cfg_obj, root=root, after_validation=True
+            )
+            final_merges += post_fix_groups["merged"]
+            semantic_closure["post_validation_fix_groups"] = post_fix_groups
+        if final_merges:
+            validated_count = sum(bool(c.get("reportable")) for c in candidates)
+            semantic_closure["post_validation_merged"] = final_merges
+            _persist_candidate_state(sast_run_id)
         _sync_candidates_to_db(sast_run_id, run.collection_id)
         _set_phase(
             sast_run_id,
@@ -3360,11 +3698,26 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             )
         else:
             log.info("SAST scan cancelled: sast_run_id=%s", sast_run_id)
+            if _checkpoint_stopped_validation(sast_run_id, current_phase):
+                events_svc.emit(
+                    sast_run_id,
+                    {
+                        "type": "agent_status",
+                        "agent_id": "sast-scanner",
+                        "role": "SAST Analyst",
+                        "status": "paused",
+                        "current_task": "Validation paused",
+                        "outcome": "resumable",
+                        "_persist": True,
+                    },
+                )
+                return
             total = 0
             if run is not None:
                 for candidate in _candidates.get(sast_run_id, []):
                     if candidate.get("validation_status") == "pending":
                         candidate["validation_status"] = "inconclusive"
+                        candidate["validation_retry_pending"] = True
                         candidate["validation_reasoning"] = (
                             "Scan stopped before validation completed."
                         )
@@ -3477,11 +3830,18 @@ def create_sast_run(
     document_id: int | None = None,
     source_archive_path: str | None = None,
     source_filename: str | None = None,
+    source_provider: str = "upload",
+    source_locator: str | None = None,
+    source_requested_ref: str | None = None,
+    source_revision: str | None = None,
+    source_archive_sha256: str | None = None,
+    source_metadata_json: str | None = None,
     llm_config_id: int | None = None,
     llm_profile_id: int | None = None,
     analysis_mode: str = "deep",
     triggered_by_run_type: str | None = None,
     triggered_by_run_id: int | None = None,
+    status: str = "pending",
 ) -> SastRun:
     """Create and persist a SastRun row. Does NOT start the scan.
 
@@ -3496,12 +3856,18 @@ def create_sast_run(
         document_id=document_id,
         source_archive_path=source_archive_path,
         source_filename=source_filename,
+        source_provider=source_provider,
+        source_locator=source_locator,
+        source_requested_ref=source_requested_ref,
+        source_revision=source_revision,
+        source_archive_sha256=source_archive_sha256,
+        source_metadata_json=source_metadata_json,
         llm_config_id=llm_config_id,
         llm_profile_id=llm_profile_id,
         analysis_mode=analysis_mode,
         triggered_by_run_type=triggered_by_run_type,
         triggered_by_run_id=triggered_by_run_id,
-        status="pending",
+        status=status,
         created_at=datetime.now(_UTC),
         updated_at=datetime.now(_UTC),
     )
@@ -3632,7 +3998,6 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
     if task is not None:
         _sast_stop_requested.add(sast_run_id)
         task.cancel()
-        _update_sast_run_status(sast_run_id, "cancelled")
         # This runs from an unscoped request handler; without the scope the
         # persisted agent_status row defaults to run_kind='web' and leaks into a
         # colliding web run (events.py has no id-keyed fallback any more).
@@ -3643,9 +4008,9 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
                     "type": "agent_status",
                     "agent_id": "sast-scanner",
                     "role": "SAST Analyst",
-                    "status": "idle",
-                    "current_task": "Scan stopped",
-                    "outcome": "stopped",
+                    "status": "stopping",
+                    "current_task": "Saving scan checkpoint",
+                    "outcome": None,
                     "_persist": True,
                 },
             )

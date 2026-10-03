@@ -410,7 +410,7 @@ function GlobalHttpHeadersSettings() {
   );
 }
 
-function PolicySettings({ Fields }) {
+export function PolicySettings({ Fields }) {
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -469,39 +469,6 @@ function PolicySettings({ Fields }) {
         </form>
       )}
     </>
-  );
-}
-
-export function GlobalPolicySubTabs({ tab, setTab }) {
-  return (
-    <div
-      className="activity-sub-tab-bar coverage-sub-tab-bar global-policy-sub-tab-bar"
-      role="tablist"
-      aria-label="Global agent settings"
-    >
-      <button
-        type="button"
-        role="tab"
-        id="global-scan-behaviour-tab"
-        aria-selected={tab === "scan-behaviour"}
-        aria-controls="global-scan-behaviour-panel"
-        className={"activity-sub-tab-btn" + (tab === "scan-behaviour" ? " active" : "")}
-        onClick={() => setTab("scan-behaviour")}
-      >
-        Scan Behaviour
-      </button>
-      <button
-        type="button"
-        role="tab"
-        id="global-headers-tab"
-        aria-selected={tab === "headers"}
-        aria-controls="global-headers-panel"
-        className={"activity-sub-tab-btn" + (tab === "headers" ? " active" : "")}
-        onClick={() => setTab("headers")}
-      >
-        HTTP Headers
-      </button>
-    </div>
   );
 }
 

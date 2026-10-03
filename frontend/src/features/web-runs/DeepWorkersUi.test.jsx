@@ -156,7 +156,7 @@ test("shows Deep worker traces inside Work Queue without a separate Workers tab"
   ).toBeGreaterThan(0);
 });
 
-test("hides the empty Burp row when the integration is disabled", () => {
+test("hides the empty Burp row without scan activity", () => {
   render(
     <ActivityAgents
       runId={1}
@@ -164,14 +164,13 @@ test("hides the empty Burp row when the integration is disabled", () => {
       run={{ coverage_mode: "standard", status: "complete" }}
       thinkingStatus={{ status: "complete" }}
       activityLog={[]}
-      burpIntegrationEnabled={false}
     />,
   );
 
   expect(screen.queryByText("Burp")).toBeNull();
 });
 
-test("keeps the Burp row when a disabled integration has scan activity", () => {
+test("keeps past Burp scan activity visible", () => {
   render(
     <ActivityAgents
       runId={1}
@@ -186,28 +185,11 @@ test("keeps the Burp row when a disabled integration has scan activity", () => {
       run={{ coverage_mode: "team", status: "complete" }}
       thinkingStatus={{ status: "complete" }}
       activityLog={[]}
-      burpIntegrationEnabled={false}
     />,
   );
 
   expect(screen.getByText("Burp")).toBeTruthy();
   expect(screen.getByText("1 scan complete")).toBeTruthy();
-});
-
-test("shows the empty Burp row when the integration is enabled", () => {
-  render(
-    <ActivityAgents
-      runId={1}
-      agents={[]}
-      run={{ coverage_mode: "deep", status: "complete" }}
-      thinkingStatus={{ status: "complete" }}
-      activityLog={[]}
-      burpIntegrationEnabled
-    />,
-  );
-
-  expect(screen.getByText("Burp")).toBeTruthy();
-  expect(screen.getByText("No active scan dispatched")).toBeTruthy();
 });
 
 test("minimizes an empty Alice chat while another agent is active", () => {

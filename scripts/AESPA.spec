@@ -8,7 +8,7 @@ from PyInstaller.utils.hooks import collect_all
 
 REPO_ROOT = Path(SPECPATH).resolve().parent
 
-datas = [('src/aespa/web', 'aespa/web'), ('src/aespa/services/data', 'aespa/services/data'), ('alembic.ini', '.'), ('alembic', 'alembic'), ('THIRD_PARTY_LICENSES.txt', '.'), ('LICENSE.txt', '.')]
+datas = [('src/aespa/web', 'aespa/web'), ('src/aespa/services/data', 'aespa/services/data'), ('extensions', 'extensions'), ('alembic.ini', '.'), ('alembic', 'alembic'), ('THIRD_PARTY_LICENSES.txt', '.'), ('LICENSE.txt', '.')]
 datas = [(str(REPO_ROOT / source), destination) for source, destination in datas]
 binaries = []
 hiddenimports = []
@@ -21,6 +21,9 @@ tmp_ret = collect_all('uvicorn')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('tiktoken')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('google.genai')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports += collect_submodules('google.auth')
 
 
 a = Analysis(

@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import sys
 from types import SimpleNamespace
@@ -8,9 +9,35 @@ from anthropic.types import TextBlock, ThinkingBlock, ToolUseBlock
 from pydantic import ValidationError
 from sqlmodel import Session, select
 
-from aespa.models import LLMConfig, LLMUsageMonth
+from aespa.models import LLMConfig, LLMUsageMonth, Site, TestRun
 from aespa.services import llm
 from aespa.services.resolved_llm_config import ResolvedLLMConfig
+
+
+def test_run_concurrency_gate_limits_provider_calls(monkeypatch):
+    monkeypatch.setattr(llm, "_read_run_concurrency_limit", lambda _kind: 2)
+    llm._run_concurrency_gates.clear()
+    active = 0
+    maximum = 0
+
+    async def one_call():
+        nonlocal active, maximum
+        async with llm._run_concurrency_slot():
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+
+    async def scenario():
+        llm.set_run_context(98765, emit_fn=None, run_kind="sast")
+        try:
+            await asyncio.gather(*(one_call() for _ in range(6)))
+        finally:
+            llm.clear_run_context()
+
+    asyncio.run(scenario())
+
+    assert maximum == 2
 
 
 def test_title_normalization_cannot_introduce_unauthenticated_claim(monkeypatch):
@@ -361,6 +388,38 @@ def test_limiter_oversized_estimate_does_not_hang():
     assert slept is False  # clamped to max_tokens; the full bucket satisfies it at once
 
 
+def test_model_limiters_are_shared_only_by_provider_and_model_pair():
+    llm._limiters.clear()
+    first = LLMConfig(
+        provider_id=10,
+        provider="openai",
+        model="shared-model",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+    duplicate = LLMConfig(
+        provider_id=10,
+        provider="openai",
+        model="shared-model",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+    other_connection = LLMConfig(
+        provider_id=20,
+        provider="openai",
+        model="shared-model",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+
+    first_limiter = llm.get_limiter_for_config(first)
+
+    assert first_limiter is llm.get_limiter_for_config(duplicate)
+    assert first_limiter is not llm.get_limiter_for_config(other_connection)
+    assert first_limiter.tpm == 120_000
+    assert first_limiter.rpm == 60
+
+
 def test_limiter_on_wait_fires_when_pacing(monkeypatch):
     # When the bucket is empty the next acquire must pace, and on_wait must fire
     # (before the sleep) so callers can tell the user it is not stuck.
@@ -547,6 +606,94 @@ def test_agentic_loop_normalizes_json_string_tool_input(monkeypatch):
     )
 
     assert received == [{"verdict": "confirmed", "reasoning": "Reproduced."}]
+
+
+def test_agentic_loop_answers_calls_skipped_after_rejected_done(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    seen_messages = []
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        seen_messages.append([dict(m) for m in messages])
+        if calls == 1:
+            blocks = [
+                {"type": "tool_use", "id": "d1", "name": "done", "input": {}},
+                {"type": "tool_use", "id": "r1", "name": "read_file", "input": {}},
+            ]
+        else:
+            blocks = [{"type": "tool_use", "id": "d2", "name": "done", "input": {}}]
+        return blocks, "tool_use", blocks
+
+    async def fake_tool_executor(name, tool_input, step):
+        return "ok"
+
+    def done_check(tool_input, step):
+        return (step > 2), "Not finished yet."
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+            done_check=done_check,
+        )
+    )
+
+    results = seen_messages[1][-1]["content"]
+    by_id = {r["tool_use_id"]: r["content"] for r in results}
+    assert by_id["d1"] == "Not finished yet."
+    assert by_id["r1"].startswith("Not run:")
+
+
+def test_agentic_loop_keeps_tool_output_up_to_shared_limit(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    seen_messages = []
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        seen_messages.append([dict(m) for m in messages])
+        name = "read_file" if calls == 1 else "done"
+        blocks = [{"type": "tool_use", "id": f"c{calls}", "name": name, "input": {}}]
+        return blocks, "tool_use", blocks
+
+    big = "x" * 20_000 + "TAIL" + "y" * (llm.TOOL_RESULT_CHAR_LIMIT)
+
+    async def fake_tool_executor(name, tool_input, step):
+        return big
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+        )
+    )
+
+    content = seen_messages[1][-1]["content"][0]["content"]
+    assert llm.TOOL_RESULT_CHAR_LIMIT >= 20_000
+    assert "TAIL" in content
+    assert "chars omitted" in content
+    assert "context_tool/history_search" not in content
 
 
 def test_agentic_loop_rejects_malformed_string_tool_input(monkeypatch):
@@ -1444,6 +1591,137 @@ def test_usage_reconciliation_accumulates_multiple_provider_events():
         "gpt-5.6-sol", input_tokens=25, output_tokens=5, cache_read_tokens=15
     )
     assert llm._last_call_tokens_var.get() == {"input": 140, "output": 15}
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "input_tokens", "extra"),
+    [
+        ("bedrock", "global.xai.grok-4.7", 450, {"bedrock_input_inclusive": True}),
+        ("bedrock", "anthropic.claude-sonnet-5", 100, {}),
+        ("anthropic", "claude-sonnet-5", 100, {}),
+        ("azure_foundry_anthropic", "claude-sonnet-5", 100, {}),
+        ("bedrock_mantle", "anthropic.claude-sonnet-5", 100, {}),
+        ("bedrock_mantle", "openai.gpt-6-sol", 450, {}),
+        ("openai", "gpt-6-sol", 450, {}),
+        ("openai_compatible", "grok-4.7", 450, {}),
+        ("openrouter", "x-ai/grok-4.7", 450, {}),
+        ("google", "gemini-test", 450, {}),
+        ("google_vertex", "xai/grok-4.7", 450, {}),
+        ("openai_codex", "gpt-6-sol", 450, {}),
+    ],
+)
+def test_usage_display_excludes_cache_without_changing_recorded_usage(
+    provider, model, input_tokens, extra
+):
+    bucket = {
+        model: {
+            "provider": provider,
+            "input": input_tokens,
+            "output": 20,
+            "cache_read": 300,
+            "cache_write": 50,
+            "estimated_cost_available": True,
+            "estimated_total_cost_usd": 1.25,
+            **extra,
+        }
+    }
+    original = copy.deepcopy(bucket)
+    totals = llm._usage_totals(bucket)
+    assert totals["total_uncached_input"] == 100
+    assert totals["by_model"][model]["uncached_input"] == 100
+    assert totals["total_input"] == input_tokens
+    assert totals["total_cache_read"] == 300
+    assert totals["total_cache_write"] == 50
+    assert totals["estimated_total_cost_usd"] == 1.25
+    assert bucket == original
+
+
+def test_usage_display_sums_mixed_providers_and_clamps_cached_only_input():
+    totals = llm._usage_totals(
+        {
+            "grok": {
+                "provider": "bedrock",
+                "bedrock_input_inclusive": True,
+                "input": 300,
+                "cache_read": 300,
+            },
+            "claude": {"provider": "anthropic", "input": 100, "cache_read": 300},
+            "gpt": {
+                "provider": "openai",
+                "input": 450,
+                "cache_read": 300,
+                "cache_write": 50,
+            },
+        }
+    )
+    assert totals["total_uncached_input"] == 200
+    assert totals["by_model"]["grok"]["uncached_input"] == 0
+
+
+def test_bedrock_usage_includes_cached_input_in_run_total(isolated_db_engine):
+    run_id = 888892
+    events = []
+    llm.set_run_context(run_id, emit_fn=events.append, run_kind="web")
+    llm._last_call_tokens_var.set(None)
+    try:
+        llm._record_usage(
+            "anthropic.claude-test",
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_tokens=300,
+            cache_write_tokens=50,
+            provider="bedrock",
+        )
+        usage = llm.get_run_token_usage(run_id)
+    finally:
+        llm.clear_run_context()
+        llm._run_token_usage.pop(("web", run_id), None)
+
+    assert usage["total_input"] == 450
+    assert usage["total_uncached_input"] == 100
+    assert events[-1]["totals"]["total_uncached_input"] == 100
+    assert usage["total_cache_read"] == 300
+    assert usage["total_cache_write"] == 50
+    assert events[-1]["input_tokens"] == 450
+    assert llm._last_call_tokens_var.get() == {"input": 150, "output": 20}
+    with Session(isolated_db_engine) as session:
+        global_usage = session.exec(select(LLMUsageMonth)).one()
+        assert global_usage.provider == "bedrock"
+        assert global_usage.input_tokens == 100
+        assert global_usage.cache_read_tokens == 300
+        assert global_usage.cache_write_tokens == 50
+
+
+def test_saved_bedrock_usage_adds_cached_input_once(isolated_db_engine):
+    model = "anthropic.claude-test"
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Bedrock usage site", base_url="https://example.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(
+            site_id=site.id,
+            name="Bedrock usage run",
+            token_usage_json=json.dumps(
+                {
+                    model: {
+                        "provider": "bedrock",
+                        "input": 100,
+                        "output": 20,
+                        "cache_read": 300,
+                        "cache_write": 50,
+                    }
+                }
+            ),
+        )
+        session.add(run)
+        session.commit()
+        run_id = run.id
+
+    first = llm._load_bucket_from_db(run_id)
+    second = llm._load_bucket_from_db(run_id)
+    assert first[model]["input"] == 450
+    assert second[model]["input"] == 450
+    assert second[model]["bedrock_input_inclusive"] is True
 
 
 def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
@@ -2563,6 +2841,7 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
     config = LLMConfig(
         provider="bedrock",
         api_key=None,
+        aws_profile="bedrock-selected",
         base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
         model="anthropic.claude-3-7-sonnet-20250219-v1:0",
         max_tokens=2048,
@@ -2572,7 +2851,7 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert captured["session"] == {"profile_name": "bedrock-dev"}
+    assert captured["session"] == {"profile_name": "bedrock-selected"}
     assert {
         "service_name": "bedrock-runtime",
         "region_name": "us-east-1",
@@ -2713,6 +2992,251 @@ def test_bedrock_mantle_uses_responses_api_with_us_east_2_default(monkeypatch):
     # Responses API uses `input`, not `messages`.
     assert captured["responses"]["model"] == "openai.gpt-oss-120b"
     assert captured["responses"]["input"] == "hello"
+
+
+def test_bedrock_mantle_uses_selected_aws_profile_for_signing(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("AWS_PROFILE", "ambient-profile")
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+
+    def fake_signer(**kwargs):
+        captured["signer"] = kwargs
+        return None
+
+    monkeypatch.setattr(llm, "_BedrockMantleSigV4Auth", fake_signer)
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        aws_profile="selected-profile",
+        base_url="https://bedrock-mantle.us-east-2.api.aws/v1",
+        model="openai.gpt-oss-120b",
+    )
+
+    llm._make_bedrock_mantle_client(config)
+
+    assert captured["signer"] == {"region": "us-east-2", "profile": "selected-profile"}
+
+
+def test_bedrock_mantle_claude_uses_messages_for_plain_and_tool_calls(monkeypatch):
+    import httpx
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        payload = json.loads(request.content)
+        content = (
+            [{"type": "text", "text": "hello"}]
+            if not payload.get("tools")
+            else [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "read_file",
+                    "input": {"path": "app.py"},
+                }
+            ]
+        )
+
+        def event(name, data):
+            return f"event: {name}\ndata: {json.dumps(data)}\n\n"
+
+        message = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "anthropic.claude-sonnet-5",
+            "content": [],
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 0},
+        }
+        body = "".join(
+            [
+                event("message_start", {"type": "message_start", "message": message}),
+                event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": content[0],
+                    },
+                ),
+                event("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                event(
+                    "message_delta",
+                    {
+                        "type": "message_delta",
+                        "delta": {
+                            "stop_reason": "tool_use"
+                            if payload.get("tools")
+                            else "end_turn",
+                            "stop_sequence": None,
+                        },
+                        "usage": {"output_tokens": 3},
+                    },
+                ),
+                event("message_stop", {"type": "message_stop"}),
+            ]
+        )
+        return httpx.Response(
+            200, text=body, headers={"content-type": "text/event-stream"}
+        )
+
+    monkeypatch.setattr(
+        llm,
+        "_llm_client_kwargs",
+        lambda: {
+            "http_client": httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        },
+    )
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="test-key",
+        base_url="https://bedrock-mantle.us-east-1.api.aws/v1",
+        project_id="proj_test",
+        model="anthropic.claude-sonnet-5",
+        max_tokens=64_000,
+    )
+
+    assert asyncio.run(llm._call(config, "hello", None)) == "hello"
+    blocks, stop_reason, _ = asyncio.run(
+        llm._call_with_tools(
+            config,
+            "system",
+            [{"role": "user", "content": "inspect app.py"}],
+            [{"name": "read_file", "input_schema": {"type": "object"}}],
+        )
+    )
+    asyncio.run(
+        llm._call_with_tools(
+            config,
+            "system",
+            [
+                {"role": "user", "content": "inspect app.py"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Checking it.", "parsed_output": None}
+                    ],
+                },
+                {"role": "user", "content": "Continue."},
+            ],
+            [{"name": "read_file", "input_schema": {"type": "object"}}],
+        )
+    )
+
+    assert len(requests) == 3
+    assert all(json.loads(r.content)["stream"] is True for r in requests)
+    assert all(r.url.path == "/anthropic/v1/messages" for r in requests)
+    assert all(r.headers["x-api-key"] == "test-key" for r in requests)
+    assert all(r.headers["anthropic-workspace-id"] == "proj_test" for r in requests)
+    assert json.loads(requests[-1].content)["messages"][1]["content"] == [
+        {"type": "text", "text": "Checking it."}
+    ]
+    assert blocks[0]["type"] == "tool_use"
+    assert blocks[0]["input"] == {"path": "app.py"}
+    assert stop_reason == "tool_use"
+
+
+def test_anthropic_stream_history_does_not_replay_sdk_parsed_output():
+    class ParsedText:
+        def model_dump(self, **_kwargs):
+            return {"type": "text", "text": "Checking the lead.", "parsed_output": None}
+
+    raw_block = llm._anthropic_history_block(ParsedText())
+    assert raw_block == {"type": "text", "text": "Checking the lead."}
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Earlier turn", "parsed_output": None},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "read_file",
+                    "input": {"path": "app.py"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "done"}
+            ],
+        },
+    ]
+    cached_messages, _ = llm._with_anthropic_cache(messages, None)
+    assert cached_messages[0]["content"][0] == {
+        "type": "text",
+        "text": "Earlier turn",
+    }
+    assert cached_messages[0]["content"][1]["input"] == {"path": "app.py"}
+    assert cached_messages[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert "parsed_output" in messages[0]["content"][0]
+
+
+def test_bedrock_mantle_non_openai_text_model_uses_chat_completions(monkeypatch):
+    captured = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="hello", tool_calls=[]),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="test-key",
+        base_url="https://bedrock-mantle.us-east-1.api.aws",
+        model="deepseek.v3.2",
+        max_tokens=1024,
+    )
+
+    assert asyncio.run(llm._call(config, "hello", None)) == "hello"
+    assert captured["client"]["base_url"].endswith("/v1")
+    assert captured["request"]["model"] == "deepseek.v3.2"
+    assert "messages" in captured["request"]
+
+
+def test_bedrock_mantle_rejects_unknown_model_api_before_request():
+    with pytest.raises(ValueError, match="No Bedrock Mantle inference API"):
+        llm._bedrock_mantle_model_api("unknown.future-model")
+
+
+@pytest.mark.parametrize(
+    ("model", "api", "suffix"),
+    [
+        ("anthropic.claude-sonnet-5", "messages", "/v1"),
+        ("openai.gpt-5.6-luna", "responses", "/openai/v1"),
+        ("openai.gpt-6-luna", "responses", "/openai/v1"),
+        ("openai.gpt-oss-120b", "responses", "/v1"),
+        ("google.gemma-4-31b", "chat_completions", "/openai/v1"),
+        ("xai.grok-4.6", "chat_completions", "/openai/v1"),
+        ("zai.glm-5", "chat_completions", "/v1"),
+    ],
+)
+def test_bedrock_mantle_model_route(model, api, suffix):
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        base_url="https://bedrock-mantle.us-east-1.api.aws/anthropic",
+        model=model,
+    )
+    assert llm._bedrock_mantle_model_api(model) == api
+    assert llm._bedrock_mantle_base_url(config).endswith(suffix)
 
 
 def test_bedrock_mantle_honours_explicit_base_url_and_region_env(monkeypatch):
@@ -2858,6 +3382,544 @@ def test_bedrock_mantle_omits_project_when_unset(monkeypatch):
     assert "project" not in captured["client"]
 
 
+def test_google_vertex_client_uses_adc_project_and_location(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("google.genai.Client", _Client)
+    config = LLMConfig(
+        provider="google_vertex",
+        api_key="must-not-be-used",
+        base_url="https://must-not-be-used.example",
+        project_id="example-project",
+        location="australia-southeast1",
+        model="gemini-2.5-flash",
+    )
+
+    llm._make_google_client(config)
+
+    assert captured["vertexai"] is True
+    assert captured["project"] == "example-project"
+    assert captured["location"] == "australia-southeast1"
+    assert "api_key" not in captured
+    assert captured["http_options"]["api_version"] == "v1"
+    assert "base_url" not in captured["http_options"]
+    asyncio.run(captured["http_options"]["httpx_async_client"].aclose())
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gemini-2.5-flash", False),
+        ("publishers/google/models/gemini-3-pro", False),
+        ("xai/grok-4.6", True),
+        ("anthropic/claude-sonnet-4-6", True),
+    ],
+)
+def test_google_vertex_transport_selection(model, expected):
+    config = LLMConfig(provider="google_vertex", model=model)
+
+    assert llm._uses_openai_responses(config) is expected
+
+
+def test_google_vertex_responses_client_uses_adc_and_openapi_endpoint(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCredentials:
+        token = None
+
+        def refresh(self, request):
+            captured["refresh_request"] = request
+            self.token = "adc-access-token"
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+    monkeypatch.setattr(
+        "google.auth.default", lambda **kwargs: (FakeCredentials(), "adc-project")
+    )
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+    config = LLMConfig(
+        provider="google_vertex",
+        project_id="example-project",
+        location="australia-southeast1",
+        model="xai/grok-4.6",
+    )
+
+    llm._make_google_vertex_responses_client(config)
+
+    client_kwargs = captured["client"]
+    assert client_kwargs["api_key"] == "adc-access-token"
+    assert client_kwargs["base_url"] == (
+        "https://australia-southeast1-aiplatform.googleapis.com/v1/"
+        "projects/example-project/locations/australia-southeast1/endpoints/openapi"
+    )
+    asyncio.run(client_kwargs["http_client"].aclose())
+
+
+def test_google_vertex_non_gemini_tool_calls_use_responses_api(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(
+                output=[
+                    SimpleNamespace(
+                        type="reasoning",
+                        id="reason_vertex",
+                        status="completed",
+                        summary=[],
+                        content=None,
+                        encrypted_content="encrypted-reasoning",
+                    ),
+                    SimpleNamespace(
+                        type="function_call",
+                        id="fc_vertex",
+                        status="completed",
+                        call_id="call_vertex",
+                        name="context_tool",
+                        arguments='{"tool":"site_map","args":{"limit":5}}',
+                        namespace=None,
+                    ),
+                ],
+                usage=SimpleNamespace(
+                    input_tokens=8,
+                    output_tokens=4,
+                    input_tokens_details=SimpleNamespace(cached_tokens=0),
+                ),
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+    monkeypatch.setattr(
+        llm,
+        "_make_google_vertex_responses_client",
+        lambda _config: FakeOpenAI(),
+    )
+    config = LLMConfig(
+        provider="google_vertex",
+        project_id="example-project",
+        location="global",
+        model="xai/grok-4.6",
+        max_tokens=4096,
+    )
+
+    blocks, stop_reason, raw_history = asyncio.run(
+        llm._call_with_tools_impl(
+            config,
+            system_message="Use tools.",
+            messages=[{"role": "user", "content": "Inspect the site."}],
+            tools=[
+                {
+                    "name": "context_tool",
+                    "description": "Read scanner context.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"tool": {"type": "string"}},
+                        "required": ["tool"],
+                    },
+                }
+            ],
+        )
+    )
+
+    assert captured["request"]["tools"][0]["name"] == "context_tool"
+    assert captured["request"]["prompt_cache_key"].startswith("aespa-")
+    assert len(captured["request"]["prompt_cache_key"]) == 64
+    assert captured["request"]["include"] == ["reasoning.encrypted_content"]
+    assert captured["request"]["store"] is False
+    assert blocks[0]["input"] == {"tool": "site_map", "args": {"limit": 5}}
+    assert stop_reason == "tool_use"
+    replayed = llm._ant_messages_to_responses(
+        [
+            {"role": "user", "content": "Inspect the site."},
+            {"role": "assistant", "content": raw_history},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_vertex",
+                        "content": "site map result",
+                    }
+                ],
+            },
+        ]
+    )
+    assert replayed[1] == {
+        "type": "reasoning",
+        "id": "reason_vertex",
+        "status": "completed",
+        "summary": [],
+        "encrypted_content": "encrypted-reasoning",
+    }
+    assert replayed[2] == {
+        "type": "function_call",
+        "call_id": "call_vertex",
+        "name": "context_tool",
+        "arguments": '{"tool":"site_map","args":{"limit":5}}',
+    }
+    assert replayed[3] == {
+        "type": "function_call_output",
+        "call_id": "call_vertex",
+        "output": "site map result",
+    }
+
+
+def test_google_vertex_grok_replay_strips_response_only_message_fields():
+    item = {
+        "id": "msg_response",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "phase": None,
+        "content": [
+            {
+                "type": "output_text",
+                "text": "Working.",
+                "annotations": [],
+                "logprobs": [],
+            }
+        ],
+    }
+
+    assert llm._responses_replay_item(item) == {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "Working.", "annotations": []}],
+    }
+
+
+def test_google_vertex_grok_cache_key_stays_stable_when_history_grows():
+    config = LLMConfig(provider="google_vertex", model="xai/grok-4.6")
+    opening = {"type": "message", "role": "user", "content": "Inspect the site."}
+    tools = [{"type": "function", "name": "context_tool", "parameters": {}}]
+
+    first = llm._responses_request_kwargs(
+        config,
+        input=[opening],
+        instructions="Use tools.",
+        tools=tools,
+    )
+    later = llm._responses_request_kwargs(
+        config,
+        input=[
+            opening,
+            {"type": "message", "role": "assistant", "content": "Working."},
+            {"type": "message", "role": "user", "content": "Continue."},
+        ],
+        instructions="Use tools.",
+        tools=tools,
+    )
+
+    assert later["prompt_cache_key"] == first["prompt_cache_key"]
+
+
+def test_google_vertex_grok_cache_key_separates_agent_transcripts():
+    config = LLMConfig(provider="google_vertex", model="xai/grok-4.6")
+
+    test_lead = llm._responses_request_kwargs(
+        config,
+        input="Inspect the whole site.",
+        instructions="You are the Test Lead.",
+    )
+    validator = llm._responses_request_kwargs(
+        config,
+        input="Disprove finding 42.",
+        instructions="You are the Validator.",
+    )
+    gemini = llm._responses_request_kwargs(
+        LLMConfig(provider="google_vertex", model="gemini-2.5-flash"),
+        input="Inspect the whole site.",
+    )
+
+    assert test_lead["prompt_cache_key"] != validator["prompt_cache_key"]
+    assert "prompt_cache_key" not in gemini
+
+
+def test_google_vertex_grok_records_per_call_cache_telemetry(monkeypatch):
+    config = LLMConfig(provider="google_vertex", model="xai/grok-4.6")
+    cache_key = "aespa-stable-cache-key"
+    events: list[dict] = []
+    response = SimpleNamespace(
+        prompt_cache_key=cache_key,
+        metadata={"system_fingerprint": "fp_vertex_backend_42"},
+        usage=SimpleNamespace(
+            input_tokens=4096,
+            output_tokens=321,
+            input_tokens_details=SimpleNamespace(cached_tokens=3072),
+        ),
+    )
+    monkeypatch.setattr(llm, "_record_usage", lambda *args, **kwargs: None)
+    emit_token = llm._emit_fn_var.set(events.append)
+    call_token = llm._traffic_call_id_var.set(77)
+    operation_token = llm._traffic_operation_var.set("scanner.test_lead")
+    try:
+        telemetry = llm._record_responses_usage(
+            config,
+            response,
+            requested_prompt_cache_key=cache_key,
+        )
+    finally:
+        llm._traffic_operation_var.reset(operation_token)
+        llm._traffic_call_id_var.reset(call_token)
+        llm._emit_fn_var.reset(emit_token)
+
+    assert telemetry == {
+        "provider": "google_vertex",
+        "model": "xai/grok-4.6",
+        "call_id": 77,
+        "operation": "scanner.test_lead",
+        "requested_cache_key_fingerprint": llm._cache_key_fingerprint(cache_key),
+        "echoed_cache_key_fingerprint": llm._cache_key_fingerprint(cache_key),
+        "cache_key_echoed": True,
+        "cache_key_match": True,
+        "system_fingerprint": "fp_vertex_backend_42",
+        "input_tokens": 4096,
+        "uncached_input_tokens": 1024,
+        "output_tokens": 321,
+        "cache_read_tokens": 3072,
+        "cache_hit_percent": 75.0,
+    }
+    assert cache_key not in json.dumps(telemetry)
+    assert events == [
+        {
+            "type": "scanner_phase",
+            "phase": "llm_cache",
+            "status": "hit",
+            "message": (
+                "LLM prompt cache hit: 3,072 of 4,096 input tokens reused (75.00%)."
+            ),
+            "data": telemetry,
+            "_persist_only": True,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_transport"),
+    [("xai/grok-4.6", "responses"), ("gemini-2.5-flash", "google")],
+)
+def test_google_vertex_plain_calls_select_transport(
+    monkeypatch, model, expected_transport
+):
+    calls: list[str] = []
+
+    async def fake_responses(*_args, **_kwargs):
+        calls.append("responses")
+        return "responses result"
+
+    async def fake_google(*_args, **_kwargs):
+        calls.append("google")
+        return "google result"
+
+    monkeypatch.setattr(llm, "_openai_responses", fake_responses)
+    monkeypatch.setattr(llm, "_google", fake_google)
+    config = LLMConfig(
+        provider="google_vertex",
+        project_id="example-project",
+        location="global",
+        model=model,
+    )
+
+    result = asyncio.run(llm._call_impl(config, "hello", None))
+
+    assert calls == [expected_transport]
+    assert result == f"{expected_transport} result"
+
+
+def test_google_vertex_tools_keep_json_schema_integer_constraints(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Models:
+        async def generate_content(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(candidates=[], usage_metadata=None)
+
+    class _AsyncClient:
+        models = _Models()
+
+        async def aclose(self):
+            pass
+
+    client = SimpleNamespace(aio=_AsyncClient())
+    monkeypatch.setattr(llm, "_make_google_client", lambda _config: client)
+    config = LLMConfig(
+        provider="google_vertex",
+        project_id="example-project",
+        location="global",
+        model="gemini-2.5-flash",
+    )
+    tools = [
+        {
+            "name": "consolidate_findings",
+            "description": "Consolidate duplicate findings.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "remove_finding_references": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                    }
+                },
+                "required": ["remove_finding_references"],
+            },
+        }
+    ]
+
+    asyncio.run(
+        llm._call_with_tools_impl(
+            config,
+            system_message="system",
+            messages=[{"role": "user", "content": "start"}],
+            tools=tools,
+        )
+    )
+
+    declaration = captured["config"].tools[0].function_declarations[0]
+    assert declaration.parameters is None
+    assert (
+        declaration.parameters_json_schema["properties"]["remove_finding_references"][
+            "minItems"
+        ]
+        == 1
+    )
+    assert isinstance(
+        declaration.parameters_json_schema["properties"]["remove_finding_references"][
+            "minItems"
+        ],
+        int,
+    )
+
+
+def test_google_vertex_stream_ignores_candidate_with_null_parts(monkeypatch):
+    text_deltas: list[str] = []
+
+    class _Stream:
+        def __init__(self):
+            self._chunks = iter(
+                [
+                    SimpleNamespace(
+                        candidates=[
+                            SimpleNamespace(
+                                content=SimpleNamespace(
+                                    parts=[SimpleNamespace(text="hello")]
+                                )
+                            )
+                        ],
+                        usage_metadata=None,
+                    ),
+                    SimpleNamespace(
+                        candidates=[
+                            SimpleNamespace(content=SimpleNamespace(parts=None))
+                        ],
+                        usage_metadata=None,
+                    ),
+                ]
+            )
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._chunks)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class _Models:
+        async def generate_content_stream(self, **_kwargs):
+            return _Stream()
+
+    class _AsyncClient:
+        models = _Models()
+
+        async def aclose(self):
+            pass
+
+    async def _on_text(delta: str):
+        text_deltas.append(delta)
+
+    async def _run():
+        client = SimpleNamespace(aio=_AsyncClient())
+        monkeypatch.setattr(llm, "_make_google_client", lambda _config: client)
+        config = LLMConfig(
+            provider="google_vertex",
+            project_id="example-project",
+            location="global",
+            model="gemini-2.5-flash",
+        )
+        token = llm._tool_text_delta_var.set(_on_text)
+        try:
+            return await llm._call_with_tools_impl(
+                config,
+                system_message="system",
+                messages=[{"role": "user", "content": "start"}],
+                tools=[],
+            )
+        finally:
+            llm._tool_text_delta_var.reset(token)
+
+    blocks, stop_reason, _raw_content = asyncio.run(_run())
+
+    assert text_deltas == ["hello"]
+    assert blocks == [
+        {
+            "type": "text",
+            "id": None,
+            "name": None,
+            "input": None,
+            "text": "hello",
+        }
+    ]
+    assert stop_reason == "end_turn"
+
+
+def test_google_vertex_response_ignores_candidate_with_null_parts(monkeypatch):
+    class _Models:
+        async def generate_content(self, **_kwargs):
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(content=SimpleNamespace(parts=None))],
+                usage_metadata=None,
+            )
+
+    class _AsyncClient:
+        models = _Models()
+
+        async def aclose(self):
+            pass
+
+    client = SimpleNamespace(aio=_AsyncClient())
+    monkeypatch.setattr(llm, "_make_google_client", lambda _config: client)
+    config = LLMConfig(
+        provider="google_vertex",
+        project_id="example-project",
+        location="global",
+        model="gemini-2.5-flash",
+    )
+
+    result = asyncio.run(
+        llm._call_with_tools_impl(
+            config,
+            system_message="system",
+            messages=[{"role": "user", "content": "start"}],
+            tools=[],
+        )
+    )
+
+    assert result == ([], "end_turn", [])
+
+
 def test_mantle_message_translation_to_responses_items():
     """Anthropic-format history maps to Responses message/function_call(_output) items."""
     messages = [
@@ -2892,6 +3954,48 @@ def test_mantle_message_translation_to_responses_items():
         "type": "function_call_output",
         "call_id": "call_1",
         "output": "200 OK",
+    }
+
+
+def test_responses_native_function_call_keeps_checkpoint_protocol_valid():
+    messages = [
+        {"role": "user", "content": "start"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": llm._RESPONSES_OUTPUT_ITEM_BLOCK,
+                    "item": {
+                        "type": "reasoning",
+                        "encrypted_content": "encrypted-reasoning",
+                    },
+                },
+                {
+                    "type": llm._RESPONSES_OUTPUT_ITEM_BLOCK,
+                    "item": {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "http_request",
+                        "arguments": '{"url":"/x"}',
+                    },
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "200 OK"}
+            ],
+        },
+    ]
+
+    assert llm._protocol_valid_suffix(messages, 1) is True
+    tool_block = llm._agentic_tool_use_block(messages[1]["content"][1])
+    assert tool_block == {
+        "type": "tool_use",
+        "id": "call_1",
+        "name": "http_request",
+        "input": {"url": "/x"},
     }
 
 
@@ -2953,6 +4057,7 @@ def test_bedrock_mantle_sigv4_signs_with_bedrock_service(monkeypatch):
     request = httpx.Request(
         "POST",
         "https://bedrock-mantle.us-east-2.api.aws/v1/chat/completions",
+        headers={"x-api-key": "not-needed"},
         json={"model": "openai.gpt-oss-120b", "messages": []},
     )
     # Drive the sync auth flow so the request is signed in place.
@@ -2965,6 +4070,7 @@ def test_bedrock_mantle_sigv4_signs_with_bedrock_service(monkeypatch):
     assert "x-amz-date" in request.headers
     # Temporary (role/STS) credentials must carry the session token.
     assert request.headers["x-amz-security-token"] == "session-token"
+    assert "x-api-key" not in request.headers
 
 
 def test_bedrock_mantle_sigv4_errors_without_credentials(monkeypatch):
@@ -4135,9 +5241,9 @@ def test_anthropic_caching_in_call_with_tools(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakeMessages:
-        async def create(self, **kwargs):
+        def stream(self, **kwargs):
             captured["create_kwargs"] = kwargs
-            return SimpleNamespace(
+            response = SimpleNamespace(
                 content=[
                     SimpleNamespace(
                         type="text",
@@ -4155,6 +5261,18 @@ def test_anthropic_caching_in_call_with_tools(monkeypatch):
                     cache_creation_input_tokens=2,
                 ),
             )
+
+            class FakeStream:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_):
+                    pass
+
+                async def get_final_message(self):
+                    return response
+
+            return FakeStream()
 
     class FakeAsyncAnthropic:
         def __init__(self, **kwargs):
@@ -4212,7 +5330,34 @@ def test_anthropic_caching_in_call_with_tools(monkeypatch):
     assert "cache_control" not in tools[-1]
 
 
-def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
+@pytest.mark.parametrize("auth", ["sdk", "bearer"])
+@pytest.mark.parametrize(
+    ("model", "supports_cache"),
+    [
+        ("anthropic.claude-3-7-sonnet-20250219-v1:0", True),
+        ("global.anthropic.claude-sonnet-5-5", True),
+        ("us.anthropic.claude-sonnet-4-20250514-v1:0", True),
+        ("eu.amazon.nova-pro-v1:0", True),
+        ("global.amazon.nova-2-lite-v1:0", True),
+        (
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/"
+            "global.anthropic.claude-sonnet-4-6",
+            True,
+        ),
+        ("global.xai.grok-4.7", False),
+        ("us.xai.grok-4.6", False),
+        ("openai.gpt-5.6-sol", False),
+        ("meta.llama3-70b-instruct-v1:0", False),
+        ("anthropic.claude-3-sonnet-20240229-v1:0", False),
+        ("anthropic.claude-3-5-sonnet-20240620-v1:0", False),
+        ("amazon.nova-sonic-v1:0", False),
+        ("anthropic.claude-sonnet-99", False),
+        ("unknown.model-v1:0", False),
+    ],
+)
+def test_bedrock_caching_multiple_messages_in_call_with_tools(
+    monkeypatch, auth, model, supports_cache
+):
     captured: dict[str, object] = {}
 
     class FakeBedrockClient:
@@ -4250,11 +5395,37 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
     fake_boto3 = SimpleNamespace(Session=FakeSession)
     monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
 
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "output": {"message": {"content": [{"text": "ok"}]}},
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 2000, "outputTokens": 250},
+            }
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, **kwargs):
+            captured["converse_kwargs"] = kwargs["json"]
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        llm, "_make_llm_http_client", lambda **kwargs: FakeAsyncClient()
+    )
+
     config = LLMConfig(
         provider="bedrock",
-        api_key=None,
+        api_key="test-key" if auth == "bearer" else None,
         base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
-        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        model=model,
         max_tokens=2048,
         temperature=0.0,
     )
@@ -4265,6 +5436,7 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
         {"role": "user", "content": "how are you?"},
     ]
 
+    original_messages = copy.deepcopy(messages)
     blocks, stop_reason, raw_content = asyncio.run(
         llm._call_with_tools(
             config,
@@ -4277,10 +5449,31 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
     converse_kwargs = captured["converse_kwargs"]
     converse_messages = converse_kwargs["messages"]
 
-    # Verify first user message has cachePoint
-    assert converse_messages[0]["content"][-1] == {"cachePoint": {"type": "default"}}
-    # Verify last user message has cachePoint
-    assert converse_messages[-1]["content"][-1] == {"cachePoint": {"type": "default"}}
+    assert messages == original_messages
+    assert blocks[0]["text"] == "ok"
+    assert stop_reason == "end_turn"
+    assert converse_messages[1] == {
+        "role": "assistant",
+        "content": [{"text": "hi there"}],
+    }
+    if supports_cache:
+        assert converse_kwargs["system"] == [
+            {"text": "system prompt"},
+            {"cachePoint": {"type": "default"}},
+        ]
+        assert converse_messages[0]["content"] == [
+            {"text": "hello"},
+            {"cachePoint": {"type": "default"}},
+        ]
+        assert converse_messages[-1]["content"] == [
+            {"text": "how are you?"},
+            {"cachePoint": {"type": "default"}},
+        ]
+    else:
+        assert "cachePoint" not in json.dumps(converse_kwargs)
+        assert converse_kwargs["system"] == [{"text": "system prompt"}]
+        assert converse_messages[0]["content"] == [{"text": "hello"}]
+        assert converse_messages[-1]["content"] == [{"text": "how are you?"}]
 
 
 def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
@@ -4400,6 +5593,168 @@ def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
     assert raw_content[0] == {
         "type": "bedrock_reasoning",
         "reasoning_content": reasoning,
+    }
+
+
+@pytest.mark.parametrize("auth", ["sdk", "bearer"])
+def test_bedrock_encrypted_reasoning_survives_tool_call_and_saved_history(
+    monkeypatch, auth
+):
+    from botocore.session import get_session
+    from botocore.validate import validate_parameters
+
+    encrypted = b"\x00encrypted\xff-reasoning"
+    encoded = "AGVuY3J5cHRlZP8tcmVhc29uaW5n"
+    requests = []
+    input_shape = (
+        get_session()
+        .get_service_model("bedrock-runtime")
+        .operation_model("ConverseStream")
+        .input_shape
+    )
+
+    class FakeBedrockClient:
+        def converse_stream(self, **kwargs):
+            validate_parameters(kwargs, input_shape)
+            requests.append(kwargs)
+            return {
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {"reasoningContent": {"redactedContent": chunk}},
+                        }
+                    }
+                    for chunk in (encrypted[:7], encrypted[7:])
+                ]
+                + [
+                    {
+                        "contentBlockStart": {
+                            "contentBlockIndex": 1,
+                            "start": {
+                                "toolUse": {"toolUseId": "read-1", "name": "read_file"}
+                            },
+                        }
+                    },
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 1,
+                            "delta": {"toolUse": {"input": '{"path":"app.py"}'}},
+                        }
+                    },
+                    {"messageStop": {"stopReason": "tool_use"}},
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, *args, **kwargs):
+            return FakeBedrockClient()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "output": {
+                    "message": {
+                        "content": [
+                            {"reasoningContent": {"redactedContent": encoded}},
+                            {
+                                "toolUse": {
+                                    "toolUseId": "read-1",
+                                    "name": "read_file",
+                                    "input": {"path": "app.py"},
+                                }
+                            },
+                        ]
+                    }
+                },
+                "stopReason": "tool_use",
+            }
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, **kwargs):
+            # Verify that the bearer request can actually be serialized as JSON.
+            requests.append(json.loads(json.dumps(kwargs["json"])))
+            return FakeResponse()
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(Session=FakeSession))
+    monkeypatch.setattr(
+        llm, "_make_llm_http_client", lambda **kwargs: FakeAsyncClient()
+    )
+    config = LLMConfig(
+        provider="bedrock",
+        model="global.xai.grok-4.7",
+        api_key="test-key" if auth == "bearer" else None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        max_tokens=2048,
+    )
+    messages = [{"role": "user", "content": "review app.py"}]
+    tools = [
+        {
+            "name": "read_file",
+            "description": "Read source",
+            "input_schema": {"type": "object"},
+        }
+    ]
+    _, stop_reason, raw = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="Review source",
+            messages=messages,
+            tools=tools,
+        )
+    )
+    assert stop_reason == "tool_use"
+    assert raw[0] == {
+        "type": "bedrock_reasoning",
+        "reasoning_content": {"redactedContent": encoded},
+    }
+    assert raw[1]["input"] == {"path": "app.py"}
+    messages.extend(
+        [
+            {"role": "assistant", "content": raw},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "read-1",
+                        "content": "source",
+                    }
+                ],
+            },
+        ]
+    )
+    # Check the same JSON round trip used by persisted agent checkpoints.
+    saved_messages = json.loads(json.dumps(messages))
+    # Also repair the empty field produced by the previous stream handler.
+    saved_messages[1]["content"][0]["reasoning_content"]["reasoningText"] = {}
+    original = copy.deepcopy(saved_messages)
+    asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="Review source",
+            messages=saved_messages,
+            tools=tools,
+        )
+    )
+    assert saved_messages == original
+    assert requests[1]["messages"][1]["content"][0] == {
+        "reasoningContent": {"redactedContent": encrypted if auth == "sdk" else encoded}
+    }
+    assert requests[1]["messages"][1]["content"][1]["toolUse"]["input"] == {
+        "path": "app.py"
     }
 
 
@@ -4881,3 +6236,92 @@ def test_small_output_profile_agentic_loop_remains_valid(monkeypatch):
     assert summary == "Complete."
     assert captured[0].max_tokens == 200
     assert config.max_tokens == 200
+
+
+def test_agentic_loop_repairs_tool_call_cut_off_by_output_limit(monkeypatch):
+    config = LLMConfig(
+        provider="bedrock",
+        model="global.anthropic.claude-sonnet-5",
+        max_tokens=2048,
+    )
+    calls: list[list[dict]] = []
+    executed: list[tuple[str, dict]] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        calls.append(copy.deepcopy(messages))
+        if len(calls) == 1:
+            blocks = [
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "record_attack_path",
+                    "input": {"candidate_id": 20},
+                    "text": None,
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_2",
+                    "name": "record_attack_path",
+                    "input": '{"candidate_id": 21',
+                    "text": None,
+                },
+            ]
+            return blocks, "max_tokens", blocks
+        block = {
+            "type": "tool_use",
+            "id": "call_3",
+            "name": "done",
+            "input": {"summary": "Complete."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        executed.append((name, tool_input))
+        return "recorded"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+        )
+    )
+
+    assert summary == "Complete."
+    assert executed == [("record_attack_path", {"candidate_id": 20})]
+    assistant = next(msg for msg in calls[1] if msg["role"] == "assistant")
+    assert [block["input"] for block in assistant["content"]] == [
+        {"candidate_id": 20},
+        {},
+    ]
+    results = calls[1][-1]["content"]
+    cut_off = next(item for item in results if item["tool_use_id"] == "call_2")
+    assert "output token limit" in cut_off["content"]
+
+
+def test_repair_tool_use_inputs_fixes_saved_history():
+    messages = [
+        {"role": "user", "content": "start"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "a", "name": "t", "input": {"x": 1}},
+                {"type": "tool_use", "id": "b", "name": "t", "input": '{"x": 2}'},
+                {"type": "tool_use", "id": "c", "name": "t", "input": '{"x": '},
+            ],
+        },
+    ]
+
+    repaired = llm._repair_tool_use_inputs(messages)
+
+    assert [block["input"] for block in repaired[1]["content"]] == [
+        {"x": 1},
+        {"x": 2},
+        {},
+    ]
+    assert messages[1]["content"][2]["input"] == '{"x": '
+    assert llm._repair_tool_use_inputs(repaired) is repaired

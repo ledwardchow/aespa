@@ -93,7 +93,10 @@ export const routes = {
   "sast-run-new": {
     section: "sast",
     Component: lazyNamed(() => import("../features/sast-runs/SastRunForm.jsx"), "SastRunForm"),
-    props: () => ({ key: "sast-new" }),
+    props: (_route, preferences) => ({
+      key: "sast-new",
+      showSastDeepScan: preferences.showSastDeepScan,
+    }),
   },
   "sast-run-detail": {
     section: "sast",
@@ -194,34 +197,47 @@ export const routes = {
   "scan-policy": {
     section: "scan-policy",
     Component: lazyNamed(() => import("../features/settings/ScanPolicyPage.jsx"), "ScanPolicyPage"),
-    props: (_route, preferences) => ({ showDeepScan: preferences.showDeepScan }),
-  },
-  "external-integrations": {
-    section: "external-integrations",
-    Component: lazyNamed(
-      () => import("../features/settings/ExternalIntegrationsPage.jsx"),
-      "ExternalIntegrationsPage",
-    ),
-    props: () => ({}),
-  },
-  debug: {
-    section: "debug",
-    Component: lazyNamed(() => import("../features/settings/DebugPage.jsx"), "DebugPage"),
-    props: (_route, preferences) => ({
+    props: (route, preferences) => ({
+      key: `${route.tab || "global"}/${route.subTab || ""}`,
+      initialTab: route.tab || "global",
+      initialSubTab: route.subTab,
       showUsername: preferences.showUsername,
       setShowUsername: preferences.setShowUsername,
-      showSystems: preferences.showSystems,
-      setShowSystems: preferences.setShowSystems,
       showDeepScan: preferences.showDeepScan,
       setShowDeepScan: preferences.setShowDeepScan,
+      showSystems: preferences.showSystems,
+      setShowSystems: preferences.setShowSystems,
       showTeamScan: preferences.showTeamScan,
       setShowTeamScan: preferences.setShowTeamScan,
+      showSastDeepScan: preferences.showSastDeepScan,
+      setShowSastDeepScan: preferences.setShowSastDeepScan,
       username: preferences.username,
       reportingDebugCfg: preferences.reportingDebugCfg,
       setReportingDebugCfg: preferences.setReportingDebugCfg,
-      benchmarkLabCfg: preferences.benchmarkLabCfg,
-      setBenchmarkLabCfg: preferences.setBenchmarkLabCfg,
     }),
+  },
+  extensions: {
+    section: "extensions",
+    Component: lazyNamed(
+      () => import("../features/extensions/ExtensionsPage.jsx"),
+      "ExtensionsPage",
+    ),
+    props: (_route, preferences) => ({
+      onExtensionUpdated: (extension) => {
+        if (extension.id !== "aespa.benchmarking") return;
+        preferences.setBenchmarkLabCfg({
+          panel_enabled: extension.enabled && extension.status === "loaded",
+        });
+      },
+    }),
+  },
+  "extension-settings": {
+    section: "extensions",
+    Component: lazyNamed(
+      () => import("../features/extensions/ExtensionSettingsPage.jsx"),
+      "ExtensionSettingsPage",
+    ),
+    props: (route) => ({ key: route.extensionId, extensionId: route.extensionId }),
   },
   "reporting-debug": {
     section: "reporting-debug",
@@ -237,7 +253,7 @@ export const routes = {
       () => import("../features/benchmark-lab/BenchmarkLabPage.jsx"),
       "BenchmarkLabPage",
     ),
-    props: () => ({}),
+    props: (route) => ({ initialResultId: route.id }),
   },
   "benchmark-evaluation-new": {
     section: "benchmark-lab",

@@ -31,16 +31,16 @@ You will need to provide:
 
 ## Performance
 
-Here's are [two](docs/results/juice-shop-results.md) [comparisons](docs/results/results-comparison.md) of this scanner, run against the [Bank of Ed](https://github.com/ledwardchow/BankOfEd/tree/vulnerable-version):
+Here are comparisons of this scanner against [Juice Shop](https://github.com/ledwardchow/vulnerable-app-info/blob/main/JuiceShop/juice-shop-results.md) and [Bank of Ed](https://github.com/ledwardchow/vulnerable-app-info/blob/main/BankOfEd/results-comparison.md):
 
 - AESPA + Sonnet 4.6 
 - Claude Code + Sonnet 4.6
 - Codex + GPT 5.5 
 - Claude Code + Qwen3.6-35b-A3b
 
-And a [comparison](docs/results/vuln-scanner-comparison.md) of a single (specialist agents turned off) vs multi-agent scan. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
+The [single-agent versus multi-agent comparison](https://github.com/ledwardchow/vulnerable-app-info/blob/main/BankOfEd/vuln-scanner-comparison.md) covers Bank of Ed. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
 
-Also, scan results for [VAmPI](docs/results/vampi/vampi.md).
+Also, scan results for [VAmPI](https://github.com/ledwardchow/vulnerable-app-info/blob/main/VAmPI/vampi.md).
 
 ## Documentation
 
@@ -63,7 +63,7 @@ If your API key has TPM/RPM quota caps this is configurable in the LLM Settings 
 
 ## Running (macOS/Windows)
 
-Standalone binaries for Windows and macOS are available at [GitHub releases](https://github.com/ledwardchow/aespa/releases). The macOS binaries are notarised. 
+Standalone binaries for Windows and macOS are available at [GitHub releases](https://github.com/ledwardchow/aespa/releases). 
 
 These versions run in the background in the menubar or systray - click on the icon to open the interface/quit the background process. 
 
@@ -98,16 +98,20 @@ docker compose up -d --build
 ## Running from source
 
 ### Setup
+Note, previously the built UI was committed, this is no longer the case. The frontend will build on first launch/any changes automatically, you will require node/npm/vite.
 
 Requirements:
 - Python 3.12+
 - uv: [https://docs.astral.sh/uv/getting-started/installation/](https://docs.astral.sh/uv/getting-started/installation/)
+- node 24+, npm + vite
 
 Clone or download a zip of this repository. Within a terminal with the working directory set to the root of the repo:
 
 ```bash
 # Install dependencies
 uv sync
+# Install the headless Chromium browser
+uv run playwright install chromium
 ```
 
 ### Run
@@ -117,12 +121,10 @@ uv run aespa
 ```
 
 The UI is available at `http://127.0.0.1:8000` by default.
-AESPA checks for Playwright's Chromium browser during startup and installs it
-automatically when it is missing.
 
 ### Optional agent Python sandbox
 
-AESPA can let Test Leads, A.L.I.C.E., and specialist agents run short Python programs for custom payload generation, parsing, and bounded request workflows. This capability is disabled by default and requires a local Docker daemon plus the dedicated executor image:
+AESPA can let Test Leads, A.L.I.C.E., and specialist agents run short Python programs in a sandbox for custom payload generation, parsing, and bounded request workflows. HTTP traffic is only permitted from the sandbox via AESPA function calls (which checks scope and logs the traffic as part of the test). This capability requires a local Docker daemon plus the dedicated executor image:
 
 ```bash
 docker pull ledwardchow/aespa-python-executor:0.1

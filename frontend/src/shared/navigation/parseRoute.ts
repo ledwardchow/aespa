@@ -4,9 +4,11 @@ export type Route = {
   siteId?: number;
   campaignId?: number;
   tab?: string;
+  subTab?: string;
   screen?: "list" | "new" | "edit";
   providerId?: number;
   modelName?: string;
+  extensionId?: string;
   findingRef?: string;
   leadRef?: string;
   trafficCoverage?: {
@@ -118,17 +120,38 @@ export function parseRoute(hash = "#/"): Route {
   }
   if ((m = routeHash.match(/^#\/settings\/models\/(\d+)\/edit$/)))
     return { name: "settings", tab: "models", screen: "edit", id: +m[1] };
-  if (routeHash === "#/scan-policy") return { name: "scan-policy" };
-  if (routeHash === "#/external-integrations") return { name: "external-integrations" };
-  if (routeHash === "#/debug") return { name: "debug" };
+  if (routeHash === "#/scan-policy" || routeHash === "#/debug") return { name: "scan-policy" };
+  if (routeHash === "#/external-integrations")
+    return { name: "scan-policy", tab: "global", subTab: "proxy" };
+  if (routeHash === "#/scan-policy/systems" || routeHash === "#/scan-policy/sast")
+    return { name: "scan-policy", tab: routeHash.slice("#/scan-policy/".length) };
+  if ((m = routeHash.match(/^#\/scan-policy\/global\/(features|debug|proxy)$/)))
+    return { name: "scan-policy", tab: "global", subTab: m[1] };
+  if (
+    (m = routeHash.match(
+      /^#\/scan-policy\/dast\/(scan-behaviour|headers|crawler|scanner|specialists|validator|reporting|code|deep)$/,
+    ))
+  )
+    return { name: "scan-policy", tab: "dast", subTab: m[1] };
+  if (routeHash === "#/extensions") return { name: "extensions" };
+  if ((m = routeHash.match(/^#\/extensions\/([a-z0-9_.-]+)\/settings$/)))
+    return { name: "extension-settings", extensionId: m[1] };
   if (routeHash === "#/reporting-debug") return { name: "reporting-debug" };
-  if (routeHash === "#/benchmark-lab") return { name: "benchmark-lab" };
-  if (routeHash === "#/benchmark-lab/evaluations/new") return { name: "benchmark-evaluation-new" };
-  if ((m = routeHash.match(/^#\/benchmark-lab\/evaluations\/(\d+)\/([a-z-]+)$/)))
+  if ((m = routeHash.match(/^#\/benchmark-lab\/results\/(\d+)$/)))
+    return { name: "benchmark-lab", id: +m[1] };
+  if (routeHash === "#/benchmark-lab" || routeHash === "#/sast-benchmarking")
+    return { name: "benchmark-lab" };
+  if (
+    ["#/benchmark-lab/evaluations/new", "#/sast-benchmarking/evaluations/new"].includes(routeHash)
+  )
+    return { name: "benchmark-evaluation-new" };
+  if (
+    (m = routeHash.match(/^#\/(?:sast-benchmarking|benchmark-lab)\/evaluations\/(\d+)\/([a-z-]+)$/))
+  )
     return { name: "benchmark-evaluation-detail", id: +m[1], tab: m[2] };
-  if ((m = routeHash.match(/^#\/benchmark-lab\/evaluations\/(\d+)$/)))
+  if ((m = routeHash.match(/^#\/(?:sast-benchmarking|benchmark-lab)\/evaluations\/(\d+)$/)))
     return { name: "benchmark-evaluation-detail", id: +m[1] };
-  if ((m = routeHash.match(/^#\/benchmark-lab\/comparisons\/(\d+)$/)))
+  if ((m = routeHash.match(/^#\/(?:sast-benchmarking|benchmark-lab)\/comparisons\/(\d+)$/)))
     return { name: "benchmark-comparison-detail", id: +m[1] };
 
   return { name: "not-found" };

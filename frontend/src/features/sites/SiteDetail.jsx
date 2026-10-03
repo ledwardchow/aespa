@@ -1,3 +1,5 @@
+import { useBenchmarkLinks } from "../../shared/hooks/useBenchmarkLinks.js";
+import { BenchmarkBadge } from "../../shared/ui/BenchmarkBadge.jsx";
 import * as settingsApi from "../../shared/api/settings.js";
 import * as sitesApi from "../../shared/api/sites.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
@@ -15,6 +17,7 @@ import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { workflowBadge } from "../../shared/runs/presentation.jsx";
 
 export function SiteDetail({ siteId }) {
+  const benchmarkLinks = useBenchmarkLinks();
   const [site, setSite] = useState(null);
   const [runs, setRuns] = useState(null);
   const [error, setError] = useState(null);
@@ -529,6 +532,7 @@ export function SiteDetail({ siteId }) {
                             }
                           </div>
                         )}
+                        <BenchmarkBadge href={benchmarkLinks[`site:${r.id}`]} />
                       </td>
                       <td>{workflowBadge(r)}</td>
                       <td>{r.pages_discovered}</td>

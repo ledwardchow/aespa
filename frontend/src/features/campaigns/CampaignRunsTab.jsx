@@ -88,6 +88,7 @@ export function CampaignRunsTab({ systemId, campaign, error, resumeSource, resum
       if (cancelled) return;
       const totals = {
         total_input: 0,
+        total_uncached_input: 0,
         total_output: 0,
         total_cache_read: 0,
         total_cache_write: 0,
@@ -112,6 +113,7 @@ export function CampaignRunsTab({ systemId, campaign, error, resumeSource, resum
           const aggregate = (totals.by_model[model] ||= { provider: usage.provider });
           for (const key of [
             "input",
+            "uncached_input",
             "output",
             "cache_read",
             "cache_write",

@@ -28,6 +28,7 @@ log = logging.getLogger("aespa.llm.codex")
 TURN_TIMEOUT_S = 600.0
 CONVERSATION_CLOSE_TIMEOUT_S = 3.0
 MAX_REQUIRED_TOOL_REPAIRS = 2
+MAX_INTERNAL_TOOL_RETRIES = 2
 MAX_RETRYABLE_TURN_ERRORS = 5
 # asyncio defaults subprocess streams to 64 KiB. Codex sends one JSON object per
 # line, and long scan contexts or tool payloads can make a valid line much larger.
@@ -82,6 +83,10 @@ class CodexTurnTimeoutError(CodexUnavailableError):
 
 class CodexToolSessionError(CodexTurnTimeoutError):
     """Codex completed a turn by reporting that AESPA tools were unavailable."""
+
+
+class CodexInternalToolError(CodexUnavailableError):
+    """Codex attempted one of its own tools during an AESPA turn."""
 
 
 class CodexTransportError(CodexUnavailableError):
@@ -807,7 +812,7 @@ def _required_tool_repair_prompt(tools: list[dict[str, Any]]) -> str:
     available = ", ".join(names)
     return (
         "Your previous response ended without calling an AESPA dynamic tool, so "
-        "no scan action was executed. Call exactly one AESPA dynamic tool now and "
+        "no scan action was executed. Call an AESPA dynamic tool now and "
         "do not respond with prose alone. Available tools: "
         f"{available}."
     )
@@ -896,8 +901,11 @@ async def _start_thread(
 ) -> _Conversation:
     tool_rule = (
         "Call only the dynamic tools supplied by AESPA. Every response must "
-        "call exactly one of those dynamic tools. Never end a response with "
-        "prose alone; call the supplied completion tool when the work is done."
+        "call at least one of those dynamic tools. When several calls do not "
+        "depend on each other's results, such as reading several files, make "
+        "them all in the same response. Never end a response with prose "
+        "alone; call the supplied completion tool on its own when the work is "
+        "done."
         if tools
         else "Do not call any tool."
     )
@@ -908,7 +916,7 @@ async def _start_thread(
         "approvalPolicy": "never",
         "baseInstructions": (
             "You are embedded in AESPA as a model and tool caller, not as a "
-            "coding agent. Never use Codex-owned tools such as exec, shell, "
+            "coding agent. Never use Codex-owned tools such as js, exec, shell, "
             "wait, sleep, collaboration, file editing, MCP, or web search. " + tool_rule
         ),
         "developerInstructions": system_message,
@@ -1148,11 +1156,9 @@ async def _completion_with_tools_once(
         if event_type in {"item/started", "item/completed"}:
             internal_action = _internal_action_name(params)
             if internal_action:
-                raise CodexUnavailableError(
+                raise CodexInternalToolError(
                     f"Codex tried to use its internal '{internal_action}' tool. "
-                    "AESPA stopped the turn because only AESPA dynamic tools can "
-                    "be used during a scan. Try a different Codex model if this "
-                    "keeps happening."
+                    "Only AESPA dynamic tools can be used during a scan."
                 )
         if event_type in {"thread/tokenUsage/updated", "tokenUsage"}:
             delta = _usage_delta(conversation, params)
@@ -1304,12 +1310,13 @@ async def completion_with_tools(
     usage_callback: Callable[..., None],
     proxy_url: str | None = None,
 ) -> tuple[list[dict], str, list[dict]]:
-    """Run a turn with bounded rate-limit and stalled-client recovery."""
+    """Run a turn with bounded rate-limit and Codex session recovery."""
     max_rate_limit_retries = 3
     rate_limit_attempt = 0
     thread_retry_used = False
     client_restart_count = 0
     max_client_restarts = 2
+    internal_tool_retries = 0
     while True:
         try:
             return await _completion_with_tools_once(
@@ -1341,6 +1348,18 @@ async def completion_with_tools(
                 max_rate_limit_retries,
             )
             await asyncio.sleep(min(delay, 5.0))
+        except CodexInternalToolError:
+            # The model drifted into a Codex-owned tool. The current thread can
+            # no longer be trusted to follow AESPA's dynamic-tool instructions.
+            await _abandon_conversation(messages)
+            if internal_tool_retries >= MAX_INTERNAL_TOOL_RETRIES:
+                raise
+            internal_tool_retries += 1
+            log.warning(
+                "Codex attempted an internal tool; retrying in a fresh thread (%d/%d)",
+                internal_tool_retries,
+                MAX_INTERNAL_TOOL_RETRIES,
+            )
         except CodexTurnTimeoutError as exc:
             if not thread_retry_used:
                 thread_retry_used = True

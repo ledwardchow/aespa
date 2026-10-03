@@ -147,6 +147,32 @@ def test_discover_llm_models_endpoint(client: TestClient, monkeypatch):
     assert r.json() == ["custom-openrouter-model-1", "custom-openrouter-model-2"]
 
 
+def test_bedrock_model_discovery_uses_saved_profile(client: TestClient, monkeypatch):
+    provider = _make_provider(
+        client,
+        name="Bedrock discovery",
+        api_format="bedrock",
+        models=["global.anthropic.claude-sonnet-4-6"],
+        aws_profile="scan-operator",
+    ).json()
+    captured = {}
+
+    async def fake_discover(**kwargs):
+        captured.update(kwargs)
+        return {"models": ["global.anthropic.claude-sonnet-4-6"], "capabilities": {}}
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_model_options_for_format", fake_discover
+    )
+    response = client.post(
+        "/api/settings/llm/discover-model-options",
+        json={"api_format": "bedrock", "provider_id": provider["id"]},
+    )
+
+    assert response.status_code == 200
+    assert captured["aws_profile"] == "scan-operator"
+
+
 def test_openai_compatible_discovery_failure_has_clear_error(
     client: TestClient, monkeypatch
 ):
@@ -171,27 +197,21 @@ def test_openai_compatible_discovery_failure_has_clear_error(
     )
 
 
-def test_burp_rest_api_config_round_trip(client: TestClient):
-    r = client.get("/api/settings/burp-rest-api")
+def test_burp_extension_config_round_trip(client: TestClient):
+    r = client.get("/api/extensions/aespa.burpsuite")
     assert r.status_code == 200
     assert r.json()["enabled"] is False
-    assert r.json()["api_url"] == "http://127.0.0.1:1337"
-    assert (
-        r.json()["scan_configuration_name"]
-        == "Audit checks - all except time-based detection methods"
+    assert r.json()["settings"] == {}
+
+    enabled = client.put(
+        "/api/extensions/aespa.burpsuite/enabled", json={"enabled": True}
     )
-    assert r.json()["scan_sqli"] is True
-    assert r.json()["scan_xss"] is True
-    assert r.json()["scan_command_injection"] is True
-    assert r.json()["scan_path_traversal"] is True
-    assert r.json()["scan_ssrf"] is True
-    assert r.json()["scan_xxe"] is True
-    assert r.json()["scan_ssti"] is True
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+    assert enabled.json()["web_scanners"][0]["id"] == "aespa.burpsuite"
 
     payload = {
-        "enabled": True,
         "api_url": "http://127.0.0.1:1337",
-        "api_key": None,
         "scan_configuration_name": "Fast audit",
         "scan_sqli": False,
         "scan_xss": True,
@@ -201,10 +221,11 @@ def test_burp_rest_api_config_round_trip(client: TestClient):
         "scan_xxe": True,
         "scan_ssti": True,
     }
-    r = client.put("/api/settings/burp-rest-api", json=payload)
+    r = client.patch(
+        "/api/extensions/aespa.burpsuite/settings", json={"settings": payload}
+    )
     assert r.status_code == 200
-    data = r.json()
-    assert data["enabled"] is True
+    data = r.json()["settings"]
     assert data["api_url"] == "http://127.0.0.1:1337"
     assert data["scan_configuration_name"] == "Fast audit"
     assert data["scan_sqli"] is False
@@ -542,6 +563,112 @@ def test_create_provider_and_profile(client: TestClient):
     assert active["provider"] == "openai"
 
 
+def test_model_rate_limits_are_saved_and_shared_by_provider_model_pair(
+    client: TestClient,
+):
+    provider = _make_provider(client).json()
+    first = _make_profile(
+        client,
+        provider["id"],
+        name="Primary llama",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+    second = _make_profile(
+        client,
+        provider["id"],
+        name="Secondary llama",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert "max_tpm" not in provider
+    assert "max_rpm" not in provider
+
+    updated = client.put(
+        f"/api/settings/llm/model-configs/{second.json()['id']}",
+        json={
+            "name": "Secondary llama",
+            "provider_id": provider["id"],
+            "model": "llama-3",
+            "max_tpm": 240_000,
+            "max_rpm": 90,
+            "max_tokens": 4096,
+        },
+    )
+
+    assert updated.status_code == 200
+    models = {
+        item["id"]: item
+        for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    for model_id in (first.json()["id"], second.json()["id"]):
+        assert models[model_id]["max_tpm"] == 240_000
+        assert models[model_id]["max_rpm"] == 90
+
+
+def test_llm_export_places_rate_limits_on_models(client: TestClient):
+    provider = _make_provider(client).json()
+    model = _make_profile(
+        client,
+        provider["id"],
+        max_tpm=120_000,
+        max_rpm=60,
+    ).json()
+
+    exported = client.get("/api/settings/llm/export").json()
+
+    assert exported["version"] == 2
+    exported_provider = next(
+        item for item in exported["providers"] if item["name"] == provider["name"]
+    )
+    exported_model = next(
+        item for item in exported["profiles"] if item["name"] == model["name"]
+    )
+    assert "max_tpm" not in exported_provider
+    assert "max_rpm" not in exported_provider
+    assert exported_model["max_tpm"] == 120_000
+    assert exported_model["max_rpm"] == 60
+
+
+def test_llm_import_accepts_legacy_provider_rate_limits(client: TestClient):
+    response = client.post(
+        "/api/settings/llm/import",
+        json={
+            "version": 1,
+            "exported_at": "2026-09-18T00:00:00Z",
+            "providers": [
+                {
+                    "name": "Legacy provider",
+                    "api_format": "openai",
+                    "models": ["gpt-4o"],
+                    "max_tpm": 100_000,
+                    "max_rpm": 50,
+                }
+            ],
+            "profiles": [
+                {
+                    "name": "Legacy model",
+                    "provider_name": "Legacy provider",
+                    "model": "gpt-4o",
+                    "max_tokens": 4096,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    model = next(
+        item
+        for item in client.get("/api/settings/llm/model-configs").json()
+        if item["name"] == "Legacy model"
+    )
+    assert model["max_tpm"] == 100_000
+    assert model["max_rpm"] == 50
+
+
 def test_create_model_defaults_name_to_provider_model(client: TestClient):
     provider_r = _make_provider(
         client, name="OpenAI Prod", models=["gpt-4o", "gpt-4o-mini"]
@@ -590,12 +717,14 @@ def test_create_bedrock_provider_with_blank_api_key(client: TestClient):
         base_url=None,
         models=["global.anthropic.claude-sonnet-4-6"],
         api_key=None,
+        aws_profile="scan-operator",
     )
     assert provider_r.status_code == 200
     provider = provider_r.json()
     assert provider["api_format"] == "bedrock"
     assert provider["api_key"] is None
     assert provider["base_url"] is None
+    assert provider["aws_profile"] == "scan-operator"
 
     profile_r = _make_profile(
         client,
@@ -607,6 +736,7 @@ def test_create_bedrock_provider_with_blank_api_key(client: TestClient):
     assert active["provider"] == "bedrock"
     assert active["api_key"] is None
     assert active["base_url"] is None
+    assert active["aws_profile"] == "scan-operator"
 
 
 def test_create_github_copilot_provider_without_token(client: TestClient):
@@ -641,11 +771,13 @@ def test_bedrock_mantle_project_id_round_trips(client: TestClient):
         project_id="proj_5d5ykleja6cwpirysbb7",
         models=["openai.gpt-oss-120b"],
         api_key="bedrock-key",
+        aws_profile="mantle-operator",
     )
     assert provider_r.status_code == 200
     provider = provider_r.json()
     assert provider["api_format"] == "bedrock_mantle"
     assert provider["project_id"] == "proj_5d5ykleja6cwpirysbb7"
+    assert provider["aws_profile"] == "mantle-operator"
 
     profile_r = _make_profile(client, provider["id"], model="openai.gpt-oss-120b")
     assert profile_r.status_code == 200
@@ -653,6 +785,65 @@ def test_bedrock_mantle_project_id_round_trips(client: TestClient):
     active = client.get("/api/settings/llm").json()
     assert active["provider"] == "bedrock_mantle"
     assert active["project_id"] == "proj_5d5ykleja6cwpirysbb7"
+    assert active["aws_profile"] == "mantle-operator"
+
+
+def test_google_vertex_provider_uses_adc_settings(client: TestClient):
+    provider_r = _make_provider(
+        client,
+        name="Vertex",
+        api_format="google_vertex",
+        base_url="https://should-not-be-stored.example",
+        project_id="example-project",
+        location="us-central1",
+        models=["gemini-2.5-flash"],
+        api_key="should-not-be-stored",
+    )
+
+    assert provider_r.status_code == 200
+    provider = provider_r.json()
+    assert provider["api_format"] == "google_vertex"
+    assert provider["project_id"] == "example-project"
+    assert provider["location"] == "us-central1"
+    assert provider["base_url"] is None
+    assert provider["has_api_key"] is False
+
+    profile_r = _make_profile(client, provider["id"], model="gemini-2.5-flash")
+    assert profile_r.status_code == 200
+    active = client.get("/api/settings/llm").json()
+    assert active["provider"] == "google_vertex"
+    assert active["project_id"] == "example-project"
+    assert active["location"] == "us-central1"
+    exported = client.get("/api/settings/llm/export").json()
+    exported_provider = next(
+        item for item in exported["providers"] if item["name"] == "Vertex"
+    )
+    assert exported_provider["project_id"] == "example-project"
+    assert exported_provider["location"] == "us-central1"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "projects/example/locations/us-central1/endpoints/123",
+        "projects/example/locations/us-central1/models/123",
+        "tunedModels/example",
+    ],
+)
+def test_google_vertex_rejects_non_serverless_model_resources(
+    client: TestClient, model: str
+):
+    response = _make_provider(
+        client,
+        name=f"Vertex {model}",
+        api_format="google_vertex",
+        project_id="example-project",
+        location="global",
+        models=[model],
+    )
+
+    assert response.status_code == 422
+    assert "serverless publisher model" in response.text
 
 
 def test_legacy_provider_formats_are_supported(client: TestClient):
@@ -752,30 +943,19 @@ def test_write_only_api_keys_behavior(client: TestClient):
     assert clear_resp.status_code == 200
     assert clear_resp.json()["has_api_key"] is False
 
-    # 5. Burp REST API key write-only test
-    burp_put = client.put(
-        "/api/settings/burp-rest-api",
-        json={
-            "enabled": True,
-            "api_url": "http://127.0.0.1:1337",
-            "api_key": "burp-secret-key",
-            "scan_configuration_name": "Audit",
-            "scan_sqli": True,
-            "scan_xss": True,
-            "scan_command_injection": True,
-            "scan_path_traversal": True,
-            "scan_ssrf": True,
-            "scan_xxe": True,
-            "scan_ssti": True,
-        },
+    # 5. Extension secret write-only test
+    client.put("/api/extensions/aespa.burpsuite/enabled", json={"enabled": True})
+    burp_put = client.patch(
+        "/api/extensions/aespa.burpsuite/settings",
+        json={"settings": {"api_key": "burp-secret-key"}},
     )
     assert burp_put.status_code == 200
-    assert burp_put.json()["has_api_key"] is True
-    assert burp_put.json()["api_key"] is None
+    assert burp_put.json()["has_secrets"]["api_key"] is True
+    assert "burp-secret-key" not in burp_put.text
 
-    burp_get = client.get("/api/settings/burp-rest-api")
-    assert burp_get.json()["has_api_key"] is True
-    assert burp_get.json()["api_key"] is None
+    burp_get = client.get("/api/extensions/aespa.burpsuite")
+    assert burp_get.json()["has_secrets"]["api_key"] is True
+    assert "burp-secret-key" not in burp_get.text
 
 
 def test_run_llm_config_resolves_provider_fields_without_changing_session_instance():
@@ -902,6 +1082,57 @@ def test_cannot_remove_provider_model_used_by_scan_profile(client: TestClient):
     assert "llama-3" in saved_provider["models"]
 
 
+def test_removing_unused_provider_model_deletes_its_model_record(client: TestClient):
+    provider = _make_provider(client).json()
+    removed_model = _make_profile(client, provider["id"], name="Removed model").json()
+    retained_model = _make_profile(
+        client, provider["id"], name="Retained model", model="gpt-4o"
+    ).json()
+
+    response = client.put(
+        f"/api/settings/llm/providers/{provider['id']}",
+        json={
+            "name": provider["name"],
+            "api_format": provider["api_format"],
+            "base_url": provider["base_url"],
+            "models": ["gpt-4o"],
+            "api_key": None,
+        },
+    )
+
+    assert response.status_code == 200
+    models = {
+        item["id"]: item
+        for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    assert removed_model["id"] not in models
+    assert models[retained_model["id"]]["is_active"] is True
+
+
+def test_import_removing_unused_provider_model_deletes_its_model_record(
+    client: TestClient,
+):
+    provider = _make_provider(client).json()
+    removed_model = _make_profile(client, provider["id"], name="Removed model").json()
+    _make_profile(client, provider["id"], name="Retained model", model="gpt-4o")
+    exported = client.get("/api/settings/llm/export").json()
+    exported_provider = next(
+        item for item in exported["providers"] if item["name"] == provider["name"]
+    )
+    exported_provider["models"] = ["gpt-4o"]
+    exported["profiles"] = [
+        item for item in exported["profiles"] if item["name"] != removed_model["name"]
+    ]
+
+    response = client.post("/api/settings/llm/import", json=exported)
+
+    assert response.status_code == 200
+    model_ids = {
+        item["id"] for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    assert removed_model["id"] not in model_ids
+
+
 def test_delete_scan_profile_clears_run_reference(client: TestClient):
     provider = _make_provider(client).json()
     model = _make_profile(client, provider["id"]).json()
@@ -960,10 +1191,14 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
     assert data["thinking_max_steps"] == 120
+    assert data["dast_max_concurrent_llm_requests"] == 4
     assert data["min_delay_s"] == 0.05
     assert data["allowed_schemes"] == ["http", "https"]
     assert "POST" in data["methods_by_mode"]["safe_active"]
     assert data["strict_locator_enforcement"] is True
+    assert data["sast_budget_mode"] == "adaptive"
+    assert data["sast_worker_budget_max"] == 250
+    assert data["sast_max_concurrent_llm_requests"] == 4
 
 
 def test_upsert_scanner_policy(client: TestClient):
@@ -978,10 +1213,13 @@ def test_upsert_scanner_policy(client: TestClient):
             "standard_coverage_percent": 72,
             "max_probes_per_page": 25,
             "thinking_max_steps": 180,
+            "dast_max_concurrent_llm_requests": 7,
             "request_timeout_s": 12.5,
             "min_delay_s": 0.1,
             "blocked_headers": ["host", "cookie", "x-admin"],
             "strict_locator_enforcement": False,
+            "sast_budget_mode": "fixed",
+            "sast_max_concurrent_llm_requests": 6,
         }
     )
     r = client.put("/api/settings/scanner-policy", json=payload)
@@ -995,8 +1233,11 @@ def test_upsert_scanner_policy(client: TestClient):
     assert data["scan_mode"] == "aggressive"
     assert data["max_probes_per_page"] == 25
     assert data["thinking_max_steps"] == 180
+    assert data["dast_max_concurrent_llm_requests"] == 7
     assert data["blocked_headers"] == ["host", "cookie", "x-admin"]
     assert data["strict_locator_enforcement"] is False
+    assert data["sast_budget_mode"] == "fixed"
+    assert data["sast_max_concurrent_llm_requests"] == 6
 
     r2 = client.get("/api/settings/scanner-policy")
     assert r2.json()["request_timeout_s"] == 12.5
@@ -1005,6 +1246,30 @@ def test_upsert_scanner_policy(client: TestClient):
 def test_upsert_scanner_policy_invalid_limit(client: TestClient):
     payload = client.get("/api/settings/scanner-policy").json()
     payload["max_probes_per_page"] = 9999
+    r = client.put("/api/settings/scanner-policy", json=payload)
+    assert r.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["dast_max_concurrent_llm_requests", "sast_max_concurrent_llm_requests"],
+)
+def test_upsert_scanner_policy_rejects_invalid_llm_concurrency(
+    client: TestClient, field: str
+):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload[field] = 0
+
+    response = client.put("/api/settings/scanner-policy", json=payload)
+
+    assert response.status_code == 422
+
+
+def test_upsert_scanner_policy_rejects_adaptive_max_below_minimum(client: TestClient):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload["sast_budget_mode"] = "adaptive"
+    payload["sast_threat_budget"] = 80
+    payload["sast_worker_budget_max"] = 79
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 422
 

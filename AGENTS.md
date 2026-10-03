@@ -44,6 +44,12 @@ When making UI changes:
 2. Do not edit files directly in `src/aespa/web/`; these are generated build artifacts.
 3. After completing UI changes, run `npm run build` inside `frontend/`. This rebuild places compiled assets in `src/aespa/web/` so they are served by `uv run aespa`.
 
+### Interface wording
+
+- Use plain, direct language across every interface. Keep labels short and describe actions and results in words users already know.
+- Avoid jargon, abstract labels, and polished or AI-generated sounding explanations. For example, use "Findings", "Finding details", and "Missing evidence" instead of "Candidate ledger", "Evidence chain", and "Proof gaps".
+- Check headings, buttons, empty states, status text, and help text when adding or changing a screen. Use technical terms only when they help users make a decision or understand a result.
+
 Frontend refactoring notes:
 
 - Do not trust Vite builds to catch undefined variables. Bundlers may ignore undefined variable references.
@@ -107,6 +113,12 @@ Everything is asyncio. Crawl, scan, SAST, and ALICE jobs run as background `asyn
 ## Database And Migrations
 
 SQLite via SQLModel, single file `aespa.db` (gitignored; never commit it). Do not inspect it by default, but read-only inspection is allowed when the user explicitly asks to diagnose a local run; use SQLite read-only mode and avoid exposing stored secrets. Schema evolution is managed via **Alembic**.
+
+### Extension database access
+
+Extension code may read AESPA's main database, for example to find saved LLM profiles or inspect completed runs. Extension code must never write to or change the main database. Do not call `add`, `delete`, `flush`, `commit`, write SQL, migrations, or core service methods that change main database data from an extension. Store extension-owned results and state in the extension's separate database through `registry.data_store(...)`. When an extension needs to change a scan or another core record, return the result to an AESPA-owned service or API so core code makes and validates that change.
+
+AESPA core owns the existing extension enablement, settings, secrets, scan results, and LLM usage writes. A call through AESPA's LLM service may record usage in the main database; extension code must not write usage records itself. Extension code must not call the write methods on `registry.secrets`; secret changes go through AESPA's settings API. Review new extension code for indirect main database writes through imported services as well as direct SQLModel sessions.
 
 Migration workflow for schema changes:
 

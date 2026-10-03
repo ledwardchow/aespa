@@ -38,6 +38,7 @@ function providerLabel(provider) {
     openai_compatible: "OpenAI-compatible",
     anthropic: "Anthropic",
     google: "Google",
+    google_vertex: "Google Vertex AI",
     bedrock: "Amazon Bedrock",
     bedrock_mantle: "Amazon Bedrock Mantle",
     github_copilot: "GitHub Copilot",

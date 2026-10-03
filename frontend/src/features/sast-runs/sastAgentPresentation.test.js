@@ -58,12 +58,11 @@ test("builds fixed SAST panes and groups concurrent workers", () => {
     "Repository Modeller",
     "Threat Modeller",
     "SAST Analyst",
+    "Review Workers",
     "Injection Workers",
-    "Access Control Workers",
-    "Logic Workers",
     "Sink Workers",
-    "Candidate Validators",
-    "Closure Analyst",
+    "Finding Validators",
+    "Gap Reviewer",
     "Attack Path Analyst",
   ]);
   const injection = roster.find((entry) => entry.id === "sast-injection-workers");
@@ -76,7 +75,7 @@ test("builds fixed SAST panes and groups concurrent workers", () => {
   expect(injection.children[0].taskHistory).toHaveLength(2);
   const validators = roster.find((entry) => entry.id === "sast-validators");
   expect(validators.status).toBe("paused");
-  expect(validators.children[0].name).toBe("Candidate 17");
+  expect(validators.children[0].name).toBe("Finding 17");
 });
 
 test("light scans omit deep-only agent panes", () => {
@@ -87,8 +86,32 @@ test("light scans omit deep-only agent panes", () => {
   expect(ids).not.toContain("sast-threat-modeller");
   expect(ids).not.toContain("sast-closure-analyst");
   expect(ids).toContain("sast-scanner");
-  expect(ids).toContain("sast-injection-workers");
+  expect(ids).toContain("sast-review-workers");
+  expect(ids).toContain("sast-sink-workers");
+  expect(ids).not.toContain("sast-injection-workers");
   expect(ids).toContain("sast-attack-path");
+});
+
+test("groups route review workers", () => {
+  const roster = buildSastAgentRoster(
+    [
+      {
+        id: 1,
+        agent_id: "sast-worker-1087",
+        role: "SAST Review Worker",
+        status: "active",
+        current_task: "src/Controllers:3:review: reviewing 51 assigned items",
+        created_at: "2026-09-28T09:56:30Z",
+      },
+    ],
+    "light",
+    true,
+  );
+
+  const review = roster.find((entry) => entry.id === "sast-review-workers");
+  expect(review.status).toBe("active");
+  expect(review.children).toHaveLength(1);
+  expect(review.children[0].classGroup).toBe("review");
 });
 
 test("deduplicates repeated reconstructed lifecycle entries", () => {
@@ -112,4 +135,36 @@ test("deduplicates repeated reconstructed lifecycle entries", () => {
 
   const sink = roster.find((entry) => entry.id === "sast-sink-workers");
   expect(sink.children[0].taskHistory).toHaveLength(1);
+});
+
+test("lists unfinished workers before completed ones", () => {
+  const row = (id, agentId, status) => ({
+    id,
+    agent_id: agentId,
+    role: "SAST Candidate Validator",
+    status,
+    current_task: `${status} ${agentId}`,
+    created_at: `2026-09-28T10:14:0${id}Z`,
+  });
+  const roster = buildSastAgentRoster(
+    [
+      row(1, "sast-validator-0", "complete"),
+      row(2, "sast-validator-1", "complete"),
+      row(3, "sast-validator-2", "spawned"),
+      row(4, "sast-validator-3", "active"),
+      row(5, "sast-validator-4", "complete"),
+    ],
+    "light",
+    true,
+  );
+
+  const validators = roster.find((entry) => entry.id === "sast-validators");
+  expect(validators.children.map((child) => child.id)).toEqual([
+    "sast-validator-3",
+    "sast-validator-2",
+    "sast-validator-0",
+    "sast-validator-1",
+    "sast-validator-4",
+  ]);
+  expect(validators.task).toBe("1 active, 1 queued, 3 complete");
 });

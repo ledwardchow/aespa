@@ -1,0 +1,9 @@
+id = "aespa.benchmarking"
+name = "Benchmark Lab"
+author = "aespa"
+version = "1.2.0"
+aespa_api = "1"
+entrypoint = "extension.py:create_extension"
+capabilities = ["api.routes"]
+data_namespace = "benchmarking"
+enabled_by_default = false

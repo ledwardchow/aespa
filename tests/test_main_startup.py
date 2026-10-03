@@ -4,7 +4,11 @@ import socket
 
 import pytest
 
-from aespa.main import _ensure_port_available, _run_server
+from aespa.main import (
+    _ensure_port_available,
+    _run_server,
+    _server_startup_failure_message,
+)
 
 
 def test_port_check_accepts_an_available_port() -> None:
@@ -44,3 +48,32 @@ def test_server_runner_does_not_hide_other_errors() -> None:
 
     with pytest.raises(RuntimeError, match="startup failed"):
         _run_server(FailedServer())
+
+
+def test_startup_failure_preserves_errors_captured_by_interactive_console() -> None:
+    class FailedServer:
+        started = False
+
+    class Handler:
+        buffers = {
+            "errors": [
+                "12:00:00  ERROR  uvicorn.error: Application startup failed\n"
+                "sqlite3.IntegrityError: FOREIGN KEY constraint failed"
+            ]
+        }
+
+    class Console:
+        handler = Handler()
+
+    message = _server_startup_failure_message(FailedServer(), Console())
+
+    assert message is not None
+    assert "Backend startup failed" in message
+    assert "sqlite3.IntegrityError: FOREIGN KEY constraint failed" in message
+
+
+def test_started_server_has_no_startup_failure_message() -> None:
+    class StartedServer:
+        started = True
+
+    assert _server_startup_failure_message(StartedServer()) is None
