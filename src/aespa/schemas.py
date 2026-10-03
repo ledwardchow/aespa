@@ -469,6 +469,7 @@ LLMProviderAPILiteral = Literal[
     "factory_droid",
     "github_copilot",
     "openai_codex",
+    "openai_chatgpt_plan",
     "google_antigravity",
     "openai",
     "openai_compatible",
@@ -486,6 +487,7 @@ LLMProviderAPILiteral = Literal[
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
     "factory_droid": [],
     "openai_codex": ["auto"],
+    "openai_chatgpt_plan": ["gpt-6.1-sol"],
     "google_antigravity": [
         "auto",
         "Gemini 3.7 Flash (High)",
@@ -651,10 +653,13 @@ class LLMProviderConfigIn(BaseModel):
 
     @model_validator(mode="after")
     def _validate_provider_connection(self) -> "LLMProviderConfigIn":
-        if self.api_format == "openai_codex":
+        if self.api_format in {"openai_codex", "openai_chatgpt_plan"}:
             self.api_key = None
             self.base_url = None
-            self.username = None
+            if self.api_format == "openai_codex":
+                self.username = None
+            elif not self.username:
+                raise ValueError("Select a signed-in ChatGPT account")
             self.project_id = None
             self.location = None
         elif self.api_format == "google_vertex":
@@ -721,6 +726,7 @@ class LLMModelDiscoveryRequest(BaseModel):
 class LLMModelDiscoveryOut(BaseModel):
     models: list[str] = Field(default_factory=list)
     capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    catalog_complete: bool = True
 
 
 class CodexIntegrationConfigIn(BaseModel):

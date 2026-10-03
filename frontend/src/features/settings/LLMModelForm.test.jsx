@@ -110,3 +110,43 @@ test("loads thinking levels on the first edit when only the context window was s
   ]);
   expect(thinkingLevel.options[0].textContent).toContain("medium");
 });
+
+test("ChatGPT plan models start with the documented budget and requested thinking", async () => {
+  const planProvider = {
+    ...provider,
+    api_format: "openai_chatgpt_plan",
+    models: ["gpt-6-sol", "gpt-6-luna"],
+    model_capabilities: {
+      "gpt-6-sol": {
+        context_window_tokens: 1050000,
+        context_window_source: "openai_documentation",
+        max_output_tokens: 128000,
+        default_effort: "medium",
+        supported_efforts: ["low", "medium", "high", "xhigh", "max"],
+      },
+      "gpt-6-luna": {
+        context_window_tokens: 1050000,
+        context_window_source: "openai_documentation",
+        max_output_tokens: 128000,
+        default_effort: "xhigh",
+        supported_efforts: ["none", "low", "medium", "high", "xhigh", "max"],
+      },
+    },
+  };
+  const user = userEvent.setup();
+  render(
+    <LLMModelForm
+      mode="new"
+      providers={[planProvider]}
+      initialProviderId={planProvider.id}
+      initialModel="gpt-6-sol"
+    />,
+  );
+  expect(screen.getByLabelText("Output budget (local)").value).toBe("128000");
+  expect(screen.getByLabelText(/Thinking level/).value).toBe("medium");
+  expect(screen.getByText(/1,050,000 from OpenAI docs/)).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText("Model"), "gpt-6-luna");
+  expect(screen.getByLabelText(/Thinking level/).value).toBe("xhigh");
+  expect(screen.getByLabelText("Output budget (local)").value).toBe("128000");
+  expect(screen.getByText(/do not support an output-token limit/)).toBeTruthy();
+});

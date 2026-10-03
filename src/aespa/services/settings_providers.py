@@ -144,23 +144,32 @@ def _apply_llm_provider(
     _reconcile_provider_model_configs(session, provider, payload.models)
     provider.name = payload.name
     provider.api_format = payload.api_format
-    if payload.api_format in {"factory_droid", "openai_codex", "google_vertex"}:
+    if payload.api_format in {
+        "factory_droid",
+        "openai_codex",
+        "openai_chatgpt_plan",
+        "google_vertex",
+    }:
         provider.api_key = None
     elif payload.api_key is not None:
         key_str = payload.api_key.strip()
         provider.api_key = key_str if key_str else None
     provider.base_url = (
         None
-        if payload.api_format in {"factory_droid", "openai_codex", "google_vertex"}
+        if payload.api_format
+        in {"factory_droid", "openai_codex", "openai_chatgpt_plan", "google_vertex"}
         else payload.base_url
     )
     username = (payload.username or "").strip()
     provider.username = (
-        username or None if payload.api_format == "github_copilot" else None
+        username or None
+        if payload.api_format in {"github_copilot", "openai_chatgpt_plan"}
+        else None
     )
     provider.project_id = (
         None
-        if payload.api_format in {"factory_droid", "openai_codex"}
+        if payload.api_format
+        in {"factory_droid", "openai_codex", "openai_chatgpt_plan"}
         else payload.project_id
     )
     provider.aws_profile = (
@@ -188,12 +197,31 @@ def _apply_llm_provider(
     for cfg in session.exec(
         select(LLMConfig).where(LLMConfig.provider_id == provider.id)
     ).all():
-        if cfg.context_limit_source == "manual":
-            continue
-        detected, source = detect_context_window(provider, cfg.model)
-        if source != "fallback":
-            cfg.max_context_tokens = detected
-            cfg.context_limit_source = source
+        changed = False
+        if cfg.context_limit_source != "manual":
+            detected, source = detect_context_window(provider, cfg.model)
+            if source != "fallback":
+                cfg.max_context_tokens = detected
+                cfg.context_limit_source = source
+                changed = True
+        if provider.api_format == "openai_chatgpt_plan":
+            capability = _provider_capabilities(provider).get(cfg.model) or {}
+            if cfg.username != provider.username:
+                cfg.username = provider.username
+                changed = True
+            output_limit = capability.get("max_output_tokens")
+            if (
+                cfg.max_tokens == 16384
+                and isinstance(output_limit, int)
+                and cfg.max_context_tokens > output_limit + 1024
+            ):
+                cfg.max_tokens = output_limit
+                changed = True
+            preferred_effort = capability.get("default_effort")
+            if cfg.reasoning_effort is None and preferred_effort:
+                cfg.reasoning_effort = preferred_effort
+                changed = True
+        if changed:
             cfg.updated_at = _utcnow()
             session.add(cfg)
     session.commit()

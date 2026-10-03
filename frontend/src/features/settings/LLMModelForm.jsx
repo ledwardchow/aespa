@@ -1,6 +1,6 @@
 import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect, useMemo } from "react";
-import { llmProfileToForm, llmPayload } from "./modelForm.js";
+import { llmProfileToForm, llmPayload, modelDefaults } from "./modelForm.js";
 import { API_FORMAT_LABELS } from "./providerMetadata.js";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
@@ -22,6 +22,7 @@ export function LLMModelForm({
     const initialProvider = providers.find((item) => item.id === initialProviderId);
     return {
       ...initialForm,
+      ...modelDefaults(initialProvider, initialModel),
       name: initialProvider?.name ? `${initialProvider.name}/${initialModel}` : initialModel,
       provider_id: initialProviderId,
       model: initialModel,
@@ -115,6 +116,20 @@ export function LLMModelForm({
     ...(discoveredCapabilities[form.model] || {}),
     ...storedCapability,
   };
+  const documentedOutput = Number(capability.max_output_tokens || 0);
+  const preferredEffort = capability.default_effort || "";
+  useEffect(() => {
+    if (mode !== "new") return;
+    setForm((current) => ({
+      ...current,
+      ...(documentedOutput > 0 && Number(current.max_tokens) === 16384
+        ? { max_tokens: documentedOutput }
+        : {}),
+      ...(preferredEffort && !current.reasoning_effort
+        ? { reasoning_effort: preferredEffort }
+        : {}),
+    }));
+  }, [mode, documentedOutput, preferredEffort]);
   const levels = Array.isArray(capability.supported_efforts) ? capability.supported_efforts : [];
   const discoveredCapability = discoveredCapabilities[form.model] || {};
   const discoveredContext = Number(
@@ -161,6 +176,7 @@ export function LLMModelForm({
                 provider_id: newProviderId,
                 model: newModel,
                 reasoning_effort: "",
+                ...modelDefaults(provider, newModel),
                 ...limitsForModel(newProviderId, newModel),
               };
               if (!nameTouched || !form.name.trim()) {
@@ -189,6 +205,7 @@ export function LLMModelForm({
               const updates = {
                 model: newModel,
                 reasoning_effort: "",
+                ...modelDefaults(selectedProvider, newModel),
                 ...limitsForModel(form.provider_id, newModel),
               };
               if (!nameTouched || !form.name.trim()) {
@@ -248,12 +265,15 @@ export function LLMModelForm({
         <div className="form-section-title">Sampling</div>
         <div className="two-col">
           <div className="field">
-            <label>Max tokens</label>
+            <label htmlFor="model-config-max-tokens">
+              {selectedProvider?.api_format === "openai_chatgpt_plan" ? "Output budget (local)" : "Max tokens"}
+            </label>
             <input
+              id="model-config-max-tokens"
               type="number"
               required
               min="1"
-              max="256000"
+              max={selectedProvider?.api_format === "openai_chatgpt_plan" && documentedOutput > 0 ? documentedOutput : 256000}
               value={form.max_tokens}
               onChange={(e) =>
                 upd({
@@ -261,6 +281,11 @@ export function LLMModelForm({
                 })
               }
             />
+            {selectedProvider?.api_format === "openai_chatgpt_plan" && (
+              <div className="field-hint">
+                AESPA uses this for context planning. ChatGPT plan requests do not support an output-token limit.
+              </div>
+            )}
           </div>
           <div className="field">
             <label>Maximum context tokens</label>
@@ -272,7 +297,9 @@ export function LLMModelForm({
               />
               <span>
                 Auto
-                {detectedContext >= 1024 ? ` (${detectedContext.toLocaleString()} detected)` : ""}
+                {detectedContext >= 1024
+                  ? ` (${detectedContext.toLocaleString()} ${capability.context_window_source === "openai_documentation" ? "from OpenAI docs" : "detected"})`
+                  : ""}
               </span>
             </label>
             <input
@@ -280,7 +307,7 @@ export function LLMModelForm({
               required={!form.max_context_auto}
               disabled={form.max_context_auto}
               min="1024"
-              max="2000000"
+              max={selectedProvider?.api_format === "openai_chatgpt_plan" && detectedContext >= 1024 ? detectedContext : 2000000}
               value={form.max_context_tokens}
               onChange={(e) =>
                 upd({

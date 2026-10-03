@@ -371,7 +371,19 @@ def _apply_llm_config(
     cfg.model = payload.model
     cfg.max_tpm = payload.max_tpm
     cfg.max_rpm = payload.max_rpm
-    cfg.max_tokens = payload.max_tokens
+    capability = _provider_capabilities(provider).get(payload.model)
+    output_budget = payload.max_tokens
+    if provider.api_format == "openai_chatgpt_plan" and isinstance(capability, dict):
+        output_limit = capability.get("max_output_tokens")
+        if isinstance(output_limit, int):
+            if "max_tokens" not in payload.model_fields_set:
+                output_budget = output_limit
+            if output_budget > output_limit:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"The output budget for this model cannot exceed {output_limit} tokens",
+                )
+    cfg.max_tokens = output_budget
     if payload.max_context_tokens is None:
         cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
             provider, payload.model
@@ -383,9 +395,21 @@ def _apply_llm_config(
             cfg.max_context_tokens = payload.detected_context_tokens
             cfg.context_limit_source = "discovered"
     else:
+        if provider.api_format == "openai_chatgpt_plan" and isinstance(
+            capability, dict
+        ):
+            documented_context = capability.get("context_window_tokens")
+            if (
+                isinstance(documented_context, int)
+                and payload.max_context_tokens > documented_context
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"The context window for this model cannot exceed {documented_context} tokens",
+                )
         cfg.max_context_tokens = payload.max_context_tokens
         cfg.context_limit_source = "manual"
-    if cfg.max_context_tokens <= payload.max_tokens + 1024:
+    if cfg.max_context_tokens <= output_budget + 1024:
         raise HTTPException(
             status_code=422,
             detail="The model context window must leave at least 1024 tokens for input",
@@ -393,9 +417,15 @@ def _apply_llm_config(
     cfg.temperature = payload.temperature
     cfg.use_vision = payload.use_vision
     cfg.force_tool_choice = payload.force_tool_choice
-    capability = _provider_capabilities(provider).get(payload.model)
+    effort = payload.reasoning_effort
+    if (
+        provider.api_format == "openai_chatgpt_plan"
+        and "reasoning_effort" not in payload.model_fields_set
+        and isinstance(capability, dict)
+    ):
+        effort = capability.get("default_effort")
     try:
-        cfg.reasoning_effort = validate_effort(capability, payload.reasoning_effort)
+        cfg.reasoning_effort = validate_effort(capability, effort)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     cfg.updated_at = _utcnow()

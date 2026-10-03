@@ -1061,6 +1061,7 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 | `factory_droid` | Official Factory Droid SDK, using the account signed in through Droid CLI |
 | `github_copilot` | Official GitHub Copilot SDK, using Copilot CLI authentication or a GitHub user token |
 | `openai_codex` | External Codex app-server, using the local Codex CLI's default ChatGPT login |
+| `openai_chatgpt_plan` | OpenAI Responses API with the selected signed-in ChatGPT account |
 | `anthropic` | `anthropic` Python SDK (native tool-use supported) |
 | `openai` | `openai` Python SDK |
 | `google` | `google-genai` with a Gemini Developer API key |
@@ -1084,6 +1085,8 @@ In addition to the run-level `token_usage_json`, `services/statistics.py` record
 Factory Droid uses the installed CLI's encrypted login state; AESPA never reads or stores its credential. The settings endpoint opens a short SDK session and uses `initialize_session().available_models` as the account-specific model catalog, including custom models. Each active AESPA message list owns an isolated persistent Droid session. All sessions use the same empty `aespa-droid-workspace` temporary directory so Factory groups them under one UI project instead of creating a project per loop. The child receives only an environment allowlist needed for CLI authentication, networking, and locale; built-in skills and non-AESPA tools are denied.
 
 Codex uses the same subscription-provider lifecycle through `services/codex_provider.py`, but AESPA starts the user's separately installed `codex app-server` and communicates over JSONL JSON-RPC. The child uses the normal Codex CLI home, including an explicitly configured `CODEX_HOME`, so it automatically uses the CLI's default ChatGPT login when one exists. It still runs in an empty working directory and receives only the environment values needed for CLI authentication, networking, and certificates. Codex dynamic tools are experimental and are required for scans; an incompatible CLI produces an upgrade error. Model discovery, account status, allowance windows, and manual login/logout are exposed through Settings. Codex token and prompt-cache counters are recorded, but subscription usage is never converted into a dollar estimate.
+
+The ChatGPT plan provider uses the account selected in Settings. It combines the account's model list with small requests that verify models missing from that list. For known models, Settings uses OpenAI's published context and output sizes. The output budget helps AESPA plan how much context to keep; ChatGPT plan requests do not accept the `max_output_tokens` field.
 
 Codex app-server advertises dynamic tools at thread start but does not provide a per-turn `tool_choice` field. AESPA therefore enforces the scan contract in the adapter. A prose-only completion receives a bounded correction asking for exactly one AESPA tool. Messages that say an advertised AESPA tool is unavailable replace the Codex thread, while unavailable target infrastructure remains ordinary scan evidence. Only recovery exhaustion reaches the shared agent loop as a no-tool response.
 
