@@ -4,6 +4,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+### Housekeeping
+
+- **Dependabot version updates**: Weekly Python dependency updates now open grouped pull requests against develop. Security updates continue to target main.
+
 ## [PR #275] October 3 Update - extensions, Benchmark Lab and scan improvements
 
 ### New features
