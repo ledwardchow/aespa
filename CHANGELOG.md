@@ -6,6 +6,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
+- **Dependency security updates**: Updated PyJWT to 2.15.0, urllib3 to 2.8.0, and the frontend's brace-expansion dependency to 1.1.21.
+
 - **Dependabot version updates**: Weekly Python dependency updates now open grouped pull requests against develop. Security updates continue to target main.
 
 ## [PR #275] October 3 Update - extensions, Benchmark Lab and scan improvements
