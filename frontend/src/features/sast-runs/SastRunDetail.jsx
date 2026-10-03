@@ -104,6 +104,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const [activePhase, setActivePhase] = useState(null);
   const [selectedLeadId, setSelectedLeadId] = useState(null);
   const [scanRunning, setScanRunning] = useState(false);
+  const [resumableWork, setResumableWork] = useState(false);
   const [startBusy, setStartBusy] = useState(false);
   const [queueBusy, setQueueBusy] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
@@ -128,6 +129,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         ]);
       setRun(runData);
       setScanRunning(status.running);
+      setResumableWork(Boolean(status.resumable_work));
       setAnalysis(analysisData);
       setLogs(logData || []);
       setAgentLog(agentData || []);
@@ -217,7 +219,6 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   );
   const workItemSummary = analysis.work_program?.work_items || {};
   const workerSummary = analysis.work_program?.workers || {};
-  const resumableFailedWorkers = workerSummary.failed || 0;
   const fileSummary = analysis.work_program?.files || {};
   const failedWorkers = (workerSummary.failed || 0) + (workerSummary.blocked || 0);
   const unfinishedWorkers = Math.max(
@@ -353,7 +354,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     run &&
     !scanRunning &&
     (run.status === "paused" ||
-      (["completed", "failed"].includes(run.status) && resumableFailedWorkers > 0));
+      (["completed", "failed", "cancelled"].includes(run.status) && resumableWork));
   const canResumeSource =
     run &&
     !scanRunning &&

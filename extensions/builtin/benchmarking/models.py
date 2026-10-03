@@ -117,3 +117,14 @@ class BenchmarkSettings(ExtensionModel, table=True):
     __tablename__ = "benchmarking_settings"
     id: int = Field(default=1, primary_key=True)
     default_model_id: int | None = None
+
+
+class TransferIdentity(ExtensionModel, table=True):
+    """Portable identities live only in the extension database."""
+
+    __tablename__ = "benchmarking_transfer_identity"
+    __table_args__ = (UniqueConstraint("kind", "local_id"),)
+    key: str = Field(primary_key=True)
+    kind: str
+    local_id: int
+    origin_json: str = "{}"

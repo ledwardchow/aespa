@@ -162,6 +162,10 @@ test("Site summary plots saved DAST and SAST analyses and filters both", async (
   render(<BenchmarkLabPage />);
   await user.selectOptions(await screen.findByLabelText("Site"), "1");
   expect(
+    screen.queryByRole("button", { name: /Shop scan, DAST with SAST Leads, Scan Test Lead/ }),
+  ).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Scan Test Lead", exact: true }));
+  expect(
     screen.getByRole("button", { name: /Shop scan, DAST with SAST Leads, Scan Test Lead/ }),
   ).toBeTruthy();
   expect(screen.getByRole("button", { name: /Source scan, SAST, SAST agent/ })).toBeTruthy();

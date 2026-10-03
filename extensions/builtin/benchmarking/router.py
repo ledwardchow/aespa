@@ -46,8 +46,10 @@ from .models import (
     GroundTruthBinding,
     Match,
     ScanResult,
+    TransferIdentity,
     now,
 )
+from .transfer import Bundle, export_bundle, import_bundle
 
 _DISPOSITIONS = {
     "full",
@@ -100,6 +102,11 @@ def scan_cost(run: TestRun | ApiTestRun | SastRun | None) -> float | None:
     usage = loads(run.token_usage_json, {}) if run else {}
     if not isinstance(usage, dict) or not usage:
         return None
+    if any(
+        not isinstance(entry, dict) or not entry.get("estimated_cost_available")
+        for entry in usage.values()
+    ):
+        return None
     values = [
         entry.get("estimated_total_cost_usd")
         for entry in usage.values()
@@ -120,26 +127,67 @@ def scan_start_time(run: TestRun | ApiTestRun | SastRun | None) -> str | None:
     return timestamp.isoformat() + ("" if timestamp.tzinfo else "+00:00")
 
 
+def combined_scan_cost(
+    core: Session | None,
+    scan_models: dict[str, Any] | None,
+    run_cost: float | None,
+) -> tuple[float | None, dict[str, Any]]:
+    source_ids = sorted(
+        {item["run_id"] for item in (scan_models or {}).get("sast", [])}
+    )
+    sources = []
+    for source_id in source_ids:
+        source = core.get(SastRun, source_id) if core else None
+        sources.append({"run_id": source_id, "cost_usd": scan_cost(source)})
+    complete = run_cost is not None and all(
+        source["cost_usd"] is not None for source in sources
+    )
+    total = (
+        round(run_cost + sum(source["cost_usd"] for source in sources), 8)
+        if complete
+        else None
+    )
+    return total, {"run_cost_usd": run_cost, "sast": sources, "complete": complete}
+
+
 def result_out(row: ScanResult, core: Session | None = None) -> dict[str, Any]:
     saved = loads(row.rows_json, [])
     items = saved.get("rows", []) if isinstance(saved, dict) else saved
     comparison = saved.get("comparison", {}) if isinstance(saved, dict) else {}
     scan_models = saved.get("scan_models") if isinstance(saved, dict) else None
+    cost_models = scan_models if isinstance(scan_models, dict) else {}
     cost = saved.get("scan_cost_usd") if isinstance(saved, dict) else None
+    breakdown = saved.get("scan_cost_breakdown") if isinstance(saved, dict) else None
     started_at = saved.get("scan_started_at") if isinstance(saved, dict) else None
-    if core is not None:
+    run = None
+    if core is not None and row.run_id > 0:
         model = {"site": TestRun, "api": ApiTestRun, "sast": SastRun}.get(row.run_kind)
         run = core.get(model, row.run_id) if model else None
-        if cost is None:
+        if cost is None and breakdown is None:
             cost = scan_cost(run)
         if started_at is None:
             started_at = scan_start_time(run)
         # Older results saved profile assignments rather than measured usage.
-        if not isinstance(scan_models, dict) or "primary" not in scan_models:
-            scan_models = scan_models_snapshot(core, row.run_kind, run) if run else None
+        if run is not None and (
+            not isinstance(scan_models, dict) or "primary" not in scan_models
+        ):
+            scan_models = scan_models_snapshot(core, row.run_kind, run)
+    if breakdown is None:
+        # Earlier snapshots contain only the dynamic run's cost. Include both
+        # saved and current source links, without changing either database.
+        if run is not None and row.run_kind in {"site", "api"}:
+            current = scan_models_snapshot(core, row.run_kind, run)
+            cost_models = {"sast": [*cost_models.get("sast", []), *current["sast"]]}
+        if row.run_kind == "sast":
+            # A standalone SAST run already includes its own cost.
+            cost_models = {}
+        cost, breakdown = combined_scan_cost(
+            core if row.run_id > 0 else None, cost_models, cost
+        )
     return {
         "id": row.id,
         "run_kind": row.run_kind,
+        "imported": row.run_id == 0,
         "run_id": row.run_id,
         "run_name": row.run_name,
         "target_kind": row.target_kind,
@@ -152,6 +200,7 @@ def result_out(row: ScanResult, core: Session | None = None) -> dict[str, Any]:
         "comparison": comparison,
         "scan_models": scan_models,
         "scan_cost_usd": cost,
+        "scan_cost_breakdown": breakdown,
         "scan_started_at": started_at,
         "summary": {
             key: sum(item["disposition"] == key for item in items)
@@ -363,6 +412,7 @@ def matches(session: Session, evaluation_id: int) -> list[Match]:
 def evaluation_out(session: Session, row: Evaluation) -> dict[str, Any]:
     return {
         **row.model_dump(),
+        "imported": row.sast_run_id == 0,
         "semantic_coverage": {},
         "partial_coverage_reasons": [],
         "matches": [item.model_dump() for item in matches(session, row.id)],
@@ -601,6 +651,32 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
     router = APIRouter(tags=["benchmarking"])
     bulk_locks = {kind: asyncio.Lock() for kind in ("site", "api", "sast")}
 
+    @router.get("/export")
+    def export_data() -> Response:
+        with store.session() as session, Session(get_engine()) as core:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            data = export_bundle(session, core)
+            session.commit()
+        return Response(
+            json.dumps(data, ensure_ascii=False, allow_nan=False),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": 'attachment; filename="aespa-benchmark-lab.json"'
+            },
+        )
+
+    @router.post("/import")
+    def import_data(payload: Bundle) -> dict:
+        with store.session() as session, Session(get_engine()) as core:
+            try:
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                report = import_bundle(session, core, payload)
+                session.commit()
+                return report
+            except (ValueError, TypeError, KeyError) as exc:
+                session.rollback()
+                raise HTTPException(422, f"Invalid benchmark file: {exc}") from exc
+
     @router.get("/settings")
     def get_settings() -> dict[str, Any]:
         with store.session() as session:
@@ -745,6 +821,14 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             row = session.get(ScanResult, result_id)
             if row is None:
                 raise HTTPException(404, "Benchmark result not found")
+            portable = session.exec(
+                select(TransferIdentity).where(
+                    TransferIdentity.kind == "results",
+                    TransferIdentity.local_id == row.id,
+                )
+            ).first()
+            if portable:
+                session.delete(portable)
             session.delete(row)
             session.commit()
 
@@ -809,7 +893,11 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             run_name = run.name
             target_name = target.name if target else ""
             scan_models = scan_models_snapshot(core, payload.run_kind, run)
-            cost = scan_cost(run)
+            cost, cost_breakdown = combined_scan_cost(
+                core,
+                scan_models if payload.run_kind != "sast" else None,
+                scan_cost(run),
+            )
             with store.session() as session:
                 if payload.dataset_id is not None:
                     dataset_id = payload.dataset_id
@@ -901,6 +989,7 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                             "comparison": comparison,
                             "scan_models": scan_models,
                             "scan_cost_usd": cost,
+                            "scan_cost_breakdown": cost_breakdown,
                             "scan_started_at": scan_start_time(run),
                         }
                     ),
@@ -1292,6 +1381,14 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             for match in matches(session, evaluation_id):
                 session.delete(match)
             session.flush()
+            portable = session.exec(
+                select(TransferIdentity).where(
+                    TransferIdentity.kind == "evaluations",
+                    TransferIdentity.local_id == row.id,
+                )
+            ).first()
+            if portable:
+                session.delete(portable)
             session.delete(row)
             session.commit()
 
@@ -1301,6 +1398,10 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             evaluation = session.get(Evaluation, evaluation_id)
             if evaluation is None:
                 raise HTTPException(404, "SAST benchmarking evaluation not found")
+            if evaluation.sast_run_id == 0:
+                raise HTTPException(
+                    409, "Imported evaluations cannot run without their original scan"
+                )
             dataset = session.get(Dataset, evaluation.dataset_id)
             if dataset is None:
                 raise HTTPException(409, "Evaluation dataset is unavailable")
@@ -1647,6 +1748,14 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             row = session.get(Comparison, comparison_id)
             if row is None:
                 raise HTTPException(404, "Comparison not found")
+            portable = session.exec(
+                select(TransferIdentity).where(
+                    TransferIdentity.kind == "comparisons",
+                    TransferIdentity.local_id == row.id,
+                )
+            ).first()
+            if portable:
+                session.delete(portable)
             session.delete(row)
             session.commit()
 

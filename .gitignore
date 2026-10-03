@@ -32,5 +32,5 @@ saml.b64
 /runtime/python-executor/output/
 
 #extensions, other than the builtin
-extensions/
-!extensions/builtin/
+/extensions/*
+!/extensions/builtin/

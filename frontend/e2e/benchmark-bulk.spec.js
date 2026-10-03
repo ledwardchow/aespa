@@ -12,7 +12,9 @@ for (const width of [1440, 600]) {
     page.on("console", (message) => {
       if (message.type() === "error") errors.push(message.text());
     });
-    const results = [{ id: 5, run_kind: "site", run_id: 2 }];
+    const results = [
+      { id: 5, run_kind: "site", run_id: 2, summary: { full: 0, partial: 0, missing: 0 } },
+    ];
     const runs = [
       {
         id: 1,
@@ -62,7 +64,12 @@ for (const width of [1440, 600]) {
       if (endpoint === "benchmark-unbenchmarked") {
         const body = route.request().postDataJSON();
         batches.push(body);
-        results.push({ id: 6, run_kind: body.run_kind, run_id: 1 });
+        results.push({
+          id: 6,
+          run_kind: body.run_kind,
+          run_id: 1,
+          summary: { full: 0, partial: 0, missing: 0 },
+        });
         return route.fulfill({ json: { completed: [1], skipped: [2], failures: [] } });
       }
       return route.fulfill({ json: [] });
@@ -77,7 +84,7 @@ for (const width of [1440, 600]) {
     await expect(region.getByRole("link", { name: "Unbenchmarked scan" })).toBeVisible();
     await expect(region.getByText("Stopped scan")).toHaveCount(0);
     await expect(region.getByRole("columnheader", { name: "Scan model" })).toBeVisible();
-    await expect(region.getByText("SAST+DAST", { exact: true })).toBeVisible();
+    await expect(region.getByText("DAST with SAST Leads", { exact: true })).toBeVisible();
     await expect(region.getByText("Test Lead (dast-model)", { exact: true })).toBeVisible();
     await region.getByRole("checkbox", { name: "Select all scans from Shop" }).check();
     await expect(region.getByRole("checkbox", { name: "Select Unbenchmarked scan" })).toBeChecked();

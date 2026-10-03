@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef } from "react";
 
-/** Loads immediately when requested and skips overlapping ticks for the same loader. */
+/**
+ * Loads immediately when requested and skips overlapping ticks for the same loader.
+ * @param {(signal: AbortSignal) => void | Promise<void>} callback
+ * @param {{ enabled?: boolean, intervalMs?: number, immediate?: boolean }} options
+ */
 export function usePolling(callback, { enabled = true, intervalMs, immediate = true } = {}) {
   const activeRef = useRef(null);
   const poll = useCallback(async () => {

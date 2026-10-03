@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -95,6 +96,10 @@ class CodexTransportError(CodexUnavailableError):
     def __init__(self, message: str, *, client: _JsonRpcClient | None = None) -> None:
         super().__init__(message)
         self.client = client
+
+
+class CodexOpenFileLimitError(CodexUnavailableError):
+    """Codex could not open another session because file handles were exhausted."""
 
 
 class CodexQuotaError(RuntimeError):
@@ -388,6 +393,34 @@ def _child_env() -> dict[str, str]:
     env = {key: current[key] for key in _ENV_ALLOWLIST if current.get(key)}
     env["PATH"] = current.get("PATH", os.defpath)
     return env
+
+
+def _is_open_file_limit_error(exc: BaseException) -> bool:
+    if isinstance(exc, OSError) and exc.errno in {errno.EMFILE, errno.ENFILE}:
+        return True
+    message = str(exc).lower()
+    return "too many open files" in message or "os error 24" in message
+
+
+def _is_unsupported_dynamic_tools_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return ("dynamictools" in message or "dynamic_tools" in message) and any(
+        marker in message
+        for marker in ("unknown", "unrecognized", "unsupported", "not supported")
+    )
+
+
+def _thread_start_error(exc: CodexUnavailableError) -> CodexUnavailableError:
+    if _is_open_file_limit_error(exc):
+        return CodexOpenFileLimitError(
+            "Codex could not start a session because it ran out of open files."
+        )
+    if _is_unsupported_dynamic_tools_error(exc):
+        return CodexUnavailableError(
+            "This Codex CLI does not support AESPA dynamic tools. "
+            "Upgrade Codex CLI and try again. Details: " + str(exc)
+        )
+    return exc
 
 
 def resolve_executable(path: str | None = None) -> str | None:
@@ -928,10 +961,9 @@ async def _start_thread(
         result = await client.request("thread/start", params)
     except CodexUnavailableError as exc:
         if tools:
-            raise CodexUnavailableError(
-                "This Codex CLI does not support AESPA dynamic tools. "
-                "Upgrade Codex CLI and try again. Details: " + str(exc)
-            ) from exc
+            detail = _thread_start_error(exc)
+            if detail is not exc:
+                raise detail from exc
         raise
     thread_id = str((result or {}).get("thread", result or {}).get("id") or "")
     if not thread_id:
@@ -1573,13 +1605,17 @@ async def status() -> dict[str, Any]:
         try:
             await _probe_dynamic_tools(client)
         except Exception as exc:
+            detail = (
+                _thread_start_error(exc)
+                if isinstance(exc, CodexUnavailableError)
+                else exc
+            )
             return info | {
                 "running": True,
                 "compatible": False,
                 "account": account,
                 "rate_limits": limits,
-                "error": "This Codex CLI does not support AESPA dynamic tools. Upgrade Codex CLI and try again. "
-                + str(exc),
+                "error": str(detail),
             }
         return info | {
             "running": True,
