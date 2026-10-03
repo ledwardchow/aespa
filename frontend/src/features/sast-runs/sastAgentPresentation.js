@@ -115,7 +115,7 @@ function inferredWorkerName(row) {
   return candidate ? `Finding ${candidate}` : row.role || row.agent_id || "Worker";
 }
 
-function buildAgents(rows) {
+function buildAgents(rows, scanRunning) {
   const agents = new Map();
   for (const row of rows || []) {
     if (!row.agent_id) continue;
@@ -131,8 +131,13 @@ function buildAgents(rows) {
     };
     existing.name = inferClassGroup(row) ? inferredWorkerName(row) : row.role || existing.name;
     existing.role = row.role || existing.role;
-    existing.status = row.status || existing.status;
-    existing.task = row.current_task || existing.task;
+    const status = row.status || existing.status;
+    const unfinished = ["active", "running", "spawned", "queued", "pausing"].includes(status);
+    existing.status = !scanRunning && unfinished ? "paused" : status;
+    existing.task =
+      !scanRunning && unfinished
+        ? "Scan stopped before this task finished"
+        : row.current_task || existing.task;
     existing.outcome = row.outcome || "";
     existing.classGroup = inferClassGroup(row) || existing.classGroup;
     const historyEntry = {
@@ -196,7 +201,7 @@ function groupTask(children, emptyTask) {
 }
 
 export function buildSastAgentRoster(rows, analysisMode = "deep", scanRunning = false) {
-  const agents = buildAgents(rows);
+  const agents = buildAgents(rows, scanRunning);
   const fixed = FIXED_AGENTS.filter((agent) => analysisMode === "deep" || !agent.deepOnly).map(
     (placeholder) => {
       const agent = agents.get(placeholder.id);

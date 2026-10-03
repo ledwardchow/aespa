@@ -52,6 +52,7 @@ from aespa.sast_workspace import (
 from aespa.services import events as events_svc
 from aespa.services import sast_semantic as semantic_svc
 from aespa.services import sast_workprogram as workprogram_svc
+from aespa.services.sast_worker_concurrency import gather_workers, worker_gate
 from aespa.services.scan_leads import (
     CONFIDENCE_THRESHOLD,
     create_lead,
@@ -86,6 +87,8 @@ _MAX_COMPRESSION_RATIO = 1_000
 _MAX_INSPECT_FILE_BYTES = 10 * 1024 * 1024
 _PHASES = ("scope", "discovery", "validation", "attack_path", "report")
 _SAST_NETWORK_RETRY_DELAYS = (1.0, 2.0, 4.0)
+_SAST_FILE_LIMIT_RETRIES = 9
+_UNFINISHED_WORKER_STATUSES = {"failed", "pending", "running"}
 
 
 class SastPauseRequested(RuntimeError):
@@ -236,11 +239,19 @@ async def _run_checkpointed_agent(
 ) -> str:
     """Run one SAST agent with durable turn checkpoints and bounded retries."""
     from aespa.services import llm as llm_svc
+    from aespa.services.codex_provider import CodexOpenFileLimitError
 
     key = _checkpoint_key(worker_key)
     saved = _load_checkpoint(sast_run_id, phase, key) if resume else {}
     last_error: BaseException | None = None
-    for attempt in range(len(_SAST_NETWORK_RETRY_DELAYS) + 1):
+    file_limit_attempt = 0
+    network_attempt = 0
+    codex_gate = (
+        worker_gate("openai_codex", llm_svc._read_run_concurrency_limit("sast"))
+        if str(getattr(config, "provider", "")) == "openai_codex"
+        else None
+    )
+    while True:
         messages = saved.get("messages")
         step_count = int(saved.get("step_count") or 0)
 
@@ -254,31 +265,56 @@ async def _run_checkpointed_agent(
             _save_checkpoint(sast_run_id, phase, key, saved)
 
         try:
-            return await llm_svc.thinking_agentic_loop(
-                config,
-                system_message=system_message,
-                initial_user_message=initial_user_message,
-                tool_executor=tool_executor,
-                emit_fn=emit_fn,
-                stop_check=stop_check,
-                tools=tools,
-                resume_messages=messages if isinstance(messages, list) else None,
-                resume_step_count=step_count,
-                on_checkpoint=_on_checkpoint,
-                done_check=done_check,
-                termination_check=termination_check,
-            )
+            async with contextlib.AsyncExitStack() as stack:
+                if codex_gate is not None:
+                    await stack.enter_async_context(codex_gate)
+                return await llm_svc.thinking_agentic_loop(
+                    config,
+                    system_message=system_message,
+                    initial_user_message=initial_user_message,
+                    tool_executor=tool_executor,
+                    emit_fn=emit_fn,
+                    stop_check=stop_check,
+                    tools=tools,
+                    resume_messages=messages if isinstance(messages, list) else None,
+                    resume_step_count=step_count,
+                    on_checkpoint=_on_checkpoint,
+                    done_check=done_check,
+                    termination_check=termination_check,
+                )
         except llm_svc.LLMQuotaPauseError:
             raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if not _is_transient_provider_error(exc):
+            if isinstance(exc, CodexOpenFileLimitError) and codex_gate is not None:
+                new_limit = await codex_gate.reduce()
+                events_svc.emit(
+                    sast_run_id,
+                    {
+                        "type": "scanner_phase",
+                        "phase": "llm_response",
+                        "status": "warning",
+                        "message": (
+                            "Codex ran out of open files. Queuing workers and "
+                            f"retrying with at most {new_limit} concurrent session(s)."
+                        ),
+                        "data": {"concurrency_limit": new_limit},
+                    },
+                )
+            elif not _is_transient_provider_error(exc):
                 raise
             last_error = exc
-            if attempt >= len(_SAST_NETWORK_RETRY_DELAYS):
+            if isinstance(exc, CodexOpenFileLimitError):
+                file_limit_attempt += 1
+                if file_limit_attempt >= _SAST_FILE_LIMIT_RETRIES:
+                    break
+                await asyncio.sleep(min(2 ** (file_limit_attempt - 1), 5))
+                continue
+            if network_attempt >= len(_SAST_NETWORK_RETRY_DELAYS):
                 break
-            delay = _SAST_NETWORK_RETRY_DELAYS[attempt]
+            delay = _SAST_NETWORK_RETRY_DELAYS[network_attempt]
+            network_attempt += 1
             events_svc.emit(
                 sast_run_id,
                 {
@@ -289,10 +325,16 @@ async def _run_checkpointed_agent(
                         "The LLM connection was interrupted. Retrying from the "
                         f"last saved step in {delay:g} second(s)."
                     ),
-                    "data": {"attempt": attempt + 1, "error": str(exc)},
+                    "data": {"attempt": network_attempt, "error": str(exc)},
                 },
             )
             await asyncio.sleep(delay)
+    if isinstance(last_error, CodexOpenFileLimitError):
+        raise SastNetworkPause(
+            "Codex still ran out of open files after reducing concurrency. The "
+            "scan was paused at its last saved step. Resuming the scan will retry "
+            "all unfinished workers."
+        ) from last_error
     raise SastNetworkPause(
         "The LLM provider is still unreachable. The scan was paused at its last "
         f"saved step and can be resumed safely. Last error: {last_error}"
@@ -1670,6 +1712,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
     run: SastRun | None = None  # populated early; used in except blocks
     llm_cfg_obj = None
     validation_tasks: list[asyncio.Task] = []
+    validator_group_closed = False
     current_phase = "scope"
     try:
         # ── Load run, collection, document ────────────────────────────────────
@@ -2021,7 +2064,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         except (TypeError, ValueError):
             saved_phases = {}
         retry_failed_discovery = resume and any(
-            worker.status == "failed"
+            worker.status in _UNFINISHED_WORKER_STATUSES | {"blocked"}
             for worker in workprogram_svc.worker_rows(sast_run_id)
         )
 
@@ -2198,19 +2241,31 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             sink_workers = [
                 worker for worker in discovery_workers if worker.class_group == "sink"
             ]
-            worker_summaries = list(
-                await asyncio.gather(
-                    *(_run_discovery_worker(worker) for worker in route_workers)
-                )
+            worker_summaries = await gather_workers(
+                _run_discovery_worker(worker) for worker in route_workers
             )
             _raise_if_stopped()
             worker_summaries.extend(
-                await asyncio.gather(
-                    *(_run_discovery_worker(worker) for worker in sink_workers)
+                await gather_workers(
+                    _run_discovery_worker(worker) for worker in sink_workers
                 )
             )
             discovery_summary = "\n".join(worker_summaries)
             _raise_if_stopped()
+            incomplete_workers = [
+                worker
+                for worker in workprogram_svc.worker_rows(sast_run_id)
+                if worker.status in _UNFINISHED_WORKER_STATUSES
+            ]
+            if incomplete_workers:
+                names = ", ".join(
+                    worker.worker_key for worker in incomplete_workers[:8]
+                )
+                raise SastWorkerPause(
+                    f"{len(incomplete_workers)} discovery worker(s) are unfinished "
+                    f"({names}). Resume Failed Work to continue them from their "
+                    "saved checkpoints."
+                )
 
         candidates = _candidates.get(sast_run_id, [])
         candidate_count = len(candidates)
@@ -2389,6 +2444,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 "_persist": True,
             },
         )
+        validator_group_closed = True
 
         # ── Independent reachability / attack-path analysis ──────────────────
         current_phase = "attack_path"
@@ -2719,6 +2775,26 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 task.cancel()
         if validation_tasks:
             await asyncio.gather(*validation_tasks, return_exceptions=True)
+        if validation_tasks and not validator_group_closed:
+            with contextlib.suppress(Exception):
+                with Session(get_engine()) as s:
+                    final_run = s.get(SastRun, sast_run_id)
+                    final_status = final_run.status if final_run else "failed"
+                stopped = final_status == "cancelled"
+                events_svc.emit(
+                    sast_run_id,
+                    {
+                        "type": "agent_status",
+                        "agent_id": "sast-validator",
+                        "role": "SAST Validator",
+                        "status": "stopped" if stopped else "paused",
+                        "current_task": "Validation stopped"
+                        if stopped
+                        else "Validation paused",
+                        "outcome": final_status,
+                        "_persist": True,
+                    },
+                )
         _sast_tasks.pop(sast_run_id, None)
         _sast_stop_requested.discard(sast_run_id)
         _sast_pause_requested.discard(sast_run_id)
@@ -2955,6 +3031,8 @@ def is_sast_scan_running(sast_run_id: int) -> bool:
 
 
 def get_sast_status(sast_run_id: int) -> dict:
+    from aespa.services import sast_scanner
+
     running = is_sast_scan_running(sast_run_id)
     with Session(get_engine()) as s:
         run = s.get(SastRun, sast_run_id)
@@ -2962,6 +3040,11 @@ def get_sast_status(sast_run_id: int) -> dict:
     return {
         "running": running,
         "status": "running" if running else run_status,
+        "resumable_work": (
+            not running
+            and run_status in {"completed", "failed", "cancelled"}
+            and sast_scanner.has_resumable_sast_work(sast_run_id)
+        ),
     }
 
 

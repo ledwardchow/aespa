@@ -310,8 +310,9 @@ def test_pause_endpoint_requests_cooperative_pause(
     assert response.json() == {"ok": True, "pause_requested": True}
 
 
-def test_completed_run_with_failed_worker_can_resume(
-    client, isolated_db_engine, monkeypatch
+@pytest.mark.parametrize("worker_status", ["failed", "pending", "running"])
+def test_completed_run_with_unfinished_worker_can_resume(
+    client, isolated_db_engine, monkeypatch, worker_status
 ):
     sast_run_id, _ = _run_with_web_target(isolated_db_engine)
     with Session(isolated_db_engine) as session:
@@ -320,7 +321,7 @@ def test_completed_run_with_failed_worker_can_resume(
                 sast_run_id=sast_run_id,
                 worker_key="sink-audit:resume",
                 class_group="sink",
-                status="failed",
+                status=worker_status,
                 error_message="maximum context length exceeded",
             )
         )
@@ -344,6 +345,25 @@ def test_completed_run_with_failed_worker_can_resume(
     assert response.status_code == 200
     assert response.json()["running"] is True
     assert starts == [(sast_run_id, True)]
+
+
+def test_status_reports_resumable_pending_worker(client, isolated_db_engine):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        session.add(
+            SastWorker(
+                sast_run_id=sast_run_id,
+                worker_key="route:pending",
+                class_group="route",
+                status="pending",
+            )
+        )
+        session.commit()
+
+    response = client.get(f"/api/sast-runs/{sast_run_id}/scan/status")
+
+    assert response.status_code == 200
+    assert response.json()["resumable_work"] is True
 
 
 def test_light_resume_retries_failed_workers_after_discovery_was_marked_complete(
@@ -391,25 +411,51 @@ def test_light_resume_retries_failed_workers_after_discovery_was_marked_complete
             status="failed",
         )
         session.add(worker)
+        other_worker = SastWorker(
+            sast_run_id=run.id,
+            worker_key="sink-audit:resume-other",
+            class_group="sink",
+            status="failed",
+        )
+        session.add(other_worker)
         session.commit()
-        run_id, worker_id = run.id, worker.id
+        run_id, worker_ids = run.id, (worker.id, other_worker.id)
 
     calls = []
+    fail_once = True
 
     async def fake_agent(**kwargs):
+        nonlocal fail_once
         calls.append(kwargs["worker_key"])
+        if kwargs["worker_key"] == "sink-audit:resume-other" and fail_once:
+            fail_once = False
+            raise RuntimeError("Codex session failed")
         return "Recovered discovery work"
 
     monkeypatch.setattr(sast_scanner_light, "_run_checkpointed_agent", fake_agent)
     asyncio.run(sast_scanner_light._sast_scan_task(run_id, resume=True))
 
     with Session(isolated_db_engine) as session:
+        paused_run = session.get(SastRun, run_id)
+        paused_workers = [
+            session.get(SastWorker, worker_id) for worker_id in worker_ids
+        ]
+    assert paused_run.status == "paused"
+    assert [worker.status for worker in paused_workers] == ["complete", "failed"]
+
+    asyncio.run(sast_scanner_light._sast_scan_task(run_id, resume=True))
+
+    with Session(isolated_db_engine) as session:
         saved_run = session.get(SastRun, run_id)
-        saved_worker = session.get(SastWorker, worker_id)
+        saved_workers = [session.get(SastWorker, worker_id) for worker_id in worker_ids]
         report = json.loads(saved_run.report_json)
-    assert calls == ["sink-audit:resume"]
-    assert saved_worker.status == "complete"
-    assert report["discovery_summary"] == "Recovered discovery work"
+    assert calls == [
+        "sink-audit:resume",
+        "sink-audit:resume-other",
+        "sink-audit:resume-other",
+    ]
+    assert all(worker.status == "complete" for worker in saved_workers)
+    assert report["discovery_summary"].count("Recovered discovery work") == 2
 
 
 def test_cancelled_run_with_unfinished_validation_can_resume(

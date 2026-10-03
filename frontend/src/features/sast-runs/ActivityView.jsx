@@ -51,7 +51,7 @@ export function ActivityView({
             onClick={() => setSubTab("agents")}
           >
             Agents
-            {agentLog.some((entry) => entry.status === "active") ? " ●" : ""}
+            {scanRunning && agentLog.some((entry) => entry.status === "active") ? " ●" : ""}
           </button>
           {groupTabs.map((item) => (
             <button
@@ -60,7 +60,7 @@ export function ActivityView({
               onClick={() => setSubTab(item.key)}
             >
               {item.label}
-              {sastGroupHasActiveAgent(agentLog, item.key) ? " ●" : ""}
+              {scanRunning && sastGroupHasActiveAgent(agentLog, item.key) ? " ●" : ""}
             </button>
           ))}
           <button className={subTab === "log" ? "active" : ""} onClick={() => setSubTab("log")}>

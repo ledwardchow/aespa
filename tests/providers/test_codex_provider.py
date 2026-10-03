@@ -1067,6 +1067,53 @@ def test_codex_thread_uses_app_server_sandbox_wire_value():
     assert calls[0][1]["sandbox"] == "read-only"
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_type", "expected_text"),
+    [
+        (
+            "{'code': -32600, 'message': 'failed to load configuration: Too many open files (os error 24)'}",
+            codex_provider.CodexOpenFileLimitError,
+            "ran out of open files",
+        ),
+        (
+            "{'code': -32602, 'message': 'unknown field dynamicTools'}",
+            codex_provider.CodexUnavailableError,
+            "Upgrade Codex CLI",
+        ),
+        (
+            "{'code': -32600, 'message': 'invalid model'}",
+            codex_provider.CodexUnavailableError,
+            "invalid model",
+        ),
+    ],
+)
+def test_codex_thread_start_errors_keep_their_cause(
+    error, expected_type, expected_text
+):
+    class FakeClient:
+        def __init__(self):
+            self._conversations = {}
+
+        async def request(self, method, params):
+            raise codex_provider.CodexUnavailableError(error)
+
+    client = FakeClient()
+    with pytest.raises(expected_type) as raised:
+        asyncio.run(
+            codex_provider._start_thread(
+                client,
+                SimpleNamespace(model="gpt-6-sol"),
+                "system",
+                [{"role": "user", "content": "hello"}],
+                [{"name": "read_file", "input_schema": {"type": "object"}}],
+            )
+        )
+
+    assert expected_text in str(raised.value)
+    if "invalid model" in error:
+        assert "Upgrade Codex CLI" not in str(raised.value)
+
+
 def test_codex_thread_allows_several_tool_calls_per_response():
     calls = []
 

@@ -4,6 +4,7 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { parseGroundTruthText } from "./groundTruthImport.js";
 import { BenchmarkModelSettings } from "./BenchmarkModelSettings.jsx";
+import { BenchmarkTransfer } from "./BenchmarkTransfer.jsx";
 import { GroundTruthDatasets } from "./GroundTruthDatasets.jsx";
 import { CompletedScanBenchmarks } from "./CompletedScanBenchmarks.jsx";
 import { SiteSummary, modelName, money } from "./SiteSummary.jsx";
@@ -77,8 +78,10 @@ export function BenchmarkLabPage({ initialResultId }) {
     () =>
       results.filter((item) =>
         tab === "site"
-          ? (item.target_kind === "site" && String(item.target_id) === String(targetId)) ||
-            (item.run_kind === "sast" &&
+          ? !targetId ||
+            (targetId.startsWith("dataset:") && item.dataset_id === Number(targetId.slice(8))) ||
+            (item.target_kind === "site" && String(item.target_id) === String(targetId)) ||
+            ((item.imported || item.run_kind === "sast") &&
               item.target_id == null &&
               target?.dataset?.id != null &&
               item.dataset_id === target?.dataset?.id &&
@@ -188,7 +191,15 @@ export function BenchmarkLabPage({ initialResultId }) {
           setSelectedResultId(null);
         }}
       >
-        <option value="">Select an application...</option>
+        <option value="">
+          {siteTab === "new" ? "Select an application..." : "All applications"}
+        </option>
+        {siteTab !== "new" &&
+          datasets.map((item) => (
+            <option key={`dataset:${item.id}`} value={`dataset:${item.id}`}>
+              Dataset: {item.label || item.name}
+            </option>
+          ))}
         {targets.sites.map((item) => (
           <option key={item.id} value={item.id}>
             {item.name}
@@ -264,7 +275,10 @@ export function BenchmarkLabPage({ initialResultId }) {
             onChange={load}
             onOpen={(id) => {
               const result = results.find((item) => item.id === id);
-              if (result) setTargetId(String(result.target_id ?? result.run_id));
+              if (result)
+                setTargetId(
+                  result.target_id ? String(result.target_id) : `dataset:${result.dataset_id}`,
+                );
               setSelectedResultId(id);
               setExpanded(null);
               setEdit(null);
@@ -273,6 +287,7 @@ export function BenchmarkLabPage({ initialResultId }) {
         )}
         {tab === "datasets" && (
           <div className={styles.settings}>
+            <BenchmarkTransfer onChange={load} />
             <BenchmarkModelSettings models={models} settings={benchmarkSettings} onChange={load} />
             <GroundTruthDatasets datasets={datasets} targets={targets} onChange={load} />
           </div>
@@ -282,17 +297,20 @@ export function BenchmarkLabPage({ initialResultId }) {
         {tab === "site" && siteTab === "summary" && (
           <SiteSummary
             siteSelector={siteSelector}
-            showChart={Boolean(target)}
+            showChart={relevantResults.length > 0}
             results={relevantResults}
             onOpen={(id) => {
               const result = results.find((item) => item.id === id);
-              if (result) setTargetId(String(result.target_id ?? result.run_id));
+              if (result)
+                setTargetId(
+                  result.target_id ? String(result.target_id) : `dataset:${result.dataset_id}`,
+                );
               setSelectedResultId(id);
               setSiteTab("analyses");
             }}
           />
         )}
-        {tab === "site" && target && siteTab === "analyses" && (
+        {tab === "site" && siteTab === "analyses" && (
           <section className="card benchmark-analyses">
             <h2>Saved analyses</h2>
             {relevantResults.length ? (
@@ -312,7 +330,10 @@ export function BenchmarkLabPage({ initialResultId }) {
                   <tbody>
                     {relevantResults.map((result) => (
                       <tr key={result.id}>
-                        <td>{result.run_name}</td>
+                        <td>
+                          {result.run_name}
+                          {result.imported ? " (imported)" : ""}
+                        </td>
                         <td>{scanType(result.run_kind, result.scan_models)}</td>
                         <td>{modelName(result)}</td>
                         <td>{money(result.scan_cost_usd)}</td>
@@ -337,7 +358,7 @@ export function BenchmarkLabPage({ initialResultId }) {
                 </table>
               </div>
             ) : (
-              <p className="subtle">No analyses have been saved for this Site.</p>
+              <p className="subtle">No saved analyses match this selection.</p>
             )}
           </section>
         )}

@@ -116,7 +116,9 @@ export function BenchmarkEvaluationDetail({ evaluationId, initialTab }) {
             <button
               className="btn primary sm"
               onClick={start}
-              disabled={busy || ["running", "completed"].includes(evaluation.status)}
+              disabled={
+                busy || evaluation.imported || ["running", "completed"].includes(evaluation.status)
+              }
             >
               {busy
                 ? "Running…"
@@ -140,6 +142,7 @@ export function BenchmarkEvaluationDetail({ evaluationId, initialTab }) {
                 </a>
               ) : null}
               <span>{evaluation.match_mode || "assisted"} matching</span>
+              {evaluation.imported && <span>Imported snapshot</span>}
             </div>
           </div>
           {evaluation.error_message && (

@@ -230,3 +230,36 @@ preserves the database.
 - Stub external services in tests. AESPA's tests do not require live LLM calls or live third-party scanners.
 - Keep runtime assets inside the extension directory. Desktop builds copy the bundled `extensions/` tree, including author folders. Additional Python dependencies or dynamically imported packages may need changes to AESPA's desktop packaging scripts.
 - See `extensions/builtin/github_repository/` and `extensions/builtin/burp_suite/` for working implementations.
+
+### Sharing Benchmark Lab data
+
+In **Benchmark Lab > Settings > Share benchmark data**, export a JSON file,
+then import that file on another installation. Both installations must support
+this import format. The file includes ground truth datasets and labels, saved
+scan results and findings, model names and costs, SAST evaluations, match reviews,
+and comparisons. It does not include source archives, provider credentials,
+model configuration, or local Site/API assignments. Finding evidence can contain
+sensitive target data.
+
+Imports combine datasets with identical ground truth, source digest, and schema
+version. Existing dataset names and labels stay unchanged. Results, evaluations,
+and comparisons have portable IDs, so importing the same file again, or passing
+it through a third host, does not add duplicates. Separate scans remain separate
+even when their names and numeric IDs match.
+
+If a record with the same portable ID has changed, the existing record is kept
+and the import lists it as a conflict. Comparisons depending on conflicting
+evaluations are also skipped. Imports do not overwrite reviews or synchronize
+deletions. An invalid file is rejected without importing any of its records.
+
+Use the dataset options in the Results selector to compare scans from multiple
+hosts. Imported records keep their saved scan details, but cannot link to or
+rerun the original scan on the receiving host. Datasets can be assigned to local
+Sites or APIs separately in Settings.
+
+The API uses `GET /extension/aespa.benchmarking/export` and
+`POST /extension/aespa.benchmarking/import`. Send the exported JSON as the POST
+body. The response reports added datasets, imported records, skipped duplicates,
+and conflicts. The file identifies itself as `aespa-benchmark-lab`, version `1`.
+The per-evaluation report export is separate and cannot be imported as a full
+Benchmark Lab file.
