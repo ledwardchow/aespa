@@ -331,6 +331,7 @@ class LLMProviderAPI(str, Enum):
     openai_compatible = "openai_compatible"
     openrouter = "openrouter"
     google = "google"
+    google_vertex = "google_vertex"
     bedrock = "bedrock"
     bedrock_mantle = "bedrock_mantle"
     azure_openai = "azure_openai"
@@ -351,15 +352,17 @@ class LLMProviderConfig(SQLModel, table=True):
     base_url: Optional[str] = Field(default=None)
     # Optional Copilot CLI account login. Blank uses Copilot CLI's default.
     username: Optional[str] = Field(default=None)
-    # Bedrock Mantle project id (proj_…); sent as the OpenAI-Project header for
-    # cost/usage attribution. Ignored by other provider formats.
+    # Provider-specific project. Bedrock Mantle uses a proj_… id for cost
+    # attribution; Google Vertex AI uses the Google Cloud project id.
     project_id: Optional[str] = Field(default=None)
+    # Named AWS credentials profile for Bedrock Runtime and Mantle.
+    aws_profile: Optional[str] = Field(default=None)
+    # Google Vertex AI location. Other providers ignore this value.
+    location: Optional[str] = Field(default=None)
     models_json: str = Field(default="[]")
     # Per-model capability metadata discovered from the provider or OpenRouter.
     # Kept as JSON so providers can add metadata without another migration.
     model_capabilities_json: str = Field(default="{}")
-    max_tpm: Optional[int] = Field(default=None, nullable=True)
-    max_rpm: Optional[int] = Field(default=None, nullable=True)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -460,7 +463,7 @@ class LLMPriceFeed(SQLModel, table=True):
 
 
 class LLMConfig(SQLModel, table=True):
-    """Saved LLM settings profile."""
+    """Saved LLM model configuration."""
 
     __tablename__ = "llm_config"
 
@@ -475,9 +478,15 @@ class LLMConfig(SQLModel, table=True):
     base_url: Optional[str] = Field(default=None)
     # Denormalized from the provider for the Copilot SDK adapter.
     username: Optional[str] = Field(default=None)
-    # Denormalized from the provider (see LLMProviderConfig.project_id).
+    # Denormalized from the provider (see LLMProviderConfig.project_id/location).
     project_id: Optional[str] = Field(default=None)
+    aws_profile: Optional[str] = Field(default=None)
+    location: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")
+    # Shared pacing limits for this provider/model pair. Saving one duplicate
+    # model configuration keeps the other entries for the same pair in sync.
+    max_tpm: Optional[int] = Field(default=None, nullable=True)
+    max_rpm: Optional[int] = Field(default=None, nullable=True)
     max_tokens: int = Field(default=16384)
     # Total model context window, including the requested output allowance.
     max_context_tokens: int = Field(
@@ -510,6 +519,9 @@ class LLMProfile(SQLModel, table=True):
     __tablename__ = "llm_profile"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    # Core-owned identity for an extension-stored profile. All model settings
+    # remain in the extension database; this row lets existing run FKs select it.
+    extension_ref: Optional[str] = Field(default=None, index=True, unique=True)
     name: str = Field(default="Default", index=True)
     is_active: bool = Field(default=False, index=True)
     # The Model used for any role without an explicit override.
@@ -533,6 +545,7 @@ class ScannerPolicy(SQLModel, table=True):
     scan_mode: str = Field(default="aggressive")
     max_probes_per_page: int = Field(default=50)
     thinking_max_steps: int = Field(default=120)
+    dast_max_concurrent_llm_requests: int = Field(default=4)
     request_timeout_s: float = Field(default=10.0)
     min_delay_s: float = Field(default=0.05)
     max_request_body_bytes: int = Field(default=65536)
@@ -548,15 +561,17 @@ class ScannerPolicy(SQLModel, table=True):
     strict_locator_enforcement: bool = Field(default=True)
     sast_rate_limit_findings: bool = Field(default=True)
     sast_race_condition_findings: bool = Field(default=True)
-    sast_audit_logging_findings: bool = Field(default=False)
+    sast_audit_logging_findings: bool = Field(default=True)
     sast_defense_in_depth_findings: bool = Field(default=False)
     sast_dependency_findings: bool = Field(default=True)
     sast_min_severity: str = Field(default="low")
-    sast_min_confidence: float = Field(default=0.35)
+    sast_budget_mode: str = Field(default="adaptive")
     sast_baseline_budget: int = Field(default=80)
     sast_threat_budget: int = Field(default=60)
+    sast_worker_budget_max: int = Field(default=250)
     sast_closure_budget: int = Field(default=40)
     sast_validator_budget: int = Field(default=50)
+    sast_max_concurrent_llm_requests: int = Field(default=4)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -621,29 +636,6 @@ class ComponentMapperConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
-class BurpRestApiConfig(SQLModel, table=True):
-    """Singleton row (id always = 1) for Burp Suite REST API integration settings."""
-
-    __tablename__ = "burp_rest_api_config"
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    enabled: bool = Field(default=False)
-    api_url: str = Field(default="http://127.0.0.1:1337")
-    api_key: Optional[str] = Field(default=None)
-    scan_configuration_name: Optional[str] = Field(
-        default="Audit checks - all except time-based detection methods"
-    )
-    # Vulnerability classes to route to Burp active scan
-    scan_sqli: bool = Field(default=True)
-    scan_xss: bool = Field(default=True)
-    scan_command_injection: bool = Field(default=True)
-    scan_path_traversal: bool = Field(default=True)
-    scan_ssrf: bool = Field(default=True)
-    scan_xxe: bool = Field(default=True)
-    scan_ssti: bool = Field(default=True)
-    updated_at: datetime = Field(default_factory=_utcnow)
-
-
 class UpstreamProxyConfig(SQLModel, table=True):
     """Singleton row (id always = 1) for upstream proxy settings."""
 
@@ -681,7 +673,6 @@ class SpecialistAgentConfig(SQLModel, table=True):
     dispatch_crypto: bool = Field(default=True)
     dispatch_config: bool = Field(default=False)
     dispatch_file_upload: bool = Field(default=True)
-    trigger_specialist_on_burp: bool = Field(default=False)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -1471,13 +1462,19 @@ class SastRun(SQLModel, table=True):
         default=None
     )  # absolute path to stored zip
     source_filename: Optional[str] = Field(default=None)  # original upload filename
+    source_provider: str = Field(default="upload", index=True)
+    source_locator: Optional[str] = Field(default=None)
+    source_requested_ref: Optional[str] = Field(default=None)
+    source_revision: Optional[str] = Field(default=None, index=True)
+    source_archive_sha256: Optional[str] = Field(default=None)
+    source_metadata_json: Optional[str] = Field(default=None)
     name: str
     # Light uses the original bounded SAST workflow. Deep adds repository
     # modeling, threat planning, reconciliation, and semantic closure.
     analysis_mode: str = Field(default="deep", index=True)
     status: str = Field(
         default="pending"
-    )  # pending|scanning|paused|completed|failed|cancelled
+    )  # preparing|pending|scanning|paused|completed|failed|cancelled
     # What triggered this run: None=standalone, or the dynamic run that spawned it
     triggered_by_run_type: Optional[str] = Field(default=None)  # "api" | "web"
     triggered_by_run_id: Optional[int] = Field(default=None, index=True)
@@ -1500,6 +1497,29 @@ class SastRun(SQLModel, table=True):
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ExtensionSetting(SQLModel, table=True):
+    """Persisted non-secret settings owned by one loaded extension."""
+
+    __tablename__ = "extension_setting"
+
+    extension_id: str = Field(primary_key=True)
+    enabled: bool = Field(default=True)
+    schema_version: int = Field(default=1)
+    settings_json: str = Field(default="{}")
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ExtensionSecret(SQLModel, table=True):
+    """Secret value scoped to a namespace declared by an extension."""
+
+    __tablename__ = "extension_secret"
+
+    namespace: str = Field(primary_key=True)
+    key: str = Field(primary_key=True)
+    value: str
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -1569,6 +1589,60 @@ class SastSurfaceItem(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class SastCodeSymbol(SQLModel, table=True):
+    """A function, method, or file top level found by the tree-sitter parser.
+
+    ``symbol_key`` is ``path::qualname@line`` and is what call rows refer to,
+    so rows stay valid when a run is exported and imported with new ids.
+    """
+
+    __tablename__ = "sast_code_symbol"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    symbol_key: str = Field(index=True)
+    path: str = Field(default="", index=True)
+    language: str = Field(default="")
+    name: str = Field(default="")
+    qualname: str = Field(default="")
+    kind: str = Field(default="function")  # function | method | module
+    start_line: int = Field(default=1)
+    end_line: int = Field(default=1)
+    reachability: str = Field(default="unknown", index=True)
+    is_root: bool = Field(default=False)
+
+
+class SastCodeCall(SQLModel, table=True):
+    """A call site or function reference, with the symbols it may resolve to."""
+
+    __tablename__ = "sast_code_call"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sast_run_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("sast_run.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    path: str = Field(default="", index=True)
+    line: int = Field(default=1)
+    caller_key: str = Field(default="", index=True)
+    callee_name: str = Field(default="")
+    receiver: str = Field(default="")
+    kind: str = Field(default="call")  # call | new | include | ref
+    text: str = Field(default="")
+    targets_json: str = Field(default="[]")
+
+
 class SastPartition(SQLModel, table=True):
     """A bounded, independently reviewable slice of the source work program."""
 
@@ -1625,6 +1699,8 @@ class SastWorker(SQLModel, table=True):
     worker_key: str = Field(index=True)
     class_group: str = Field(index=True)
     status: str = Field(default="pending", index=True)
+    tool_call_budget: int = Field(default=0)
+    budget_basis_json: str = Field(default="{}")
     summary: str = Field(default="")
     error_message: str = Field(default="")
     started_at: Optional[datetime] = Field(default=None)

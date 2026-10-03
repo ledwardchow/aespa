@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import * as settingsApi from "../../shared/api/settings.js";
-import { DebugPage } from "./DebugPage.jsx";
+import { SystemSettingsPanels } from "./DebugPage.jsx";
 
 vi.mock("../../shared/api/settings.js");
 
@@ -32,7 +32,8 @@ test("hides Playwright Chromium and selects system Chrome after provisioning fai
   });
 
   render(
-    <DebugPage
+    <SystemSettingsPanels
+      tab="features"
       showUsername={true}
       setShowUsername={vi.fn()}
       showSystems={true}
@@ -58,7 +59,8 @@ test("groups Systems, Deep Scan, and Team Scan under Experimental Features", () 
   const setShowDeepScan = vi.fn();
   const setShowTeamScan = vi.fn();
   render(
-    <DebugPage
+    <SystemSettingsPanels
+      tab="features"
       showUsername={true}
       setShowUsername={vi.fn()}
       showSystems={true}

@@ -1,4 +1,5 @@
 import * as settingsApi from "../shared/api/settings.js";
+import * as extensionsApi from "../shared/api/extensions.js";
 import { useEffect, useState } from "react";
 
 export function useAppPreferences() {
@@ -35,6 +36,13 @@ export function useAppPreferences() {
       return false;
     }
   });
+  const [showSastDeepScan, setShowSastDeepScan] = useState(() => {
+    try {
+      return localStorage.getItem("aespa_show_sast_deep_scan") === "true";
+    } catch {
+      return false;
+    }
+  });
   const [reportingDebugCfg, setReportingDebugCfg] = useState(null);
   const [benchmarkLabCfg, setBenchmarkLabCfg] = useState(null);
   useEffect(() => {
@@ -49,9 +57,15 @@ export function useAppPreferences() {
       .getReportingDebugConfig()
       .then(setReportingDebugCfg)
       .catch(() => {});
-    settingsApi
-      .getBenchmarkLabConfig()
-      .then(setBenchmarkLabCfg)
+    extensionsApi
+      .listExtensions()
+      .then((extensions) =>
+        setBenchmarkLabCfg({
+          panel_enabled: extensions.some(
+            (extension) => extension.id === "aespa.benchmarking" && extension.enabled && extension.status === "loaded",
+          ),
+        }),
+      )
       .catch(() => {});
   }, []);
 
@@ -66,6 +80,8 @@ export function useAppPreferences() {
     setShowDeepScan,
     showTeamScan,
     setShowTeamScan,
+    showSastDeepScan,
+    setShowSastDeepScan,
     reportingDebugCfg,
     setReportingDebugCfg,
     benchmarkLabCfg,

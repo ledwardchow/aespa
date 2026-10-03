@@ -344,31 +344,14 @@ def test_worker_step_description_has_plain_fallbacks():
     )
 
 
-def test_deep_mode_is_web_only():
+def test_deep_and_team_modes_are_web_only():
     from aespa.api.scan import _StartScanBody
     from aespa.schemas import ApiTestRunCreate
 
-    assert _StartScanBody(coverage_mode="deep").coverage_mode == "deep"
-    with pytest.raises(ValidationError):
-        ApiTestRunCreate(coverage_mode="deep")
-
-
-def test_team_mode_is_web_only():
-    from aespa.api.scan import _StartScanBody
-    from aespa.schemas import ApiTestRunCreate
-
-    assert _StartScanBody(coverage_mode="team").coverage_mode == "team"
-    with pytest.raises(ValidationError):
-        ApiTestRunCreate(coverage_mode="team")
-
-
-def test_deep_is_a_web_only_scan_mode():
-    from aespa.api.scan import _StartScanBody
-    from aespa.schemas import ApiTestRunCreate
-
-    assert _StartScanBody(coverage_mode="deep").coverage_mode == "deep"
-    with pytest.raises(ValidationError):
-        ApiTestRunCreate(coverage_mode="deep")
+    for mode in ("deep", "team"):
+        assert _StartScanBody(coverage_mode=mode).coverage_mode == mode
+        with pytest.raises(ValidationError):
+            ApiTestRunCreate(coverage_mode=mode)
 
 
 def test_deep_task_seeding_preserves_imported_sast_leads(db_session):

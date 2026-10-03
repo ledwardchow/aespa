@@ -54,6 +54,7 @@ async def discover_bedrock_mantle_model_options(
     api_key: str | None = None,
     base_url: str | None = None,
     proxy_url: str | None = None,
+    profile: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return models exposed by Mantle's OpenAI-compatible Models API."""
     root = (base_url or "https://bedrock-mantle.us-east-2.api.aws").rstrip("/")
@@ -74,7 +75,7 @@ async def discover_bedrock_mantle_model_options(
 
         client_kwargs["auth"] = _BedrockMantleSigV4Auth(
             region=_bedrock_mantle_region_from_url(root),
-            profile=os.getenv("AWS_PROFILE"),
+            profile=profile or os.getenv("AWS_PROFILE"),
         )
     if proxy_url:
         client_kwargs["proxy"] = proxy_url
@@ -217,8 +218,79 @@ async def discover_google_model_options(
         return records
 
 
+def _vertex_publisher_model_id(name: str) -> str | None:
+    """Return a portable serverless publisher model id.
+
+    Vertex endpoint and tuned-model resources are deliberately excluded. AESPA
+    only supports publisher models that do not require a user-managed endpoint.
+    """
+    value = name.strip().strip("/")
+    if not value or "/endpoints/" in value or "/locations/" in value:
+        return None
+    if value.startswith("publishers/"):
+        parts = value.split("/")
+        if len(parts) >= 4 and parts[2] == "models":
+            publisher = parts[1]
+            model = "/".join(parts[3:])
+            return model if publisher == "google" else f"{publisher}/{model}"
+        return None
+    return value if value.startswith("gemini-") else None
+
+
+async def discover_google_vertex_model_options(
+    project_id: str,
+    location: str = "global",
+) -> list[dict[str, Any]]:
+    """List serverless Google publisher models through Vertex AI and ADC."""
+    from google import genai
+    from google.genai import types
+
+    project = project_id.strip()
+    if not project:
+        raise ValueError("Google Cloud project id is required for Vertex AI")
+    region = (location or "global").strip() or "global"
+    client = genai.Client(
+        vertexai=True,
+        project=project,
+        location=region,
+        http_options=types.HttpOptions(api_version="v1"),
+    )
+    async_client = client.aio
+    records: list[dict[str, Any]] = []
+    try:
+        pager = await async_client.models.list(config={"query_base": True})
+        async for model in pager:
+            model_id = _vertex_publisher_model_id(str(getattr(model, "name", "")))
+            if not model_id:
+                continue
+            actions = [
+                str(action).replace("_", "").casefold()
+                for action in (getattr(model, "supported_actions", None) or [])
+            ]
+            if actions and not any(
+                action.endswith("generatecontent") for action in actions
+            ):
+                continue
+            record: dict[str, Any] = {"id": model_id}
+            input_limit = getattr(model, "input_token_limit", None)
+            output_limit = getattr(model, "output_token_limit", None)
+            if isinstance(input_limit, int) and input_limit > 0:
+                record["input_token_limit"] = input_limit
+            if isinstance(output_limit, int) and output_limit > 0:
+                record["output_token_limit"] = output_limit
+            if actions:
+                record["supported_actions"] = list(
+                    getattr(model, "supported_actions", None) or []
+                )
+            records.append(record)
+    finally:
+        await async_client.aclose()
+    return records
+
+
 async def discover_bedrock_models(
     region_name: str | None = None,
+    profile: str | None = None,
 ) -> list[str]:
     """Return foundation model IDs and system-defined inference profile IDs available from AWS Bedrock."""
 
@@ -257,7 +329,8 @@ async def discover_bedrock_models(
             else:
                 client_kwargs["endpoint_url"] = endpoint_url
 
-        client = boto3.client("bedrock", **client_kwargs)
+        session_kwargs = {"profile_name": profile} if profile else {}
+        client = boto3.Session(**session_kwargs).client("bedrock", **client_kwargs)
 
         # 1. System-defined inference profiles (includes global.*, us.*, eu.*, apac.*)
         profiles: list[str] = []

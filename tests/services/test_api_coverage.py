@@ -359,135 +359,49 @@ def test_get_coverage_no_endpoints(client):
     assert data["endpoints"] == []
 
 
-# ── 9. _applicable_categories — API2 always present ──────────────────────────
+# ── Pure coverage helpers ─────────────────────────────────────────────────────
 
 
-def test_applicable_categories_api2_always(db_engine, db_session, collection):
-    ep = ApiEndpoint(
-        collection_id=collection.id, method="GET", path="/ping", in_scope=True
-    )
-    db_session.add(ep)
-    db_session.commit()
-    db_session.refresh(ep)
-    cats = _applicable_categories(ep)
-    assert "API2" in cats
+def test_applicable_categories_for_method_and_path(collection):
+    cases = [
+        ("GET", "/ping", {"API2"}, {"API1", "API3"}),
+        ("GET", "/users/{id}", {"API1", "API2"}, {"API3"}),
+        ("PATCH", "/users/{id}", {"API1", "API2", "API3"}, set()),
+    ]
+    for method, path, present, absent in cases:
+        endpoint = ApiEndpoint(
+            collection_id=collection.id, method=method, path=path, in_scope=True
+        )
+        categories = set(_applicable_categories(endpoint))
+        assert present <= categories, (method, path)
+        assert not (absent & categories), (method, path)
 
 
-# ── 10. _applicable_categories — API1 for path params ─────────────────────────
-
-
-def test_applicable_categories_api1_path_param(db_engine, db_session, collection):
-    ep = ApiEndpoint(
-        collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True
-    )
-    db_session.add(ep)
-    db_session.commit()
-    db_session.refresh(ep)
-    cats = _applicable_categories(ep)
-    assert "API1" in cats
-
-
-def test_applicable_categories_no_api1_without_param(db_engine, db_session, collection):
-    ep = ApiEndpoint(
-        collection_id=collection.id, method="GET", path="/users", in_scope=True
-    )
-    db_session.add(ep)
-    db_session.commit()
-    db_session.refresh(ep)
-    cats = _applicable_categories(ep)
-    assert "API1" not in cats
-
-
-# ── 11. _applicable_categories — API3 for PUT/PATCH ──────────────────────────
-
-
-def test_applicable_categories_api3_patch(db_engine, db_session, collection):
-    ep = ApiEndpoint(
-        collection_id=collection.id, method="PATCH", path="/users/{id}", in_scope=True
-    )
-    db_session.add(ep)
-    db_session.commit()
-    db_session.refresh(ep)
-    cats = _applicable_categories(ep)
-    assert "API3" in cats
-
-
-def test_applicable_categories_no_api3_get(db_engine, db_session, collection):
-    ep = ApiEndpoint(
-        collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True
-    )
-    db_session.add(ep)
-    db_session.commit()
-    db_session.refresh(ep)
-    cats = _applicable_categories(ep)
-    assert "API3" not in cats
-
-
-# ── 12. _match_endpoint_for_url — exact path ──────────────────────────────────
-
-
-def test_match_endpoint_exact(db_engine, db_session, collection):
-    ep = ApiEndpoint(
-        collection_id=collection.id, method="GET", path="/health", in_scope=True
-    )
-    db_session.add(ep)
-    db_session.commit()
-    db_session.refresh(ep)
-    matched = _match_endpoint_for_url(
-        "http://api.local/health", [ep], "http://api.local"
-    )
-    assert matched is not None
-    assert matched.id == ep.id
-
-
-# ── 13. _match_endpoint_for_url — parameterized path ─────────────────────────
-
-
-def test_match_endpoint_path_param(db_engine, db_session, collection):
-    ep = ApiEndpoint(
-        collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True
-    )
-    db_session.add(ep)
-    db_session.commit()
-    db_session.refresh(ep)
-    matched = _match_endpoint_for_url(
-        "http://api.local/users/42", [ep], "http://api.local"
-    )
-    assert matched is not None
-    assert matched.id == ep.id
-
-
-def test_match_endpoint_nested_param(db_engine, db_session, collection):
-    ep = ApiEndpoint(
-        collection_id=collection.id,
-        method="PATCH",
-        path="/users/{uid}/posts/{pid}",
-        in_scope=True,
-    )
-    db_session.add(ep)
-    db_session.commit()
-    db_session.refresh(ep)
-    matched = _match_endpoint_for_url(
-        "http://api.local/users/10/posts/200", [ep], "http://api.local"
-    )
-    assert matched is not None
-    assert matched.id == ep.id
-
-
-# ── 14. _match_endpoint_for_url — no match ────────────────────────────────────
-
-
-def test_match_endpoint_no_match(db_engine, db_session, collection):
-    ep = ApiEndpoint(
-        collection_id=collection.id, method="GET", path="/health", in_scope=True
-    )
-    db_session.add(ep)
-    db_session.commit()
-    db_session.refresh(ep)
-    matched = _match_endpoint_for_url(
-        "http://api.local/foobar/baz", [ep], "http://api.local"
-    )
-    assert matched is None
+def test_match_endpoint_exact_parameterized_and_missing(collection):
+    endpoints = [
+        ApiEndpoint(
+            collection_id=collection.id, method="GET", path="/health", in_scope=True
+        ),
+        ApiEndpoint(
+            collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True
+        ),
+        ApiEndpoint(
+            collection_id=collection.id,
+            method="PATCH",
+            path="/users/{uid}/posts/{pid}",
+            in_scope=True,
+        ),
+    ]
+    cases = [
+        ("http://api.local/health", endpoints[0]),
+        ("http://api.local/users/42", endpoints[1]),
+        ("http://api.local/users/10/posts/200", endpoints[2]),
+        ("http://api.local/foobar/baz", None),
+    ]
+    for url, expected in cases:
+        assert (
+            _match_endpoint_for_url(url, endpoints, "http://api.local") is expected
+        ), url
 
 
 # ── 15. get_coverage_matrix totals ────────────────────────────────────────────

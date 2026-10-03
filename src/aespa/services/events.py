@@ -65,11 +65,12 @@ def emit(run_id: int, event: dict) -> None:
     activity log survives page navigation.
     """
     run_kind = _run_kind_for(run_id, event)
-    for q in _queues.get((run_kind, run_id), []):
-        try:
-            q.put_nowait(event)
-        except asyncio.QueueFull:
-            pass  # slow client — drop the event rather than block
+    if not event.get("_persist_only"):
+        for q in _queues.get((run_kind, run_id), []):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass  # slow client — drop the event rather than block
 
     if event.get("type") == "scanner_phase":
         _persist_phase_event(run_id, event)

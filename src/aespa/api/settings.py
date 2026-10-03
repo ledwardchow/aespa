@@ -13,8 +13,6 @@ from aespa.schemas import (
     BenchmarkLabConfigOut,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
-    BurpRestApiConfigIn,
-    BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
     CodeExecutionConfigIn,
@@ -51,7 +49,6 @@ from aespa.schemas import (
     ValidatorConfigIn,
     ValidatorConfigOut,
 )
-from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import crawler as crawler_svc
 from aespa.services import settings as settings_service
 from aespa.services import settings_integrations as integration_settings
@@ -305,6 +302,14 @@ def list_llm_providers(
     return provider_settings.list_llm_providers(session)
 
 
+@router.get("/llm/extension-catalog")
+def list_extension_llm_catalog() -> dict[str, list[dict]]:
+    """Read extension-owned LLM settings for display in the settings screen."""
+    from aespa.extensions import get_extension_manager
+
+    return get_extension_manager().llm_catalog_items()
+
+
 @router.post("/llm/providers", response_model=LLMProviderConfigOut)
 def create_llm_provider(
     payload: LLMProviderConfigIn,
@@ -345,12 +350,22 @@ async def default_models(
         api_key = p.api_key if p else None
         base_url = p.base_url if p else None
         username = p.username if p else None
+        project_id = p.project_id if p else None
+        location = p.location if p else None
+        aws_profile = p.aws_profile if p else None
         try:
-            discovered = await settings_service.discover_models_for_format(
+            discovery_kwargs = dict(
                 api_format=fmt,
                 api_key=api_key,
                 base_url=base_url,
                 username=username,
+            )
+            if fmt == "google_vertex":
+                discovery_kwargs.update(project_id=project_id, location=location)
+            if fmt in {"bedrock", "bedrock_mantle"}:
+                discovery_kwargs["aws_profile"] = aws_profile
+            discovered = await settings_service.discover_models_for_format(
+                **discovery_kwargs
             )
             if discovered:
                 models[fmt] = discovered
@@ -370,6 +385,9 @@ async def discover_llm_models(
     api_key = payload.api_key
     base_url = payload.base_url
     username = payload.username
+    project_id = payload.project_id
+    location = payload.location
+    aws_profile = payload.aws_profile
 
     if not api_key or api_key.startswith("••"):
         db_prov = (
@@ -387,13 +405,26 @@ async def discover_llm_models(
                 base_url = db_prov.base_url
             if not username:
                 username = db_prov.username
+            if not project_id:
+                project_id = db_prov.project_id
+            if not location:
+                location = db_prov.location
+            if aws_profile is None:
+                aws_profile = db_prov.aws_profile
 
     try:
-        discovered = await settings_service.discover_models_for_format(
+        discovery_kwargs = dict(
             api_format=api_format,
             api_key=api_key,
             base_url=base_url,
             username=username,
+        )
+        if api_format == "google_vertex":
+            discovery_kwargs.update(project_id=project_id, location=location)
+        if api_format in {"bedrock", "bedrock_mantle"}:
+            discovery_kwargs["aws_profile"] = aws_profile
+        discovered = await settings_service.discover_models_for_format(
+            **discovery_kwargs
         )
         if discovered:
             return discovered
@@ -420,6 +451,9 @@ async def discover_llm_model_options(
     api_key = payload.api_key
     base_url = payload.base_url
     username = payload.username
+    project_id = payload.project_id
+    location = payload.location
+    aws_profile = payload.aws_profile
     if not api_key or api_key.startswith("••"):
         db_prov = (
             session.get(LLMProviderConfig, payload.provider_id)
@@ -434,12 +468,23 @@ async def discover_llm_model_options(
             api_key = db_prov.api_key or api_key
             base_url = base_url or db_prov.base_url
             username = username or db_prov.username
+            project_id = project_id or db_prov.project_id
+            location = location or db_prov.location
+            if aws_profile is None:
+                aws_profile = db_prov.aws_profile
     try:
-        result = await settings_service.discover_model_options_for_format(
+        discovery_kwargs = dict(
             api_format=api_format,
             api_key=api_key,
             base_url=base_url,
             username=username,
+        )
+        if api_format == "google_vertex":
+            discovery_kwargs.update(project_id=project_id, location=location)
+        if api_format in {"bedrock", "bedrock_mantle"}:
+            discovery_kwargs["aws_profile"] = aws_profile
+        result = await settings_service.discover_model_options_for_format(
+            **discovery_kwargs
         )
         capabilities = dict(result.get("capabilities", {}))
         for model in payload.models:
@@ -555,30 +600,6 @@ def upsert_component_mapper_config(
 ) -> ComponentMapperConfigOut:
     """Persist component-mapper budgets and attack-path trace limits."""
     return integration_settings.upsert_component_mapper_config(session, payload)
-
-
-@router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)
-def get_burp_rest_api_config(
-    session: Session = Depends(get_session),
-) -> BurpRestApiConfigOut:
-    return integration_settings.get_burp_rest_api_config(session)
-
-
-@router.put("/burp-rest-api", response_model=BurpRestApiConfigOut)
-def upsert_burp_rest_api_config(
-    payload: BurpRestApiConfigIn,
-    session: Session = Depends(get_session),
-) -> BurpRestApiConfigOut:
-    return integration_settings.upsert_burp_rest_api_config(session, payload)
-
-
-@router.post("/burp-rest-api/test-connection")
-async def test_burp_rest_api_connection(
-    session: Session = Depends(get_session),
-) -> dict:
-    cfg = integration_settings.get_burp_rest_api_config_model(session)
-    ok, message = await burp_rest_svc.test_connection(cfg)
-    return {"ok": ok, "message": message}
 
 
 @router.get("/upstream-proxy", response_model=UpstreamProxyConfigOut)

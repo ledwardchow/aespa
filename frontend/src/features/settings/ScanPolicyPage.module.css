@@ -18,3 +18,9 @@
   margin: 0 0 0 -16px;
   padding: 0 16px;
 }
+.subTabs {
+  margin: 0 0 0 -16px;
+}
+.systemSettingsPanels > :first-child {
+  margin-top: 0 !important;
+}

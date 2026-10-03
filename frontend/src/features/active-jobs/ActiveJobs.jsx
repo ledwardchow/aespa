@@ -26,6 +26,7 @@ function activeJobBadge(job) {
                 "running",
                 "analysing",
                 "analyzing",
+                "preparing",
                 "sast_running",
                 "correlating",
                 "dast_running",

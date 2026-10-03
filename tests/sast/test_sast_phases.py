@@ -28,7 +28,8 @@ from aespa.services.scan_leads import create_lead
 
 
 @pytest.mark.parametrize(
-    "provider", ["openai_codex", "github_copilot", "factory_droid"]
+    "provider",
+    ["openai_codex", "github_copilot", "factory_droid", "google_vertex"],
 )
 def test_semantic_phases_accept_session_authenticated_providers(provider):
     config = SimpleNamespace(provider=provider, api_key=None, base_url=None)
@@ -135,10 +136,10 @@ def test_agent_log_recovers_fixed_agent_state_from_phase_history(
     assert threat["current_task"] == "Threat model ready."
 
 
-@pytest.mark.parametrize("scanner_module", [sast_scanner, pytest.param(None, id="light")])
-def test_running_phase_updates_sast_analyst_status(
-    isolated_db_engine, scanner_module
-):
+@pytest.mark.parametrize(
+    "scanner_module", [sast_scanner, pytest.param(None, id="light")]
+)
+def test_running_phase_updates_sast_analyst_status(isolated_db_engine, scanner_module):
     if scanner_module is None:
         from aespa.services import sast_scanner_light
 
@@ -342,6 +343,121 @@ def test_completed_run_with_failed_worker_can_resume(
 
     assert response.status_code == 200
     assert response.json()["running"] is True
+    assert starts == [(sast_run_id, True)]
+
+
+def test_light_resume_retries_failed_workers_after_discovery_was_marked_complete(
+    isolated_db_engine, tmp_path, monkeypatch
+):
+    from aespa.services import sast_scanner_light
+
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.py", "print('ok')\n")
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="test", is_active=True, model="fake")
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        run = SastRun(
+            name="partial light review",
+            status="completed",
+            analysis_mode="light",
+            source_archive_path=str(archive),
+            source_filename="source.zip",
+            llm_config_id=config.id,
+            phase_state_json=json.dumps(
+                {
+                    phase: {"status": "complete"}
+                    for phase in (
+                        "scope",
+                        "discovery",
+                        "validation",
+                        "attack_path",
+                        "report",
+                    )
+                }
+            ),
+            report_json=json.dumps({"discovery_summary": "stale"}),
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        worker = SastWorker(
+            sast_run_id=run.id,
+            worker_key="sink-audit:resume",
+            class_group="sink",
+            status="failed",
+        )
+        session.add(worker)
+        session.commit()
+        run_id, worker_id = run.id, worker.id
+
+    calls = []
+
+    async def fake_agent(**kwargs):
+        calls.append(kwargs["worker_key"])
+        return "Recovered discovery work"
+
+    monkeypatch.setattr(sast_scanner_light, "_run_checkpointed_agent", fake_agent)
+    asyncio.run(sast_scanner_light._sast_scan_task(run_id, resume=True))
+
+    with Session(isolated_db_engine) as session:
+        saved_run = session.get(SastRun, run_id)
+        saved_worker = session.get(SastWorker, worker_id)
+        report = json.loads(saved_run.report_json)
+    assert calls == ["sink-audit:resume"]
+    assert saved_worker.status == "complete"
+    assert report["discovery_summary"] == "Recovered discovery work"
+
+
+def test_cancelled_run_with_unfinished_validation_can_resume(
+    client, isolated_db_engine, monkeypatch
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        run = session.get(SastRun, sast_run_id)
+        run.status = "cancelled"
+        session.add(run)
+        session.add(
+            PhaseCheckpoint(
+                run_kind="sast",
+                run_id=sast_run_id,
+                phase="state",
+                idempotency_key="candidates",
+                data_json=json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "candidate_id": 8,
+                                "confidence": 0.91,
+                                "validation_status": "inconclusive",
+                                "validation_retry_pending": True,
+                            }
+                        ]
+                    }
+                ),
+            )
+        )
+        session.commit()
+
+    starts = []
+
+    async def fake_start(run_id, *, resume=False):
+        starts.append((run_id, resume))
+
+    monkeypatch.setattr(sast_scanner, "start_sast_scan", fake_start)
+    monkeypatch.setattr(sast_scanner, "is_sast_scan_running", lambda _run_id: False)
+    monkeypatch.setattr(
+        sast_scanner,
+        "get_sast_status",
+        lambda run_id: {"run_id": run_id, "running": True},
+    )
+
+    response = client.post(f"/api/sast-runs/{sast_run_id}/scan/resume")
+
+    assert response.status_code == 200
     assert starts == [(sast_run_id, True)]
 
 
@@ -985,6 +1101,53 @@ def test_review_executor_records_independent_verdict_and_attack_path(
     sast_scanner._candidates.pop(41, None)
 
 
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_confirmed_verdict_is_reportable_regardless_of_confidence(
+    analysis_mode, tmp_path, isolated_db_engine
+):
+    from aespa.services import sast_scanner_light
+
+    scanner_module = sast_scanner_light if analysis_mode == "light" else sast_scanner
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "app.py").write_text("value = request.args['id']\ndb.execute(value)\n")
+    coverage = scanner_module._build_source_inventory(root)
+    run_id = 43
+    scanner_module._candidates[run_id] = [
+        {
+            "candidate_id": candidate_id,
+            "title": "Injection",
+            "location": "app.py:2",
+            "reportable": False,
+            "validation_status": "pending",
+        }
+        for candidate_id in (0, 1)
+    ]
+    executor = scanner_module._make_review_executor(
+        run_id, root, coverage, "validation"
+    )
+    try:
+        for candidate_id, verdict in ((0, "confirmed"), (1, "inconclusive")):
+            asyncio.run(
+                executor(
+                    "validate_candidate",
+                    {
+                        "candidate_id": candidate_id,
+                        "verdict": verdict,
+                        "confidence": 0.4,
+                        "reasoning": "Validator reasoning.",
+                    },
+                    1,
+                )
+            )
+        candidates = scanner_module._candidates[run_id]
+        assert candidates[0]["reportable"] is True
+        assert candidates[0]["confidence"] == 0.4
+        assert candidates[1]["reportable"] is False
+    finally:
+        scanner_module._candidates.pop(run_id, None)
+
+
 def test_review_executor_persists_each_verdict_before_next_candidate(
     tmp_path, isolated_db_engine, monkeypatch
 ):
@@ -1137,6 +1300,12 @@ def test_discovery_candidates_are_persisted_before_validation(
         "location": "app.py:1",
         "description": "Request input reaches SQL execution.",
         "evidence": "db.execute(request.args['id'])",
+        "source_trace": {"file": "app.py", "line": 1},
+        "sink_trace": {"file": "app.py", "line": 1},
+        "fix_location": "app.py:1",
+        "root_cause": "Request input is concatenated into SQL.",
+        "confidence": 0.81,
+        "confidence_reasoning": "A request parameter reaches the SQL sink.",
     }
     asyncio.run(executor("write_lead", candidate_input, 1))
     replay = asyncio.run(executor("write_lead", candidate_input, 1))
@@ -1151,7 +1320,7 @@ def test_discovery_candidates_are_persisted_before_validation(
             .where(ScanLead.imported_into_run_id == None)  # noqa: E711
         ).one()
         assert lead.validation_status == "pending"
-        assert lead.confidence == 0.0
+        assert lead.confidence == 0.81
 
     response = client.get(f"/api/sast-runs/{run_id}/leads")
     assert response.status_code == 200
@@ -1174,6 +1343,430 @@ def test_discovery_candidates_are_persisted_before_validation(
         assert lead.confidence == 0.88
         assert lead.validation_status == "pending"
     sast_scanner._candidates.pop(run_id, None)
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_legacy_character_proof_gaps_are_restored(analysis_mode):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+
+    gap = "Confirm the input reaches the query."
+    legacy = [*gap, "Validator failed before closing this candidate."]
+    assert scanner_module._normalize_tool_list(legacy) == [
+        gap,
+        "Validator failed before closing this candidate.",
+    ]
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_write_lead_normalizes_text_proof_gaps(
+    analysis_mode, tmp_path, isolated_db_engine
+):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+
+    root = tmp_path / analysis_mode
+    root.mkdir()
+    (root / "app.py").write_text("db.execute(request.args['id'])\n")
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name=f"{analysis_mode} proof gaps", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    executor = scanner_module._make_tool_executor(run_id, root, None)
+    asyncio.run(
+        executor(
+            "write_lead",
+            {
+                "title": "SQL injection",
+                "category": "A03",
+                "severity": "high",
+                "location": "app.py:1",
+                "description": "Request input reaches SQL execution.",
+                "evidence": "db.execute(request.args['id'])",
+                "confidence": 0.81,
+                "confidence_reasoning": "A request parameter reaches the SQL sink.",
+                "source_trace": {"file": "app.py", "line": 1},
+                "sink_trace": {"file": "app.py", "line": 1},
+                "fix_location": "app.py:1",
+                "root_cause": "Request input is concatenated into SQL.",
+                "controls": "Authentication middleware",
+                "proof_gaps": "Confirm whether the query is parameterized.",
+            },
+            1,
+        )
+    )
+
+    candidate = scanner_module._candidates[run_id][0]
+    assert candidate["controls"] == ["Authentication middleware"]
+    assert candidate["proof_gaps"] == ["Confirm whether the query is parameterized."]
+    with Session(isolated_db_engine) as session:
+        lead = session.exec(
+            select(ScanLead).where(ScanLead.producer_run_id == run_id)
+        ).one()
+        assert json.loads(lead.proof_gaps_json) == candidate["proof_gaps"]
+    scanner_module._candidates.pop(run_id, None)
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_write_lead_requires_atomic_confidence(
+    analysis_mode, tmp_path, isolated_db_engine
+):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+
+    root = tmp_path / analysis_mode
+    root.mkdir()
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name=f"{analysis_mode} confidence", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    executor = scanner_module._make_tool_executor(run_id, root, None)
+    result = asyncio.run(
+        executor(
+            "write_lead",
+            {
+                "title": "Unscored lead",
+                "category": "A03",
+                "severity": "high",
+                "location": "app.py:1",
+                "description": "Missing a discovery score.",
+                "evidence": "db.execute(value)",
+            },
+            1,
+        )
+    )
+
+    assert result.startswith("Error: write_lead requires a numeric confidence")
+    assert scanner_module._candidates[run_id] == []
+    with Session(isolated_db_engine) as session:
+        assert (
+            session.exec(
+                select(ScanLead).where(ScanLead.producer_run_id == run_id)
+            ).all()
+            == []
+        )
+    scanner_module._candidates.pop(run_id, None)
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_unscored_checkpoint_candidates_become_inconclusive(analysis_mode):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+    candidates = [
+        {
+            "candidate_id": 7,
+            "confidence": None,
+            "validation_status": "pending",
+            "proof_gaps": "Unverified source to sink path.",
+            "reportable": False,
+        }
+    ]
+
+    assert scanner_module._close_unscored_candidates(candidates) == 1
+    assert candidates[0]["validation_status"] == "inconclusive"
+    assert "confidence score" in candidates[0]["validation_reasoning"]
+    assert candidates[0]["proof_gaps"] == [
+        "Unverified source to sink path.",
+        "Discovery ended before a confidence score was recorded.",
+    ]
+    assert scanner_module._pending_candidate_ids(candidates) == []
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_unfinished_inconclusive_candidates_still_require_validation(analysis_mode):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+    candidates = [
+        {
+            "candidate_id": 8,
+            "confidence": 0.91,
+            "validation_status": "inconclusive",
+            "validation_retry_pending": True,
+            "reportable": False,
+        },
+        {
+            "candidate_id": 9,
+            "confidence": 0.5,
+            "validation_status": "inconclusive",
+            "validation_reasoning": "Validator failed: boom",
+            "reportable": False,
+        },
+        {
+            "candidate_id": 10,
+            "confidence": 0.5,
+            "validation_status": "inconclusive",
+            "validation_reasoning": "Validator returned no explicit verdict.",
+            "reportable": False,
+        },
+    ]
+
+    assert scanner_module._pending_candidate_ids(candidates) == [8, 9, 10]
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_validator_inconclusive_verdict_is_final(analysis_mode):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+    candidates = [
+        {
+            "candidate_id": 38,
+            "confidence": 0.3,
+            "validation_status": "inconclusive",
+            "validation_reasoning": "Could not prove the transfer bypass.",
+            "reportable": False,
+        }
+    ]
+
+    assert scanner_module._pending_candidate_ids(candidates) == []
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_reset_incomplete_validation_clears_failure_state(analysis_mode):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+    candidate = {
+        "candidate_id": 8,
+        "confidence": 0.9,
+        "validation_status": "inconclusive",
+        "validation_retry_pending": True,
+        "validation_reasoning": "Validator failed: boom",
+        "proof_gaps": [
+            "Unverified sink.",
+            "Independent validator failed before closing this candidate.",
+        ],
+        "reportable": False,
+    }
+
+    scanner_module._reset_incomplete_validation(candidate)
+
+    assert candidate["validation_status"] == "pending"
+    assert "validation_retry_pending" not in candidate
+    assert candidate["validation_reasoning"] == ""
+    assert candidate["proof_gaps"] == ["Unverified sink."]
+    assert scanner_module._pending_candidate_ids([candidate]) == [8]
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_reconciled_duplicate_does_not_schedule_another_validator(analysis_mode):
+    from aespa.services import sast_scanner_light
+    from aespa.services.sast_semantic import reconcile_candidate_ledger
+
+    scanner_module = sast_scanner_light if analysis_mode == "light" else sast_scanner
+    candidates = [
+        {
+            "candidate_id": 3,
+            "category": "A03",
+            "title": "SQL injection in lookup",
+            "location": "app.py:10",
+            "confidence": 0.8,
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 8,
+            "category": "A03",
+            "title": "Unsafe SQL query in lookup",
+            "location": "app.py:10",
+            "confidence": 0.9,
+            "validation_status": "pending",
+        },
+    ]
+
+    reconcile_candidate_ledger(candidates)
+    assert scanner_module._pending_candidate_ids(candidates) == [3]
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_reconciled_lead_keeps_locations_in_saved_evidence(
+    analysis_mode, isolated_db_engine
+):
+    from aespa.services import sast_scanner_light
+    from aespa.services.sast_semantic import reconcile_candidate_ledger
+
+    scanner_module = sast_scanner_light if analysis_mode == "light" else sast_scanner
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name=f"{analysis_mode} merged leads", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+    candidates = [
+        {
+            "candidate_id": 3,
+            "category": "A03",
+            "title": "SQL injection in lookup",
+            "location": "app.py:10",
+            "description": "User input reaches SQL.",
+            "evidence": "First trace",
+            "source_trace": {"file": "app.py", "symbol": "lookup"},
+            "sink_trace": {"file": "app.py", "symbol": "execute"},
+            "confidence": 0.8,
+            "validation_status": "pending",
+        },
+        {
+            "candidate_id": 8,
+            "category": "A03",
+            "title": "Unsafe SQL query in lookup",
+            "location": "app.py:12",
+            "description": "The lookup changes query syntax.",
+            "evidence": "Second trace",
+            "source_trace": {"file": "app.py", "symbol": "lookup"},
+            "sink_trace": {"file": "app.py", "symbol": "execute"},
+            "confidence": 0.9,
+            "validation_status": "pending",
+        },
+    ]
+    reconcile_candidate_ledger(candidates)
+    candidates[0]["validation_status"] = "confirmed"
+    candidates[0]["reportable"] = True
+    scanner_module._candidates[run_id] = candidates
+    try:
+        assert scanner_module._sync_candidates_to_db(run_id, None) == (2, 1)
+        with Session(isolated_db_engine) as session:
+            leads = session.exec(
+                select(ScanLead).where(ScanLead.producer_run_id == run_id)
+            ).all()
+        assert len([lead for lead in leads if lead.reportable]) == 1
+        saved = next(lead for lead in leads if lead.reportable)
+        assert "First trace" in saved.evidence
+        assert "Second trace" in saved.evidence
+        assert "app.py:12" in saved.evidence
+    finally:
+        scanner_module._candidates.pop(run_id, None)
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_discovery_workers_add_matching_evidence_to_one_lead(
+    analysis_mode, tmp_path, isolated_db_engine
+):
+    from aespa.services import sast_scanner_light
+
+    scanner_module = sast_scanner_light if analysis_mode == "light" else sast_scanner
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name=f"{analysis_mode} online merge", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+    (tmp_path / "app.py").write_text("line\n" * 20)
+    executor = scanner_module._make_tool_executor(run_id, tmp_path, None, coverage={})
+    proposal = {
+        "work_item_id": -1,
+        "title": "SQL injection in customer search",
+        "category": "A03",
+        "severity": "high",
+        "location": "app.py:10",
+        "description": "Request input reaches a raw query.",
+        "evidence": "first trace",
+        "suggested_endpoint": "GET /customers?sort=",
+        "source_trace": {"file": "app.py", "symbol": "search"},
+        "sink_trace": {"file": "app.py", "line": 10, "symbol": "execute"},
+        "fix_location": "app.py:10 (search)",
+        "root_cause": "The sort value is placed into the SQL text.",
+        "confidence": 0.8,
+        "confidence_reasoning": "Source and sink are shown.",
+    }
+    try:
+        first = asyncio.run(executor("write_lead", proposal, 1))
+        second = asyncio.run(
+            executor(
+                "write_lead",
+                {
+                    **proposal,
+                    "title": "Unsafe SQL query in customer search",
+                    "location": "app.py:12",
+                    "evidence": "second trace",
+                    "confidence": 0.9,
+                },
+                2,
+            )
+        )
+        assert "recorded" in first
+        assert "already recorded" in second
+        assert len(scanner_module._candidates[run_id]) == 1
+        assert scanner_module._candidates[run_id][0]["observation_count"] == 2
+        with Session(isolated_db_engine) as session:
+            leads = session.exec(
+                select(ScanLead).where(ScanLead.producer_run_id == run_id)
+            ).all()
+        assert len(leads) == 1
+        assert "second trace" in leads[0].evidence
+        assert "app.py:12" in leads[0].evidence
+    finally:
+        scanner_module._candidates.pop(run_id, None)
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_stopping_during_validation_checkpoints_pending_candidates(
+    analysis_mode, isolated_db_engine
+):
+    scanner_module = sast_scanner
+    if analysis_mode == "light":
+        from aespa.services import sast_scanner_light
+
+        scanner_module = sast_scanner_light
+    run_id, _ = _run_with_web_target(isolated_db_engine)
+    scanner_module._candidates[run_id] = [
+        {
+            "candidate_id": 8,
+            "confidence": 0.91,
+            "validation_status": "pending",
+            "reportable": False,
+        }
+    ]
+    try:
+        saved_count = scanner_module._checkpoint_stopped_validation(
+            run_id, "validation"
+        )
+    finally:
+        scanner_module._candidates.pop(run_id, None)
+
+    with Session(isolated_db_engine) as session:
+        run = session.get(SastRun, run_id)
+        pause = session.exec(
+            select(RunPause)
+            .where(RunPause.run_kind == "sast")
+            .where(RunPause.run_id == run_id)
+        ).one()
+        checkpoint = session.exec(
+            select(PhaseCheckpoint)
+            .where(PhaseCheckpoint.run_kind == "sast")
+            .where(PhaseCheckpoint.run_id == run_id)
+            .where(PhaseCheckpoint.phase == "state")
+            .where(PhaseCheckpoint.idempotency_key == "candidates")
+        ).one()
+
+    saved_candidates = json.loads(checkpoint.data_json)["candidates"]
+    assert saved_count == 1
+    assert run.status == "paused"
+    assert pause.resume_stage == "validation"
+    assert saved_candidates[0]["validation_status"] == "pending"
 
 
 def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
@@ -1204,6 +1797,7 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
         run_id = run.id
 
     calls: list[str] = []
+    discovery_groups: list[str] = []
 
     async def fake_loop(_config, **kwargs):
         prompt = kwargs["system_message"]
@@ -1241,15 +1835,19 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
         else:
             calls.append("discovery")
             payload = json.loads(await execute("get_work_program", {}, 0))
+            discovery_groups.append(payload["class_group"])
             work_items = payload["work_items"]
             await execute(
                 "read_file", {"path": "app.py", "start_line": 1, "end_line": 3}, 1
             )
-            if "assigned focus is injection" in prompt:
+            injection_items = [
+                item for item in work_items if item["class_group"] == "injection"
+            ]
+            if injection_items:
                 await execute(
                     "write_lead",
                     {
-                        "work_item_id": work_items[0]["work_item_id"],
+                        "work_item_id": injection_items[0]["work_item_id"],
                         "title": "SQL injection in item",
                         "category": "A03",
                         "severity": "high",
@@ -1260,7 +1858,11 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
                         "source_trace": {"file": "app.py", "line": 2},
                         "controls": [],
                         "sink_trace": {"file": "app.py", "line": 3},
+                        "fix_location": "app.py:3",
+                        "root_cause": "Request id is concatenated into SQL.",
                         "proof_gaps": [],
+                        "confidence": 0.88,
+                        "confidence_reasoning": "Concrete path",
                     },
                     1,
                 )
@@ -1269,7 +1871,11 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
                     {"lead_id": 0, "confidence": 0.88, "reasoning": "Concrete path"},
                     2,
                 )
-                work_items = work_items[1:]
+                work_items = [
+                    item
+                    for item in work_items
+                    if item["work_item_id"] != injection_items[0]["work_item_id"]
+                ]
             for item in work_items:
                 await execute(
                     "record_disposition",
@@ -1291,8 +1897,9 @@ def test_full_sast_task_executes_discovery_validation_closure_and_attack_path(
     with events_svc.run_kind_scope("sast"):
         asyncio.run(sast_scanner._sast_scan_task(run_id))
 
-    # Four discovery workers plus the semantic closure worker.
-    assert calls.count("discovery") == 5
+    # The route worker owns the local sink; closure is the other discovery call.
+    assert calls.count("discovery") == 2
+    assert discovery_groups == ["review"]
     assert calls.count("validation") == 1
     assert calls[-1] == "attack_path"
     with Session(isolated_db_engine) as session:
@@ -1387,6 +1994,15 @@ def test_sast_validation_starts_after_discovery_reconciliation(
     monkeypatch.setattr(
         sast_scanner, "_reconcile_candidate_ledger", track_reconciliation
     )
+    validation_progress: list[tuple[str, dict]] = []
+    original_set_phase = sast_scanner._set_phase
+
+    def track_set_phase(run, phase, status, message, data=None):
+        if phase == "validation":
+            validation_progress.append((status, dict(data or {})))
+        return original_set_phase(run, phase, status, message, data)
+
+    monkeypatch.setattr(sast_scanner, "_set_phase", track_set_phase)
 
     async def fake_loop(_config, **kwargs):
         prompt = kwargs["system_message"]
@@ -1444,7 +2060,10 @@ def test_sast_validation_starts_after_discovery_reconciliation(
             await execute(
                 "read_file", {"path": "app.py", "start_line": 1, "end_line": 3}, 1
             )
-            if "assigned focus is injection" not in prompt:
+            injection_items = [
+                item for item in work_items if item["class_group"] == "injection"
+            ]
+            if not injection_items:
                 for item in work_items:
                     await execute(
                         "record_disposition",
@@ -1460,7 +2079,7 @@ def test_sast_validation_starts_after_discovery_reconciliation(
                 await execute(
                     "write_lead",
                     {
-                        "work_item_id": work_items[0]["work_item_id"],
+                        "work_item_id": injection_items[0]["work_item_id"],
                         "title": f"SQL injection in item {candidate_id}",
                         "category": "A03",
                         "severity": "high",
@@ -1473,6 +2092,12 @@ def test_sast_validation_starts_after_discovery_reconciliation(
                             if candidate_id == 0
                             else []
                         ),
+                        "source_trace": {"file": "app.py", "line": 2},
+                        "sink_trace": {"file": "app.py", "line": candidate_id + 2},
+                        "fix_location": f"app.py:{candidate_id + 2}",
+                        "root_cause": "Request id is concatenated into SQL.",
+                        "confidence": 0.88,
+                        "confidence_reasoning": "Concrete path",
                     },
                     1,
                 )
@@ -1488,6 +2113,18 @@ def test_sast_validation_starts_after_discovery_reconciliation(
                 if candidate_id == 0:
                     await asyncio.sleep(0)
                     discovery_observed_validator.append(bool(validator_started))
+            for item in work_items:
+                if item["work_item_id"] == injection_items[0]["work_item_id"]:
+                    continue
+                await execute(
+                    "record_disposition",
+                    {
+                        "work_item_id": item["work_item_id"],
+                        "status": "no_match",
+                        "reasoning": "No issue in this assigned class.",
+                    },
+                    3,
+                )
         return "phase complete"
 
     from aespa.services import llm
@@ -1502,6 +2139,14 @@ def test_sast_validation_starts_after_discovery_reconciliation(
     assert sorted(validator_started) == [0, 1, 2]
     assert reconciled_candidate_syncs[0] == 3
     assert visible_candidates_at_validation == [3, 3, 3]
+    running = [data for status, data in validation_progress if status == "running"]
+    assert running[0] == {"candidates": 1, "completed": 0}
+    assert {"candidates": 3, "completed": 0} in running
+    assert running[-1] == {"candidates": 3, "completed": 3}
+    assert [data["completed"] for data in running] == sorted(
+        data["completed"] for data in running
+    )
+    assert validation_progress[-1][0] == "complete"
     assert calls[0] == "discovery"
     assert calls.count("validation") == 3
     assert calls[-1] == "attack_path"
@@ -1515,6 +2160,7 @@ def test_sast_validation_starts_after_discovery_reconciliation(
         ).all()
     assert saved_run.status == "completed"
     assert saved_run.leads_count == 3
+    assert json.loads(saved_run.report_json)["candidates"] == 3
     assert [lead.validation_status for lead in saved_leads] == [
         "confirmed",
         "confirmed",
@@ -1540,6 +2186,24 @@ def test_grep_scope_does_not_count_as_direct_file_review(tmp_path, isolated_db_e
     from aespa.services import sast_workprogram
 
     sast_workprogram.build_source_atlas(run_id, source_root)
+    workers = sast_workprogram.worker_rows(run_id)
+    route_workers = [worker for worker in workers if worker.class_group == "review"]
+    assert route_workers
+    assert not any(
+        worker.class_group in {"injection", "access", "logic"} for worker in workers
+    )
+    for worker in route_workers:
+        items = sast_workprogram.worker_payload(worker.id)["work_items"]
+        by_surface = {}
+        for item in items:
+            by_surface.setdefault(item["surface"]["path"], set()).add(
+                item["class_group"]
+            )
+        assert all(
+            {"injection", "access", "logic"} <= groups
+            and groups <= {"injection", "access", "logic", "sink"}
+            for groups in by_surface.values()
+        )
     result = sast_scanner._run_read_tool(
         run_id,
         source_root,
@@ -1578,3 +2242,99 @@ def test_grep_scope_does_not_count_as_direct_file_review(tmp_path, isolated_db_e
         work_item_id, status="no_match", reasoning="No matching flow."
     )
     assert ok is True
+
+
+def test_work_program_view_lists_open_items_first_and_done_names_them(
+    tmp_path, isolated_db_engine
+):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "route.py").write_text(
+        "@app.get('/items')\ndef items(request):\n    return db.execute(request.args['q'])\n"
+    )
+    with Session(isolated_db_engine) as session:
+        run = SastRun(name="view-test", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    coverage = sast_scanner._build_source_inventory(source_root)
+    from aespa.services import sast_workprogram
+
+    sast_workprogram.build_source_atlas(run_id, source_root)
+    worker = next(
+        w
+        for w in sast_workprogram.worker_rows(run_id)
+        if len(sast_workprogram.worker_payload(w.id)["work_items"]) > 1
+    )
+    items = sast_workprogram.worker_payload(worker.id)["work_items"]
+    sast_scanner._run_read_tool(
+        run_id,
+        source_root,
+        coverage,
+        "discovery",
+        "read_file",
+        {"path": "route.py", "start_line": 1, "end_line": 3},
+        worker.id,
+    )
+    finished_id = items[0]["work_item_id"]
+    ok, _ = sast_workprogram.record_disposition(
+        finished_id, status="no_match", reasoning="No matching flow."
+    )
+    assert ok is True
+
+    view = sast_workprogram.work_program_view(worker.id)
+    assert view["finished_items"] == [
+        {"work_item_id": finished_id, "status": "no_match"}
+    ]
+    assert view["open_count"] == len(items) - 1
+    assert all(item["status"] not in {"no_match"} for item in view["work_items"])
+    assert all("surface" in item for item in view["work_items"])
+
+    message = sast_workprogram.unresolved_items_message(worker.id)
+    open_item = view["work_items"][0]
+    assert message.startswith("Resolve these assigned work items before done:")
+    assert f"- {open_item['work_item_id']}:" in message
+    assert "route.py:" in message
+    assert f"- {finished_id}:" not in message
+
+
+def test_discovery_worker_budget_scales_with_assigned_work():
+    from aespa.services.sast_workprogram import discovery_worker_budget
+
+    payload = {
+        "class_group": "access",
+        "files": ["app/routes.py"],
+        "work_items": [
+            {"surface": {"path": f"app/model_{index}.py"}} for index in range(20)
+        ],
+    }
+
+    budget, basis = discovery_worker_budget(
+        payload,
+        security_check_count=12,
+        budget_mode="adaptive",
+        minimum=60,
+        maximum=250,
+    )
+
+    assert budget == 168
+    assert basis["work_items"] == 20
+    assert basis["security_checks"] == 12
+    assert basis["unique_files"] == 21
+
+
+def test_discovery_worker_budget_keeps_fixed_mode_exact():
+    from aespa.services.sast_workprogram import discovery_worker_budget
+
+    budget, basis = discovery_worker_budget(
+        {"class_group": "sink", "work_items": [{}] * 40},
+        security_check_count=30,
+        budget_mode="fixed",
+        minimum=60,
+        maximum=250,
+    )
+
+    assert budget == 60
+    assert basis["calculated"] == 60

@@ -4,12 +4,7 @@ import { SastRunActionsMenu } from "./SastRunActionsMenu.jsx";
 import { ActivityView } from "./ActivityView.jsx";
 import { CoverageView } from "./CoverageView.jsx";
 import { CandidatesView } from "./CandidatesView.jsx";
-import {
-  EfficiencyView,
-  ObligationsView,
-  RepositoryModelView,
-  ThreatModelView,
-} from "./SemanticAnalysisView.jsx";
+import { EfficiencyView, RepositoryModelView, ThreatModelView } from "./SemanticAnalysisView.jsx";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -17,34 +12,36 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { nav } from "../../shared/navigation/router.js";
 import { sastCandidatesToMarkdown, sastReportFilename } from "../../shared/leads/files.js";
 import { downloadTextFile } from "../../shared/lib/download.js";
+import { usePolling } from "../../shared/hooks/usePolling.js";
 
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { DismissibleAlert } from "../../shared/ui/DismissibleAlert.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
+import { jsonListValue } from "../../shared/ui/SastLeadDetails.jsx";
 
 const DEEP_PHASES = [
   { key: "scope", label: "Scope", short: "Archive and inventory", view: "coverage" },
   { key: "repository_model", label: "Model", short: "Repository facts", view: "model" },
   { key: "threat_model", label: "Threats", short: "Assets and boundaries", view: "threats" },
-  { key: "planning", label: "Planning", short: "Required security checks", view: "obligations" },
-  { key: "discovery", label: "Discovery", short: "Source-to-sink candidates", view: "candidates" },
+  { key: "planning", label: "Planning", short: "Required security checks", view: "threats" },
+  { key: "discovery", label: "Discovery", short: "Find possible issues", view: "candidates" },
   {
     key: "reconciliation",
-    label: "Reconcile",
-    short: "Merge and split candidates",
-    view: "obligations",
+    label: "Deduplicate",
+    short: "Merge duplicate findings",
+    view: "threats",
   },
   {
     key: "validation",
     label: "Validation",
-    short: "Controls and counterevidence",
+    short: "Confirm or dismiss findings",
     view: "candidates",
   },
-  { key: "closure", label: "Closure", short: "Resolve security gaps", view: "obligations" },
+  { key: "closure", label: "Gap review", short: "Check for missed areas", view: "threats" },
   {
     key: "attack_path",
     label: "Attack paths",
-    short: "Reachability and severity",
+    short: "Check reachability and severity",
     view: "candidates",
   },
   { key: "report", label: "Report", short: "Findings and coverage", view: "coverage" },
@@ -54,37 +51,26 @@ const LIGHT_PHASES = DEEP_PHASES.filter((phase) =>
   ["scope", "discovery", "validation", "attack_path", "report"].includes(phase.key),
 );
 
-const TAB_ALIASES = { overview: "coverage", progress: "coverage", leads: "candidates" };
+const TAB_ALIASES = {
+  overview: "coverage",
+  progress: "coverage",
+  leads: "candidates",
+  obligations: "threats",
+};
 const TAB_PHASES = {
   model: "repository_model",
   threats: "threat_model",
-  obligations: "closure",
   efficiency: "report",
   candidates: "discovery",
 };
 
 function normaliseTab(tab) {
   const candidate = TAB_ALIASES[tab] || tab;
-  return [
-    "coverage",
-    "model",
-    "threats",
-    "obligations",
-    "efficiency",
-    "candidates",
-    "activity",
-  ].includes(candidate)
+  return ["coverage", "model", "threats", "efficiency", "candidates", "activity"].includes(
+    candidate,
+  )
     ? candidate
     : "coverage";
-}
-
-function jsonValue(value, fallback) {
-  if (value && typeof value === "object") return value;
-  try {
-    return JSON.parse(value || "");
-  } catch {
-    return fallback;
-  }
 }
 
 function asArray(value) {
@@ -125,6 +111,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const bottomRef = useRef(null);
+  const liveEventSequence = useRef(0);
 
   const loadData = useCallback(async () => {
     try {
@@ -159,19 +146,13 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     }
   }, [runId, initialLeadRef]);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  usePolling(loadData, { intervalMs: 8000 });
   useEffect(() => {
     settingsApi
       .listLLMProfiles()
       .then((items) => setProfiles(items || []))
       .catch((err) => setError(err.message));
   }, []);
-  useEffect(() => {
-    const timer = setInterval(loadData, scanRunning ? 3000 : 8000);
-    return () => clearInterval(timer);
-  }, [loadData, scanRunning]);
   useEffect(() => {
     const es = new EventSource(`/api/sast-runs/${runId}/events`);
     es.onmessage = (event) => {
@@ -188,7 +169,17 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             },
           ]);
         }
-        if (payload.type === "scanner_phase") loadData();
+        if (payload.type === "scanner_phase") {
+          setLogs((previous) => [
+            ...previous,
+            {
+              ...payload,
+              id: `live-phase-${Date.now()}-${liveEventSequence.current++}`,
+              created_at: new Date().toISOString(),
+            },
+          ]);
+        }
+        if (payload.type === "source_preparation") loadData();
       } catch {}
     };
     return () => es.close();
@@ -221,7 +212,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   );
   const reportableCount = leads.filter((lead) => lead.reportable).length;
   const proofGapCount = leads.reduce(
-    (count, lead) => count + jsonValue(lead.proof_gaps_json, []).length,
+    (count, lead) => count + jsonListValue(lead.proof_gaps_json).length,
     0,
   );
   const workItemSummary = analysis.work_program?.work_items || {};
@@ -292,6 +283,19 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       setStartBusy(false);
     }
   };
+  const onResumeSource = async () => {
+    setStartBusy(true);
+    setError(null);
+    try {
+      const updated = await sastRunsApi.resumeSastSource(runId);
+      setRun(updated);
+      await loadData();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setStartBusy(false);
+    }
+  };
   const onDelete = async () => {
     if (!confirm("Delete this SAST run and all its leads?")) return;
     try {
@@ -350,10 +354,17 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     !scanRunning &&
     (run.status === "paused" ||
       (["completed", "failed"].includes(run.status) && resumableFailedWorkers > 0));
+  const canResumeSource =
+    run &&
+    !scanRunning &&
+    ["failed", "cancelled"].includes(run.status) &&
+    run.source_provider !== "upload" &&
+    !run.source_archive_path;
   const canStart =
     run &&
     !scanRunning &&
     !canResume &&
+    !canResumeSource &&
     ["pending", "completed", "failed", "cancelled"].includes(run.status);
 
   if (!run)
@@ -372,13 +383,24 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         className="sast-run-topbar"
         title={
           <span className="sast-header-title">
-            <Crumb href="#/sast-runs">SAST</Crumb>
-            <Sep />
-            <span className="sast-header-name">{run.name}</span>
-            <span className="badge neutral">
-              {run.analysis_mode === "light" ? "Light" : "Deep"}
+            <span className="sast-header-main">
+              <Crumb href="#/sast-runs">SAST</Crumb>
+              <Sep />
+              <span className="sast-header-name">{run.name}</span>
+              <span className="badge neutral">
+                {run.analysis_mode === "light" ? "Light" : "Deep"}
+              </span>
+              <StatusBadge status={scanRunning ? "scanning" : run.status} />
             </span>
-            <StatusBadge status={scanRunning ? "scanning" : run.status} />
+            {run.source_provider !== "upload" && run.source_revision ? (
+              <span
+                className="sast-header-source"
+                title={`Source: ${run.source_locator || run.source_provider} · ${run.source_revision}`}
+              >
+                Source: {run.source_locator || run.source_provider} ·{" "}
+                {run.source_revision.slice(0, 12)}
+              </span>
+            ) : null}
           </span>
         }
         actions={
@@ -404,6 +426,11 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                     : "Resume Failed Work"}
               </button>
             )}
+            {canResumeSource && (
+              <button className="btn" disabled={startBusy} onClick={onResumeSource}>
+                {startBusy ? "Resuming…" : "Resume source preparation"}
+              </button>
+            )}
             {scanRunning && (
               <button className="btn secondary" disabled={startBusy} onClick={onPause}>
                 {startBusy ? "Pausing…" : "Pause"}
@@ -422,6 +449,23 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           </>
         }
       />
+      {run.status === "preparing" ? (
+        <div className="content sast-run-preparing">
+          <div className="card" style={{ maxWidth: 760 }}>
+            <div className="form-section-title">Preparing source snapshot</div>
+            <p className="subtle" style={{ margin: "6px 0 0" }}>
+              AESPA is resolving the requested repository revision and creating an immutable
+              archive. The SAST scan will start automatically when it is ready.
+            </p>
+            {run.source_locator ? (
+              <div style={{ marginTop: 12, fontSize: 13 }}>
+                <strong>Source:</strong> {run.source_locator}
+                {run.source_requested_ref ? ` · ${run.source_requested_ref}` : " · default branch"}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       <div className="sast-run-shell">
         <div
           className="sast-phase-rail"
@@ -467,14 +511,10 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                     key: "threats",
                     label: `Threats ${asArray(threatModel.scenarios).length}`,
                   },
-                  {
-                    key: "obligations",
-                    label: `Security checks ${asArray(planning.obligations).length}`,
-                  },
                   { key: "efficiency", label: "Execution Summary" },
                 ]
               : []),
-            { key: "candidates", label: `Candidates ${leads.length}` },
+            { key: "candidates", label: `Findings ${leads.length}` },
             { key: "activity", label: "Activity" },
           ].map((item) => (
             <button
@@ -495,6 +535,9 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             <DismissibleAlert variant="error" onDismiss={() => setError(null)}>
               {error}
             </DismissibleAlert>
+          ) : null}
+          {run.error_message && ["failed", "cancelled"].includes(run.status) ? (
+            <div className="alert error">{run.error_message}</div>
           ) : null}
           {notice ? (
             <DismissibleAlert
@@ -537,19 +580,19 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                 <small>files returned</small>
               </div>
               <div>
-                <span>Candidates</span>
+                <span>Findings</span>
                 <strong>{leads.length}</strong>
-                <small>persisted hypotheses</small>
+                <small>possible issues found</small>
               </div>
               <div>
                 <span>Reportable</span>
                 <strong>{reportableCount}</strong>
-                <small>independently confirmed</small>
+                <small>confirmed by validation</small>
               </div>
               <div>
-                <span>Proof gaps</span>
+                <span>Missing evidence</span>
                 <strong>{proofGapCount}</strong>
-                <small>unresolved evidence</small>
+                <small>open questions on findings</small>
               </div>
             </div>
           ) : null}
@@ -568,7 +611,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           {tab === "coverage" && (
             <div className="sast-assurance-note">
               <span>
-                <strong>Coverage assurance:</strong>{" "}
+                <strong>Coverage:</strong>{" "}
                 {analysis.assurance?.reasons?.length
                   ? analysis.assurance.reasons.join(" ")
                   : "Every generated source and sink security check was completed."}
@@ -587,10 +630,8 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             <RepositoryModelView model={repositoryModel} status={semanticStatus} />
           )}
           {tab === "threats" && (
-            <ThreatModelView threatModel={threatModel} status={semanticStatus} />
-          )}
-          {tab === "obligations" && (
-            <ObligationsView
+            <ThreatModelView
+              threatModel={threatModel}
               planning={planning}
               closure={closure}
               report={analysis.report}

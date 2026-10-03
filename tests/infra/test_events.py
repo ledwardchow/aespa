@@ -48,3 +48,29 @@ def test_agent_status_is_mirrored_to_console_activity(caplog, monkeypatch):
     assert caplog.messages == [
         "api run 17  COMPLETE    Validator (validator-4)  Review finding -> Confirmed"
     ]
+
+
+def test_persist_only_phase_event_is_not_broadcast(monkeypatch):
+    from aespa.services import events
+
+    queue: asyncio.Queue = asyncio.Queue()
+    key = ("web", 91)
+    persisted: list[tuple[int, dict]] = []
+    events._queues[key] = [queue]
+    monkeypatch.setattr(
+        events,
+        "_persist_phase_event",
+        lambda run_id, event: persisted.append((run_id, event)),
+    )
+    event = {
+        "type": "scanner_phase",
+        "phase": "llm_cache",
+        "_persist_only": True,
+    }
+    try:
+        events.emit(91, event)
+    finally:
+        events._queues.pop(key, None)
+
+    assert queue.empty()
+    assert persisted == [(91, event)]

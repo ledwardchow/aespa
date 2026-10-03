@@ -4,15 +4,32 @@
 }
 .sast-header-title {
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.sast-header-main {
+  display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 0;
   max-width: 100%;
   overflow: hidden;
 }
 .sast-header-name {
   min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sast-header-source {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -101,6 +118,10 @@
   flex-direction: column;
   overflow: hidden;
   background: var(--bg);
+}
+.sast-run-preparing {
+  flex: 0 0 auto;
+  padding-bottom: 16px;
 }
 .sast-phase-rail {
   display: grid;
@@ -322,7 +343,7 @@
 }
 .sast-panel-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
   padding: 11px 12px;
@@ -330,7 +351,7 @@
 }
 .sast-panel-title {
   color: var(--text);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 700;
 }
 .sast-panel-sub {
@@ -481,6 +502,35 @@
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
+}
+.sast-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 6px);
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.sast-sort-button:hover,
+.sast-sort-button.active {
+  color: var(--text);
+}
+.sast-sort-button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+.sast-sort-indicator {
+  font-size: 9px;
+  opacity: 0.5;
+}
+.sast-sort-button.active .sast-sort-indicator {
+  opacity: 1;
 }
 .sast-column-resizer {
   position: absolute;
@@ -743,6 +793,15 @@
   grid-template-columns: minmax(0, 1.5fr) minmax(245px, 0.75fr);
   gap: 10px;
   align-items: start;
+}
+.sast-coverage-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.sast-coverage-summary .sast-coverage-grid > .sast-coverage-name {
+  font-weight: 600;
 }
 .sast-assurance-note {
   display: flex;
@@ -1358,4 +1417,36 @@
     grid-template-columns: 1fr;
     padding-left: 12px;
   }
+}
+.sast-status-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.sast-status-filter-label,
+.sast-status-filter-hidden {
+  color: var(--muted);
+  font-size: 11px;
+}
+.sast-status-filter-hidden {
+  margin-left: auto;
+}
+.sast-status-filter-chip {
+  border: 1px solid transparent;
+  font-family: inherit;
+  cursor: pointer;
+}
+.sast-status-filter-chip:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.sast-status-filter-chip.hidden {
+  border-color: var(--border);
+  color: var(--muted);
+  background: transparent;
+  text-decoration: line-through;
+  opacity: 0.7;
 }

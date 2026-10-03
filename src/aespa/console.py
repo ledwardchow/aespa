@@ -1708,6 +1708,7 @@ class InteractiveConsole:
         host: str = "127.0.0.1",
         env_path: Path | None = None,
         on_port_change: Callable[[int], None] | None = None,
+        on_quit: Callable[[], None] | None = None,
         allow_port_change: bool = True,
         replace_logging_handlers: bool = True,
         terminal_size: tuple[int, int] | None = None,
@@ -1725,11 +1726,13 @@ class InteractiveConsole:
             log_db_path=log_db_path,
         )
         self.replace_logging_handlers = replace_logging_handlers
+        self.on_quit = on_quit
         self._stop = threading.Event()
         self._logo_animation_stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._animation_thread: threading.Thread | None = None
         self._terminal_state = None
+        self._windows_console_state = None
         self._key_buffer = b""
         self._previous_root_level: int | None = None
         self._logger_states: dict[str, tuple[list[logging.Handler], bool]] = {}
@@ -1844,6 +1847,7 @@ class InteractiveConsole:
 
     def _enable_immediate_keys(self) -> None:
         if os.name == "nt":
+            self._enable_windows_ctrl_c_key()
             return
         try:
             import termios
@@ -1856,6 +1860,10 @@ class InteractiveConsole:
             self._terminal_state = None
 
     def _restore_terminal(self) -> None:
+        if self._windows_console_state is not None:
+            kernel32, handle, mode = self._windows_console_state
+            kernel32.SetConsoleMode(handle, mode)
+            self._windows_console_state = None
         if self._terminal_state is None:
             return
         import termios
@@ -1866,6 +1874,27 @@ class InteractiveConsole:
         except (OSError, termios.error):
             pass
         self._terminal_state = None
+
+    def _enable_windows_ctrl_c_key(self) -> None:
+        """Report Ctrl+C as keyboard input while the interactive UI is attached."""
+        import ctypes
+        import msvcrt
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetConsoleMode.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+        )
+        kernel32.SetConsoleMode.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+        handle = msvcrt.get_osfhandle(self.input_stream.fileno())
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(
+            handle, ctypes.byref(mode)
+        ) and kernel32.SetConsoleMode(
+            handle,
+            mode.value & ~1,  # ENABLE_PROCESSED_INPUT
+        ):
+            self._windows_console_state = (kernel32, handle, mode.value)
 
     def _read_keys(self) -> None:
         if not self.input_stream.isatty():
@@ -1982,31 +2011,75 @@ class InteractiveConsole:
             self.handler.page_down()
 
     def _read_windows_keys(self) -> None:
+        import ctypes
         import msvcrt
-        import time
+
+        class KeyEvent(ctypes.Structure):
+            _fields_ = (
+                ("key_down", ctypes.c_int),
+                ("repeat_count", ctypes.c_ushort),
+                ("virtual_key", ctypes.c_ushort),
+                ("scan_code", ctypes.c_ushort),
+                ("character", ctypes.c_wchar),
+                ("control_state", ctypes.c_uint32),
+            )
+
+        class Event(ctypes.Union):
+            _fields_ = (("key", KeyEvent), ("padding", ctypes.c_byte * 16))
+
+        class InputRecord(ctypes.Structure):
+            _fields_ = (("event_type", ctypes.c_ushort), ("event", Event))
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+        kernel32.ReadConsoleInputW.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(InputRecord),
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+        )
+        handle = msvcrt.get_osfhandle(self.input_stream.fileno())
 
         while not self._stop.is_set():
-            if msvcrt.kbhit():
-                key = msvcrt.getwch()
-                if key in ("\x00", "\xe0"):
-                    special = msvcrt.getwch()
-                    if special == "I":
-                        self.handler.page_up()
-                    elif special == "Q":
-                        self.handler.page_down()
-                    elif special == "H":
-                        self.handler.select_previous_llm()
-                    elif special == "P":
-                        self.handler.select_next_llm()
-                elif self.handler.handle_settings_key(key):
-                    continue
-                elif key in _MODE_KEYS:
-                    self.handler.switch(_MODE_KEYS[key])
-                elif key == "\r":
-                    self.handler.toggle_selected_llm()
-            else:
-                time.sleep(0.05)
+            wait_result = kernel32.WaitForSingleObject(handle, 50)
+            if wait_result == 0xFFFFFFFF:
+                return
+            if wait_result == 0:
+                record = InputRecord()
+                count = ctypes.c_uint32()
+                if not kernel32.ReadConsoleInputW(
+                    handle, ctypes.byref(record), 1, ctypes.byref(count)
+                ):
+                    return
+                if count.value and record.event_type == 1 and record.event.key.key_down:
+                    key = record.event.key
+                    self._handle_windows_key(
+                        key.character, key.virtual_key, key.control_state
+                    )
             self.handler.refresh_for_resize()
+
+    def _handle_windows_key(
+        self, character: str, virtual_key: int, control_state: int
+    ) -> None:
+        if (
+            character == "\x03" or virtual_key == 0x43 and control_state & 0xC
+        ) and self.on_quit:
+            self.on_quit()
+        elif virtual_key == 0x21:
+            self.handler.page_up()
+        elif virtual_key == 0x22:
+            self.handler.page_down()
+        elif virtual_key == 0x26:
+            self.handler.select_previous_llm()
+        elif virtual_key == 0x28:
+            self.handler.select_next_llm()
+        elif character not in ("", "\x00"):
+            if self.handler.handle_settings_key(character):
+                return
+            if character in _MODE_KEYS:
+                self.handler.switch(_MODE_KEYS[character])
+            elif character == "\r":
+                self.handler.toggle_selected_llm()
 
 
 def interactive_console_available() -> bool:

@@ -31,6 +31,7 @@ PROVIDER_CAPABILITY_STRATEGIES = {
     "openai_compatible": "endpoint_model_metadata_then_openrouter",
     "openrouter": "openrouter_model_metadata",
     "google": "google_model_list_then_documented_family_then_openrouter",
+    "google_vertex": "vertex_publisher_model_list_then_documented_family_then_openrouter",
     "bedrock": "bedrock_model_list_then_documented_family_then_openrouter",
     "bedrock_mantle": "mantle_model_list_then_documented_family_then_openrouter",
     "azure_openai": "azure_openai_model_list_then_documented_family_then_openrouter",
@@ -239,7 +240,7 @@ def gemini_capability(model: str) -> dict[str, Any] | None:
 
 
 def documented_model_capability(api_format: str, model: str) -> dict[str, Any] | None:
-    if api_format == "google":
+    if api_format in {"google", "google_vertex"}:
         capability = gemini_capability(model)
         if capability is not None:
             capability["strategy"] = "documented_registry"

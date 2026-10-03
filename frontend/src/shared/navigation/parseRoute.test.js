@@ -50,8 +50,20 @@ test.each([
   ],
   ["#/settings/models/7/edit", { name: "settings", tab: "models", screen: "edit", id: 7 }],
   ["#/scan-policy", { name: "scan-policy" }],
-  ["#/external-integrations", { name: "external-integrations" }],
-  ["#/debug", { name: "debug" }],
+  ["#/external-integrations", { name: "scan-policy", tab: "global", subTab: "proxy" }],
+  ["#/scan-policy/global/features", { name: "scan-policy", tab: "global", subTab: "features" }],
+  ["#/scan-policy/global/debug", { name: "scan-policy", tab: "global", subTab: "debug" }],
+  ["#/scan-policy/global/proxy", { name: "scan-policy", tab: "global", subTab: "proxy" }],
+  ["#/scan-policy/systems", { name: "scan-policy", tab: "systems" }],
+  ["#/scan-policy/sast", { name: "scan-policy", tab: "sast" }],
+  ["#/scan-policy/dast/headers", { name: "scan-policy", tab: "dast", subTab: "headers" }],
+  ["#/scan-policy/dast/validator", { name: "scan-policy", tab: "dast", subTab: "validator" }],
+  ["#/extensions", { name: "extensions" }],
+  [
+    "#/extensions/aespa.burpsuite/settings",
+    { name: "extension-settings", extensionId: "aespa.burpsuite" },
+  ],
+  ["#/debug", { name: "scan-policy" }],
   ["#/reporting-debug", { name: "reporting-debug" }],
   ["#/benchmark-lab", { name: "benchmark-lab" }],
   ["#/benchmark-lab/evaluations/new", { name: "benchmark-evaluation-new" }],
@@ -88,4 +100,8 @@ test("run links round-trip run kind and encoded references", async () => {
     tab: "traffic",
     trafficCoverage: { cellIds: [12, 13], category: "A03", testClass: "sqli" },
   });
+});
+
+test("opens saved benchmark results", () => {
+  expect(parseRoute("#/benchmark-lab/results/42")).toEqual({ name: "benchmark-lab", id: 42 });
 });

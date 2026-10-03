@@ -22,6 +22,7 @@ export const defaultPolicyForm = () => ({
   scan_mode: "aggressive",
   max_probes_per_page: 50,
   thinking_max_steps: 120,
+  dast_max_concurrent_llm_requests: 4,
   request_timeout_s: 10,
   min_delay_s: 0.05,
   max_request_body_bytes: 65536,
@@ -38,15 +39,17 @@ export const defaultPolicyForm = () => ({
   strict_locator_enforcement: true,
   sast_rate_limit_findings: true,
   sast_race_condition_findings: true,
-  sast_audit_logging_findings: false,
+  sast_audit_logging_findings: true,
   sast_defense_in_depth_findings: false,
   sast_dependency_findings: true,
   sast_min_severity: "low",
-  sast_min_confidence: 0.35,
+  sast_budget_mode: "adaptive",
   sast_baseline_budget: 80,
   sast_threat_budget: 60,
+  sast_worker_budget_max: 250,
   sast_closure_budget: 40,
   sast_validator_budget: 50,
+  sast_max_concurrent_llm_requests: 4,
 });
 export const policyToForm = (p) => {
   const f = defaultPolicyForm();
@@ -63,6 +66,8 @@ export const policyToForm = (p) => {
     scan_mode: p.scan_mode || f.scan_mode,
     max_probes_per_page: p.max_probes_per_page ?? f.max_probes_per_page,
     thinking_max_steps: p.thinking_max_steps ?? f.thinking_max_steps,
+    dast_max_concurrent_llm_requests:
+      p.dast_max_concurrent_llm_requests ?? f.dast_max_concurrent_llm_requests,
     request_timeout_s: p.request_timeout_s ?? f.request_timeout_s,
     min_delay_s: p.min_delay_s ?? f.min_delay_s,
     max_request_body_bytes: p.max_request_body_bytes ?? f.max_request_body_bytes,
@@ -84,15 +89,18 @@ export const policyToForm = (p) => {
     strict_locator_enforcement: p.strict_locator_enforcement ?? true,
     sast_rate_limit_findings: p.sast_rate_limit_findings ?? true,
     sast_race_condition_findings: p.sast_race_condition_findings ?? true,
-    sast_audit_logging_findings: p.sast_audit_logging_findings ?? false,
+    sast_audit_logging_findings: p.sast_audit_logging_findings ?? true,
     sast_defense_in_depth_findings: p.sast_defense_in_depth_findings ?? false,
     sast_dependency_findings: p.sast_dependency_findings ?? true,
     sast_min_severity: p.sast_min_severity || "low",
-    sast_min_confidence: p.sast_min_confidence ?? 0.35,
+    sast_budget_mode: p.sast_budget_mode || "adaptive",
     sast_baseline_budget: p.sast_baseline_budget ?? 80,
     sast_threat_budget: p.sast_threat_budget ?? 60,
+    sast_worker_budget_max: p.sast_worker_budget_max ?? 250,
     sast_closure_budget: p.sast_closure_budget ?? 40,
     sast_validator_budget: p.sast_validator_budget ?? 50,
+    sast_max_concurrent_llm_requests:
+      p.sast_max_concurrent_llm_requests ?? f.sast_max_concurrent_llm_requests,
   };
 };
 export const policyPayload = (form) => ({
@@ -104,6 +112,7 @@ export const policyPayload = (form) => ({
   scan_mode: form.scan_mode,
   max_probes_per_page: Number(form.max_probes_per_page),
   thinking_max_steps: Number(form.thinking_max_steps),
+  dast_max_concurrent_llm_requests: Number(form.dast_max_concurrent_llm_requests),
   request_timeout_s: Number(form.request_timeout_s),
   min_delay_s: Number(form.min_delay_s),
   max_request_body_bytes: Number(form.max_request_body_bytes),
@@ -126,9 +135,11 @@ export const policyPayload = (form) => ({
   sast_defense_in_depth_findings: !!form.sast_defense_in_depth_findings,
   sast_dependency_findings: !!form.sast_dependency_findings,
   sast_min_severity: form.sast_min_severity,
-  sast_min_confidence: Number(form.sast_min_confidence),
+  sast_budget_mode: form.sast_budget_mode,
   sast_baseline_budget: Number(form.sast_baseline_budget),
   sast_threat_budget: Number(form.sast_threat_budget),
+  sast_worker_budget_max: Number(form.sast_worker_budget_max),
   sast_closure_budget: Number(form.sast_closure_budget),
   sast_validator_budget: Number(form.sast_validator_budget),
+  sast_max_concurrent_llm_requests: Number(form.sast_max_concurrent_llm_requests),
 });

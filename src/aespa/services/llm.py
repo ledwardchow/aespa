@@ -15,6 +15,7 @@ import re
 import sys
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -140,6 +141,15 @@ _base_url_var: ContextVar[str | None] = ContextVar("_base_url", default=None)
 _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
+_last_response_cache_telemetry_var: ContextVar[dict[str, Any] | None] = ContextVar(
+    "last_response_cache_telemetry", default=None
+)
+_traffic_call_id_var: ContextVar[int | None] = ContextVar(
+    "llm_traffic_call_id", default=None
+)
+_traffic_operation_var: ContextVar[str | None] = ContextVar(
+    "llm_traffic_operation", default=None
+)
 _operation_var: ContextVar[str | None] = ContextVar("llm_operation", default=None)
 _traffic_call_ids = itertools.count(1)
 
@@ -187,6 +197,66 @@ _run_token_seeded: set[tuple[str, int]] = set()
 
 
 LLM_PACING_NOTICE_THRESHOLD_S = 1.0
+
+
+class _RunConcurrencyGate:
+    """Bound in-flight provider calls for one run."""
+
+    def __init__(self) -> None:
+        self._active = 0
+        self._condition = asyncio.Condition()
+
+    async def acquire(self, limit: int) -> None:
+        async with self._condition:
+            while self._active >= limit:
+                await self._condition.wait()
+            self._active += 1
+
+    async def release(self) -> None:
+        async with self._condition:
+            self._active = max(0, self._active - 1)
+            self._condition.notify_all()
+
+
+_run_concurrency_gates: dict[tuple[int, str, int], _RunConcurrencyGate] = {}
+
+
+def _read_run_concurrency_limit(run_kind: str) -> int:
+    """Read the DAST or SAST LLM concurrency setting."""
+    try:
+        from sqlmodel import Session
+
+        from aespa.db import get_engine
+        from aespa.models import ScannerPolicy
+
+        with Session(get_engine()) as session:
+            policy = session.get(ScannerPolicy, 1)
+            if run_kind == "sast":
+                value = getattr(policy, "sast_max_concurrent_llm_requests", 4)
+            else:
+                value = getattr(policy, "dast_max_concurrent_llm_requests", 4)
+        return max(1, int(value or 4))
+    except Exception:
+        return 4
+
+
+@asynccontextmanager
+async def _run_concurrency_slot():
+    """Limit live provider requests for the current DAST or SAST run."""
+    run_id = _run_id_var.get()
+    run_kind = _run_kind_var.get()
+    if run_id is None or run_kind not in {"web", "api", "sast"}:
+        yield
+        return
+
+    loop = asyncio.get_running_loop()
+    key = (id(loop), run_kind, run_id)
+    gate = _run_concurrency_gates.setdefault(key, _RunConcurrencyGate())
+    await gate.acquire(_read_run_concurrency_limit(run_kind))
+    try:
+        yield
+    finally:
+        await gate.release()
 
 
 class AsyncTokenBucketLimiter:
@@ -421,43 +491,29 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
     if config.provider_id is None:
         return None
 
-    key = f"{config.provider}:{config.model}"
-    try:
-        from sqlmodel import Session
+    key = f"{config.provider_id}:{config.model}"
+    if not config.max_tpm and not config.max_rpm:
+        _limiters.pop(key, None)
+        return None
 
-        from aespa.db import get_engine
-        from aespa.models import LLMProviderConfig
-
-        with Session(get_engine()) as session:
-            provider = session.get(LLMProviderConfig, config.provider_id)
-            if not provider or (not provider.max_tpm and not provider.max_rpm):
-                _limiters.pop(key, None)
-                return None
-
-            tpm = provider.max_tpm or 10_000_000
-            rpm = provider.max_rpm
-
-            limiter = _limiters.get(key)
-            burst_seconds = 0.0 if config.provider == "openai_codex" else 60.0
-            burst_requests = 1 if config.provider == "openai_codex" else None
-            if (
-                not limiter
-                or limiter.tpm != tpm
-                or limiter.rpm != rpm
-                or limiter.burst_seconds != burst_seconds
-                or (
-                    config.provider == "openai_codex"
-                    and limiter.request_capacity != 1.0
-                )
-            ):
-                _limiters[key] = AsyncTokenBucketLimiter(
-                    tpm=tpm,
-                    rpm=rpm,
-                    burst_seconds=burst_seconds,
-                    burst_requests=burst_requests,
-                )
-    except Exception as e:
-        log.warning(f"Failed to lookup rate limit for provider: {e}")
+    tpm = config.max_tpm or 10_000_000
+    rpm = config.max_rpm
+    limiter = _limiters.get(key)
+    burst_seconds = 0.0 if config.provider == "openai_codex" else 60.0
+    burst_requests = 1 if config.provider == "openai_codex" else None
+    if (
+        not limiter
+        or limiter.tpm != tpm
+        or limiter.rpm != rpm
+        or limiter.burst_seconds != burst_seconds
+        or (config.provider == "openai_codex" and limiter.request_capacity != 1.0)
+    ):
+        _limiters[key] = AsyncTokenBucketLimiter(
+            tpm=tpm,
+            rpm=rpm,
+            burst_seconds=burst_seconds,
+            burst_requests=burst_requests,
+        )
 
     return _limiters.get(key)
 
@@ -512,6 +568,16 @@ def _load_bucket_from_db(
                         changed = True
                     if not provider:
                         continue
+                    if provider == "bedrock" and not counts.get(
+                        "bedrock_input_inclusive"
+                    ):
+                        counts["input"] = (
+                            counts.get("input", 0)
+                            + counts.get("cache_read", 0)
+                            + counts.get("cache_write", 0)
+                        )
+                        counts["bedrock_input_inclusive"] = True
+                        changed = True
                     rates = statistics_service._rates_for(s, provider, model)
                     cost = statistics_service.estimate_usage_cost(
                         provider,
@@ -661,6 +727,8 @@ def set_run_context(run_id: int, emit_fn: Any, run_kind: str = "web") -> None:
                 for k in ("provider", "copilot_quota"):
                     if counts.get(k) is not None:
                         bucket[model][k] = counts[k]
+                if counts.get("bedrock_input_inclusive"):
+                    bucket[model]["bedrock_input_inclusive"] = True
         _run_token_seeded.add(key)
 
 
@@ -695,6 +763,32 @@ def _cost_total(bucket: dict[str, dict[str, Any]], key: str) -> float | None:
     return sum(values) if values else None
 
 
+def _uncached_run_input(model: str, counts: dict[str, Any]) -> int:
+    """Convert recorded input to the uncached count used for display."""
+    provider = counts.get("provider")
+    includes_cache = provider in {
+        "openai",
+        "openai_compatible",
+        "openrouter",
+        "azure_openai",
+        "azure_foundry",
+        "azure_foundry_openai",
+        "google",
+        "google_vertex",
+        "openai_codex",
+        "google_antigravity",
+    }
+    if provider == "bedrock":
+        includes_cache = bool(counts.get("bedrock_input_inclusive"))
+    elif provider == "bedrock_mantle":
+        # Mantle Claude uses Messages, whose input count excludes cache tokens.
+        includes_cache = not model.lower().startswith(("anthropic.", "claude-"))
+    input_tokens = counts.get("input", 0)
+    if includes_cache:
+        input_tokens -= counts.get("cache_read", 0) + counts.get("cache_write", 0)
+    return max(0, input_tokens)
+
+
 def _usage_totals(
     bucket: dict[str, dict[str, Any]],
     pending_calls: dict[int, dict[str, Any]] | None = None,
@@ -708,7 +802,12 @@ def _usage_totals(
         )
 
     pending = pending_calls or {}
+    by_model = {
+        model: {**counts, "uncached_input": _uncached_run_input(model, counts)}
+        for model, counts in bucket.items()
+    }
     return {
+        "total_uncached_input": sum(v["uncached_input"] for v in by_model.values()),
         "total_input": sum(v.get("input", 0) for v in bucket.values()),
         "total_output": sum(v.get("output", 0) for v in bucket.values()),
         "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
@@ -723,8 +822,7 @@ def _usage_totals(
         "total_requests": sum(v.get("requests", 0) for v in bucket.values()),
         "pending_requests": len(pending),
         "pending_input_tokens": sum(
-            max(0, int(call.get("input_tokens", 0) or 0))
-            for call in pending.values()
+            max(0, int(call.get("input_tokens", 0) or 0)) for call in pending.values()
         ),
         "estimated_token_cost_usd": _cost_total(bucket, "estimated_token_cost_usd"),
         "estimated_credit_cost_usd": _cost_total(bucket, "estimated_credit_cost_usd"),
@@ -734,13 +832,11 @@ def _usage_totals(
         ),
         "copilot_quota": latest_quota("copilot_quota"),
         "codex_quota": latest_quota("codex_quota"),
-        "by_model": {m: dict(v) for m, v in bucket.items()},
+        "by_model": by_model,
     }
 
 
-def _emit_pending_usage_update(
-    context: _UsageContext, key: tuple[str, int]
-) -> None:
+def _emit_pending_usage_update(context: _UsageContext, key: tuple[str, int]) -> None:
     if context.emit_fn is None:
         return
     try:
@@ -802,6 +898,7 @@ def _record_usage(
     copilot_quota: dict[str, Any] | None = None,
     codex_quota: dict[str, Any] | None = None,
     thinking_tokens: int = 0,
+    input_includes_cache: bool | None = None,
     **kwargs: Any,
 ) -> None:
     """Accumulate provider usage for a run and the independent monthly ledger."""
@@ -809,18 +906,29 @@ def _record_usage(
     # this as its cumulative ``thread/tokenUsage/updated`` stream advances).
     # Keep a per-call total so the limiter reconciles the whole turn rather than
     # only the final notification.
-    previous_call_usage = _last_call_tokens_var.get() or {"input": 0, "output": 0}
-    _last_call_tokens_var.set(
-        {
-            "input": previous_call_usage.get("input", 0)
-            + input_tokens
-            + cache_read_tokens,
-            "output": previous_call_usage.get("output", 0) + output_tokens,
-        }
-    )
     context = usage_context or _capture_usage_context()
     usage_provider = provider or _provider_var.get() or "unknown"
     usage_base_url = base_url if base_url is not None else _base_url_var.get()
+    # Bedrock Converse reports only uncached tokens in inputTokens. Keep the
+    # run's input total inclusive while retaining separate cache counters.
+    reported_input = (
+        input_tokens + cache_read_tokens + cache_write_tokens
+        if usage_provider == "bedrock"
+        else input_tokens
+    )
+    # Bedrock's token quota counts cache writes, but not cache reads.
+    limiter_input = (
+        input_tokens + cache_write_tokens
+        if usage_provider == "bedrock"
+        else input_tokens + cache_read_tokens
+    )
+    previous_call_usage = _last_call_tokens_var.get() or {"input": 0, "output": 0}
+    _last_call_tokens_var.set(
+        {
+            "input": previous_call_usage.get("input", 0) + limiter_input,
+            "output": previous_call_usage.get("output", 0) + output_tokens,
+        }
+    )
     inclusive_input_providers = {
         "openai",
         "openai_compatible",
@@ -828,13 +936,19 @@ def _record_usage(
         "azure_foundry",
         "azure_foundry_openai",
         "bedrock_mantle",
+        "bedrock",
         "google",
+        "google_vertex",
         "openai_codex",
         "google_antigravity",
     }
-    normalized_input = max(0, input_tokens)
-    if usage_provider in inclusive_input_providers:
-        normalized_input = max(0, input_tokens - cache_read_tokens - cache_write_tokens)
+    normalized_input = max(0, reported_input)
+    if input_includes_cache is True or (
+        input_includes_cache is None and usage_provider in inclusive_input_providers
+    ):
+        normalized_input = max(
+            0, reported_input - cache_read_tokens - cache_write_tokens
+        )
     usage_rates: dict[str, Any] = {}
     try:
         from aespa.services import statistics as statistics_service
@@ -863,7 +977,7 @@ def _record_usage(
     entry = bucket.setdefault(
         model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     )
-    entry["input"] += input_tokens
+    entry["input"] += reported_input
     entry["output"] += output_tokens
     entry["cache_read"] += cache_read_tokens
     entry["cache_write"] += cache_write_tokens
@@ -872,6 +986,8 @@ def _record_usage(
     entry["factory_credits"] = entry.get("factory_credits", 0) + factory_credits
     entry["premium_requests"] = entry.get("premium_requests", 0) + premium_requests
     entry["requests"] = entry.get("requests", 0) + requests
+    if usage_provider == "bedrock":
+        entry["bedrock_input_inclusive"] = True
     try:
         from aespa.services import statistics as statistics_service
 
@@ -901,7 +1017,7 @@ def _record_usage(
                 {
                     "type": "token_usage_update",
                     "model": model,
-                    "input_tokens": input_tokens,
+                    "input_tokens": reported_input,
                     "output_tokens": output_tokens,
                     "cache_read_tokens": cache_read_tokens,
                     "cache_write_tokens": cache_write_tokens,
@@ -1544,39 +1660,56 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         return raw_cleaned, [], dict(_EMPTY_CATS)
 
 
+async def _dispatch_completion(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    if config.provider == "factory_droid":
+        return await _factory_droid(config, prompt, screenshot_b64)
+    if config.provider == "github_copilot":
+        return await _github_copilot(config, prompt, screenshot_b64)
+    if config.provider == "openai_codex":
+        return await _openai_codex(config, prompt, screenshot_b64)
+    if config.provider == "google_antigravity":
+        return await _google_antigravity(config, prompt, screenshot_b64)
+    if config.provider == "anthropic":
+        return await _anthropic(config, prompt, screenshot_b64)
+    if config.provider == "google_vertex" and _uses_openai_responses(config):
+        return await _openai_responses(config, prompt, screenshot_b64)
+    if config.provider in {"google", "google_vertex"}:
+        return await _google(config, prompt, screenshot_b64)
+    if config.provider == "azure_openai":
+        return await _azure_openai(config, prompt, screenshot_b64)
+    if config.provider in ("azure_foundry", "azure_foundry_openai"):
+        return await _azure_foundry_openai(config, prompt, screenshot_b64)
+    if config.provider == "azure_foundry_anthropic":
+        return await _azure_foundry_anthropic(config, prompt, screenshot_b64)
+    if config.provider == "openrouter":
+        return await _openrouter(config, prompt, screenshot_b64)
+    if config.provider == "bedrock":
+        return await _bedrock(config, prompt, screenshot_b64)
+    if config.provider == "bedrock_mantle":
+        mantle_api = _bedrock_mantle_model_api(config.model)
+        if mantle_api == "messages":
+            return await _anthropic(config, prompt, screenshot_b64)
+        if mantle_api == "chat_completions":
+            return await _openai_compat(config, prompt, screenshot_b64)
+        return await _openai_responses(config, prompt, screenshot_b64)
+    if _uses_openai_responses(config):
+        return await _openai_responses(config, prompt, screenshot_b64)
+    return await _openai_compat(config, prompt, screenshot_b64)
+
+
 async def _call_impl(
     config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
 ) -> str:
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
     _last_call_tokens_var.set(None)
+    _last_response_cache_telemetry_var.set(None)
     limiter = get_limiter_for_config(config)
     if limiter is None:
-        if config.provider == "factory_droid":
-            return await _factory_droid(config, prompt, screenshot_b64)
-        if config.provider == "github_copilot":
-            return await _github_copilot(config, prompt, screenshot_b64)
-        if config.provider == "openai_codex":
-            return await _openai_codex(config, prompt, screenshot_b64)
-        if config.provider == "google_antigravity":
-            return await _google_antigravity(config, prompt, screenshot_b64)
-        if config.provider == "anthropic":
-            return await _anthropic(config, prompt, screenshot_b64)
-        if config.provider == "google":
-            return await _google(config, prompt, screenshot_b64)
-        if config.provider == "azure_openai":
-            return await _azure_openai(config, prompt, screenshot_b64)
-        if config.provider in ("azure_foundry", "azure_foundry_openai"):
-            return await _azure_foundry_openai(config, prompt, screenshot_b64)
-        if config.provider == "azure_foundry_anthropic":
-            return await _azure_foundry_anthropic(config, prompt, screenshot_b64)
-        if config.provider == "openrouter":
-            return await _openrouter(config, prompt, screenshot_b64)
-        if config.provider == "bedrock":
-            return await _bedrock(config, prompt, screenshot_b64)
-        if config.provider == "bedrock_mantle" or _uses_openai_responses(config):
-            return await _openai_responses(config, prompt, screenshot_b64)
-        return await _openai_compat(config, prompt, screenshot_b64)
+        async with _run_concurrency_slot():
+            return await _dispatch_completion(config, prompt, screenshot_b64)
 
     estimated_input = estimate_tokens(
         prompt, screenshot_b64, config.provider, model=config.model
@@ -1596,32 +1729,8 @@ async def _call_impl(
         _emit_llm_pacing_finished(config.model)
 
     try:
-        if config.provider == "factory_droid":
-            resp = await _factory_droid(config, prompt, screenshot_b64)
-        elif config.provider == "github_copilot":
-            resp = await _github_copilot(config, prompt, screenshot_b64)
-        elif config.provider == "openai_codex":
-            resp = await _openai_codex(config, prompt, screenshot_b64)
-        elif config.provider == "google_antigravity":
-            resp = await _google_antigravity(config, prompt, screenshot_b64)
-        elif config.provider == "anthropic":
-            resp = await _anthropic(config, prompt, screenshot_b64)
-        elif config.provider == "google":
-            resp = await _google(config, prompt, screenshot_b64)
-        elif config.provider == "azure_openai":
-            resp = await _azure_openai(config, prompt, screenshot_b64)
-        elif config.provider in ("azure_foundry", "azure_foundry_openai"):
-            resp = await _azure_foundry_openai(config, prompt, screenshot_b64)
-        elif config.provider == "azure_foundry_anthropic":
-            resp = await _azure_foundry_anthropic(config, prompt, screenshot_b64)
-        elif config.provider == "openrouter":
-            resp = await _openrouter(config, prompt, screenshot_b64)
-        elif config.provider == "bedrock":
-            resp = await _bedrock(config, prompt, screenshot_b64)
-        elif config.provider == "bedrock_mantle" or _uses_openai_responses(config):
-            resp = await _openai_responses(config, prompt, screenshot_b64)
-        else:
-            resp = await _openai_compat(config, prompt, screenshot_b64)
+        async with _run_concurrency_slot():
+            resp = await _dispatch_completion(config, prompt, screenshot_b64)
 
         usage = _last_call_tokens_var.get()
         if usage:
@@ -1725,6 +1834,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             model=config.model,
         ),
     )
+    call_token = _traffic_call_id_var.set(call_id)
+    operation_token = _traffic_operation_var.set(operation)
     try:
         response = await _call_impl(config, prompt, screenshot_b64)
     except Exception as exc:
@@ -1736,18 +1847,31 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             operation=operation,
             call_id=call_id,
         )
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
         raise
     finally:
         _end_pending_usage(pending_token)
-    _log_llm_traffic(
-        "RESPONSE",
-        config,
-        response,
-        kind="completion",
-        operation=operation,
-        call_id=call_id,
-    )
-    return response
+    try:
+        telemetry = _last_response_cache_telemetry_var.get()
+        response_payload: Any = response
+        if telemetry is not None:
+            response_payload = {
+                "content": response,
+                "cache_telemetry": telemetry,
+            }
+        _log_llm_traffic(
+            "RESPONSE",
+            config,
+            response_payload,
+            kind="completion",
+            operation=operation,
+            call_id=call_id,
+        )
+        return response
+    finally:
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
 
 
 async def plain_completion(
@@ -1778,11 +1902,12 @@ async def stream_chat_completion(
     )
     chunks: list[str] = []
     try:
-        async for chunk in _stream_chat_completion_impl(
-            config, system_message, messages
-        ):
-            chunks.append(chunk)
-            yield chunk
+        async with _run_concurrency_slot():
+            async for chunk in _stream_chat_completion_impl(
+                config, system_message, messages
+            ):
+                chunks.append(chunk)
+                yield chunk
     except Exception as exc:
         _log_llm_traffic(
             "FAILED",
@@ -1839,10 +1964,17 @@ async def _stream_chat_completion_impl(
             yield await _openai_codex(config, combined, None)
         else:
             yield await _google_antigravity(config, combined, None)
-    elif config.provider == "anthropic":
+    elif config.provider == "anthropic" or (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "messages"
+    ):
         import anthropic as _ant
 
-        client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        client = (
+            _make_bedrock_mantle_anthropic_client(config)
+            if config.provider == "bedrock_mantle"
+            else _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        )
         formatted_messages = []
         for m in messages:
             if m.get("role") in ("user", "assistant"):
@@ -1931,7 +2063,7 @@ async def _stream_chat_completion_impl(
                 import boto3
 
                 region = _bedrock_region(config)
-                profile = os.getenv("AWS_PROFILE")
+                profile = config.aws_profile or os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
                 _boto_cfg = _bedrock_botocore_config(_proxy_url)
@@ -1981,7 +2113,10 @@ async def _stream_chat_completion_impl(
                 elif item_type == "error":
                     raise RuntimeError(f"Bedrock SDK stream failed: {val}") from val
 
-    elif config.provider == "bedrock_mantle" or _uses_openai_responses(config):
+    elif (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "responses"
+    ) or _uses_openai_responses(config):
         client = _make_responses_client(config)
         r_input = [
             {"type": "message", "role": m["role"], "content": m["content"]}
@@ -2014,7 +2149,11 @@ async def _stream_chat_completion_impl(
                 base += "/v1"
             kwargs["base_url"] = base
         kwargs.update(_llm_client_kwargs())
-        client = AsyncOpenAI(**kwargs)
+        client = (
+            _make_bedrock_mantle_client(config)
+            if config.provider == "bedrock_mantle"
+            else AsyncOpenAI(**kwargs)
+        )
 
         formatted_messages = [{"role": "system", "content": system_message}]
         for m in messages:
@@ -2257,7 +2396,10 @@ def _is_gpt_5_6(model: str) -> bool:
 
 
 def _uses_openai_responses(config: LLMConfig) -> bool:
-    """Return whether this direct OpenAI model uses the Responses API."""
+    """Return whether this model uses an OpenAI-compatible Responses API."""
+    if config.provider == "google_vertex":
+        model_name = (config.model or "").lower().split("/")[-1]
+        return not model_name.startswith("gemini-")
     return config.provider == "openai" and (
         _is_gpt_6_astra(config.model) or _is_gpt_5_6(config.model)
     )
@@ -2411,7 +2553,11 @@ async def _anthropic(
 ) -> str:
     import anthropic as _ant
 
-    client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+    client = (
+        _make_bedrock_mantle_anthropic_client(config)
+        if config.provider == "bedrock_mantle"
+        else _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+    )
     content: list = []
     if screenshot_b64:
         content.append(
@@ -2425,7 +2571,7 @@ async def _anthropic(
             }
         )
     content.append({"type": "text", "text": prompt})
-    resp = await client.messages.create(
+    async with client.messages.stream(
         model=config.model,
         max_tokens=config.max_tokens,
         **_anthropic_reasoning_kwargs(config),
@@ -2435,31 +2581,24 @@ async def _anthropic(
             else {}
         ),
         messages=[{"role": "user", "content": content}],
-    )
+    ) as stream:
+        resp = await stream.get_final_message()
     _record_usage(
         config.model,
         getattr(resp.usage, "input_tokens", 0),
         getattr(resp.usage, "output_tokens", 0),
-        cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
-        cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0),
+        cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
+        cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0) or 0,
+        input_includes_cache=False,
     )
     return "".join(_content_part_text(block) for block in (resp.content or [])).strip()
 
 
 async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    from google import genai
     from google.genai import types
 
-    _g_proxy = _llm_proxy_var.get()
-    _g_http_opts: dict = {}
-    if config.base_url:
-        _g_http_opts["base_url"] = config.base_url
-    _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=_g_proxy is None,
-        headers=_LLM_HEADERS,
-        **({"proxy": _g_proxy} if _g_proxy else {}),
-    )
-    client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
+    client = _make_google_client(config)
+    async_client = client.aio
     parts: list = []
     if screenshot_b64:
         parts.append(
@@ -2470,21 +2609,62 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
         )
     parts.append(prompt)
 
-    resp = await client.aio.models.generate_content(
-        model=config.model,
-        contents=parts,
-        config=types.GenerateContentConfig(
-            max_output_tokens=config.max_tokens,
-            **_google_thinking_config(types, config),
-            **(
-                {"temperature": config.temperature}
-                if config.temperature is not None
-                else {}
+    try:
+        resp = await async_client.models.generate_content(
+            model=config.model,
+            contents=parts,
+            config=types.GenerateContentConfig(
+                max_output_tokens=config.max_tokens,
+                **_google_thinking_config(types, config),
+                **(
+                    {"temperature": config.temperature}
+                    if config.temperature is not None
+                    else {}
+                ),
             ),
-        ),
-    )
+        )
+    finally:
+        await async_client.aclose()
     _record_google_usage(config.model, getattr(resp, "usage_metadata", None))
     return resp.text or ""
+
+
+def _make_google_client(config: LLMConfig):
+    """Build a Gemini Developer API or Vertex AI client for one request."""
+    from google import genai
+
+    project_id = None
+    if config.provider == "google_vertex":
+        project_id = (getattr(config, "project_id", None) or "").strip()
+        if not project_id:
+            raise ValueError("Google Cloud project id is required for Vertex AI")
+
+    _g_proxy = _llm_proxy_var.get()
+    _g_http_opts: dict = {}
+    if config.provider == "google_vertex":
+        _g_http_opts["api_version"] = "v1"
+    elif config.base_url:
+        _g_http_opts["base_url"] = config.base_url
+    _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
+        verify=_g_proxy is None,
+        headers=_LLM_HEADERS,
+        **({"proxy": _g_proxy} if _g_proxy else {}),
+    )
+    if config.provider == "google_vertex":
+        return genai.Client(
+            vertexai=True,
+            project=project_id,
+            location=(getattr(config, "location", None) or "global").strip()
+            or "global",
+            http_options=_g_http_opts,
+        )
+    return genai.Client(api_key=config.api_key, http_options=_g_http_opts)
+
+
+def _google_candidate_parts(candidate: Any | None) -> list[Any]:
+    """Return response parts when a Google candidate carries content."""
+    content = getattr(candidate, "content", None)
+    return list(getattr(content, "parts", None) or [])
 
 
 async def _github_copilot(
@@ -2671,7 +2851,11 @@ async def _openai_compat(
             base += "/v1"
         kwargs["base_url"] = base
     kwargs.update(_llm_client_kwargs())
-    client = AsyncOpenAI(**kwargs)
+    client = (
+        _make_bedrock_mantle_client(config)
+        if config.provider == "bedrock_mantle"
+        else AsyncOpenAI(**kwargs)
+    )
 
     if screenshot_b64:
         msg_content: object = [
@@ -2707,9 +2891,39 @@ async def _openai_compat(
     return _extract_first_choice_text(resp)
 
 
-# ── Bedrock Mantle (OpenAI Responses API) ─────────────────────────────────────
-# Mantle's frontier OpenAI models (gpt-5.x) are served only via the Responses
-# API (/v1/responses), not Chat Completions, so all Mantle traffic uses Responses.
+# ── Bedrock Mantle (model-specific inference APIs) ───────────────────────────
+
+
+def _bedrock_mantle_model_api(model: str) -> str:
+    """Select the Mantle API supported by a model family.
+
+    Mantle's model catalog lists available IDs, but an available model does not
+    necessarily support every Mantle inference API. Claude uses Anthropic
+    Messages, OpenAI models use Responses, and the other text families exposed
+    by Mantle use Chat Completions.
+    """
+    family = (model or "").split(".", 1)[0].lower()
+    if family == "anthropic":
+        return "messages"
+    if family == "openai":
+        return "responses"
+    if family in {
+        "deepseek",
+        "google",
+        "minimax",
+        "mistral",
+        "moonshotai",
+        "nvidia",
+        "qwen",
+        "writer",
+        "xai",
+        "zai",
+    }:
+        return "chat_completions"
+    raise ValueError(
+        f"No Bedrock Mantle inference API is known for model '{model}'. "
+        "Check the model's endpoint-specific API support before using it."
+    )
 
 
 def _ant_tools_to_responses(tools: list[dict]) -> list[dict]:
@@ -2723,6 +2937,87 @@ def _ant_tools_to_responses(tools: list[dict]) -> list[dict]:
         }
         for t in tools
     ]
+
+
+_RESPONSES_OUTPUT_ITEM_BLOCK = "responses_output_item"
+
+
+def _responses_output_item_dict(item: Any) -> dict[str, Any] | None:
+    """Serialize one Responses output item for exact replay on the next turn."""
+    if isinstance(item, dict):
+        return copy.deepcopy(item)
+    model_dump = getattr(item, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="json", exclude_none=True)
+        except TypeError:
+            try:
+                dumped = model_dump(exclude_none=True)
+            except Exception:
+                dumped = None
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            return dumped
+    to_dict = getattr(item, "to_dict", None)
+    if callable(to_dict):
+        try:
+            dumped = to_dict()
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            return dumped
+    values = getattr(item, "__dict__", None)
+    if isinstance(values, dict):
+        return {
+            key: copy.deepcopy(value)
+            for key, value in values.items()
+            if not str(key).startswith("_")
+        }
+    return None
+
+
+def _responses_replay_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep only fields Vertex accepts when response output becomes input."""
+
+    def without_none(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: without_none(child)
+                for key, child in value.items()
+                if child is not None
+            }
+        if isinstance(value, list):
+            return [without_none(child) for child in value if child is not None]
+        return copy.deepcopy(value)
+
+    cleaned = without_none(item)
+    item_type = cleaned.get("type")
+    allowed_fields = {
+        # xAI requires encrypted reasoning for cache-stable stateless turns.
+        # Its id and status are part of the documented replay shape.
+        "reasoning": {"type", "id", "summary", "encrypted_content", "status"},
+        # Vertex returns read-only ids, status, phase and log-probability data on
+        # these items. Replaying those fields produces INVALID_ARGUMENT,
+        # especially when parallel function calls share one response id.
+        "message": {"type", "role", "content"},
+        "function_call": {"type", "call_id", "name", "arguments"},
+    }.get(item_type)
+    if allowed_fields is None:
+        return cleaned
+    replay = {key: value for key, value in cleaned.items() if key in allowed_fields}
+    if item_type == "message" and isinstance(replay.get("content"), list):
+        replay["content"] = [
+            {
+                key: value
+                for key, value in part.items()
+                if key in {"type", "text", "annotations"}
+            }
+            if isinstance(part, dict)
+            else part
+            for part in replay["content"]
+        ]
+    return replay
 
 
 def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
@@ -2758,6 +3053,19 @@ def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
             if joined:
                 items.append({"type": "message", "role": "user", "content": joined})
         elif role == "assistant":
+            native_items = [
+                block.get("item")
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type") == _RESPONSES_OUTPUT_ITEM_BLOCK
+                and isinstance(block.get("item"), dict)
+            ]
+            if native_items:
+                # Grok reasoning models require the previous output, including
+                # encrypted reasoning, to remain in the next request. Strip
+                # response-only metadata that Vertex rejects as input.
+                items.extend(_responses_replay_item(item) for item in native_items)
+                continue
             text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
             joined = " ".join(p for p in text_parts if p)
             if joined:
@@ -2791,6 +3099,8 @@ def _is_reasoning_model_without_sampling(model: str) -> bool:
 def _make_responses_client(config: LLMConfig) -> Any:
     if config.provider == "bedrock_mantle":
         return _make_bedrock_mantle_client(config)
+    if config.provider == "google_vertex":
+        return _make_google_vertex_responses_client(config)
 
     from openai import AsyncOpenAI
 
@@ -2802,6 +3112,43 @@ def _make_responses_client(config: LLMConfig) -> Any:
         kwargs["base_url"] = base
     kwargs.update(_llm_client_kwargs())
     return AsyncOpenAI(**kwargs)
+
+
+def _make_google_vertex_responses_client(config: LLMConfig) -> Any:
+    """Build an ADC-authenticated client for Vertex's Responses endpoint."""
+    from google import auth as google_auth
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from openai import AsyncOpenAI
+
+    project_id = (getattr(config, "project_id", None) or "").strip()
+    if not project_id:
+        raise ValueError("Google Cloud project id is required for Vertex AI")
+
+    credentials, _ = google_auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    credentials.refresh(GoogleAuthRequest())
+    access_token = str(getattr(credentials, "token", None) or "").strip()
+    if not access_token:
+        raise RuntimeError(
+            "Google Application Default Credentials returned no access token"
+        )
+
+    location = (getattr(config, "location", None) or "global").strip() or "global"
+    host = (
+        "aiplatform.googleapis.com"
+        if location == "global"
+        else f"{location}-aiplatform.googleapis.com"
+    )
+    base_url = (
+        f"https://{host}/v1/projects/{quote(project_id, safe='')}"
+        f"/locations/{quote(location, safe='')}/endpoints/openapi"
+    )
+    return AsyncOpenAI(
+        api_key=access_token,
+        base_url=base_url,
+        **_llm_client_kwargs(),
+    )
 
 
 def _responses_request_kwargs(
@@ -2817,6 +3164,19 @@ def _responses_request_kwargs(
         "input": input,
         "max_output_tokens": config.max_tokens,
     }
+    prompt_cache_key = _grok_prompt_cache_key(
+        config,
+        input=input,
+        instructions=instructions,
+        tools=tools,
+    )
+    if prompt_cache_key is not None:
+        kwargs["prompt_cache_key"] = prompt_cache_key
+        # Vertex-hosted Grok does not currently support previous_response_id.
+        # Return encrypted reasoning so stateless calls can replay the exact
+        # prior output and retain the prompt-cache prefix.
+        kwargs["include"] = ["reasoning.encrypted_content"]
+        kwargs["store"] = False
     if instructions is not None:
         kwargs["instructions"] = instructions
     reasoning_effort = config.reasoning_effort
@@ -2835,6 +3195,39 @@ def _responses_request_kwargs(
     if stream:
         kwargs["stream"] = True
     return kwargs
+
+
+def _grok_prompt_cache_key(
+    config: LLMConfig,
+    *,
+    input: Any,
+    instructions: str | None,
+    tools: list[dict] | None,
+) -> str | None:
+    """Return a stable routing key for one Vertex-hosted Grok conversation."""
+    model = (config.model or "").lower()
+    if config.provider != "google_vertex" or not model.startswith("xai/grok-"):
+        return None
+
+    # Grok uses this key to route related requests to the server holding their
+    # prompt cache. Hash only the stable opening prefix so appending later turns
+    # does not change the key. Instructions and tools separate agent roles that
+    # happen to start with the same user message.
+    opening_input = input[0] if isinstance(input, list) and input else input
+    seed = json.dumps(
+        {
+            "model": config.model,
+            "instructions": instructions or "",
+            "opening_input": opening_input,
+            "tools": tools or [],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return f"aespa-{digest[:58]}"
 
 
 async def _create_response(client: Any, kwargs: dict[str, Any]) -> Any:
@@ -2858,8 +3251,81 @@ async def _create_response(client: Any, kwargs: dict[str, Any]) -> Any:
         return await client.responses.create(**retry)
 
 
-def _record_responses_usage(config: LLMConfig, resp: Any) -> None:
+def _cache_key_fingerprint(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _response_metadata_value(resp: Any, name: str) -> Any:
+    metadata = getattr(resp, "metadata", None)
+    if isinstance(metadata, dict):
+        return metadata.get(name)
+    return getattr(metadata, name, None) if metadata is not None else None
+
+
+def _responses_cache_telemetry(
+    config: LLMConfig,
+    resp: Any,
+    *,
+    requested_prompt_cache_key: str | None = None,
+) -> dict[str, Any]:
     usage = getattr(resp, "usage", None)
+    input_tokens = max(0, int(getattr(usage, "input_tokens", 0) or 0))
+    output_tokens = max(0, int(getattr(usage, "output_tokens", 0) or 0))
+    cached_tokens = max(
+        0,
+        int(
+            getattr(
+                getattr(usage, "input_tokens_details", None),
+                "cached_tokens",
+                0,
+            )
+            or 0
+        ),
+    )
+    echoed_key = getattr(resp, "prompt_cache_key", None)
+    requested_fingerprint = _cache_key_fingerprint(requested_prompt_cache_key)
+    echoed_fingerprint = _cache_key_fingerprint(echoed_key)
+    cache_key_match = None
+    if requested_prompt_cache_key and echoed_key:
+        cache_key_match = str(requested_prompt_cache_key) == str(echoed_key)
+    return {
+        "provider": str(getattr(config.provider, "value", config.provider)),
+        "model": config.model,
+        "call_id": _traffic_call_id_var.get(),
+        "operation": _traffic_operation_var.get()
+        or _operation_var.get()
+        or _infer_llm_operation(),
+        "requested_cache_key_fingerprint": requested_fingerprint,
+        "echoed_cache_key_fingerprint": echoed_fingerprint,
+        "cache_key_echoed": echoed_fingerprint is not None,
+        "cache_key_match": cache_key_match,
+        "system_fingerprint": _response_metadata_value(resp, "system_fingerprint"),
+        "input_tokens": input_tokens,
+        "uncached_input_tokens": max(0, input_tokens - cached_tokens),
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cached_tokens,
+        "cache_hit_percent": round(100 * cached_tokens / input_tokens, 2)
+        if input_tokens
+        else 0.0,
+    }
+
+
+def _record_responses_usage(
+    config: LLMConfig,
+    resp: Any,
+    *,
+    requested_prompt_cache_key: str | None = None,
+) -> dict[str, Any]:
+    usage = getattr(resp, "usage", None)
+    telemetry = _responses_cache_telemetry(
+        config,
+        resp,
+        requested_prompt_cache_key=requested_prompt_cache_key,
+    )
+    _last_response_cache_telemetry_var.set(telemetry)
     _record_usage(
         config.model,
         getattr(usage, "input_tokens", 0) if usage else 0,
@@ -2870,6 +3336,30 @@ def _record_responses_usage(config: LLMConfig, resp: Any) -> None:
             else 0
         ),
     )
+    emit_fn = _emit_fn_var.get()
+    if emit_fn is not None and (
+        requested_prompt_cache_key is not None or telemetry["cache_read_tokens"] > 0
+    ):
+        try:
+            cached = telemetry["cache_read_tokens"]
+            total = telemetry["input_tokens"]
+            emit_fn(
+                {
+                    "type": "scanner_phase",
+                    "phase": "llm_cache",
+                    "status": "hit" if cached else "miss",
+                    "message": (
+                        f"LLM prompt cache {'hit' if cached else 'miss'}: "
+                        f"{cached:,} of {total:,} input tokens reused "
+                        f"({telemetry['cache_hit_percent']:.2f}%)."
+                    ),
+                    "data": telemetry,
+                    "_persist_only": True,
+                }
+            )
+        except Exception:
+            pass
+    return telemetry
 
 
 def _extract_responses_text(resp: Any) -> str:
@@ -2907,10 +3397,13 @@ async def _openai_responses(
         ]
     else:
         r_input = prompt
-    resp = await _create_response(
-        client, _responses_request_kwargs(config, input=r_input)
+    request_kwargs = _responses_request_kwargs(config, input=r_input)
+    resp = await _create_response(client, request_kwargs)
+    _record_responses_usage(
+        config,
+        resp,
+        requested_prompt_cache_key=request_kwargs.get("prompt_cache_key"),
     )
-    _record_responses_usage(config, resp)
     return _extract_responses_text(resp)
 
 
@@ -3156,6 +3649,22 @@ def _bedrock_region(config: LLMConfig) -> str:
     )
 
 
+def _bedrock_reasoning_content(
+    content: dict[str, Any], *, for_sdk: bool = False
+) -> dict[str, Any]:
+    """Keep encrypted reasoning JSON-safe in history and binary for the SDK."""
+    if "redactedContent" not in content:
+        return copy.deepcopy(content)
+    redacted = content["redactedContent"]
+    if for_sdk and isinstance(redacted, str):
+        redacted = base64.b64decode(redacted, validate=True)
+    elif not for_sdk and isinstance(redacted, (bytes, bytearray)):
+        redacted = base64.b64encode(redacted).decode("ascii")
+    # Older histories can also contain an empty reasoningText object here.
+    # Bedrock accepts only one member of this union.
+    return {"redactedContent": redacted}
+
+
 def _consume_bedrock_converse_stream(
     response: dict[str, Any], on_text_delta: Callable[[str], None] | None = None
 ) -> dict[str, Any]:
@@ -3204,7 +3713,8 @@ def _consume_bedrock_converse_stream(
                 if isinstance(reasoning_delta, dict):
                     block = content.setdefault(index, {"reasoningContent": {}})
                     native = block.setdefault("reasoningContent", {})
-                    reasoning_text = native.setdefault("reasoningText", {})
+                    if "text" in reasoning_delta or "signature" in reasoning_delta:
+                        reasoning_text = native.setdefault("reasoningText", {})
                     if "text" in reasoning_delta:
                         reasoning_text["text"] = str(
                             reasoning_text.get("text") or ""
@@ -3212,7 +3722,10 @@ def _consume_bedrock_converse_stream(
                     if "signature" in reasoning_delta:
                         reasoning_text["signature"] = reasoning_delta["signature"]
                     if "redactedContent" in reasoning_delta:
-                        native["redactedContent"] = reasoning_delta["redactedContent"]
+                        native["redactedContent"] = (
+                            native.get("redactedContent", b"")
+                            + reasoning_delta["redactedContent"]
+                        )
 
             stopped = event.get("messageStop")
             if isinstance(stopped, dict):
@@ -3259,6 +3772,55 @@ def _consume_bedrock_converse_stream(
 _BEDROCK_MANTLE_SIGV4_SERVICE = "bedrock"
 
 
+# Converse cachePoint support, not caching through other Bedrock APIs.
+# Unknown models default to no markers. Keep this list in sync with:
+# https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+_BEDROCK_CONVERSE_CACHE_MODELS = {
+    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "anthropic.claude-3-7-sonnet",
+    "anthropic.claude-haiku-4-5",
+    "anthropic.claude-sonnet-4",
+    "anthropic.claude-sonnet-4-5",
+    "anthropic.claude-sonnet-4-6",
+    "anthropic.claude-sonnet-5",
+    "anthropic.claude-sonnet-5-5",
+    "anthropic.claude-opus-4",
+    "anthropic.claude-opus-4-1",
+    "anthropic.claude-opus-4-5",
+    "anthropic.claude-opus-4-6",
+    "anthropic.claude-opus-4-7",
+    "anthropic.claude-opus-4-8",
+    "anthropic.claude-opus-5",
+    "anthropic.claude-opus-5-5",
+    "anthropic.claude-fable-5",
+    "anthropic.claude-fable-5-1",
+    "anthropic.claude-mythos-5",
+    "anthropic.claude-mythos-5-1",
+    "amazon.nova-micro-v1:0",
+    "amazon.nova-lite-v1:0",
+    "amazon.nova-pro-v1:0",
+    "amazon.nova-premier-v1:0",
+    "amazon.nova-2-lite-v1:0",
+}
+
+
+def _bedrock_supports_cache_points(model: str) -> bool:
+    """Whether the model supports explicit cache markers in Converse requests."""
+    name = (model or "").lower()
+    # Foundation-model and geographic inference-profile ARNs include the ID.
+    if name.startswith("arn:"):
+        name = name.rsplit("/", 1)[-1]
+    for prefix in ("global.", "us.", "eu.", "apac.", "jp.", "au."):
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    if name in _BEDROCK_CONVERSE_CACHE_MODELS:
+        return True
+    # Claude IDs may include a release date and Bedrock revision.
+    name = re.sub(r"(?:-\d{8})?(?:-v\d+(?::\d+)?)?$", "", name)
+    return name in _BEDROCK_CONVERSE_CACHE_MODELS
+
+
 def _bedrock_mantle_region() -> str:
     """Default region for Bedrock Mantle when no base URL is configured."""
     return (
@@ -3269,36 +3831,39 @@ def _bedrock_mantle_region() -> str:
     )
 
 
-def _bedrock_mantle_is_frontier_model(model: str) -> bool:
-    """Frontier OpenAI models (gpt-5.x) are served on Mantle's ``/openai/v1`` path.
+def _bedrock_mantle_uses_openai_path(model: str) -> bool:
+    """Models served on Mantle's ``/openai/v1`` path.
 
-    The gpt-oss and other models use the plain ``/v1`` path instead — confirmed by
-    the AWS launch blog and the OpenAI Bedrock cookbook.
+    Frontier GPT models and Gemma 4 use this path; GPT OSS and older
+    third-party text models use plain ``/v1``.
     """
-    return "gpt-5" in (model or "").lower()
+    name = (model or "").lower()
+    return name.startswith(
+        ("openai.gpt-5", "openai.gpt-6", "google.gemma-4", "xai.grok-4")
+    )
+
+
+def _bedrock_mantle_root(config: LLMConfig) -> str:
+    base = (config.base_url or "").rstrip("/")
+    if not base:
+        base = f"https://bedrock-mantle.{_bedrock_mantle_region()}.api.aws"
+    for suffix in ("/anthropic/v1/messages", "/anthropic", "/openai/v1", "/v1"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return base
 
 
 def _bedrock_mantle_base_url(config: LLMConfig) -> str:
-    """Resolve the OpenAI Responses base URL for a Bedrock Mantle config.
+    """Resolve the OpenAI-compatible base URL for a Bedrock Mantle model.
 
-    The path is model-dependent: frontier ``openai.gpt-5.x`` models use
-    ``/openai/v1`` while gpt-oss and others use ``/v1`` — so a single provider can
-    serve both. An explicit ``base_url`` keeps its host (and region) but the path
-    suffix is normalised to match the selected model. When blank, the region comes
+    The path is model-dependent. An explicit ``base_url`` keeps its host (and
+    region) but the path suffix is normalised to match the selected model.
+    When blank, the region comes
     from ``BEDROCK_MANTLE_REGION``/``AWS_REGION``/``AWS_DEFAULT_REGION`` (default
     ``us-east-2``).
     """
-    suffix = "/openai/v1" if _bedrock_mantle_is_frontier_model(config.model) else "/v1"
-    if config.base_url:
-        base = config.base_url.rstrip("/")
-        # Drop any path suffix the user supplied, then re-apply the one this model
-        # needs, so switching models on the same provider routes correctly.
-        for known in ("/openai/v1", "/v1"):
-            if base.endswith(known):
-                base = base[: -len(known)]
-                break
-        return f"{base}{suffix}"
-    return f"https://bedrock-mantle.{_bedrock_mantle_region()}.api.aws{suffix}"
+    suffix = "/openai/v1" if _bedrock_mantle_uses_openai_path(config.model) else "/v1"
+    return f"{_bedrock_mantle_root(config)}{suffix}"
 
 
 def _bedrock_mantle_region_from_url(base_url: str) -> str:
@@ -3349,6 +3914,9 @@ class _BedrockMantleSigV4Auth(httpx.Auth):
         from botocore.awsrequest import AWSRequest
 
         frozen = self._resolve_credentials().get_frozen_credentials()
+        # Anthropic's SDK requires an API key before its httpx auth hook runs.
+        # Remove that placeholder so AWS sees only the SigV4 credential.
+        request.headers.pop("x-api-key", None)
         aws_request = AWSRequest(
             method=request.method,
             url=str(request.url),
@@ -3401,7 +3969,7 @@ def _make_bedrock_mantle_client(config: LLMConfig):
     proxy = _llm_proxy_var.get()
     signer = _BedrockMantleSigV4Auth(
         region=_bedrock_mantle_region_from_url(base_url),
-        profile=os.getenv("AWS_PROFILE"),
+        profile=config.aws_profile or os.getenv("AWS_PROFILE"),
     )
     http_client = httpx.AsyncClient(
         verify=proxy is None,
@@ -3414,6 +3982,40 @@ def _make_bedrock_mantle_client(config: LLMConfig):
         base_url=base_url,
         http_client=http_client,
         **project_kwargs,
+    )
+
+
+def _make_bedrock_mantle_anthropic_client(config: LLMConfig):
+    """Build an Anthropic Messages client for Claude on Bedrock Mantle."""
+    import anthropic
+
+    base_url = f"{_bedrock_mantle_root(config)}/anthropic"
+    project_id = getattr(config, "project_id", None) or None
+    headers = {"anthropic-workspace-id": project_id} if project_id else None
+    if config.api_key:
+        return anthropic.AsyncAnthropic(
+            api_key=config.api_key,
+            base_url=base_url,
+            default_headers=headers,
+            **_llm_client_kwargs(),
+        )
+
+    proxy = _llm_proxy_var.get()
+    signer = _BedrockMantleSigV4Auth(
+        region=_bedrock_mantle_region_from_url(base_url),
+        profile=config.aws_profile or os.getenv("AWS_PROFILE"),
+    )
+    http_client = httpx.AsyncClient(
+        verify=proxy is None,
+        headers=_LLM_HEADERS,
+        auth=signer,
+        **({"proxy": proxy} if proxy else {}),
+    )
+    return anthropic.AsyncAnthropic(
+        api_key="not-needed",
+        base_url=base_url,
+        default_headers=headers,
+        http_client=http_client,
     )
 
 
@@ -3451,7 +4053,7 @@ async def _bedrock(
         import boto3
 
         region = _bedrock_region(config)
-        profile = os.getenv("AWS_PROFILE")
+        profile = config.aws_profile or os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
         _model = config.model
         _messages = payload["messages"]
@@ -4430,8 +5032,17 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 
 # ── Continuous agentic session (Anthropic native tool use) ────────────────────
 
-TOOL_RESULT_CHAR_LIMIT = 8_000
-CONTEXT_TOOL_RESULT_CHAR_LIMIT = 12_000
+TOOL_RESULT_CHAR_LIMIT = 24_000
+CONTEXT_TOOL_RESULT_CHAR_LIMIT = 30_000
+
+
+def _tool_result_omitted_note(omitted: int) -> str:
+    return (
+        f"\n[{omitted} chars omitted — request a narrower range, fewer results, "
+        "or a more specific query to see the rest]"
+    )
+
+
 CONTEXT_JOURNAL_CHAR_LIMIT = 16_000
 _COMPACTION_SUFFIX_COUNTS = (32, 16, 8, 4, 2, 0)
 # A tool call needs room for a JSON action and its arguments. Keep this much
@@ -4511,6 +5122,35 @@ def _content_blocks(message: dict) -> list[Any]:
     return []
 
 
+def _agentic_tool_use_block(block: Any) -> dict[str, Any] | None:
+    """Return a canonical tool-use view of a saved provider output block."""
+    if not isinstance(block, dict):
+        return None
+    if block.get("type") == "tool_use":
+        return block
+    if block.get("type") != _RESPONSES_OUTPUT_ITEM_BLOCK:
+        return None
+    item = block.get("item")
+    if not isinstance(item, dict) or item.get("type") != "function_call":
+        return None
+    arguments = item.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            tool_input = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            tool_input = {}
+    elif isinstance(arguments, dict):
+        tool_input = arguments
+    else:
+        tool_input = {}
+    return {
+        "type": "tool_use",
+        "id": item.get("call_id") or item.get("id") or "",
+        "name": item.get("name") or "",
+        "input": tool_input,
+    }
+
+
 def _journal_from_first_message(message: dict) -> tuple[dict, list[str]]:
     """Return a first message without old journals and their useful lines."""
     first = dict(message)
@@ -4556,6 +5196,13 @@ def _journal_from_first_message(message: dict) -> tuple[dict, list[str]]:
 
 def _tool_block_ids(message: dict, block_type: str) -> list[str]:
     content = _content_blocks(message)
+    if block_type == "tool_use":
+        return [
+            str(tool_block.get("id"))
+            for block in content
+            if (tool_block := _agentic_tool_use_block(block)) is not None
+            and tool_block.get("id")
+        ]
     key = "id" if block_type == "tool_use" else "tool_use_id"
     return [
         str(block.get(key))
@@ -4603,7 +5250,11 @@ def _protocol_valid_suffix(messages: list[dict], start: int) -> bool:
         # valid exchange appear complete. This also keeps model SDK objects
         # from being silently ignored by the protocol check.
         if any(
-            isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}
+            isinstance(block, dict)
+            and (
+                block.get("type") in {"tool_use", "tool_result"}
+                or _agentic_tool_use_block(block) is not None
+            )
             for block in blocks
         ) and not (use_ids or result_ids):
             return False
@@ -4698,13 +5349,14 @@ def compact_agentic_messages(
             for block in blocks:
                 if not isinstance(block, dict):
                     continue
-                if block.get("type") == "tool_use":
+                tool_block = _agentic_tool_use_block(block)
+                if tool_block is not None:
                     tool_input = (
-                        block.get("input")
-                        if isinstance(block.get("input"), dict)
+                        tool_block.get("input")
+                        if isinstance(tool_block.get("input"), dict)
                         else {}
                     )
-                    details = [str(block.get("name") or "tool")]
+                    details = [str(tool_block.get("name") or "tool")]
                     for key in (
                         "method",
                         "url",
@@ -4919,8 +5571,19 @@ AGENTIC_LOOP_PROVIDERS = frozenset(
         "azure_foundry",
         "azure_foundry_openai",
         "google",
+        "google_vertex",
     }
 )
+
+
+def _anthropic_history_block(block: Any) -> dict[str, Any]:
+    """Keep SDK parsing metadata out of subsequent Messages requests."""
+    canonical = _canonical_content_block(block)
+    if not isinstance(canonical, dict):
+        raise TypeError("Anthropic message content block could not be serialized")
+    wire_block = dict(canonical)
+    wire_block.pop("parsed_output", None)
+    return wire_block
 
 
 def _with_anthropic_cache(
@@ -4930,7 +5593,14 @@ def _with_anthropic_cache(
     """Helper to copy messages and tools, and attach ephemeral cache points
     to the last item of each, avoiding in-place mutation of the caller's lists.
     """
-    cached_messages = [dict(m) for m in messages]
+    cached_messages = []
+    for message in messages:
+        copied = dict(message)
+        if isinstance(copied.get("content"), list):
+            copied["content"] = [
+                _anthropic_history_block(block) for block in copied["content"]
+            ]
+        cached_messages.append(copied)
     if cached_messages:
         last_msg = dict(cached_messages[-1])
         content = last_msg.get("content")
@@ -5227,11 +5897,13 @@ async def _call_with_tools_rate_limited(
     implementation.
     """
     _last_call_tokens_var.set(None)
+    _last_response_cache_telemetry_var.set(None)
     limiter = get_limiter_for_config(config)
     if limiter is None:
-        return await _call_with_tools_impl(
-            config, system_message, messages, tools=tools
-        )
+        async with _run_concurrency_slot():
+            return await _call_with_tools_impl(
+                config, system_message, messages, tools=tools
+            )
 
     active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
     estimated = _estimate_tools_call_tokens(
@@ -5250,9 +5922,10 @@ async def _call_with_tools_rate_limited(
     if slept:
         _emit_llm_pacing_finished(config.model)
     try:
-        result = await _call_with_tools_impl(
-            config, system_message, messages, tools=tools
-        )
+        async with _run_concurrency_slot():
+            result = await _call_with_tools_impl(
+                config, system_message, messages, tools=tools
+            )
         usage = _last_call_tokens_var.get()
         actual_total = (usage["input"] + usage["output"]) if usage else estimated
         await limiter.reconcile(estimated, actual_total)
@@ -5273,6 +5946,7 @@ async def _call_with_tools(
     operation = _operation_var.get() or _infer_llm_operation()
     call_id = next(_traffic_call_ids)
     active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    messages = _repair_tool_use_inputs(messages)
     request = {
         "system": system_message,
         "messages": messages,
@@ -5297,6 +5971,8 @@ async def _call_with_tools(
             provider=str(getattr(config.provider, "value", config.provider)),
         ),
     )
+    call_token = _traffic_call_id_var.set(call_id)
+    operation_token = _traffic_operation_var.set(operation)
     try:
         result = await _call_with_tools_rate_limited(
             config, system_message, messages, tools=tools
@@ -5310,19 +5986,29 @@ async def _call_with_tools(
             operation=operation,
             call_id=call_id,
         )
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
         raise
     finally:
         _end_pending_usage(pending_token)
-    blocks, stop_reason, raw_content = result
-    _log_llm_traffic(
-        "RESPONSE",
-        config,
-        {"stop_reason": stop_reason, "content": blocks},
-        kind="tools",
-        operation=operation,
-        call_id=call_id,
-    )
-    return blocks, stop_reason, raw_content
+    try:
+        blocks, stop_reason, raw_content = result
+        response_payload = {"stop_reason": stop_reason, "content": blocks}
+        telemetry = _last_response_cache_telemetry_var.get()
+        if telemetry is not None:
+            response_payload["cache_telemetry"] = telemetry
+        _log_llm_traffic(
+            "RESPONSE",
+            config,
+            response_payload,
+            kind="tools",
+            operation=operation,
+            call_id=call_id,
+        )
+        return blocks, stop_reason, raw_content
+    finally:
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
 
 
 async def stream_tools_call(
@@ -5460,10 +6146,17 @@ async def _call_with_tools_impl(
                 str(exc), reset_at=exc.reset_at, snapshot=exc.snapshot
             ) from exc
     # ── Anthropic (direct) ────────────────────────────────────────────────────
-    if config.provider == "anthropic":
+    if config.provider == "anthropic" or (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "messages"
+    ):
         import anthropic as _ant
 
-        client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        client = (
+            _make_bedrock_mantle_anthropic_client(config)
+            if config.provider == "bedrock_mantle"
+            else _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        )
         cached_messages, cached_tools = _with_anthropic_cache(messages, _active_tools)
         request_kwargs = dict(
             model=config.model,
@@ -5485,13 +6178,11 @@ async def _call_with_tools_impl(
             messages=cached_messages,
         )
         on_text_delta = _tool_text_delta_var.get()
-        if on_text_delta is None:
-            resp = await client.messages.create(**request_kwargs)
-        else:
-            async with client.messages.stream(**request_kwargs) as stream:
+        async with client.messages.stream(**request_kwargs) as stream:
+            if on_text_delta is not None:
                 async for text_delta in stream.text_stream:
                     await on_text_delta(text_delta)
-                resp = await stream.get_final_message()
+            resp = await stream.get_final_message()
         blocks = [
             {
                 "type": b.type,
@@ -5507,10 +6198,16 @@ async def _call_with_tools_impl(
             config.model,
             getattr(resp.usage, "input_tokens", 0),
             getattr(resp.usage, "output_tokens", 0),
-            cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
-            cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0),
+            cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
+            cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0)
+            or 0,
+            input_includes_cache=False,
         )
-        return blocks, resp.stop_reason or "end_turn", resp.content
+        return (
+            blocks,
+            resp.stop_reason or "end_turn",
+            [_anthropic_history_block(block) for block in (resp.content or [])],
+        )
 
     # ── Azure AI Foundry (Anthropic endpoint) ─────────────────────────────────
     if config.provider == "azure_foundry_anthropic":
@@ -5655,7 +6352,13 @@ async def _call_with_tools_impl(
                     if isinstance(reasoning_content, dict) and reasoning_content:
                         # Bedrock requires reasoning text/signatures to be replayed
                         # byte-for-byte in subsequent multi-turn requests.
-                        cvt.append({"reasoningContent": reasoning_content})
+                        cvt.append(
+                            {
+                                "reasoningContent": _bedrock_reasoning_content(
+                                    reasoning_content, for_sdk=not config.api_key
+                                )
+                            }
+                        )
             if not cvt:
                 # Legacy checkpoints can contain an empty assistant turn when a
                 # model returned reasoning-only or otherwise unsupported content.
@@ -5664,31 +6367,32 @@ async def _call_with_tools_impl(
             return {"role": role, "content": cvt}
 
         converse_messages = [_ant_msg_to_converse(m) for m in messages]
-        system_list = [
-            {"text": system_message},
-            {"cachePoint": {"type": "default"}},
-        ]
+        system_list = [{"text": system_message}]
+        if _bedrock_supports_cache_points(config.model):
+            system_list.append({"cachePoint": {"type": "default"}})
 
-        # Cache the static initial user message (crawl context + WSTG blocks).
-        # It is messages[0] and never changes during the scan, so it qualifies
-        # as a stable prefix.  The cachePoint is re-sent on every turn, which
-        # is correct — Bedrock resets the TTL on each cache hit.
-        if converse_messages and converse_messages[0].get("role") == "user":
-            first_content = list(converse_messages[0].get("content") or [])
-            if not any("cachePoint" in blk for blk in first_content):
-                first_content = first_content + [{"cachePoint": {"type": "default"}}]
-            converse_messages = [
-                {**converse_messages[0], "content": first_content},
-                *converse_messages[1:],
-            ]
+            # Cache the static initial user message (crawl context + WSTG blocks).
+            # It is messages[0] and never changes during the scan, so it qualifies
+            # as a stable prefix.  The cachePoint is re-sent on every turn, which
+            # is correct — Bedrock resets the TTL on each cache hit.
+            if converse_messages and converse_messages[0].get("role") == "user":
+                first_content = list(converse_messages[0].get("content") or [])
+                if not any("cachePoint" in blk for blk in first_content):
+                    first_content = first_content + [
+                        {"cachePoint": {"type": "default"}}
+                    ]
+                converse_messages = [
+                    {**converse_messages[0], "content": first_content},
+                    *converse_messages[1:],
+                ]
 
-        # Cache the latest turn of the conversation history to enable prefix extension caching.
-        if len(converse_messages) > 1:
-            last_msg = converse_messages[-1]
-            last_content = list(last_msg.get("content") or [])
-            if not any("cachePoint" in blk for blk in last_content):
-                last_content = last_content + [{"cachePoint": {"type": "default"}}]
-            converse_messages[-1] = {**last_msg, "content": last_content}
+            # Cache the latest turn of the conversation history to enable prefix extension caching.
+            if len(converse_messages) > 1:
+                last_msg = converse_messages[-1]
+                last_content = list(last_msg.get("content") or [])
+                if not any("cachePoint" in blk for blk in last_content):
+                    last_content = last_content + [{"cachePoint": {"type": "default"}}]
+                converse_messages[-1] = {**last_msg, "content": last_content}
 
         bedrock_transport: dict[str, Any] = {}
         if config.api_key:
@@ -5741,7 +6445,7 @@ async def _call_with_tools_impl(
                 import boto3
 
                 region = _bedrock_region(config)
-                profile = os.getenv("AWS_PROFILE")
+                profile = config.aws_profile or os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
                 _boto_cfg = _bedrock_botocore_config(_proxy_url)
@@ -5785,7 +6489,9 @@ async def _call_with_tools_impl(
                 raw_content_ant.append(
                     {
                         "type": "bedrock_reasoning",
-                        "reasoning_content": blk["reasoningContent"],
+                        "reasoning_content": _bedrock_reasoning_content(
+                            blk["reasoningContent"]
+                        ),
                     }
                 )
             if "text" in blk:
@@ -5847,7 +6553,10 @@ async def _call_with_tools_impl(
         return blocks, str(stop_reason_raw), raw_content_ant
 
     # ── OpenAI Responses API with function tools ──────────────────────────────
-    if config.provider == "bedrock_mantle" or _uses_openai_responses(config):
+    if (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "responses"
+    ) or _uses_openai_responses(config):
         client = _make_responses_client(config)
         r_kwargs = _responses_request_kwargs(
             config,
@@ -5879,7 +6588,17 @@ async def _call_with_tools_impl(
                 raise RuntimeError("Responses API stream ended without a response")
 
         blocks = []
+        preserve_native_history = config.provider == "google_vertex" and (
+            config.model or ""
+        ).lower().startswith("xai/grok-")
+        native_history = []
         for item in getattr(resp, "output", None) or []:
+            if preserve_native_history:
+                native_item = _responses_output_item_dict(item)
+                if native_item is not None:
+                    native_history.append(
+                        {"type": _RESPONSES_OUTPUT_ITEM_BLOCK, "item": native_item}
+                    )
             itype = getattr(item, "type", None)
             if itype == "message":
                 for part in getattr(item, "content", None) or []:
@@ -5912,8 +6631,12 @@ async def _call_with_tools_impl(
         stop_reason = (
             "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
         )
-        _record_responses_usage(config, resp)
-        return blocks, stop_reason, blocks  # store Anthropic-format in history
+        _record_responses_usage(
+            config,
+            resp,
+            requested_prompt_cache_key=r_kwargs.get("prompt_cache_key"),
+        )
+        return blocks, stop_reason, native_history or blocks
 
     # ── OpenAI-style providers ─────────────────────────────────────────────────
     # Covers: openai, openai_compatible, openrouter, azure_openai,
@@ -6023,6 +6746,7 @@ async def _call_with_tools_impl(
         "azure_openai",
         "azure_foundry",
         "azure_foundry_openai",
+        "bedrock_mantle",
     ):
         from openai import AsyncOpenAI
 
@@ -6046,7 +6770,11 @@ async def _call_with_tools_impl(
                 base += "/v1"
             client_kwargs["base_url"] = base
         client_kwargs.update(_llm_client_kwargs())
-        oai_client = AsyncOpenAI(**client_kwargs)
+        oai_client = (
+            _make_bedrock_mantle_client(config)
+            if config.provider == "bedrock_mantle"
+            else AsyncOpenAI(**client_kwargs)
+        )
         oai_tools = _ant_tools_to_openai()
         oai_messages = _ant_messages_to_openai(messages)
         call_kwargs = _chat_completion_kwargs(
@@ -6207,19 +6935,23 @@ async def _call_with_tools_impl(
         return blocks, stop_reason, blocks  # store Anthropic-format in history
 
     # ── Google Gemini (function calling) ──────────────────────────────────────
-    if config.provider == "google":
-        from google import genai
+    if config.provider in {"google", "google_vertex"}:
         from google.genai import types as _gtypes
 
         def _ant_tools_to_gemini() -> list:
             fn_decls = []
             for t in _active_tools:
                 schema = t.get("input_schema") or {}
+                schema_arg = (
+                    {"parameters_json_schema": schema if schema else None}
+                    if config.provider == "google_vertex"
+                    else {"parameters": schema if schema else None}
+                )
                 fn_decls.append(
                     _gtypes.FunctionDeclaration(
                         name=t["name"],
                         description=t.get("description", ""),
-                        parameters=schema if schema else None,
+                        **schema_arg,
                     )
                 )
             return [_gtypes.Tool(function_declarations=fn_decls)]
@@ -6266,16 +6998,8 @@ async def _call_with_tools_impl(
                     result.append(_gtypes.Content(role=role, parts=parts))
             return result
 
-        _g_proxy = _llm_proxy_var.get()
-        _g_http_opts: dict = {}
-        if config.base_url:
-            _g_http_opts["base_url"] = config.base_url
-        _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-            verify=_g_proxy is None,
-            headers=_LLM_HEADERS,
-            **({"proxy": _g_proxy} if _g_proxy else {}),
-        )
-        g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
+        g_client = _make_google_client(config)
+        g_async = g_client.aio
         g_tools = _ant_tools_to_gemini()
         g_contents = _ant_contents_to_gemini(messages)
         generate_config = _gtypes.GenerateContentConfig(
@@ -6294,35 +7018,40 @@ async def _call_with_tools_impl(
             text_parts: list[str] = []
             streamed_functions: list[dict[str, Any]] = []
             usage_metadata = None
-            g_stream = await g_client.aio.models.generate_content_stream(
-                model=config.model,
-                contents=g_contents,
-                config=generate_config,
-            )
-            async for chunk in g_stream:
-                usage_metadata = (
-                    getattr(chunk, "usage_metadata", None) or usage_metadata
+            try:
+                g_stream = await g_async.models.generate_content_stream(
+                    model=config.model,
+                    contents=g_contents,
+                    config=generate_config,
                 )
-                candidates = getattr(chunk, "candidates", None) or []
-                parts = candidates[0].content.parts if candidates else []
-                for part in parts:
-                    if getattr(part, "text", None):
-                        text_parts.append(part.text)
-                        await on_text_delta(part.text)
-                    elif getattr(part, "function_call", None):
-                        fc = part.function_call
-                        streamed_functions.append(
-                            {
-                                "type": "tool_use",
-                                "id": fc.name,
-                                "name": fc.name,
-                                "input": dict(fc.args) if fc.args else {},
-                                "text": None,
-                                "thought_signature": getattr(
-                                    part, "thought_signature", None
-                                ),
-                            }
-                        )
+                async for chunk in g_stream:
+                    usage_metadata = (
+                        getattr(chunk, "usage_metadata", None) or usage_metadata
+                    )
+                    candidates = getattr(chunk, "candidates", None) or []
+                    parts = _google_candidate_parts(
+                        candidates[0] if candidates else None
+                    )
+                    for part in parts:
+                        if getattr(part, "text", None):
+                            text_parts.append(part.text)
+                            await on_text_delta(part.text)
+                        elif getattr(part, "function_call", None):
+                            fc = part.function_call
+                            streamed_functions.append(
+                                {
+                                    "type": "tool_use",
+                                    "id": fc.name,
+                                    "name": fc.name,
+                                    "input": dict(fc.args) if fc.args else {},
+                                    "text": None,
+                                    "thought_signature": getattr(
+                                        part, "thought_signature", None
+                                    ),
+                                }
+                            )
+            finally:
+                await g_async.aclose()
             blocks: list[dict[str, Any]] = []
             streamed_text = "".join(text_parts)
             if streamed_text:
@@ -6343,13 +7072,17 @@ async def _call_with_tools_impl(
             )
             _record_google_usage(config.model, usage_metadata)
             return blocks, stop_reason, blocks
-        g_resp = await g_client.aio.models.generate_content(
-            model=config.model,
-            contents=g_contents,
-            config=generate_config,
-        )
+        try:
+            g_resp = await g_async.models.generate_content(
+                model=config.model,
+                contents=g_contents,
+                config=generate_config,
+            )
+        finally:
+            await g_async.aclose()
         blocks = []
-        for part in g_resp.candidates[0].content.parts if g_resp.candidates else []:
+        candidates = getattr(g_resp, "candidates", None) or []
+        for part in _google_candidate_parts(candidates[0] if candidates else None):
             if getattr(part, "text", None):
                 blocks.append(
                     {
@@ -6379,6 +7112,56 @@ async def _call_with_tools_impl(
         return blocks, stop_reason, blocks
 
     raise ValueError(f"Provider {config.provider!r} does not support native tool use")
+
+
+def _history_tool_input(value: Any) -> dict[str, Any]:
+    """Return a tool-call input that every provider accepts in conversation history."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _repair_tool_use_inputs(messages: list[dict]) -> list[dict]:
+    """Replace tool-call inputs that are not JSON objects in *messages*.
+
+    A reply cut off by the output token limit can end with a partial tool call
+    whose arguments are an unparsed string. Providers reject that in later
+    requests, so the history keeps the call and its id with empty arguments.
+    """
+    repaired: list[dict] | None = None
+    for index, message in enumerate(messages):
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        new_content: list[Any] | None = None
+        for block_index, block in enumerate(content):
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and "input" in block
+                and not isinstance(block.get("input"), dict)
+            ):
+                if new_content is None:
+                    new_content = list(content)
+                new_content[block_index] = {
+                    **block,
+                    "input": _history_tool_input(block.get("input")),
+                }
+        if new_content is not None:
+            if repaired is None:
+                repaired = list(messages)
+            repaired[index] = {**message, "content": new_content}
+    return repaired if repaired is not None else messages
+
+
+_OUTPUT_LIMIT_STOP_REASONS = {"max_tokens", "length", "max_output_tokens"}
 
 
 def _normalize_agentic_tool_input(value: Any) -> tuple[dict[str, Any], str | None]:
@@ -6477,11 +7260,10 @@ async def thinking_agentic_loop(
                 assistant_content if isinstance(assistant_content, list) else []
             )
             interrupted_tools = [
-                block
+                tool_block
                 for block in assistant_blocks
-                if isinstance(block, dict)
-                and block.get("type") == "tool_use"
-                and block.get("id")
+                if (tool_block := _agentic_tool_use_block(block)) is not None
+                and tool_block.get("id")
             ]
             if interrupted_tools:
                 repair_content = [
@@ -6502,7 +7284,7 @@ async def thinking_agentic_loop(
                         "type": "text",
                         "text": (
                             "The previous model turn ended without a completed tool "
-                            "exchange. Resume the assessment by calling exactly one tool."
+                            "exchange. Resume the assessment by calling a tool."
                         ),
                     }
                 ]
@@ -6849,7 +7631,16 @@ async def thinking_agentic_loop(
             # non-empty marker when a provider returns no usable blocks so the
             # checkpoint itself remains valid for every messages API on resume.
             assistant_content = (
-                [_canonical_content_block(block) for block in raw_content]
+                _repair_tool_use_inputs(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": [
+                                _canonical_content_block(block) for block in raw_content
+                            ],
+                        }
+                    ]
+                )[0]["content"]
                 if isinstance(raw_content, list) and raw_content
                 else [
                     {
@@ -6923,7 +7714,7 @@ async def thinking_agentic_loop(
                                     text_only_repair_message
                                     or (
                                         "Your previous response did not call a tool, so no scan action "
-                                        "was executed. Continue by calling exactly one tool now. Use "
+                                        "was executed. Continue by calling a tool now. Use "
                                         "http_request, browser, context_tool, write_finding, forge_jwt, "
                                         "decode_jwt, credential_check, or register_account for the next "
                                         "assessment step. Call done only if the assessment is genuinely "
@@ -6961,6 +7752,12 @@ async def thinking_agentic_loop(
                     break
 
                 if tool_input_error:
+                    if str(stop_reason or "").lower() in _OUTPUT_LIMIT_STOP_REASONS:
+                        tool_input_error = (
+                            "This tool call was cut off because the response reached "
+                            "the output token limit, so it was not run. Call it again, "
+                            "and make fewer or shorter tool calls in each response."
+                        )
                     log.warning(
                         "thinking_agentic_loop: invalid input for tool %r: %s",
                         tool_name,
@@ -7083,16 +7880,31 @@ async def thinking_agentic_loop(
                 )
                 if len(result_str) > limit:
                     omitted = len(result_str) - limit
-                    result_str = (
-                        result_str[:limit]
-                        + f"\n[{omitted} chars omitted — use context_tool/history_search for details]"
-                    )
+                    result_str = result_str[:limit] + _tool_result_omitted_note(omitted)
 
                 tool_results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
                         "content": result_str,
+                    }
+                )
+
+            # Providers require a result for every tool call in a response, so
+            # calls skipped after `done` or a stop request still get one.
+            answered_ids = {r.get("tool_use_id") for r in tool_results}
+            for block in tool_use_blocks:
+                skipped_id = block.get("id") or ""
+                if skipped_id in answered_ids:
+                    continue
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": skipped_id,
+                        "content": (
+                            "Not run: an earlier call in this response ended the "
+                            "step. Call this tool again if you still need it."
+                        ),
                     }
                 )
 

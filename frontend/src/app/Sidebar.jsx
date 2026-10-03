@@ -19,9 +19,8 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
   const onActiveJobs = section === "active-jobs";
   const onSettings = section === "settings";
   const onScanPolicy = section === "scan-policy";
-  const onExternalIntegrations = section === "external-integrations";
+  const onExtensions = section === "extensions";
   const onSast = section === "sast";
-  const onDebug = section === "debug";
   const onReportingDebug = section === "reporting-debug";
   const onBenchmarkLab = section === "benchmark-lab";
   const onStats = section === "stats";
@@ -169,42 +168,32 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
         <a
           href="#/settings/profiles"
           className={"nav-item" + (onSettings ? " active" : "")}
-          title="LLM Settings"
+          title="LLM Configuration"
         >
           <span className="nav-icon">
             <IconSettings />
           </span>
-          {!collapsed && " LLM Settings"}
+          {!collapsed && " LLM Configuration"}
+        </a>
+        <a
+          href="#/extensions"
+          className={"nav-item" + (onExtensions ? " active" : "")}
+          title="Extensions"
+        >
+          <span className="nav-icon">
+            <IconSettings />
+          </span>
+          {!collapsed && " Extensions"}
         </a>
         <a
           href="#/scan-policy"
           className={"nav-item" + (onScanPolicy ? " active" : "")}
-          title="Agent Settings"
+          title="Settings"
         >
           <span className="nav-icon">
-            <IconShield />
+            <IconSettings />
           </span>
-          {!collapsed && " Agent Settings"}
-        </a>
-        <a
-          href="#/external-integrations"
-          className={"nav-item" + (onExternalIntegrations ? " active" : "")}
-          title="External Integrations"
-        >
-          <span className="nav-icon">
-            <IconShield />
-          </span>
-          {!collapsed && " External Integrations"}
-        </a>
-        <a
-          href="#/debug"
-          className={"nav-item" + (onDebug ? " active" : "")}
-          title="System Settings"
-        >
-          <span className="nav-icon">
-            <IconBug />
-          </span>
-          {!collapsed && " System Settings"}
+          {!collapsed && " Settings"}
         </a>
         {(reportingDebugCfg?.panel_enabled || benchmarkLabCfg?.panel_enabled) && (
           <>

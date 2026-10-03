@@ -4,7 +4,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 
 - **Web application scanning** - discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage in Quick, Standard, Full, and experimental Team modes, while SAST Validate focuses only on imported SAST leads.
 - **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
-- **SAST assistance** — a standalone agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
+- **SAST assistance** - a standalone agentic static-analysis pass over an uploaded source ZIP or an immutable repository snapshot that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
 - **Multi-repository systems** - when a product's code is split across several repositories/micro-frontends, a **System** groups them (with immutable uploaded ZIP snapshots) alongside the existing Sites/API Collections that make up the live product. An **AssessmentCampaign** coordinates ordinary SAST/web/API child runs for that system, joins compact per-repository interface facts into a cross-repository map, and proposes which live target should receive each SAST lead, subject to human review before any dynamic scan starts.
 
 ---
@@ -19,7 +19,6 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
    - [LLM Profiles (`LLMProfile`)](#llm-profiles-llmprofile-model)
    - [Scanner Policy](#scanner-policy-scannerpolicy-model)
    - [Python Sandbox](#python-sandbox-codeexecutionconfig-model)
-   - [Burp Suite REST API Config](#burp-suite-rest-api-config-burprestapiconfig-model)
    - [Upstream Proxy Config](#upstream-proxy-config-upstreamproxyconfig-model)
    - [Specialist Agent Config](#specialist-agent-config-specialistagentconfig-model)
    - [Adversarial Validator Config](#adversarial-validator-config-adversarialvalidatorconfig-model)
@@ -62,7 +61,8 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 17. [SAST Scanner & Scan Leads](#17-sast-scanner--scan-leads)
     - [Architecture overview](#architecture-overview-1) · [File tools](#file-tools-all-path-jailed-to-the-extraction-root) · [Lead lifecycle](#lead-lifecycle)
     - [ScanLead entity](#scanlead-entity-servicesscan_leadspy) · [Lead consumption (API vs web)](#lead-consumption-api-vs-web) · [Concurrency](#concurrency)
-18. [Systems & Multi-Repository Campaigns](#18-systems--multi-repository-campaigns)
+18. [Extensions](#18-extensions)
+19. [Systems & Multi-Repository Campaigns](#19-systems--multi-repository-campaigns)
     - [Data model](#data-model) · [Component facts](#component-facts-servicescomponent_factspy)
     - [Correlation](#correlation-servicescorrelationpy) · [Review gate](#review-gate) · [Campaign lifecycle](#campaign-lifecycle-servicescampaignspy)
     - [Cleanup & restart recovery](#cleanup--restart-recovery)
@@ -84,7 +84,7 @@ src/aespa/
 │   ├── scan.py            # /api/test-runs/{id}/thinking-scan/* and crawl
 │   ├── test_runs.py       # /api/test-runs/* — CRUD, status, site map graph
 │   ├── sites.py           # /api/sites/* — target website management
-│   ├── settings.py        # /api/settings/* — LLM, policy, Burp, proxy, specialists, headers
+│   ├── settings.py        # /api/settings/* - LLM, policy, proxy, specialists, headers
 │   ├── traffic.py         # /api/traffic/* — HTTP traffic log
 │   ├── events.py          # WebSocket event stream
 │   ├── alice.py           # /api/test-runs/{id}/alice/* — A.L.I.C.E. chat
@@ -113,7 +113,7 @@ src/aespa/
     ├── api_documents.py   # Document upload, storage, and doc_type sniffing
     ├── api_readiness.py   # LLM-driven readiness gap analysis for collections
     ├── api_scanner.py     # API scan orchestration — OWASP Top-10 coverage matrix
-    ├── burp_rest.py       # Burp Suite Professional REST API client
+    ├── external_scans.py  # Web active scanner extension tasks and finding writes
     ├── checkpoint.py      # Scan resume — persist and restore LLM conversation state
     ├── findings.py        # Finding CRUD operations & validation status management
     ├── recon_summary.py   # Structured attack-surface summary from crawl data
@@ -125,7 +125,7 @@ src/aespa/
     ├── scan_leads.py      # ScanLead CRUD and confidence-threshold filtering
     ├── scanner_sessions.py# Auth session vault (cookies, tokens)
     ├── scope.py           # Scan scope boundaries and out-of-scope filtering
-    ├── settings.py        # LLM config / profiles / policy / Burp / proxy / specialist config
+    ├── settings.py        # LLM config / profiles / policy / proxy / specialist config
     ├── tls_scan.py        # Pure stdlib + cryptography TLS/SSL security posture probe
     ├── traffic.py         # HTTP capture (Playwright intercept + httpx)
     ├── validator.py       # Adversarial validator agent (LLM-assisted finding validation)
@@ -176,7 +176,7 @@ AESPA_PORT         = 8000
 │  findings   │
 │  validator  │       ┌─────────────────────────────────────┐
 │  recon      │       │  Burp Suite Professional            │
-│  burp_rest  │──────►│  REST API  (default :1337)          │
+│  extensions│──────►│  REST API  (default :1337)          │
 │  traffic    │       └─────────────────────────────────────┘
 │  events     │
 └──────┬──────┘
@@ -188,7 +188,7 @@ AESPA_PORT         = 8000
 │  TrafficEntries · ScanFindings · ScannerSessions            │
 │  TargetIntelItems · PageOwaspTests · ScanCheckpoints        │
 │  ScanLogs · AliceChatSessions · AliceChatMessages           │
-│  BurpRestApiConfig · UpstreamProxyConfig                    │
+│  ExtensionSetting · ExtensionSecret · UpstreamProxyConfig   │
 │  ApiCollections · ApiDocuments · ApiEndpoints               │
 │  ApiCredentials · ApiTestRuns · ApiEndpointTests            │
 │  SastRuns · ScanLeads                                       │
@@ -207,21 +207,20 @@ LLM settings are structured into three entities to separate reusable provider co
 
 #### 1. Reusable Provider Config (`LLMProviderConfig` model)
 
-Defines API connections, optional project identifiers, and rate limits for LLM backends:
+Defines API connections, optional project identifiers, and model discovery settings for LLM backends:
 
 | Field | Default | Description |
 |---|---|---|
 | `name` | `Default Provider` | Label for the provider |
-| `api_format` | `anthropic` | API format: `factory_droid`, `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
+| `api_format` | `anthropic` | API format: `factory_droid`, `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `google_vertex`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
 | `api_key` | — | Provider API key (stored in DB; masked and excluded from non-localhost exports) |
 | `base_url` | — | Override endpoint URL |
 | `username` | — | Optional Copilot CLI account login; blank uses Copilot CLI's selected default account |
-| `project_id` | — | Bedrock Mantle project ID (sent as `OpenAI-Project` header for cost/usage attribution) |
-| `models_json` | `[]` | JSON list of available model names for this provider |
-| `max_tpm` | — | Optional Token-Per-Minute rate limit for this provider |
-| `max_rpm` | — | Optional Request-Per-Minute rate limit for this provider |
+| `project_id` | — | Bedrock Mantle project ID, or Google Cloud project ID for Vertex AI |
+| `location` | — | Google Vertex AI location; defaults to `global` |
+| `models_json` | `[]` | JSON list of available model names for this provider. Removing a name deletes unused saved model settings; names used by a scan profile cannot be removed until the profile is updated. API model refreshes keep names used by scan profiles. |
 
-#### 2. Saved LLM Profile (`LLMConfig` model)
+#### 2. Saved LLM Model Configuration (`LLMConfig` model)
 
 Defines execution parameters linked to a provider:
 
@@ -231,6 +230,8 @@ Defines execution parameters linked to a provider:
 | `is_active` | `false` | Global active switch (only one profile active globally) |
 | `provider_id` | — | Foreign key linking to the `LLMProviderConfig` connection |
 | `model` | `claude-opus-4-5` | Specific model identifier to run |
+| `max_tpm` | — | Optional token-per-minute limit shared by saved configurations using this provider and model |
+| `max_rpm` | — | Optional request-per-minute limit shared by saved configurations using this provider and model |
 | `max_tokens` | `16384` | Maximum output tokens per LLM call |
 | `max_context_tokens` | `200000` | Total model context window, including prompts, tools, conversation history, and the output allowance. Auto mode stores the latest provider-discovered value, follows later provider metadata refreshes, and uses a conservative fallback only when discovery has no context limit. |
 | `temperature` | — | Unset by default (falls through to provider/model default) |
@@ -310,24 +311,6 @@ profile and verifies that the non-root harness can write to its private tmpfs
 workspace. An incompatible Docker installation therefore fails readiness before
 an agent attempts execution.
 
-### Burp Suite REST API Config (`BurpRestApiConfig` model)
-
-Singleton row (id = 1). Configures the optional Burp Suite Professional active-scan integration.
-
-| Field | Default | Description |
-|---|---|---|
-| `enabled` | `false` | Enable Burp integration |
-| `api_url` | `http://127.0.0.1:1337` | Burp REST API base URL |
-| `api_key` | — | Bearer token for the Burp REST API (optional) |
-| `scan_configuration_name` | `Audit checks - all except time-based detection methods` | Named Burp scan config to apply |
-| `scan_sqli` | `true` | Route SQLi findings to Burp active scan |
-| `scan_xss` | `true` | Route XSS findings to Burp active scan |
-| `scan_command_injection` | `true` | Route command injection findings |
-| `scan_path_traversal` | `true` | Route path traversal findings |
-| `scan_ssrf` | `true` | Route SSRF findings |
-| `scan_xxe` | `true` | Route XXE findings |
-| `scan_ssti` | `true` | Route SSTI findings |
-
 ### Upstream Proxy Config (`UpstreamProxyConfig` model)
 
 Singleton row (id = 1). Routes scanner and/or LLM traffic through independently configured upstream HTTP proxies.
@@ -372,7 +355,6 @@ Singleton row (id = 1). Controls when and how Specialist Agents are dispatched d
 | `dispatch_crypto` | `true` | Dispatch specialists for cryptography/secrets leads |
 | `dispatch_config` | `false` | Dispatch specialists for misconfiguration leads |
 | `dispatch_file_upload` | `true` | Dispatch specialists for file upload leads |
-| `trigger_specialist_on_burp` | `false` | Also dispatch a specialist alongside each Burp active scan |
 
 ### Adversarial Validator Config (`AdversarialValidatorConfig` model)
 
@@ -429,7 +411,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `LLMConfig` | Saved LLM configuration/execution profile linked to a provider |
 | `LLMProfile` | Named per-agent-role model routing profile mapping roles to specific `LLMConfig` IDs |
 | `ScannerPolicy` | Scan behaviour policy for a test run |
-| `BurpRestApiConfig` | Singleton — Burp Suite REST API connection and routing settings |
+| `ExtensionSetting` / `ExtensionSecret` | Extension settings and namespaced secret values, including Burp Suite configuration |
 | `UpstreamProxyConfig` | Singleton — upstream HTTP proxy settings for scanner and LLM traffic |
 | `GlobalHttpHeaderConfig` | Singleton — custom HTTP header added to all scanner and crawler requests |
 | `ReportingDebugConfig` | Singleton — reporting prompt execution capture and debug settings |
@@ -980,7 +962,7 @@ A.L.I.C.E. (Interactive chat — user-directed, runs as persistent background ta
   └── Can dispatch Specialist Agents via agent_dispatch tool
   └── Can write findings directly via write_finding tool
 
-Burp active scans  (dispatched from scanner, surfaced in Agents panel)
+Burp active scans  (bundled extension, surfaced in Agents panel when active)
 Reporting agent    (post-scan LLM pre-screen pass over new findings)
 ```
 
@@ -1010,7 +992,7 @@ Test Lead calls agent_dispatch
        4. Emit specialist_step + agent_status events throughout
 ```
 
-Specialists can also be triggered alongside Burp active scans via the `trigger_specialist_on_burp` config flag.
+The Burp extension can request a specialist alongside an active scan when its specialist setting is enabled.
 
 **`SpecialistAgentConfig` fields:**
 
@@ -1081,12 +1063,15 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 | `openai_codex` | External Codex app-server, using the local Codex CLI's default ChatGPT login |
 | `anthropic` | `anthropic` Python SDK (native tool-use supported) |
 | `openai` | `openai` Python SDK |
-| `google` | `google-generativeai` |
+| `google` | `google-genai` with a Gemini Developer API key |
+| `google_vertex` | `google-genai` for Gemini models and the `openai` SDK for other publisher models, using Google Cloud Application Default Credentials |
 | `bedrock` | `boto3` / `anthropic` Bedrock adapter |
-| `bedrock_mantle` | `openai` SDK with Bedrock Mantle endpoint (`project_id` sent as `OpenAI-Project` header) |
+| `bedrock_mantle` | `anthropic` SDK for Claude Messages; `openai` SDK for Responses or Chat Completions, selected by model (`project_id` sent as `anthropic-workspace-id` or `OpenAI-Project`) |
 | `azure_openai` | `openai` SDK with Azure base URL |
 | `openai_compatible` | `openai` SDK with custom base URL |
 | `openrouter` | `openai` SDK with OpenRouter base URL |
+
+The Google Vertex AI provider saves only the Google Cloud project and location. It reads Application Default Credentials from the AESPA process and does not copy credentials into the database. Gemini models use Vertex `generateContent`. All other serverless publisher models use Vertex's OpenAI-compatible Responses endpoint. User-managed endpoint resources, tuned models, and self-deployed Model Garden models are rejected. Model discovery lists Google publisher models available in the configured project and location; compatible Model-as-a-Service publisher IDs can be entered manually.
 
 When both the provider token and username are blank, the GitHub Copilot SDK reads Copilot CLI's real home directory and uses the account selected there. A configured username resolves that account's stored Copilot CLI credential, while an explicit provider token takes precedence over both choices. The provider form lists locally authenticated Copilot accounts and can launch Copilot CLI's device-code login command; AESPA exposes only the verification URL, one-time code, completion state, and account login to the browser, while Copilot CLI stores the resulting credential in its normal credential store. Named-account and explicit-token sessions get a temporary Copilot home. Every path keeps scans isolated: they use a temporary working directory, remove Copilot's repository environment from the prompt, disable instructions, skills, memory, hooks, embeddings, telemetry, host Git operations, and session storage, and expose only the custom tools AESPA explicitly registers. One Copilot session stays alive for the full AESPA agent conversation, allowing the provider to reuse conversation state and prompt caches. When Copilot requests a tool, its SDK handler pauses while AESPA applies the existing scope checks, execution monitoring, checkpointing, and tool-result limits. AESPA returns the real result to that handler and the same Copilot session continues.
 
@@ -1130,7 +1115,7 @@ If the compacted request fits only with a smaller response allowance, AESPA crea
 
 ### Prompt caching
 
-The LLM service uses Anthropic prompt caching for large, repeated context blocks (crawl summaries, system prompts). This significantly reduces token usage on multi-step dynamic scans where the same context is sent across many loop iterations.
+The LLM service uses Anthropic prompt caching for large, repeated context blocks (crawl summaries, system prompts). Vertex-hosted Grok conversations receive a stable cache-routing key derived from the model, system instructions, tool set, and opening message. The key stays unchanged as the agent appends turns, while separate Test Lead, Specialist, and Validator conversations use different keys. AESPA also requests and replays Grok's encrypted reasoning output because Vertex AI does not support stateful response chaining for these models. Response-only metadata is removed before replay so the saved output remains valid as Vertex input. This keeps the earlier prompt prefix unchanged across tool steps and improves cache reuse during multi-step scans. Each response records input, output, cached and uncached token counts, cache-hit percentage, safe fingerprints for the requested and echoed cache keys, and the provider system fingerprint in the LLM response log and persisted scan telemetry. These diagnostic entries do not appear in the live activity feed. The cache key itself is never logged.
 
 ### Upstream proxy
 
@@ -1138,10 +1123,12 @@ All LLM SDK clients (GitHub Copilot, Anthropic, OpenAI, Azure, OpenRouter, Bedro
 
 ### Rate Limiting & Pacing
 
-To prevent exceeding upstream LLM API limits (which can cause active scans to fail or encounter transient errors), `llm.py` implements a provider-level **Rate Limiting & Pacing** layer:
+To prevent exceeding upstream LLM API limits (which can cause active scans to fail or encounter transient errors), `llm.py` implements a model-level **Rate Limiting & Pacing** layer:
 
-- **Token Bucket Algorithm:** Uses an asynchronous token-bucket rate limiter (`AsyncTokenBucketLimiter`) linked to each unique `(provider, model)` pair.
-- **Coverage:** Pacing wraps **both** the non-agentic path (`_call` — page analysis, probe planning, reporting) **and** the agentic tool-using path (`_call_with_tools`, used by every dynamic / API / SAST / ALICE scan loop), so a configured `max_tpm` / `max_rpm` applies to the whole run, not just page analysis.
+- **Per-run concurrency:** DAST and SAST have separate maximum concurrent LLM request settings. The DAST limit covers web and API scan agents, including reporting. The SAST limit covers discovery and validation agents. These settings bound requests that are waiting on provider responses; provider TPM and RPM pacing still applies separately.
+
+- **Token Bucket Algorithm:** Uses an asynchronous token-bucket rate limiter (`AsyncTokenBucketLimiter`) linked to each unique provider connection and model pair.
+- **Coverage:** Pacing wraps **both** the non-agentic path (`_call` - page analysis, probe planning, reporting) **and** the agentic tool-using path (`_call_with_tools`, used by every dynamic / API / SAST / ALICE scan loop), so configured `max_tpm` / `max_rpm` values apply to every call using that provider and model pair.
 - **Estimated Pre-allocation:**
   - Before making an API request, the limiter estimates token usage (`estimate_tokens`) for prompt text (1.1x scaling of character count divided by 4) and vision payloads (765–1600 tokens depending on the provider). The agentic path flattens the running message history to estimate input size.
   - It also includes the configured `max_tokens` (or a 4096 default) for the model's response.
@@ -1154,40 +1141,13 @@ To prevent exceeding upstream LLM API limits (which can cause active scans to fa
 
 ## 10. Burp Suite Integration
 
-**File**: `src/aespa/services/burp_rest.py`
+**Files**: `extensions/builtin/burp_suite/`, `src/aespa/services/external_scans.py`
 
-When enabled, aespa can hand off targeted active scans to **Burp Suite Professional** via its REST API (default `http://127.0.0.1:1337`). This augments aespa's own probing with Burp's full active-scan engine for injection-class vulnerabilities.
+Burp Suite active scanning is a bundled extension. It is disabled by default and is configured on its Settings page, reached from the Extensions list. Existing Burp connection details, vulnerability class switches, API key, and specialist option are copied to the extension during database upgrade. The old Burp settings routes and table are removed.
 
-### Workflow
+The web scanner offers saved findings and HTTP investigation notes to registered `web.active_scanner` extensions. The Burp extension selects SQL injection, XSS, command injection, path traversal, SSRF, XXE, and SSTI candidates based on its settings. It launches a targeted Burp REST API scan, polls for issues, and returns normalized results. AESPA checks the target against the run's scope, suppresses duplicate scans, saves findings with `finding_source="burp_active_scan"`, and emits activity events. Existing authenticated cookies and headers are passed to the extension for the target scan.
 
-```
-Finding written by aespa scanner
-  └─ _finding_burp_vuln_class(finding)
-       • Maps finding to a Burp vulnerability class (sqli, xss, cmdi, etc.)
-       • Checks BurpRestApiConfig to see if that class is enabled
-  └─ _run_burp_active_scan_for_target(run_id, url, vuln_class)
-       1. burp_rest.launch_active_scan(config, url, cookies=..., extra_headers=...)
-            POST /v0.1/scan  →  returns integer task_id
-       2. burp_rest.wait_for_scan(config, task_id)
-            Polls GET /v0.1/scan/{task_id} with adaptive back-off:
-              • 0–60 s  →  every 5 s
-              • 60–180 s →  every 15 s
-              • 180–600 s → every 30 s
-            Returns when status ∈ {succeeded, failed, cancelled}
-       3. Normalised Burp issues → ScanFinding rows (finding_source = "burp_active_scan")
-```
-
-### Scope pinning
-
-Each Burp scan is scoped to the exact URL path prefix being tested so Burp does not re-crawl the whole site. Cookies and bearer tokens from the active `ScannerSession` are forwarded to Burp as custom headers so authenticated endpoints are tested with valid sessions.
-
-### Per-class routing
-
-Each vulnerability class can be toggled independently in `BurpRestApiConfig` (e.g. enable only SQLi and SSRF, skip XSS). The scanner also deduplicates Burp targets: if a `(run_id, url, vuln_class)` triple has already been dispatched in the current run, a second Burp scan is not launched.
-
-### Connection test
-
-`POST /api/settings/burp-rest-api/test-connection` probes `GET /v0.1/scan/0` and returns `{ok, message}`. A 404 from Burp counts as success (server is reachable; the scan ID just doesn't exist).
+Active scan tasks are tracked by run. Stopping a run or disabling the extension cancels in-flight polling. The extension can request a specialist scan alongside its own scan through a generic core callback. Check connection on the Burp settings page tests the REST API connection.
 
 ---
 
@@ -1252,8 +1212,6 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/settings/code-execution` | `settings.py` | Get/set Python sandbox limits and allowed roles |
 | `/api/settings/code-execution/status` | `settings.py` | Report Docker and executor-image readiness |
 | `/api/settings/specialist-agent` | `settings.py` | Get/set specialist agent config |
-| `/api/settings/burp-rest-api` | `settings.py` | Get/set Burp Suite REST API config |
-| `/api/settings/burp-rest-api/test-connection` | `settings.py` | Test connectivity to Burp REST API |
 | `/api/settings/upstream-proxy` | `settings.py` | Get/set upstream proxy config |
 | `/api/settings/global-http-header` | `settings.py` | Get/set global custom HTTP header appended to scanner requests |
 | `/api/settings/reporting-debug` | `reporting_debug.py` | Get/set reporting prompt debug capture settings |
@@ -1400,6 +1358,7 @@ The phase rail exposes all ten SAST phases from scope through report and scrolls
 
 ## 14. Concurrency & State Management
 
+- **LLM requests** — each web/API run uses the DAST concurrent LLM request limit, while each SAST run uses the SAST limit. The limits are configured under DAST > Test Lead and SAST in Settings.
 - **FastAPI async handlers** — all I/O is non-blocking via `asyncio`
 - **Parallel crawl workers** — multiple Playwright browser instances share a `_CrawlShared` state object (asyncio locks around the URL frontier and seen-set)
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
@@ -1745,11 +1704,26 @@ ALICE wrapper is made fully API-aware.
 
 **Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
 
-The SAST scanner is a standalone agentic static-analysis pass over an uploaded source archive that produces high-confidence vulnerability **leads**. It is created from the SAST screen with `POST /api/sast-runs` (multipart); `collection_id` is NULL and the archive is stored on the run (`source_archive_path` / `source_filename`). Users choose `analysis_mode=light` for the original lower-cost workflow or `analysis_mode=deep` for the current semantic workflow. The mode is saved on the run and used for starts, resumes, and reruns. Existing runs are migrated as Light. New API callers that omit the field use Deep. A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
+The SAST scanner is a standalone agentic static-analysis pass over an immutable source archive that produces high-confidence vulnerability **leads**. Uploads use `POST /api/sast-runs` (multipart). Extension source providers use `POST /api/sast-runs/from-source`; the run enters `preparing` while the provider resolves the source and AESPA creates the archive. In both cases `collection_id` is NULL and the final archive is stored on the run (`source_archive_path` / `source_filename`). Users choose `analysis_mode=light` for the original lower-cost workflow or `analysis_mode=deep` for the current semantic workflow. The mode is saved on the run and used for starts, resumes, and reruns. Existing runs are migrated as Light. New API callers that omit the field use Deep. A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
 
 ### Architecture overview
 
 Light runs inventory the archive, build the original source work program, run discovery workers, independently validate candidates, and trace attack paths. Deep runs add the repository model, threat model, semantic coverage plan, reconciliation, and closure phases shown below.
+
+The shared source work program looks for route registrations and request inputs, then assigns a review to each route or likely handler file. Likely handlers are selected by common file names and directories when route syntax is unfamiliar. These inferred handlers still leave the run with partial coverage until a concrete entry point is found. Response serialization calls also receive a separate review so sensitive fields are not missed by a scan focused on database and authorization calls.
+
+Before matching sinks, `services/sast_codegraph.py` parses PHP, JavaScript, TypeScript/TSX, Python, Java, Go, C#, and Ruby with tree-sitter. Grammars ship as Python wheels, so parsing needs no network. The parser records each function and method, each call site, and function names passed as values, such as a route callback or a JSX `onClick={handler}`. Calls resolve by name within the same language family. The resolver prefers the caller's own class for `this`/`self`, the named class for static calls and `new`, then the same file, then the nearest directories, keeping at most three targets. There is no type information, so resolution is approximate.
+
+The code graph is used in two ways:
+
+- Call-shaped sinks (database query, command execution, file access, outbound request, code evaluation, logging) count in a parsed file only when the matching text is inside a real call on that line. Matches in comments or plain strings are dropped. Serialization and deserialization stay line-based because definitions such as `toPublic()` or Java's `readObject()` are review points too. Unparsed files, including HTML, keep line matching.
+- Reachability starts from every file's top level, every function holding a detected route or request input, and every function in a likely handler file. Each surface item records its enclosing function and one of `reachable` (with the shortest `reached_from` chain), `no_callers` (nothing calls it directly, so it may be called dynamically), or `not_reached`. Workers see these hints in `get_work_program`. They affect ordering only; every item still needs a disposition.
+
+Deep mode's repository model uses the same parser through `sast_parsers.TreeSitterAdapter`. It emits `route` facts for registration calls with a literal path (Express, Laravel, Slim, Go `HandleFunc`/gin/echo/chi, Rails `get`/`resources`, ASP.NET `MapGet`) and for declared routes (Spring mappings, ASP.NET attribute and conventional routes, Razor Page handlers, PHP `#[Route]`). Calls on HTTP client objects such as `this.http.get()` are not routes. It also emits `sensitive_operation` and `auth_boundary` facts for calls matching the work-program sink and control patterns, and `callable` facts for every function. Each fact carries its enclosing function and reachability. Facts are ordered routes, access checks, sensitive calls, dependencies, then callables, so the model's node cap drops plain functions first. Vendor, build, `bin/`, `obj/`, and `wwwroot/lib/` folders are skipped.
+
+.NET is handled like the other supported stacks. `component_facts._aspnet_route_facts` combines a controller's `[Route]` prefix with action `[HttpGet]`/`[Route]` templates, replaces `[controller]` and `[action]`, and falls back to `/{controller}/{action}` for public actions without attributes. Razor Pages routes come from the file path under `Pages/`, and Blazor routes from `@page`. `.cshtml`, `.razor`, and Web Forms files are source; `*.cshtml.cs` code-behind files, `Hubs/` folders, and files ending in `Hub` or `Endpoints` count as likely handlers. The manifest adapter reads NuGet `PackageReference`/`PackageVersion` items and `packages.config`.
+
+The graph is stored in `SastCodeSymbol` and `SastCodeCall`. Calls refer to symbols by `path::qualname@line` key rather than by row id, so the rows are exported and imported unchanged. The scope phase data and `work_program_summary` report files parsed per language, functions and their reachability, calls, resolved calls, sink reachability, and sink matches dropped because they were outside a call. The SAST Coverage tab shows these in a Code map panel.
 
 ```
 start_sast_scan(sast_run_id)
@@ -1761,8 +1735,9 @@ start_sast_scan(sast_run_id)
           a cross-process workspace lease while the directory is live. A
           startup sweep (`db._cleanup_orphaned_sast_extractions`) skips leased
           workspaces and reconciles only dirs leaked by a previous hard crash.
-       3. Build a normalized repository graph using Python AST, ECMAScript
-          structure, manifest, component-fact, and pattern adapters. An LLM
+       3. Build a normalized repository graph using Python AST, tree-sitter
+          (PHP, JavaScript/TypeScript, Java, Go, C#, Ruby; regex ECMAScript
+          fallback), manifest, component-fact, and pattern adapters. An LLM
           reconciliation pass is used only to resolve source-backed model gaps.
        4. Run a dedicated threat-analysis pass. Persist actors, assets,
           boundaries, scenarios, and semantic coverage obligations before any
@@ -1799,10 +1774,12 @@ start_sast_scan(sast_run_id)
 | `read_file` | Read a file by path; optional `start_line`/`end_line`; capped at 20,000 chars |
 | `grep` | Regex or literal search across files; capped at 200 results. The receipt records the search scope and returned matches. Files in the search scope do not count as directly opened. |
 | `get_work_program` | Return the current worker's assigned source or sink items |
+| `claim_traced_sink` | Move an inventoried helper sink to a route worker after it opens the route and exact sink line; the claimed sink still needs its own disposition |
 | `record_disposition` | Close one assigned item with a result, reason, trace, controls, and evidence |
 | `record_semantic_disposition` | Resolve one threat-scenario or repository-model security obligation |
-| `write_lead` | Record a source-backed discovery candidate |
-| `filter_lead` | Apply discovery confidence filtering before independent validation |
+| `write_lead` | Record a source-backed discovery candidate with its confidence score and reasoning. Requires a source trace (file), a sink trace (file and line), a `fix_location` (`file:line`, checked against the archive), and a one-sentence `root_cause`. The reply lists other open leads that cite the same files |
+| `filter_lead` | Revise the confidence score of an existing candidate before independent validation |
+| `merge_lead` | Merge a pending lead into another pending lead when one code change closes both; the leads must cite a common file and the worker must give the reason |
 
 Threat-model workers replace the discovery tools with `record_model_fact`,
 `record_threat_scenario`, and `finalize_threat_model`. Candidate validators use
@@ -1812,7 +1789,7 @@ own `done` schema. See [Agent Tool Reference](agent-tool-reference.md) for the c
 phase-by-phase list.
 
 The normalized work program is stored in `SastSourceFile`, `SastSurfaceItem`,
-`SastSurfaceEdge`, `SastPartition`, `SastWorker`, `SastWorkItem`,
+`SastCodeSymbol`, `SastCodeCall`, `SastSurfaceEdge`, `SastPartition`, `SastWorker`, `SastWorkItem`,
 `SastThreatModel`, `SastThreatScenario`, `SastCoverageObligation`,
 `SastObligationLead`, `SastDiscoveryTelemetry`, and `SastEvidenceReceipt`.
 Checkpoint JSON remains the resume projection; relational rows are the auditable
@@ -1822,16 +1799,44 @@ where `reviewed` means the file was opened with `read_file`.
 ### Lead lifecycle
 
 ```
-Discovery calls write_lead(...) and filter_lead(...)
+Discovery calls write_lead(...) with confidence, reasoning, traces, fix
+location, and root cause
   └─ Candidate remains a hypothesis regardless of discovery self-score
+  └─ Matching worker observations add evidence to the same lead
+  └─ The worker sees related open leads and may call merge_lead(...)
+Reconciliation groups remaining candidates before validation
+An optional bounded model pass checks uncertain source-related pairs and only
+merges them when it names one shared fix in the cited files
+A fix-grouping model pass then reviews leads that share any cited file and
+merges groups that one code change fixes. The named fix file and line must
+exist and be cited by every member.
 Independent validator calls validate_candidate(...)
-  ├─ confirmed + confidence ≥ 0.7 → reportable
+  ├─ confirmed → reportable (confidence is recorded but does not filter)
   ├─ dismissed → retained with counterevidence, not reportable
   └─ inconclusive → retained with explicit proof gaps, not reportable
+Confirmed leads receive a final duplicate check. Two leads whose validator fix
+locations name the same file and function (or lines within five of each other)
+merge even across categories when their root causes agree. A second
+fix-grouping model pass then reviews confirmed leads. Merged leads keep both
+validator notes.
 Attack-path analyst calls record_attack_path(...) for reportable candidates
   └─ Ordered nodes, impact, severity reasoning, and dynamic-test objective persisted
 Final sync upserts candidates by stable fingerprint, preventing rerun duplicates
 ```
+
+Candidate creation and discovery scoring are one database operation. Resumed
+checkpoints from older versions may contain unscored candidates; these are closed
+as inconclusive instead of being left pending. Validation cannot complete while
+any scored candidate still has a pending verdict. Reconciliation totals are
+calculated after candidates are split by root cause.
+New scans assign injection, access, and logic checks for each route partition to
+one worker. That worker also reviews a bounded number of sinks in its route
+files. While tracing a route, it can claim a helper sink after opening both
+the route file and the sink line. The claimed sink needs its own result. Sink
+workers start afterward for unclaimed sinks and any excess local sinks. Each
+security check still gets its own work item and disposition. Reconciliation
+records why each candidate was joined. Resumed scans keep their existing worker
+assignments.
 
 ### ScanLead entity (`services/scan_leads.py`)
 
@@ -1844,7 +1849,7 @@ Final sync upserts candidates by stable fingerprint, preventing rerun duplicates
 | `title` / `description` | Human-readable vulnerability description |
 | `category` | OWASP category slug (e.g. `"API1"` or `"A03"`) |
 | `severity` | `critical` · `high` · `medium` · `low` |
-| `confidence` | 0.0–1.0; the SAST policy controls the reportable minimum |
+| `confidence` | 0.0–1.0; recorded for review, does not decide whether a lead is reportable |
 | `classification` / `discovery_strategy` | Exploitability class and baseline, threat, sink, deterministic, dependency, or closure provenance |
 | `location` | Source file path and line reference |
 | `evidence` | Code snippet or supporting text |
@@ -1879,32 +1884,70 @@ test unless that persisted copy succeeds.
 
 SAST scans use the same task-registry pattern as web and API scans. Stop cancels the run, while Pause waits for a safe agent-step boundary and keeps pending candidates intact. Discovery, each validator, and attack-path analysis save their LLM transcript and step count in `PhaseCheckpoint` rows after every completed tool exchange. Candidate state and file-review receipts are saved separately. Resume re-extracts the immutable source ZIP, restores those checkpoints, skips completed phases and validators, and continues the interrupted conversation without superseding existing leads.
 
+The SAST concurrent LLM request setting limits how many discovery and validation agent calls can wait on provider responses at once. Increasing it also increases the worker and validator pools, while the run-level LLM gate ensures other SAST phases share the same overall limit.
+
+Deep discovery budgets are configured on the SAST tab in Agent Settings. Fixed mode gives each baseline or threat worker the configured value. Adaptive mode starts from the configured minimum and adds capacity for assigned source items, security checks, and unique files, up to the configured allocation maximum. The selected budget and its inputs are stored on `SastWorker`. If a resumed worker already used its saved allocation, it receives another bounded allocation without resetting its checkpoint step count.
+
 Temporary provider connection failures are retried with bounded backoff. If the provider remains unavailable, the run is paused with reason `network` instead of failed. A process restart also changes an orphaned `scanning` run to a resumable `paused` run after removing its disposable extraction directory. Browser or SSE disconnection does not affect the server-side scan task.
 
 The cross-process workspace lease is checked before startup recovery changes a SAST run, so starting a second AESPA process does not mark a live scan as interrupted. A genuine interruption writes a `restart_recovery` entry to the phase log. Agent Activity persists queue, start, and terminal events for each discovery worker and candidate validator. Runs created before these events were added rebuild the available discovery-worker history from `SastWorker` rows and completed validator activity from phase checkpoints.
 
 ---
 
-### Benchmark Lab isolation and comparisons
+### Benchmark Lab extension
 
-Benchmark Lab is an evaluator over completed ordinary `SastRun` rows; it never
-starts or alters a scan. Ground truth is stored only in `BenchmarkDataset` and is
-not included in scanner APIs, prompts, checkpoints, evidence receipts, SAST
-exports, or lead handoffs. Evaluation performs answer-key/source digest and
-evidence-access checks before scoring. Deterministic mode uses explainable
-location/category/root-cause similarity. Assisted mode gives the evaluator model
-only canonical ground truth, completed lead output, and deterministic proposals;
-it has no repository tools. Human-reviewed mode leaves every proposal unreviewed
-until an operator records an audited override.
+Benchmark Lab is a bundled, disabled-by-default extension. It compares completed
+Site, API, and SAST scans with uploaded ground truth and never starts or changes a
+scan. A Site or API retains one active ground truth file for later scans. SAST
+comparisons use a new upload or a file saved for a Site or API. Each result saves
+copies of the ground truth and scan findings it compared, so later changes do
+not alter it. The result lists every expected finding as full, partial, or
+missing. The user can select the scan's Test Lead model or another saved model.
+The model must return one valid decision for every expected finding. If the model
+is unavailable or returns an incomplete answer, no result is saved. Users can
+review, correct, and delete saved results. New runs of the older SAST evaluation
+workflow also require a model; existing evaluations remain readable.
+The Site view has a Summary chart, an Analyses table, and a New comparison form.
+The chart plots scan cost against the number of full and partial findings, with
+filters for scan type and model. New results save the run's recorded cost. Older
+results use the current run cost when the run is still available. A SAST result
+using ground truth saved for one Site or API is linked to that target.
+Each result also saves the Test Lead model for a Site or API scan, and the SAST
+model for a SAST scan. If a Site or API scan imported SAST leads, the result
+lists the model for each source SAST run. Imported leads are matched by run type
+and ID so Site and API runs with the same numeric ID stay separate.
 
-`BenchmarkComparison` groups two or more completed evaluations of the same
-dataset without executing new scans. Contaminated evaluations are excluded by
-default. The comparison stores median/range metrics, per-item detection
-frequency, and pass/fail results for configured minimum or maximum thresholds.
-The navigation and APIs remain hidden from the sidebar until the persisted
-Testing Features toggle is enabled; hiding it does not delete evaluator data.
+Ground truth and comparison results stay in the extension database. They are not
+included in scanner prompts, checkpoints, evidence receipts, SAST exports, or
+lead handoffs. The older SAST evaluation and repeated-run comparison routes
+remain available for saved work. Its routes are served below
+`/extension/aespa.benchmarking/`, and its datasets, results, evaluations,
+matches, and comparisons use an isolated extension SQLite database
+with `benchmarking_` table names. Enabling the extension exposes its navigation
+and routes. Disabling it removes both cleanly, closes its database engine, and retains
+the database file for a later re-enable without affecting ordinary SAST runs.
+On first enable after the rename, the extension copies data from the old
+`aespa.sast-benchmarking.db` file into `aespa.benchmarking.db` and keeps the old
+file. Its previous enabled setting is also used until the new extension setting
+is saved.
 
-## 18. Systems & Multi-Repository Campaigns
+## 18. Extensions
+
+**Files**: `src/aespa/extensions/`, `extensions/`, `src/aespa/api/extensions.py`, `src/aespa/services/sast_sources.py`, `src/aespa/services/external_scans.py`
+
+AESPA loads trusted Python extensions at startup. Shipped extensions live in the repository's top-level `extensions/` directory and are included as runtime data in desktop builds. The extension manager checks both direct child folders and `<author>/<extension>` folders under that directory and the configured user extension directory for `extension.toml`. Each manifest declares its ID, version, AESPA extension API version, entrypoint, and capabilities. Load failures are kept as diagnostics and do not stop other extensions or the application. Enabled state is stored in the database. Disabling an extension unloads its capabilities without importing its code, and enabling it reloads the registry immediately.
+
+Extensions register typed capabilities through `ExtensionRegistry`. They do not add FastAPI routes, frontend modules, or database models. The `sast.source_provider` capability describes settings fields, new-run fields, an availability check, and an asynchronous materializer. The `web.active_scanner` capability selects web scan candidates and returns findings from an external scanner. The frontend reads extension descriptions from `/api/extensions` and source provider descriptions from `/api/extensions/source-providers`.
+
+Extensions may declare `author` and `secrets_namespace` in their manifest. Secret settings use a password field on each extension's settings page, are stored separately from ordinary settings under `<author>.<secrets_namespace>`, and are never returned by the settings API. Runtime contexts expose a secret store bound to that full namespace. Extensions can also declare settings without registering a SAST source provider.
+
+`sast_sources.start_source_preparation()` owns the background lifecycle. It asks the provider for an archive, extracts it using the same SAST limits, creates a normalized archive, calculates its checksum, saves source provenance on `SastRun`, and optionally starts the ordinary scanner. Extension settings are stored separately by extension ID. Secret fields are stored under the namespace declared by the extension and are redacted from API responses.
+
+See `docs/extensions.md` for the extension API contract and bundled implementations.
+
+---
+
+## 19. Systems & Multi-Repository Campaigns
 
 **Files**: `src/aespa/services/systems.py`, `src/aespa/services/campaigns.py`, `src/aespa/services/correlation.py`, `src/aespa/services/component_facts.py`, `src/aespa/services/component_mapper.py`, `src/aespa/services/source_tools.py`, `src/aespa/api/systems.py`
 

@@ -386,6 +386,12 @@ class SastRunSummary(BaseModel):
     collection_id: int | None
     document_id: int | None
     source_filename: str | None
+    source_provider: str = "upload"
+    source_locator: str | None = None
+    source_requested_ref: str | None = None
+    source_revision: str | None = None
+    source_archive_sha256: str | None = None
+    source_metadata_json: str | None = None
     name: str
     analysis_mode: Literal["light", "deep"] = "deep"
     status: str
@@ -468,6 +474,7 @@ LLMProviderAPILiteral = Literal[
     "openai_compatible",
     "openrouter",
     "google",
+    "google_vertex",
     "bedrock",
     "bedrock_mantle",
     "azure_openai",
@@ -539,6 +546,11 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "gemini-1.5-pro",
         "gemini-1.5-flash",
     ],
+    "google_vertex": [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    ],
     "bedrock": [
         "global.anthropic.claude-opus-4-8",
         "global.anthropic.claude-sonnet-4-6",
@@ -604,11 +616,11 @@ class LLMProviderConfigIn(BaseModel):
     base_url: str | None = None
     username: str | None = Field(default=None, max_length=255)
     project_id: str | None = Field(default=None, max_length=120)
+    aws_profile: str | None = Field(default=None, max_length=255)
+    location: str | None = Field(default=None, max_length=120)
     models: list[str] = Field(default_factory=list, min_length=1)
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     api_key: str | None = None
-    max_tpm: int | None = Field(default=None, ge=1)
-    max_rpm: int | None = Field(default=None, ge=1)
 
     @field_validator("models")
     @classmethod
@@ -638,12 +650,39 @@ class LLMProviderConfigIn(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_codex_connection(self) -> "LLMProviderConfigIn":
+    def _validate_provider_connection(self) -> "LLMProviderConfigIn":
         if self.api_format == "openai_codex":
             self.api_key = None
             self.base_url = None
             self.username = None
             self.project_id = None
+            self.location = None
+        elif self.api_format == "google_vertex":
+            if not self.project_id:
+                raise ValueError("project_id is required for Google Vertex AI")
+            self.location = self.location or "global"
+            self.api_key = None
+            self.base_url = None
+            self.username = None
+            for model in self.models:
+                lowered = model.casefold()
+                if (
+                    lowered.startswith(
+                        ("projects/", "models/", "tunedmodels/", "endpoints/")
+                    )
+                    or "/endpoints/" in lowered
+                    or "/models/" in lowered
+                    and not lowered.startswith("publishers/")
+                ):
+                    raise ValueError(
+                        "Google Vertex AI models must be serverless publisher model IDs"
+                    )
+                if "/" not in model and not lowered.startswith("gemini-"):
+                    raise ValueError(
+                        "Use a Gemini model ID or a publisher/model ID for Google Vertex AI"
+                    )
+        else:
+            self.location = None
         return self
 
 
@@ -656,11 +695,12 @@ class LLMProviderConfigOut(BaseModel):
     base_url: str | None
     username: str | None = None
     project_id: str | None = None
+    aws_profile: str | None = None
+    location: str | None = None
     models: list[str] = Field(default_factory=list)
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key: str | None = None
-    max_tpm: int | None = None
     updated_at: datetime
 
 
@@ -673,6 +713,9 @@ class LLMModelDiscoveryRequest(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     username: str | None = None
+    project_id: str | None = None
+    aws_profile: str | None = None
+    location: str | None = None
 
 
 class LLMModelDiscoveryOut(BaseModel):
@@ -702,6 +745,8 @@ class LLMConfigIn(BaseModel):
     name: Optional[str] = Field(default=None, max_length=120)
     provider_id: int
     model: str = Field(min_length=1)
+    max_tpm: int | None = Field(default=None, ge=1)
+    max_rpm: int | None = Field(default=None, ge=1)
     max_tokens: int = Field(default=16384, ge=1, le=256000)
     # ``None`` asks the server to use the detected model context window.
     max_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
@@ -744,7 +789,11 @@ class LLMConfigOut(BaseModel):
     base_url: str | None
     username: str | None = None
     project_id: str | None = None
+    aws_profile: str | None = None
+    location: str | None = None
     model: str
+    max_tpm: int | None = None
+    max_rpm: int | None = None
     max_tokens: int
     max_context_tokens: int
     context_limit_source: str = "configured"
@@ -771,9 +820,11 @@ class LLMProfileOut(BaseModel):
     id: int
     name: str
     is_active: bool
-    default_model_id: int | None = None
+    extension_id: str | None = None
+    extension_name: str | None = None
+    default_model_id: int | str | None = None
     default_model_name: str | None = None
-    role_models: dict[str, int] = Field(default_factory=dict)
+    role_models: dict[str, int | str] = Field(default_factory=dict)
     role_model_names: dict[str, str | None] = Field(default_factory=dict)
     updated_at: datetime
 
@@ -803,6 +854,7 @@ class ScannerPolicyBase(BaseModel):
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)
+    dast_max_concurrent_llm_requests: int = Field(default=4, ge=1, le=100)
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=120.0)
     min_delay_s: float = Field(default=0.05, ge=0.0, le=60.0)
     max_request_body_bytes: int = Field(default=65536, ge=0, le=10 * 1024 * 1024)
@@ -822,15 +874,17 @@ class ScannerPolicyBase(BaseModel):
     strict_locator_enforcement: bool = True
     sast_rate_limit_findings: bool = True
     sast_race_condition_findings: bool = True
-    sast_audit_logging_findings: bool = False
+    sast_audit_logging_findings: bool = True
     sast_defense_in_depth_findings: bool = False
     sast_dependency_findings: bool = True
     sast_min_severity: Literal["low", "medium", "high", "critical"] = "low"
-    sast_min_confidence: float = Field(default=0.35, ge=0, le=1)
+    sast_budget_mode: Literal["adaptive", "fixed"] = "adaptive"
     sast_baseline_budget: int = Field(default=80, ge=1, le=1000)
     sast_threat_budget: int = Field(default=60, ge=1, le=1000)
+    sast_worker_budget_max: int = Field(default=250, ge=1, le=1000)
     sast_closure_budget: int = Field(default=40, ge=1, le=1000)
     sast_validator_budget: int = Field(default=50, ge=1, le=1000)
+    sast_max_concurrent_llm_requests: int = Field(default=4, ge=1, le=100)
 
     @field_validator("methods_by_mode", mode="before")
     @classmethod
@@ -877,6 +931,12 @@ class ScannerPolicyBase(BaseModel):
         ):
             raise ValueError(
                 "methods_by_mode must include methods for the selected scan_mode"
+            )
+        if self.sast_budget_mode == "adaptive" and self.sast_worker_budget_max < max(
+            self.sast_baseline_budget, self.sast_threat_budget
+        ):
+            raise ValueError(
+                "sast_worker_budget_max must be at least the baseline and threat minimums"
             )
         return self
 
@@ -1007,51 +1067,6 @@ class UpstreamProxyConfigOut(UpstreamProxyConfigBase):
     updated_at: datetime
 
 
-class BurpRestApiConfigBase(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    enabled: bool = False
-    api_url: str = Field(default="http://127.0.0.1:1337", min_length=1, max_length=500)
-    api_key: str | None = None
-    scan_configuration_name: str | None = Field(
-        default="Audit checks - all except time-based detection methods",
-        max_length=200,
-    )
-    scan_sqli: bool = True
-    scan_xss: bool = True
-    scan_command_injection: bool = True
-    scan_path_traversal: bool = True
-    scan_ssrf: bool = True
-    scan_xxe: bool = True
-    scan_ssti: bool = True
-
-    @field_validator("api_url")
-    @classmethod
-    def _normalize_api_url(cls, v: str) -> str:
-        v = v.strip().rstrip("/")
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("api_url must start with http:// or https://")
-        return v
-
-    @field_validator("scan_configuration_name")
-    @classmethod
-    def _normalize_scan_configuration_name(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        v = v.strip()
-        return v or None
-
-
-class BurpRestApiConfigIn(BurpRestApiConfigBase):
-    pass
-
-
-class BurpRestApiConfigOut(BurpRestApiConfigBase):
-    has_api_key: bool = False
-    api_key: str | None = None
-    updated_at: datetime
-
-
 # ── Specialist agent config schemas ──────────────────────────────────────────
 
 
@@ -1075,7 +1090,6 @@ class SpecialistAgentConfigBase(BaseModel):
     dispatch_crypto: bool = True
     dispatch_config: bool = False
     dispatch_file_upload: bool = True
-    trigger_specialist_on_burp: bool = False
 
 
 class SpecialistAgentConfigIn(SpecialistAgentConfigBase):
@@ -1296,6 +1310,7 @@ class BenchmarkEvaluationIn(BaseModel):
     sast_run_id: int = Field(gt=0)
     dataset_id: int = Field(gt=0)
     match_mode: Literal["deterministic", "assisted", "human_reviewed"] = "assisted"
+    llm_profile_id: int | None = Field(default=None, gt=0)
     policy: dict = Field(default_factory=dict)
     notes: str = Field(default="", max_length=10000)
 
@@ -1434,18 +1449,23 @@ class LLMExportProviderItem(BaseModel):
     base_url: str | None = None
     username: str | None = None
     project_id: str | None = None
+    aws_profile: str | None = None
+    location: str | None = None
     models: list[str]
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key: str | None = None
-    max_tpm: int | None = None
-    max_rpm: int | None = None
+    # Accepted when importing version 1 exports. Version 2 exports omit these.
+    max_tpm: int | None = Field(default=None, exclude=True)
+    max_rpm: int | None = Field(default=None, exclude=True)
 
 
 class LLMExportProfileItem(BaseModel):
     name: str
     provider_name: str
     model: str
+    max_tpm: int | None = None
+    max_rpm: int | None = None
     max_tokens: int = 16384
     max_context_tokens: int | None = None
     temperature: Optional[float] = None
@@ -1456,7 +1476,7 @@ class LLMExportProfileItem(BaseModel):
 
 
 class LLMConfigExport(BaseModel):
-    version: int = 1
+    version: int = 2
     exported_at: datetime
     providers: list[LLMExportProviderItem]
     profiles: list[LLMExportProfileItem]

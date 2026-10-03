@@ -3,7 +3,6 @@ on:
   pull_request:
     paths:
       - 'frontend/**'
-      - 'src/aespa/web/**'
       - '.github/workflows/frontend.yml'
   push:
     branches: [main]

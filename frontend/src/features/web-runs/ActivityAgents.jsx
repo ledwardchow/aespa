@@ -8,14 +8,7 @@ import { useEffect } from "react";
 const isAliceWelcomeMessage = (message) =>
   message?.id === "welcome" || String(message?.id || "").startsWith("welcome-");
 
-export function ActivityAgents({
-  runId,
-  agents,
-  run,
-  thinkingStatus,
-  activityLog,
-  burpIntegrationEnabled = null,
-}) {
+export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog }) {
   const {
     collapsedAgentIds,
     toggleAgentId,
@@ -66,7 +59,7 @@ export function ActivityAgents({
       {(() => {
         const hasBurpActivity = agents.some((agent) => representsAgent(agent, { id: "burp" }));
         const roster = defaultAgentRoster().filter(
-          (agent) => agent.id !== "burp" || burpIntegrationEnabled !== false || hasBurpActivity,
+          (agent) => agent.id !== "burp" || hasBurpActivity,
         );
         // Container slots must always render as
         // their placeholder so the multi-agent container row fires correctly.

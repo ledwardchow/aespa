@@ -2,12 +2,13 @@ import { useState } from "react";
 
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { SastAgentGroupView, SastAgentRoster } from "./SastAgentRoster.jsx";
-import { sastGroupHasActiveAgent } from "./sastAgentPresentation.js";
+import { sastGroupHasActiveAgent, sastGroupHasAgents } from "./sastAgentPresentation.js";
 
 const GROUP_TABS = [
-  { key: "injection", label: "Injection", groupId: "sast-injection-workers" },
-  { key: "access", label: "Access", groupId: "sast-access-workers" },
-  { key: "logic", label: "Logic", groupId: "sast-logic-workers" },
+  { key: "review", label: "Review", groupId: "sast-review-workers" },
+  { key: "injection", label: "Injection", groupId: "sast-injection-workers", legacy: true },
+  { key: "access", label: "Access", groupId: "sast-access-workers", legacy: true },
+  { key: "logic", label: "Logic", groupId: "sast-logic-workers", legacy: true },
   { key: "sink", label: "Sink", groupId: "sast-sink-workers" },
   { key: "validator", label: "Validators", groupId: "sast-validators" },
 ];
@@ -32,7 +33,10 @@ export function ActivityView({
   analysisMode,
 }) {
   const [subTab, setSubTab] = useState("agents");
-  const selectedGroup = GROUP_TABS.find((item) => item.key === subTab);
+  const groupTabs = GROUP_TABS.filter(
+    (item) => !item.legacy || sastGroupHasAgents(agentLog, item.key),
+  );
+  const selectedGroup = groupTabs.find((item) => item.key === subTab);
   return (
     <div className="sast-activity-panel">
       <TokenUsageBar
@@ -49,7 +53,7 @@ export function ActivityView({
             Agents
             {agentLog.some((entry) => entry.status === "active") ? " ●" : ""}
           </button>
-          {GROUP_TABS.map((item) => (
+          {groupTabs.map((item) => (
             <button
               key={item.key}
               className={subTab === item.key ? "active" : ""}

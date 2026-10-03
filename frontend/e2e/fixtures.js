@@ -79,6 +79,83 @@ export const campaign = {
 
 export async function installFixtures(page, { empty = false } = {}) {
   const writes = [];
+  const sastBenchmarkingExtension = {
+    id: "aespa.benchmarking",
+    name: "Benchmark Lab",
+    author: "aespa",
+    version: "1.0.0",
+    aespa_api: "1",
+    capabilities: ["api.routes"],
+    enabled: false,
+    status: "disabled",
+    settings: {},
+    settings_fields: [],
+    source_providers: [],
+    web_scanners: [],
+  };
+  await page.route("**/extension/aespa.benchmarking/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const tables = {
+      "/extension/aespa.benchmarking/targets": {
+        sites: [
+          {
+            id: 1,
+            name: site.name,
+            dataset: {
+              id: 1,
+              name: "Fixture ground truth",
+              item_count: 2,
+            },
+            runs: [
+              {
+                id: 1,
+                name: "Fixture scan",
+                status: "complete",
+                default_evaluation_model: { id: 1, name: "Fixture model" },
+              },
+            ],
+          },
+        ],
+        apis: [{ id: 1, name: collection.name, dataset: null, runs: [] }],
+        sast_runs: [{ id: 1, name: sast.name, status: "completed" }],
+      },
+      "/extension/aespa.benchmarking/datasets": [
+        { id: 1, name: "Fixture ground truth", item_count: 2 },
+      ],
+      "/extension/aespa.benchmarking/results": [
+        {
+          id: 1,
+          run_kind: "site",
+          run_id: 1,
+          target_kind: "site",
+          target_id: 1,
+          run_name: "Fixture scan",
+          scan_cost_usd: 0.42,
+          comparison: { method: "model", model: { id: 1, name: "Fixture model" } },
+          scan_models: {
+            test_lead: { id: 1, name: "Fixture Test Lead", model: "fixture-model" },
+            sast: [],
+          },
+          created_at: "2026-09-27T00:00:00Z",
+          summary: { full: 1, partial: 0, missing: 1 },
+          ground_truth: {
+            name: "Fixture ground truth",
+            items: [
+              { external_id: "GT-1", title: "SQL injection" },
+              { external_id: "GT-2", title: "Missing audit logs" },
+            ],
+          },
+          findings: [{ id: 4, reference: "SITE-004", title: "SQL injection" }],
+          rows: [
+            { external_id: "GT-1", disposition: "full", finding_ids: [4], reason: "Matched" },
+            { external_id: "GT-2", disposition: "missing", finding_ids: [], reason: "No match" },
+          ],
+        },
+      ],
+      "/extension/aespa.benchmarking/evaluations": [],
+    };
+    return route.fulfill({ json: tables[path] || [] });
+  });
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -86,6 +163,13 @@ export async function installFixtures(page, { empty = false } = {}) {
     if (!path.startsWith("/api/")) return route.continue();
     if (request.method() !== "GET") {
       writes.push({ path, method: request.method(), body: request.postDataJSON() });
+      if (path === "/api/extensions/aespa.benchmarking/enabled") {
+        sastBenchmarkingExtension.enabled = request.postDataJSON()?.enabled ?? false;
+        sastBenchmarkingExtension.status = sastBenchmarkingExtension.enabled
+          ? "loaded"
+          : "disabled";
+        return route.fulfill({ json: sastBenchmarkingExtension });
+      }
       return route.fulfill({ json: request.postDataJSON() || {} });
     }
     const tables = {
@@ -127,6 +211,7 @@ export async function installFixtures(page, { empty = false } = {}) {
         panel_enabled: false,
       },
       "/api/settings/cloudflare-access": { audience: null },
+      "/api/extensions": [sastBenchmarkingExtension],
       "/api/settings/code-execution": {
         enabled: true,
         image_ref: "ledwardchow/aespa-python-executor:0.1",
