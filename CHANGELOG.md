@@ -4,6 +4,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+## [PR #275] October 3 Update - extensions, Benchmark Lab and scan improvements
+
 ### New features
 
 - **Extension LLM catalogs**: Extensions can keep CLI and SDK based LLM providers, models, and profiles in their own storage and show them in LLM Settings with an Extension storage label. Their profiles can be selected for web, API, SAST, and campaign scans or set as the default. Extension code can also resolve those profiles for its own LLM calls without copying credentials or model settings into AESPA's database.
