@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlmodel import Session, select
 
@@ -62,6 +63,11 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 def _model_discovery_error(api_format: str) -> HTTPException:
+    if api_format == "openai_chatgpt_plan":
+        return HTTPException(
+            status_code=502,
+            detail="Could not load models for this ChatGPT account. Check that it is signed in.",
+        )
     if api_format == "openai_compatible":
         return HTTPException(
             status_code=502,
@@ -136,6 +142,78 @@ async def logout_codex() -> dict:
     from aespa.services import codex_provider
 
     return await codex_provider.logout()
+
+
+@router.get("/llm/chatgpt-plan/status")
+def chatgpt_plan_status() -> dict:
+    from aespa.services import chatgpt_plan
+
+    return chatgpt_plan.status()
+
+
+@router.post("/llm/chatgpt-plan/check-access")
+async def check_chatgpt_plan_access(payload: dict[str, str | bool]) -> dict:
+    from aespa.services import chatgpt_plan
+
+    client_id = payload.get("client_id")
+    if not isinstance(client_id, str) or not client_id:
+        raise HTTPException(
+            status_code=400, detail="Select a signed-in ChatGPT account"
+        )
+    try:
+        return await chatgpt_plan.check_access(
+            client_id, force=payload.get("force") is True
+        )
+    except (RuntimeError, httpx.HTTPError) as exc:
+        raise HTTPException(
+            status_code=502, detail="Could not check ChatGPT model access"
+        ) from exc
+
+
+@router.post("/llm/chatgpt-plan/login")
+async def start_chatgpt_plan_login(
+    payload: dict[str, str | None] | None = None,
+) -> dict:
+    from aespa.services import chatgpt_plan
+
+    try:
+        return await chatgpt_plan.start_login((payload or {}).get("client_id"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/llm/chatgpt-plan/login/{login_id}")
+def chatgpt_plan_login_status(login_id: str) -> dict:
+    from aespa.services import chatgpt_plan
+
+    try:
+        return chatgpt_plan.login_status(login_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="ChatGPT sign-in was not found"
+        ) from exc
+
+
+@router.post("/llm/chatgpt-plan/select")
+async def select_chatgpt_plan_account(payload: dict[str, str]) -> dict:
+    from aespa.services import chatgpt_plan
+
+    try:
+        await chatgpt_plan.select_account(payload.get("client_id", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return chatgpt_plan.status()
+
+
+@router.post("/llm/chatgpt-plan/logout")
+async def logout_chatgpt_plan(payload: dict[str, str]) -> dict:
+    from aespa.services import chatgpt_plan
+
+    try:
+        await chatgpt_plan.sign_out(payload.get("client_id", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return chatgpt_plan.status()
 
 
 @router.get("/llm/copilot/accounts")
@@ -432,11 +510,13 @@ async def discover_llm_models(
         log.warning(
             "Explicit model discovery for format '%s' failed: %s", api_format, exc
         )
-        if api_format == "openai_compatible":
+        if api_format in {"openai_compatible", "openai_chatgpt_plan"}:
             raise _model_discovery_error(api_format) from exc
 
     fallback = list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
-    if api_format == "openai_compatible" and not fallback:
+    if api_format == "openai_chatgpt_plan" or (
+        api_format == "openai_compatible" and not fallback
+    ):
         raise _model_discovery_error(api_format)
     return fallback
 
@@ -486,6 +566,8 @@ async def discover_llm_model_options(
         result = await settings_service.discover_model_options_for_format(
             **discovery_kwargs
         )
+        if api_format == "openai_chatgpt_plan" and not result.get("models"):
+            raise _model_discovery_error(api_format)
         capabilities = dict(result.get("capabilities", {}))
         for model in payload.models:
             if model not in capabilities:
@@ -495,12 +577,13 @@ async def discover_llm_model_options(
         return LLMModelDiscoveryOut(
             models=list(result.get("models", [])),
             capabilities=capabilities,
+            catalog_complete=bool(result.get("catalog_complete", True)),
         )
     except Exception as exc:
         log.warning(
             "Structured model discovery for format '%s' failed: %s", api_format, exc
         )
-        if api_format == "openai_compatible":
+        if api_format in {"openai_compatible", "openai_chatgpt_plan"}:
             raise _model_discovery_error(api_format) from exc
         models = payload.models or list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
         capabilities = {

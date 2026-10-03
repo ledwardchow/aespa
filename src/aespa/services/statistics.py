@@ -89,6 +89,7 @@ _INCLUSIVE_INPUT_PROVIDERS = {
     "google",
     "google_vertex",
     "openai_codex",
+    "openai_chatgpt_plan",
     "google_antigravity",
 }
 

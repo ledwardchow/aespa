@@ -44,6 +44,7 @@ function providerLabel(provider) {
     github_copilot: "GitHub Copilot",
     factory_droid: "Factory Droid",
     openai_codex: "OpenAI Codex subscription",
+    openai_chatgpt_plan: "ChatGPT plan",
     azure_openai: "Azure OpenAI",
     azure_foundry: "Azure AI Foundry",
     azure_foundry_openai: "Azure AI Foundry",

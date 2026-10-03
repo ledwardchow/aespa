@@ -471,6 +471,7 @@ def estimate_tokens(
             vision_tokens = 1600
         elif provider_name in (
             "openai",
+            "openai_chatgpt_plan",
             "azure_openai",
             "openrouter",
             "github_copilot",
@@ -776,6 +777,7 @@ def _uncached_run_input(model: str, counts: dict[str, Any]) -> int:
         "google",
         "google_vertex",
         "openai_codex",
+        "openai_chatgpt_plan",
         "google_antigravity",
     }
     if provider == "bedrock":
@@ -940,6 +942,7 @@ def _record_usage(
         "google",
         "google_vertex",
         "openai_codex",
+        "openai_chatgpt_plan",
         "google_antigravity",
     }
     normalized_input = max(0, reported_input)
@@ -2117,24 +2120,51 @@ async def _stream_chat_completion_impl(
         config.provider == "bedrock_mantle"
         and _bedrock_mantle_model_api(config.model) == "responses"
     ) or _uses_openai_responses(config):
-        client = _make_responses_client(config)
+        client = (
+            await _make_chatgpt_plan_client(config)
+            if config.provider == "openai_chatgpt_plan"
+            else _make_responses_client(config)
+        )
         r_input = [
             {"type": "message", "role": m["role"], "content": m["content"]}
             for m in messages
             if m.get("role") in ("user", "assistant")
         ]
         try:
-            stream = await _create_response(
-                client,
-                _responses_request_kwargs(
-                    config, input=r_input, instructions=system_message, stream=True
-                ),
+            request_kwargs = _responses_request_kwargs(
+                config, input=r_input, instructions=system_message, stream=True
             )
+            if config.provider == "openai_chatgpt_plan":
+                await _add_daybreak_access(config, request_kwargs)
+            stream = await _create_response(client, request_kwargs)
+            completed = False
             async for event in stream:
                 if getattr(event, "type", None) == "response.output_text.delta":
                     delta = getattr(event, "delta", None)
                     if delta:
                         yield delta
+                elif config.provider == "openai_chatgpt_plan":
+                    event_type = getattr(event, "type", None)
+                    if event_type == "response.completed":
+                        completed = True
+                    elif event_type == "response.failed":
+                        response = getattr(event, "response", None)
+                        error = getattr(response, "error", None)
+                        code = str(getattr(error, "code", None) or "unknown_error")
+                        if code in {
+                            "subscription_sharing_usage_limit_exceeded",
+                            "subscription_sharing_usage_unavailable",
+                        }:
+                            raise LLMQuotaPauseError(
+                                "ChatGPT plan usage is unavailable or exhausted"
+                            )
+                        raise RuntimeError(f"ChatGPT plan response failed: {code}")
+                    elif event_type == "response.incomplete":
+                        raise RuntimeError("ChatGPT plan response was incomplete")
+            if config.provider == "openai_chatgpt_plan" and not completed:
+                raise RuntimeError("ChatGPT plan stream ended early")
+        except LLMQuotaPauseError:
+            raise
         except Exception as e:
             log.exception("Error in OpenAI Responses stream")
             raise RuntimeError(f"OpenAI Responses stream failed: {e}") from e
@@ -2397,6 +2427,8 @@ def _is_gpt_5_6(model: str) -> bool:
 
 def _uses_openai_responses(config: LLMConfig) -> bool:
     """Return whether this model uses an OpenAI-compatible Responses API."""
+    if config.provider == "openai_chatgpt_plan":
+        return True
     if config.provider == "google_vertex":
         model_name = (config.model or "").lower().split("/")[-1]
         return not model_name.startswith("gemini-")
@@ -3114,6 +3146,93 @@ def _make_responses_client(config: LLMConfig) -> Any:
     return AsyncOpenAI(**kwargs)
 
 
+async def _make_chatgpt_plan_client(config: LLMConfig) -> Any:
+    from openai import AsyncOpenAI
+
+    from aespa.services import chatgpt_plan
+
+    return AsyncOpenAI(
+        api_key=await chatgpt_plan.access_token(getattr(config, "username", None)),
+        base_url="https://api.openai.com/v1",
+        max_retries=0,
+        **_llm_client_kwargs(),
+    )
+
+
+async def _add_daybreak_access(config: LLMConfig, kwargs: dict[str, Any]) -> None:
+    from aespa.services import chatgpt_plan
+
+    program = await chatgpt_plan.daybreak_program(
+        getattr(config, "username", None), config.model
+    )
+    if program:
+        kwargs["extra_body"] = {"access_programs": {"cyber": program}}
+
+
+async def _chatgpt_plan_response(
+    client: Any,
+    kwargs: dict[str, Any],
+    on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+) -> Any:
+    """Complete the required HTTP stream and reject failed or incomplete turns."""
+    completed = None
+    output_items: list[Any] = []
+    try:
+        stream = await client.responses.create(**kwargs)
+        async for event in stream:
+            event_type = getattr(event, "type", None)
+            if event_type == "response.output_text.delta" and on_text_delta:
+                delta = getattr(event, "delta", None)
+                if delta:
+                    await on_text_delta(delta)
+            elif event_type == "response.output_item.done":
+                item = getattr(event, "item", None)
+                if item is not None:
+                    output_items.append(item)
+            elif event_type == "response.completed":
+                completed = getattr(event, "response", None)
+            elif event_type == "response.failed":
+                response = getattr(event, "response", None)
+                error = getattr(response, "error", None)
+                code = str(getattr(error, "code", None) or "unknown_error")
+                if code in {
+                    "subscription_sharing_usage_limit_exceeded",
+                    "subscription_sharing_usage_unavailable",
+                }:
+                    raise LLMQuotaPauseError(
+                        "ChatGPT plan usage is unavailable or exhausted"
+                    )
+                raise RuntimeError(f"ChatGPT plan request failed: {code}")
+            elif event_type == "response.incomplete":
+                raise RuntimeError("ChatGPT plan response was incomplete")
+    except Exception as exc:
+        if isinstance(exc, LLMQuotaPauseError):
+            raise
+        body = getattr(exc, "body", None)
+        error = body.get("error", body) if isinstance(body, dict) else {}
+        code = error.get("code") if isinstance(error, dict) else None
+        if code in {
+            "subscription_sharing_usage_limit_exceeded",
+            "subscription_sharing_usage_unavailable",
+        }:
+            raise LLMQuotaPauseError(
+                "ChatGPT plan usage is unavailable or exhausted"
+            ) from exc
+        raise
+    if completed is None:
+        raise RuntimeError("ChatGPT plan stream ended without a completed response")
+    # Subscription streams can leave the final response.output empty even
+    # though completed message and function-call items arrived earlier.
+    if not getattr(completed, "output", None) and output_items:
+        if hasattr(completed, "model_copy"):
+            completed = completed.model_copy(update={"output": output_items})
+        else:
+            completed.output = output_items
+    if not getattr(completed, "output", None):
+        raise RuntimeError("ChatGPT plan completed without any output items")
+    return completed
+
+
 def _make_google_vertex_responses_client(config: LLMConfig) -> Any:
     """Build an ADC-authenticated client for Vertex's Responses endpoint."""
     from google import auth as google_auth
@@ -3164,6 +3283,25 @@ def _responses_request_kwargs(
         "input": input,
         "max_output_tokens": config.max_tokens,
     }
+    if config.provider == "openai_chatgpt_plan":
+        kwargs.pop("max_output_tokens")
+        kwargs["store"] = False
+        kwargs["stream"] = True
+        kwargs["include"] = ["reasoning.encrypted_content"]
+        if instructions is not None:
+            kwargs["instructions"] = instructions
+        if tools is not None:
+            kwargs["tools"] = [
+                {
+                    "type": "namespace",
+                    "name": "aespa",
+                    "description": "Tools provided by AESPA for this scan.",
+                    "tools": tools,
+                }
+            ]
+        if config.reasoning_effort:
+            kwargs["reasoning"] = {"effort": config.reasoning_effort}
+        return kwargs
     prompt_cache_key = _grok_prompt_cache_key(
         config,
         input=input,
@@ -3380,7 +3518,11 @@ def _extract_responses_text(resp: Any) -> str:
 async def _openai_responses(
     config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
 ) -> str:
-    client = _make_responses_client(config)
+    client = (
+        await _make_chatgpt_plan_client(config)
+        if config.provider == "openai_chatgpt_plan"
+        else _make_responses_client(config)
+    )
     if screenshot_b64:
         r_input: Any = [
             {
@@ -3396,9 +3538,19 @@ async def _openai_responses(
             }
         ]
     else:
-        r_input = prompt
+        r_input = (
+            [{"type": "message", "role": "user", "content": prompt}]
+            if config.provider == "openai_chatgpt_plan"
+            else prompt
+        )
     request_kwargs = _responses_request_kwargs(config, input=r_input)
-    resp = await _create_response(client, request_kwargs)
+    if config.provider == "openai_chatgpt_plan":
+        await _add_daybreak_access(config, request_kwargs)
+    resp = (
+        await _chatgpt_plan_response(client, request_kwargs)
+        if config.provider == "openai_chatgpt_plan"
+        else await _create_response(client, request_kwargs)
+    )
     _record_responses_usage(
         config,
         resp,
@@ -5559,6 +5711,7 @@ AGENTIC_LOOP_PROVIDERS = frozenset(
         "factory_droid",
         "github_copilot",
         "openai_codex",
+        "openai_chatgpt_plan",
         "google_antigravity",
         "anthropic",
         "azure_foundry_anthropic",
@@ -5751,7 +5904,12 @@ def _context_budget_for_request(
     leave less room in the model window. The effective value is request-local.
     """
     configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
-    minimum_output_tokens = min(configured, MIN_AGENT_OUTPUT_TOKENS)
+    provider = getattr(config.provider, "value", config.provider)
+    minimum_output_tokens = (
+        configured
+        if provider == "openai_chatgpt_plan"
+        else min(configured, MIN_AGENT_OUTPUT_TOKENS)
+    )
     context_limit = max(
         0,
         int(
@@ -5822,7 +5980,12 @@ def _fit_plain_prompt_to_context(
         )
 
     configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
-    minimum_output_tokens = min(configured, MIN_AGENT_OUTPUT_TOKENS)
+    provider = getattr(config.provider, "value", config.provider)
+    minimum_output_tokens = (
+        configured
+        if provider == "openai_chatgpt_plan"
+        else min(configured, MIN_AGENT_OUTPUT_TOKENS)
+    )
     initial_input = estimate_tokens(
         combined,
         provider=getattr(config.provider, "value", config.provider),
@@ -6557,19 +6720,30 @@ async def _call_with_tools_impl(
         config.provider == "bedrock_mantle"
         and _bedrock_mantle_model_api(config.model) == "responses"
     ) or _uses_openai_responses(config):
-        client = _make_responses_client(config)
+        client = (
+            await _make_chatgpt_plan_client(config)
+            if config.provider == "openai_chatgpt_plan"
+            else _make_responses_client(config)
+        )
         r_kwargs = _responses_request_kwargs(
             config,
             input=_ant_messages_to_responses(messages),
             instructions=system_message,
             tools=_ant_tools_to_responses(_active_tools),
         )
+        if config.provider == "openai_chatgpt_plan":
+            await _add_daybreak_access(config, r_kwargs)
         # Force a tool call unless disabled; if the model rejects forced tool
         # choice, _create_response retries once without it.
-        if getattr(config, "force_tool_choice", False):
+        if (
+            getattr(config, "force_tool_choice", False)
+            and config.provider != "openai_chatgpt_plan"
+        ):
             r_kwargs["tool_choice"] = "required"
         on_text_delta = _tool_text_delta_var.get()
-        if on_text_delta is None:
+        if config.provider == "openai_chatgpt_plan":
+            resp = await _chatgpt_plan_response(client, r_kwargs, on_text_delta)
+        elif on_text_delta is None:
             resp = await _create_response(client, r_kwargs)
         else:
             stream_kwargs = dict(r_kwargs)
@@ -6588,9 +6762,10 @@ async def _call_with_tools_impl(
                 raise RuntimeError("Responses API stream ended without a response")
 
         blocks = []
-        preserve_native_history = config.provider == "google_vertex" and (
-            config.model or ""
-        ).lower().startswith("xai/grok-")
+        preserve_native_history = config.provider == "openai_chatgpt_plan" or (
+            config.provider == "google_vertex"
+            and (config.model or "").lower().startswith("xai/grok-")
+        )
         native_history = []
         for item in getattr(resp, "output", None) or []:
             if preserve_native_history:
@@ -6623,7 +6798,11 @@ async def _call_with_tools_impl(
                     {
                         "type": "tool_use",
                         "id": getattr(item, "call_id", None),
-                        "name": getattr(item, "name", None),
+                        "name": (
+                            str(getattr(item, "name", "")).removeprefix("aespa.")
+                            if config.provider == "openai_chatgpt_plan"
+                            else getattr(item, "name", None)
+                        ),
                         "input": inp,
                         "text": None,
                     }

@@ -4,6 +4,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+### New features
+
+- **ChatGPT plan provider**: Sign in with ChatGPT in LLM Settings and use an eligible model in web, API, and SAST scans. AESPA loads the account's models when you sign in, checks models missing from the API list, and shows Daybreak Blue and Red access. Known models get their published context sizes and output budgets, with Luna set to xhigh thinking and Sol set to medium. AESPA keeps the full output budget free when fitting prompts into the context window. Scanner requests use the available Daybreak access for supported models and retain tool calls and text from streamed replies. The existing Codex subscription provider remains available.
+
 ### Housekeeping
 
 - **Dependency security updates**: Updated PyJWT to 2.15.0, urllib3 to 2.8.0, and the frontend's brace-expansion dependency to 1.1.21.

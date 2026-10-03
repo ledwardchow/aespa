@@ -102,6 +102,27 @@ test("new profiles choose a predictable first model without mutating the provide
   expect(provider.models).toEqual(["z", "a"]);
 });
 
+test("ChatGPT plan model drafts use documented limits and preferred thinking", () => {
+  const provider = {
+    id: 7,
+    name: "ChatGPT plan",
+    api_format: "openai_chatgpt_plan",
+    models: ["gpt-6-luna"],
+    model_capabilities: {
+      "gpt-6-luna": {
+        context_window_tokens: 1050000,
+        max_output_tokens: 128000,
+        default_effort: "xhigh",
+      },
+    },
+  };
+  expect(llmProfileToForm(null, [provider])).toMatchObject({
+    max_context_tokens: 1050000,
+    max_tokens: 128000,
+    reasoning_effort: "xhigh",
+  });
+});
+
 test("scan profile drafts retain role selections as select values", () => {
   const models = [
     { id: 2, provider_id: 10 },
