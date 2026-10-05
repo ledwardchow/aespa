@@ -18,6 +18,7 @@ from aespa.schemas import (
     LLMProviderConfigIn,
     LLMProviderConfigOut,
 )
+from aespa.services.model_capabilities import documented_model_capability
 from aespa.services.settings_values import (
     CONTEXT_WINDOW_FALLBACK,
     _json_dumps,
@@ -33,7 +34,20 @@ def _provider_models(provider: LLMProviderConfig) -> list[str]:
 
 def _provider_capabilities(provider: LLMProviderConfig) -> dict[str, dict]:
     value = _json_loads(getattr(provider, "model_capabilities_json", "{}"), {})
-    return value if isinstance(value, dict) else {}
+    capabilities = value if isinstance(value, dict) else {}
+    if provider.api_format != "openai_chatgpt_plan":
+        return capabilities
+    return {
+        model: {
+            **(
+                capabilities.get(model)
+                if isinstance(capabilities.get(model), dict)
+                else {}
+            ),
+            **(documented_model_capability(provider.api_format, model) or {}),
+        }
+        for model in _provider_models(provider)
+    }
 
 
 def _context_window_from_capability(value: object) -> int | None:
@@ -183,50 +197,130 @@ def _apply_llm_provider(
     provider.models_json = _json_dumps(payload.models)
     provider.model_capabilities_json = _json_dumps(
         {
-            model: payload.model_capabilities.get(model, {})
+            model: {
+                **(payload.model_capabilities.get(model) or {}),
+                **(documented_model_capability(payload.api_format, model) or {}),
+            }
             for model in payload.models
             if model in payload.model_capabilities
+            or documented_model_capability(payload.api_format, model)
         }
     )
     provider.updated_at = _utcnow()
     session.add(provider)
     session.flush()
 
-    # Profiles in automatic mode follow refreshed provider metadata. Preserve
-    # the last useful automatic value when discovery still has no context size.
-    for cfg in session.exec(
-        select(LLMConfig).where(LLMConfig.provider_id == provider.id)
-    ).all():
-        changed = False
-        if cfg.context_limit_source != "manual":
+    if provider.api_format == "openai_chatgpt_plan":
+        _sync_chatgpt_plan_models(session, provider)
+    else:
+        # Automatic model settings follow refreshed provider metadata.
+        for cfg in session.exec(
+            select(LLMConfig).where(LLMConfig.provider_id == provider.id)
+        ).all():
+            if cfg.context_limit_source == "manual":
+                continue
             detected, source = detect_context_window(provider, cfg.model)
             if source != "fallback":
                 cfg.max_context_tokens = detected
                 cfg.context_limit_source = source
-                changed = True
-        if provider.api_format == "openai_chatgpt_plan":
-            capability = _provider_capabilities(provider).get(cfg.model) or {}
-            if cfg.username != provider.username:
-                cfg.username = provider.username
-                changed = True
-            output_limit = capability.get("max_output_tokens")
-            if (
-                cfg.max_tokens == 16384
-                and isinstance(output_limit, int)
-                and cfg.max_context_tokens > output_limit + 1024
-            ):
-                cfg.max_tokens = output_limit
-                changed = True
-            preferred_effort = capability.get("default_effort")
-            if cfg.reasoning_effort is None and preferred_effort:
-                cfg.reasoning_effort = preferred_effort
-                changed = True
-        if changed:
-            cfg.updated_at = _utcnow()
-            session.add(cfg)
+                cfg.updated_at = _utcnow()
+                session.add(cfg)
     session.commit()
     session.refresh(provider)
     return _provider_out(provider)
+
+
+def _sync_chatgpt_plan_models(
+    session: Session,
+    provider: LLMProviderConfig,
+    configured_models: list[LLMConfig] | None = None,
+) -> bool:
+    """Fill known model defaults and create scan models for a ChatGPT account."""
+    if configured_models is None:
+        configured_models = session.exec(
+            select(LLMConfig).where(LLMConfig.provider_id == provider.id)
+        ).all()
+    capabilities = _provider_capabilities(provider)
+    changed = False
+    existing = {cfg.model for cfg in configured_models}
+    for cfg in configured_models:
+        capability = capabilities.get(cfg.model, {})
+        updated = False
+        if cfg.context_limit_source != "manual":
+            context, source = detect_context_window(provider, cfg.model)
+            if source != "fallback" and (
+                cfg.max_context_tokens != context or cfg.context_limit_source != source
+            ):
+                cfg.max_context_tokens = context
+                cfg.context_limit_source = source
+                updated = True
+        if cfg.username != provider.username:
+            cfg.username = provider.username
+            updated = True
+        output_limit = capability.get("max_output_tokens")
+        legacy_output_budget = cfg.max_tokens == 16384
+        if (
+            legacy_output_budget
+            and isinstance(output_limit, int)
+            and cfg.max_context_tokens > output_limit + 1024
+        ):
+            cfg.max_tokens = output_limit
+            updated = True
+        preferred_effort = capability.get("default_effort")
+        if preferred_effort and (
+            cfg.reasoning_effort is None
+            or (
+                legacy_output_budget
+                and cfg.model.endswith("-luna")
+                and cfg.reasoning_effort == "medium"
+            )
+        ):
+            cfg.reasoning_effort = preferred_effort
+            updated = True
+        if updated:
+            cfg.updated_at = _utcnow()
+            session.add(cfg)
+            changed = True
+    for model in _provider_models(provider):
+        if model in existing:
+            continue
+        capability = capabilities.get(model, {})
+        context, source = detect_context_window(provider, model)
+        session.add(
+            LLMConfig(
+                name=f"{provider.name}/{model}",
+                provider_id=provider.id,
+                provider=provider.api_format,
+                username=provider.username,
+                model=model,
+                max_tokens=capability.get("max_output_tokens", 16384),
+                max_context_tokens=context,
+                context_limit_source=source,
+                reasoning_effort=capability.get("default_effort"),
+            )
+        )
+        existing.add(model)
+        changed = True
+    return changed
+
+
+def repair_chatgpt_plan_models(session: Session) -> None:
+    """Bring saved ChatGPT models up to date when the app starts."""
+    changed = False
+    providers = session.exec(
+        select(LLMProviderConfig).where(
+            LLMProviderConfig.api_format == "openai_chatgpt_plan"
+        )
+    ).all()
+    for provider in providers:
+        capabilities = _provider_capabilities(provider)
+        if capabilities != _json_loads(provider.model_capabilities_json, {}):
+            provider.model_capabilities_json = _json_dumps(capabilities)
+            session.add(provider)
+            changed = True
+        changed = _sync_chatgpt_plan_models(session, provider) or changed
+    if changed:
+        session.commit()
 
 
 def _reconcile_provider_model_configs(

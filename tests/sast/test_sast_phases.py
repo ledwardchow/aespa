@@ -59,6 +59,129 @@ def test_light_run_uses_original_scanner_engine(isolated_db_engine, monkeypatch)
     assert calls == [(run_id, True)]
 
 
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_revalidate_only_selected_inconclusive_lead(
+    client, isolated_db_engine, monkeypatch, tmp_path, analysis_mode
+):
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as source:
+        source.writestr("app.py", "print('hello')")
+    with Session(isolated_db_engine) as session:
+        run = SastRun(
+            name="review",
+            analysis_mode=analysis_mode,
+            status="completed",
+            source_archive_path=str(archive),
+            phase_state_json=json.dumps(
+                {
+                    phase: {"status": "complete"}
+                    for phase in ("discovery", "validation", "attack_path", "report")
+                }
+            ),
+        )
+        session.add(run)
+        session.commit()
+        first = ScanLead(
+            producer_run_id=run.id,
+            title="First",
+            validation_status="inconclusive",
+            reportable=False,
+        )
+        second = ScanLead(
+            producer_run_id=run.id,
+            title="Second",
+            validation_status="inconclusive",
+            reportable=False,
+        )
+        session.add(first)
+        session.add(second)
+        session.commit()
+        session.refresh(first)
+        session.refresh(second)
+        session.add(
+            PhaseCheckpoint(
+                run_kind="sast",
+                run_id=run.id,
+                phase="state",
+                idempotency_key="candidates",
+                data_json=json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "candidate_id": 1,
+                                "lead_id": first.id,
+                                "confidence": 0.8,
+                                "validation_status": "inconclusive",
+                            },
+                            {
+                                "candidate_id": 2,
+                                "lead_id": second.id,
+                                "confidence": 0.9,
+                                "validation_status": "inconclusive",
+                            },
+                        ]
+                    }
+                ),
+            )
+        )
+        session.add(
+            PhaseCheckpoint(
+                run_kind="sast",
+                run_id=run.id,
+                phase="validation",
+                idempotency_key="agent:validator:1",
+                data_json="{}",
+            )
+        )
+        session.commit()
+        run_id, first_id, second_id = run.id, first.id, second.id
+
+    starts = []
+
+    async def fake_start(sast_run_id, *, resume=False):
+        starts.append((sast_run_id, resume))
+
+    monkeypatch.setattr(sast_scanner, "start_sast_scan", fake_start)
+    response = client.post(f"/api/sast-runs/{run_id}/leads/{first_id}/revalidate")
+    assert response.status_code == 200
+    assert starts == [(run_id, True)]
+    with Session(isolated_db_engine) as session:
+        state = session.exec(
+            select(PhaseCheckpoint).where(
+                PhaseCheckpoint.run_kind == "sast",
+                PhaseCheckpoint.run_id == run_id,
+                PhaseCheckpoint.phase == "state",
+                PhaseCheckpoint.idempotency_key == "candidates",
+            )
+        ).one()
+        candidates = json.loads(state.data_json)["candidates"]
+        assert [item["validation_status"] for item in candidates] == [
+            "pending",
+            "inconclusive",
+        ]
+        assert session.get(ScanLead, first_id).validation_status == "pending"
+        assert session.get(ScanLead, second_id).validation_status == "inconclusive"
+        assert (
+            session.exec(
+                select(PhaseCheckpoint).where(
+                    PhaseCheckpoint.run_kind == "sast",
+                    PhaseCheckpoint.run_id == run_id,
+                    PhaseCheckpoint.phase == "validation",
+                    PhaseCheckpoint.idempotency_key == "agent:validator:1",
+                )
+            ).first()
+            is None
+        )
+        phases = json.loads(session.get(SastRun, run_id).phase_state_json)
+        assert all(
+            phases[phase]["status"] == "pending"
+            for phase in ("validation", "attack_path", "report")
+        )
+
+    rejected = client.post(f"/api/sast-runs/{run_id}/leads/{second_id}/revalidate")
+    assert rejected.status_code == 409
+
+
 def _run_with_web_target(engine) -> tuple[int, int]:
     with Session(engine) as session:
         sast_run = SastRun(

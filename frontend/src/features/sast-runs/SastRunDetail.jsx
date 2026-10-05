@@ -107,6 +107,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const [resumableWork, setResumableWork] = useState(false);
   const [startBusy, setStartBusy] = useState(false);
   const [queueBusy, setQueueBusy] = useState(false);
+  const [revalidatingLeadId, setRevalidatingLeadId] = useState(null);
   const [profileBusy, setProfileBusy] = useState(false);
   const [tokenExpanded, setTokenExpanded] = useState(false);
   const [error, setError] = useState(null);
@@ -323,6 +324,19 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       setError(err.message);
     } finally {
       setQueueBusy(false);
+    }
+  };
+  const onRevalidate = async (lead) => {
+    setRevalidatingLeadId(lead.id);
+    setError(null);
+    try {
+      await sastRunsApi.revalidateSastLead(runId, lead.id);
+      setScanRunning(true);
+      await loadData();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRevalidatingLeadId(null);
     }
   };
   const onExportReport = () =>
@@ -607,6 +621,9 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               queueBusy={queueBusy}
               reportableCount={reportableCount}
               onExport={onExportReport}
+              onRevalidate={onRevalidate}
+              revalidatingLeadId={revalidatingLeadId}
+              canRevalidate={run?.status === "completed" && !scanRunning && !resumableWork}
             />
           )}
           {tab === "coverage" && (

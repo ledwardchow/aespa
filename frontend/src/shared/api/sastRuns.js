@@ -37,6 +37,9 @@ export const getSastAgentLog = (id) => req(`/api/sast-runs/${id}/agent-log`);
 
 export const getSastLeads = (id) => req(`/api/sast-runs/${id}/leads`);
 
+export const revalidateSastLead = (id, leadId) =>
+  req(`/api/sast-runs/${id}/leads/${leadId}/revalidate`, { method: "POST" });
+
 export const getSastTokenUsage = (id) => req(`/api/sast-runs/${id}/token-usage`);
 
 export const createStandaloneSastRun = (file, name, llm_profile_id, analysis_mode) => {

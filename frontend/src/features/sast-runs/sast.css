@@ -1,4 +1,9 @@
 /* ── SAST run phase experience ───────────────────────────────────────────── */
+.sast-lead-validation-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .sast-run-topbar .topbar-title {
   overflow: hidden;
 }
