@@ -733,6 +733,24 @@ async def resume_sast_scan(
     return sast_scanner.get_sast_status(run_id)
 
 
+@router.post("/api/sast-runs/{run_id}/leads/{lead_id}/revalidate")
+async def revalidate_sast_lead(
+    run_id: int,
+    lead_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Run a fresh validator pass for one inconclusive SAST lead."""
+    _get_run_or_404(session, run_id)
+    from aespa.services import sast_scanner
+
+    try:
+        sast_scanner.queue_lead_revalidation(run_id, lead_id)
+        await sast_scanner.start_sast_scan(run_id, resume=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return sast_scanner.get_sast_status(run_id)
+
+
 @router.get("/api/sast-runs/{run_id}/scan/status")
 def sast_scan_status(
     run_id: int,

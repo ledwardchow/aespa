@@ -6,7 +6,9 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **ChatGPT plan provider**: Sign in with ChatGPT in LLM Settings and use an eligible model in web, API, and SAST scans. AESPA loads the account's models when you sign in, checks models missing from the API list, and shows Daybreak Blue and Red access. Known models get their published context sizes and output budgets, with Luna set to xhigh thinking and Sol set to medium. AESPA keeps the full output budget free when fitting prompts into the context window. Scanner requests use the available Daybreak access for supported models and retain tool calls and text from streamed replies. The existing Codex subscription provider remains available.
+- **Re-validate SAST findings**: Completed SAST runs now show a Re-validate button for inconclusive findings. It runs a fresh validator check for the selected finding and updates its result and report.
+
+- **ChatGPT plan provider**: Sign in with ChatGPT in LLM Settings and use an eligible model in web, API, and SAST scans. AESPA loads the account's models when you sign in, checks models missing from the API list, and shows Daybreak Blue and Red access. All loaded models are ready to select in scan profiles. Known models get their published context sizes and output budgets, with Luna set to xhigh thinking and Sol set to medium. Existing ChatGPT model settings are updated when AESPA starts. AESPA keeps the full output budget free when fitting prompts into the context window and counts completed requests in scan usage. Scanner requests use the available Daybreak access for supported models and retain tool calls and text from streamed replies. The existing Codex subscription provider remains available.
 
 ### Housekeeping
 

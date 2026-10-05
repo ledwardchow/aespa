@@ -3473,6 +3473,7 @@ def _record_responses_usage(
             if usage
             else 0
         ),
+        requests=1,
     )
     emit_fn = _emit_fn_var.get()
     if emit_fn is not None and (

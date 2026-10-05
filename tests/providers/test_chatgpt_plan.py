@@ -127,27 +127,54 @@ def test_plan_discovery_adds_verified_models_and_documented_limits(
     ]
 
 
-def test_plan_provider_refresh_fills_default_model_settings(client: TestClient):
+def test_plan_provider_refresh_fills_default_model_settings(
+    client: TestClient, db_session
+):
     from aespa.services.model_capabilities import documented_model_capability
+    from aespa.services.settings_providers import repair_chatgpt_plan_models
 
     capability = documented_model_capability("openai_chatgpt_plan", "gpt-6-luna")
     payload = {
         "name": "ChatGPT plan test",
         "api_format": "openai_chatgpt_plan",
         "username": "oaiapp_test",
-        "models": ["gpt-6-luna"],
+        "models": ["gpt-6-luna", "gpt-6-sol"],
         "model_capabilities": {},
     }
     provider = client.post("/api/settings/llm/providers", json=payload).json()
-    model = client.post(
-        "/api/settings/llm/model-configs",
-        json={
-            "provider_id": provider["id"],
-            "model": "gpt-6-luna",
-            "max_tokens": 16384,
-        },
-    ).json()
-    assert model["max_tokens"] == 16384
+    models = client.get("/api/settings/llm/model-configs").json()
+    assert {item["model"] for item in models} == {"gpt-6-luna", "gpt-6-sol"}
+    model = next(item for item in models if item["model"] == "gpt-6-luna")
+    assert model["max_tokens"] == 128_000
+    assert model["reasoning_effort"] == "xhigh"
+    assert provider["model_capabilities"]["gpt-6-luna"]["default_effort"] == "xhigh"
+
+    # Existing providers created before documented metadata was stored are
+    # repaired on startup without changing their scan-profile model IDs.
+    stale = db_session.get(LLMConfig, model["id"])
+    stale.max_tokens = 16384
+    stale.max_context_tokens = 128000
+    stale.context_limit_source = "fallback"
+    stale.reasoning_effort = "medium"
+    db_session.add(stale)
+    db_session.commit()
+    repair_chatgpt_plan_models(db_session)
+    db_session.refresh(stale)
+    assert stale.max_tokens == 128_000
+    assert stale.max_context_tokens == 1_050_000
+    assert stale.reasoning_effort == "xhigh"
+    repair_chatgpt_plan_models(db_session)
+    assert len(client.get("/api/settings/llm/model-configs").json()) == 2
+    stale.reasoning_effort = "medium"
+    db_session.add(stale)
+    db_session.commit()
+    repair_chatgpt_plan_models(db_session)
+    db_session.refresh(stale)
+    assert stale.reasoning_effort == "medium"  # A later manual choice is preserved.
+    stale.reasoning_effort = "xhigh"
+    db_session.add(stale)
+    db_session.commit()
+
     payload["model_capabilities"] = {"gpt-6-luna": capability}
     refreshed = client.put(
         f"/api/settings/llm/providers/{provider['id']}", json=payload
@@ -232,6 +259,24 @@ def test_plan_request_uses_supported_streaming_shape():
     assert result["include"] == ["reasoning.encrypted_content"]
     assert "temperature" not in result
     assert "max_output_tokens" not in result
+
+
+def test_plan_response_counts_one_request(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        llm, "_record_usage", lambda *args, **kwargs: recorded.append(kwargs)
+    )
+    config = LLMConfig(provider="openai_chatgpt_plan", model="gpt-6-sol")
+    response = SimpleNamespace(
+        usage=SimpleNamespace(
+            input_tokens=100,
+            output_tokens=20,
+            input_tokens_details=SimpleNamespace(cached_tokens=30),
+        ),
+        prompt_cache_key=None,
+    )
+    llm._record_responses_usage(config, response)
+    assert recorded[0]["requests"] == 1
 
 
 def test_plan_context_budget_keeps_full_output_space_for_plain_requests(monkeypatch):

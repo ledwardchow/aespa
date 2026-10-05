@@ -298,6 +298,99 @@ def has_resumable_sast_work(sast_run_id: int) -> bool:
     return bool(incomplete_workers is not None or _pending_candidate_ids(candidates))
 
 
+def queue_lead_revalidation(sast_run_id: int, lead_id: int) -> None:
+    """Queue one completed run's inconclusive lead for a fresh validator pass."""
+    from aespa.services import sast_scanner_light
+
+    restore_candidates = (
+        sast_scanner_light._restore_candidate_state
+        if _is_light_run(sast_run_id)
+        else _restore_candidate_state
+    )
+    if is_sast_scan_running(sast_run_id):
+        raise ValueError("SAST scan is already running")
+    with Session(get_engine()) as session:
+        run = session.get(SastRun, sast_run_id)
+        lead = session.get(ScanLead, lead_id)
+        if run is None or run.status != "completed":
+            raise ValueError("Only completed SAST runs can re-validate a lead")
+        if (
+            lead is None
+            or lead.producer_run_id != sast_run_id
+            or lead.imported_into_run_id is not None
+            or lead.validation_status != "inconclusive"
+        ):
+            raise ValueError("This run has no inconclusive lead with that ID")
+        if has_resumable_sast_work(sast_run_id):
+            raise ValueError("Resume the unfinished scan work first")
+        archive_path = run.source_archive_path
+        if run.document_id:
+            doc = session.get(ApiDocument, run.document_id)
+            archive_path = doc.stored_path if doc else archive_path
+        elif run.collection_id:
+            doc = session.exec(
+                select(ApiDocument)
+                .where(ApiDocument.collection_id == run.collection_id)
+                .where(ApiDocument.doc_type == "source_zip")
+                .order_by(ApiDocument.id.desc())
+            ).first()
+            archive_path = doc.stored_path if doc else archive_path
+        if not archive_path or not Path(archive_path).is_file():
+            raise ValueError("The SAST source archive is unavailable")
+        candidates = restore_candidates(sast_run_id)
+        candidate = next(
+            (item for item in candidates if item.get("lead_id") == lead_id), None
+        )
+        if (
+            candidate is None
+            or candidate.get("confidence") is None
+            or candidate.get("reconciled_duplicate")
+        ):
+            raise ValueError(
+                "This lead has no saved candidate that can be re-validated"
+            )
+        candidate_id = int(candidate["candidate_id"])
+        candidate["validation_status"] = "pending"
+        candidate["validation_reasoning"] = ""
+        candidate["reportable"] = False
+        candidate.pop("validation_retry_pending", None)
+        candidate["attack_path"] = {}
+        checkpoint = session.exec(
+            select(PhaseCheckpoint)
+            .where(PhaseCheckpoint.run_kind == "sast")
+            .where(PhaseCheckpoint.run_id == sast_run_id)
+            .where(PhaseCheckpoint.phase == "validation")
+            .where(
+                PhaseCheckpoint.idempotency_key
+                == _checkpoint_key(f"validator:{candidate_id}")
+            )
+        ).first()
+        if checkpoint is not None:
+            session.delete(checkpoint)
+        state = session.exec(
+            select(PhaseCheckpoint)
+            .where(PhaseCheckpoint.run_kind == "sast")
+            .where(PhaseCheckpoint.run_id == sast_run_id)
+            .where(PhaseCheckpoint.phase == "state")
+            .where(PhaseCheckpoint.idempotency_key == "candidates")
+        ).first()
+        if state is None:
+            raise ValueError("Saved SAST candidate state is unavailable")
+        state.data_json = json.dumps({"candidates": candidates}, ensure_ascii=False)
+        phases = json.loads(run.phase_state_json or "{}")
+        for phase in ("validation", "attack_path", "report"):
+            phases.setdefault(phase, {})["status"] = "pending"
+        run.phase_state_json = json.dumps(phases, ensure_ascii=False)
+        lead.validation_status = "pending"
+        lead.validation_reasoning = ""
+        lead.reportable = False
+        lead.attack_path_json = "{}"
+        session.add(state)
+        session.add(run)
+        session.add(lead)
+        session.commit()
+
+
 async def _run_checkpointed_agent(
     *,
     sast_run_id: int,
