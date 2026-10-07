@@ -6,9 +6,21 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
+- **AESPA Benchmarks Online**: Publish compact benchmark graph summaries to a private results site from Benchmark Lab. Create separate upload-only tokens on the results site and revoke them individually. Configure the site URL, service token, and upload token in the Benchmark Lab extension settings, where you can also view the saved token. Repeated uploads update existing results with scan dates and token counts, without sending scan names, findings, or evidence.
+
+- **Claude CLI provider**: Use a signed-in Claude Code account for scans. Choose Sonnet, Opus, Haiku, or Mythos, or enter another Claude model name. The Mythos aliases use `claude-mythos-5`. Scan tool calls stay inside AESPA, and usage is recorded from the CLI response.
+
 - **Re-validate SAST findings**: Completed SAST runs now show a Re-validate button for inconclusive findings. It runs a fresh validator check for the selected finding and updates its result and report.
 
 - **ChatGPT plan provider**: Sign in with ChatGPT in LLM Settings and use an eligible model in web, API, and SAST scans. AESPA loads the account's models when you sign in, checks models missing from the API list, and shows Daybreak Blue and Red access. All loaded models are ready to select in scan profiles. Known models get their published context sizes and output budgets, with Luna set to xhigh thinking and Sol set to medium. Existing ChatGPT model settings are updated when AESPA starts. AESPA keeps the full output budget free when fitting prompts into the context window and counts completed requests in scan usage. Scanner requests use the available Daybreak access for supported models and retain tool calls and text from streamed replies. The existing Codex subscription provider remains available.
+
+### Updates
+
+- **Benchmark cost graphs**: Hide scans without a recorded cost without showing a warning.
+
+- **More useful XSS leads**: Web scans now read discovered JavaScript for possible unsafe rendering even when automatic security checks are off. The Test Lead sees likely fields and rendering contexts early in the scan. Automatic checks no longer create an XSS finding just because a payload appears in a response; browser execution still needs confirmation.
+
+- **Clearer XSS validation**: The validator now accounts for browser checks already recorded by the scanner and checks escaping in the right rendering context. XSS findings filed under the wrong category no longer receive an access control verdict.
 
 ### Housekeeping
 

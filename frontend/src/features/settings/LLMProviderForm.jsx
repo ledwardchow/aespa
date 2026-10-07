@@ -826,6 +826,7 @@ export function LLMProviderForm({
             onChange={(e) => onFormatChange(e.target.value)}
           >
             <option value="anthropic">Anthropic API</option>
+            <option value="claude_cli">Claude CLI subscription</option>
             <option value="factory_droid">Factory Droid subscription</option>
             <option value="github_copilot">GitHub Copilot subscription</option>
             <option value="openai_codex">OpenAI Codex subscription</option>
@@ -873,7 +874,7 @@ export function LLMProviderForm({
             </div>
           </div>
         )}
-        {!["factory_droid", "openai_codex", "openai_chatgpt_plan", "google_antigravity", "google_vertex"].includes(
+        {!["claude_cli", "factory_droid", "openai_codex", "openai_chatgpt_plan", "google_antigravity", "google_vertex"].includes(
           form.api_format,
         ) &&
           !isBedrockProvider(form.api_format) && (
@@ -902,6 +903,11 @@ export function LLMProviderForm({
           <div className="field-hint">
             Uses the account signed in through Droid CLI. AESPA does not read or store Factory
             credentials.
+          </div>
+        )}
+        {form.api_format === "claude_cli" && (
+          <div className="field-hint">
+            Uses the account signed in through Claude CLI. Install Claude Code and run claude auth login first. AESPA does not store Claude credentials. Claude's own tools are disabled for scans.
           </div>
         )}
         {form.api_format === "google_antigravity" && (
@@ -1016,7 +1022,7 @@ export function LLMProviderForm({
         {form.api_format === "github_copilot" && (
           <CopilotConnectionCard value={form.username} onSelect={selectCopilotUsername} />
         )}
-        {!["factory_droid", "openai_codex", "openai_chatgpt_plan", "google_antigravity", "google_vertex"].includes(
+        {!["claude_cli", "factory_droid", "openai_codex", "openai_chatgpt_plan", "google_antigravity", "google_vertex"].includes(
           form.api_format,
         ) && (
           <div className="field">

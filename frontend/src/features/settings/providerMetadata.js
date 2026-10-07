@@ -1,5 +1,6 @@
 export const API_FORMAT_LABELS = {
   anthropic: "Anthropic API",
+  claude_cli: "Claude CLI subscription",
   factory_droid: "Factory Droid subscription",
   github_copilot: "GitHub Copilot subscription",
   openai_codex: "OpenAI Codex subscription",
@@ -51,6 +52,7 @@ export const DEFAULT_LLM_FORM = {
 
 export const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic: "https://api.anthropic.com",
+  claude_cli: "Not required",
   factory_droid: "Not required",
   github_copilot: "Not required",
   openai_codex: "Not required",
@@ -71,6 +73,7 @@ export const PROVIDER_BASE_URL_PLACEHOLDERS = {
 
 export const PROVIDER_DEFAULT_BASE_URLS = {
   anthropic: "https://api.anthropic.com",
+  claude_cli: "Claude CLI (signed-in account)",
   factory_droid: "Droid CLI (signed-in account)",
   github_copilot: "Copilot SDK (selected default account)",
   openai_codex: "Codex app-server (ChatGPT account)",
@@ -93,6 +96,7 @@ export const PROVIDER_DEFAULT_BASE_URLS = {
 
 export const PROVIDER_MODEL_PLACEHOLDERS = {
   anthropic: "claude-opus-4-8\nclaude-sonnet-4-5",
+  claude_cli: "sonnet\nopus\nhaiku\nmythos\nmythos-5\nclaude-mythos-5",
   factory_droid: "Models are loaded from the signed-in Droid CLI",
   github_copilot: "auto\nModels are loaded from GitHub Copilot API",
   openai_codex: "auto\nModels are loaded from the signed-in ChatGPT account",

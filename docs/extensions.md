@@ -263,3 +263,14 @@ body. The response reports added datasets, imported records, skipped duplicates,
 and conflicts. The file identifies itself as `aespa-benchmark-lab`, version `1`.
 The per-evaluation report export is separate and cannot be imported as a full
 Benchmark Lab file.
+
+
+### Hosted benchmark graphs
+
+Extensions → Benchmark Lab → Settings includes a Hosted benchmark graphs panel. Save the private Sites URL, service token, and upload token there. Create upload tokens in the results site’s API & connection tab. Each token can upload and update graph summaries, and can be revoked separately. Service access cannot read results or manage tokens. Choose Show saved token to view its value. Then use Publish results in Benchmark Lab’s Settings tab. Both tokens stay in the extension’s own database; exports never include them. Restart AESPA after installing this update.
+
+Only graph data is uploaded: stable result ID, dataset name and fingerprint, scan type, model/provider names, SAST source models, finding counts, estimated scan cost, scan start time, and update time. Finding text, evidence, ground-truth items, source files, and model credentials are excluded. Unknown cost or dates stay unknown. Dataset fingerprints keep different ground-truth versions separate.
+
+The extension sends `POST /api/v1/results` with `{ "version": 1, "results": [...] }` and the service credential in `OAI-Sites-Authorization: Bearer <token>`. Batches contain at most 100 results and 256 KiB. Repeated uploads update the same UUIDs; older updates are skipped. A failed upload can be retried, including when earlier batches succeeded. Publishing does not delete hosted results that were removed locally.
+
+`GET /extension/aespa.benchmarking/graph-export` returns the compact upload format. `GET` and `PUT /extension/aespa.benchmarking/publishing` read or save the connection; the read response only says whether a token exists. `POST /extension/aespa.benchmarking/publishing/token` reveals the saved token on request with `Cache-Control: no-store`. `POST /extension/aespa.benchmarking/publish` sends saved results. Only HTTPS URLs on `.chatgpt.site` are accepted, and upload redirects are disabled. Extension writes stay in the extension database.

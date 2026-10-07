@@ -413,6 +413,10 @@ async def discover_model_options_for_format(
             native = {item["id"]: item for item in raw if item.get("id")}
         else:
             discovered = await droid_provider.discover_models()
+    elif api_format == "claude_cli":
+        from aespa.services.claude_cli_provider import DEFAULT_MODELS
+
+        discovered = list(DEFAULT_MODELS)
     elif api_format == "openai_codex":
         from aespa.services import codex_provider
 

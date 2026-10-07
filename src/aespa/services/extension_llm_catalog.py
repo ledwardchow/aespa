@@ -17,6 +17,7 @@ EXTENSION_LLM_FORMATS = frozenset(
         "bedrock",
         "bedrock_mantle",
         "openai_codex",
+        "claude_cli",
         "github_copilot",
         "factory_droid",
         "google_vertex",

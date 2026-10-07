@@ -4,6 +4,7 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { parseGroundTruthText } from "./groundTruthImport.js";
 import { BenchmarkModelSettings } from "./BenchmarkModelSettings.jsx";
+import { BenchmarkPublishing } from "./BenchmarkPublishing.jsx";
 import { BenchmarkTransfer } from "./BenchmarkTransfer.jsx";
 import { GroundTruthDatasets } from "./GroundTruthDatasets.jsx";
 import { CompletedScanBenchmarks } from "./CompletedScanBenchmarks.jsx";
@@ -287,6 +288,7 @@ export function BenchmarkLabPage({ initialResultId }) {
         )}
         {tab === "datasets" && (
           <div className={styles.settings}>
+            <BenchmarkPublishing />
             <BenchmarkTransfer onChange={load} />
             <BenchmarkModelSettings models={models} settings={benchmarkSettings} onChange={load} />
             <GroundTruthDatasets datasets={datasets} targets={targets} onChange={load} />

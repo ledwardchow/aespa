@@ -411,14 +411,18 @@ Post-confirmation escalation (after injection is proven — read-only, no PII bu
 Constraint: never DROP/INSERT/UPDATE/DELETE; read-only escalation probes only; no bulk PII dump.""",
     "xss": r"""─── XSS (WSTG-INPV-01/02) ──────────────────────────────────────────────────────
 Step 0 — check for pre-identified sinks: call context_tool with tool="target_inventory"
-  and args={"kind": "xss_sink"}. Each item has key=field_name, value=js_file_url, and
-  evidence=code_context showing the unsanitized innerHTML assignment. For each sink:
+  and args={"kind": "xss_sink"}. These are source-based leads, not proven issues.
+  Each item gives a possible field, JS file, rendering context, and source line.
+  Check the surrounding code before testing. For each plausible sink:
     a. Find the write endpoint: call target_inventory with kind="input" and filter by
        the same field name (key) to get the URL and method that accepts that field.
     b. POST a payload to that write endpoint as the attacker session.
-    c. Log in as a different user (victim session) and navigate to the page that loads
-       the JS file identified in the sink item — verify execution via browser DOM check.
-  This step finds cross-user stored XSS that generic fuzzing misses.
+    c. Where another configured user can receive the stored value, call browser
+       with login_as set to that user's username. This opens a fresh browser and
+       runs the configured login flow before visiting the rendering page. Do not
+       use a second token label as proof that it belongs to a different user.
+       Check the stored value and browser execution there. Test distinct views separately.
+  If one path is blocked, record why and continue to the other plausible sinks.
 Step 1 — inject a unique canary string; check if it appears in the response.
 Step 2 — identify rendering context, then use a context-matched payload:
   HTML body:      <script>alert(1)</script>  /  <img src=x onerror=alert(1)>  /  <svg/onload=alert(1)>
@@ -801,7 +805,9 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "one injection class never proves coverage of another.\n"
     "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
     "interaction is genuinely required. For XSS, use dom_check with a unique canary "
-    "attribute or exact text to prove the payload affected the rendered DOM. When a click "
+    "attribute or exact text to check the rendered DOM. For cross-user stored XSS, "
+    "set login_as to a different configured username so the browser logs in afresh. "
+    "A DOM match alone does not prove JavaScript execution. When a click "
     "fails or is intercepted, use inspect_element to collect obstruction evidence before "
     "recover_click; recover_click never forces a click.\n"
     "- execute_python: use only when computation, custom encoding/parsing, state correlation, "
@@ -1024,6 +1030,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "description": "Replay the saved deterministic page recipe before executing these steps (recommended for interactive states).",
                 },
                 "use_session": {"type": "string"},
+                "login_as": {
+                    "type": "string",
+                    "description": (
+                        "Configured username to log in as in a fresh browser context. "
+                        "Use for a stored XSS viewing page when another configured "
+                        "account can receive the payload. Cannot be combined with use_session."
+                    ),
+                },
                 "headers": {
                     "type": "object",
                     "description": (

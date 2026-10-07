@@ -212,7 +212,7 @@ Defines API connections, optional project identifiers, and model discovery setti
 | Field | Default | Description |
 |---|---|---|
 | `name` | `Default Provider` | Label for the provider |
-| `api_format` | `anthropic` | API format: `factory_droid`, `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `google_vertex`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
+| `api_format` | `anthropic` | API format: `claude_cli`, `factory_droid`, `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `google_vertex`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
 | `api_key` | — | Provider API key (stored in DB; masked and excluded from non-localhost exports) |
 | `base_url` | — | Override endpoint URL |
 | `username` | — | Optional Copilot CLI account login; blank uses Copilot CLI's selected default account |

@@ -159,6 +159,7 @@ def _apply_llm_provider(
     provider.name = payload.name
     provider.api_format = payload.api_format
     if payload.api_format in {
+        "claude_cli",
         "factory_droid",
         "openai_codex",
         "openai_chatgpt_plan",
@@ -171,7 +172,13 @@ def _apply_llm_provider(
     provider.base_url = (
         None
         if payload.api_format
-        in {"factory_droid", "openai_codex", "openai_chatgpt_plan", "google_vertex"}
+        in {
+            "claude_cli",
+            "factory_droid",
+            "openai_codex",
+            "openai_chatgpt_plan",
+            "google_vertex",
+        }
         else payload.base_url
     )
     username = (payload.username or "").strip()
@@ -183,7 +190,7 @@ def _apply_llm_provider(
     provider.project_id = (
         None
         if payload.api_format
-        in {"factory_droid", "openai_codex", "openai_chatgpt_plan"}
+        in {"claude_cli", "factory_droid", "openai_codex", "openai_chatgpt_plan"}
         else payload.project_id
     )
     provider.aws_profile = (
