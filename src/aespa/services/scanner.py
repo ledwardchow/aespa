@@ -4590,6 +4590,18 @@ async def _run_specialist_agent(
             "The tool executor will flag canary matches automatically with [SSRF CANARY MATCH].\n"
         )
 
+    alternate_accounts = ""
+    if attack_class == "xss" and not is_api_run:
+        with Session(get_engine()) as _site_session:
+            site = _site_session.get(Site, site_id)
+            account_names = [c.username for c in site.credentials] if site else []
+        if len(account_names) > 1:
+            alternate_accounts = (
+                "Configured accounts for cross-user viewing: "
+                + ", ".join(account_names)
+                + ". Use browser login_as to log in as a different account.\n"
+            )
+
     initial_message = "".join(
         [
             f"Target: {base_url}\n",
@@ -4602,6 +4614,7 @@ async def _run_specialist_agent(
             ),
             f"Use session: {target_session_label}\n" if target_session_label else "",
             f"Lead rationale: {rationale}\n",
+            alternate_accounts,
             f"{recon_block}",
             f"{canary_block}\n",
             f"You have a budget of {max_steps} steps. Begin immediately.",
@@ -5018,10 +5031,16 @@ async def _run_specialist_agent(
                     "from the primary account. Cross-user viewing was not checked."
                 )
             if alternate_credential is not None:
-                login_target = _login_url_for_credential(
-                    site.login_url if site else base_url, alternate_credential
-                ) or base_url
-                for checked_url in (login_target, browser_action.get("url") or base_url):
+                login_target = (
+                    _login_url_for_credential(
+                        site.login_url if site else base_url, alternate_credential
+                    )
+                    or base_url
+                )
+                for checked_url in (
+                    login_target,
+                    browser_action.get("url") or base_url,
+                ):
                     scope_error = check_scope(checked_url, site_id, run_id)
                     if scope_error:
                         return f"[SCOPE BLOCK] {scope_error}"
@@ -5038,7 +5057,9 @@ async def _run_specialist_agent(
                 )
             else:
                 browser_session_label, browser_session, browser_note = (
-                    _resolve_requested_scan_session(session_vault, browser_session_label)
+                    _resolve_requested_scan_session(
+                        session_vault, browser_session_label
+                    )
                 )
             if browser_page_id is not None and tool_input.get("replay"):
                 with Session(get_engine()) as _page_session:
@@ -5090,6 +5111,7 @@ async def _run_specialist_agent(
                             login_url=login_target,
                             run_id=run_id,
                             llm_cfg=llm_cfg,
+                            request_headers=tool_input.get("headers"),
                         )
                     else:
                         _ctx = await _browser.new_context(ignore_https_errors=True)
@@ -5134,6 +5156,12 @@ async def _run_specialist_agent(
                             default_url=base_url,
                             scanner_policy=scanner_policy,
                         )
+                        if alternate_credential is not None:
+                            final_scope_error = check_scope(
+                                str(browser_result.get("url") or ""), site_id, run_id
+                            )
+                            if final_scope_error:
+                                return f"[SCOPE BLOCK] {final_scope_error}"
                     finally:
                         traffic_svc.clear_browser_context_tag(_ctx)
                         await _browser.close()
@@ -10140,8 +10168,9 @@ async def _do_agentic_thinking_loop(
                     "from the primary account. Cross-user viewing was not checked."
                 )
             if alternate_credential is not None:
-                alternate_login_url = _login_url_for_credential(
-                    login_url, alternate_credential
+                alternate_login_url = (
+                    _login_url_for_credential(login_url, alternate_credential)
+                    or base_url
                 )
                 login_scope_error = _active_scope_check(alternate_login_url)
                 if login_scope_error:
@@ -10153,8 +10182,7 @@ async def _do_agentic_thinking_loop(
             )
             if (
                 not login_as
-                and
-                use_session_label is None
+                and use_session_label is None
                 and br_replay_requested
                 and br_target_page
                 and br_target_page.get("target_session_label")
@@ -10162,8 +10190,7 @@ async def _do_agentic_thinking_loop(
                 use_session_label = str(br_target_page["target_session_label"])
             if (
                 not login_as
-                and
-                use_session_label is None
+                and use_session_label is None
                 and br_replay_requested
                 and br_target_page
                 and br_target_page.get("replay_credential_id") is not None
@@ -10217,20 +10244,26 @@ async def _do_agentic_thinking_loop(
             active_browser_ctx = browser_ctx
             active_browser_page = pw_page
             alternate_browser_ctx = None
+            cookie_list: list[dict] = []
             if alternate_credential is not None:
                 try:
-                    alternate_browser_ctx, active_browser_page = (
-                        await _open_browser_as_configured_account(
-                            browser_ctx.browser,
-                            alternate_credential,
-                            base_url=base_url,
-                            login_url=alternate_login_url,
-                            run_id=run_id,
-                            llm_cfg=llm_cfg,
-                        )
+                    (
+                        alternate_browser_ctx,
+                        active_browser_page,
+                    ) = await _open_browser_as_configured_account(
+                        browser_ctx.browser,
+                        alternate_credential,
+                        base_url=base_url,
+                        login_url=alternate_login_url,
+                        run_id=run_id,
+                        llm_cfg=llm_cfg,
+                        request_headers=tool_input.get("headers"),
                     )
                     active_browser_ctx = alternate_browser_ctx
+                    cookie_list = await active_browser_ctx.cookies()
                 except Exception as exc:
+                    if alternate_browser_ctx is not None:
+                        await alternate_browser_ctx.close()
                     return f"Browser: alternate account login failed: {exc}"
             else:
                 try:
@@ -10263,7 +10296,9 @@ async def _do_agentic_thinking_loop(
                                 ],
                                 cookie_list,
                                 br_url,
-                                tuple(_br_waf_strategy.get("preserve_cookie_prefixes", [])),
+                                tuple(
+                                    _br_waf_strategy.get("preserve_cookie_prefixes", [])
+                                ),
                             )
                     else:
                         cookie_list = _primary_browser_cookies
@@ -10358,6 +10393,11 @@ async def _do_agentic_thinking_loop(
                 use_session_label,
             )
             resp_body = str(br_result.get("body") or "")[:BODY_READ_LIMIT]
+            if alternate_credential is not None:
+                resp_body = (
+                    f"Logged in as configured account {alternate_credential.username} "
+                    f"for this browser visit.\n\n{resp_body}"
+                )
             if _br_session_resolution_note:
                 resp_body = f"{_br_session_resolution_note}\n\n{resp_body}"
             resp_status = br_result.get("status") or 0
@@ -10472,7 +10512,7 @@ async def _do_agentic_thinking_loop(
                         response_status=resp_status,
                         response_headers=resp_headers,
                         response_body=resp_body,
-                        authenticated=bool(cookie_list),
+                        authenticated=bool(cookie_list or alternate_credential),
                         browser_observation=True,
                         source_page_id=br_page_id,
                     )
@@ -13478,6 +13518,7 @@ async def _open_browser_as_configured_account(
     login_url: str,
     run_id: int,
     llm_cfg,
+    request_headers: dict | None = None,
 ):
     """Log in to an isolated browser context using an alternate site account."""
     from aespa.services.crawler import _authenticate
@@ -13489,7 +13530,11 @@ async def _open_browser_as_configured_account(
     )
     try:
         protect_playwright_context(browser, context)
-        headers = _playwright_global_headers()
+        headers = {
+            key: value
+            for key, value in _playwright_global_headers(request_headers).items()
+            if key.lower() not in {"authorization", "cookie"}
+        }
         if headers:
             await context.set_extra_http_headers(headers)
         traffic_svc.setup_playwright_logging(context, run_id)
@@ -13502,10 +13547,12 @@ async def _open_browser_as_configured_account(
         cookies = await context.cookies()
         token, _ = await _read_browser_auth_token(page)
         if not cookies and not token:
-            raise RuntimeError("The configured account did not produce a browser session")
+            raise RuntimeError(
+                "The configured account did not produce a browser session"
+            )
         if token:
             await context.set_extra_http_headers(
-                _playwright_global_headers({"Authorization": f"Bearer {token}"})
+                {**headers, "Authorization": f"Bearer {token}"}
             )
         return context, page
     except Exception:

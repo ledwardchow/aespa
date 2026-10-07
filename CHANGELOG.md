@@ -18,11 +18,13 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Benchmark cost graphs**: Hide scans without a recorded cost without showing a warning.
 
-- **More useful XSS leads**: Web scans now read discovered JavaScript for possible unsafe rendering even when automatic security checks are off. The Test Lead sees likely fields and rendering contexts early in the scan. Automatic checks no longer create an XSS finding just because a payload appears in a response; browser execution still needs confirmation.
+- **More useful XSS leads**: Web scans now read discovered JavaScript for possible unsafe rendering even when automatic security checks are off. The Test Lead sees likely fields and rendering contexts early in the scan and can log in as another configured account in a fresh browser to check stored payloads. Automatic checks no longer create an XSS finding just because a payload appears in a response; browser execution still needs confirmation.
 
 - **Clearer XSS validation**: The validator now accounts for browser checks already recorded by the scanner and checks escaping in the right rendering context. XSS findings filed under the wrong category no longer receive an access control verdict.
 
 ### Housekeeping
+
+- **Architecture documentation**: Corrected event streaming, run lifecycle, scan defaults, crawl phases, JavaScript analysis, extension storage and routes, and campaign matching descriptions.
 
 - **Dependency security updates**: Updated PyJWT to 2.15.0, urllib3 to 2.8.0, and the frontend's brace-expansion dependency to 1.1.21.
 
