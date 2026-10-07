@@ -6,7 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **AESPA Benchmarks Online**: Publish compact benchmark graph summaries to a private results site from Benchmark Lab. Create separate upload-only tokens on the results site and revoke them individually. Configure the site URL, service token, and upload token in the Benchmark Lab extension settings, where you can also view the saved token. Repeated uploads update existing results with scan dates and token counts, without sending scan names, findings, or evidence.
+- **AESPA Benchmarks Online**: Publish compact benchmark graph summaries to a private results site from Benchmark Lab. Create separate upload-only tokens on the results site and revoke them individually. Configure the site URL and one upload token generated on the results site in the Benchmark Lab extension settings, where you can also view the saved token. Repeated uploads update existing results with scan dates and token counts, without sending scan names, findings, or evidence.
 
 - **Claude CLI provider**: Use a signed-in Claude Code account for scans. Choose Sonnet, Opus, Haiku, or Mythos, or enter another Claude model name. The Mythos aliases use `claude-mythos-5`. Scan tool calls stay inside AESPA, and usage is recorded from the CLI response.
 
