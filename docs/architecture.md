@@ -15,8 +15,8 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 2. [How to Run](#2-how-to-run)
 3. [System Overview](#3-system-overview)
 4. [Configuration](#4-configuration)
-   - [LLM Configuration (`LLMProviderConfig` & `LLMConfig`)](#llm-configuration-llmproviderconfig--llmconfig-models)
-   - [LLM Profiles (`LLMProfile`)](#llm-profiles-llmprofile-model)
+   - [LLM Configuration (`LLMProviderConfig`, `LLMConfig`, and `LLMProfile`)](#llm-configuration-llmproviderconfig-llmconfig--llmprofile-models)
+   - [LLM Profiles (`LLMProfile`)](#3-multi-role-model-profile-llmprofile-model)
    - [Scanner Policy](#scanner-policy-scannerpolicy-model)
    - [Python Sandbox](#python-sandbox-codeexecutionconfig-model)
    - [Upstream Proxy Config](#upstream-proxy-config-upstreamproxyconfig-model)
@@ -40,15 +40,14 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
    - [Recon summary](#recon-summary)
 9. [LLM Integration](#9-llm-integration)
    - [Agent tool sets](#agent-tool-sets) · [WSTG skills](#wstg-skills) · [Prompt caching](#prompt-caching)
-   - [Upstream proxy](#upstream-proxy) · [Rate Limiting & Pacing](#rate-limiting--pacing) · [Token Usage Telemetry](#token-usage-telemetry--telemetry-persistence)
+   - [Upstream proxy](#upstream-proxy) · [Rate Limiting & Pacing](#rate-limiting--pacing) · [Monthly usage statistics](#independent-monthly-statistics)
 10. [Burp Suite Integration](#10-burp-suite-integration)
-    - [Workflow](#workflow) · [Scope pinning](#scope-pinning) · [Per-class routing](#per-class-routing) · [Connection test](#connection-test)
 11. [Findings & Validation](#11-findings--validation)
     - [Deduplication](#deduplication) · [Validation](#validation)
 12. [API Layer](#12-api-layer)
     - [Key route groups](#key-route-groups)
 13. [Frontend & Real-time Events](#13-frontend--real-time-events)
-    - [WebSocket event types](#websocket-event-types-emitted-by-serviceseventspy) · [UI tabs](#ui-tabs)
+    - [SSE event types](#sse-event-types-emitted-by-serviceseventspy) · [UI tabs](#ui-tabs)
 14. [Concurrency & State Management](#14-concurrency--state-management)
 15. [A.L.I.C.E. — Interactive Pentesting Chat](#15-alice--interactive-pentesting-chat)
     - [Architecture overview](#architecture-overview) · [Background task registry](#background-task-registry-alice_taskspy)
@@ -71,6 +70,8 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 
 ## 1. Repository Layout
 
+The main files are listed below. Provider adapters and supporting scan modules are described in their own sections.
+
 ```
 src/aespa/
 ├── __init__.py            # Package entry point — exports main()
@@ -86,18 +87,24 @@ src/aespa/
 │   ├── sites.py           # /api/sites/* — target website management
 │   ├── settings.py        # /api/settings/* - LLM, policy, proxy, specialists, headers
 │   ├── traffic.py         # /api/traffic/* — HTTP traffic log
-│   ├── events.py          # WebSocket event stream
+│   ├── events.py          # Server-Sent Events (SSE) stream
 │   ├── alice.py           # /api/test-runs/{id}/alice/* — A.L.I.C.E. chat
 │   ├── api_collections.py # /api/api-collections/* — collections, documents, endpoints
 │   ├── api_test_runs.py   # /api/api-collections/{id}/test-runs/* — API scan runs
 │   ├── sast_runs.py       # /api/sast-runs/* and dynamic-run lead import routes
+│   ├── systems.py         # Systems, campaign control, review, and activity
+│   ├── extensions.py      # Extension discovery and settings
+│   ├── statistics.py      # Monthly LLM usage and prices
 │   └── reporting_debug.py # /api/reporting-debug/* — reporting-prompt editing & replay
 └── services/
     ├── active_jobs.py     # Active job summaries for the UI
     ├── campaign_results.py # Campaign finding grouping and mapping response data
+    ├── campaigns.py       # Multi-repository campaign orchestration
+    ├── correlation.py     # Component mapping and lead-to-target matching
     ├── sites.py           # CRUD service layer for Site and Credential
     ├── crawler.py         # LLM-guided parallel web crawl
     ├── scanner.py         # Dynamic agentic scan engine, specialist dispatch, finding dedup
+    ├── deep_scan.py       # Persistent Deep scan queue, planning, and workers
     ├── llm.py             # Multi-provider LLM client, agent tools, rate limiting, token telemetry
     ├── prompts/           # Extracted modular prompt templates
     │   ├── reporting.py   # Reporting / post-scan review prompts
@@ -131,7 +138,7 @@ src/aespa/
     ├── validator.py       # Adversarial validator agent (LLM-assisted finding validation)
     ├── web_route_inventory.py # Web route inventory classification & dynamic enrichment
     ├── web_workprogram.py # Web OWASP Top-10 matrix & per-class obligation tracking
-    └── events.py          # WebSocket event emission
+    └── events.py          # SSE event bus and activity persistence
 ```
 
 ---
@@ -159,7 +166,7 @@ AESPA_PORT         = 8000
 │  Browser / API client                                       │
 │  (Web UI SPA or raw HTTP)                                   │
 └─────────────────┬───────────────────────────────────────────┘
-                  │  HTTP + WebSocket
+                  │  HTTP + SSE
 ┌─────────────────▼───────────────────────────────────────────┐
 │  FastAPI application  (src/aespa/main.py)                   │
 │  Routers: sites · settings · test_runs · scan · alice       │
@@ -195,7 +202,15 @@ AESPA_PORT         = 8000
 └─────────────────────────────────────────────────────────────┘
 ```
 
-A **test run** is the central unit of work. It ties together a target site, its credentials, the LLM config, the scanner policy, and all results (crawled pages, traffic, findings, hypotheses). A run progresses through phases: `created → crawling → crawled → scanning → scanned` (plus `thinking_scanning`).
+A **test run** is the central unit of work. It ties together a target site, its credentials, the LLM config, the scanner policy, and its pages, traffic, findings, coverage, and imported leads.
+
+Web runs store lifecycle information in separate fields:
+
+- `status`: `pending`, `running`, `complete`, `incomplete`, `failed`, `stopped`, or `paused`.
+- `phase`: the current stage, such as `created`, `crawling`, `crawled`, `scanning`, `reporting`, `validating`, or `finished`.
+- `outcome` and `terminal_reason`: the saved result and reason the scan ended.
+
+A completed crawl leaves the run ready for scanning. Scan completion can still be incomplete when required work remains.
 
 ---
 
@@ -212,11 +227,12 @@ Defines API connections, optional project identifiers, and model discovery setti
 | Field | Default | Description |
 |---|---|---|
 | `name` | `Default Provider` | Label for the provider |
-| `api_format` | `anthropic` | API format: `claude_cli`, `factory_droid`, `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `google_vertex`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
+| `api_format` | `anthropic` | API format: `claude_cli`, `factory_droid`, `github_copilot`, `openai_codex`, `openai_chatgpt_plan`, `google_antigravity`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `google_vertex`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
 | `api_key` | — | Provider API key (stored in DB; masked and excluded from non-localhost exports) |
 | `base_url` | — | Override endpoint URL |
 | `username` | — | Optional Copilot CLI account login; blank uses Copilot CLI's selected default account |
 | `project_id` | — | Bedrock Mantle project ID, or Google Cloud project ID for Vertex AI |
+| `aws_profile` | - | Named AWS credentials profile for Bedrock Runtime and Mantle |
 | `location` | — | Google Vertex AI location; defaults to `global` |
 | `models_json` | `[]` | JSON list of available model names for this provider. Removing a name deletes unused saved model settings; names used by a scan profile cannot be removed until the profile is updated. API model refreshes keep names used by scan profiles. |
 
@@ -235,6 +251,7 @@ Defines execution parameters linked to a provider:
 | `max_tokens` | `16384` | Maximum output tokens per LLM call |
 | `max_context_tokens` | `200000` | Total model context window, including prompts, tools, conversation history, and the output allowance. Auto mode stores the latest provider-discovered value, follows later provider metadata refreshes, and uses a conservative fallback only when discovery has no context limit. |
 | `temperature` | — | Unset by default (falls through to provider/model default) |
+| `reasoning_effort` | - | Optional reasoning or thinking level; unset uses the provider default |
 | `use_vision` | `false` | Include Playwright screenshots in prompts |
 | `force_tool_choice` | `false` | Force tool selection through the provider wire format where supported. Codex app-server does not expose a per-turn tool-choice field, so AESPA repairs prose-only Codex scan turns inside its adapter. |
 
@@ -256,15 +273,17 @@ Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm
 | Field | Default | Description |
 |---|---|---|
 | `execution_monitor_enabled` | `false` | Enable duplicate-action and stalled-progress supervision by the Mentor |
-| `disable_deterministic_checks` | `false` | Skip automatic JavaScript sink, TLS, authentication, IDOR, and probe-result checks |
+| `disable_deterministic_checks` | `false` | Skip automatic TLS, authentication, IDOR, and probe-result checks. Passive JavaScript source analysis still runs in ordinary Test Lead scans. |
 | `max_consecutive_text_turns` | `0` | Stop after this many text-only Test Lead turns; `0` allows unlimited turns |
 | `enforce_full_coverage_obligations` | `false` | Require every coverage obligation to be resolved before the Test Lead can finish |
-| `scan_mode` | `safe_active` | `passive` (GET/HEAD only) · `safe_active` (+ POST) · `aggressive` (all methods) · `destructive` |
+| `standard_coverage_percent` | `60` | Percentage of applicable coverage cells required in Standard mode |
+| `scan_mode` | `aggressive` | Default method lists: `passive` allows GET/HEAD; `safe_active` adds POST; `aggressive` adds PUT/PATCH/OPTIONS; `destructive` also allows DELETE. Lists are configurable through `methods_by_mode`. |
 | `max_probes_per_page` | `50` | Cap on probe attempts per crawled page |
 | `thinking_max_steps` | `120` | Legacy compatibility setting; the active Test Lead loop is deliberately uncapped and does not read this value |
-| `request_timeout` | `10` | HTTP timeout per probe (seconds) |
-| `min_delay` | `0.05` | Minimum delay between probes (rate-limiting) |
-| `max_request_body` | `65536` | Probe body size cap (bytes) |
+| `dast_max_concurrent_llm_requests` | `4` | Maximum concurrent LLM requests per web or API scan |
+| `request_timeout_s` | `10` | HTTP timeout per probe (seconds) |
+| `min_delay_s` | `0.05` | Minimum delay between probes (rate-limiting) |
+| `max_request_body_bytes` | `65536` | Probe body size cap (bytes) |
 | `follow_redirects` | `true` | |
 | `allow_subdomains` | `true` | Allow crawling/probing subdomains of the target |
 
@@ -407,7 +426,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 |---|---|
 | `Site` | Target website (base URL, auth settings, associated credentials) |
 | `Credential` | Login credentials tied to a site (username, password, login URL) |
-| `LLMProviderConfig` | Reusable LLM provider connection settings (API keys, base URLs, rate limits, project IDs) |
+| `LLMProviderConfig` | Reusable LLM provider connection settings (API keys, base URLs, account, cloud project, and model discovery) |
 | `LLMConfig` | Saved LLM configuration/execution profile linked to a provider |
 | `LLMProfile` | Named per-agent-role model routing profile mapping roles to specific `LLMConfig` IDs |
 | `ScannerPolicy` | Scan behaviour policy for a test run |
@@ -476,9 +495,9 @@ start_crawl(run_id)
   └─ _do_crawl(run_id)
        1. Load site config, credentials, and upstream proxy settings
        2. Build crawl phases:
-            • Phase 0 — always unauthenticated (even if credentials exist)
-            • Phase 1..N — one phase per stored Credential
-       └─ Per phase:
+            • Default: one anonymous phase, plus one per Credential when auth is required
+            • Pinned credential: only that credential's phase, without an anonymous phase
+       └─ Run phases concurrently; per phase:
             a. Authenticate via Playwright (or skip for unauthenticated phase)
             b. Export auth cookies → ScannerSession
             c. Spawn N parallel browser workers (_CrawlShared state)
@@ -506,7 +525,7 @@ enabled, the UI labels this as access verification, shows progress such as
 `Access check 12/168`, and keeps each page check in the activity log. This is
 verification of known pages, not new page discovery.
 
-The unauthenticated phase is always run first so the crawler maps the public attack surface before logging in. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
+By default, the crawler schedules an anonymous phase alongside the authenticated phases. All phases run concurrently, so public pages are not guaranteed to be visited before authenticated pages. A run pinned to a valid `crawl_credential_id` uses only that credential when the site requires authentication. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
 
 **`max_pages` caps the total site-map size.** All phases run concurrently and share `_CrawlShared` (the `crawled_norms` dedup map + a `pages_done` counter, guarded by an `asyncio.Lock`). New nodes — both HTML pages and promoted API endpoints — are only created while `pages_done < max_pages`, so the number of distinct `CrawledPage` nodes in the site map never exceeds `max_pages` regardless of how many credential phases run. Already-discovered URLs still fall through the cap so every phase records its own access view of them (this is the differential broken-access-control signal); they don't create new nodes.
 
@@ -614,10 +633,11 @@ The dynamic scan is an **autonomous agentic loop**: the LLM is given a toolkit a
 start_thinking_scan(run_id)
   └─ _do_thinking_scan(run_id)
        1. Load crawl data, prior findings, TargetIntelItems
-       2. Unless deterministic checks are disabled, run JS sink analysis (_analyse_js_sinks) — fetches each
-          discovered JS file (TargetIntelItem kind=script), regex-scans
-          for unsanitized innerHTML/outerHTML/document.write sinks,
-          saves TargetIntelItem(kind=xss_sink) and info-severity findings
+       2. On fresh ordinary Test Lead scans, run JS sink analysis (_analyse_js_sinks)
+          - reads discovered scripts and identifies possible unsafe rendering paths;
+          saves TargetIntelItem(kind=xss_sink), without creating findings.
+          This passive inventory still runs when deterministic checks are disabled.
+          SAST Validate skips it; Team runs it for the first member only.
        3. Authenticate → ScannerSession
        4. Build attack-surface projection (_build_thinking_context_from_recon_summary)
           — canonical routes, real parameters, access observations, evidence
@@ -910,7 +930,7 @@ targeted scan round will change the next action.
 | `finding_list` | Already-confirmed findings |
 | `lead_list` | Imported SAST leads and their status |
 | `lead_detail` | Full evidence, traces, validation data, and attack path for an imported lead |
-| `target_inventory` | Extracted endpoints, forms, inputs, IDs, scripts, and pre-identified `xss_sink` items (unsanitized innerHTML sinks found by static JS analysis) |
+| `target_inventory` | Extracted endpoints, forms, inputs, IDs, scripts, and possible XSS rendering paths recorded as `xss_sink` items. Source analysis alone does not prove exploitable XSS. |
 | `search_assets` | Search-oriented view of the web crawl inventory |
 | `traffic_search` | Search the HTTP traffic log |
 | `endpoint_detail` | Combined page + intel + traffic for a URL |
@@ -987,7 +1007,8 @@ Test Lead calls agent_dispatch
      )
        1. Build opening brief from the explicit dispatch payload
        2. Run focused agentic loop using SPECIALIST_AGENT_TOOLS
-          (no agent_dispatch — no recursive dispatch; no JWT/register tools)
+          (no recursive dispatch or account-registration tools;
+           crypto specialists also receive forge_jwt and decode_jwt)
        3. Write findings directly to DB under the same run_id
        4. Emit specialist_step + agent_status events throughout
 ```
@@ -1058,10 +1079,12 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 
 | Provider | SDK used |
 |---|---|
+| `claude_cli` | Installed Claude Code CLI, using its signed-in account |
 | `factory_droid` | Official Factory Droid SDK, using the account signed in through Droid CLI |
 | `github_copilot` | Official GitHub Copilot SDK, using Copilot CLI authentication or a GitHub user token |
 | `openai_codex` | External Codex app-server, using the local Codex CLI's default ChatGPT login |
 | `openai_chatgpt_plan` | OpenAI Responses API with the selected signed-in ChatGPT account |
+| `google_antigravity` | Local Antigravity CLI/SDK adapter |
 | `anthropic` | `anthropic` Python SDK (native tool-use supported) |
 | `openai` | `openai` Python SDK |
 | `google` | `google-genai` with a Gemini Developer API key |
@@ -1069,6 +1092,8 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 | `bedrock` | `boto3` / `anthropic` Bedrock adapter |
 | `bedrock_mantle` | `anthropic` SDK for Claude Messages; `openai` SDK for Responses or Chat Completions, selected by model (`project_id` sent as `anthropic-workspace-id` or `OpenAI-Project`) |
 | `azure_openai` | `openai` SDK with Azure base URL |
+| `azure_foundry` / `azure_foundry_openai` | `openai` SDK for Azure Foundry endpoints |
+| `azure_foundry_anthropic` | `anthropic` SDK for Azure Foundry Claude endpoints |
 | `openai_compatible` | `openai` SDK with custom base URL |
 | `openrouter` | `openai` SDK with OpenRouter base URL |
 
@@ -1092,21 +1117,21 @@ Codex app-server advertises dynamic tools at thread start but does not provide a
 
 Droid tool calls pass through a minimal authenticated loopback MCP relay. The relay advertises only the current AESPA tool schemas and suspends each call while AESPA performs its existing validation, scope checks, execution, checkpointing, and result truncation. Supplying the canonical `tool_result` resumes the same Droid session. A checkpoint restored into a new process starts a fresh session seeded from the canonical message history. Factory-reported input, output, cache-read, cache-write, and Droid credit counters feed normal AESPA telemetry. AESPA records per-turn deltas from Droid's cumulative session counters, so persistent sessions preserve prompt-cache reporting without double-counting tokens or credits.
 
-Structured outputs such as probe lists, finding objects, and page analysis are requested as JSON or produced through tool calls. AESPA does not parse free-form model text with regular expressions.
+Structured outputs such as probe lists, finding objects, and page analysis are usually requested as JSON or produced through tool calls. Some older paths still parse constrained text replies, including the post-scan ACCEPT/LOW_CONFIDENCE review.
 
 ### Agent tool sets
 
 Different agent roles receive different tool sets:
 
 - **Test Lead** — full tool set including `agent_dispatch`, `jwt`, `credential_check`, `browser`, `http`, all context tools
-- **Specialist** — `SPECIALIST_AGENT_TOOLS`: `http`, `browser`, context tools; no `agent_dispatch` (prevents recursive dispatch), no JWT/credential/register tools (specialist is narrowly focused)
+- **Specialist** - HTTP, browser, Python, context lookup, finding creation, and completion tools. Specialists cannot dispatch more agents or use credential/account-registration tools. Crypto specialists additionally receive `forge_jwt` and `decode_jwt` through `get_specialist_tools("crypto")`.
 - **Adversarial validator** — purpose-built prompt and tool set focused on re-running and disproving a specific finding
 
 ### WSTG skills
 
 The LLM service dynamically selects a subset of OWASP Web Security Testing Guide (WSTG) technique descriptions relevant to the target's attack surface and injects them into the Test Lead's system prompt. This gives the scanner domain-specific testing guidance without overloading the context with irrelevant techniques.
 
-Vision support (when `enable_vision=true`) attaches base64-encoded Playwright screenshots to prompts, giving the LLM visual context about what a page looks like.
+Vision support (when `use_vision=true`) attaches base64-encoded Playwright screenshots to prompts, giving the LLM visual context about what a page looks like.
 
 ### Context limits and compaction
 
@@ -1202,7 +1227,7 @@ When the validator confirms a finding, `validator.py` tries to attach a **reprod
 
 **Files**: `src/aespa/api/`
 
-The API is a **FastAPI** application. All routes are async and use SQLModel sessions injected via `Depends`.
+The API is a **FastAPI** application with both synchronous and asynchronous route handlers. Database-backed routes generally use SQLModel sessions injected via `Depends`.
 
 ### Key route groups
 
@@ -1234,7 +1259,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/test-runs/{id}/alice/status` | `alice.py` | Check whether an ALICE task is running |
 | `/api/test-runs/{id}/alice/sessions` | `alice.py` | `GET`/`PUT` chat session persistence |
 | `/api/traffic/` | `traffic.py` | Paginated HTTP traffic log |
-| `/ws/events/{run_id}` | `events.py` | WebSocket event stream |
+| `/api/test-runs/{run_id}/events` | `events.py` | SSE stream for web crawl and scan events |
 | `/api/api-collections/` | `api_collections.py` | CRUD for API collections; document upload and parse; endpoint and credential management |
 | `/api/api-collections/{id}/export` · `/api/api-collections/import` | `api_collections.py` | Export a collection (endpoints, credentials, metadata) as a JSON bundle and re-import it elsewhere |
 | `/api/api-collections/{id}/readiness` | `api_collections.py` | `POST` run · `GET` retrieve LLM gap analysis |
@@ -1259,13 +1284,13 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/systems/{id}/campaigns/` | `systems.py` | Create/list/get/delete campaigns; `start`/`stop`/`resume`/`retry`/`continue` lifecycle actions |
 | `/api/systems/{id}/campaigns/{id}/status` | `systems.py` | Campaign progress (status, warnings, source/target member states) |
 | `/api/systems/{id}/campaigns/{id}/events` | `systems.py` | Live SSE stream (same event bus as web/API/SAST runs, scoped `run_kind="campaign"`) |
-| `/api/systems/{id}/campaigns/{id}/activity` | `systems.py` | Persisted campaign activity: merged, chronological `AgentLog`/`ScanLog` history (§18) |
-| `/api/systems/{id}/campaigns/{id}/activity/stream` | `systems.py` | Cursor-safe SSE replay-then-follow of the same activity feed, with no fetch-to-subscribe gap (§18) |
+| `/api/systems/{id}/campaigns/{id}/activity` | `systems.py` | Persisted campaign activity: merged, chronological `AgentLog`/`ScanLog` history (§19) |
+| `/api/systems/{id}/campaigns/{id}/activity/stream` | `systems.py` | Cursor-safe SSE replay-then-follow of the same activity feed, with no fetch-to-subscribe gap (§19) |
 | `/api/systems/{id}/campaigns/{id}/connections` | `systems.py` | The campaign's cross-repository system map (`ComponentConnection` rows) |
-| `/api/systems/{id}/campaigns/{id}/mappings` | `systems.py` | Lead-target mapping proposals, enriched with lead/component context for review (§18) |
-| `/api/systems/{id}/campaigns/{id}/validation-cases` | `systems.py` | Resolved paths, readiness blockers, live bindings, and execution outcomes for approved mappings (§18) |
+| `/api/systems/{id}/campaigns/{id}/mappings` | `systems.py` | Lead-target mapping proposals, enriched with lead/component context for review (§19) |
+| `/api/systems/{id}/campaigns/{id}/validation-cases` | `systems.py` | Resolved paths, readiness blockers, live bindings, and execution outcomes for approved mappings (§19) |
 | `/api/systems/{id}/campaigns/{id}/review` | `systems.py` | Submit approve/reject decisions for pending mappings |
-| `/api/systems/{id}/campaigns/{id}/findings` | `systems.py` | Combined findings across every child run, with resolved component provenance (§18) |
+| `/api/systems/{id}/campaigns/{id}/findings` | `systems.py` | Combined findings across every child run, with resolved component provenance (§19) |
 
 ---
 
@@ -1273,7 +1298,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 
 The web UI is a **single-page application** served from `src/aespa/web/`. It communicates with the backend over:
 - **REST** for CRUD and control operations
-- **WebSocket** (`/ws/events/{run_id}`) for real-time progress updates
+- **Server-Sent Events (SSE)** for real-time progress updates. Web runs use `/api/test-runs/{run_id}/events`; API and SAST runs have their own `/events` routes. The frontend subscribes through `EventSource`.
 
 ### Telemetry rendering (`TokenUsageBar`)
 
@@ -1281,15 +1306,14 @@ Detail views for Web runs, API runs, and SAST runs embed the `TokenUsageBar` com
 
 The sidebar's **Stats → Usage** page is independent of those detail views. It shows one month at a time, with totals and a provider/model table for uncached input, output, cache reads, cache writes, native credits, and estimated USD cost. It uses the operating system's local month boundary and asks for confirmation before clearing all usage months.
 
-### WebSocket event types (emitted by `services/events.py`)
+### SSE event types (emitted by `services/events.py`)
 
 Events are emitted at key points during crawling and scanning:
 
 - Crawl progress (pages discovered, depth reached)
 - Thinking-scan step (action taken, tool called, finding written)
 - Finding created / updated
-- Task graph changes (hypothesis seeded, task status update)
-- `agent_status` — emitted by every agent type (Test Lead, Specialist, Burp, Validator, Reporting) with `agent_id`, `role`, `status`, `current_task`, `outcome`; persisted to `ScanLog` so the Agents panel survives page reload
+- `agent_status` - emitted by scan agents with `agent_id`, `role`, `status`, `current_task`, and `outcome`; persisted to `AgentLog` so the Agents panel survives page reload
 - `specialist_step` — per-step event from a running specialist (action type, method, URL, hypothesis)
 - `scanner_phase` — scanner lifecycle events (scan started, JS sink analysis, stored XSS sweep, post-scan review, etc.)
 - `llm_response` / `llm_protocol` scanner phases persist provider/model, native stop reason, usable block counts, context size, retry state, and safe Bedrock request/usage metadata
@@ -1304,7 +1328,7 @@ Events are emitted at key points during crawling and scanning:
 
 | Tab | Content |
 |---|---|
-| **Status** | Scan controls, run metadata, `TokenUsageBar` telemetry; sub-tabs: **Agents** (all agent rows with status), **Specialists** (specialist-only thread view), **Log** (raw timestamped event feed) |
+| **Status** | Scan controls, run metadata, `TokenUsageBar` telemetry; sub-tabs: **Agents**, **Workers** (specialist threads for ordinary scans) or **Work Queue** (Deep testers and worker traces), and **Log** |
 | **Site Map** | Interactive graph of `CrawledPage` nodes and `PageLink` edges |
 | **Attack Surface & Coverage** | Live evidence projection — canonical routes/methods/parameters, access observations, workprogram gaps, provenance, signals, and observed technologies |
 | **Sessions** | `ScannerSession` records — auth cookies and tokens captured during crawl/scan |
@@ -1362,12 +1386,12 @@ The phase rail exposes all ten SAST phases from scope through report and scrolls
 ## 14. Concurrency & State Management
 
 - **LLM requests** — each web/API run uses the DAST concurrent LLM request limit, while each SAST run uses the SAST limit. The limits are configured under DAST > Test Lead and SAST in Settings.
-- **FastAPI async handlers** — all I/O is non-blocking via `asyncio`
+- **Request handlers** - FastAPI runs synchronous handlers in its thread pool. Async handlers and background scans use `asyncio`, but SQLModel sessions are synchronous; some blocking work is moved to worker threads.
 - **Parallel crawl workers** — multiple Playwright browser instances share a `_CrawlShared` state object (asyncio locks around the URL frontier and seen-set)
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
 - **Specialist agents** — each specialist runs as its own `asyncio.Task`; tracked in `_specialist_tasks[run_id]` so it is cancelled when the parent scan is stopped. Extra handoffs wait in `_specialist_pending[run_id]` and start as slots open. The final specialist barrier waits for both active and queued work.
 - **Finding validation** — end-of-scan findings use one managed bounded batch; manual finding actions use tracked inline tasks capped by `AdversarialValidatorConfig.end_scan_max_concurrent`. Both appear as one run-level validation job and are stopped together.
-- **ALICE background tasks** — `alice_tasks.py` holds a module-level `_registry: dict[int, AliceTask]` (one entry per run). Each task runs `run_alice_turn_stream` as an `asyncio.create_task`, decoupled from the HTTP connection; all emitted events are buffered in `AliceTask.events` so clients can replay from any cursor on reconnect
+- **ALICE background tasks** - `alice_tasks.py` holds a module-level `_registry: dict[tuple[str, int], AliceTask]`, keyed by `(run_type, run_id)`, where `run_type` is `site` or `api`. Each task runs independently of the HTTP connection. Its bounded event buffer supports reconnect replay; older cursors receive a state snapshot.
 - **Scan checkpointing** — the LLM conversation history is serialised to the DB at regular intervals by `checkpoint.py`; `start_thinking_scan_resume` restores it on restart
 - **Bounded scan completion** — `scan_completion.py` tracks structural progress across agentic turns to enforce termination policy and prevent non-terminating tool loops
 - **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed. Alembic applies schema changes at startup. Databases created before Alembic receive a one-time compatibility upgrade; normal startups only reconcile interrupted jobs and temporary workspaces.
@@ -1408,7 +1432,7 @@ Browser subscribes to event stream
   ▼
 GET /api/test-runs/{id}/alice/stream?cursor=N
   └─ alice_tasks.stream_events(run_id, cursor)
-       ├─ Replay buffered events[cursor:]  ← catches up missed events (page refresh)
+       ├─ Replay retained events after the absolute cursor, or send a state snapshot
        └─ Live events from asyncio.Queue   ← pushed by _append() as they arrive
 ```
 
@@ -1423,7 +1447,9 @@ class AliceTask:
     tab_id: str           # which chat session tab started this turn
     think_msg_id: str     # client-assigned ID for the thinking bubble
     reply_msg_id: str     # client-assigned ID for the reply bubble
-    events: list[dict]    # all SSE events since task start (capped at BUFFER_LIMIT=2000)
+    run_type: str        # site or api; part of the registry key
+    events: list[dict]    # retained SSE events (capped at BUFFER_LIMIT=2000)
+    dropped: int         # events removed from the front; cursors remain absolute
     waiters: set[asyncio.Queue]  # one queue per connected SSE client
     asyncio_task: asyncio.Task
     done: bool
@@ -1440,7 +1466,7 @@ On `asyncio.CancelledError` (user hits Stop A.L.I.C.E.), a final `done` event is
 
 ### Reconnect and replay
 
-When a client reconnects (page refresh, SPA navigation back to the run), it calls `GET /alice/stream?cursor=0`. The server replays `task.events[0:]` as SSE lines immediately, then switches to live delivery. The client re-accumulates `accumulatedThought` and `accumulatedMessage` from these replayed events, so the chat UI rebuilds the correct state even if the page was refreshed mid-stream.
+When a client reconnects, it requests `/alice/stream` with an absolute event cursor. Starting from `cursor=0` rebuilds the current turn. The server replays retained events after that cursor, then switches to live delivery. If the cursor predates the retained buffer, the server sends a `state_snapshot` with the current thought and reply text before following new events. The client uses replayed events or the snapshot to restore the chat state.
 
 `GET /alice/status` is polled on page load. If `running: true`, the client automatically calls `aliceSessionConnect` to start receiving events.
 
@@ -1940,7 +1966,11 @@ is saved.
 
 AESPA loads trusted Python extensions at startup. Shipped extensions live in the repository's top-level `extensions/` directory and are included as runtime data in desktop builds. The extension manager checks both direct child folders and `<author>/<extension>` folders under that directory and the configured user extension directory for `extension.toml`. Each manifest declares its ID, version, AESPA extension API version, entrypoint, and capabilities. Load failures are kept as diagnostics and do not stop other extensions or the application. Enabled state is stored in the database. Disabling an extension unloads its capabilities without importing its code, and enabling it reloads the registry immediately.
 
-Extensions register typed capabilities through `ExtensionRegistry`. They do not add FastAPI routes, frontend modules, or database models. The `sast.source_provider` capability describes settings fields, new-run fields, an availability check, and an asynchronous materializer. The `web.active_scanner` capability selects web scan candidates and returns findings from an external scanner. The frontend reads extension descriptions from `/api/extensions` and source provider descriptions from `/api/extensions/source-providers`.
+Extensions register capabilities through `ExtensionRegistry`. The `sast.source_provider` capability supplies settings, new-run fields, an availability check, and an asynchronous source materializer. The `web.active_scanner` capability selects web scan candidates and returns external findings. The `llm.catalog` capability supplies providers, models, and profiles from extension storage. The frontend reads extension descriptions from `/api/extensions` and source providers from `/api/extensions/source-providers`.
+
+With `api.routes` declared in its manifest, an extension can register one FastAPI router through `register_api_router`. Its routes are served below `/extension/<extension-id>/`; the core `/api` namespace is reserved for AESPA. Disabling the extension makes its routes return 404. Extensions do not register arbitrary frontend modules.
+
+An extension with a declared `data_namespace` can pass its own SQLAlchemy or SQLModel metadata to `registry.data_store(metadata)`. Its tables are created in a separate SQLite file and must use the declared table-name prefix. Disabling the extension closes that database's engine but retains the file. Extension code may read AESPA's main database, but must keep its own writes and schema changes in its isolated store. Changes to core scans, settings, secrets, and results go through AESPA-owned APIs or services. Calls through AESPA's LLM service may record normal usage in the main database.
 
 Extensions may declare `author` and `secrets_namespace` in their manifest. Secret settings use a password field on each extension's settings page, are stored separately from ordinary settings under `<author>.<secrets_namespace>`, and are never returned by the settings API. Runtime contexts expose a secret store bound to that full namespace. Extensions can also declare settings without registering a SAST source provider.
 
@@ -2026,7 +2056,7 @@ draft ─start─▶ sast_running ─▶ correlating ─▶ awaiting_review
 ```
 
 - **`sast_running`** — `start_campaign` creates one `SastRun` per frozen `(component, snapshot)` pair inside one transaction (the "frozen child manifest"), then awaits them under a bounded `asyncio.Semaphore(max_parallel_sast)`. A single component's scan failing does not fail the campaign — it is recorded on that `CampaignSourceMember` and surfaced as a plain-language warning on the campaign (`warnings_json`), and the campaign still reaches review with the results it has. A member already `completed`/`failed` (from an earlier run or a retry) is never rerun.
-- **`correlating`** — runs `correlate_campaign` (synchronous, deterministic). Facts are looked up by each `CampaignSourceMember`'s own `sast_run_id` — never by `component_id` alone — so a component reused across two campaigns/snapshots never leaks the other campaign's facts into this one.
+- **`correlating`** - awaits `correlate_campaign_with_llm`, which runs component mapping, deterministic matching, and bounded LLM matching for unresolved calls. Campaigns without a selected or active LLM profile use the deterministic fallback described above. Facts are looked up by each `CampaignSourceMember`'s own `sast_run_id`, so reused components do not mix facts from different campaign snapshots.
 - **`awaiting_review`** — paused until the review gate is satisfied: `submit_review` rejects an unknown/foreign `mapping_id` outright (all-or-nothing per batch) and only accepts an empty decision list when the campaign genuinely has zero proposals; `review_submitted_at` is stamped only once every proposed mapping — across one or more submissions — has an approved/rejected decision.
 - **`dast_running`** — for each frozen target, a `TestRun`/`ApiTestRun` is created once. A Site child crawls first, then resolves approved schema version 3 paths against its own page, action, and browser traffic rows. An API child resolves approved backend paths against its parsed endpoint rows. The scanner starts only when at least one resolved case has produced an open copied lead. Retryable missing evidence marks the target incomplete; terminal blockers are recorded without running a scanner. Crawl-discovered alternatives are saved as unapproved proposals for later review. Every target runs concurrently. A target is marked completed only after its runnable cases finish or every approved path has a terminal readiness result. A failed target makes a mixed campaign incomplete so another successful target cannot hide it. Later-approved paths use `POST .../targets/{target_id}/supplemental-validate`, reuse the existing web run, and pass through the same readiness gate before the lead-only scan starts.
 - **Independent child retry** — once the campaign orchestrator is idle, `POST .../sources/{member_id}/resume` and `POST .../targets/{member_id}/resume` retry only the selected failed/pending/skipped child. The existing child run is reused when available, completed siblings and the campaign stage are left untouched (except that a failed no-target campaign is promoted to `completed` when a target retry succeeds), and the retry is tracked separately so stopping or deleting a campaign cannot race an in-flight member retry. The same child run remains directly manageable from its ordinary SAST, web, or API screen; deleting a child detaches that member and allows the campaign resume action to create a replacement child from the frozen snapshot or target.
