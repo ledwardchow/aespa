@@ -10,7 +10,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   req.mockImplementation(async (url) =>
     url.endsWith("/token")
-      ? { service_token: "fixture-secret" }
+      ? { token: "fixture-secret" }
       : { site_url: "https://example.chatgpt.site", token_saved: true, upload_token_saved: true },
   );
 });
@@ -23,7 +23,7 @@ test("extension settings reveals the saved token only when requested and can hid
   expect(screen.queryByDisplayValue("fixture-secret")).toBeNull();
   await user.click(show);
   expect(req).toHaveBeenCalledWith(`${BASE}/publishing/token`, { method: "POST" });
-  expect(await screen.findByLabelText("Saved service token")).toHaveProperty(
+  expect(await screen.findByLabelText("Saved upload token")).toHaveProperty(
     "value",
     "fixture-secret",
   );
@@ -68,23 +68,18 @@ test("publishing stays disabled until an upload token has been saved", async () 
   expect(screen.getByRole("button", { name: "Publish results" }).disabled).toBe(true);
 });
 
-test("settings save both credentials and keep them out of the fields after saving", async () => {
+test("settings save one generated token and clear its field after saving", async () => {
   const user = userEvent.setup();
   render(<BenchmarkPublishing mode="settings" />);
   await screen.findByRole("button", { name: "Show saved token" });
-  await user.type(screen.getByLabelText("Private Sites service token"), "new-service");
-  await user.type(screen.getByLabelText("Upload token"), "aespa_upload_" + "a".repeat(64));
+  expect(screen.queryByLabelText("Private Sites service token")).toBeNull();
+  await user.type(screen.getByLabelText("Upload token"), "aespa_publish_v1_fixture");
   await user.click(screen.getByRole("button", { name: "Save connection" }));
   await waitFor(() =>
     expect(req).toHaveBeenCalledWith(`${BASE}/publishing`, {
       method: "PUT",
-      body: {
-        site_url: "https://example.chatgpt.site",
-        service_token: "new-service",
-        upload_token: "aespa_upload_" + "a".repeat(64),
-      },
+      body: { site_url: "https://example.chatgpt.site", token: "aespa_publish_v1_fixture" },
     }),
   );
   expect(screen.getByLabelText("Upload token").value).toBe("");
-  expect(screen.getByLabelText("Private Sites service token").value).toBe("");
 });

@@ -7,10 +7,7 @@ const DEFAULT_SITE = "https://aespa-benchmarks.maranthis.chatgpt.site";
 export function BenchmarkPublishing({ mode = "publish" }) {
   const [url, setUrl] = useState(DEFAULT_SITE);
   const [token, setToken] = useState("");
-  const [uploadToken, setUploadToken] = useState("");
   const [serviceSaved, setServiceSaved] = useState(false);
-  const [uploadSaved, setUploadSaved] = useState(false);
-  const [revealedUploadToken, setRevealedUploadToken] = useState("");
   const [configured, setConfigured] = useState(false);
   const [revealedToken, setRevealedToken] = useState("");
   const [busy, setBusy] = useState(false);
@@ -21,7 +18,6 @@ export function BenchmarkPublishing({ mode = "publish" }) {
       .then((data) => {
         setUrl(data.site_url || DEFAULT_SITE);
         setServiceSaved(data.token_saved);
-        setUploadSaved(data.upload_token_saved);
         setConfigured(data.token_saved && data.upload_token_saved);
       })
       .catch((err) => setError(err.message));
@@ -36,15 +32,11 @@ export function BenchmarkPublishing({ mode = "publish" }) {
         method: "PUT",
         body: {
           site_url: url,
-          ...(token ? { service_token: token } : {}),
-          ...(uploadToken ? { upload_token: uploadToken } : {}),
+          ...(token ? { token } : {}),
         },
       });
       setToken("");
-      setUploadToken("");
       setServiceSaved(true);
-      setUploadSaved(true);
-      setRevealedUploadToken("");
       setRevealedToken("");
       setConfigured(true);
       setMessage("Site connection saved.");
@@ -72,8 +64,7 @@ export function BenchmarkPublishing({ mode = "publish" }) {
     setError("");
     try {
       const saved = await req(`${BASE}/publishing/token`, { method: "POST" });
-      setRevealedToken(saved.service_token);
-      setRevealedUploadToken(saved.upload_token || "");
+      setRevealedToken(saved.token);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -105,38 +96,26 @@ export function BenchmarkPublishing({ mode = "publish" }) {
             />
           </label>
           <label className="field">
-            Private Sites service token
+            Upload token
             <input
               className="input"
               type="password"
               autoComplete="new-password"
               value={token}
               disabled={busy}
-              placeholder={serviceSaved ? "Saved. Leave blank to keep it." : "Enter service token"}
+              placeholder={
+                configured
+                  ? "Saved. Leave blank to keep it."
+                  : "Paste a token generated on the results site"
+              }
               onChange={(event) => setToken(event.target.value)}
             />
           </label>
-          <label className="field">
-            Upload token
-            <input
-              className="input"
-              type="password"
-              autoComplete="new-password"
-              value={uploadToken}
-              disabled={busy}
-              placeholder={
-                uploadSaved
-                  ? "Saved. Leave blank to keep it."
-                  : "Create a token on the results site"
-              }
-              onChange={(event) => setUploadToken(event.target.value)}
-            />
-          </label>
           <p className="subtle">
-            Open the results site’s API &amp; connection tab to create or revoke upload tokens. Both
-            tokens are required to publish.
+            Open the results site’s API &amp; connection tab to create or revoke upload tokens. Copy
+            the generated token here. No separate service token is needed.
           </p>
-          {serviceSaved && (
+          {configured && (
             <div className="field">
               <div className="form-actions">
                 <button
@@ -146,7 +125,6 @@ export function BenchmarkPublishing({ mode = "publish" }) {
                   onClick={() => {
                     if (revealedToken) {
                       setRevealedToken("");
-                      setRevealedUploadToken("");
                     } else {
                       reveal();
                     }
@@ -157,7 +135,7 @@ export function BenchmarkPublishing({ mode = "publish" }) {
               </div>
               {revealedToken && (
                 <label>
-                  Saved service token
+                  Saved upload token
                   <input
                     className="input"
                     readOnly
@@ -168,19 +146,8 @@ export function BenchmarkPublishing({ mode = "publish" }) {
               )}
             </div>
           )}
-          {revealedUploadToken && (
-            <label className="field">
-              Saved upload token
-              <input
-                className="input"
-                readOnly
-                value={revealedUploadToken}
-                onFocus={(event) => event.target.select()}
-              />
-            </label>
-          )}
           <p className="subtle">
-            Both tokens are stored in this installation’s benchmark extension database and are never
+            The token is stored in this installation’s benchmark extension database and is never
             included in benchmark exports.
           </p>
           <div className="form-actions">

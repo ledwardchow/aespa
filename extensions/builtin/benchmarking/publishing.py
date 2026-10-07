@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 from datetime import datetime, timezone
@@ -131,8 +133,53 @@ def graph_bundle(store) -> dict:
     return {"version": 1, "results": output}
 
 
+CONNECTION_PREFIX = "aespa_publish_v1_"
+
+
+def connection_token(url: str, service: str, upload: str) -> str:
+    value = json.dumps(
+        {"site_url": url, "service_token": service, "upload_token": upload},
+        separators=(",", ":"),
+    )
+    return CONNECTION_PREFIX + base64.urlsafe_b64encode(value.encode()).decode().rstrip(
+        "="
+    )
+
+
+def decode_connection_token(value: str, url: str) -> tuple[str, str]:
+    error = "Enter an upload token generated on the results site"
+    if len(value) > 32768 or not value.startswith(CONNECTION_PREFIX):
+        raise ValueError(error)
+    encoded = value[len(CONNECTION_PREFIX) :]
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
+        raise ValueError(error)
+    try:
+        data = json.loads(
+            base64.b64decode(
+                encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
+            )
+        )
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        raise ValueError(error) from None
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"site_url", "service_token", "upload_token"}
+        or not all(isinstance(v, str) for v in data.values())
+    ):
+        raise ValueError(error)
+    if data["site_url"] != url:
+        raise ValueError("This token was generated for a different site")
+    service, upload = data["service_token"], data["upload_token"]
+    if not re.fullmatch(r"[\x21-\x7e]{1,8192}", service) or not re.fullmatch(
+        r"aespa_upload_[a-f0-9]{64}", upload
+    ):
+        raise ValueError(error)
+    return service, upload
+
+
 class PublishingIn(BaseModel):
     site_url: str = Field(max_length=300)
+    token: SecretStr | None = Field(default=None)
     service_token: SecretStr | None = Field(default=None)
     upload_token: SecretStr | None = Field(default=None)
 
@@ -156,14 +203,14 @@ def register_publishing(router: APIRouter, store) -> None:
             saved = session.get(PublishingSettings, 1)
             if not saved or not saved.service_token:
                 raise HTTPException(404, "No service token has been saved")
+            upload = session.get(PublishingUploadToken, 1)
+            if not upload or not upload.token:
+                raise HTTPException(404, "No upload token has been saved")
             return JSONResponse(
                 {
-                    "service_token": saved.service_token,
-                    "upload_token": (
-                        upload.token
-                        if (upload := session.get(PublishingUploadToken, 1))
-                        else ""
-                    ),
+                    "token": connection_token(
+                        saved.site_url, saved.service_token, upload.token
+                    )
                 },
                 headers={"Cache-Control": "no-store"},
             )
@@ -187,11 +234,23 @@ def register_publishing(router: APIRouter, store) -> None:
                 if payload.upload_token is not None
                 else None
             )
+            if payload.token is not None:
+                if (
+                    payload.service_token is not None
+                    or payload.upload_token is not None
+                ):
+                    raise HTTPException(422, "Send only the generated upload token")
+                try:
+                    token, upload_token = decode_connection_token(
+                        payload.token.get_secret_value().strip(), url
+                    )
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from None
             # Never reuse a site's credential for a different site.
             if saved.site_url and saved.site_url != url and not token:
-                raise HTTPException(422, "Enter the service token for the new site")
+                raise HTTPException(422, "Enter a token generated for the new site")
             if saved.site_url and saved.site_url != url and not upload_token:
-                raise HTTPException(422, "Enter the upload token for the new site")
+                raise HTTPException(422, "Enter a token generated for the new site")
             if upload_token is not None:
                 if not re.fullmatch(r"aespa_upload_[a-f0-9]{64}", upload_token):
                     raise HTTPException(422, "Enter a valid upload token")
@@ -209,7 +268,9 @@ def register_publishing(router: APIRouter, store) -> None:
                     raise HTTPException(422, "Enter a valid service token")
                 saved.service_token = token
             if not saved.service_token:
-                raise HTTPException(422, "Enter the private Sites service token")
+                raise HTTPException(
+                    422, "Enter an upload token generated on the results site"
+                )
             saved.site_url = url
             session.add(saved)
             session.add(upload)
@@ -289,7 +350,7 @@ def register_publishing(router: APIRouter, store) -> None:
                     if response.status_code in (401, 403):
                         raise HTTPException(
                             502,
-                            f"Site access was rejected. Check the service token and upload token. {sent} results sent.",
+                            f"Site access was rejected. Check the upload token. If access still fails, generate a new token on the results site. {sent} results sent.",
                         )
                     if not response.is_success:
                         raise HTTPException(

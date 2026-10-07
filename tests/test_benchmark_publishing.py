@@ -196,10 +196,9 @@ def test_reveal_token_is_explicit_and_not_cached(portable):
         )
         assert "fixture-secret" not in client.get("/publishing").text
         response = client.post("/publishing/token")
-        assert response.json() == {
-            "service_token": "fixture-secret",
-            "upload_token": UPLOAD_TOKEN,
-        }
+        assert publishing.decode_connection_token(
+            response.json()["token"], "https://a.chatgpt.site"
+        ) == ("fixture-secret", UPLOAD_TOKEN)
         assert response.headers["cache-control"] == "no-store"
         # A new settings page and a blank update keep the stored token.
         assert (
@@ -208,9 +207,9 @@ def test_reveal_token_is_explicit_and_not_cached(portable):
             ).status_code
             == 200
         )
-        assert (
-            client.post("/publishing/token").json()["service_token"] == "fixture-secret"
-        )
+        assert publishing.decode_connection_token(
+            client.post("/publishing/token").json()["token"], "https://a.chatgpt.site"
+        ) == ("fixture-secret", UPLOAD_TOKEN)
 
 
 def test_upload_token_required_and_not_reused_for_another_site(portable):
@@ -260,10 +259,9 @@ def test_upload_token_required_and_not_reused_for_another_site(portable):
             == 422
         )
         # A rejected change must not overwrite either saved credential.
-        assert client.post("/publishing/token").json() == {
-            "service_token": "service-secret",
-            "upload_token": UPLOAD_TOKEN,
-        }
+        assert publishing.decode_connection_token(
+            client.post("/publishing/token").json()["token"], "https://a.chatgpt.site"
+        ) == ("service-secret", UPLOAD_TOKEN)
         assert UPLOAD_TOKEN not in client.get("/graph-export").text
         assert (
             client.put(
@@ -276,3 +274,74 @@ def test_upload_token_required_and_not_reused_for_another_site(portable):
             ).status_code
             == 200
         )
+
+
+def test_single_token_saves_and_sends_both_credentials(portable, monkeypatch):
+    models, _, stores = portable
+    seed(models, stores[0])
+    from fastapi import APIRouter
+
+    publishing = modules()
+    app = FastAPI()
+    router = APIRouter()
+    publishing.register_publishing(router, stores[0])
+    app.include_router(router)
+    called = []
+
+    async def fake_post(self, url, **kwargs):
+        called.append(kwargs)
+        return httpx.Response(
+            200, json={"received": 1, "stored": 1, "skipped_stale": 0}
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    token = publishing.connection_token(
+        "https://a.chatgpt.site", "service-secret", UPLOAD_TOKEN
+    )
+    with TestClient(app) as client:
+        assert (
+            client.put(
+                "/publishing",
+                json={"site_url": "https://a.chatgpt.site", "token": token},
+            ).status_code
+            == 200
+        )
+        assert token not in client.get("/publishing").text
+        assert client.post("/publishing/token").json() == {"token": token}
+        assert client.post("/publish").status_code == 200
+        assert (
+            called[0]["headers"]["OAI-Sites-Authorization"] == "Bearer service-secret"
+        )
+        assert called[0]["headers"]["X-AESPA-Upload-Token"] == UPLOAD_TOKEN
+        response = client.put(
+            "/publishing", json={"site_url": "https://b.chatgpt.site", "token": token}
+        )
+        assert response.status_code == 422
+        assert token not in response.text
+        assert client.post("/publishing/token").json() == {"token": token}
+        assert (
+            client.put(
+                "/publishing",
+                json={
+                    "site_url": "https://a.chatgpt.site",
+                    "token": token,
+                    "service_token": "conflict",
+                },
+            ).status_code
+            == 422
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "raw-service",
+        "aespa_publish_v1_!!!!",
+        "aespa_publish_v1_e30",
+        "aespa_publish_v1_" + "a" * 33000,
+    ],
+)
+def test_rejects_malformed_single_tokens(value):
+    with pytest.raises(ValueError):
+        modules().decode_connection_token(value, "https://a.chatgpt.site")

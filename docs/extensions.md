@@ -267,7 +267,7 @@ Benchmark Lab file.
 
 ### Hosted benchmark graphs
 
-Extensions → Benchmark Lab → Settings includes a Hosted benchmark graphs panel. Save the private Sites URL, service token, and upload token there. Create upload tokens in the results site’s API & connection tab. Each token can upload and update graph summaries, and can be revoked separately. Service access cannot read results or manage tokens. Choose Show saved token to view its value. Then use Publish results in Benchmark Lab’s Settings tab. Both tokens stay in the extension’s own database; exports never include them. Restart AESPA after installing this update.
+Extensions → Benchmark Lab → Settings includes a Hosted benchmark graphs panel. Save the private Sites URL and one upload token generated on the results site. No separate service token is needed. Create upload tokens in the results site’s API & connection tab. Each token can upload and update graph summaries, and can be revoked separately. Service access cannot read results or manage tokens. Choose Show saved token to view its value. Then use Publish results in Benchmark Lab’s Settings tab. The token stays in the extension’s own database; exports never include it. Existing connections saved with two tokens continue to work. Restart AESPA after installing this update.
 
 Only graph data is uploaded: stable result ID, dataset name and fingerprint, scan type, model/provider names, SAST source models, finding counts, estimated scan cost, scan start time, and update time. Finding text, evidence, ground-truth items, source files, and model credentials are excluded. Unknown cost or dates stay unknown. Dataset fingerprints keep different ground-truth versions separate.
 
