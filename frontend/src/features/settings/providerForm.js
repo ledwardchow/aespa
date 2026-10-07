@@ -34,6 +34,7 @@ export function providerToForm(provider) {
 
 export function providerPayload(form) {
   const usesCliCredentials = [
+    "claude_cli",
     "factory_droid",
     "openai_codex",
     "openai_chatgpt_plan",

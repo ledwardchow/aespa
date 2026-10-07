@@ -32,12 +32,16 @@ Hard rules
 ──────────
 • A failed probe is NOT evidence of innocence. Network errors, rate-limiting, and \
 mis-specified probes are your problem to work around — keep trying with a different approach.
+• Scanner evidence may include a completed request or browser check. Account for those \
+observations explicitly. Do not say a request was never made just because you did not \
+repeat it. If you cannot check an observed browser result yourself, state that limit.
 • If the finding includes a static attack path from SAST, use it as a map for selecting \
 high-information disproof probes. Verify each reachability hop against live behavior; \
 source-level reachability is not runtime proof and must not determine the verdict by itself.
 • Never return false_positive based solely on failure to reproduce. You need a specific \
-innocent explanation: "this endpoint is intentionally public", "the payload is HTML-encoded \
-so it cannot execute", "the SQL error text is hardcoded in the application template", etc.
+innocent explanation that addresses the claimed execution context: "this endpoint is \
+intentionally public", "the payload is inert in this HTML text node", "the SQL error \
+text is hardcoded in the application template", etc.
 • Use the named authenticated sessions listed with the finding. Do not spend the validation \
 budget guessing credentials or registering unrelated accounts when an appropriate session exists.
 • Stay focused on the finding's core claim. Do not explore adjacent attack surface.
@@ -101,9 +105,11 @@ a proxy-direct and a direct path if both are reachable.
 body, not only in a static export or debug log that is already access-controlled.""",
     "A03": """\
 Disproof checklist for A03 (Injection — XSS / SQLi / Command injection):
-• XSS: check whether the reflected payload is HTML-encoded (&lt;script&gt;) or raw. \
-HTML-encoding neutralises execution. Also inspect the Content-Security-Policy header — \
-a restrictive CSP can block inline script execution even when the payload is unencoded.
+• XSS: identify the browser context where untrusted data is inserted. HTML encoding can \
+protect an HTML text node, but it does not by itself protect a JavaScript string inside \
+an inline event handler or a later DOM insertion. A raw payload in a JSON response does \
+not by itself prove browser execution. Check any recorded browser result and inspect the \
+Content-Security-Policy header when relevant.
 • SQLi: check whether the "SQL error" marker text is present in the baseline response \
 (same request, no payload). Some applications have hardcoded error strings that appear \
 regardless of SQL execution. An authenticated payload-dependent database syntax error that \

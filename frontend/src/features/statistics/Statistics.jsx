@@ -43,6 +43,7 @@ function providerLabel(provider) {
     bedrock_mantle: "Amazon Bedrock Mantle",
     github_copilot: "GitHub Copilot",
     factory_droid: "Factory Droid",
+    claude_cli: "Claude CLI",
     openai_codex: "OpenAI Codex subscription",
     openai_chatgpt_plan: "ChatGPT plan",
     azure_openai: "Azure OpenAI",

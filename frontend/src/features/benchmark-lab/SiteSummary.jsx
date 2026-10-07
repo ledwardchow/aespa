@@ -599,7 +599,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                   {axis === "cost" ? "scan cost" : "scan start time"} match these filters.
                 </p>
               )}
-              {unavailable.length > 0 && (
+              {axis !== "cost" && unavailable.length > 0 && (
                 <p className="subtle">
                   {unavailable.length} matching{" "}
                   {unavailable.length === 1 ? "analysis has" : "analyses have"} no recorded{" "}

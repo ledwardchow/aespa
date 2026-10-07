@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { BenchmarkPublishing } from "../benchmark-lab/BenchmarkPublishing.jsx";
+
 import * as extensionsApi from "../../shared/api/extensions.js";
 import { Crumb, PageHeader, Sep } from "../../shared/ui/PageHeader.jsx";
 
@@ -183,7 +185,9 @@ export function ExtensionSettingsPage({ extensionId }) {
               </div>
             ) : (
               <>
-                {(extension.settings_fields || []).length ? (
+                {extension.id === "aespa.benchmarking" ? (
+                  <BenchmarkPublishing mode="settings" />
+                ) : (extension.settings_fields || []).length ? (
                   extension.settings_fields.map((field) => (
                     <ExtensionSettingField
                       key={field.key}

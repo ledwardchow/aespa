@@ -57,6 +57,7 @@ from aespa.services.execution_monitor import (
     InterventionState,
     intentional_repetition_contract,
 )
+from aespa.services.js_xss_sinks import find_js_xss_sinks
 from aespa.services.prompts.specialist import (
     SPECIALIST_SYSTEM_PROMPT as _SPECIALIST_SYSTEM_PROMPT,
 )
@@ -2153,12 +2154,41 @@ def _build_thinking_context_from_recon_summary(
 
 def _build_target_intelligence_context(run_id: int, limit: int = 80) -> str:
     with Session(get_engine()) as s:
-        items = s.exec(
+        all_xss_items = list(
+            s.exec(
+                select(TargetIntelItem)
+                .where(TargetIntelItem.test_run_id == run_id)
+                .where(TargetIntelItem.kind == "xss_sink")
+                .order_by(
+                    TargetIntelItem.confidence.desc(),
+                    TargetIntelItem.discovered_at.desc(),
+                )
+                .limit(300)
+            ).all()
+        )
+        xss_items = []
+        by_script: dict[str, list[TargetIntelItem]] = {}
+        for item in all_xss_items:
+            by_script.setdefault(item.value, []).append(item)
+        # First show one lead from each script, then fill from the highest
+        # confidence leads. A long script cannot crowd out every other page.
+        for group in sorted(by_script.values(), key=lambda rows: -rows[0].confidence):
+            if len(xss_items) >= min(24, limit):
+                break
+            xss_items.append(group.pop(0))
+        remaining = sorted(
+            (item for group in by_script.values() for item in group),
+            key=lambda item: -item.confidence,
+        )
+        xss_items.extend(remaining[: max(0, min(24, limit) - len(xss_items))])
+        other_items = s.exec(
             select(TargetIntelItem)
             .where(TargetIntelItem.test_run_id == run_id)
+            .where(TargetIntelItem.kind != "xss_sink")
             .order_by(TargetIntelItem.kind, TargetIntelItem.discovered_at.desc())
-            .limit(limit)
+            .limit(max(0, limit - len(xss_items)))
         ).all()
+        items = [*xss_items, *other_items]
     if not items:
         return ""
 
@@ -2170,6 +2200,17 @@ def _build_target_intelligence_context(run_id: int, limit: int = 80) -> str:
         "Counts in sampled inventory: "
         + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())),
     ]
+    if xss_items:
+        lines.append(
+            "XSS sink leads come from JavaScript source. Trace each field to an input, "
+            "write a harmless canary, and check the rendering page in a browser. "
+            "A source match alone is not a finding."
+        )
+        if len(all_xss_items) > len(xss_items):
+            lines.append(
+                f"Showing {len(xss_items)} of {len(all_xss_items)} XSS sink leads; "
+                "use target_inventory with kind=xss_sink for the rest."
+            )
     for item in items[:limit]:
         method = f" {item.method}" if item.method else ""
         url = f" @ {item.url}" if item.url else ""
@@ -2180,6 +2221,12 @@ def _build_target_intelligence_context(run_id: int, limit: int = 80) -> str:
         lines.append(
             f"  - {item.kind}{method} {item.key}{value}{url}; source={item.source}{evidence}"
         )
+        if item.kind == "xss_sink":
+            pages = _loads_json_dict(item.item_metadata).get("observed_pages") or []
+            if pages:
+                lines.append(
+                    "    Seen on: " + ", ".join(str(page) for page in pages[:3])
+                )
     return "\n".join(lines)
 
 
@@ -4955,12 +5002,44 @@ async def _run_specialist_agent(
             except (TypeError, ValueError):
                 browser_page_id = None
             browser_action = dict(tool_input)
+            login_as = str(tool_input.get("login_as") or "").strip()
+            if login_as and tool_input.get("use_session"):
+                return "Browser: set either login_as or use_session, not both."
+            alternate_credential = None
+            if login_as and not is_api_run:
+                with Session(get_engine()) as _site_session:
+                    site = _site_session.get(Site, site_id)
+                    alternate_credential = _alternate_configured_credential(
+                        list(site.credentials) if site else [], login_as
+                    )
+            if login_as and alternate_credential is None:
+                return (
+                    "Browser: login_as must name one configured account different "
+                    "from the primary account. Cross-user viewing was not checked."
+                )
+            if alternate_credential is not None:
+                login_target = _login_url_for_credential(
+                    site.login_url if site else base_url, alternate_credential
+                ) or base_url
+                for checked_url in (login_target, browser_action.get("url") or base_url):
+                    scope_error = check_scope(checked_url, site_id, run_id)
+                    if scope_error:
+                        return f"[SCOPE BLOCK] {scope_error}"
             browser_session_label = (
                 tool_input.get("use_session") or target_session_label
             )
-            browser_session_label, browser_session, browser_note = (
-                _resolve_requested_scan_session(session_vault, browser_session_label)
-            )
+            if alternate_credential is not None:
+                browser_session_label = (
+                    f"configured_credential_{alternate_credential.id}"
+                )
+                browser_session = {"username": alternate_credential.username}
+                browser_note = (
+                    f"Logged in as configured account {alternate_credential.username}."
+                )
+            else:
+                browser_session_label, browser_session, browser_note = (
+                    _resolve_requested_scan_session(session_vault, browser_session_label)
+                )
             if browser_page_id is not None and tool_input.get("replay"):
                 with Session(get_engine()) as _page_session:
                     replay_page = _page_session.get(CrawledPage, browser_page_id)
@@ -5003,8 +5082,19 @@ async def _run_specialist_agent(
 
                 async with async_playwright() as _pw:
                     _browser = await _pw.chromium.launch(headless=True)
-                    _ctx = await _browser.new_context(ignore_https_errors=True)
-                    if browser_session:
+                    if alternate_credential is not None:
+                        _ctx, _page = await _open_browser_as_configured_account(
+                            _browser,
+                            alternate_credential,
+                            base_url=base_url,
+                            login_url=login_target,
+                            run_id=run_id,
+                            llm_cfg=llm_cfg,
+                        )
+                    else:
+                        _ctx = await _browser.new_context(ignore_https_errors=True)
+                        _page = await _ctx.new_page()
+                    if browser_session and alternate_credential is None:
                         cookies_to_add = [
                             {
                                 "name": name,
@@ -5017,11 +5107,12 @@ async def _run_specialist_agent(
                         ]
                         if cookies_to_add:
                             await _ctx.add_cookies(cookies_to_add)
-                    traffic_svc.setup_playwright_logging(
-                        _ctx,
-                        run_id,
-                        username=(browser_session or {}).get("username"),
-                    )
+                    if alternate_credential is None:
+                        traffic_svc.setup_playwright_logging(
+                            _ctx,
+                            run_id,
+                            username=(browser_session or {}).get("username"),
+                        )
                     traffic_svc.set_browser_context_tag(
                         _ctx,
                         browser_page_id,
@@ -5036,7 +5127,6 @@ async def _run_specialist_agent(
                         test_class=tool_input.get("test_class"),
                         obligation_id=tool_input.get("obligation_id"),
                     )
-                    _page = await _ctx.new_page()
                     try:
                         browser_result = await _run_thinking_browser_action(
                             _page,
@@ -6703,12 +6793,10 @@ async def _do_thinking_scan(
     if (
         not resuming
         and coverage_mode != "sast_validate"
-        and not scanner_policy.disable_deterministic_checks
         and (team_assignment is None or team_assignment.get("run_preflight", False))
     ):
-        # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM
-        # loop starts. The thinking-scan agent can then find them via target_inventory
-        # without re-fetching and re-parsing JS source itself.
+        # Passive source inventory runs even when automatic probes are disabled.
+        # It only creates leads; the agent must confirm execution before reporting.
         async with _make_scanner_client(
             run_id=run_id,
             verify=False,
@@ -10038,12 +10126,34 @@ async def _do_agentic_thinking_loop(
             if _scope_err:
                 return f"[SCOPE BLOCK] {_scope_err}"
             steps_list = (br_action.get("steps") or []) + br_followup_steps
+            login_as = str(tool_input.get("login_as") or "").strip()
+            if login_as and tool_input.get("use_session"):
+                return "Browser: set either login_as or use_session, not both."
+            alternate_credential = (
+                _alternate_configured_credential(creds or [], login_as)
+                if login_as
+                else None
+            )
+            if login_as and alternate_credential is None:
+                return (
+                    "Browser: login_as must name one configured account different "
+                    "from the primary account. Cross-user viewing was not checked."
+                )
+            if alternate_credential is not None:
+                alternate_login_url = _login_url_for_credential(
+                    login_url, alternate_credential
+                )
+                login_scope_error = _active_scope_check(alternate_login_url)
+                if login_scope_error:
+                    return f"[SCOPE BLOCK] Login URL: {login_scope_error}"
             use_session_label = (
                 tool_input.get("use_session")
                 if isinstance(tool_input.get("use_session"), str)
                 else None
             )
             if (
+                not login_as
+                and
                 use_session_label is None
                 and br_replay_requested
                 and br_target_page
@@ -10051,6 +10161,8 @@ async def _do_agentic_thinking_loop(
             ):
                 use_session_label = str(br_target_page["target_session_label"])
             if (
+                not login_as
+                and
                 use_session_label is None
                 and br_replay_requested
                 and br_target_page
@@ -10072,6 +10184,12 @@ async def _do_agentic_thinking_loop(
             use_session_label, selected_session, _br_session_resolution_note = (
                 _resolve_requested_scan_session(session_vault, use_session_label)
             )
+            if alternate_credential is not None:
+                use_session_label = f"configured_credential_{alternate_credential.id}"
+                selected_session = {
+                    "username": alternate_credential.username,
+                    "credential_id": alternate_credential.id,
+                }
             payload_summary = _thinking_browser_payload_summary(steps_list)
             action_message = _thinking_action_log_message(
                 step, "BROWSER", br_url, tool_input
@@ -10096,61 +10214,80 @@ async def _do_agentic_thinking_loop(
                     },
                 },
             )
-            try:
-                _br_waf_strategy = _waf_strategy_for_run(run_id) or {}
-                # Isolate the browser session per step: clear the shared context's
-                # cookies first so a prior authenticated step can't leak into an
-                # anonymous/other-user navigation, then install exactly the selected
-                # session (default → restore the primary session).
-                cookie_list: list[dict] = []
-                with contextlib.suppress(Exception):
-                    await browser_ctx.clear_cookies()
-                if selected_session is not None:
-                    cookie_list = [
-                        {"name": k, "value": v, "url": br_url}
-                        for k, v in (selected_session.get("cookies") or {}).items()
-                    ]
-                    if _br_waf_strategy.get("transport") == "browser_page":
-                        cookie_list = _merge_browser_cookies(
-                            [
-                                cookie
-                                for cookie in _primary_browser_cookies
-                                if any(
-                                    str(cookie.get("name") or "")
-                                    .lower()
-                                    .startswith(prefix)
-                                    for prefix in _br_waf_strategy.get(
-                                        "preserve_cookie_prefixes", []
-                                    )
-                                )
-                            ],
-                            cookie_list,
-                            br_url,
-                            tuple(_br_waf_strategy.get("preserve_cookie_prefixes", [])),
+            active_browser_ctx = browser_ctx
+            active_browser_page = pw_page
+            alternate_browser_ctx = None
+            if alternate_credential is not None:
+                try:
+                    alternate_browser_ctx, active_browser_page = (
+                        await _open_browser_as_configured_account(
+                            browser_ctx.browser,
+                            alternate_credential,
+                            base_url=base_url,
+                            login_url=alternate_login_url,
+                            run_id=run_id,
+                            llm_cfg=llm_cfg,
                         )
-                else:
-                    cookie_list = _primary_browser_cookies
-                if cookie_list:
-                    await browser_ctx.add_cookies(cookie_list)
-                _br_call_headers = (
-                    tool_input.get("headers")
-                    if isinstance(tool_input.get("headers"), dict)
-                    else {}
-                )
-                await browser_ctx.set_extra_http_headers(
-                    {
-                        **_playwright_global_headers(
-                            (selected_session.get("extra_headers") or {})
-                            if selected_session
-                            else {}
-                        ),
-                        **_br_call_headers,
-                    }
-                )
-            except Exception:
-                pass
+                    )
+                    active_browser_ctx = alternate_browser_ctx
+                except Exception as exc:
+                    return f"Browser: alternate account login failed: {exc}"
+            else:
+                try:
+                    _br_waf_strategy = _waf_strategy_for_run(run_id) or {}
+                    # Isolate the browser session per step: clear the shared context's
+                    # cookies first so a prior authenticated step can't leak into an
+                    # anonymous/other-user navigation, then install exactly the selected
+                    # session (default → restore the primary session).
+                    cookie_list: list[dict] = []
+                    with contextlib.suppress(Exception):
+                        await browser_ctx.clear_cookies()
+                    if selected_session is not None:
+                        cookie_list = [
+                            {"name": k, "value": v, "url": br_url}
+                            for k, v in (selected_session.get("cookies") or {}).items()
+                        ]
+                        if _br_waf_strategy.get("transport") == "browser_page":
+                            cookie_list = _merge_browser_cookies(
+                                [
+                                    cookie
+                                    for cookie in _primary_browser_cookies
+                                    if any(
+                                        str(cookie.get("name") or "")
+                                        .lower()
+                                        .startswith(prefix)
+                                        for prefix in _br_waf_strategy.get(
+                                            "preserve_cookie_prefixes", []
+                                        )
+                                    )
+                                ],
+                                cookie_list,
+                                br_url,
+                                tuple(_br_waf_strategy.get("preserve_cookie_prefixes", [])),
+                            )
+                    else:
+                        cookie_list = _primary_browser_cookies
+                    if cookie_list:
+                        await browser_ctx.add_cookies(cookie_list)
+                    _br_call_headers = (
+                        tool_input.get("headers")
+                        if isinstance(tool_input.get("headers"), dict)
+                        else {}
+                    )
+                    await browser_ctx.set_extra_http_headers(
+                        {
+                            **_playwright_global_headers(
+                                (selected_session.get("extra_headers") or {})
+                                if selected_session
+                                else {}
+                            ),
+                            **_br_call_headers,
+                        }
+                    )
+                except Exception:
+                    pass
             traffic_svc.set_browser_context_tag(
-                browser_ctx,
+                active_browser_ctx,
                 br_page_id,
                 use_session_label,
                 username=(
@@ -10171,7 +10308,7 @@ async def _do_agentic_thinking_loop(
             )
             try:
                 br_result = await _run_thinking_browser_action(
-                    pw_page,
+                    active_browser_page,
                     br_action,
                     default_url=base_url,
                     scanner_policy=scanner_policy,
@@ -10195,7 +10332,7 @@ async def _do_agentic_thinking_loop(
                         if isinstance(step, dict)
                     ]
                     br_result = await _run_thinking_browser_action(
-                        pw_page,
+                        active_browser_page,
                         fallback_action,
                         default_url=base_url,
                         scanner_policy=scanner_policy,
@@ -10205,13 +10342,15 @@ async def _do_agentic_thinking_loop(
                     followup_action = dict(br_action)
                     followup_action["steps"] = br_followup_steps
                     br_result = await _run_thinking_browser_action(
-                        pw_page,
+                        active_browser_page,
                         followup_action,
                         default_url=base_url,
                         scanner_policy=scanner_policy,
                     )
             finally:
-                traffic_svc.clear_browser_context_tag(browser_ctx)
+                traffic_svc.clear_browser_context_tag(active_browser_ctx)
+                if alternate_browser_ctx is not None:
+                    await alternate_browser_ctx.close()
             _persist_browser_object_references(
                 run_id,
                 br_page_id,
@@ -13185,21 +13324,6 @@ def _deterministic_findings_from_results(
                 "Use parameterized queries, strict input validation, and generic error handling.",
             )
 
-        reflected_payload = _reflected_payload_from_result(result)
-        if (
-            reflected_payload
-            and reflected_payload in body
-            and _looks_xss_payload(reflected_payload)
-        ):
-            add(
-                "Reflected cross-site scripting",
-                "A03",
-                6.1,
-                "A script-capable payload was reflected in the response body without being removed or encoded.",
-                "Attackers could execute JavaScript in a victim browser if they can deliver a crafted URL or form submission.",
-                "Apply context-aware output encoding and reject dangerous HTML/JavaScript input where it is not expected.",
-            )
-
         if (
             "ssti" in desc.lower()
             and "49" in body
@@ -13254,40 +13378,6 @@ def _deterministic_findings_from_results(
             )
 
     return findings
-
-
-def _reflected_payload_from_result(result: dict) -> str:
-    desc = str(result.get("desc") or "")
-    if ":" in desc:
-        candidate = desc.split(":", 1)[1].strip()
-        if candidate:
-            return candidate[:200]
-    parsed = urlparse(str(result.get("url") or ""))
-    qs = parse_qs(parsed.query, keep_blank_values=True)
-    for values in qs.values():
-        for value in values:
-            if _looks_xss_payload(value):
-                return value
-    payload = str(result.get("payload") or "")
-    return payload if _looks_xss_payload(payload) else ""
-
-
-def _looks_xss_payload(value: str) -> bool:
-    lower = (value or "").lower()
-    return any(
-        marker in lower
-        for marker in (
-            "<script",
-            "onerror=",
-            "onload=",
-            "ontoggle=",
-            "javascript:alert",
-            "<svg",
-            "autofocus",
-            "<details",
-            "alert(",
-        )
-    )
 
 
 def _looks_like_json_or_api(result: dict) -> bool:
@@ -13367,6 +13457,60 @@ def _browser_page_target_matches(result: dict, page: dict) -> bool:
 
 
 # ── Passive checks ────────────────────────────────────────────────────────────
+
+
+def _alternate_configured_credential(creds: list, username: str):
+    """Select a configured account other than the scan's primary account."""
+    requested = username.strip().casefold()
+    if not requested or not creds:
+        return None
+    matches = [c for c in creds if str(c.username).casefold() == requested]
+    if len(matches) != 1 or matches[0].id == creds[0].id:
+        return None
+    return matches[0]
+
+
+async def _open_browser_as_configured_account(
+    browser,
+    credential,
+    *,
+    base_url: str,
+    login_url: str,
+    run_id: int,
+    llm_cfg,
+):
+    """Log in to an isolated browser context using an alternate site account."""
+    from aespa.services.crawler import _authenticate
+
+    context = await browser.new_context(
+        user_agent=playwright_user_agent(browser),
+        ignore_https_errors=True,
+        **_playwright_proxy(),
+    )
+    try:
+        protect_playwright_context(browser, context)
+        headers = _playwright_global_headers()
+        if headers:
+            await context.set_extra_http_headers(headers)
+        traffic_svc.setup_playwright_logging(context, run_id)
+        page = await context.new_page()
+        try:
+            await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+        except Exception:
+            pass
+        await _authenticate(page, login_url, credential, run_id, llm_cfg=llm_cfg)
+        cookies = await context.cookies()
+        token, _ = await _read_browser_auth_token(page)
+        if not cookies and not token:
+            raise RuntimeError("The configured account did not produce a browser session")
+        if token:
+            await context.set_extra_http_headers(
+                _playwright_global_headers({"Authorization": f"Bearer {token}"})
+            )
+        return context, page
+    except Exception:
+        await context.close()
+        raise
 
 
 async def _run_thinking_browser_action(
@@ -13861,21 +14005,7 @@ async def _analyse_js_sinks(
     hx: httpx.AsyncClient,
     scanner_policy=None,
 ) -> list[dict]:
-    """Fetch every JS file discovered during crawling and grep for unsanitized innerHTML sinks.
-
-    For each match where no sanitizer call (escapeHtml, DOMPurify, etc.) wraps the value:
-    - Saves a TargetIntelItem(kind='xss_sink') so the thinking-scan agent can find it
-      and dynamically confirm it.
-    - Emits scanner_phase events at start and completion.
-
-    These static matches seed leads for the dynamic scan only — they are deliberately
-    NOT written as findings. A regex match on `innerHTML` is not a confirmed
-    vulnerability, and emitting one info-level "Potential stored XSS sink" row per
-    match (often dozens of near-duplicates) buried the high-value confirmed findings.
-    The agentic loop promotes a sink to a real finding only after dynamic confirmation.
-
-    Returns a list of sink dicts (field, js_file, snippet) for the completion event payload.
-    """
+    """Read discovered scripts and save source-based XSS leads, never findings."""
     timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
 
     with Session(get_engine()) as s:
@@ -13888,15 +14018,14 @@ async def _analyse_js_sinks(
     if not script_items:
         return []
 
-    unique_script_urls = sorted(
-        list(
-            {
-                item.value or item.url or item.key
-                for item in script_items
-                if (item.value or item.url or item.key)
-            }
-        )
-    )
+    observed_pages: dict[str, set[str]] = {}
+    for item in script_items:
+        script_url = item.value or item.url or item.key
+        if script_url:
+            observed_pages.setdefault(script_url, set())
+            if item.url and item.url != script_url:
+                observed_pages[script_url].add(item.url)
+    unique_script_urls = sorted(observed_pages)
 
     if not unique_script_urls:
         return []
@@ -13907,27 +14036,16 @@ async def _analyse_js_sinks(
             "type": "scanner_phase",
             "phase": "js_sink_analysis",
             "status": "start",
-            "message": f"JS sink analysis: scanning {len(unique_script_urls)} script file(s) for unsanitized innerHTML sinks…",
+            "message": f"JS sink analysis: scanning {len(unique_script_urls)} script file(s) for possible XSS rendering paths…",
         },
-    )
-
-    _SINK_RE = re.compile(
-        r"(\.innerHTML\s*[+=]|\.outerHTML\s*[+=]|document\.write\s*\(|insertAdjacentHTML\s*\()",
-        re.MULTILINE,
-    )
-    _SANITIZER_RE = re.compile(
-        r"escapeHtml|DOMPurify|sanitize|htmlEncode|encodeHtml|\.escape\(",
-        re.IGNORECASE,
-    )
-    # Extract a dotted field name from the sink context, e.g. "tx.description"
-    _FIELD_RE = re.compile(
-        r"\b(?:tx|item|entry|row|data|msg|rec|obj|comment|result)\s*\.\s*([a-zA-Z_]\w*)"
     )
 
     from aespa.services.crawler import _save_intel_item as _si
 
     found_sinks: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
+    fetched = 0
+    failed = 0
 
     for js_url in unique_script_urls:
         if not js_url:
@@ -13935,34 +14053,26 @@ async def _analyse_js_sinks(
         try:
             resp = await hx.get(js_url, timeout=timeout)
             if resp.status_code != 200:
+                failed += 1
                 continue
             body = resp.text
+            fetched += 1
         except Exception as exc:
             log.debug("JS sink analysis: failed to fetch %s: %s", js_url, exc)
+            failed += 1
             continue
 
-        for m in _SINK_RE.finditer(body):
-            ctx_start = max(0, m.start() - 200)
-            ctx_end = min(len(body), m.end() + 200)
-            context = body[ctx_start:ctx_end]
-
-            if _SANITIZER_RE.search(context):
-                continue
-
-            field_m = _FIELD_RE.search(context)
-            field_name = (
-                field_m.group(1) if field_m else m.group(1).strip().rstrip("(= ")
-            )
-
-            dedup = (js_url, field_name)
+        for candidate in find_js_xss_sinks(body):
+            field_name = candidate["field"]
+            context = candidate["context"]
+            dedup = (js_url, field_name, context)
             if dedup in seen:
                 continue
             seen.add(dedup)
-
-            snippet = context.replace("\n", " ").strip()[:400]
+            snippet = candidate["evidence"]
             log.info(
-                "JS sink analysis: unsanitized %s for field '%s' in %s",
-                m.group(1).strip(),
+                "JS sink analysis: possible %s rendering of field '%s' in %s",
+                context,
                 field_name,
                 js_url,
             )
@@ -13975,12 +14085,22 @@ async def _analyse_js_sinks(
                 url=js_url,
                 method="GET",
                 source="js_sink_analysis",
-                confidence=0.85,
+                confidence=candidate["confidence"],
                 evidence=snippet,
-                metadata={"js_file": js_url, "pattern": m.group(1).strip()},
+                metadata={
+                    "js_file": js_url,
+                    "context": context,
+                    "sink": candidate["sink"],
+                    "observed_pages": sorted(observed_pages[js_url])[:5],
+                },
             )
             found_sinks.append(
-                {"field": field_name, "js_file": js_url, "snippet": snippet[:200]}
+                {
+                    "field": field_name,
+                    "context": context,
+                    "js_file": js_url,
+                    "snippet": snippet[:200],
+                }
             )
 
     events_svc.emit(
@@ -13990,11 +14110,13 @@ async def _analyse_js_sinks(
             "phase": "js_sink_analysis",
             "status": "complete",
             "message": (
-                f"JS sink analysis: found {len(found_sinks)} unsanitized innerHTML sink(s)"
+                f"JS sink analysis: found {len(found_sinks)} possible XSS rendering path(s)"
                 if found_sinks
-                else "JS sink analysis: no unsanitized innerHTML sinks found"
+                else "JS sink analysis: no possible XSS rendering paths found"
             ),
             "sinks": found_sinks,
+            "scripts_fetched": fetched,
+            "scripts_failed": failed,
         },
     )
     return found_sinks

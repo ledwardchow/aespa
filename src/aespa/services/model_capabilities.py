@@ -23,6 +23,7 @@ log = logging.getLogger("aespa.llm.capabilities")
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 PROVIDER_CAPABILITY_STRATEGIES = {
     "anthropic": "provider_model_list_then_documented_family_then_openrouter",
+    "claude_cli": "documented_family_then_openrouter",
     "factory_droid": "droid_sdk_model_metadata_then_openrouter",
     "github_copilot": "copilot_sdk_model_metadata_then_openrouter",
     "openai_codex": "codex_app_server_model_metadata_then_openrouter",

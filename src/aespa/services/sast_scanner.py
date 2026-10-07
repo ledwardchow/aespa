@@ -105,6 +105,7 @@ _UNFINISHED_WORKER_STATUSES = {"failed", "pending", "running"}
 _SESSION_AUTHENTICATED_LLM_PROVIDERS = {
     "codex",
     "openai_codex",
+    "claude_cli",
     "github_copilot",
     "factory_droid",
     "google_antigravity",

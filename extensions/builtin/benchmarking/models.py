@@ -128,3 +128,16 @@ class TransferIdentity(ExtensionModel, table=True):
     kind: str
     local_id: int
     origin_json: str = "{}"
+
+
+class PublishingSettings(ExtensionModel, table=True):
+    __tablename__ = "benchmarking_publishing_settings"
+    id: int = Field(default=1, primary_key=True)
+    site_url: str = ""
+    service_token: str = ""
+
+
+class PublishingUploadToken(ExtensionModel, table=True):
+    __tablename__ = "benchmarking_publishing_upload_token"
+    id: int = Field(default=1, primary_key=True)
+    token: str = ""

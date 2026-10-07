@@ -1668,6 +1668,8 @@ async def _dispatch_completion(
 ) -> str:
     if config.provider == "factory_droid":
         return await _factory_droid(config, prompt, screenshot_b64)
+    if config.provider == "claude_cli":
+        return await _claude_cli(config, prompt, screenshot_b64)
     if config.provider == "github_copilot":
         return await _github_copilot(config, prompt, screenshot_b64)
     if config.provider == "openai_codex":
@@ -1942,6 +1944,7 @@ async def _stream_chat_completion_impl(
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
     if config.provider in (
+        "claude_cli",
         "factory_droid",
         "github_copilot",
         "openai_codex",
@@ -1959,7 +1962,9 @@ async def _stream_chat_completion_impl(
                 ],
             ]
         )
-        if config.provider == "factory_droid":
+        if config.provider == "claude_cli":
+            yield await _claude_cli(config, combined, None)
+        elif config.provider == "factory_droid":
             yield await _factory_droid(config, combined, None)
         elif config.provider == "github_copilot":
             yield await _github_copilot(config, combined, None)
@@ -2727,6 +2732,43 @@ async def _factory_droid(
         _droid_usage_callback(),
         _llm_proxy_var.get(),
     )
+
+
+async def _claude_cli(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    from aespa.services import claude_cli_provider
+
+    return await claude_cli_provider.plain_completion(
+        config,
+        prompt,
+        screenshot_b64,
+        _claude_cli_usage_callback(),
+        _llm_proxy_var.get(),
+    )
+
+
+def _claude_cli_usage_callback() -> Any:
+    usage_context = _capture_usage_context()
+
+    def record(
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> None:
+        _record_usage(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            usage_context=usage_context,
+            provider="claude_cli",
+        )
+
+    return record
 
 
 async def _google_antigravity(
@@ -5709,6 +5751,7 @@ def compact_messages_for_config(
 # wire format or the Bedrock Runtime toolConfig format.
 AGENTIC_LOOP_PROVIDERS = frozenset(
     {
+        "claude_cli",
         "factory_droid",
         "github_copilot",
         "openai_codex",
@@ -6255,6 +6298,17 @@ async def _call_with_tools_impl(
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
     _active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    if config.provider == "claude_cli":
+        from aespa.services import claude_cli_provider
+
+        return await claude_cli_provider.completion_with_tools(
+            config,
+            system_message,
+            messages,
+            _active_tools,
+            _claude_cli_usage_callback(),
+            _llm_proxy_var.get(),
+        )
     if config.provider == "factory_droid":
         from aespa.services import droid_provider
 

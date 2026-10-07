@@ -649,6 +649,9 @@ def blindness_checks(run: SastRun, dataset: Dataset) -> tuple[dict[str, Any], st
 
 def build_router(store: ExtensionDataStore) -> APIRouter:
     router = APIRouter(tags=["benchmarking"])
+    from .publishing import register_publishing
+
+    register_publishing(router, store)
     bulk_locks = {kind: asyncio.Lock() for kind in ("site", "api", "sast")}
 
     @router.get("/export")
