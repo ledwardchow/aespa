@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { BenchmarkPublishing } from "../benchmark-lab/BenchmarkPublishing.jsx";
+import { BenchmarkPublishing } from "../benchmark-lab/public.js";
 
 import * as extensionsApi from "../../shared/api/extensions.js";
 import { Crumb, PageHeader, Sep } from "../../shared/ui/PageHeader.jsx";

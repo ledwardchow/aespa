@@ -91,11 +91,7 @@ export function BenchmarkEvaluationForm() {
       }
       if (!runId || !selectedDatasetId)
         throw new Error("Choose a completed SAST run and a ground-truth dataset.");
-      const {
-        include_conditional,
-        include_hardening,
-        ...evaluationForm
-      } = form;
+      const { include_conditional, include_hardening, ...evaluationForm } = form;
       const created = await benchmarkApi.createBenchmarkEvaluation({
         ...evaluationForm,
         sast_run_id: Number(runId),

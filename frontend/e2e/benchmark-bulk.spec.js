@@ -64,13 +64,15 @@ for (const width of [1440, 600]) {
       if (endpoint === "benchmark-unbenchmarked") {
         const body = route.request().postDataJSON();
         batches.push(body);
-        results.push({
-          id: 6,
-          run_kind: body.run_kind,
-          run_id: 1,
-          summary: { full: 0, partial: 0, missing: 0 },
-        });
-        return route.fulfill({ json: { completed: [1], skipped: [2], failures: [] } });
+        for (const runId of body.run_ids) {
+          results.push({
+            id: 5 + runId,
+            run_kind: body.run_kind,
+            run_id: runId,
+            summary: { full: 0, partial: 0, missing: 0 },
+          });
+        }
+        return route.fulfill({ json: { completed: body.run_ids, skipped: [2], failures: [] } });
       }
       return route.fulfill({ json: [] });
     });
@@ -80,14 +82,15 @@ for (const width of [1440, 600]) {
     await expect(page.getByLabel("Ground truth for bulk benchmarks")).toHaveCount(0);
     await page.getByRole("tab", { name: "DAST", exact: true }).click();
     await expect(page.getByRole("tab", { name: "Summary" })).toHaveCount(0);
-    const region = page.getByRole("region", { name: "Sites completed scans" });
+    const region = page.getByRole("region", { name: "Sites finished scans" });
     await expect(region.getByRole("link", { name: "Unbenchmarked scan" })).toBeVisible();
-    await expect(region.getByText("Stopped scan")).toHaveCount(0);
+    await expect(region.getByRole("link", { name: "Stopped scan" })).toBeVisible();
     await expect(region.getByRole("columnheader", { name: "Scan model" })).toBeVisible();
     await expect(region.getByText("DAST with SAST Leads", { exact: true })).toBeVisible();
     await expect(region.getByText("Test Lead (dast-model)", { exact: true })).toBeVisible();
     await region.getByRole("checkbox", { name: "Select all scans from Shop" }).check();
     await expect(region.getByRole("checkbox", { name: "Select Unbenchmarked scan" })).toBeChecked();
+    await expect(region.getByRole("checkbox", { name: "Select Stopped scan" })).toBeChecked();
     await expect(
       region.getByRole("checkbox", { name: "Select Already benchmarked scan" }),
     ).toBeDisabled();
@@ -98,23 +101,23 @@ for (const width of [1440, 600]) {
         .evaluate((element) => element.indeterminate),
     ).toBe(true);
     await page.screenshot({ path: path.join(tmpdir(), `aespa-benchmark-selection-${width}.png`) });
-    const action = region.getByRole("button", { name: "Benchmark 1 selected scans" });
+    const action = region.getByRole("button", { name: "Benchmark 2 selected scans" });
     await expect(action).toBeDisabled();
     await region.getByLabel("Ground truth for bulk benchmarks").selectOption("7");
     await action.click();
-    await expect(region.getByRole("status")).toContainText("Benchmarked 1 scans");
-    expect(batches).toEqual([{ run_kind: "site", run_ids: [1], dataset_id: 7 }]);
+    await expect(region.getByRole("status")).toContainText("Benchmarked 2 scans");
+    expect(batches).toEqual([{ run_kind: "site", run_ids: [1, 3], dataset_id: 7 }]);
     await page.screenshot({ path: path.join(tmpdir(), `aespa-benchmark-outcome-${width}.png`) });
     await page.getByRole("tab", { name: "APIs", exact: true }).click();
     await expect(
       page
-        .getByRole("region", { name: "API completed scans" })
+        .getByRole("region", { name: "API finished scans" })
         .getByText("Test Lead (dast-model)", { exact: true }),
     ).toBeVisible();
     await page.getByRole("tab", { name: "SAST", exact: true }).click();
     await expect(
       page
-        .getByRole("region", { name: "SAST completed scans" })
+        .getByRole("region", { name: "SAST finished scans" })
         .getByRole("link", { name: "Source scan" }),
     ).toBeVisible();
     await expect(page.getByText("Source model (sast-model)", { exact: true })).toBeVisible();
