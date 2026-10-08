@@ -133,7 +133,7 @@ export async function installFixtures(page, { empty = false } = {}) {
           scan_cost_usd: 0.42,
           comparison: { method: "model", model: { id: 1, name: "Fixture model" } },
           scan_models: {
-            test_lead: { id: 1, name: "Fixture Test Lead", model: "fixture-model" },
+            primary: { id: 1, name: "Fixture Test Lead", model: "fixture-model" },
             sast: [],
           },
           created_at: "2026-09-27T00:00:00Z",
@@ -153,6 +153,7 @@ export async function installFixtures(page, { empty = false } = {}) {
         },
       ],
       "/extension/aespa.benchmarking/evaluations": [],
+      "/extension/aespa.benchmarking/settings": { default_model_id: 1 },
     };
     return route.fulfill({ json: tables[path] || [] });
   });
@@ -200,6 +201,7 @@ export async function installFixtures(page, { empty = false } = {}) {
       "/api/systems/1/campaigns": empty ? [] : [campaign],
       "/api/systems/1/campaigns/1": campaign,
       "/api/settings/llm/models": {},
+      "/api/settings/llm/extension-catalog": { models: [], providers: [] },
       "/api/settings/browser-debug": {
         browser_engine: "playwright_chromium",
         browser_visible: false,

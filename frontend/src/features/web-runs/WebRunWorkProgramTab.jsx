@@ -408,15 +408,11 @@ export function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 })
                           title={`Show traffic for ${cat} on ${pg.url}`}
                           onClick={() =>
                             nav(
-                              runHref(
-                                { runKind: "web", runId },
-                                "traffic",
-                                {
-                                  coverage_cells: (cell.cell_ids || []).join(","),
-                                  coverage_category: column.category,
-                                  test_class: column.test_class || undefined,
-                                },
-                              ),
+                              runHref({ runKind: "web", runId }, "traffic", {
+                                coverage_cells: (cell.cell_ids || []).join(","),
+                                coverage_category: column.category,
+                                test_class: column.test_class || undefined,
+                              }),
                             )
                           }
                         >

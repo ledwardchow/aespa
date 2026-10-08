@@ -94,9 +94,7 @@ export function DeepScanSettings() {
               min="1"
               max="20"
               value={form.max_concurrent_planners}
-              onChange={(event) =>
-                update({ max_concurrent_planners: Number(event.target.value) })
-              }
+              onChange={(event) => update({ max_concurrent_planners: Number(event.target.value) })}
             />
             <div className="field-hint">
               Plans independent testers in parallel. Provider request and token limits still apply.

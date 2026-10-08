@@ -18,8 +18,8 @@ export function ScannerPolicyFields({ form, upd, disabled = false }) {
           }
         />
         <div className="field-hint">
-          Maximum LLM requests that DAST agents can have in flight across a web or API run.
-          Provider request and token limits still apply. Default: 4.
+          Maximum LLM requests that DAST agents can have in flight across a web or API run. Provider
+          request and token limits still apply. Default: 4.
         </div>
       </div>
       <label className="toggle-row">
@@ -36,8 +36,8 @@ export function ScannerPolicyFields({ form, upd, disabled = false }) {
         <span>Disable automatic security checks</span>
       </label>
       <div className="subtle" style={{ marginBottom: "10px" }}>
-        Skip automatic TLS, authentication, IDOR, and probe-result checks. JavaScript source is still
-        read for possible XSS paths, but those leads need browser confirmation.
+        Skip automatic TLS, authentication, IDOR, and probe-result checks. JavaScript source is
+        still read for possible XSS paths, but those leads need browser confirmation.
       </div>
       <label className="toggle-row">
         <input

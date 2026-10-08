@@ -90,7 +90,9 @@ function inferClassGroup(row) {
   }
   if (row.class_group) return row.class_group;
   const role = String(row.role || "").toLowerCase();
-  return ["review", "injection", "access", "logic", "sink"].find((group) => role.includes(`${group} worker`));
+  return ["review", "injection", "access", "logic", "sink"].find((group) =>
+    role.includes(`${group} worker`),
+  );
 }
 
 export function sastGroupHasAgents(rows, classGroup) {

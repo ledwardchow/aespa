@@ -49,14 +49,14 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
     hasChatGPTPlan && !hasCodex && !hasDroid && !hasCopilot && !hasAntigravity
       ? "ChatGPT plan usage"
       : hasAntigravity && !hasCodex && !hasDroid && !hasCopilot
-      ? "Antigravity usage"
-      : hasCodex && !hasDroid && !hasCopilot
-        ? "Codex usage"
-        : hasDroid && !hasCopilot
-          ? "Droid usage"
-          : hasCopilot && !hasDroid
-            ? "Copilot usage"
-            : "LLM usage";
+        ? "Antigravity usage"
+        : hasCodex && !hasDroid && !hasCopilot
+          ? "Codex usage"
+          : hasDroid && !hasCopilot
+            ? "Droid usage"
+            : hasCopilot && !hasDroid
+              ? "Copilot usage"
+              : "LLM usage";
   const quota = tokenUsage?.codex_quota || tokenUsage?.copilot_quota;
 
   return (
