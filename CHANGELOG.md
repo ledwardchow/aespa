@@ -2,7 +2,7 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## Unreleased
+## [PR #278] Public Benchmarking, Claude CLI and ChatGPT plan LLM providerse
 
 ### New features
 
