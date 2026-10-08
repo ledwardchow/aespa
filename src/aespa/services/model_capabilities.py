@@ -23,6 +23,7 @@ log = logging.getLogger("aespa.llm.capabilities")
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 PROVIDER_CAPABILITY_STRATEGIES = {
     "anthropic": "provider_model_list_then_documented_family_then_openrouter",
+    "claude_cli": "documented_family_then_openrouter",
     "factory_droid": "droid_sdk_model_metadata_then_openrouter",
     "github_copilot": "copilot_sdk_model_metadata_then_openrouter",
     "openai_codex": "codex_app_server_model_metadata_then_openrouter",
@@ -240,6 +241,78 @@ def gemini_capability(model: str) -> dict[str, Any] | None:
 
 
 def documented_model_capability(api_format: str, model: str) -> dict[str, Any] | None:
+    if api_format == "openai_chatgpt_plan":
+        # The ChatGPT-plan model catalog does not include context or output
+        # limits. Keep this list to models with published OpenAI specifications.
+        specifications = {
+            "gpt-6-astra": (
+                1_050_000,
+                128_000,
+                ["low", "medium", "high", "xhigh", "max"],
+                None,
+            ),
+            "gpt-6.1-sol": (
+                1_050_000,
+                128_000,
+                ["low", "medium", "high", "xhigh", "max"],
+                "medium",
+            ),
+            "gpt-6-sol": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh", "max"],
+                "medium",
+            ),
+            "gpt-6-luna": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh", "max"],
+                "xhigh",
+            ),
+            "gpt-5.6-sol": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh", "max"],
+                "medium",
+            ),
+            "gpt-5.6-terra": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh", "max"],
+                None,
+            ),
+            "gpt-5.6-luna": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh", "max"],
+                "xhigh",
+            ),
+            "gpt-5.5": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh"],
+                None,
+            ),
+            "gpt-daybreak-blue-latest": (1_050_000, 128_000, None, None),
+            "gpt-5.6-cyber": (400_000, 128_000, None, None),
+            "gpt-daybreak-red-latest": (400_000, 128_000, None, None),
+        }
+        if model not in specifications:
+            return None
+        context, output, efforts, default = specifications[model]
+        capability = {
+            "context_window_tokens": context,
+            "max_output_tokens": output,
+            "context_window_source": "openai_documentation",
+            "source": "native",
+            "confidence": "documented",
+            "strategy": "documented_registry",
+        }
+        if efforts is not None:
+            capability["supported_efforts"] = efforts
+        if default is not None:
+            capability["default_effort"] = default
+        return capability
     if api_format in {"google", "google_vertex"}:
         capability = gemini_capability(model)
         if capability is not None:

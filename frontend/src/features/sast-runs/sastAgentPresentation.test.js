@@ -168,3 +168,18 @@ test("lists unfinished workers before completed ones", () => {
   ]);
   expect(validators.task).toBe("1 active, 1 queued, 3 complete");
 });
+
+test("stopped scans do not show stale validator activity", () => {
+  const rows = [
+    { id: 1, agent_id: "sast-validator", role: "SAST Validator", status: "active" },
+    { id: 2, agent_id: "sast-validator-1", role: "SAST Candidate Validator", status: "failed" },
+    { id: 3, agent_id: "sast-validator-2", role: "SAST Candidate Validator", status: "complete" },
+  ];
+
+  const validators = buildSastAgentRoster(rows, "light", false).find(
+    (entry) => entry.id === "sast-validators",
+  );
+  expect(validators.status).toBe("paused");
+  expect(validators.task).toBe("1 complete, 1 failed");
+  expect(validators.children.every((child) => child.status !== "active")).toBe(true);
+});

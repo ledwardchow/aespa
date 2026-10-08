@@ -63,7 +63,14 @@ export function readStoredValue(key, fallback, validate) {
   }
 }
 
-export function CandidateTable({ leads, selectedId, onSelect }) {
+export function CandidateTable({
+  leads,
+  selectedId,
+  onSelect,
+  onRevalidate,
+  revalidatingLeadId,
+  canRevalidate,
+}) {
   const [widths, setWidths] = useState(() =>
     readStoredValue(
       CANDIDATE_COLUMN_WIDTHS_KEY,
@@ -258,11 +265,26 @@ export function CandidateTable({ leads, selectedId, onSelect }) {
                   </td>
                   <td>{Math.round((lead.confidence || 0) * 100)}%</td>
                   <td>
-                    <span
-                      className={`sast-state sast-state-${lead.validation_status || "pending"}`}
-                    >
-                      {lead.validation_status || "pending"}
-                    </span>
+                    <div className="sast-lead-validation-actions">
+                      <span
+                        className={`sast-state sast-state-${lead.validation_status || "pending"}`}
+                      >
+                        {lead.validation_status || "pending"}
+                      </span>
+                      {lead.validation_status === "inconclusive" && onRevalidate && (
+                        <button
+                          type="button"
+                          className="btn ghost sm"
+                          disabled={!canRevalidate || revalidatingLeadId != null}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onRevalidate(lead);
+                          }}
+                        >
+                          {revalidatingLeadId === lead.id ? "Starting…" : "Re-validate"}
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -285,6 +307,9 @@ export function CandidatesView({
   queueBusy,
   reportableCount,
   onExport,
+  onRevalidate,
+  revalidatingLeadId,
+  canRevalidate,
 }) {
   const [ledgerWidth, setLedgerWidth] = useState(() =>
     readStoredValue(
@@ -355,7 +380,14 @@ export function CandidatesView({
             </button>
           </div>
         </div>
-        <CandidateTable leads={leads} selectedId={selectedLead?.id} onSelect={onSelect} />
+        <CandidateTable
+          leads={leads}
+          selectedId={selectedLead?.id}
+          onSelect={onSelect}
+          onRevalidate={onRevalidate}
+          revalidatingLeadId={revalidatingLeadId}
+          canRevalidate={canRevalidate}
+        />
       </section>
       <div
         className="sast-layout-resizer"
@@ -371,12 +403,28 @@ export function CandidatesView({
       >
         <span aria-hidden="true" />
       </div>
-      <LeadEvidence lead={selectedLead} targets={targets} onQueue={onQueue} queueBusy={queueBusy} />
+      <LeadEvidence
+        lead={selectedLead}
+        targets={targets}
+        onQueue={onQueue}
+        queueBusy={queueBusy}
+        onRevalidate={onRevalidate}
+        revalidatingLeadId={revalidatingLeadId}
+        canRevalidate={canRevalidate}
+      />
     </div>
   );
 }
 
-export function LeadEvidence({ lead, targets, onQueue, queueBusy }) {
+export function LeadEvidence({
+  lead,
+  targets,
+  onQueue,
+  queueBusy,
+  onRevalidate,
+  revalidatingLeadId,
+  canRevalidate,
+}) {
   const [targetKey, setTargetKey] = useState("");
   useEffect(() => {
     setTargetKey("");
@@ -405,9 +453,21 @@ export function LeadEvidence({ lead, targets, onQueue, queueBusy }) {
             · {lead.fingerprint?.slice(0, 10) || "no fingerprint"}
           </div>
         </div>
-        <span className={`sast-state sast-state-${lead.validation_status || "pending"}`}>
-          {lead.validation_status || "pending"}
-        </span>
+        <div className="sast-lead-validation-actions">
+          <span className={`sast-state sast-state-${lead.validation_status || "pending"}`}>
+            {lead.validation_status || "pending"}
+          </span>
+          {lead.validation_status === "inconclusive" && onRevalidate && (
+            <button
+              type="button"
+              className="btn ghost sm"
+              disabled={!canRevalidate || revalidatingLeadId != null}
+              onClick={() => onRevalidate(lead)}
+            >
+              {revalidatingLeadId === lead.id ? "Starting…" : "Re-validate"}
+            </button>
+          )}
+        </div>
       </div>
       <div className="sast-evidence-body">
         <SastLeadDetails lead={lead} showSummary={false} />

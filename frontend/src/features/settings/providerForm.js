@@ -34,8 +34,10 @@ export function providerToForm(provider) {
 
 export function providerPayload(form) {
   const usesCliCredentials = [
+    "claude_cli",
     "factory_droid",
     "openai_codex",
+    "openai_chatgpt_plan",
     "google_antigravity",
     "google_vertex",
   ].includes(form.api_format);
@@ -61,7 +63,9 @@ export function providerPayload(form) {
     name: form.name.trim(),
     api_format: form.api_format,
     base_url: usesCliCredentials ? null : baseUrl,
-    username: form.api_format === "github_copilot" ? form.username.trim() || null : null,
+    username: ["github_copilot", "openai_chatgpt_plan"].includes(form.api_format)
+      ? form.username.trim() || null
+      : null,
     project_id: ["bedrock_mantle", "google_vertex"].includes(form.api_format)
       ? form.project_id.trim() || null
       : null,

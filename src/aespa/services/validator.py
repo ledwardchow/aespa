@@ -1805,6 +1805,13 @@ def _has_equivalent_public_and_authenticated_views(
 
 
 def _is_access_control_finding(finding: ScanFinding) -> bool:
+    # A finding can be assigned the wrong OWASP category. Do not use an
+    # access-control shortcut to decide an injection claim.
+    title = (finding.title or "").lower()
+    if re.search(
+        r"\b(?:xss|cross.site scripting|html injection|script injection)\b", title
+    ):
+        return False
     text = " ".join(
         [
             finding.owasp_category or "",

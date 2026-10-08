@@ -191,8 +191,160 @@ test("keeps profile models when loading models from the provider API", async () 
   });
   expect(
     screen.getByText(
-      "Loaded 1 model(s) and capability metadata from API. Kept 1 model(s) used by scan profiles.",
+      "Loaded 1 model(s) from the API. Kept 1 model(s) used by scan profiles.",
     ),
   ).toBeTruthy();
   expect(screen.getByRole("button", { name: "existing-model" })).toBeTruthy();
+});
+
+test("shows the selected ChatGPT account's Daybreak access", async () => {
+  settingsApi.getChatGPTPlanStatus.mockResolvedValue({
+    active: "oaiapp_test",
+    accounts: [{ client_id: "oaiapp_test", email: "user@example.test", signed_in: true }],
+  });
+  settingsApi.checkChatGPTPlanAccess.mockResolvedValue({
+    models: ["gpt-6-sol", "gpt-6-luna"],
+    daybreak: { blue: true, red: false },
+  });
+
+  render(
+    <LLMProviderForm
+      mode="edit"
+      provider={{ ...provider, api_format: "openai_chatgpt_plan", username: "oaiapp_test" }}
+      models={[]}
+      profiles={[]}
+    />,
+  );
+
+  await waitFor(() => expect(screen.getByText("Daybreak Blue: Available")).toBeTruthy());
+  expect(screen.getByText("Daybreak Red: Not available")).toBeTruthy();
+  expect(settingsApi.checkChatGPTPlanAccess).toHaveBeenCalledWith("oaiapp_test");
+});
+
+test("warns when the selected ChatGPT account has no Daybreak access", async () => {
+  settingsApi.getChatGPTPlanStatus.mockResolvedValue({
+    active: "oaiapp_test",
+    accounts: [{ client_id: "oaiapp_test", signed_in: true }],
+  });
+  settingsApi.checkChatGPTPlanAccess.mockResolvedValue({
+    models: [], daybreak: { blue: false, red: false },
+  });
+
+  render(
+    <LLMProviderForm
+      mode="edit"
+      provider={{ ...provider, api_format: "openai_chatgpt_plan", username: "oaiapp_test" }}
+      models={[]}
+      profiles={[]}
+    />,
+  );
+
+  await waitFor(() =>
+    expect(screen.getByRole("alert").textContent).toContain("does not have Daybreak Blue or Red access"),
+  );
+  expect(screen.getByText("Daybreak Blue: Not available")).toBeTruthy();
+  expect(screen.getByText("Daybreak Red: Not available")).toBeTruthy();
+});
+
+test("shows Daybreak Red when the access check confirms it", async () => {
+  settingsApi.getChatGPTPlanStatus.mockResolvedValue({
+    active: "oaiapp_test",
+    accounts: [{ client_id: "oaiapp_test", signed_in: true }],
+  });
+  settingsApi.checkChatGPTPlanAccess.mockResolvedValue({
+    models: ["gpt-daybreak-red-latest"],
+    daybreak: { blue: false, red: true },
+  });
+
+  render(
+    <LLMProviderForm
+      mode="edit"
+      provider={{ ...provider, api_format: "openai_chatgpt_plan", username: "oaiapp_test" }}
+      models={[]}
+      profiles={[]}
+    />,
+  );
+
+  await waitFor(() => expect(screen.getByText("Daybreak Red: Available")).toBeTruthy());
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("loads ChatGPT models verified for the account when the catalog omits them", async () => {
+  const user = userEvent.setup();
+  settingsApi.getChatGPTPlanStatus.mockResolvedValue({
+    active: "oaiapp_test",
+    accounts: [{ client_id: "oaiapp_test", signed_in: true }],
+  });
+  settingsApi.discoverModelOptions.mockResolvedValue({
+    models: ["gpt-6-astra"], capabilities: {},
+  });
+  settingsApi.checkChatGPTPlanAccess.mockResolvedValue({
+    models: ["gpt-6-sol", "gpt-6-luna"],
+    daybreak: { blue: true, red: false },
+  });
+  settingsApi.updateLLMProvider.mockImplementation(async (_id, payload) => ({
+    ...provider,
+    api_format: "openai_chatgpt_plan",
+    username: "oaiapp_test",
+    models: payload.models,
+  }));
+
+  render(
+    <LLMProviderForm
+      mode="edit"
+      provider={{ ...provider, api_format: "openai_chatgpt_plan", username: "oaiapp_test" }}
+      models={[]}
+      profiles={[]}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Load models from API" }));
+  await waitFor(() => expect(settingsApi.updateLLMProvider).toHaveBeenCalledTimes(1));
+  expect(settingsApi.checkChatGPTPlanAccess).toHaveBeenCalledWith("oaiapp_test", true);
+  expect(settingsApi.updateLLMProvider.mock.calls[0][1].models).toEqual([
+    "gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+  ]);
+});
+
+test("loads ChatGPT account models automatically when the account is selected", async () => {
+  settingsApi.getChatGPTPlanStatus.mockResolvedValue({
+    active: "oaiapp_test",
+    accounts: [{ client_id: "oaiapp_test", signed_in: true }],
+  });
+  settingsApi.discoverModelOptions.mockResolvedValue({
+    models: ["gpt-6-sol", "gpt-6-luna"],
+    capabilities: {
+      "gpt-6-sol": { context_window_tokens: 1050000, max_output_tokens: 128000 },
+      "gpt-6-luna": { context_window_tokens: 1050000, max_output_tokens: 128000 },
+    },
+  });
+  settingsApi.checkChatGPTPlanAccess.mockResolvedValue({
+    models: ["gpt-6-sol", "gpt-6-luna"],
+    daybreak: { blue: true, red: false },
+  });
+  settingsApi.updateLLMProvider.mockImplementation(async (_id, payload) => ({
+    ...provider,
+    api_format: "openai_chatgpt_plan",
+    username: payload.username,
+    models: payload.models,
+    model_capabilities: payload.model_capabilities,
+  }));
+
+  render(
+    <LLMProviderForm
+      mode="edit"
+      provider={{ ...provider, api_format: "openai_chatgpt_plan", username: null, models: [] }}
+      models={[]}
+      profiles={[]}
+    />,
+  );
+
+  await waitFor(() => expect(settingsApi.updateLLMProvider).toHaveBeenCalledTimes(1));
+  expect(settingsApi.updateLLMProvider.mock.calls[0][1]).toMatchObject({
+    username: "oaiapp_test",
+    models: ["gpt-6-sol", "gpt-6-luna"],
+    model_capabilities: {
+      "gpt-6-sol": { context_window_tokens: 1050000, max_output_tokens: 128000 },
+    },
+  });
 });

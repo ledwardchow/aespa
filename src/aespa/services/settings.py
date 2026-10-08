@@ -413,6 +413,10 @@ async def discover_model_options_for_format(
             native = {item["id"]: item for item in raw if item.get("id")}
         else:
             discovered = await droid_provider.discover_models()
+    elif api_format == "claude_cli":
+        from aespa.services.claude_cli_provider import DEFAULT_MODELS
+
+        discovered = list(DEFAULT_MODELS)
     elif api_format == "openai_codex":
         from aespa.services import codex_provider
 
@@ -423,6 +427,35 @@ async def discover_model_options_for_format(
             native = {item["id"]: item for item in raw if item.get("id")}
         else:
             discovered = await codex_provider.discover_models()
+    elif api_format == "openai_chatgpt_plan":
+        from aespa.services import chatgpt_plan
+
+        client_id = username or chatgpt_plan.status().get("active")
+        catalog_complete = True
+        try:
+            discovered = await chatgpt_plan.discover_models(client_id)
+        except Exception:
+            discovered = []
+            catalog_complete = False
+        try:
+            access = await chatgpt_plan.check_access(client_id)
+        except Exception:
+            if not discovered:
+                raise
+            access = {"models": []}
+        discovered = list(dict.fromkeys([*discovered, *access["models"]]))
+        if not discovered:
+            raise RuntimeError("No models are available for this ChatGPT account")
+        return {
+            "models": discovered,
+            "catalog_complete": catalog_complete,
+            "capabilities": {
+                model: capability
+                for model in discovered
+                if (capability := documented_model_capability(api_format, model))
+                is not None
+            },
+        }
     elif api_format == "google_antigravity":
         from aespa.services import antigravity_provider
 

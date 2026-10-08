@@ -33,11 +33,11 @@ export function ScannerPolicyFields({ form, upd, disabled = false }) {
             })
           }
         />
-        <span>Disable all deterministic checks</span>
+        <span>Disable automatic security checks</span>
       </label>
       <div className="subtle" style={{ marginBottom: "10px" }}>
-        Skip automatic JavaScript sink, TLS, authentication, IDOR, and probe-result checks. The Test
-        Lead will continue with LLM-driven testing.
+        Skip automatic TLS, authentication, IDOR, and probe-result checks. JavaScript source is still
+        read for possible XSS paths, but those leads need browser confirmation.
       </div>
       <label className="toggle-row">
         <input

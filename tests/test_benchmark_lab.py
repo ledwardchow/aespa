@@ -63,7 +63,13 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
                     "estimated_cost_available": True,
                     "estimated_total_cost_usd": 0.42,
                 },
-                "other-model": {"input": 250, "output": 1, "requests": 100},
+                "other-model": {
+                    "input": 250,
+                    "output": 1,
+                    "requests": 100,
+                    "estimated_cost_available": True,
+                    "estimated_total_cost_usd": 0.0,
+                },
             }
         )
         if kind == "site":
@@ -348,13 +354,22 @@ def test_dast_result_lists_sast_models_from_leads_for_the_right_run_kind(
         api_source = SastRun(
             name="API source", status="completed", llm_config_id=api_sast_model_id
         )
-        for scan, model in [
-            (web_run, "web-model"),
-            (api_run, "api-model"),
-            (web_source, "web-sast-model"),
-            (api_source, "api-sast-model"),
+        for scan, model, cost in [
+            (web_run, "web-model", 1.0),
+            (api_run, "api-model", 2.0),
+            (web_source, "web-sast-model", 3.0),
+            (api_source, "api-sast-model", 4.0),
         ]:
-            scan.token_usage_json = json.dumps({model: {"input": 10, "output": 5}})
+            scan.token_usage_json = json.dumps(
+                {
+                    model: {
+                        "input": 10,
+                        "output": 5,
+                        "estimated_cost_available": True,
+                        "estimated_total_cost_usd": cost,
+                    }
+                }
+            )
         session.add_all([web_run, api_run, web_source, api_source])
         session.commit()
         session.add_all(
@@ -365,6 +380,13 @@ def test_dast_result_lists_sast_models_from_leads_for_the_right_run_kind(
                     imported_into_run_type="web",
                     imported_into_run_id=web_run.id,
                     title="Web SAST lead",
+                ),
+                ScanLead(
+                    producer_run_type="sast",
+                    producer_run_id=web_source.id,
+                    investigated_by_run_type="web",
+                    investigated_by_run_id=web_run.id,
+                    title="Another lead from the same SAST run",
                 ),
                 ScanLead(
                     producer_run_type="sast",
@@ -432,6 +454,178 @@ def test_dast_result_lists_sast_models_from_leads_for_the_right_run_kind(
         assert len(saved["scan_models"]["sast"]) == 1
         assert saved["scan_models"]["sast"][0]["run_name"] == source_name
         assert saved["scan_models"]["sast"][0]["model"]["model"] == source_model
+        assert response.json()["scan_cost_usd"] == (4.0 if kind == "site" else 6.0)
+        assert saved["scan_cost_usd"] == (4.0 if kind == "site" else 6.0)
+        assert saved["scan_cost_breakdown"]["complete"] is True
+        assert len(saved["scan_cost_breakdown"]["sast"]) == 1
+
+
+@pytest.mark.parametrize("source_state", ["priced", "unpriced", "deleted"])
+def test_existing_result_adds_all_sast_costs_without_changing_saved_data(
+    db_engine, source_state
+):
+    router = importlib.import_module("aespa_external_aespa_benchmarking.router")
+
+    def usage(cost):
+        return json.dumps(
+            {
+                "model": {
+                    "estimated_cost_available": True,
+                    "estimated_total_cost_usd": cost,
+                }
+            }
+        )
+
+    with Session(db_engine) as core:
+        site = Site(name="Cost fixture", base_url="https://example.test")
+        core.add(site)
+        core.commit()
+        run = TestRun(site_id=site.id, name="DAST", token_usage_json=usage(10))
+        first = SastRun(name="First source", token_usage_json=usage(3))
+        second = SastRun(
+            name="Second source",
+            token_usage_json=usage(4) if source_state != "unpriced" else None,
+        )
+        core.add_all([run, first, second])
+        core.commit()
+        core.add(
+            ScanLead(
+                producer_run_type="sast",
+                producer_run_id=second.id,
+                imported_into_run_type="web",
+                imported_into_run_id=run.id,
+                title="Source linked after the benchmark was saved",
+            )
+        )
+        core.commit()
+        second_id = second.id
+        # The first source appears twice in the old snapshot.
+        row = router.ScanResult(
+            run_kind="site",
+            run_id=run.id,
+            run_name=run.name,
+            rows_json=json.dumps(
+                {
+                    "rows": [],
+                    "scan_cost_usd": 10,
+                    "scan_models": {
+                        "primary": None,
+                        "sast": [{"run_id": first.id}, {"run_id": first.id}],
+                    },
+                }
+            ),
+        )
+        if source_state == "deleted":
+            core.delete(second)
+            core.commit()
+        original = row.rows_json
+        result = router.result_out(row, core)
+        assert result["scan_cost_usd"] == (17 if source_state == "priced" else None)
+        assert result["scan_cost_breakdown"] == {
+            "run_cost_usd": 10,
+            "sast": [
+                {"run_id": first.id, "cost_usd": 3},
+                {
+                    "run_id": second_id,
+                    "cost_usd": 4 if source_state == "priced" else None,
+                },
+            ],
+            "complete": source_state == "priced",
+        }
+        assert row.rows_json == original
+        # New snapshots keep the total if the source data is later removed.
+        row.rows_json = json.dumps(
+            {
+                "rows": [],
+                "scan_cost_usd": result["scan_cost_usd"],
+                "scan_cost_breakdown": result["scan_cost_breakdown"],
+            }
+        )
+        core.delete(first)
+        core.commit()
+        assert router.result_out(row, core)["scan_cost_usd"] == result["scan_cost_usd"]
+
+
+def test_standalone_sast_cost_is_counted_once(db_engine):
+    router = importlib.import_module("aespa_external_aespa_benchmarking.router")
+    with Session(db_engine) as core:
+        run = SastRun(
+            name="SAST",
+            token_usage_json=json.dumps(
+                {
+                    "model": {
+                        "estimated_cost_available": True,
+                        "estimated_total_cost_usd": 3,
+                    }
+                }
+            ),
+        )
+        core.add(run)
+        core.commit()
+        row = router.ScanResult(
+            run_kind="sast",
+            run_id=run.id,
+            run_name=run.name,
+            rows_json=json.dumps(
+                {
+                    "rows": [],
+                    "scan_models": router.scan_models_snapshot(core, "sast", run),
+                }
+            ),
+        )
+        assert router.result_out(row, core)["scan_cost_usd"] == 3
+
+
+def test_scan_cost_requires_prices_for_every_model():
+    router = importlib.import_module("aespa_external_aespa_benchmarking.router")
+    run = SastRun(
+        name="Partially priced source",
+        token_usage_json=json.dumps(
+            {
+                "priced": {
+                    "estimated_cost_available": True,
+                    "estimated_total_cost_usd": 3,
+                },
+                "unpriced": {"input": 1000, "estimated_cost_available": False},
+            }
+        ),
+    )
+    assert router.scan_cost(run) is None
+
+
+def test_historical_result_does_not_use_local_sast_ids(db_engine):
+    router = importlib.import_module("aespa_external_aespa_benchmarking.router")
+    with Session(db_engine) as core:
+        source = SastRun(
+            name="Unrelated local source",
+            token_usage_json=json.dumps(
+                {
+                    "model": {
+                        "estimated_cost_available": True,
+                        "estimated_total_cost_usd": 3,
+                    }
+                }
+            ),
+        )
+        core.add(source)
+        core.commit()
+        row = router.ScanResult(
+            run_kind="site",
+            run_id=-1000000,
+            run_name="Historical scan",
+            rows_json=json.dumps(
+                {
+                    "rows": [],
+                    "scan_cost_usd": 10,
+                    "scan_models": {"primary": None, "sast": [{"run_id": source.id}]},
+                }
+            ),
+        )
+        result = router.result_out(row, core)
+        assert result["scan_cost_usd"] is None
+        assert result["scan_cost_breakdown"]["sast"] == [
+            {"run_id": source.id, "cost_usd": None}
+        ]
 
 
 def test_explicit_evaluation_model_is_recorded(client, db_engine, monkeypatch):
@@ -1144,6 +1338,70 @@ def test_benchmark_comparison_reports_range_frequency_and_thresholds(
         "values": [1.0, 1.0],
     }
     assert metrics["detection_frequency"]["GT-1"]["frequency"] == 1.0
+
+
+@pytest.mark.parametrize("kind", ["site", "api"])
+@pytest.mark.parametrize("status", ["stopped", "incomplete"])
+def test_bulk_benchmarks_finished_scans(client, db_engine, monkeypatch, kind, status):
+    with Session(db_engine) as session:
+        model = LLMConfig(name="Evaluator", model="test-model")
+        target = (
+            Site(name="Site", base_url="https://example.test")
+            if kind == "site"
+            else ApiCollection(name="API", base_url="https://example.test")
+        )
+        session.add_all([model, target])
+        session.commit()
+        run = (
+            TestRun(site_id=target.id, name="Finished scan", status=status)
+            if kind == "site"
+            else ApiTestRun(
+                collection_id=target.id, name="Finished scan", status=status
+            )
+        )
+        run.llm_config_id = model.id
+        session.add(run)
+        session.commit()
+        run_id, model_id = run.id, model.id
+
+    async def answer(*args, **kwargs):
+        return json.dumps(
+            {
+                "decisions": [
+                    {
+                        "ground_truth_external_id": "GT-1",
+                        "disposition": "missing",
+                        "finding_ids": [],
+                        "reason": "No findings",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("aespa.services.llm.plain_completion", answer)
+    dataset = client.post(
+        f"{BASE}/datasets",
+        json={
+            "name": "Truth",
+            "ground_truth": {
+                "items": [{"external_id": "GT-1", "title": "SQL injection"}]
+            },
+        },
+    ).json()
+    response = client.post(
+        f"{BASE}/results/benchmark-unbenchmarked",
+        json={
+            "run_kind": kind,
+            "run_ids": [run_id],
+            "dataset_id": dataset["id"],
+            "evaluation_model_id": model_id,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"completed": [run_id], "skipped": [], "failures": []}
+    with Session(db_engine) as session:
+        stored_run = session.get(TestRun if kind == "site" else ApiTestRun, run_id)
+        assert stored_run.status == status
 
 
 @pytest.mark.parametrize("kind", ["site", "api", "sast"])

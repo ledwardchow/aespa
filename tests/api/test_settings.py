@@ -30,6 +30,14 @@ def test_get_default_models(client: TestClient, monkeypatch):
     assert r.status_code == 200
     data = r.json()
     assert "anthropic" in data
+    assert data["claude_cli"] == [
+        "sonnet",
+        "opus",
+        "haiku",
+        "mythos",
+        "mythos-5",
+        "claude-mythos-5",
+    ]
     assert "factory_droid" in data
     assert "github_copilot" in data
     assert "openai" in data
@@ -538,6 +546,28 @@ def test_factory_droid_provider_uses_cli_credentials(client: TestClient):
     assert provider["project_id"] is None
     assert provider["username"] is None
     assert provider["models"] == ["gpt-5.6-luna"]
+
+
+def test_claude_cli_provider_uses_signed_in_account(client: TestClient):
+    response = _make_provider(
+        client,
+        name="Claude CLI",
+        api_format="claude_cli",
+        base_url="https://should-not-be-stored.example",
+        models=["sonnet", "opus"],
+        api_key="should-not-be-stored",
+        username="should-not-be-stored",
+    )
+
+    assert response.status_code == 200
+    provider = response.json()
+    assert provider["base_url"] is None
+    assert provider["has_api_key"] is False
+    assert provider["username"] is None
+    assert provider["models"] == ["sonnet", "opus"]
+    profile = _make_profile(client, provider["id"], model="sonnet")
+    assert profile.status_code == 200
+    assert profile.json()["provider"] == "claude_cli"
 
 
 def test_create_provider_and_profile(client: TestClient):

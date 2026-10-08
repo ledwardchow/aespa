@@ -45,7 +45,12 @@ export function CompletedScanBenchmarks({
           target.runs.map((run) => ({ ...run, targetId: target.id, targetName: target.name })),
         )
   )
-    .filter((run) => ["complete", "completed"].includes(run.status))
+    .filter((run) =>
+      (category === "sast"
+        ? ["completed"]
+        : ["complete", "completed", "incomplete", "stopped"]
+      ).includes(run.status),
+    )
     .map((run) => ({
       ...run,
       result: results.find((result) => result.run_kind === category && result.run_id === run.id),
@@ -112,10 +117,10 @@ export function CompletedScanBenchmarks({
     }
   };
   return (
-    <section className={styles.section} aria-label={`${label} completed scans`}>
-      <h2>{label} completed scans</h2>
+    <section className={styles.section} aria-label={`${label} finished scans`}>
+      <h2>{label} finished scans</h2>
       <p className="subtle">
-        {runs.length} completed scans · {pending.length} unbenchmarked. The selected ground truth
+        {runs.length} finished scans · {pending.length} unbenchmarked. The selected ground truth
         applies to the selected scans.
       </p>
       <form className={`card ${styles.controls}`} onSubmit={apply}>
@@ -196,7 +201,7 @@ export function CompletedScanBenchmarks({
         </fieldset>
       )}
       {!runs.length ? (
-        <p className="subtle">No completed scans in this category.</p>
+        <p className="subtle">No finished scans in this category.</p>
       ) : (
         <div className="table-wrap">
           <table className={styles.table}>
@@ -215,7 +220,7 @@ export function CompletedScanBenchmarks({
                 <th>Type</th>
                 <th>Scan model</th>
                 <th>Target</th>
-                <th>Completed</th>
+                <th>Finished</th>
                 <th>Benchmark</th>
               </tr>
             </thead>

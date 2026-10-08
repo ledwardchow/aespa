@@ -66,6 +66,23 @@ export const cancelCodexLogin = (b) =>
 
 export const logoutCodex = () => req("/api/settings/llm/codex/logout", { method: "POST" });
 
+export const getChatGPTPlanStatus = () => req("/api/settings/llm/chatgpt-plan/status");
+export const checkChatGPTPlanAccess = (client_id, force = false) =>
+  req("/api/settings/llm/chatgpt-plan/check-access", {
+    method: "POST",
+    body: { client_id, force },
+  });
+export const startChatGPTPlanLogin = (client_id) =>
+  req("/api/settings/llm/chatgpt-plan/login", {
+    method: "POST",
+    body: client_id ? { client_id } : {},
+  });
+export const getChatGPTPlanLogin = (id) => req(`/api/settings/llm/chatgpt-plan/login/${id}`);
+export const selectChatGPTPlanAccount = (client_id) =>
+  req("/api/settings/llm/chatgpt-plan/select", { method: "POST", body: { client_id } });
+export const logoutChatGPTPlan = (client_id) =>
+  req("/api/settings/llm/chatgpt-plan/logout", { method: "POST", body: { client_id } });
+
 export const listCopilotAccounts = () => req("/api/settings/llm/copilot/accounts");
 
 export const startCopilotLogin = () => req("/api/settings/llm/copilot/login", { method: "POST" });

@@ -113,8 +113,8 @@
   min-width: 0;
 }
 .chartCard > :global(.benchmark-chart-legend) {
-  max-height: 56px;
-  overflow-y: auto;
+  max-height: none;
+  overflow: visible;
   flex-shrink: 0;
 }
 @media (max-width: 700px) {
@@ -200,36 +200,68 @@
   cursor: default;
   color: var(--muted);
 }
-.typeTrends {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 18px;
-  margin-top: 8px;
-  font-size: 12px;
-}
-.typeTrends > span {
-  color: var(--muted);
-  font-weight: 600;
-}
-.typeTrends label {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  cursor: pointer;
-}
-.typeTrendLine {
-  width: 18px;
-  height: 3px;
-  border-radius: 2px;
+.modelVisibility[aria-pressed="false"] {
+  opacity: 0.5;
 }
 .trend {
   pointer-events: none;
 }
-.trend text {
-  font-size: 11px;
+.summary .trend text,
+.summary .singleScanLabel text {
+  font-size: 10px;
   font-weight: 600;
   stroke: var(--panel);
   stroke-width: 3px;
   paint-order: stroke;
+}
+
+.summary .singleScanLabel text {
+  font-size: 9px;
+  pointer-events: none;
+}
+
+.singleScanLabel {
+  pointer-events: none;
+}
+
+.optimalBadge {
+  padding: 1px 4px;
+  border: 1px solid var(--text-2);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 10px;
+}
+
+.chartHeader {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.chartHeader > div {
+  min-width: 0;
+}
+.chartHeader > .selector {
+  width: 140px;
+  flex-shrink: 0;
+}
+@media (max-width: 700px) {
+  .chartHeader {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 700px) {
+  .chartCard > :global(.benchmark-chart-legend) {
+    gap: 4px 8px;
+  }
+  .modelLegend {
+    gap: 5px;
+    padding: 2px 4px;
+    font-size: 10px;
+  }
+  .optimalBadge {
+    font-size: 9px;
+  }
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import { runWorkflowStatus } from "../../shared/runs/presentation.jsx";
 
 import {
   canResumeSelectedScanMode,
@@ -22,6 +23,10 @@ test("stopped and quota-paused experimental scans remain resumable without a che
   assert.equal(hasResumableExperimentalScan({ coverage_mode: "team", status: "paused" }), true);
   assert.equal(hasResumableExperimentalScan({ coverage_mode: "team", status: "complete" }), false);
   assert.equal(hasResumableExperimentalScan({ coverage_mode: "track", status: "stopped" }), false);
+});
+
+test("the run badge says stopped", () => {
+  assert.equal(runWorkflowStatus({ status: "stopped" }).label, "stopped");
 });
 
 test("crawler activity follows its own agent state", () => {
