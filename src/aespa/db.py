@@ -497,6 +497,10 @@ def _migrate(engine: Engine) -> None:
 
     _reset_orphaned_validating_findings(engine)
     _reset_orphaned_running_runs(engine)
+    from aespa.services.settings_providers import repair_chatgpt_plan_models
+
+    with Session(engine) as session:
+        repair_chatgpt_plan_models(session)
     _cleanup_orphaned_sast_extractions()
 
 

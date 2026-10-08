@@ -19,6 +19,12 @@ def test_track_prompt_requires_broad_context_aware_xss_testing() -> None:
     assert "at least two input-bearing routes" not in prompt
 
 
+def test_browser_tool_can_log_in_as_another_configured_account() -> None:
+    browser = next(tool for tool in THINKING_AGENT_TOOLS if tool["name"] == "browser")
+    assert "login_as" in browser["input_schema"]["properties"]
+    assert "login_as" in get_thinking_agent_system(False)
+
+
 def _http_request_tool(tools: list[dict]) -> dict:
     return next(tool for tool in tools if tool["name"] == "http_request")
 

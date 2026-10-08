@@ -191,6 +191,182 @@ function CodexConnectionCard() {
   );
 }
 
+function ChatGPTPlanConnectionCard({ value, onSelect, reloadKey }) {
+  const [state, setState] = useState(null);
+  const [daybreak, setDaybreak] = useState(null);
+  const [pending, setPending] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const refresh = useCallback(async () => {
+    const next = await settingsApi.getChatGPTPlanStatus();
+    setState(next);
+    return next;
+  }, []);
+
+  useEffect(() => {
+    refresh().catch((e) => setError(e.message));
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!value && state?.active) onSelect(state.active);
+  }, [value, state?.active, onSelect]);
+
+  useEffect(() => {
+    const account = state?.accounts?.find((item) => item.client_id === value);
+    if (!account?.signed_in) {
+      setDaybreak(null);
+      return undefined;
+    }
+    let stopped = false;
+    setDaybreak({ status: "loading" });
+    settingsApi
+      .checkChatGPTPlanAccess(value)
+      .then((result) => {
+        if (stopped) return;
+        setDaybreak({
+          status: "ready",
+          blue: Boolean(result.daybreak?.blue),
+          red: Boolean(result.daybreak?.red),
+        });
+      })
+      .catch(() => {
+        if (!stopped) setDaybreak({ status: "error" });
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [value, state, reloadKey]);
+
+  useEffect(() => {
+    if (!pending) return undefined;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const result = await settingsApi.getChatGPTPlanLogin(pending);
+        if (stopped || ["pending", "processing"].includes(result.status)) return;
+        setPending(null);
+        setBusy(false);
+        if (result.status === "complete") {
+          const next = await refresh();
+        if (next.active) onSelect(next.active, true);
+        } else {
+          setError(result.error || "ChatGPT sign-in failed");
+        }
+      } catch (e) {
+        if (!stopped) setError(e.message);
+      }
+    };
+    const timer = window.setInterval(poll, 1500);
+    poll();
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [pending, refresh, onSelect]);
+
+  const signIn = async (clientId = null) => {
+    const popup = window.open("", "_blank");
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await settingsApi.startChatGPTPlanLogin(clientId);
+      if (popup) {
+        popup.opener = null;
+        popup.location.href = result.url;
+      } else {
+        window.location.href = result.url;
+      }
+      setPending(result.login_id);
+    } catch (e) {
+      popup?.close();
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+
+  const signOut = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await settingsApi.logoutChatGPTPlan(value);
+      onSelect("");
+      await refresh();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const accounts = state?.accounts || [];
+  const selected = accounts.find((account) => account.client_id === value);
+  return (
+    <div className="form-section" style={{ marginTop: 12 }}>
+      <div className="form-section-title">ChatGPT connection</div>
+      <div className="field-hint">
+        Sign in to use your ChatGPT account for this provider.
+      </div>
+      {accounts.length > 0 && (
+        <div className="field">
+          <label>ChatGPT account</label>
+          <select className="select" value={value} onChange={(e) => onSelect(e.target.value)}>
+            <option value="">Select an account</option>
+            {accounts.map((account) => (
+              <option key={account.client_id} value={account.client_id}>
+                {account.email || account.client_id} {account.signed_in ? "" : "(signed out)"}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {selected?.signed_in && (
+        <div className="form-section" style={{ marginTop: 12 }}>
+          <div className="form-section-title">Daybreak Access</div>
+          {daybreak?.status === "loading" && <div className="field-hint">Checking access…</div>}
+          {daybreak?.status === "error" && (
+            <div className="field-hint">Could not check Daybreak access. Try again.</div>
+          )}
+          {daybreak?.status === "ready" && (
+            <>
+              <div className="field-hint">
+                Daybreak Blue: {daybreak.blue ? "Available" : "Not available"}
+              </div>
+              <div className="field-hint">
+                Daybreak Red: {daybreak.red ? "Available" : "Not available"}
+              </div>
+              {!daybreak.blue && !daybreak.red && (
+                <div className="alert warning" role="alert" style={{ marginTop: 8 }}>
+                  This ChatGPT account does not have Daybreak Blue or Red access.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <button type="button" className="btn secondary sm" disabled={busy} onClick={() => signIn()}>
+          Continue with ChatGPT
+        </button>
+        {selected && (
+          <>
+            <button type="button" className="btn secondary sm" disabled={busy} onClick={() => signIn(value)}>
+              Sign in again
+            </button>
+            {selected.signed_in && (
+              <button type="button" className="btn ghost sm" disabled={busy} onClick={signOut}>
+                Sign out
+              </button>
+            )}
+          </>
+        )}
+      </div>
+      {pending && <div className="field-hint">Finish signing in in your browser.</div>}
+      {error && <div className="alert error">{error}</div>}
+    </div>
+  );
+}
+
 function CopilotConnectionCard({ value, onSelect }) {
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -414,6 +590,7 @@ export function LLMProviderForm({
     [upd],
   );
   const [loadingModels, setLoadingModels] = useState(false);
+  const [daybreakReloadKey, setDaybreakReloadKey] = useState(0);
   const [loadMessage, setLoadMessage] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const configuredModelsByName = new Map(
@@ -486,30 +663,48 @@ export function LLMProviderForm({
     });
   };
 
-  const onLoadModels = async () => {
+  const loadModels = async (accountId = form.username, forceAccess = true) => {
     setLoadingModels(true);
     setLoadMessage(null);
     setLoadFailed(false);
     try {
-      const fetched = await settingsApi.discoverModelOptions({
+      const discovery = settingsApi.discoverModelOptions({
         provider_id: provider?.id || null,
         api_format: form.api_format,
         api_key: form.api_key,
         base_url: isBedrockProvider(form.api_format)
           ? bedrockBaseUrl(form.api_format, form.region)
           : form.base_url,
-        username: form.username,
+        username: accountId,
         project_id: form.project_id,
         aws_profile: form.aws_profile,
         location: form.location,
       });
-      if (fetched?.models?.length > 0) {
-        const discoveredModelNames = [...new Set(fetched.models)];
+      const isChatGPTPlan = form.api_format === "openai_chatgpt_plan";
+      const accessCheck = isChatGPTPlan
+        ? settingsApi.checkChatGPTPlanAccess(accountId, forceAccess)
+        : Promise.resolve(null);
+      let catalogFailed = false;
+      const [fetched, access] = await Promise.all([
+        isChatGPTPlan
+          ? discovery.catch(() => {
+              catalogFailed = true;
+              return { models: [], capabilities: {} };
+            })
+          : discovery,
+        accessCheck,
+      ]);
+      catalogFailed = catalogFailed || fetched.catalog_complete === false;
+      if (fetched?.models?.length > 0 || access?.models?.length > 0) {
+        const discoveredModelNames = [...new Set(fetched.models || [])];
+        const extraModelNames = (access?.models || []).filter(
+          (name) => !discoveredModelNames.includes(name),
+        );
         const retainedModelNames = [...configuredModelsByName.entries()]
           .filter(([, modelConfig]) => profileNamesByModelId.has(String(modelConfig.id)))
           .map(([modelName]) => modelName)
-          .filter((modelName) => !discoveredModelNames.includes(modelName));
-        const nextModelNames = [...discoveredModelNames, ...retainedModelNames];
+          .filter((modelName) => !discoveredModelNames.includes(modelName) && !extraModelNames.includes(modelName));
+        const nextModelNames = [...discoveredModelNames, ...extraModelNames, ...retainedModelNames];
         const nextCapabilities = Object.fromEntries(
           nextModelNames.flatMap((modelName) => {
             const capability =
@@ -519,6 +714,7 @@ export function LLMProviderForm({
         );
         const nextForm = {
           ...form,
+          username: isChatGPTPlan ? accountId : form.username,
           models: nextModelNames.join("\n"),
           model_capabilities: nextCapabilities,
         };
@@ -534,8 +730,15 @@ export function LLMProviderForm({
         } else {
           upd(nextForm);
         }
+        if (isChatGPTPlan) {
+          setDaybreakReloadKey((count) => count + 1);
+        }
         setLoadMessage(
-          `Loaded ${fetched.models.length} model(s) and capability metadata from API.${
+          `${catalogFailed ? "Could not load the full model list." : `Loaded ${discoveredModelNames.length} model(s) ${isChatGPTPlan ? "for this account" : "from the API"}.`}${
+            extraModelNames.length > 0
+              ? ` Verified ${extraModelNames.join(" and ")} for this account.`
+              : ""
+          }${
             retainedModelNames.length > 0
               ? ` Kept ${retainedModelNames.length} model(s) used by scan profiles.`
               : ""
@@ -552,16 +755,20 @@ export function LLMProviderForm({
       setLoadingModels(false);
     }
   };
+  const onLoadModels = () => loadModels();
 
   const onFormatChange = async (api_format) => {
     const region = isBedrockProvider(api_format) ? BEDROCK_DEFAULT_REGIONS[api_format] : "";
     upd({
       api_format,
+      username: api_format === "openai_chatgpt_plan" ? "" : form.username,
+      models: api_format === "openai_chatgpt_plan" ? "" : form.models,
       region,
       base_url: isBedrockProvider(api_format) ? bedrockBaseUrl(api_format, region) : form.base_url,
       location: api_format === "google_vertex" ? "global" : "",
       model_capabilities: {},
     });
+    if (api_format === "openai_chatgpt_plan") return;
     if (form.models.trim()) return;
     try {
       const defaults = await settingsApi.getDefaultModels();
@@ -619,9 +826,11 @@ export function LLMProviderForm({
             onChange={(e) => onFormatChange(e.target.value)}
           >
             <option value="anthropic">Anthropic API</option>
+            <option value="claude_cli">Claude CLI subscription</option>
             <option value="factory_droid">Factory Droid subscription</option>
             <option value="github_copilot">GitHub Copilot subscription</option>
             <option value="openai_codex">OpenAI Codex subscription</option>
+            <option value="openai_chatgpt_plan">ChatGPT plan</option>
             <option value="google_antigravity">Google Antigravity subscription</option>
             <option value="openai">OpenAI API</option>
             <option value="openai_compatible">OpenAI-compatible API</option>
@@ -665,7 +874,7 @@ export function LLMProviderForm({
             </div>
           </div>
         )}
-        {!["factory_droid", "openai_codex", "google_antigravity", "google_vertex"].includes(
+        {!["claude_cli", "factory_droid", "openai_codex", "openai_chatgpt_plan", "google_antigravity", "google_vertex"].includes(
           form.api_format,
         ) &&
           !isBedrockProvider(form.api_format) && (
@@ -694,6 +903,11 @@ export function LLMProviderForm({
           <div className="field-hint">
             Uses the account signed in through Droid CLI. AESPA does not read or store Factory
             credentials.
+          </div>
+        )}
+        {form.api_format === "claude_cli" && (
+          <div className="field-hint">
+            Uses the account signed in through Claude CLI. Install Claude Code and run claude auth login first. AESPA does not store Claude credentials. Claude's own tools are disabled for scans.
           </div>
         )}
         {form.api_format === "google_antigravity" && (
@@ -750,6 +964,20 @@ export function LLMProviderForm({
             <CodexConnectionCard />
           </>
         )}
+        {form.api_format === "openai_chatgpt_plan" && (
+          <ChatGPTPlanConnectionCard
+            value={form.username}
+            onSelect={(username, signedInNow = false) => {
+              if (username !== form.username) {
+                upd({ username, models: "", model_capabilities: {} });
+              }
+              if (username && (signedInNow || username !== form.username || !form.models.trim())) {
+                void loadModels(username, signedInNow);
+              }
+            }}
+            reloadKey={daybreakReloadKey}
+          />
+        )}
         {form.api_format === "bedrock_mantle" && (
           <div className="field">
             <label htmlFor="provider-project-id">
@@ -794,7 +1022,7 @@ export function LLMProviderForm({
         {form.api_format === "github_copilot" && (
           <CopilotConnectionCard value={form.username} onSelect={selectCopilotUsername} />
         )}
-        {!["factory_droid", "openai_codex", "google_antigravity", "google_vertex"].includes(
+        {!["claude_cli", "factory_droid", "openai_codex", "openai_chatgpt_plan", "google_antigravity", "google_vertex"].includes(
           form.api_format,
         ) && (
           <div className="field">

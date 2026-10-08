@@ -145,3 +145,18 @@ test("shows a source failure and resumes preparation on the same run", async () 
   await user.click(screen.getByRole("button", { name: "Resume source preparation" }));
   expect(sastRunsApi.resumeSastSource).toHaveBeenCalledWith(249);
 });
+
+test("shows Resume Failed Work for unfinished work without a failed worker count", async () => {
+  const user = userEvent.setup();
+  sastRunsApi.getSastRun.mockResolvedValue({ ...run, status: "completed" });
+  sastRunsApi.getSastScanStatus.mockResolvedValue({
+    running: false,
+    resumable_work: true,
+  });
+  sastRunsApi.resumeSastScan.mockResolvedValue({ running: true });
+
+  render(<SastRunDetailExperience runId={249} initialTab="coverage" />);
+
+  await user.click(await screen.findByRole("button", { name: "Resume Failed Work" }));
+  expect(sastRunsApi.resumeSastScan).toHaveBeenCalledWith(249);
+});

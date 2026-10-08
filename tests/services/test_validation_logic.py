@@ -57,6 +57,38 @@ def test_access_control_validation_without_comparison_data_falls_through():
     assert result is None
 
 
+@pytest.mark.parametrize(
+    "title",
+    ["Stored XSS in profile name", "Cross-site scripting in search results"],
+)
+def test_xss_claim_does_not_use_access_control_shortcut(title):
+    finding = ScanFinding(
+        test_run_id=1,
+        owasp_category="A01",
+        severity="high",
+        title=title,
+        description="A stored value may execute in another user's browser.",
+        affected_url="https://target.local/api/profile",
+        evidence="GET /api/profile returned the stored value.",
+    )
+
+    assert validator._is_access_control_finding(finding) is False
+
+
+def test_access_control_claim_still_uses_access_control_shortcut():
+    finding = ScanFinding(
+        test_run_id=1,
+        owasp_category="A01",
+        severity="high",
+        title="Other user's profile is readable",
+        description="An unauthorized account could read the profile.",
+        affected_url="https://target.local/api/profile",
+        evidence="",
+    )
+
+    assert validator._is_access_control_finding(finding) is True
+
+
 def test_unauthenticated_access_claim_is_false_positive_when_anonymous_is_denied(
     monkeypatch,
 ):
@@ -1687,7 +1719,7 @@ def test_deterministic_result_analysis_detects_sql_error():
     assert findings[0].validation_status == "confirmed"
 
 
-def test_deterministic_result_analysis_detects_reflected_xss():
+def test_deterministic_result_analysis_does_not_confirm_xss_from_reflection():
     payload = '"><img src=x onerror=alert(1)>'
     findings = scanner._deterministic_findings_from_results(
         run_id=1,
@@ -1706,9 +1738,7 @@ def test_deterministic_result_analysis_detects_reflected_xss():
         ],
     )
 
-    assert len(findings) == 1
-    assert findings[0].title == "Reflected cross-site scripting"
-    assert findings[0].owasp_category == "A03"
+    assert findings == []
 
 
 def test_dynamic_deterministic_analysis_persists_findings(monkeypatch):

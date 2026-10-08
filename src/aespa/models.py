@@ -323,9 +323,11 @@ class ApiEndpointTest(SQLModel, table=True):
 
 class LLMProviderAPI(str, Enum):
     anthropic = "anthropic"
+    claude_cli = "claude_cli"
     factory_droid = "factory_droid"
     github_copilot = "github_copilot"
     openai_codex = "openai_codex"
+    openai_chatgpt_plan = "openai_chatgpt_plan"
     google_antigravity = "google_antigravity"
     openai = "openai"
     openai_compatible = "openai_compatible"

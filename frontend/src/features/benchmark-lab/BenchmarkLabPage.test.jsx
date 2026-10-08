@@ -162,6 +162,10 @@ test("Site summary plots saved DAST and SAST analyses and filters both", async (
   render(<BenchmarkLabPage />);
   await user.selectOptions(await screen.findByLabelText("Site"), "1");
   expect(
+    screen.queryByRole("button", { name: /Shop scan, DAST with SAST Leads, Scan Test Lead/ }),
+  ).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Scan Test Lead", exact: true }));
+  expect(
     screen.getByRole("button", { name: /Shop scan, DAST with SAST Leads, Scan Test Lead/ }),
   ).toBeTruthy();
   expect(screen.getByRole("button", { name: /Source scan, SAST, SAST agent/ })).toBeTruthy();
@@ -207,16 +211,16 @@ test("completed scans use parent tabs while Sites keeps its existing views", asy
   expect(screen.getByRole("button", { name: "Open Shop scan" })).toBeTruthy();
   expect(screen.queryByLabelText("Ground truth for bulk benchmarks")).toBeNull();
   await user.click(screen.getByRole("tab", { name: "DAST", exact: true }));
-  expect(screen.getByRole("region", { name: "Sites completed scans" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Sites finished scans" })).toBeTruthy();
   expect(screen.queryByRole("tab", { name: "Summary" })).toBeNull();
   expect(screen.queryByLabelText("Site")).toBeNull();
   await user.click(screen.getByRole("button", { name: "Open benchmark for Shop scan" }));
   expect(screen.getByText(/GT-1 - SQL injection/)).toBeTruthy();
   await user.click(screen.getByRole("tab", { name: "APIs" }));
-  expect(screen.getByRole("region", { name: "API completed scans" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "API finished scans" })).toBeTruthy();
   expect(screen.queryByLabelText("API")).toBeNull();
   await user.click(screen.getByRole("tab", { name: "SAST" }));
-  expect(screen.getByRole("region", { name: "SAST completed scans" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "SAST finished scans" })).toBeTruthy();
   expect(screen.getByLabelText("Ground truth for bulk benchmarks")).toBeTruthy();
   expect(screen.queryByLabelText("Completed SAST scan")).toBeNull();
   await user.click(screen.getByRole("tab", { name: "Results" }));
