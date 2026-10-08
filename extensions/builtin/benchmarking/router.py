@@ -1024,11 +1024,16 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                 ]
             )
             selected_ids = set(payload.run_ids)
-            completed_ids = {
-                run["id"] for run in runs if run["status"] in {"complete", "completed"}
+            allowed_statuses = (
+                {"completed"}
+                if payload.run_kind == "sast"
+                else {"complete", "completed", "incomplete", "stopped"}
+            )
+            finished_ids = {
+                run["id"] for run in runs if run["status"] in allowed_statuses
             }
-            if selected_ids - completed_ids:
-                raise HTTPException(400, "Select completed scans from this category")
+            if selected_ids - finished_ids:
+                raise HTTPException(400, "Select finished scans from this category")
             runs = [run for run in runs if run["id"] in selected_ids]
             outcome: dict[str, Any] = {"completed": [], "skipped": [], "failures": []}
 

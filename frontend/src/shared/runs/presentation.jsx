@@ -69,7 +69,7 @@ export function runWorkflowStatus(run, opts = {}) {
   if (run.status === "stopped")
     return {
       key: "neutral",
-      label: "crawl stopped",
+      label: "stopped",
     };
   if (thinkingStatus === "stopped")
     return {

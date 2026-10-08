@@ -1340,6 +1340,70 @@ def test_benchmark_comparison_reports_range_frequency_and_thresholds(
     assert metrics["detection_frequency"]["GT-1"]["frequency"] == 1.0
 
 
+@pytest.mark.parametrize("kind", ["site", "api"])
+@pytest.mark.parametrize("status", ["stopped", "incomplete"])
+def test_bulk_benchmarks_finished_scans(client, db_engine, monkeypatch, kind, status):
+    with Session(db_engine) as session:
+        model = LLMConfig(name="Evaluator", model="test-model")
+        target = (
+            Site(name="Site", base_url="https://example.test")
+            if kind == "site"
+            else ApiCollection(name="API", base_url="https://example.test")
+        )
+        session.add_all([model, target])
+        session.commit()
+        run = (
+            TestRun(site_id=target.id, name="Finished scan", status=status)
+            if kind == "site"
+            else ApiTestRun(
+                collection_id=target.id, name="Finished scan", status=status
+            )
+        )
+        run.llm_config_id = model.id
+        session.add(run)
+        session.commit()
+        run_id, model_id = run.id, model.id
+
+    async def answer(*args, **kwargs):
+        return json.dumps(
+            {
+                "decisions": [
+                    {
+                        "ground_truth_external_id": "GT-1",
+                        "disposition": "missing",
+                        "finding_ids": [],
+                        "reason": "No findings",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("aespa.services.llm.plain_completion", answer)
+    dataset = client.post(
+        f"{BASE}/datasets",
+        json={
+            "name": "Truth",
+            "ground_truth": {
+                "items": [{"external_id": "GT-1", "title": "SQL injection"}]
+            },
+        },
+    ).json()
+    response = client.post(
+        f"{BASE}/results/benchmark-unbenchmarked",
+        json={
+            "run_kind": kind,
+            "run_ids": [run_id],
+            "dataset_id": dataset["id"],
+            "evaluation_model_id": model_id,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"completed": [run_id], "skipped": [], "failures": []}
+    with Session(db_engine) as session:
+        stored_run = session.get(TestRun if kind == "site" else ApiTestRun, run_id)
+        assert stored_run.status == status
+
+
 @pytest.mark.parametrize("kind", ["site", "api", "sast"])
 def test_bulk_completed_benchmarks_skip_existing_and_retry_failures(
     client, db_engine, monkeypatch, kind

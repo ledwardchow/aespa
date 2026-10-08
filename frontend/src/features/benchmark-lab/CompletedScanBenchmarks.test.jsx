@@ -35,11 +35,11 @@ beforeEach(() => {
   benchmarkUnbenchmarked.mockResolvedValue({ completed: [1], skipped: [2], failures: [] });
 });
 
-test("lists completed scans and benchmarks only missing results with selected ground truth", async () => {
+test("lists finished scans and benchmarks only missing results with selected ground truth", async () => {
   const user = userEvent.setup();
   render(<CompletedScanBenchmarks {...props} />);
   expect(screen.getByText("Completed shop scan")).toBeTruthy();
-  expect(screen.queryByText("Stopped shop scan")).toBeNull();
+  expect(screen.getByText("Stopped shop scan")).toBeTruthy();
   const button = screen.getByRole("button", { name: "Benchmark 0 selected scans" });
   expect(button.disabled).toBe(true);
   await user.selectOptions(screen.getByLabelText("Ground truth for bulk benchmarks"), "4");
@@ -57,6 +57,19 @@ test("lists completed scans and benchmarks only missing results with selected gr
     screen.getByRole("button", { name: "Open benchmark for Benchmarked shop scan" }),
   );
   expect(props.onOpen).toHaveBeenCalledWith(8);
+});
+
+test("benchmarks a stopped scan", async () => {
+  const user = userEvent.setup();
+  render(<CompletedScanBenchmarks {...props} />);
+  await user.selectOptions(screen.getByLabelText("Ground truth for bulk benchmarks"), "4");
+  await user.click(screen.getByRole("checkbox", { name: "Select Stopped shop scan" }));
+  await user.click(screen.getByRole("button", { name: "Benchmark 1 selected scans" }));
+  expect(benchmarkUnbenchmarked).toHaveBeenCalledWith({
+    run_kind: "site",
+    run_ids: [3],
+    dataset_id: 4,
+  });
 });
 
 test("counts completed legacy SAST evaluations as benchmarked", () => {
