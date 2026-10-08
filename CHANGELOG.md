@@ -8,15 +8,13 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **AESPA Benchmarks Online**: Publish compact benchmark graph summaries to a private results site from Benchmark Lab. Create separate upload-only tokens on the results site and revoke them individually. Configure the site URL and one upload token generated on the results site in the Benchmark Lab extension settings, where you can also view the saved token. Repeated uploads update existing results with scan dates and token counts, without sending scan names, findings, or evidence.
 
-- **Claude CLI provider**: Use a signed-in Claude Code account for scans. Choose Sonnet, Opus, Haiku, or Mythos, or enter another Claude model name. The Mythos aliases use `claude-mythos-5`. Scan tool calls stay inside AESPA, and usage is recorded from the CLI response.
+- **Claude CLI provider**: Use a signed-in Claude CLI account for scans. 
 
 - **Re-validate SAST findings**: Completed SAST runs now show a Re-validate button for inconclusive findings. It runs a fresh validator check for the selected finding and updates its result and report.
 
-- **ChatGPT plan provider**: Sign in with ChatGPT in LLM Settings and use an eligible model in web, API, and SAST scans. AESPA loads the account's models when you sign in, checks models missing from the API list, and shows Daybreak Blue and Red access. All loaded models are ready to select in scan profiles. Known models get their published context sizes and output budgets, with Luna set to xhigh thinking and Sol set to medium. Existing ChatGPT model settings are updated when AESPA starts. AESPA keeps the full output budget free when fitting prompts into the context window and counts completed requests in scan usage. Scanner requests use the available Daybreak access for supported models and retain tool calls and text from streamed replies. If a streamed reply ends before completion, AESPA retries that request so the scan can continue. The existing Codex subscription provider remains available.
+- **ChatGPT plan provider**: Announced as part of OpenAI DevDay 2026, you can now use "Sign in with ChatGPT" to use the OpenAI API directly with the Oauth2 flow. This performs significantly better than the existing Codex CLI provider and doesn't leave session logs all over your Codex interface.
 
 ### Updates
-
-- **Stopped scan labels**: The run status badge now says Stopped when a scan stops.
 
 - **Benchmark cost graphs**: Hide scans without a recorded cost without showing a warning.
 
@@ -26,7 +24,9 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
-- **Benchmarking stopped scans**: Benchmark Lab now lists stopped and incomplete web and API scans and accepts them in bulk benchmarks.
+- **Stopped scan labels**: The run status badge now says Stopped when a scan stops (instead of the erroneous Crawl stopped).
+
+- **Benchmarking stopped scans**: Benchmark Lab used to allow benchmarking a stopped state scan when using the new analysis tab, but not on the DAST/SAST tables. Now it'll let you do it on either.
 
 ### Housekeeping
 
