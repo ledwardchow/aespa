@@ -361,7 +361,12 @@ def test_plan_sends_daybreak_program_for_supported_scan_models(monkeypatch):
     assert asyncio.run(request("gpt-5.6-luna")) == {}
 
 
-def test_plan_stream_requires_completion_and_pauses_on_usage_limit():
+def test_plan_stream_requires_completion_and_pauses_on_usage_limit(monkeypatch):
+    async def no_delay(_seconds):
+        pass
+
+    monkeypatch.setattr(llm.asyncio, "sleep", no_delay)
+
     class Stream:
         def __init__(self, events):
             self.events = iter(events)
@@ -427,6 +432,51 @@ def test_plan_stream_requires_completion_and_pauses_on_usage_limit():
     )
     with pytest.raises(llm.LLMQuotaPauseError):
         asyncio.run(call([failed]))
+
+
+def test_plan_stream_retries_missing_completion_without_reusing_partial_output(
+    monkeypatch,
+):
+    delays = []
+
+    async def record_delay(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr(llm.asyncio, "sleep", record_delay)
+
+    class Responses:
+        calls = 0
+
+        async def create(self, **kwargs):
+            assert kwargs == {"stream": True}
+            self.calls += 1
+            events = (
+                [SimpleNamespace(type="response.output_item.done", item="discard")]
+                if self.calls == 1
+                else [
+                    SimpleNamespace(type="response.output_item.done", item="keep"),
+                    SimpleNamespace(
+                        type="response.completed",
+                        response=SimpleNamespace(output=[]),
+                    ),
+                ]
+            )
+
+            async def stream():
+                for event in events:
+                    yield event
+
+            return stream()
+
+    responses = Responses()
+    result = asyncio.run(
+        llm._chatgpt_plan_response(
+            SimpleNamespace(responses=responses), {"stream": True}
+        )
+    )
+    assert responses.calls == 2
+    assert delays == [1]
+    assert result.output == ["keep"]
 
 
 def test_id_token_checks_signature_audience_and_nonce():

@@ -3217,52 +3217,72 @@ async def _chatgpt_plan_response(
     on_text_delta: Callable[[str], Awaitable[None]] | None = None,
 ) -> Any:
     """Complete the required HTTP stream and reject failed or incomplete turns."""
-    completed = None
-    output_items: list[Any] = []
-    try:
-        stream = await client.responses.create(**kwargs)
-        async for event in stream:
-            event_type = getattr(event, "type", None)
-            if event_type == "response.output_text.delta" and on_text_delta:
-                delta = getattr(event, "delta", None)
-                if delta:
-                    await on_text_delta(delta)
-            elif event_type == "response.output_item.done":
-                item = getattr(event, "item", None)
-                if item is not None:
-                    output_items.append(item)
-            elif event_type == "response.completed":
-                completed = getattr(event, "response", None)
-            elif event_type == "response.failed":
-                response = getattr(event, "response", None)
-                error = getattr(response, "error", None)
-                code = str(getattr(error, "code", None) or "unknown_error")
-                if code in {
-                    "subscription_sharing_usage_limit_exceeded",
-                    "subscription_sharing_usage_unavailable",
-                }:
-                    raise LLMQuotaPauseError(
-                        "ChatGPT plan usage is unavailable or exhausted"
-                    )
-                raise RuntimeError(f"ChatGPT plan request failed: {code}")
-            elif event_type == "response.incomplete":
-                raise RuntimeError("ChatGPT plan response was incomplete")
-    except Exception as exc:
-        if isinstance(exc, LLMQuotaPauseError):
+    # A stream can close without the terminal event even though the request did
+    # not raise. No tool calls are executed until this function returns, so a
+    # scanner turn can safely repeat the request. Do not repeat streamed text:
+    # callers with a delta callback may already have shown it to the user.
+    max_attempts = 3 if on_text_delta is None else 1
+    for attempt in range(1, max_attempts + 1):
+        completed = None
+        output_items: list[Any] = []
+        try:
+            stream = await client.responses.create(**kwargs)
+            async for event in stream:
+                event_type = getattr(event, "type", None)
+                if event_type == "response.output_text.delta" and on_text_delta:
+                    delta = getattr(event, "delta", None)
+                    if delta:
+                        await on_text_delta(delta)
+                elif event_type == "response.output_item.done":
+                    item = getattr(event, "item", None)
+                    if item is not None:
+                        output_items.append(item)
+                elif event_type == "response.completed":
+                    completed = getattr(event, "response", None)
+                elif event_type == "response.failed":
+                    response = getattr(event, "response", None)
+                    error = getattr(response, "error", None)
+                    code = str(getattr(error, "code", None) or "unknown_error")
+                    if code in {
+                        "subscription_sharing_usage_limit_exceeded",
+                        "subscription_sharing_usage_unavailable",
+                    }:
+                        raise LLMQuotaPauseError(
+                            "ChatGPT plan usage is unavailable or exhausted"
+                        )
+                    raise RuntimeError(f"ChatGPT plan request failed: {code}")
+                elif event_type == "response.incomplete":
+                    raise RuntimeError("ChatGPT plan response was incomplete")
+        except Exception as exc:
+            if isinstance(exc, LLMQuotaPauseError):
+                raise
+            body = getattr(exc, "body", None)
+            error = body.get("error", body) if isinstance(body, dict) else {}
+            code = error.get("code") if isinstance(error, dict) else None
+            if code in {
+                "subscription_sharing_usage_limit_exceeded",
+                "subscription_sharing_usage_unavailable",
+            }:
+                raise LLMQuotaPauseError(
+                    "ChatGPT plan usage is unavailable or exhausted"
+                ) from exc
             raise
-        body = getattr(exc, "body", None)
-        error = body.get("error", body) if isinstance(body, dict) else {}
-        code = error.get("code") if isinstance(error, dict) else None
-        if code in {
-            "subscription_sharing_usage_limit_exceeded",
-            "subscription_sharing_usage_unavailable",
-        }:
-            raise LLMQuotaPauseError(
-                "ChatGPT plan usage is unavailable or exhausted"
-            ) from exc
-        raise
-    if completed is None:
-        raise RuntimeError("ChatGPT plan stream ended without a completed response")
+        if completed is not None:
+            break
+        if attempt == max_attempts:
+            raise RuntimeError(
+                "ChatGPT plan stream ended without a completed response "
+                f"after {max_attempts} attempt(s)"
+            )
+        delay = 2 ** (attempt - 1)
+        log.warning(
+            "ChatGPT plan stream ended without a completed response; "
+            "retrying request %s/%s in %ss",
+            attempt + 1,
+            max_attempts,
+            delay,
+        )
+        await asyncio.sleep(delay)
     # Subscription streams can leave the final response.output empty even
     # though completed message and function-call items arrived earlier.
     if not getattr(completed, "output", None) and output_items:
