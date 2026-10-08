@@ -38,7 +38,9 @@ test("shows Docker service guidance without image build instructions", async () 
 
   render(<CodeExecutionSettings />);
 
-  expect(await screen.findByText(/Docker is installed, but its service is not running/)).toBeTruthy();
+  expect(
+    await screen.findByText(/Docker is installed, but its service is not running/),
+  ).toBeTruthy();
   expect(screen.queryByText(/Build it with:/)).toBeNull();
 });
 

@@ -105,7 +105,7 @@ test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/benchmark-lab");
   await expect(page).toHaveTitle("AESPA");
-  await expect(page.getByRole("tab", { name: "Sites" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Results" })).toBeVisible();
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   await page.getByRole("combobox", { name: "Site" }).selectOption("1");
   await expect(
@@ -114,13 +114,11 @@ test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
   await page.screenshot({ path: path.join(tmpdir(), "aespa-benchmark-lab-summary.png") });
   await page.getByRole("tab", { name: "New" }).click();
   await page.getByRole("combobox", { name: "Completed scan" }).selectOption("1");
-  await expect(
-    page.getByRole("option", { name: "Scan's Test Lead model: Fixture model" }),
-  ).toHaveCount(1);
+  await expect(page.getByText("Benchmark model: Fixture model")).toBeVisible();
   await page.getByRole("tab", { name: "Analyses" }).click();
   await page.getByRole("button", { name: "Open Fixture scan" }).click();
   await expect(page.getByText("Compared by Fixture model")).toBeVisible();
-  await expect(page.getByText("Test Lead model: Fixture Test Lead (fixture-model)")).toBeVisible();
+  await expect(page.getByText("Scan model: Fixture Test Lead (fixture-model)")).toBeVisible();
   await expect(page.getByText("GT-2 - Missing audit logs")).toBeVisible();
   const panel = await page.locator("main").boundingBox();
   const tabs = await page.getByRole("tablist", { name: "Scan type" }).boundingBox();
@@ -141,7 +139,7 @@ test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
   await page.getByRole("button", { name: "Open Fixture scan" }).click();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Delete result" }).click();
-  await expect(page.getByText("No analyses have been saved for this Site.")).toBeVisible();
+  await expect(page.getByText("No saved analyses match this selection.")).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -802,6 +800,7 @@ test("Python Sandbox explains when the Docker service is unavailable", async ({ 
   });
   await installFixtures(page);
   await page.goto("/#/scan-policy");
+  await page.getByRole("tab", { name: "DAST", exact: true }).click();
   await page.getByRole("tab", { name: "Python Sandbox", exact: true }).click();
 
   await expect(page.getByText("Runtime unavailable", { exact: true })).toBeVisible();
@@ -913,10 +912,10 @@ test("a failed request shows a useful error instead of an empty page", async ({ 
 test("back and forward restore the selected run tab", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/sast-runs/1/coverage");
-  await page.getByRole("tab", { name: /^Candidates/ }).click();
+  await page.getByRole("tab", { name: /^Findings/ }).click();
   await page.getByRole("tab", { name: "Activity", exact: true }).click();
   await page.goBack();
-  await expect(page.getByRole("tab", { name: /^Candidates/ })).toHaveAttribute(
+  await expect(page.getByRole("tab", { name: /^Findings/ })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -1028,7 +1027,7 @@ test("SAST summary cards only appear on the Coverage tab", async ({ page }) => {
   await expect(summary).toBeVisible();
   await expect(summary.locator(":scope > div")).toHaveCount(7);
 
-  for (const tabName of ["Model", /^Threats/, "Execution Summary", /^Candidates/, "Activity"]) {
+  for (const tabName of ["Model", /^Threats/, "Execution Summary", /^Findings/, "Activity"]) {
     await viewTabs.getByRole("tab", { name: tabName }).click();
     await expect(summary).toHaveCount(0);
   }
@@ -1113,7 +1112,7 @@ test("SAST threats include security check progress without a duplicate tab", asy
   );
   await expect(viewTabs.getByRole("tab", { name: /Security checks/ })).toHaveCount(0);
   await expect(page.getByText("Security check progress")).toBeVisible();
-  await expect(page.getByText("1 of 1 checks completed · 0 reportable candidates")).toBeVisible();
+  await expect(page.getByText("1 of 1 checks completed · 0 reportable findings")).toBeVisible();
 
   await page.getByText("Protect account access").click();
   await expect(page.getByText("Can one user read another account?")).toBeVisible();
@@ -1200,10 +1199,8 @@ test("a running SAST scan explains that semantic analysis is still being generat
   await expect(page.getByText("This analysis will appear as the scan progresses.")).toBeVisible();
   await expect(page.getByText(/Run the scan again with the current SAST workflow/)).toHaveCount(0);
 
-  await page.getByRole("tab", { name: /^Security checks/ }).click();
-  await expect(page.getByText("Security check analysis is not ready yet.")).toBeVisible();
-  await expect(page.getByText("This analysis will appear as the scan progresses.")).toBeVisible();
-  await expect(page.getByText(/Run the scan again with the current SAST workflow/)).toHaveCount(0);
+  await page.getByRole("tab", { name: "Coverage", exact: true }).click();
+  await expect(page.getByText("Security checks", { exact: true }).first()).toBeVisible();
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(errors).toEqual([]);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-analysis-running.png") });

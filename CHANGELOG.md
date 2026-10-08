@@ -2,7 +2,13 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## [PR #278] Public Benchmarking, Claude CLI and ChatGPT plan LLM providerse
+## Unreleased
+
+### Housekeeping
+
+- **GitHub Actions**: Frontend checks now use current browser fixtures and labels. Desktop release jobs build the web app before packaging the Windows and macOS apps.
+
+## [PR #278] October 8 - Public Benchmarking, Claude CLI and ChatGPT plan LLM providerse
 
 ### New features
 

@@ -249,7 +249,7 @@ function ChatGPTPlanConnectionCard({ value, onSelect, reloadKey }) {
         setBusy(false);
         if (result.status === "complete") {
           const next = await refresh();
-        if (next.active) onSelect(next.active, true);
+          if (next.active) onSelect(next.active, true);
         } else {
           setError(result.error || "ChatGPT sign-in failed");
         }
@@ -304,9 +304,7 @@ function ChatGPTPlanConnectionCard({ value, onSelect, reloadKey }) {
   return (
     <div className="form-section" style={{ marginTop: 12 }}>
       <div className="form-section-title">ChatGPT connection</div>
-      <div className="field-hint">
-        Sign in to use your ChatGPT account for this provider.
-      </div>
+      <div className="field-hint">Sign in to use your ChatGPT account for this provider.</div>
       {accounts.length > 0 && (
         <div className="field">
           <label>ChatGPT account</label>
@@ -350,7 +348,12 @@ function ChatGPTPlanConnectionCard({ value, onSelect, reloadKey }) {
         </button>
         {selected && (
           <>
-            <button type="button" className="btn secondary sm" disabled={busy} onClick={() => signIn(value)}>
+            <button
+              type="button"
+              className="btn secondary sm"
+              disabled={busy}
+              onClick={() => signIn(value)}
+            >
               Sign in again
             </button>
             {selected.signed_in && (
@@ -703,7 +706,10 @@ export function LLMProviderForm({
         const retainedModelNames = [...configuredModelsByName.entries()]
           .filter(([, modelConfig]) => profileNamesByModelId.has(String(modelConfig.id)))
           .map(([modelName]) => modelName)
-          .filter((modelName) => !discoveredModelNames.includes(modelName) && !extraModelNames.includes(modelName));
+          .filter(
+            (modelName) =>
+              !discoveredModelNames.includes(modelName) && !extraModelNames.includes(modelName),
+          );
         const nextModelNames = [...discoveredModelNames, ...extraModelNames, ...retainedModelNames];
         const nextCapabilities = Object.fromEntries(
           nextModelNames.flatMap((modelName) => {
@@ -874,9 +880,14 @@ export function LLMProviderForm({
             </div>
           </div>
         )}
-        {!["claude_cli", "factory_droid", "openai_codex", "openai_chatgpt_plan", "google_antigravity", "google_vertex"].includes(
-          form.api_format,
-        ) &&
+        {![
+          "claude_cli",
+          "factory_droid",
+          "openai_codex",
+          "openai_chatgpt_plan",
+          "google_antigravity",
+          "google_vertex",
+        ].includes(form.api_format) &&
           !isBedrockProvider(form.api_format) && (
             <div className="field">
               <label>
@@ -907,7 +918,9 @@ export function LLMProviderForm({
         )}
         {form.api_format === "claude_cli" && (
           <div className="field-hint">
-            Uses the account signed in through Claude CLI. Install Claude Code and run claude auth login first. AESPA does not store Claude credentials. Claude's own tools are disabled for scans.
+            Uses the account signed in through Claude CLI. Install Claude Code and run claude auth
+            login first. AESPA does not store Claude credentials. Claude's own tools are disabled
+            for scans.
           </div>
         )}
         {form.api_format === "google_antigravity" && (
@@ -1022,9 +1035,14 @@ export function LLMProviderForm({
         {form.api_format === "github_copilot" && (
           <CopilotConnectionCard value={form.username} onSelect={selectCopilotUsername} />
         )}
-        {!["claude_cli", "factory_droid", "openai_codex", "openai_chatgpt_plan", "google_antigravity", "google_vertex"].includes(
-          form.api_format,
-        ) && (
+        {![
+          "claude_cli",
+          "factory_droid",
+          "openai_codex",
+          "openai_chatgpt_plan",
+          "google_antigravity",
+          "google_vertex",
+        ].includes(form.api_format) && (
           <div className="field">
             <label htmlFor="provider-api-key">
               {form.api_format === "github_copilot" ? "GitHub token" : "API Key"}{" "}

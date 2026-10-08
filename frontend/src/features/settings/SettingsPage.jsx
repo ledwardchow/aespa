@@ -89,12 +89,15 @@ export function SettingsPage({
     });
     nav(`#/settings/models/new?${query}`);
   };
-  const onProviderUpdated = useCallback((savedProvider) => {
-    setProviders((current) =>
-      current?.map((item) => (item.id === savedProvider.id ? savedProvider : item)),
-    );
-    void load();
-  }, [load]);
+  const onProviderUpdated = useCallback(
+    (savedProvider) => {
+      setProviders((current) =>
+        current?.map((item) => (item.id === savedProvider.id ? savedProvider : item)),
+      );
+      void load();
+    },
+    [load],
+  );
   const onCancel = () => {
     if (section === "models") {
       const providerId = editing?.provider_id || initialProviderId;

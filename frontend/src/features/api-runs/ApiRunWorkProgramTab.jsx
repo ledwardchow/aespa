@@ -350,14 +350,10 @@ export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
                         title={`Show traffic for ${cat} on ${ep.method} ${ep.path}`}
                         onClick={() =>
                           nav(
-                            runHref(
-                              { runKind: "api", runId },
-                              "traffic",
-                              {
-                                coverage_cells: cell.cell_id ? String(cell.cell_id) : undefined,
-                                coverage_category: cat,
-                              },
-                            ),
+                            runHref({ runKind: "api", runId }, "traffic", {
+                              coverage_cells: cell.cell_id ? String(cell.cell_id) : undefined,
+                              coverage_category: cat,
+                            }),
                           )
                         }
                       >
