@@ -7,25 +7,25 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "alembic>=1.14.0",
-    "anthropic>=0.97.0",
-    "boto3>=1.42.0",
-    "fastapi>=0.136.1",
-    "google-genai>=1.74.0",
+    "alembic>=1.20.0",
+    "anthropic>=1.11.0",
+    "boto3>=1.43.108",
+    "fastapi>=0.142.2",
+    "google-genai>=2.28.0",
     "httpx>=0.28.1",
-    "openai>=2.33.0",
-    "playwright>=1.62.0",
-    "pydantic-settings>=2.14.2",
-    "python-multipart>=0.0.31",
-    "sqlmodel>=0.0.38",
-    "uvicorn[standard]>=0.46.0",
-    "cryptography>=50.0.0",
-    "pyjwt>=2.15.0",
-    "pyotp>=2.9.0",
-    "prance>=25.4.8.0",
-    "github-copilot-sdk>=1.0.7",
-    "droid-sdk>=0.1.2",
-    "tiktoken>=0.12.0",
+    "openai>=3.24.0",
+    "playwright>=1.63.0",
+    "pydantic-settings>=2.15.0",
+    "python-multipart>=0.0.32",
+    "sqlmodel>=0.0.47",
+    "uvicorn[standard]>=0.54.0",
+    "cryptography>=50.0.2",
+    "pyjwt>=2.15.1",
+    "pyotp>=2.10.0",
+    "prance>=26.7.19.0",
+    "github-copilot-sdk>=1.0.16",
+    "droid-sdk>=0.5.0",
+    "tiktoken>=0.14.0",
     "tree-sitter>=0.26,<0.27",
     "tree-sitter-php>=0.24.1,<0.25",
     "tree-sitter-javascript>=0.25.0,<0.26",
@@ -41,7 +41,7 @@ dependencies = [
 aespa = "aespa:main"
 
 [build-system]
-requires = ["uv_build>=0.11.8,<0.12.0"]
+requires = ["uv_build>=0.12.23,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]
@@ -61,6 +61,6 @@ ignore = ["E501"]
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
-    "pytest>=9.0.3",
-    "ruff>=0.15.12",
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
 ]
