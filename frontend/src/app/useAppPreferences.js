@@ -62,7 +62,10 @@ export function useAppPreferences() {
       .then((extensions) =>
         setBenchmarkLabCfg({
           panel_enabled: extensions.some(
-            (extension) => extension.id === "aespa.benchmarking" && extension.enabled && extension.status === "loaded",
+            (extension) =>
+              extension.id === "aespa.benchmarking" &&
+              extension.enabled &&
+              extension.status === "loaded",
           ),
         }),
       )

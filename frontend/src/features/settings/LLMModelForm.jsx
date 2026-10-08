@@ -266,14 +266,20 @@ export function LLMModelForm({
         <div className="two-col">
           <div className="field">
             <label htmlFor="model-config-max-tokens">
-              {selectedProvider?.api_format === "openai_chatgpt_plan" ? "Output budget (local)" : "Max tokens"}
+              {selectedProvider?.api_format === "openai_chatgpt_plan"
+                ? "Output budget (local)"
+                : "Max tokens"}
             </label>
             <input
               id="model-config-max-tokens"
               type="number"
               required
               min="1"
-              max={selectedProvider?.api_format === "openai_chatgpt_plan" && documentedOutput > 0 ? documentedOutput : 256000}
+              max={
+                selectedProvider?.api_format === "openai_chatgpt_plan" && documentedOutput > 0
+                  ? documentedOutput
+                  : 256000
+              }
               value={form.max_tokens}
               onChange={(e) =>
                 upd({
@@ -283,7 +289,8 @@ export function LLMModelForm({
             />
             {selectedProvider?.api_format === "openai_chatgpt_plan" && (
               <div className="field-hint">
-                AESPA uses this for context planning. ChatGPT plan requests do not support an output-token limit.
+                AESPA uses this for context planning. ChatGPT plan requests do not support an
+                output-token limit.
               </div>
             )}
           </div>
@@ -307,7 +314,11 @@ export function LLMModelForm({
               required={!form.max_context_auto}
               disabled={form.max_context_auto}
               min="1024"
-              max={selectedProvider?.api_format === "openai_chatgpt_plan" && detectedContext >= 1024 ? detectedContext : 2000000}
+              max={
+                selectedProvider?.api_format === "openai_chatgpt_plan" && detectedContext >= 1024
+                  ? detectedContext
+                  : 2000000
+              }
               value={form.max_context_tokens}
               onChange={(e) =>
                 upd({

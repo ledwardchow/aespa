@@ -190,9 +190,7 @@ test("keeps profile models when loading models from the provider API", async () 
     model_capabilities: savedProvider.model_capabilities,
   });
   expect(
-    screen.getByText(
-      "Loaded 1 model(s) from the API. Kept 1 model(s) used by scan profiles.",
-    ),
+    screen.getByText("Loaded 1 model(s) from the API. Kept 1 model(s) used by scan profiles."),
   ).toBeTruthy();
   expect(screen.getByRole("button", { name: "existing-model" })).toBeTruthy();
 });
@@ -227,7 +225,8 @@ test("warns when the selected ChatGPT account has no Daybreak access", async () 
     accounts: [{ client_id: "oaiapp_test", signed_in: true }],
   });
   settingsApi.checkChatGPTPlanAccess.mockResolvedValue({
-    models: [], daybreak: { blue: false, red: false },
+    models: [],
+    daybreak: { blue: false, red: false },
   });
 
   render(
@@ -240,7 +239,9 @@ test("warns when the selected ChatGPT account has no Daybreak access", async () 
   );
 
   await waitFor(() =>
-    expect(screen.getByRole("alert").textContent).toContain("does not have Daybreak Blue or Red access"),
+    expect(screen.getByRole("alert").textContent).toContain(
+      "does not have Daybreak Blue or Red access",
+    ),
   );
   expect(screen.getByText("Daybreak Blue: Not available")).toBeTruthy();
   expect(screen.getByText("Daybreak Red: Not available")).toBeTruthy();
@@ -276,7 +277,8 @@ test("loads ChatGPT models verified for the account when the catalog omits them"
     accounts: [{ client_id: "oaiapp_test", signed_in: true }],
   });
   settingsApi.discoverModelOptions.mockResolvedValue({
-    models: ["gpt-6-astra"], capabilities: {},
+    models: ["gpt-6-astra"],
+    capabilities: {},
   });
   settingsApi.checkChatGPTPlanAccess.mockResolvedValue({
     models: ["gpt-6-sol", "gpt-6-luna"],
@@ -302,7 +304,9 @@ test("loads ChatGPT models verified for the account when the catalog omits them"
   await waitFor(() => expect(settingsApi.updateLLMProvider).toHaveBeenCalledTimes(1));
   expect(settingsApi.checkChatGPTPlanAccess).toHaveBeenCalledWith("oaiapp_test", true);
   expect(settingsApi.updateLLMProvider.mock.calls[0][1].models).toEqual([
-    "gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
   ]);
 });
 

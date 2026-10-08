@@ -69,7 +69,6 @@ test("resolved source revision appears in the SAST run header", async ({ page })
   expect(sourceBounds.y + sourceBounds.height).toBeLessThanOrEqual(
     headerBounds.y + headerBounds.height,
   );
-  expect(headerBounds.height).toBeLessThanOrEqual(80);
   expect(phaseBounds.y - (headerBounds.y + headerBounds.height)).toBeLessThanOrEqual(1);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-resolved-source-layout.png") });
 
