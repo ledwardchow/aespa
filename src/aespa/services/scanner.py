@@ -47,7 +47,7 @@ from aespa.models import (
 )
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import events as events_svc
-from aespa.services import external_scans
+from aespa.services import external_scans, js_libraries
 from aespa.services import llm as llm_svc
 from aespa.services import recon_summary as recon_summary_svc
 from aespa.services import scanner_sessions as session_svc
@@ -12416,6 +12416,257 @@ async def _run_tls_posture_module(
     return [finding] if finding else []
 
 
+_OUTDATED_JS_MAX_REFETCH = 40
+_OUTDATED_JS_MAX_BYTES = 3_000_000
+_SEVERITY_CVSS = {"low": 3.7, "medium": 6.1, "high": 7.5, "critical": 9.0}
+
+
+def _captured_scripts(run_id: int) -> tuple[dict[str, dict], dict[str, str]]:
+    """Return captured script responses keyed by URL, plus script→page links."""
+    scripts: dict[str, dict] = {}
+    loaded_by: dict[str, str] = {}
+    with Session(get_engine()) as s:
+        rows = s.exec(
+            select(
+                TrafficEntry.url,
+                TrafficEntry.status,
+                TrafficEntry.response_headers,
+                TrafficEntry.response_body,
+                TrafficEntry.response_body_size,
+            ).where(
+                TrafficEntry.test_run_id == run_id,
+                TrafficEntry.method == "GET",
+            )
+        ).all()
+        for url, status, headers, body, size in rows:
+            if not url or (status is not None and not 200 <= status < 300):
+                continue
+            path = urlparse(url).path.lower()
+            if (
+                not path.endswith((".js", ".mjs"))
+                and "javascript" not in (headers or "").lower()
+            ):
+                continue
+            text = (
+                body if isinstance(body, str) and not body.startswith("[binary") else ""
+            )
+            current = scripts.get(url)
+            if current is None or len(text) > len(current["body"]):
+                scripts[url] = {
+                    "body": text,
+                    "truncated": bool(size and size > len(text.encode())),
+                }
+        intel = s.exec(
+            select(TargetIntelItem.value, TargetIntelItem.url).where(
+                TargetIntelItem.test_run_id == run_id,
+                TargetIntelItem.kind == "script",
+            )
+        ).all()
+        for script_url, page_url in intel:
+            if not script_url:
+                continue
+            scripts.setdefault(script_url, {"body": "", "truncated": True})
+            if page_url:
+                loaded_by.setdefault(script_url, page_url)
+    return scripts, loaded_by
+
+
+async def _runtime_library_detections(browser_page) -> list[js_libraries.Detection]:
+    if browser_page is None:
+        return []
+    try:
+        page_url = browser_page.url
+    except Exception:
+        return []
+    detections: list[js_libraries.Detection] = []
+    for library, expr in js_libraries.runtime_probes():
+        try:
+            value = await browser_page.evaluate(
+                f"() => {{ try {{ const v = ({expr}); "
+                "return v ? String(v) : null; } catch (e) { return null; } }"
+            )
+        except Exception:
+            continue
+        version = js_libraries.clean_version(value)
+        if version:
+            detections.append(
+                js_libraries.Detection(
+                    library,
+                    version,
+                    js_libraries.METHOD_RUNTIME,
+                    page_url,
+                    f"{expr} → {value}"[:200],
+                )
+            )
+    return detections
+
+
+def _outdated_js_finding(
+    run_id: int, report: js_libraries.LibraryReport, loaded_by: dict[str, str]
+) -> ScanFinding:
+    issue_lines = js_libraries.describe_vulnerabilities(report)
+    detection_lines = [
+        f"- {det.source} ({det.method}): {det.evidence}" for det in report.detections
+    ]
+    pages = sorted({loaded_by[src] for src in report.sources if src in loaded_by})
+    fixed = report.fixed_version
+    if fixed:
+        recommendation = (
+            f"Upgrade {report.display} to {fixed} or later, then retest the pages "
+            "that load it. If the library is no longer needed, remove it."
+        )
+    else:
+        recommendation = (
+            f"{report.display} {report.version} has issues with no fixed release in "
+            "this version line. Move to a supported release or replacement, or "
+            "remove the library if it is no longer needed."
+        )
+    description = (
+        f"The application loads {report.display} {report.version}, which is affected "
+        f"by {len(report.vulnerabilities)} known issue(s) (OWASP A06, Vulnerable and "
+        "Outdated Components):\n\n"
+        + "\n".join(f"- {line}" for line in issue_lines)
+        + "\n\nWhere the version was found:\n"
+        + "\n".join(detection_lines)
+    )
+    if pages:
+        description += "\n\nLoaded by:\n" + "\n".join(f"- {p}" for p in pages[:20])
+    summary = (
+        f"{report.display} {report.version} detected by "
+        f"{', '.join(report.methods)}; matches {', '.join(report.identifiers) or 'known issues'}."
+    )
+    detail = "\n".join(detection_lines)
+    cvss = _SEVERITY_CVSS.get(report.severity, 5.0)
+    affected = report.sources[0] if report.sources else ""
+    return ScanFinding(
+        test_run_id=run_id,
+        page_id=None,
+        owasp_category="A06",
+        severity=report.severity if report.severity in _SEVERITY_CVSS else "medium",
+        title=f"Outdated {report.display} {report.version} with known vulnerabilities",
+        description=description,
+        impact=(
+            "Known vulnerabilities in client-side libraries can let attackers run "
+            "script in users' browsers, pollute object prototypes, or slow pages down, "
+            "depending on which library features the application uses."
+        ),
+        likelihood=(
+            "The version is confirmed. Whether each issue can be exploited depends on "
+            "how the application uses the affected library features."
+        ),
+        recommendation=recommendation,
+        cvss_score=cvss,
+        cvss_vector="",
+        affected_url=affected,
+        evidence=_full_evidence(f"GET {affected}", detail, summary),
+        request_evidence=_request_evidence(f"GET {affected}"),
+        response_evidence=_response_evidence(detail),
+        evidence_json=_http_evidence_items_json(
+            f"GET {affected}", detail, summary=summary
+        ),
+        finding_source="deterministic_probe",
+        validation_status="confirmed",
+        validation_note=(
+            f"Library version confirmed from {', '.join(report.methods)}. "
+            "Exploitability of the listed issues was not tested."
+        ),
+        created_at=_utcnow(),
+    )
+
+
+async def _run_outdated_js_module(
+    *,
+    run_id: int,
+    base_url: str,
+    site_id: int = 0,
+    browser_page=None,
+) -> list[ScanFinding]:
+    """Check captured JavaScript files for library versions with known issues.
+
+    Uses script responses already recorded during the crawl. In-scope scripts
+    whose stored body was truncated are fetched again in full so libraries
+    bundled deeper in a file are still found. Out-of-scope scripts (CDNs) are
+    judged from their URL and stored body only.
+    """
+    events_svc.emit(
+        run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "outdated_js",
+            "status": "start",
+            "message": "Checking JavaScript libraries for known vulnerable versions…",
+        },
+    )
+    scripts, loaded_by = _captured_scripts(run_id)
+    detections: list[js_libraries.Detection] = []
+    refetch: list[str] = []
+    for url, info in scripts.items():
+        found = js_libraries.detect(url, info["body"])
+        detections.extend(found)
+        has_content_match = any(d.method == js_libraries.METHOD_CONTENT for d in found)
+        if info["truncated"] and not has_content_match:
+            refetch.append(url)
+
+    fetched = 0
+    if refetch:
+        async with _make_scanner_client(
+            run_id=run_id,
+            headers={"User-Agent": _UA},
+            timeout=REQUEST_TIMEOUT,
+            follow_redirects=True,
+        ) as hx:
+            for url in refetch:
+                if fetched >= _OUTDATED_JS_MAX_REFETCH:
+                    break
+                if site_id and check_scope(url, site_id, run_id):
+                    continue
+                if not site_id and urlparse(url).netloc != urlparse(base_url).netloc:
+                    continue
+                fetched += 1
+                try:
+                    resp = await hx.get(url)
+                except Exception:
+                    continue
+                if not 200 <= resp.status_code < 300:
+                    continue
+                body = resp.content[:_OUTDATED_JS_MAX_BYTES].decode(errors="replace")
+                content_matches = js_libraries.detect_in_content(body, url)
+                if content_matches:
+                    libraries = {d.library for d in content_matches}
+                    detections = [
+                        d
+                        for d in detections
+                        if not (d.source == url and d.library in libraries)
+                    ]
+                    detections.extend(content_matches)
+
+    detections.extend(await _runtime_library_detections(browser_page))
+    reports = js_libraries.vulnerable_reports(detections)
+    findings = [_outdated_js_finding(run_id, r, loaded_by) for r in reports]
+    events_svc.emit(
+        run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "outdated_js",
+            "status": "complete",
+            "message": (
+                f"JavaScript library check complete — {len(scripts)} script(s) checked, "
+                f"{len(findings)} outdated library version(s) found."
+            ),
+            "data": {
+                "scripts": len(scripts),
+                "refetched": fetched,
+                "libraries": [
+                    {"library": r.display, "version": r.version}
+                    for r in js_libraries.build_reports(detections)
+                ],
+                "finding_count": len(findings),
+            },
+        },
+    )
+    return findings
+
+
 async def _run_deterministic_site_modules(
     *,
     run_id: int,
@@ -12433,6 +12684,21 @@ async def _run_deterministic_site_modules(
     # TLS handshake probe is non-intrusive. Records at most one consolidated finding.
     tls_findings = await _run_tls_posture_module(run_id=run_id, base_url=base_url)
     if tls_findings and _save_deterministic_findings(run_id, tls_findings):
+        _emit_scan_update(run_id)
+
+    # Library version checks only read captured scripts (and re-fetch in-scope
+    # static files), so they also run in passive mode.
+    try:
+        js_findings = await _run_outdated_js_module(
+            run_id=run_id,
+            base_url=base_url,
+            site_id=site_id,
+            browser_page=browser_page,
+        )
+    except Exception:
+        log.exception("Outdated JavaScript library check failed for run %s", run_id)
+        js_findings = []
+    if js_findings and _save_deterministic_findings(run_id, js_findings):
         _emit_scan_update(run_id)
 
     if scanner_policy and scanner_policy.scan_mode == "passive":

@@ -7,6 +7,7 @@ from sqlalchemy import (
     Column,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     UniqueConstraint,
     event,
@@ -101,6 +102,42 @@ class Site(SQLModel, table=True):
         back_populates="site",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
+    saved_crawls: List["SavedCrawl"] = Relationship(
+        back_populates="site",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
+
+class SavedCrawl(SQLModel, table=True):
+    """A crawl kept on its site so later runs can skip crawling.
+
+    The archive is the same gzip-compressed JSON format as a crawl export.
+    It is site-owned rather than run-owned, so it survives deletion of the
+    run it was saved from.
+    """
+
+    __tablename__ = "saved_crawl"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    site_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("site.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    name: str
+    notes: Optional[str] = Field(default=None)
+    # Plain id with no foreign key: the source run may be deleted later.
+    source_run_id: Optional[int] = Field(default=None)
+    crawler_mode: str = Field(default="url")
+    page_count: int = Field(default=0)
+    size_bytes: int = Field(default=0)
+    archive_gz: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
+    created_at: datetime = Field(default_factory=_utcnow)
+
+    site: Optional[Site] = Relationship(back_populates="saved_crawls")
 
 
 class Credential(SQLModel, table=True):

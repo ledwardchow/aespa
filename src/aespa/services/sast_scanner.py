@@ -2411,6 +2411,9 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                             semantic_planning.get("dependency_analysis", {})
                         )
                     )
+                    deterministic_candidates.extend(
+                        semantic_svc.vendored_library_candidates(root)
+                    )
                 for candidate in deterministic_candidates:
                     fingerprint = lead_fingerprint(
                         category=candidate["category"],
