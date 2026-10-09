@@ -91,6 +91,7 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
             cfg, "sast_defense_in_depth_findings", False
         ),
         sast_dependency_findings=getattr(cfg, "sast_dependency_findings", True),
+        retire_auto_update=getattr(cfg, "retire_auto_update", True),
         sast_min_severity=getattr(cfg, "sast_min_severity", "low"),
         sast_budget_mode=getattr(cfg, "sast_budget_mode", "adaptive"),
         sast_baseline_budget=getattr(cfg, "sast_baseline_budget", 80),
@@ -188,6 +189,7 @@ def upsert_scanner_policy(
     cfg.sast_audit_logging_findings = payload.sast_audit_logging_findings
     cfg.sast_defense_in_depth_findings = payload.sast_defense_in_depth_findings
     cfg.sast_dependency_findings = payload.sast_dependency_findings
+    cfg.retire_auto_update = payload.retire_auto_update
     cfg.sast_min_severity = payload.sast_min_severity
     cfg.sast_budget_mode = payload.sast_budget_mode
     cfg.sast_baseline_budget = payload.sast_baseline_budget

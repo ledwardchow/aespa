@@ -47,7 +47,7 @@ from aespa.models import (
 )
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import events as events_svc
-from aespa.services import external_scans, js_libraries
+from aespa.services import external_scans, js_libraries, retire_repository
 from aespa.services import llm as llm_svc
 from aespa.services import recon_summary as recon_summary_svc
 from aespa.services import scanner_sessions as session_svc
@@ -12418,6 +12418,7 @@ async def _run_tls_posture_module(
 
 _OUTDATED_JS_MAX_REFETCH = 40
 _OUTDATED_JS_MAX_BYTES = 3_000_000
+_OUTDATED_JS_TIME_BUDGET_S = 120.0
 _SEVERITY_CVSS = {"low": 3.7, "medium": 6.1, "high": 7.5, "critical": 9.0}
 
 
@@ -12502,7 +12503,10 @@ async def _runtime_library_detections(browser_page) -> list[js_libraries.Detecti
 
 
 def _outdated_js_finding(
-    run_id: int, report: js_libraries.LibraryReport, loaded_by: dict[str, str]
+    run_id: int,
+    report: js_libraries.LibraryReport,
+    loaded_by: dict[str, str],
+    list_label: str = "",
 ) -> ScanFinding:
     issue_lines = js_libraries.describe_vulnerabilities(report)
     detection_lines = [
@@ -12531,6 +12535,8 @@ def _outdated_js_finding(
     )
     if pages:
         description += "\n\nLoaded by:\n" + "\n".join(f"- {p}" for p in pages[:20])
+    if list_label:
+        description += f"\n\nMatched against the {list_label}."
     summary = (
         f"{report.display} {report.version} detected by "
         f"{', '.join(report.methods)}; matches {', '.join(report.identifiers) or 'known issues'}."
@@ -12569,6 +12575,7 @@ def _outdated_js_finding(
         validation_note=(
             f"Library version confirmed from {', '.join(report.methods)}. "
             "Exploitability of the listed issues was not tested."
+            + (f" Matched against the {list_label}." if list_label else "")
         ),
         created_at=_utcnow(),
     )
@@ -12580,14 +12587,20 @@ async def _run_outdated_js_module(
     base_url: str,
     site_id: int = 0,
     browser_page=None,
+    auto_update: bool = True,
 ) -> list[ScanFinding]:
     """Check captured JavaScript files for library versions with known issues.
 
     Uses script responses already recorded during the crawl. In-scope scripts
     whose stored body was truncated are fetched again in full so libraries
     bundled deeper in a file are still found. Out-of-scope scripts (CDNs) are
-    judged from their URL and stored body only.
+    judged from their URL and stored body only. Versions are matched against
+    the Retire.js list, refreshed first when ``auto_update`` is on.
     """
+    refresh = await retire_repository.ensure_fresh(enabled=auto_update)
+    list_label = js_libraries.source_label()
+    deadline = time.monotonic() + _OUTDATED_JS_TIME_BUDGET_S
+    stopped_early = False
     events_svc.emit(
         run_id,
         {
@@ -12601,6 +12614,9 @@ async def _run_outdated_js_module(
     detections: list[js_libraries.Detection] = []
     refetch: list[str] = []
     for url, info in scripts.items():
+        if time.monotonic() > deadline:
+            stopped_early = True
+            break
         found = js_libraries.detect(url, info["body"])
         detections.extend(found)
         has_content_match = any(d.method == js_libraries.METHOD_CONTENT for d in found)
@@ -12618,6 +12634,9 @@ async def _run_outdated_js_module(
             for url in refetch:
                 if fetched >= _OUTDATED_JS_MAX_REFETCH:
                     break
+                if time.monotonic() > deadline:
+                    stopped_early = True
+                    break
                 if site_id and check_scope(url, site_id, run_id):
                     continue
                 if not site_id and urlparse(url).netloc != urlparse(base_url).netloc:
@@ -12629,8 +12648,14 @@ async def _run_outdated_js_module(
                     continue
                 if not 200 <= resp.status_code < 300:
                     continue
-                body = resp.content[:_OUTDATED_JS_MAX_BYTES].decode(errors="replace")
-                content_matches = js_libraries.detect_in_content(body, url)
+                raw = resp.content
+                complete = len(raw) <= _OUTDATED_JS_MAX_BYTES
+                raw = raw[:_OUTDATED_JS_MAX_BYTES]
+                content_matches = js_libraries.detect_in_content(
+                    raw.decode(errors="replace"),
+                    url,
+                    raw=raw if complete else None,
+                )
                 if content_matches:
                     libraries = {d.library for d in content_matches}
                     detections = [
@@ -12642,19 +12667,26 @@ async def _run_outdated_js_module(
 
     detections.extend(await _runtime_library_detections(browser_page))
     reports = js_libraries.vulnerable_reports(detections)
-    findings = [_outdated_js_finding(run_id, r, loaded_by) for r in reports]
+    findings = [_outdated_js_finding(run_id, r, loaded_by, list_label) for r in reports]
+    message = (
+        f"JavaScript library check complete — {len(scripts)} script(s) checked "
+        f"against the {list_label}, {len(findings)} outdated library version(s) found."
+    )
+    if refresh.get("status") == "failed":
+        message += " The latest Retire.js list could not be downloaded."
+    if stopped_early:
+        message += " The check stopped early because it hit its time limit."
     events_svc.emit(
         run_id,
         {
             "type": "scanner_phase",
             "phase": "outdated_js",
             "status": "complete",
-            "message": (
-                f"JavaScript library check complete — {len(scripts)} script(s) checked, "
-                f"{len(findings)} outdated library version(s) found."
-            ),
+            "message": message,
             "data": {
                 "scripts": len(scripts),
+                "retire_list": refresh,
+                "stopped_early": stopped_early,
                 "refetched": fetched,
                 "libraries": [
                     {"library": r.display, "version": r.version}
@@ -12694,6 +12726,7 @@ async def _run_deterministic_site_modules(
             base_url=base_url,
             site_id=site_id,
             browser_page=browser_page,
+            auto_update=getattr(scanner_policy, "retire_auto_update", True),
         )
     except Exception:
         log.exception("Outdated JavaScript library check failed for run %s", run_id)

@@ -18,7 +18,7 @@ from typing import Any
 
 from aespa.services import js_libraries
 from aespa.services.component_facts import extract_component_facts
-from aespa.services.sast_parsers import extract_parser_facts
+from aespa.services.sast_parsers import ManifestAdapter, extract_parser_facts
 
 _MAX_NODES = 2_000
 _MAX_SCENARIOS = 300
@@ -2336,25 +2336,32 @@ _RANGE_PREFIX = re.compile(r"^\s*[\^~<>=v]")
 def _browser_library_matches(
     dependencies: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Match npm/bower dependencies against the bundled JS library list.
+    """Match npm/bower dependencies against the Retire.js library list.
 
     An exact (lockfile) version wins over a declared range for the same
     package; a range alone is judged by its lowest allowed version and marked
-    as lower confidence.
+    as lower confidence. A package that Retire.js tracks as several entries
+    (such as ``jquery-ui`` and its widgets) is reported once.
     """
-    by_library: dict[str, list[dict[str, Any]]] = {}
+    by_package: dict[str, list[dict[str, Any]]] = {}
     for dependency in dependencies:
-        library = js_libraries.library_for_package(str(dependency.get("name") or ""))
+        package = str(dependency.get("name") or "")
+        libraries = js_libraries.libraries_for_package(package)
         raw = str(dependency.get("version") or "")
         version = js_libraries.clean_version(raw)
-        if not library or not version:
+        if not libraries or not version:
             continue
         exact = not _RANGE_PREFIX.match(raw)
-        by_library.setdefault(library, []).append(
-            {**dependency, "clean_version": version, "exact": exact}
+        by_package.setdefault(package.casefold(), []).append(
+            {
+                **dependency,
+                "libraries": libraries,
+                "clean_version": version,
+                "exact": exact,
+            }
         )
     matches = []
-    for library, entries in by_library.items():
+    for entries in by_package.values():
         exact_entries = [entry for entry in entries if entry["exact"]]
         seen_versions: set[str] = set()
         for entry in exact_entries or entries:
@@ -2362,31 +2369,34 @@ def _browser_library_matches(
             if version in seen_versions:
                 continue
             seen_versions.add(version)
-            report = js_libraries.LibraryReport(
-                library=library,
-                display=js_libraries.display_name(library),
-                version=version,
-                vulnerabilities=js_libraries.vulnerabilities_for(library, version),
-            )
-            if not report.vulnerabilities:
-                continue
-            matches.append(
-                {
-                    "advisory_id": ", ".join(report.identifiers) or "known issues",
-                    "package": entry.get("name"),
-                    "version": version,
-                    "declared_version": entry.get("version"),
-                    "affected": "; ".join(
-                        js_libraries.describe_vulnerabilities(report)
-                    ),
-                    "severity": report.severity,
-                    "evidence": entry.get("evidence", []),
-                    "confidence": 0.85 if entry["exact"] else 0.6,
-                    "library": report.display,
-                    "fixed_version": report.fixed_version,
-                    "declared_range": not entry["exact"],
-                }
-            )
+            evidence = entry.get("evidence") or []
+            detections = [
+                js_libraries.Detection(
+                    library,
+                    version,
+                    js_libraries.METHOD_MANIFEST,
+                    str(evidence[0]) if evidence else "dependency manifest",
+                )
+                for library in entry["libraries"]
+            ]
+            for report in js_libraries.vulnerable_reports(detections):
+                matches.append(
+                    {
+                        "advisory_id": ", ".join(report.identifiers) or "known issues",
+                        "package": entry.get("name"),
+                        "version": version,
+                        "declared_version": entry.get("version"),
+                        "affected": "; ".join(
+                            js_libraries.describe_vulnerabilities(report)
+                        ),
+                        "severity": report.severity,
+                        "evidence": evidence,
+                        "confidence": 0.85 if entry["exact"] else 0.6,
+                        "library": report.display,
+                        "fixed_version": report.fixed_version,
+                        "declared_range": not entry["exact"],
+                    }
+                )
     return matches
 
 
@@ -2415,8 +2425,11 @@ def vendored_library_candidates(root: Path) -> list[dict[str, Any]]:
                     )
                 ),
                 "evidence": "\n".join(
-                    f"{det.source} ({det.method}): {det.evidence}"
-                    for det in report.detections[:20]
+                    [
+                        f"{det.source} ({det.method}): {det.evidence}"
+                        for det in report.detections[:20]
+                    ]
+                    + [f"Matched against the {js_libraries.source_label()}."]
                 ),
                 "source_trace": {"path": location},
                 "sink_trace": {},
@@ -2432,10 +2445,46 @@ def vendored_library_candidates(root: Path) -> list[dict[str, Any]]:
                 "counterevidence": [],
                 "attack_path": {},
                 "reportable": False,
-                "provenance": ["bundled_js_library_list"],
+                "provenance": ["retire_js"],
                 "locations": locations[:20],
             }
         )
+    return candidates
+
+
+_MAX_MANIFEST_SCAN_FILES = 20_000
+
+
+def browser_library_candidates(root: Path) -> list[dict[str, Any]]:
+    """Outdated browser library candidates without the full repository model.
+
+    Light scans do not build the semantic model, so this reads only the
+    dependency manifests and lockfiles, then adds vendored ``.js`` files.
+    """
+    adapter = ManifestAdapter()
+    dependencies: list[dict[str, Any]] = []
+    for index, path in enumerate(sorted(root.rglob("*"))):
+        if index >= _MAX_MANIFEST_SCAN_FILES:
+            break
+        if ".git" in path.parts or "node_modules" in path.parts:
+            continue
+        if not path.is_file() or not adapter.accepts(path):
+            continue
+        result = adapter.parse(path, path.relative_to(root).as_posix())
+        for fact in result.facts:
+            detail = fact.get("detail") or {}
+            dependencies.append(
+                {
+                    "name": fact.get("name"),
+                    "version": detail.get("version") or "unresolved",
+                    "evidence": [fact.get("evidence_location")],
+                }
+            )
+    candidates = [
+        _library_match_candidate(match)
+        for match in _browser_library_matches(dependencies)
+    ]
+    candidates.extend(vendored_library_candidates(root))
     return candidates
 
 
@@ -2501,7 +2550,10 @@ def _library_match_candidate(match: dict[str, Any]) -> dict[str, Any]:
             )
             + declared
         ),
-        "evidence": f"Manifest evidence: {location}; matched issues: {match.get('advisory_id')}",
+        "evidence": (
+            f"Manifest evidence: {location}; matched issues: {match.get('advisory_id')} "
+            f"({js_libraries.source_label()})"
+        ),
         "source_trace": {"path": location.split(":", 1)[0]},
         "sink_trace": {},
         "controls": [],
@@ -2516,7 +2568,7 @@ def _library_match_candidate(match: dict[str, Any]) -> dict[str, Any]:
         "counterevidence": [],
         "attack_path": {},
         "reportable": False,
-        "provenance": ["bundled_js_library_list"],
+        "provenance": ["retire_js"],
         "locations": [location],
     }
 

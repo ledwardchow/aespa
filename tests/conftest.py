@@ -101,3 +101,22 @@ def fk_engine():
     set_engine(prev_engine)
     SQLModel.metadata.drop_all(engine)
     engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def offline_retire_list(monkeypatch, tmp_path_factory):
+    """Keep tests off the network and away from a downloaded Retire.js copy.
+
+    Scans use the Retire.js list shipped with AESPA. Tests of the download
+    itself import ``ensure_fresh`` directly, before this patch applies.
+    """
+    from aespa.services import retire_repository
+
+    cache = tmp_path_factory.mktemp("retire-cache")
+    monkeypatch.setattr(retire_repository, "cache_dir", lambda: cache)
+
+    async def _no_download(**_kwargs):
+        return {**retire_repository.info(), "status": "disabled"}
+
+    monkeypatch.setattr(retire_repository, "ensure_fresh", _no_download)
+    return cache

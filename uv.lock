@@ -8,7 +8,7 @@ resolution-markers = [
 
 [[package]]
 name = "aespa"
-version = "0.7.20261009.7"
+version = "0.7.20261009.9"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

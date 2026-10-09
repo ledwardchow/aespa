@@ -16,6 +16,7 @@ export const csv = (value, transform = (x) => x) =>
 export const defaultPolicyForm = () => ({
   execution_monitor_enabled: false,
   disable_deterministic_checks: false,
+  retire_auto_update: true,
   max_consecutive_text_turns: 0,
   enforce_full_coverage_obligations: false,
   standard_coverage_percent: 60,
@@ -59,6 +60,7 @@ export const policyToForm = (p) => {
     ...f,
     execution_monitor_enabled: p.execution_monitor_enabled ?? false,
     disable_deterministic_checks: p.disable_deterministic_checks ?? false,
+    retire_auto_update: p.retire_auto_update ?? true,
     max_consecutive_text_turns: p.max_consecutive_text_turns ?? f.max_consecutive_text_turns,
     enforce_full_coverage_obligations:
       p.enforce_full_coverage_obligations ?? f.enforce_full_coverage_obligations,
@@ -106,6 +108,7 @@ export const policyToForm = (p) => {
 export const policyPayload = (form) => ({
   execution_monitor_enabled: !!form.execution_monitor_enabled,
   disable_deterministic_checks: !!form.disable_deterministic_checks,
+  retire_auto_update: !!form.retire_auto_update,
   max_consecutive_text_turns: Number(form.max_consecutive_text_turns),
   enforce_full_coverage_obligations: !!form.enforce_full_coverage_obligations,
   standard_coverage_percent: Number(form.standard_coverage_percent),

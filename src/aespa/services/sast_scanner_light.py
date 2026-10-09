@@ -44,6 +44,7 @@ from aespa.sast_workspace import (
     try_acquire_sast_workspace_lease,
 )
 from aespa.services import events as events_svc
+from aespa.services import retire_repository
 from aespa.services import sast_semantic as semantic_svc
 from aespa.services import sast_workprogram as workprogram_svc
 from aespa.services.sast_scan_shared import (
@@ -886,6 +887,65 @@ def _checkpoint_stopped_validation(sast_run_id: int, current_phase: str) -> int:
     return len(unfinished_ids)
 
 
+def _add_library_candidates(
+    sast_run_id: int, collection_id: int | None, root: Path
+) -> int:
+    """Record outdated JavaScript library leads from manifests and vendored files.
+
+    Leads are keyed by fingerprint, so a resumed scan does not add them twice.
+    They go through the same independent validation as agent leads.
+    """
+    try:
+        found = semantic_svc.browser_library_candidates(root)
+    except Exception:
+        log.exception("JavaScript library check failed for SAST run %s", sast_run_id)
+        return 0
+    existing = _candidates.setdefault(sast_run_id, [])
+    known = {item.get("fingerprint") for item in existing}
+    added = 0
+    for candidate in found:
+        fingerprint = lead_fingerprint(
+            category=candidate["category"],
+            title=candidate["title"],
+            location=candidate["location"],
+        )
+        if fingerprint in known:
+            continue
+        known.add(fingerprint)
+        candidate.update(
+            {
+                "candidate_id": max(
+                    (int(item.get("candidate_id", -1)) for item in existing),
+                    default=-1,
+                )
+                + 1,
+                "fingerprint": fingerprint,
+                "source_work_item_id": None,
+                "source_work_item_ids": [],
+                "observation_count": 1,
+                "filter_reasoning": (
+                    "Version matched the Retire.js list of vulnerable JavaScript "
+                    "library versions."
+                ),
+            }
+        )
+        existing.append(candidate)
+        added += 1
+    if added:
+        _sync_candidates_to_db(sast_run_id, collection_id)
+        _persist_candidate_state(sast_run_id)
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "scanner_phase",
+                "phase": "sast_candidate",
+                "status": "running",
+                "message": f"Recorded {added} outdated JavaScript library lead(s).",
+            },
+        )
+    return added
+
+
 def _sync_candidates_to_db(
     sast_run_id: int, collection_id: int | None
 ) -> tuple[int, int]:
@@ -1531,6 +1591,15 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     f"({names}). Resume Failed Work to continue them from their "
                     "saved checkpoints."
                 )
+
+        if (
+            not scanner_policy.disable_deterministic_checks
+            and scanner_policy.sast_dependency_findings
+        ):
+            await retire_repository.ensure_fresh(
+                enabled=scanner_policy.retire_auto_update
+            )
+            _add_library_candidates(sast_run_id, run.collection_id, root)
 
         candidates = _candidates.get(sast_run_id, [])
         candidate_count = len(candidates)

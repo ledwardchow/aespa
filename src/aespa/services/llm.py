@@ -14,7 +14,9 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -152,6 +154,12 @@ _traffic_operation_var: ContextVar[str | None] = ContextVar(
 )
 _operation_var: ContextVar[str | None] = ContextVar("llm_operation", default=None)
 _traffic_call_ids = itertools.count(1)
+# Running hash of a logged conversation prefix -> the call that logged it. Agent
+# loops resend the whole conversation on every call, so later requests log only
+# the messages added since the matching earlier call.
+_traffic_prefixes: OrderedDict[str, int] = OrderedDict()
+_TRAFFIC_PREFIX_LIMIT = 4096
+_traffic_prefix_lock = threading.Lock()
 
 
 def _usage_provider(config: LLMConfig) -> str:
@@ -1778,6 +1786,53 @@ def _infer_llm_operation() -> str:
     return f"{module}.{function}"
 
 
+def _traffic_request_payload(
+    system_message: str,
+    messages: list[dict],
+    call_id: int,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build the logged request, replacing a known conversation prefix by a link.
+
+    The full request is logged the first time a conversation is seen. Later
+    requests that extend an already logged conversation record only the new
+    messages plus the call ID that holds the earlier ones.
+    """
+    if not traffic_log.isEnabledFor(logging.INFO):
+        return {}
+    digest = hashlib.sha256(system_message.encode("utf-8", "replace"))
+    prefixes: list[str] = []
+    for message in messages:
+        digest.update(
+            json.dumps(message, ensure_ascii=False, sort_keys=True, default=str).encode(
+                "utf-8", "replace"
+            )
+        )
+        prefixes.append(digest.copy().hexdigest())
+    with _traffic_prefix_lock:
+        matched = 0
+        previous_call: int | None = None
+        for index in range(len(prefixes) - 1, -1, -1):
+            found = _traffic_prefixes.get(prefixes[index])
+            if found is not None:
+                matched, previous_call = index + 1, found
+                _traffic_prefixes.move_to_end(prefixes[index])
+                break
+        if prefixes:
+            _traffic_prefixes[prefixes[-1]] = call_id
+            _traffic_prefixes.move_to_end(prefixes[-1])
+            while len(_traffic_prefixes) > _TRAFFIC_PREFIX_LIMIT:
+                _traffic_prefixes.popitem(last=False)
+    if previous_call is None:
+        return {"system": system_message, "messages": messages, **extra}
+    return {
+        "continues_call": previous_call,
+        "previous_messages": matched,
+        "new_messages": messages[matched:],
+        **extra,
+    }
+
+
 def _log_llm_traffic(
     direction: str,
     config: LLMConfig,
@@ -1896,7 +1951,7 @@ async def stream_chat_completion(
 ) -> AsyncGenerator[str, None]:
     operation = _operation_var.get() or _infer_llm_operation()
     call_id = next(_traffic_call_ids)
-    request = {"system": system_message, "messages": messages}
+    request = _traffic_request_payload(system_message, messages, call_id)
     _log_llm_traffic(
         "REQUEST",
         config,
@@ -6174,11 +6229,12 @@ async def _call_with_tools(
     call_id = next(_traffic_call_ids)
     active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
     messages = _repair_tool_use_inputs(messages)
-    request = {
-        "system": system_message,
-        "messages": messages,
-        "tools": [tool.get("name", "") for tool in active_tools],
-    }
+    request = _traffic_request_payload(
+        system_message,
+        messages,
+        call_id,
+        tools=[tool.get("name", "") for tool in active_tools],
+    )
     _log_llm_traffic(
         "REQUEST",
         config,

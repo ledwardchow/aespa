@@ -86,8 +86,8 @@ class ConsoleLogStore:
                     INSERT INTO console_logs (
                         created_at, view, logger, level, message, exception,
                         llm_call_id, llm_direction, llm_operation, llm_kind,
-                        llm_context, llm_payload, run_kind, run_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        llm_context, run_kind, run_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         datetime.fromtimestamp(
@@ -103,7 +103,6 @@ class ConsoleLogStore:
                         getattr(record, "aespa_llm_operation", None),
                         getattr(record, "aespa_llm_kind", None),
                         getattr(record, "aespa_llm_context", None),
-                        getattr(record, "aespa_llm_payload", None),
                         getattr(record, "aespa_llm_run_kind", None),
                         int(run_id) if run_id is not None else None,
                     ),
@@ -149,7 +148,6 @@ class ConsoleLogStore:
                     llm_operation TEXT,
                     llm_kind TEXT,
                     llm_context TEXT,
-                    llm_payload TEXT,
                     run_kind TEXT,
                     run_id INTEGER
                 );
