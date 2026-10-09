@@ -6,6 +6,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
+- **Saved crawls**: A finished crawl can now be saved on its site and loaded into a new run, so repeat scans and benchmarks can skip crawling. Use **Save crawl to site** on a run with crawl data, then **Load saved crawl** on a new run. The site page lists saved crawls, where you can rename, download, or delete them, and add crawl export files you downloaded earlier. Saved crawls include the session cookies and tokens captured during the crawl, the same as crawl export files.
+
 - **Outdated JavaScript library checks**: Web scans now check the JavaScript files captured while crawling for library versions with known vulnerabilities, such as old jQuery, jQuery UI, Bootstrap, AngularJS, Lodash, Moment.js, Handlebars, and DOMPurify. Each outdated library version is reported once as a Vulnerable and Outdated Components finding that lists the matching CVEs, where the version was seen, and the version to upgrade to. The check also runs in passive mode and can be turned off with the other deterministic checks.
 
 - **Vulnerable JavaScript libraries in SAST**: Deep SAST scans now check npm and Bower manifests, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, and JavaScript files copied into the repository against the same list of vulnerable library versions. Exact versions from lockfiles take priority over version ranges in `package.json`.

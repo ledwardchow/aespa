@@ -1331,6 +1331,35 @@ class LLMImportResult(BaseModel):
 # ── Test run schemas ──────────────────────────────────────────────────────────
 
 
+class SavedCrawlCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class SavedCrawlUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class SavedCrawlOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    name: str
+    notes: str | None = None
+    source_run_id: int | None = None
+    source_run_exists: bool = False
+    crawler_mode: str
+    page_count: int
+    size_bytes: int
+    created_at: datetime
+
+
 class TestRunCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 

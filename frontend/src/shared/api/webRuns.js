@@ -50,6 +50,12 @@ export const importCrawl = (id, file) => {
   return req(`/api/test-runs/${id}/crawl/import`, { method: "POST", body: fd });
 };
 
+export const saveCrawl = (id, b) =>
+  req(`/api/test-runs/${id}/crawl/save`, { method: "POST", body: b });
+
+export const loadSavedCrawl = (id, savedId) =>
+  req(`/api/test-runs/${id}/crawl/load/${savedId}`, { method: "POST" });
+
 export const getGraph = (id) => req(`/api/test-runs/${id}/graph`);
 
 export const listPages = (id) => req(`/api/test-runs/${id}/pages`);
