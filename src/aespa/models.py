@@ -603,6 +603,8 @@ class ScannerPolicy(SQLModel, table=True):
     sast_audit_logging_findings: bool = Field(default=True)
     sast_defense_in_depth_findings: bool = Field(default=False)
     sast_dependency_findings: bool = Field(default=True)
+    # Download the latest Retire.js vulnerable-library list at scan start.
+    retire_auto_update: bool = Field(default=True)
     sast_min_severity: str = Field(default="low")
     sast_budget_mode: str = Field(default="adaptive")
     sast_baseline_budget: int = Field(default=80)

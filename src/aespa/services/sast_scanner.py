@@ -47,6 +47,7 @@ from aespa.sast_workspace import (
     try_acquire_sast_workspace_lease,
 )
 from aespa.services import events as events_svc
+from aespa.services import retire_repository
 from aespa.services import sast_semantic as semantic_svc
 from aespa.services import sast_workprogram as workprogram_svc
 from aespa.services.sast_scan_shared import (
@@ -1821,6 +1822,10 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             semantic_planning["legacy_work_program_projection"] = (
                 workprogram_svc.semantic_obligation_summary(semantic_planning)
             )
+            if scanner_policy.sast_dependency_findings:
+                await retire_repository.ensure_fresh(
+                    enabled=scanner_policy.retire_auto_update
+                )
             semantic_planning["dependency_analysis"] = (
                 semantic_svc.deterministic_dependency_analysis(semantic_model)
             )

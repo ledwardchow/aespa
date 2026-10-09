@@ -1,0 +1,61 @@
+name: Update Retire.js list
+
+# Keeps the Retire.js vulnerable-library list shipped with AESPA current.
+# Opens (or refreshes) a pull request against develop when the list changes.
+# Requires "Allow GitHub Actions to create and approve pull requests" in the
+# repository's Actions settings.
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"  # Mondays 03:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-retire
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      BRANCH: automation/update-retire-list
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Download and check the latest list
+        id: update
+        run: |
+          uv run python scripts/update_retire_repository.py | tee update.log
+          echo "result=$(tail -n 1 update.log)" >> "$GITHUB_OUTPUT"
+
+      - name: Run JavaScript library tests
+        if: steps.update.outputs.result == 'changed'
+        run: uv run pytest -q tests/services/test_js_libraries.py
+
+      - name: Open pull request
+        if: steps.update.outputs.result == 'changed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add src/aespa/services/data/retire/
+          git commit -m "Update shipped Retire.js vulnerable-library list"
+          git push --force origin "$BRANCH"
+          if [ -z "$(gh pr list --head "$BRANCH" --base develop --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base develop --head "$BRANCH" \
+              --title "Update shipped Retire.js list" \
+              --body "Automated weekly refresh of \`src/aespa/services/data/retire/jsrepository-v6.json\` from the Retire.js project. The new list passed AESPA's checks and the JavaScript library tests."
+          fi

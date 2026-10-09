@@ -1,0 +1,19 @@
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0 0 10px;
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+}
+
+.statusCard {
+  max-width: 680px;
+  margin-bottom: 16px;
+}

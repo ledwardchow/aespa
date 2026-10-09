@@ -54,6 +54,10 @@ test.each([
   ["#/scan-policy/global/features", { name: "scan-policy", tab: "global", subTab: "features" }],
   ["#/scan-policy/global/debug", { name: "scan-policy", tab: "global", subTab: "debug" }],
   ["#/scan-policy/global/proxy", { name: "scan-policy", tab: "global", subTab: "proxy" }],
+  [
+    "#/scan-policy/global/libraries",
+    { name: "scan-policy", tab: "global", subTab: "libraries" },
+  ],
   ["#/scan-policy/systems", { name: "scan-policy", tab: "systems" }],
   ["#/scan-policy/sast", { name: "scan-policy", tab: "sast" }],
   ["#/scan-policy/dast/headers", { name: "scan-policy", tab: "dast", subTab: "headers" }],

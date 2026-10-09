@@ -896,14 +896,14 @@ def test_console_log_database_records_full_logs_except_testing_traffic(
     with sqlite3.connect(log_db_path) as connection:
         rows = connection.execute(
             """
-            SELECT view, message, llm_direction, llm_payload
+            SELECT view, message, llm_direction
             FROM console_logs ORDER BY id
             """
         ).fetchall()
 
     assert [row[0] for row in rows] == [LLM, LLM, AGENT, ERRORS, HTTP]
-    assert rows[0][2:] == ("REQUEST", request)
-    assert rows[1][2:] == ("RESPONSE", response)
+    assert rows[0][2] == "REQUEST"
+    assert rows[1][2] == "RESPONSE"
     assert rows[2][1] == "agent detail"
     assert rows[3][1] == "error detail"
     assert "/api/health" in rows[4][1]
@@ -1127,6 +1127,39 @@ def test_llm_traffic_delimiters_identify_operation_and_pair(
     assert request_call == response_call
     assert caplog.records[0].aespa_llm_run_id == 217
     assert caplog.records[0].aespa_llm_run_kind == "web"
+
+
+def test_llm_traffic_logs_only_new_messages_for_continued_conversations(
+    caplog, monkeypatch
+) -> None:
+    from aespa.services import llm
+
+    monkeypatch.setattr(llm, "_traffic_prefixes", llm.OrderedDict())
+    caplog.set_level(logging.INFO, logger="aespa.llm.traffic")
+    first = [{"role": "user", "content": "start"}]
+    second = [
+        *first,
+        {"role": "assistant", "content": "tool call"},
+        {"role": "user", "content": "tool result"},
+    ]
+
+    assert llm._traffic_request_payload("system", first, 10, tools=["a"]) == {
+        "system": "system",
+        "messages": first,
+        "tools": ["a"],
+    }
+    assert llm._traffic_request_payload("system", second, 11, tools=["a"]) == {
+        "continues_call": 10,
+        "previous_messages": 1,
+        "new_messages": second[1:],
+        "tools": ["a"],
+    }
+    third = [*second, {"role": "user", "content": "more"}]
+    assert llm._traffic_request_payload("system", third, 12)["continues_call"] == 11
+    # A different system prompt or a rewritten history is logged in full.
+    assert "messages" in llm._traffic_request_payload("other", second, 13)
+    rewritten = [{"role": "user", "content": "summary"}, *second[1:]]
+    assert "messages" in llm._traffic_request_payload("system", rewritten, 14)
 
 
 def test_startup_pulse_reveals_logo_in_all_sizes() -> None:

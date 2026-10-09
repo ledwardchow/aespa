@@ -624,6 +624,28 @@ def upsert_scanner_policy(
     return integration_settings.upsert_scanner_policy(session, payload)
 
 
+@router.get("/retire-list")
+def get_retire_list_status() -> dict:
+    from aespa.services import js_libraries
+
+    return js_libraries.list_status()
+
+
+@router.post("/retire-list/refresh")
+async def refresh_retire_list() -> dict:
+    """Download the latest Retire.js list now, even when automatic updates are off."""
+    from datetime import timedelta
+
+    from aespa.services import js_libraries, retire_repository
+
+    result = await retire_repository.ensure_fresh(enabled=True, max_age=timedelta(0))
+    return {
+        **js_libraries.list_status(),
+        "status": result.get("status"),
+        "error": result.get("error"),
+    }
+
+
 @router.get("/code-execution", response_model=CodeExecutionConfigOut)
 def get_code_execution_config(
     session: Session = Depends(get_session),

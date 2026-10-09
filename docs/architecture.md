@@ -290,6 +290,7 @@ Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm
 | `max_request_body_bytes` | `65536` | Probe body size cap (bytes) |
 | `follow_redirects` | `true` | |
 | `allow_subdomains` | `true` | Allow crawling/probing subdomains of the target |
+| `retire_auto_update` | `true` | Download the latest Retire.js vulnerable-library list at scan start (at most once a day). When off, or when the download fails, scans use the last downloaded copy, or the copy shipped with AESPA. Edited under **Settings → Global → Vulnerable Libraries**. |
 
 ### Python Sandbox (`CodeExecutionConfig` model)
 
@@ -964,6 +965,19 @@ Input-bearing A03 cells additionally persist class-level states in `test_classes
 - `web_route_inventory.enrich_dynamic_route` classifies routes first observed during the dynamic scan from their request/response evidence. It OR-merges deterministic and LLM-derived applicability into the canonical `CrawledPage`, reseeds newly applicable cells, and leaves the current probe hook to mark the exercised category `in_progress`. Browser-observed routes are enriched too; passive JavaScript route literals remain target intelligence until actively reached.
 - `TestRun.coverage_mode` selects **Quick** (`track`), **Standard** (`standard`), **Full** (`enforce`), or **SAST Validate** (`sast_validate`). Standard requires the configured coverage percentage. In Full mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop. SAST Validate does not use the work program; it validates only open imported SAST leads and retains the HTTPS TLS posture check.
 - `get_web_coverage_matrix(run_id)` powers the coverage view inside the **Attack Surface & Coverage** tab (`GET /api/test-runs/{id}/coverage`).
+
+### Outdated JavaScript libraries (Retire.js)
+
+**Files**: `src/aespa/services/js_libraries.py`, `src/aespa/services/retire_repository.py`
+
+A deterministic module (`_run_outdated_js_module` in `scanner.py`) runs with the other site-level checks, including in passive mode. It reads script responses captured during the crawl, re-fetches in-scope scripts whose stored body was truncated (CDN scripts are judged from their URL and stored body only), and asks the live browser page for library versions. Versions are matched against the Retire.js list, and each outdated library version becomes one A06 finding naming the matched CVEs, where the version was found, and the version to upgrade to.
+
+SAST uses the same detector: Deep scans match npm/bower manifests and lockfiles from the repository model and scan vendored `.js` files; Light scans run the same checks after discovery (`browser_library_candidates`). Results become pending leads that go through normal validation.
+
+- The list is the Retire.js `jsrepository-v6.json`. A copy ships in `services/data/retire/` and is refreshed by the weekly `update-retire.yml` workflow (`scripts/update_retire_repository.py`).
+- When `retire_auto_update` is on, `retire_repository.ensure_fresh()` downloads the latest list into `<data_dir>/retire/` at scan start if the cached copy is more than a day old, using the ETag to skip unchanged files. A download is used only after `validate()` accepts it; any failure leaves the current copy in place.
+- **Settings → Global → Vulnerable Libraries** shows which copy is in use (`GET /api/settings/retire-list`) and has a **Refresh now** button (`POST /api/settings/retire-list/refresh`) that downloads the latest list immediately, even when automatic updates are off.
+- Supported extractors: `uri`, `filename`, `filecontent`, `filecontentreplace`, `hashes`, and browser-only `func` expressions. Retire.js `ast` extractors are not used, and the rare pattern Python cannot compile is skipped. Libraries that share a package (jQuery UI and its widgets) are reported together.
 
 ---
 

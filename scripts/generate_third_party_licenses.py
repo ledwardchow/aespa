@@ -86,6 +86,31 @@ def _license_texts(dist: metadata.Distribution) -> list[tuple[str, str]]:
     return out
 
 
+# Non-Python data shipped with AESPA: (name, license id, license file).
+_BUNDLED_DATA = (
+    (
+        "Retire.js vulnerable-library list (jsrepository-v6.json)",
+        "Apache-2.0",
+        Path("src/aespa/services/data/retire/LICENSE.txt"),
+    ),
+)
+
+
+def _bundled_data_section() -> list[str]:
+    lines = ["BUNDLED DATA", "-" * 78, ""]
+    for name, license_id, path in _BUNDLED_DATA:
+        lines.append(name)
+        lines.append(f"License: {license_id}")
+        if path.is_file():
+            lines.append("")
+            lines.append(f"----- {path.name} -----")
+            lines.append(path.read_text("utf-8", errors="replace").strip())
+        lines.append("")
+        lines.append("=" * 78)
+        lines.append("")
+    return lines
+
+
 def main() -> int:
     out_path = (
         Path(sys.argv[1]) if len(sys.argv) > 1 else Path("THIRD_PARTY_LICENSES.txt")
@@ -145,6 +170,7 @@ def main() -> int:
         lines.append("=" * 78)
         lines.append("")
 
+    lines.extend(_bundled_data_section())
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
     print(f"Wrote {out_path} covering {len(dists)} packages.")

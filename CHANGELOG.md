@@ -8,13 +8,17 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Saved crawls**: A finished crawl can now be saved on its site and loaded into a new run, so repeat scans and benchmarks can skip crawling. Use **Save crawl to site** on a run with crawl data, then **Load saved crawl** on a new run. The site page lists saved crawls, where you can rename, download, or delete them, and add crawl export files you downloaded earlier. Saved crawls include the session cookies and tokens captured during the crawl, the same as crawl export files.
 
-- **Outdated JavaScript library checks**: Web scans now check the JavaScript files captured while crawling for library versions with known vulnerabilities, such as old jQuery, jQuery UI, Bootstrap, AngularJS, Lodash, Moment.js, Handlebars, and DOMPurify. Each outdated library version is reported once as a Vulnerable and Outdated Components finding that lists the matching CVEs, where the version was seen, and the version to upgrade to. The check also runs in passive mode and can be turned off with the other deterministic checks.
+- **Outdated JavaScript library checks**: Web scans now check the JavaScript files captured while crawling for library versions with known vulnerabilities, using the community-maintained Retire.js list (more than 70 libraries, including jQuery, jQuery UI, Bootstrap, AngularJS, Lodash, Moment.js, Handlebars, DOMPurify, CKEditor, and TinyMCE). Each outdated library version is reported once as a Vulnerable and Outdated Components finding that lists the matching CVEs, where the version was seen, the version to upgrade to, and the date of the list used. The check also runs in passive mode and can be turned off with the other deterministic checks.
 
-- **Vulnerable JavaScript libraries in SAST**: Deep SAST scans now check npm and Bower manifests, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, and JavaScript files copied into the repository against the same list of vulnerable library versions. Exact versions from lockfiles take priority over version ranges in `package.json`.
+- **Up-to-date vulnerable library list**: AESPA ships with a copy of the Retire.js list and, by default, downloads the latest version from GitHub at most once a day when a scan starts. **Settings → Global → Vulnerable Libraries** shows which copy is in use and when it was last updated, and has a **Refresh now** button to download the latest list immediately. Turn off automatic updates there for offline use; scans then use the last downloaded copy, or the copy included with AESPA.
+
+- **Vulnerable JavaScript libraries in SAST**: Light and Deep SAST scans now check npm and Bower manifests, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, and JavaScript files copied into the repository against the same Retire.js list. Exact versions from lockfiles take priority over version ranges in `package.json`.
 
 ### Updates
 
 - **Portable installation data**: AESPA now keeps its main, console-log, and reporting-debug databases in `aespa_data` alongside uploads and extension data. Existing databases are moved there on first start, and uploaded-file references are repaired when the folder is copied to another installation. The console's Data Folder setting lets source and desktop users choose where AESPA stores data on the next launch; an empty folder starts a new database, while existing data is left in place.
+
+- **Smaller console log database**: When console log saving is on, each LLM request and response is now stored once instead of twice. Agent conversations that continue an earlier logged call now save only the new messages, with a reference to that earlier call, instead of repeating the whole conversation on every step. Together these greatly reduce how fast the console log database grows during long scans.
 
 ### Fixes
 

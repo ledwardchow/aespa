@@ -97,6 +97,11 @@ export const getScannerPolicy = () => req("/api/settings/scanner-policy");
 export const upsertScannerPolicy = (b) =>
   req("/api/settings/scanner-policy", { method: "PUT", body: b });
 
+export const getRetireListStatus = () => req("/api/settings/retire-list");
+
+export const refreshRetireList = () =>
+  req("/api/settings/retire-list/refresh", { method: "POST" });
+
 export const getCodeExecutionConfig = () => req("/api/settings/code-execution");
 
 export const upsertCodeExecutionConfig = (b) =>

@@ -13,6 +13,7 @@ import { DeepScanSettings } from "./DeepScanSettings.jsx";
 import { SastSettings } from "./SastSettings.jsx";
 import { SystemSettingsPanels } from "./DebugPage.jsx";
 import { UpstreamProxySettings } from "./UpstreamProxySettings.jsx";
+import { RetireListSettings } from "./RetireListSettings.jsx";
 
 const TOP_LEVEL_TABS = [
   { key: "global", label: "Global" },
@@ -37,6 +38,7 @@ const GLOBAL_TABS = [
   { key: "features", label: "Feature Visibility" },
   { key: "debug", label: "Debug Settings" },
   { key: "proxy", label: "Upstream Proxy" },
+  { key: "libraries", label: "Vulnerable Libraries" },
 ];
 
 export function ScanPolicyPage({
@@ -117,7 +119,7 @@ export function ScanPolicyPage({
           />
         )}
         <div className={`scroll-content ${styles.scroll}`}>
-          {tab === "global" && globalTab !== "proxy" && (
+          {tab === "global" && !["proxy", "libraries"].includes(globalTab) && (
             <div className={styles.systemSettingsPanels}>
               <SystemSettingsPanels
                 tab={globalTab}
@@ -138,6 +140,7 @@ export function ScanPolicyPage({
             </div>
           )}
           {tab === "global" && globalTab === "proxy" && <UpstreamProxySettings />}
+          {tab === "global" && globalTab === "libraries" && <RetireListSettings />}
           {tab === "systems" && <ComponentMapperSettings />}
           {tab === "dast" && dastTab === "scan-behaviour" && (
             <GlobalPolicySettings tab="scan-behaviour" />

@@ -892,6 +892,7 @@ class ScannerPolicyBase(BaseModel):
     sast_audit_logging_findings: bool = True
     sast_defense_in_depth_findings: bool = False
     sast_dependency_findings: bool = True
+    retire_auto_update: bool = True
     sast_min_severity: Literal["low", "medium", "high", "critical"] = "low"
     sast_budget_mode: Literal["adaptive", "fixed"] = "adaptive"
     sast_baseline_budget: int = Field(default=80, ge=1, le=1000)
