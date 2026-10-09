@@ -16,7 +16,7 @@ from aespa.extensions.runtime import (
     ProcessResult,
     ProviderAvailability,
 )
-from aespa.models import ExtensionSetting, SastRun, ScanLog
+from aespa.models import ApiCollection, ExtensionSetting, SastRun, ScanLog
 from aespa.services import sast_sources
 from extensions.builtin.github_repository.provider import (
     GitHubRepositoryProvider,
@@ -242,11 +242,19 @@ def test_benchmarking_imports_retired_core_tables_without_core_models(
     from aespa.extensions import get_extension_manager
 
     with Session(db_engine) as session:
-        run = SastRun(name="Saved scan", status="completed")
+        collection = ApiCollection(
+            name="Saved collection", base_url="https://example.test"
+        )
+        session.add(collection)
+        session.flush()
+        run = SastRun(
+            name="Saved scan", status="completed", collection_id=collection.id
+        )
         session.add(run)
         session.commit()
         session.refresh(run)
         run_id = run.id
+        collection_id = collection.id
 
     with db_engine.begin() as connection:
         connection.execute(
@@ -340,7 +348,11 @@ def test_benchmarking_imports_retired_core_tables_without_core_models(
     comparison = client.get("/extension/aespa.benchmarking/comparisons/10")
     assert comparison.status_code == 200
     assert comparison.json()["evaluation_ids"] == [8]
-    assert client.delete(f"/api/sast-runs/{run_id}").status_code == 409
+    direct_delete = client.delete(f"/api/sast-runs/{run_id}")
+    parent_delete = client.delete(f"/api/api-collections/{collection_id}")
+    assert direct_delete.status_code == parent_delete.status_code == 409
+    assert direct_delete.json() == parent_delete.json()
+    assert client.get(f"/api/api-collections/{collection_id}").status_code == 200
     assert client.get("/api/benchmark-lab/datasets").status_code == 404
     assert client.get("/api/settings/benchmark-lab").status_code == 404
 

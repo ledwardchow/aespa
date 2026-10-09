@@ -38,6 +38,7 @@ from aespa.services import copilot_provider as copilot_provider_svc
 from aespa.services import droid_provider as droid_provider_svc
 from aespa.services import sast_sources as sast_sources_svc
 from aespa.services import validator as validator_svc
+from aespa.services.run_cleanup import LegacyBenchmarkReferenceError
 from aespa.services.settings import get_cloudflare_access_config
 from aespa.storage_migration import migrate_legacy_storage
 
@@ -132,6 +133,12 @@ def _verify_cloudflare_jwt(token: str, audience: str | None = None) -> str | Non
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     app = FastAPI(title="AESPA", version=settings.app_version, lifespan=_lifespan)
+
+    @app.exception_handler(LegacyBenchmarkReferenceError)
+    async def _legacy_benchmark_reference(
+        _request: Request, exc: LegacyBenchmarkReferenceError
+    ):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     app.include_router(sites_router)
     app.include_router(api_collections_router)

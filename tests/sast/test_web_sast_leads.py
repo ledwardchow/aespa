@@ -469,7 +469,7 @@ def test_api_style_sast_run_still_constructs(env):
 def test_jail_rejects_sibling_dir_with_shared_prefix(tmp_path):
     """The path jail must not treat a sibling whose name shares a prefix (…/5x)
     as living inside the run root (…/5) — a string-prefix check would."""
-    from aespa.services.sast_scanner import _jail
+    from aespa.services.source_tools import jail
 
     root = tmp_path / "5"
     root.mkdir()
@@ -477,17 +477,17 @@ def test_jail_rejects_sibling_dir_with_shared_prefix(tmp_path):
     (tmp_path / "5x" / "secret.txt").write_text("nope")
 
     # Inside the jail is fine.
-    assert _jail(root, "ok.txt") == (root / "ok.txt")
+    assert jail(root, "ok.txt") == (root / "ok.txt")
     # Escaping into the prefixed sibling is rejected.
     with pytest.raises(ValueError):
-        _jail(root, "../5x/secret.txt")
+        jail(root, "../5x/secret.txt")
     with pytest.raises(ValueError):
-        _jail(root, "../../etc/passwd")
+        jail(root, "../../etc/passwd")
 
 
 def test_safe_unzip_skips_prefixed_sibling_escape(tmp_path):
     """A crafted entry resolving to a prefixed sibling must not be extracted."""
-    from aespa.services.sast_scanner import _safe_unzip
+    from aespa.services.source_tools import safe_unzip
 
     target = tmp_path / "5"
     target.mkdir()
@@ -498,14 +498,14 @@ def test_safe_unzip_skips_prefixed_sibling_escape(tmp_path):
         zf.writestr("good.py", "print(1)")
         zf.writestr("../5x/evil.py", "pwned")
 
-    _safe_unzip(str(archive), str(target))
+    safe_unzip(str(archive), str(target))
 
     assert (target / "good.py").exists()
     assert not (tmp_path / "5x" / "evil.py").exists()  # escape blocked
 
 
 def test_safe_unzip_rejects_oversized_entry(tmp_path, monkeypatch):
-    from aespa.services import sast_scanner
+    from aespa.services import source_tools
 
     target = tmp_path / "extract"
     target.mkdir()
@@ -513,9 +513,9 @@ def test_safe_unzip_rejects_oversized_entry(tmp_path, monkeypatch):
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("large.py", "123456")
 
-    monkeypatch.setattr(sast_scanner, "_MAX_ARCHIVE_ENTRY_BYTES", 5)
+    monkeypatch.setattr(source_tools, "_MAX_ARCHIVE_ENTRY_BYTES", 5)
     with pytest.raises(ValueError, match="exceeds"):
-        sast_scanner._safe_unzip(str(archive), str(target))
+        source_tools.safe_unzip(str(archive), str(target))
 
 
 def test_standalone_sast_upload_streams_and_enforces_limit(env, tmp_path, monkeypatch):

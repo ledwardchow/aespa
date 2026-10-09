@@ -1735,7 +1735,7 @@ ALICE wrapper is made fully API-aware.
 
 ## 17. SAST Scanner & Scan Leads
 
-**Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
+**Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/sast_scanner_light.py`, `src/aespa/services/sast_scan_shared.py`, `src/aespa/services/source_tools.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
 
 The SAST scanner is a standalone agentic static-analysis pass over an immutable source archive that produces high-confidence vulnerability **leads**. Uploads use `POST /api/sast-runs` (multipart). Extension source providers use `POST /api/sast-runs/from-source`; the run enters `preparing` while the provider resolves the source and AESPA creates the archive. In both cases `collection_id` is NULL and the final archive is stored on the run (`source_archive_path` / `source_filename`). Users choose `analysis_mode=light` for the original lower-cost workflow or `analysis_mode=deep` for the current semantic workflow. The mode is saved on the run and used for starts, resumes, and reruns. Existing runs are migrated as Light. New API callers that omit the field use Deep. A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
 
