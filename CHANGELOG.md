@@ -10,11 +10,15 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **SAST deletion with older benchmarks**: Deleting a collection or campaign now reports a clear conflict when one of its SAST runs is still referenced by an older Benchmark Lab evaluation.
+
 - **Existing Benchmark Lab data**: Older Benchmark Lab extension databases now load saved dates correctly when reused from another installation.
 
 - **Console startup on occupied ports**: When the requested port is in use, AESPA starts on port 9000 or the next available higher port instead of exiting.
 
 ### Housekeeping
+
+- **SAST scan maintenance**: Light and Deep scans now share archive extraction, source file tools, and candidate-state helpers, keeping those behaviors consistent across both modes.
 
 - **Benchmark Lab extension cleanup**: Removed the retired core Benchmark Lab API and scan service. Existing evaluations still import into the extension when it is enabled.
 

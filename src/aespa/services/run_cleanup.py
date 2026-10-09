@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, or_, text
+from sqlalchemy import delete, inspect, or_, text
 from sqlmodel import Session, select
 
 from aespa.models import (
@@ -83,6 +83,30 @@ from aespa.models import (
     TestRun,
     TrafficEntry,
 )
+
+
+class LegacyBenchmarkReferenceError(RuntimeError):
+    """A retired core benchmark row still has a restrictive SAST foreign key."""
+
+
+def ensure_sast_run_deletable(session: Session, run_id: int) -> None:
+    """Guard all SAST deletion paths against retained legacy benchmark rows."""
+    if not inspect(session.connection()).has_table("benchmark_evaluation"):
+        return
+    # A parent cascade can already have FK-sensitive deletes queued. This
+    # compatibility lookup must not flush them before the normal cleanup order.
+    with session.no_autoflush:
+        referenced = session.execute(
+            text(
+                "SELECT 1 FROM benchmark_evaluation WHERE sast_run_id = :run_id LIMIT 1"
+            ),
+            {"run_id": run_id},
+        ).first()
+    if referenced:
+        raise LegacyBenchmarkReferenceError(
+            "An older Benchmark Lab evaluation still refers to this SAST run. "
+            "The run cannot be deleted while it exists."
+        )
 
 
 def _delete_run_identity(session: Session, run_id: int, run) -> None:
@@ -453,6 +477,7 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
     copies imported into a dynamic run keep ``producer_run_id`` pointing here but
     belong to that run and are cleaned up when the run is deleted instead.
     """
+    ensure_sast_run_deletable(session, run_id)
     for member in session.exec(
         select(CampaignSourceMember).where(CampaignSourceMember.sast_run_id == run_id)
     ).all():
