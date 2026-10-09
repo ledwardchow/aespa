@@ -14,7 +14,6 @@ beforeEach(() => {
     playwright_chromium_installing: false,
     graphical_display_available: true,
   });
-  settingsApi.getBenchmarkLabConfig.mockResolvedValue({ panel_enabled: false });
   settingsApi.getReportingDebugConfig.mockResolvedValue({
     capture_enabled: false,
     panel_enabled: false,
@@ -45,8 +44,6 @@ test("hides Playwright Chromium and selects system Chrome after provisioning fai
       username=""
       reportingDebugCfg={{ capture_enabled: false, panel_enabled: false }}
       setReportingDebugCfg={vi.fn()}
-      benchmarkLabCfg={{ panel_enabled: false }}
-      setBenchmarkLabCfg={vi.fn()}
     />,
   );
 
@@ -72,8 +69,6 @@ test("groups Systems, Deep Scan, and Team Scan under Experimental Features", () 
       username=""
       reportingDebugCfg={{ capture_enabled: false, panel_enabled: false }}
       setReportingDebugCfg={vi.fn()}
-      benchmarkLabCfg={{ panel_enabled: false }}
-      setBenchmarkLabCfg={vi.fn()}
     />,
   );
 

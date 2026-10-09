@@ -22,6 +22,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.responses import Response as HTTPResponse
 from pydantic import BaseModel
+from sqlalchemy import inspect, text
 from sqlmodel import Session, select
 
 from aespa.config import get_settings
@@ -30,7 +31,6 @@ from aespa.models import (
     AgentLog,
     ApiCollection,
     ApiTestRun,
-    BenchmarkEvaluation,
     PhaseCheckpoint,
     SastRun,
     SastWorker,
@@ -599,11 +599,18 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
 @router.delete("/api/sast-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
+    # Old installations can retain rows in the former core benchmark table.
+    # Its RESTRICT foreign key still applies after those rows are copied into
+    # extension storage, so preserve the existing conflict response.
+    engine = session.get_bind()
     if (
-        session.exec(
-            select(BenchmarkEvaluation).where(BenchmarkEvaluation.sast_run_id == run_id)
+        inspect(engine).has_table("benchmark_evaluation")
+        and session.execute(
+            text(
+                "SELECT 1 FROM benchmark_evaluation WHERE sast_run_id = :run_id LIMIT 1"
+            ),
+            {"run_id": run_id},
         ).first()
-        is not None
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

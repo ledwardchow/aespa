@@ -20,6 +20,22 @@ config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = SQLModel.metadata
 
+# These historical tables are read only during the Benchmark Lab extension's
+# one-time import. Keep them on existing installations without treating their
+# absence from core ORM metadata as an instruction to drop saved data.
+_LEGACY_BENCHMARK_TABLES = {
+    "benchmark_lab_config",
+    "benchmark_dataset",
+    "benchmark_evaluation",
+    "benchmark_match",
+    "benchmark_comparison",
+    "benchmark_comparison_evaluation",
+}
+
+
+def _include_object(object, name, type_, reflected, compare_to):
+    return not (type_ == "table" and name in _LEGACY_BENCHMARK_TABLES)
+
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
@@ -30,6 +46,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         render_as_batch=True,
+        include_object=_include_object,
     )
 
     with context.begin_transaction():
@@ -41,6 +58,7 @@ def _do_run_migrations(connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         render_as_batch=True,
+        include_object=_include_object,
     )
 
     with context.begin_transaction():

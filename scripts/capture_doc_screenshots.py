@@ -2,7 +2,7 @@
 """
 Documentation Screenshot Capture Utility for AESPA
 
-Automatically inspects aespa.db to locate top web and API scan runs,
+Automatically inspects aespa_data/aespa.db to locate top web and API scan runs,
 launches headless Playwright, navigates all UI routes and tab views,
 and saves updated documentation screenshots to docs/images/.
 """
@@ -245,7 +245,9 @@ def main():
     parser.add_argument(
         "--out-dir", default="docs/images", help="Target output directory for images"
     )
-    parser.add_argument("--db-path", default="aespa.db", help="Path to SQLite database")
+    parser.add_argument(
+        "--db-path", default="aespa_data/aespa.db", help="Path to SQLite database"
+    )
     args = parser.parse_args()
 
     web_run_id, site_id, api_run_id, collection_id = get_top_runs(args.db_path)

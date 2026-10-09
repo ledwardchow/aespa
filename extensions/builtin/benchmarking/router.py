@@ -29,13 +29,6 @@ from aespa.models import (
     Site,
     TestRun,
 )
-from aespa.schemas import (
-    BenchmarkComparisonIn,
-    BenchmarkDatasetIn,
-    BenchmarkEvaluationIn,
-    BenchmarkGroundTruth,
-    BenchmarkMatchReviewIn,
-)
 
 from .models import (
     BenchmarkSettings,
@@ -48,6 +41,13 @@ from .models import (
     ScanResult,
     TransferIdentity,
     now,
+)
+from .schemas import (
+    BenchmarkComparisonIn,
+    BenchmarkDatasetIn,
+    BenchmarkEvaluationIn,
+    BenchmarkGroundTruth,
+    BenchmarkMatchReviewIn,
 )
 from .transfer import Bundle, export_bundle, import_bundle
 

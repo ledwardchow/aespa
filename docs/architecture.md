@@ -152,10 +152,14 @@ uv run aespa          # starts the server at http://127.0.0.1:8000
 Runtime configuration is read from a `.env` file:
 
 ```
-AESPA_DATABASE_URL = sqlite:///./aespa.db
+AESPA_DATABASE_URL = sqlite:///./aespa_data/aespa.db
 AESPA_HOST         = 127.0.0.1
 AESPA_PORT         = 8000
 ```
+
+Desktop builds also read a writable `settings.env` in the per-user AESPA
+application support directory. The console's Data Folder setting writes there
+on desktop builds and to `.env` for source runs; it takes effect after restart.
 
 ---
 

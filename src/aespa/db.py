@@ -4,12 +4,13 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from alembic.config import Config
-from sqlalchemy import event, inspect
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, create_engine, select
 
 from aespa import db_legacy
 from aespa.config import Settings, get_settings
+from aespa.storage_migration import migrate_legacy_storage
 from alembic import command
 
 _engine: Engine | None = None
@@ -57,7 +58,9 @@ def _build_engine(settings: Settings) -> Engine:
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
-        _engine = _build_engine(get_settings())
+        settings = get_settings()
+        migrate_legacy_storage(settings)
+        _engine = _build_engine(settings)
     return _engine
 
 
@@ -495,6 +498,8 @@ def _migrate(engine: Engine) -> None:
                     conn.exec_driver_sql("PRAGMA foreign_keys=ON")
                     conn.commit()
 
+    _relocate_stored_paths(engine)
+
     _reset_orphaned_validating_findings(engine)
     _reset_orphaned_running_runs(engine)
     from aespa.services.settings_providers import repair_chatgpt_plan_models
@@ -502,6 +507,50 @@ def _migrate(engine: Engine) -> None:
     with Session(engine) as session:
         repair_chatgpt_plan_models(session)
     _cleanup_orphaned_sast_extractions()
+
+
+def _relocate_stored_paths(engine: Engine) -> None:
+    """Repair uploaded-file references after the data folder moves."""
+    if engine.dialect.name != "sqlite":
+        return
+    data_dir = Path(get_settings().data_dir).resolve()
+    columns = (
+        ("api_document", "stored_path", ("api_collections",)),
+        ("code_artifact", "stored_path", ("code_artifacts", "aespa_data")),
+        ("component_snapshot", "stored_path", ("system_snapshots",)),
+        (
+            "sast_run",
+            "source_archive_path",
+            ("sast_uploads", "system_snapshots"),
+        ),
+    )
+    tables = set(inspect(engine).get_table_names())
+    with engine.begin() as connection:
+        for table, column, folders in columns:
+            if table not in tables:
+                continue
+            for row_id, old_path in connection.execute(
+                text(f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL")
+            ):
+                parts = str(old_path).replace("\\", "/").split("/")
+                markers = [index for index, part in enumerate(parts) if part in folders]
+                if not markers:
+                    continue
+                marker_index = max(markers)
+                relative_parts = parts[
+                    marker_index + (1 if parts[marker_index] == "aespa_data" else 0) :
+                ]
+                if not relative_parts or any(
+                    part in {"", ".", ".."} for part in relative_parts
+                ):
+                    continue
+                relocated = data_dir.joinpath(*relative_parts)
+                if str(relocated) == old_path or not relocated.is_file():
+                    continue
+                connection.execute(
+                    text(f"UPDATE {table} SET {column} = :path WHERE id = :id"),
+                    {"path": str(relocated), "id": row_id},
+                )
 
 
 def get_session() -> Iterator[Session]:

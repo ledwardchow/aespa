@@ -4,11 +4,21 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+### Updates
+
+- **Portable installation data**: AESPA now keeps its main, console-log, and reporting-debug databases in `aespa_data` alongside uploads and extension data. Existing databases are moved there on first start, and uploaded-file references are repaired when the folder is copied to another installation. The console's Data Folder setting lets source and desktop users choose where AESPA stores data on the next launch; an empty folder starts a new database, while existing data is left in place.
+
+### Fixes
+
+- **Existing Benchmark Lab data**: Older Benchmark Lab extension databases now load saved dates correctly when reused from another installation.
+
+- **Console startup on occupied ports**: When the requested port is in use, AESPA starts on port 9000 or the next available higher port instead of exiting.
+
 ### Housekeeping
 
-- **Local dependencies**: Git no longer tracks files under `node_modules`.
+- **Benchmark Lab extension cleanup**: Removed the retired core Benchmark Lab API and scan service. Existing evaluations still import into the extension when it is enabled.
 
-- **GitHub Actions**: Frontend checks now use current browser fixtures and labels. Desktop release jobs build the web app before packaging the Windows and macOS apps.
+- **GitHub Actions**: Fixed the broken build actions and rebuilt the Oct 8 release. Frontend checks now use current browser fixtures and labels. Desktop release jobs build the web app before packaging the Windows and macOS apps, this was broken because the frontend build used to be committed and was removed.
 
 ## [PR #278] October 8 - Public Benchmarking, Claude CLI and ChatGPT plan LLM providerse
 

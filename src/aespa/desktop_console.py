@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 
-from aespa.config import DEFAULT_LOG_DB_PATH
+from aespa.config import get_settings, settings_env_path
 from aespa.console import InteractiveConsole
 
 
@@ -34,9 +34,10 @@ class DesktopConsoleServer:
             output_stream=io.StringIO(),
             host=self.host,
             port=self.port,
+            env_path=settings_env_path(),
             allow_port_change=False,
             replace_logging_handlers=False,
-            log_db_path=DEFAULT_LOG_DB_PATH,
+            log_db_path=get_settings().data_dir / "logs.db",
         )
         self._console.start_capture()
         threading.Thread(

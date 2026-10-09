@@ -1,6 +1,6 @@
 # AESPA — AI-Enabled Security Pentesting Agent
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ledwardchow/aespa) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
+[![Ask DeepWiki](docs/images/deepwiki-badge.svg)](https://deepwiki.com/ledwardchow/aespa) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
 
 ## What is this?
 
@@ -190,15 +190,32 @@ Copy `.env.example` to `.env` and adjust as needed:
 cp .env.example .env
 ```
 
-| Variable             | Default                | Description                                       |
-| -------------------- | ---------------------- | ------------------------------------------------- |
-| `AESPA_DATABASE_URL` | `sqlite:///./aespa.db` | SQLAlchemy database URL                           |
-| `AESPA_HOST`         | `127.0.0.1`            | Bind address                                      |
-| `AESPA_PORT`         | `8000`                 | Bind port                                         |
-| `AESPA_WEB_DIR`      | `./src/aespa/web`      | Path to static web UI assets                      |
-| `AESPA_DATA_DIR`     | `./aespa_data`         | Path to persistent uploads and temporary storage  |
+| Variable             | Default                            | Description                               |
+| -------------------- | ---------------------------------- | ----------------------------------------- |
+| `AESPA_DATABASE_URL` | `sqlite:///./aespa_data/aespa.db` | SQLAlchemy database URL                   |
+| `AESPA_HOST`         | `127.0.0.1`                        | Bind address                              |
+| `AESPA_PORT`         | `8000`                             | Bind port                                 |
+| `AESPA_WEB_DIR`      | `./src/aespa/web`                  | Path to static web UI assets             |
+| `AESPA_DATA_DIR`     | `./aespa_data`                     | Path to databases and uploaded files     |
 
 If you don't do this, it will use the values above as the default.
+
+To move an installation, stop AESPA on both machines and copy `aespa_data/` and
+your `extensions/` folder to the new installation. AESPA stores its main,
+console-log, reporting-debug, and extension databases inside `aespa_data/`.
+On first start after upgrading an older installation, AESPA copies any databases
+at the installation root into `aespa_data/` and archives the originals under
+`aespa_data/legacy-backups/`.
+An older `.env` with `sqlite:///./aespa.db` also uses the new location. Custom
+`AESPA_DATABASE_URL` values still point to the path you configured, so include
+that database separately when moving an installation.
+
+In the console's **Settings → Data Folder**, enter a folder path to use it on
+the next launch. This works with the source run and the macOS and Windows desktop
+builds. Choose an empty folder for a new database, or a folder containing
+`aespa.db` and the rest of your AESPA data to use it without overwriting files.
+The desktop builds save this choice in their application support settings file,
+so it persists even though the app bundle is read-only.
 
 ## LLM Configuration
 

@@ -9,8 +9,12 @@ import sqlite3
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from aespa.config import Settings
 from aespa.console import (
     _ANSI_SGR,
     AGENT,
@@ -25,6 +29,7 @@ from aespa.console import (
     _aespa_logo_lines,
     _legend,
     _python_executor_runtime_status,
+    _write_data_dir_setting,
     _write_port_setting,
 )
 
@@ -781,6 +786,7 @@ def test_settings_menu_hides_server_details_until_opened() -> None:
     assert "Server Settings" in frame
     assert "Database Operations" in frame
     assert "Console Log Database" in frame
+    assert "Data Folder" in frame
     assert "Listening address" not in frame
     assert "Port                " not in frame
 
@@ -788,6 +794,55 @@ def test_settings_menu_hides_server_details_until_opened() -> None:
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
     assert "Listening address" in frame
     assert "Port                8000" in frame
+
+
+@pytest.mark.parametrize("allow_port_change", [True, False])
+def test_console_data_folder_setting_accepts_empty_or_existing_folder(
+    tmp_path, allow_port_change
+) -> None:
+    env_path = tmp_path / "settings.env"
+    folder = tmp_path / "Mes données AESPA"
+    folder.mkdir()
+    with sqlite3.connect(folder / "aespa.db") as connection:
+        connection.execute("CREATE TABLE marker (value TEXT)")
+        connection.execute("INSERT INTO marker VALUES ('keep me')")
+
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=io.StringIO(),
+        env_path=env_path,
+        allow_port_change=allow_port_change,
+    )
+    console.handler.start_screen()
+    console._process_posix_keys(
+        b"6\x1b[B\x1b[B\x1b[B\r\r" + str(folder).encode() + b"\r"
+    )
+
+    assert console.handler.settings_section == "storage"
+    assert console.handler.selected_data_dir == folder
+    assert "Restart AESPA" in console.handler.settings_status
+    assert f'AESPA_DATA_DIR="{folder}"' in env_path.read_text()
+    assert f"AESPA_DATABASE_URL=sqlite:///{folder / 'aespa.db'}" in env_path.read_text()
+    assert Settings(_env_file=env_path).data_dir == folder
+    with sqlite3.connect(folder / "aespa.db") as connection:
+        assert connection.execute("SELECT value FROM marker").fetchone()[0] == "keep me"
+
+
+def test_console_data_folder_rejects_file_path(tmp_path) -> None:
+    env_path = tmp_path / "settings.env"
+    occupied = tmp_path / "file"
+    occupied.write_text("existing")
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=io.StringIO(),
+        env_path=env_path,
+    )
+    console.handler.start_screen()
+    console._process_posix_keys(
+        b"6\x1b[B\x1b[B\x1b[B\r\r" + str(occupied).encode() + b"\r"
+    )
+    assert "Could not use that folder" in console.handler.settings_status
+    assert not env_path.exists()
 
 
 def test_console_log_database_is_disabled_by_default(tmp_path) -> None:
@@ -954,6 +1009,36 @@ def test_write_port_setting_replaces_existing_value(tmp_path) -> None:
 
     assert env_path.read_text(encoding="utf-8") == (
         "OTHER=value\nAESPA_PORT=8100\nAESPA_PORT=8100\n"
+    )
+
+
+def test_write_data_dir_setting_preserves_other_settings(tmp_path) -> None:
+    env_path = tmp_path / "settings.env"
+    env_path.write_text("AESPA_PORT=8000\nAESPA_DATA_DIR=/old\n")
+    folder = tmp_path / "Data With Spaces"
+
+    _write_data_dir_setting(env_path, folder)
+
+    assert env_path.read_text() == (
+        f'AESPA_PORT=8000\nAESPA_DATA_DIR="{folder}"\n'
+        f"AESPA_DATABASE_URL=sqlite:///{folder / 'aespa.db'}\n"
+    )
+    settings = Settings(_env_file=env_path)
+    assert settings.data_dir == folder
+    assert settings.database_url == f"sqlite:///{folder / 'aespa.db'}"
+
+
+def test_write_data_dir_setting_replaces_windows_path(tmp_path) -> None:
+    env_path = tmp_path / "settings.env"
+    env_path.write_text("AESPA_DATA_DIR=old\nAESPA_DATABASE_URL=old\n")
+
+    _write_data_dir_setting(env_path, Path(r"C:\Users\Alice\AESPA Data"))
+
+    assert 'AESPA_DATA_DIR="C:\\\\Users\\\\Alice\\\\AESPA Data"' in (
+        env_path.read_text()
+    )
+    assert "AESPA_DATABASE_URL=sqlite:///C:\\Users\\Alice\\AESPA Data/aespa.db" in (
+        env_path.read_text()
     )
 
 
