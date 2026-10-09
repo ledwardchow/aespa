@@ -429,6 +429,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | Model | Purpose |
 |---|---|
 | `Site` | Target website (base URL, auth settings, associated credentials) |
+| `SavedCrawl` | Gzip-compressed crawl archive kept on a site so new runs can load it instead of crawling |
 | `Credential` | Login credentials tied to a site (username, password, login URL) |
 | `LLMProviderConfig` | Reusable LLM provider connection settings (API keys, base URLs, account, cloud project, and model discovery) |
 | `LLMConfig` | Saved LLM configuration/execution profile linked to a provider |
@@ -621,6 +622,12 @@ modal/no-route logins, non-standard field labels, and multi-step flows that the
 selector heuristics miss. Credential values are kept out of this LLM call: the
 model returns named placeholders such as `{{credential.policy_number}}` and the
 crawler substitutes the real values locally.
+
+### Reusing a crawl (export, import, and saved crawls)
+
+`services/crawl_archives.py` serializes a run's crawl into an `aespa-crawl-export` archive. The archive holds pages, links, per-credential views, target intelligence, traffic, scanner sessions, OWASP applicability, and crawl activity. `import_into_run()` restores an archive into a new pending run with no crawl data. It checks that the archive's base URL matches the site, rebuilds the recon summary, and seeds a fresh coverage workprogram. Coverage results are not copied.
+
+Saved crawls (`SavedCrawl`, `services/saved_crawls.py`) store such an archive, gzip-compressed, on the **site** instead of in a file. They are created from a run (`POST /api/test-runs/{id}/crawl/save`) or from an uploaded export file (`POST /api/sites/{id}/saved-crawls/upload`), and loaded with `POST /api/test-runs/{id}/crawl/load/{saved_id}`. A saved crawl keeps `source_run_id` only as a plain reference, so it outlives the run it came from. Saved crawls are deleted when their site is deleted. List endpoints never return the archive itself.
 
 ---
 

@@ -351,17 +351,19 @@ function TestRunContent({
   };
   const onExportCrawl = () => webRunsApi.exportCrawl(runId);
   const onImportCrawlClick = () => crawlImportInputRef.current?.click();
+  const showImportedCrawl = async (imported) => {
+    const importedGraph = await webRunsApi.getGraph(runId);
+    setRun(imported);
+    setGraph(importedGraph);
+    setWpReloadKey((key) => key + 1);
+    setActiveTab("sitemap");
+  };
   const onImportCrawlFile = async (event) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
     try {
-      const imported = await webRunsApi.importCrawl(runId, file);
-      const importedGraph = await webRunsApi.getGraph(runId);
-      setRun(imported);
-      setGraph(importedGraph);
-      setWpReloadKey((key) => key + 1);
-      setActiveTab("sitemap");
+      await showImportedCrawl(await webRunsApi.importCrawl(runId, file));
     } catch (e) {
       setError(e.message);
     }
@@ -457,6 +459,8 @@ function TestRunContent({
         onResume={onResumeThinkingScan}
         onExportCrawl={onExportCrawl}
         onImportCrawl={onImportCrawlClick}
+        onSavedCrawlLoaded={showImportedCrawl}
+        onError={setError}
         aliceRunning={aliceGlobalRunning}
         onStopAlice={handleAliceStop}
       />

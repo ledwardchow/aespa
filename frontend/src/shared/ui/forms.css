@@ -530,3 +530,35 @@ legend {
 .mono {
   font-family: ui-monospace, "Cascadia Code", "SF Mono", monospace;
 }
+.saved-crawls-panel {
+  padding: 12px 20px;
+  flex: 0 0 auto;
+}
+.saved-crawls-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  cursor: pointer;
+}
+.saved-crawls-heading:hover {
+  color: var(--text);
+}
+.saved-crawls-count {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.saved-crawls-table {
+  margin-top: 10px;
+  max-height: 260px;
+  overflow-y: auto;
+}

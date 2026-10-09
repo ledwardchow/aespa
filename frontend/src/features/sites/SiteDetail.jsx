@@ -13,6 +13,7 @@ import { IconChevronDown, IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { SavedCrawlsPanel } from "./SavedCrawlsPanel.jsx";
 
 import { workflowBadge } from "../../shared/runs/presentation.jsx";
 
@@ -413,6 +414,8 @@ export function SiteDetail({ siteId }) {
             )}
           </div>
         )}
+
+        {site && <SavedCrawlsPanel siteId={siteId} />}
 
         <div className="site-runs-section">
           <div

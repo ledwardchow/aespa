@@ -29,6 +29,8 @@ from aespa.schemas import (
     CredentialSummary,
     GraphData,
     PageCredentialViewOut,
+    SavedCrawlCreate,
+    SavedCrawlOut,
     ScanLeadOut,
     ScannerSessionOut,
     ScannerSessionSummary,
@@ -46,6 +48,7 @@ from aespa.services import active_jobs as active_jobs_svc
 from aespa.services import crawl_archives, run_cleanup
 from aespa.services import crawler as crawler_svc
 from aespa.services import recon_summary as recon_summary_svc
+from aespa.services import saved_crawls as saved_crawls_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services import settings as settings_service
@@ -626,17 +629,6 @@ async def import_test_run_crawl(
 ) -> TestRunSummary:
     """Populate a new run from an exported crawl without re-running Playwright."""
     run = _get_run_or_404(session, run_id)
-    if run.status != TestRunStatus.pending:
-        raise HTTPException(
-            status_code=409,
-            detail="Crawl data can only be imported into a new pending run",
-        )
-    if session.exec(
-        select(CrawledPage).where(CrawledPage.test_run_id == run_id)
-    ).first():
-        raise HTTPException(
-            status_code=409, detail="Clear this run's crawl data before importing"
-        )
     raw = await file.read()
     try:
         payload = json.loads(raw)
@@ -646,18 +638,47 @@ async def import_test_run_crawl(
         ) from exc
     site = _get_site_or_404(session, run.site_id)
     try:
-        crawl = crawl_archives.validate_archive(payload, site.base_url)
+        crawl_archives.import_into_run(session, run, payload, site)
     except crawl_archives.ArchiveError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return _run_summary(run, session)
 
+
+@router.post(
+    "/api/test-runs/{run_id}/crawl/save",
+    response_model=SavedCrawlOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def save_test_run_crawl(
+    run_id: int, payload: SavedCrawlCreate, session: Session = Depends(get_session)
+) -> SavedCrawlOut:
+    """Keep this run's crawl on its site so later runs can load it."""
+    run = _get_run_or_404(session, run_id)
     try:
-        pages_by_url = crawl_archives.restore_archive_records(
-            session, run_id, crawl, site
+        saved = saved_crawls_svc.save_from_run(
+            session, run, payload.name, payload.notes
         )
     except crawl_archives.ArchiveError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return SavedCrawlOut.model_validate(saved).model_copy(
+        update={"source_run_exists": True}
+    )
 
-    crawl_archives.finish_archive_import(session, run, crawl, pages_by_url)
+
+@router.post(
+    "/api/test-runs/{run_id}/crawl/load/{saved_crawl_id}",
+    response_model=TestRunSummary,
+)
+def load_saved_crawl(
+    run_id: int, saved_crawl_id: int, session: Session = Depends(get_session)
+) -> TestRunSummary:
+    """Populate a new pending run from a crawl saved on its site."""
+    run = _get_run_or_404(session, run_id)
+    try:
+        saved = saved_crawls_svc.get_for_site(session, run.site_id, saved_crawl_id)
+        saved_crawls_svc.load_into_run(session, saved, run)
+    except crawl_archives.ArchiveError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     return _run_summary(run, session)
 
 

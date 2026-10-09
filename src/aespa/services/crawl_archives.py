@@ -106,6 +106,7 @@ def build_archive(session: Session, run: TestRun) -> dict:
             "site_base_url": site.base_url,
             "run_id": run.id,
             "run_name": run.name,
+            "crawler_mode": run.crawler_mode,
         },
         "crawl": {
             "progress": {
@@ -593,3 +594,22 @@ def finish_archive_import(
     session.commit()
     session.refresh(run)
     return run
+
+
+def import_into_run(
+    session: Session, run: TestRun, payload: object, site: Site
+) -> TestRun:
+    """Restore a crawl archive into a new pending run with no crawl data."""
+    if run.status != TestRunStatus.pending:
+        raise ArchiveError(
+            status=409, message="Crawl data can only be imported into a new pending run"
+        )
+    if session.exec(
+        select(CrawledPage).where(CrawledPage.test_run_id == run.id)
+    ).first():
+        raise ArchiveError(
+            status=409, message="Clear this run's crawl data before importing"
+        )
+    crawl = validate_archive(payload, site.base_url)
+    pages_by_url = restore_archive_records(session, run.id, crawl, site)
+    return finish_archive_import(session, run, crawl, pages_by_url)

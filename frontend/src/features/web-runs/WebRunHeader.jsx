@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { IconChevronDown, IconPlay, IconStop } from "../../shared/ui/Icons.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { resolveRunPrimaryAction, RUN_PRIMARY_ACTION } from "./runState.js";
+import { LoadSavedCrawlButton, SaveCrawlButton } from "./SavedCrawlControls.jsx";
 
 const RUN_ACTION_DETAILS = {
   [RUN_PRIMARY_ACTION.START_CRAWL]: { label: "Start Crawl", className: "run-start-action" },
@@ -140,6 +141,8 @@ export function WebRunHeader({
   onResume,
   onExportCrawl,
   onImportCrawl,
+  onSavedCrawlLoaded,
+  onError,
   aliceRunning,
   onStopAlice,
 }) {
@@ -192,6 +195,17 @@ export function WebRunHeader({
             <button className="btn secondary sm" onClick={onImportCrawl}>
               Import crawl
             </button>
+          )}
+          {canImportCrawl && onSavedCrawlLoaded && (
+            <LoadSavedCrawlButton
+              siteId={run?.site_id}
+              runId={run?.id}
+              onLoaded={onSavedCrawlLoaded}
+              onError={onError}
+            />
+          )}
+          {hasCrawlResult && !crawlerActive && !crawlStopping && onError && (
+            <SaveCrawlButton run={run} onError={onError} />
           )}
           {canStartPentest && (
             <label
