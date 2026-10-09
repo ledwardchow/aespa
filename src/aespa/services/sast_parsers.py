@@ -205,6 +205,49 @@ class EcmaScriptAdapter:
         return result
 
 
+def _lockfile_browser_libraries(
+    name: str, text: str, yarn_entry: re.Pattern[str]
+) -> list[tuple[str, str]]:
+    """Resolved versions of tracked browser libraries from an npm/yarn lockfile.
+
+    Lockfiles list every transitive package, so only libraries with known
+    vulnerable version data are kept; the rest would crowd out other facts.
+    """
+    from aespa.services.js_libraries import library_for_package
+
+    found: dict[tuple[str, str], None] = {}
+    if name == "yarn.lock":
+        for match in yarn_entry.finditer(text):
+            if library_for_package(match.group("name")):
+                found[(match.group("name"), match.group("version"))] = None
+        return list(found)
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return []
+    for key, info in (payload.get("packages") or {}).items():
+        package = str(key).rsplit("node_modules/", 1)[-1]
+        if (
+            isinstance(info, dict)
+            and info.get("version")
+            and library_for_package(package)
+        ):
+            found[(package, str(info["version"]))] = None
+
+    def _walk(deps: object) -> None:
+        if not isinstance(deps, dict):
+            return
+        for package, info in deps.items():
+            if not isinstance(info, dict):
+                continue
+            if info.get("version") and library_for_package(package):
+                found[(package, str(info["version"]))] = None
+            _walk(info.get("dependencies"))
+
+    _walk(payload.get("dependencies"))
+    return list(found)
+
+
 class ManifestAdapter:
     name = "manifest"
     _names = {
@@ -219,7 +262,15 @@ class ManifestAdapter:
         "gemfile",
         "packages.config",
         "directory.packages.props",
+        "bower.json",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
     }
+    _yarn_entry = re.compile(
+        r'^"?(?P<name>@?[^@\s",]+)@[^\n]*:\s*\n(?:[ \t]+[^\n]*\n)*?[ \t]+version:?\s+"?(?P<version>[^"\s]+)',
+        re.MULTILINE,
+    )
     _suffixes = {".csproj", ".vbproj", ".fsproj"}
     _nuget_reference = re.compile(
         r"<(?P<tag>PackageReference|PackageVersion)\b(?P<attrs>[^>]*?)(?:/>|>(?P<body>.*?)</(?P=tag)\s*>)",
@@ -247,7 +298,10 @@ class ManifestAdapter:
             )
             return result
         dependencies: list[tuple[str, str]] = []
-        if path.name.casefold() == "package.json":
+        lowered = path.name.casefold()
+        if lowered in {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock"}:
+            dependencies = _lockfile_browser_libraries(lowered, text, self._yarn_entry)
+        elif lowered in {"package.json", "bower.json"}:
             try:
                 payload = json.loads(text)
                 for group in (
@@ -264,7 +318,7 @@ class ManifestAdapter:
                     {
                         "adapter": self.name,
                         "path": relative_path,
-                        "reason": "invalid package.json",
+                        "reason": f"invalid {path.name}",
                     }
                 )
         elif path.suffix.casefold() in self._suffixes or path.name.casefold() in {

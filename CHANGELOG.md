@@ -4,6 +4,12 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+### New features
+
+- **Outdated JavaScript library checks**: Web scans now check the JavaScript files captured while crawling for library versions with known vulnerabilities, such as old jQuery, jQuery UI, Bootstrap, AngularJS, Lodash, Moment.js, Handlebars, and DOMPurify. Each outdated library version is reported once as a Vulnerable and Outdated Components finding that lists the matching CVEs, where the version was seen, and the version to upgrade to. The check also runs in passive mode and can be turned off with the other deterministic checks.
+
+- **Vulnerable JavaScript libraries in SAST**: Deep SAST scans now check npm and Bower manifests, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, and JavaScript files copied into the repository against the same list of vulnerable library versions. Exact versions from lockfiles take priority over version ranges in `package.json`.
+
 ### Updates
 
 - **Portable installation data**: AESPA now keeps its main, console-log, and reporting-debug databases in `aespa_data` alongside uploads and extension data. Existing databases are moved there on first start, and uploaded-file references are repaired when the folder is copied to another installation. The console's Data Folder setting lets source and desktop users choose where AESPA stores data on the next launch; an empty folder starts a new database, while existing data is left in place.
