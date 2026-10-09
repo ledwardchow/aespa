@@ -223,6 +223,8 @@ that used `aespa.sast-benchmarking` keep their enabled setting, and the saved
 extension database is copied into `aespa.benchmarking.db` once. The old file is
 left in place. Disabling the extension removes its routes and sidebar entry but
 preserves the database.
+The legacy primary-database tables remain available for this one-time import,
+but new Benchmark Lab data and settings are handled only by the extension.
 
 ## Testing and packaging
 

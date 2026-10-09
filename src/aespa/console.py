@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 from collections import deque
@@ -223,17 +224,24 @@ class InteractiveConsoleHandler(logging.Handler):
         self.runtime_port = port
         self.configured_port = port
         self.host = host
-        self.env_path = env_path or Path(".env")
+        from aespa.config import get_settings, settings_env_path
+
+        self.env_path = env_path or settings_env_path()
         self.on_port_change = on_port_change
         self.allow_port_change = allow_port_change
         self.fixed_terminal_size = terminal_size
-        self.log_store = ConsoleLogStore(log_db_path or Path("logs.db"))
+        self.log_store = ConsoleLogStore(
+            log_db_path or get_settings().data_dir / "logs.db"
+        )
         self.settings_editing = False
         self.settings_replace_on_digit = False
         self.settings_value = str(port)
         self.settings_status = ""
         self.settings_section = "root"
         self.settings_selected = 0
+        self.active_data_dir = Path(get_settings().data_dir).expanduser().resolve()
+        self.selected_data_dir = self.active_data_dir
+        self.data_folder_input = ""
         self.database_selected = 0
         self.database_action: str | None = None
         self.database_input = ""
@@ -310,10 +318,12 @@ class InteractiveConsoleHandler(logging.Handler):
                 return self._handle_database_key(key)
             if self.settings_section == "logging":
                 return self._handle_log_database_key(key)
+            if self.settings_section == "storage":
+                return self._handle_data_folder_key(key)
             if self.settings_section == "root":
                 if key not in ("\r", "\n"):
                     return False
-                self.settings_section = ("server", "database", "logging")[
+                self.settings_section = ("server", "database", "logging", "storage")[
                     self.settings_selected
                 ]
                 self.settings_status = ""
@@ -367,6 +377,55 @@ class InteractiveConsoleHandler(logging.Handler):
                 self._redraw_locked()
                 return True
             return True
+
+    def _handle_data_folder_key(self, key: str) -> bool:
+        if not self.settings_editing:
+            if key == "\x1b":
+                self.settings_section = "root"
+                self.settings_status = ""
+                self._redraw_locked()
+                return True
+            if key not in ("\r", "\n"):
+                return False
+            self.settings_editing = True
+            self.data_folder_input = ""
+            self.settings_status = "Enter the folder that should contain aespa.db."
+            self._redraw_locked()
+            return True
+        if key == "\x1b":
+            self.settings_editing = False
+            self.data_folder_input = ""
+            self.settings_status = "Change cancelled."
+        elif key in ("\b", "\x7f"):
+            self.data_folder_input = self.data_folder_input[:-1]
+        elif key in ("\r", "\n"):
+            self._save_data_folder()
+        elif key.isprintable() and len(self.data_folder_input) < 4096:
+            self.data_folder_input += key
+        self._redraw_locked()
+        return True
+
+    def _save_data_folder(self) -> None:
+        raw = self.data_folder_input.strip()
+        if not raw:
+            self.settings_status = "Enter a folder path."
+            return
+        folder = Path(raw).expanduser().resolve()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=folder):
+                pass
+            _write_data_dir_setting(self.env_path, folder)
+        except (OSError, ValueError) as exc:
+            self.settings_status = f"Could not use that folder: {exc}"
+            return
+        self.selected_data_dir = folder
+        self.settings_editing = False
+        self.data_folder_input = ""
+        if folder == self.active_data_dir:
+            self.settings_status = "This folder is already in use."
+        else:
+            self.settings_status = "Data folder saved. Restart AESPA to use it."
 
     def _handle_log_database_key(self, key: str) -> bool:
         if key == "\x1b":
@@ -514,7 +573,7 @@ class InteractiveConsoleHandler(logging.Handler):
             if self.settings_section == "database":
                 self.database_selected = min(max(self.database_selected + delta, 0), 2)
             elif self.settings_section == "root":
-                self.settings_selected = min(max(self.settings_selected + delta, 0), 2)
+                self.settings_selected = min(max(self.settings_selected + delta, 0), 3)
             self._redraw_locked()
 
     def toggle_selected_llm(self) -> None:
@@ -838,11 +897,39 @@ class InteractiveConsoleHandler(logging.Handler):
             return self._server_settings_body_lines(width)
         if self.settings_section == "logging":
             return self._log_database_settings_body_lines(width)
+        if self.settings_section == "storage":
+            return self._data_folder_body_lines(width)
         return [
             f"{'▶' if self.settings_selected == 0 else ' '} Server Settings",
             f"{'▶' if self.settings_selected == 1 else ' '} Database Operations",
             f"{'▶' if self.settings_selected == 2 else ' '} Console Log Database",
+            f"{'▶' if self.settings_selected == 3 else ' '} Data Folder",
         ]
+
+    def _data_folder_body_lines(self, width: int) -> list[str]:
+        lines = [
+            "Data Folder",
+            "",
+            f"  In use now        {self.active_data_dir}",
+            f"  Next launch       {self.selected_data_dir}",
+            "",
+            "Choose the folder that directly contains aespa.db and your uploads.",
+            "An empty folder gets new databases on the next launch.",
+            "A folder with existing AESPA data is used without replacing it.",
+            "Extensions remain in the separate extensions folder.",
+            "",
+            "Press Enter to choose a folder or Esc to return to Settings.",
+        ]
+        if self.settings_editing:
+            lines.extend(["", "Folder path:", f"  {self.data_folder_input}▌"])
+        if os.environ.get("AESPA_DATA_DIR") or os.environ.get("AESPA_DATABASE_URL"):
+            lines.extend(["", "Environment settings may override this saved choice."])
+        if self.settings_status:
+            lines.extend(["", self.settings_status])
+        wrapped: list[str] = []
+        for line in lines:
+            wrapped.extend(_wrap_console_line(line, width))
+        return wrapped
 
     def _server_settings_body_lines(self, width: int) -> list[str]:
         value = (
@@ -1230,6 +1317,10 @@ def _legend(
             if editing:
                 return "[Enter] Confirm  [Backspace] Delete  [Esc] Cancel"
             return "[↑/↓] Select  [Enter] Open  [Esc] Back"
+        if settings_section == "storage":
+            if editing:
+                return "[Enter] Save  [Backspace] Delete  [Esc] Cancel"
+            return "[Enter] Choose folder  [Esc] Back  [Ctrl+C] Quit"
         if settings_section == "root":
             return "[1-6] Views  [↑/↓] Select  [Enter] Open  [Ctrl+C] Quit"
         if editing:
@@ -1678,14 +1769,36 @@ def _python_executor_runtime_status() -> str:
 
 def _write_port_setting(path: Path, port: int) -> None:
     """Persist AESPA_PORT while preserving unrelated .env settings."""
-    existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    replacement = f"AESPA_PORT={port}"
-    pattern = re.compile(r"^\s*(?:export\s+)?AESPA_PORT\s*=.*$", re.MULTILINE)
-    if pattern.search(existing):
-        updated = pattern.sub(replacement, existing)
-    else:
-        separator = "" if not existing or existing.endswith(("\n", "\r")) else "\n"
-        updated = f"{existing}{separator}{replacement}\n"
+    _write_env_setting(path, "AESPA_PORT", str(port))
+
+
+def _write_data_dir_setting(path: Path, folder: Path) -> None:
+    _write_env_settings(
+        path,
+        {
+            "AESPA_DATA_DIR": json.dumps(str(folder), ensure_ascii=False),
+            "AESPA_DATABASE_URL": f"sqlite:///{folder / 'aespa.db'}",
+        },
+    )
+
+
+def _write_env_setting(path: Path, name: str, value: str) -> None:
+    _write_env_settings(path, {name: value})
+
+
+def _write_env_settings(path: Path, values: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    updated = path.read_text(encoding="utf-8") if path.exists() else ""
+    for name, value in values.items():
+        replacement = f"{name}={value}"
+        pattern = re.compile(
+            rf"^\s*(?:export\s+)?{re.escape(name)}\s*=.*$", re.MULTILINE
+        )
+        if pattern.search(updated):
+            updated = pattern.sub(lambda _match: replacement, updated)
+        else:
+            separator = "" if not updated or updated.endswith(("\n", "\r")) else "\n"
+            updated = f"{updated}{separator}{replacement}\n"
     temporary = path.with_name(
         f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
@@ -1946,8 +2059,9 @@ class InteractiveConsole:
             if mouse_result:
                 continue
             if self.handler.mode == SETTINGS and self.handler.settings_editing:
-                key = self._key_buffer[:1].decode(errors="ignore")
-                self._key_buffer = self._key_buffer[1:]
+                key = self._pop_key_character()
+                if key is None:
+                    return
                 self.handler.handle_settings_key(key)
                 continue
             matched = next(
@@ -1964,14 +2078,33 @@ class InteractiveConsole:
                 continue
             if any(sequence.startswith(self._key_buffer) for sequence in sequences):
                 return
-            key = self._key_buffer[:1].decode(errors="ignore")
-            self._key_buffer = self._key_buffer[1:]
+            key = self._pop_key_character()
+            if key is None:
+                return
             if self.handler.handle_settings_key(key):
                 continue
             if key in _MODE_KEYS:
                 self.handler.switch(_MODE_KEYS[key])
             elif key in ("\r", "\n"):
                 self.handler.toggle_selected_llm()
+
+    def _pop_key_character(self) -> str | None:
+        first = self._key_buffer[0]
+        if first < 0x80:
+            length = 1
+        elif 0xC2 <= first <= 0xDF:
+            length = 2
+        elif 0xE0 <= first <= 0xEF:
+            length = 3
+        elif 0xF0 <= first <= 0xF4:
+            length = 4
+        else:
+            length = 1
+        if len(self._key_buffer) < length:
+            return None
+        candidate = self._key_buffer[:length]
+        self._key_buffer = self._key_buffer[length:]
+        return candidate.decode("utf-8", errors="ignore")
 
     def _consume_mouse_sequence(self) -> bool | None:
         """Consume one terminal mouse report, waiting when a report is incomplete."""

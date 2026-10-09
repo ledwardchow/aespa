@@ -13,11 +13,17 @@ variable is optional and uses the `AESPA_` prefix.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AESPA_DATABASE_URL` | `sqlite:///./aespa.db` | Database connection string |
+| `AESPA_DATABASE_URL` | `sqlite:///./aespa_data/aespa.db` | Database connection string |
 | `AESPA_HOST` | `127.0.0.1` | Server bind address |
 | `AESPA_PORT` | `8000` | Server bind port |
 | `AESPA_WEB_DIR` | `./src/aespa/web` | Compiled frontend directory |
-| `AESPA_DATA_DIR` | `./aespa_data` | Uploaded files and temporary data |
+| `AESPA_DATA_DIR` | `./aespa_data` | Databases and uploaded files |
+
+You can also set the data folder from **Console → Settings → Data Folder** in
+source runs and the macOS and Windows desktop builds. Restart AESPA after
+saving. The folder itself should contain `aespa.db`; AESPA creates a database
+for an empty folder and uses existing data without replacing it. Desktop builds
+save the choice in a writable application support settings file.
 
 AESPA has no built-in user authentication and is designed to run on localhost.
 When it is placed behind Cloudflare Access, it verifies the

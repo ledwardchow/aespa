@@ -3,19 +3,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, insert
-from sqlmodel import Session, select
+from sqlalchemy import DateTime, MetaData, Table, insert, inspect
+from sqlmodel import select
 
 from aespa.db import get_engine
-from aespa.models import (
-    BenchmarkComparison,
-    BenchmarkComparisonEvaluation,
-    BenchmarkDataset,
-    BenchmarkEvaluation,
-    BenchmarkMatch,
-)
 
 from . import models
 from .router import build_router
@@ -58,8 +51,13 @@ def _migrate_renamed_database(store) -> None:
                         column = table.columns.get(key)
                         if column is None:
                             continue
-                        if isinstance(column.type, DateTime) and isinstance(value, str):
+                        is_datetime = isinstance(column.type, DateTime) or isinstance(
+                            getattr(column.type, "impl", None), DateTime
+                        )
+                        if is_datetime and isinstance(value, str):
                             value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                            if value.tzinfo is None:
+                                value = value.replace(tzinfo=timezone.utc)
                         values[key] = value
                     rows.append(values)
                 if rows:
@@ -67,34 +65,63 @@ def _migrate_renamed_database(store) -> None:
 
 
 def _migrate_legacy_data(store) -> None:
-    """Copy the retired core Benchmark Lab rows once, preserving identifiers."""
+    """Read retired core tables without registering them as core ORM models."""
     with store.session() as target:
         if target.exec(select(models.Dataset)).first() is not None:
             return
-        with Session(get_engine()) as source:
-            datasets = list(source.exec(select(BenchmarkDataset)))
-            evaluations = list(source.exec(select(BenchmarkEvaluation)))
-            matches = list(source.exec(select(BenchmarkMatch)))
-            comparisons = list(source.exec(select(BenchmarkComparison)))
-            links = list(source.exec(select(BenchmarkComparisonEvaluation)))
+        engine = get_engine()
+        names = (
+            "benchmark_dataset",
+            "benchmark_evaluation",
+            "benchmark_match",
+            "benchmark_comparison",
+            "benchmark_comparison_evaluation",
+        )
+        existing = set(inspect(engine).get_table_names())
+        if not set(names).issubset(existing):
+            return
+        metadata = MetaData()
+        tables = {name: Table(name, metadata, autoload_with=engine) for name in names}
+        with engine.connect() as source:
+            rows = {
+                name: [
+                    {
+                        key: (
+                            value.replace(tzinfo=timezone.utc)
+                            if isinstance(value, datetime) and value.tzinfo is None
+                            else value
+                        )
+                        for key, value in row.items()
+                    }
+                    for row in source.execute(select(table)).mappings()
+                ]
+                for name, table in tables.items()
+            }
+        datasets = rows["benchmark_dataset"]
+        evaluations = rows["benchmark_evaluation"]
+        matches = rows["benchmark_match"]
+        comparisons = rows["benchmark_comparison"]
+        links = rows["benchmark_comparison_evaluation"]
         if not datasets and not evaluations and not matches and not comparisons:
             return
-        target.add_all(models.Dataset(**row.model_dump()) for row in datasets)
-        target.add_all(models.Evaluation(**row.model_dump()) for row in evaluations)
-        target.add_all(models.Match(**row.model_dump()) for row in matches)
+        target.add_all(models.Dataset(**row) for row in datasets)
+        target.flush()
+        target.add_all(models.Evaluation(**row) for row in evaluations)
+        target.flush()
+        target.add_all(models.Match(**row) for row in matches)
         evaluation_ids = {}
         for link in links:
-            evaluation_ids.setdefault(link.comparison_id, []).append(
-                (link.ordinal, link.evaluation_id)
+            evaluation_ids.setdefault(link["comparison_id"], []).append(
+                (link["ordinal"], link["evaluation_id"])
             )
         target.add_all(
             models.Comparison(
-                **row.model_dump(),
+                **row,
                 evaluation_ids_json=json.dumps(
                     [
                         evaluation_id
                         for _ordinal, evaluation_id in sorted(
-                            evaluation_ids.get(row.id, [])
+                            evaluation_ids.get(row["id"], [])
                         )
                     ]
                 ),

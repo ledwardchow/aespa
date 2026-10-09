@@ -10,8 +10,6 @@ from aespa.db import get_session
 from aespa.models import CodexIntegrationConfig, LLMProviderConfig
 from aespa.schemas import (
     PROVIDER_DEFAULT_MODELS,
-    BenchmarkLabConfigIn,
-    BenchmarkLabConfigOut,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
     CloudflareAccessConfigIn,
@@ -773,21 +771,6 @@ def upsert_reporting_debug_config(
     session: Session = Depends(get_session),
 ) -> ReportingDebugConfigOut:
     return integration_settings.upsert_reporting_debug_config(session, payload)
-
-
-@router.get("/benchmark-lab", response_model=BenchmarkLabConfigOut)
-def get_benchmark_lab_config(
-    session: Session = Depends(get_session),
-) -> BenchmarkLabConfigOut:
-    return integration_settings.get_benchmark_lab_config(session)
-
-
-@router.put("/benchmark-lab", response_model=BenchmarkLabConfigOut)
-def upsert_benchmark_lab_config(
-    payload: BenchmarkLabConfigIn,
-    session: Session = Depends(get_session),
-) -> BenchmarkLabConfigOut:
-    return integration_settings.upsert_benchmark_lab_config(session, payload)
 
 
 @router.get("/browser-debug", response_model=BrowserDebugConfigOut)
