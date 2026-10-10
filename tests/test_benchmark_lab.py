@@ -19,6 +19,7 @@ from aespa.models import (
     ScanLead,
     Site,
     TestRun,
+    UpstreamProxyConfig,
 )
 
 BASE = "/extension/aespa.benchmarking"
@@ -33,6 +34,14 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
         model = LLMConfig(name="Benchmark evaluator", model="test-model")
         scan_model = LLMConfig(name="Test Lead", model="scan-model")
         session.add_all([model, scan_model])
+        session.add(
+            UpstreamProxyConfig(
+                id=1,
+                llm_proxy_url="http://benchmark-proxy.local:8080",
+                proxy_llm=True,
+                llm_ca_bundle_path="/certs/benchmark.pem",
+            )
+        )
         session.commit()
         model_id = model.id
         target = (
@@ -105,8 +114,12 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
         target_id, run_id, finding_id = target.id, run.id, finding.id
 
     calls = []
+    network_calls = []
 
     async def answer(_config, prompt, **_kwargs):
+        from aespa.services import llm
+
+        network_calls.append((llm._llm_proxy_var.get(), llm._llm_ca_bundle_var.get()))
         calls.append(json.loads(prompt))
         return json.dumps(
             {
@@ -168,6 +181,9 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
         },
     )
     assert response.status_code == 201, response.text
+    assert network_calls == [
+        ("http://benchmark-proxy.local:8080", "/certs/benchmark.pem")
+    ]
     assert client.delete(f"{BASE}/datasets/{dataset['id']}").status_code == 409
     result = response.json()
     assert result["comparison"]["method"] == "model"
@@ -1094,6 +1110,14 @@ def test_assisted_matching_uses_bounded_completed_output_only(
     with Session(db_engine) as session:
         config = LLMConfig(name="benchmark evaluator", model="fake")
         session.add(config)
+        session.add(
+            UpstreamProxyConfig(
+                id=1,
+                llm_proxy_url="http://benchmark-proxy.local:8080",
+                proxy_llm=True,
+                llm_ca_bundle_path="/certs/benchmark.pem",
+            )
+        )
         session.commit()
         session.refresh(config)
         run = session.get(SastRun, run_id)
@@ -1109,6 +1133,10 @@ def test_assisted_matching_uses_bounded_completed_output_only(
     captured: dict[str, str] = {}
 
     async def fake_completion(_config, prompt, *, system_prompt):
+        from aespa.services import llm
+
+        captured["proxy"] = llm._llm_proxy_var.get()
+        captured["ca_bundle"] = llm._llm_ca_bundle_var.get()
         captured["prompt"] = prompt
         captured["system_prompt"] = system_prompt
         return json.dumps(
@@ -1155,6 +1183,8 @@ def test_assisted_matching_uses_bounded_completed_output_only(
     result = client.post(f"{BASE}/evaluations/{evaluation['id']}/run")
 
     assert result.status_code == 200, result.text
+    assert captured["proxy"] == "http://benchmark-proxy.local:8080"
+    assert captured["ca_bundle"] == "/certs/benchmark.pem"
     body = result.json()
     assert body["matching_version"] == "model-v2"
     assert body["matches"][0]["disposition"] == "partial"

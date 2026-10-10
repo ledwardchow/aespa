@@ -17,6 +17,22 @@ def test_llm_ca_bundle_is_used_even_with_proxy(monkeypatch):
     assert seen[0]["proxy"] == "http://proxy.local:8080"
 
 
+def test_llm_transport_scope_restores_previous_settings():
+    proxy_token = llm._llm_proxy_var.set("http://previous.local:8080")
+    ca_token = llm._llm_ca_bundle_var.set("/certs/previous.pem")
+    try:
+        with llm.llm_transport_scope(
+            "http://benchmark.local:8080", "/certs/benchmark.pem"
+        ):
+            assert llm._llm_proxy_var.get() == "http://benchmark.local:8080"
+            assert llm._llm_ca_bundle_var.get() == "/certs/benchmark.pem"
+        assert llm._llm_proxy_var.get() == "http://previous.local:8080"
+        assert llm._llm_ca_bundle_var.get() == "/certs/previous.pem"
+    finally:
+        llm._llm_ca_bundle_var.reset(ca_token)
+        llm._llm_proxy_var.reset(proxy_token)
+
+
 def test_scanner_ca_bundle_changes_http_verification(monkeypatch):
     seen = []
     monkeypatch.setattr(
