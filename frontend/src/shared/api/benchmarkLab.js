@@ -8,6 +8,8 @@ export const saveBenchmarkGroundTruth = (kind, id, datasetId) =>
 export const listBenchmarkResults = () => req(`${BASE}/results`);
 export const createBenchmarkResult = (body) => req(`${BASE}/results`, { method: "POST", body });
 export const deleteBenchmarkResult = (id) => req(`${BASE}/results/${id}`, { method: "DELETE" });
+export const saveBenchmarkResultComment = (id, comment) =>
+  req(`${BASE}/results/${id}/comment`, { method: "PUT", body: { comment } });
 export const reviewBenchmarkResult = (resultId, externalId, body) =>
   req(`${BASE}/results/${resultId}/review`, {
     method: "PUT",

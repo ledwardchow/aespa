@@ -99,6 +99,8 @@ function Point({
 export function SiteSummary({ results, onOpen, siteSelector, showChart = true }) {
   const [axis, setAxis] = useState("cost");
   const [display, setDisplay] = useState("optimal");
+  const [showLabels, setShowLabels] = useState(true);
+  const [showLocalModelResults, setShowLocalModelResults] = useState(false);
   const tooltipId = useId();
   const plotClipId = useId();
   const [kinds, setKinds] = useState({ DAST: true, "DAST with SAST Leads": true, SAST: true });
@@ -107,13 +109,18 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
   const [hoveredLegend, setHoveredLegend] = useState(null);
   const [focusedLegend, setFocusedLegend] = useState(null);
   const graphResults = useMemo(
-    () => results.filter((result) => result.summary.full + result.summary.partial > 0),
-    [results],
+    () =>
+      results.filter(
+        (result) =>
+          (showLocalModelResults || result.scan_cost_usd !== 0) &&
+          result.summary.full + result.summary.partial > 0,
+      ),
+    [results, showLocalModelResults],
   );
   const models = useMemo(() => [...new Set(graphResults.map(modelName))].sort(), [graphResults]);
   const defaultVisibleModels = useMemo(() => {
     const counts = new Map();
-    for (const result of results) {
+    for (const result of graphResults) {
       const name = modelName(result);
       counts.set(name, (counts.get(name) || 0) + 1);
     }
@@ -127,7 +134,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
       ).map((point) => point.name),
     );
     return new Set(models.filter((name) => counts.get(name) > 1 || optimal.has(name)));
-  }, [results, graphResults, models]);
+  }, [graphResults, models]);
   const excludedModels = models.filter(
     (name) => !(modelVisibility[name] ?? defaultVisibleModels.has(name)),
   );
@@ -379,26 +386,44 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                 </p>
               )}
             </div>
-            <label className={styles.selector}>
-              Display
-              <select
-                className="select"
-                aria-label="Display"
-                value={display}
-                onChange={(event) => {
-                  setDisplay(event.target.value);
-                  setHoveredLegend(null);
-                  setFocusedLegend(null);
-                  if (event.target.value === "optimal" && dateMode)
-                    setAxis(scoreMode ? "score" : "cost");
-                  setHovered(null);
-                }}
-              >
-                <option value="model">By Model</option>
-                <option value="scan-type">By Scan Type</option>
-                <option value="optimal">Optimal</option>
-              </select>
-            </label>
+            <div className={styles.displayControls}>
+              <label className={styles.labelToggle}>
+                <input
+                  type="checkbox"
+                  checked={showLabels}
+                  onChange={(event) => setShowLabels(event.target.checked)}
+                />
+                Show labels
+              </label>
+              <label className={styles.labelToggle}>
+                <input
+                  type="checkbox"
+                  checked={showLocalModelResults}
+                  onChange={(event) => setShowLocalModelResults(event.target.checked)}
+                />
+                Show local model ($0) results
+              </label>
+              <label className={styles.selector}>
+                Display
+                <select
+                  className="select"
+                  aria-label="Display"
+                  value={display}
+                  onChange={(event) => {
+                    setDisplay(event.target.value);
+                    setHoveredLegend(null);
+                    setFocusedLegend(null);
+                    if (event.target.value === "optimal" && dateMode)
+                      setAxis(scoreMode ? "score" : "cost");
+                    setHovered(null);
+                  }}
+                >
+                  <option value="model">By Model</option>
+                  <option value="scan-type">By Scan Type</option>
+                  <option value="optimal">Optimal</option>
+                </select>
+              </label>
+            </div>
           </div>
           {results.length === 0 ? (
             <p className="subtle">No analyses have been saved for this Site.</p>
@@ -495,7 +520,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                             strokeDasharray={trend.dash}
                             clipPath={`url(#${plotClipId})`}
                           />
-                          {label && (
+                          {showLabels && label && (
                             <text
                               x={label.x}
                               y={label.y}
@@ -525,7 +550,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                           strokeLinejoin="round"
                           clipPath={`url(#${plotClipId})`}
                         />
-                        {optimalLabel && (
+                        {showLabels && optimalLabel && (
                           <text
                             x={optimalLabel.x}
                             y={optimalLabel.y}
@@ -558,57 +583,58 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                         describedBy={hovered?.result.id === result.id ? tooltipId : undefined}
                       />
                     ))}
-                    {[...pointLabels].map(([name, label]) => (
-                      <g
-                        key={name}
-                        data-guide-label={name}
-                        className={styles.singleScanLabel}
-                        style={{
-                          opacity: plotted.some(
-                            (result) => modelName(result) === name && pointMatchesLegend(result),
-                          )
-                            ? 1
-                            : 0.15,
-                        }}
-                      >
-                        <line
-                          x1={label.pointX}
-                          y1={label.pointY}
-                          x2={label.edgeX}
-                          y2={label.edgeY}
-                          stroke="var(--panel)"
-                          strokeWidth="4.5"
-                          strokeLinecap="round"
-                        />
-                        <line
-                          x1={label.pointX}
-                          y1={label.pointY}
-                          x2={label.edgeX}
-                          y2={label.edgeY}
-                          stroke={modelColor(name)}
-                          strokeWidth="1.3"
-                          strokeLinecap="round"
-                        />
-                        <circle
-                          cx={label.pointX}
-                          cy={label.pointY}
-                          r="3"
-                          fill={modelColor(name)}
-                          stroke="var(--panel)"
-                          strokeWidth="1.5"
-                        />
-                        <text
-                          x={label.x}
-                          y={label.y}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          style={{ fill: modelColor(name) }}
-                          aria-label={`${name}${optimalModels.has(name) ? " optimal model" : " single scan"}`}
+                    {showLabels &&
+                      [...pointLabels].map(([name, label]) => (
+                        <g
+                          key={name}
+                          data-guide-label={name}
+                          className={styles.singleScanLabel}
+                          style={{
+                            opacity: plotted.some(
+                              (result) => modelName(result) === name && pointMatchesLegend(result),
+                            )
+                              ? 1
+                              : 0.15,
+                          }}
                         >
-                          {name}
-                        </text>
-                      </g>
-                    ))}
+                          <line
+                            x1={label.pointX}
+                            y1={label.pointY}
+                            x2={label.edgeX}
+                            y2={label.edgeY}
+                            stroke="var(--panel)"
+                            strokeWidth="4.5"
+                            strokeLinecap="round"
+                          />
+                          <line
+                            x1={label.pointX}
+                            y1={label.pointY}
+                            x2={label.edgeX}
+                            y2={label.edgeY}
+                            stroke={modelColor(name)}
+                            strokeWidth="1.3"
+                            strokeLinecap="round"
+                          />
+                          <circle
+                            cx={label.pointX}
+                            cy={label.pointY}
+                            r="3"
+                            fill={modelColor(name)}
+                            stroke="var(--panel)"
+                            strokeWidth="1.5"
+                          />
+                          <text
+                            x={label.x}
+                            y={label.y}
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            style={{ fill: modelColor(name) }}
+                            aria-label={`${name}${optimalModels.has(name) ? " optimal model" : " single scan"}`}
+                          >
+                            {name}
+                          </text>
+                        </g>
+                      ))}
                   </svg>
                 </div>
               ) : (
@@ -732,6 +758,12 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                 {hovered.result.summary.full} full · {hovered.result.summary.partial} partial
               </dd>
             </dl>
+            {hovered.result.comment && (
+              <div className={styles.comment}>
+                <strong>Comment</strong>
+                <p>{hovered.result.comment}</p>
+              </div>
+            )}
             <div className={styles.categorySummary}>
               <strong>Matched / ground truth by OWASP category</strong>
               {hovered.result.category_counts && hovered.result.category_totals ? (

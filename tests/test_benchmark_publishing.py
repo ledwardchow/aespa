@@ -40,6 +40,7 @@ def test_graph_export_keeps_only_summary_and_stable_identity(portable):
     assert result["primary"] == {"model": "scanner", "name": None, "provider": None}
     assert result["scan_type"] == "DAST"
     assert result["tokens"] is None
+    assert result["comment"] == ""
     assert "run_name" not in result
     assert result["sast"] == []
     assert len(result["dataset"]["key"]) == 64

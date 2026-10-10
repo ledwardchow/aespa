@@ -187,6 +187,13 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
     assert client.delete(f"{BASE}/datasets/{dataset['id']}").status_code == 409
     result = response.json()
     assert result["comparison"]["method"] == "model"
+    assert result["comment"] == ""
+    commented = client.put(
+        f"{BASE}/results/{result['id']}/comment",
+        json={"comment": "  Local model - 18 hours  "},
+    )
+    assert commented.status_code == 200
+    assert commented.json()["comment"] == "Local model - 18 hours"
     expected_hour = "08" if has_start_time else "07"
     assert result["scan_started_at"] == f"2026-09-30T{expected_hour}:00:00+00:00"
     assert result["scan_cost_usd"] == 0.42
@@ -233,6 +240,8 @@ def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(
     saved = client.get(f"{BASE}/results/{result['id']}").json()
     assert saved["ground_truth"]["items"][0]["external_id"] == "GT-1"
     assert saved["scan_cost_usd"] == 0.42
+    assert saved["comment"] == "Local model - 18 hours"
+    assert reviewed.json()["comment"] == "Local model - 18 hours"
     assert client.get(f"{BASE}/results").json()[0]["scan_cost_usd"] == 0.42
 
 
