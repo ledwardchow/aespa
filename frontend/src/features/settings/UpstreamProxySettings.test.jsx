@@ -8,6 +8,8 @@ vi.mock("../../shared/api/settings.js");
 const config = {
   scanner_proxy_url: "http://scanner-proxy.local:8080",
   llm_proxy_url: "http://llm-proxy.local:8081",
+  scanner_ca_bundle_path: null,
+  llm_ca_bundle_path: null,
   proxy_scanner: true,
   proxy_llm: true,
 };
@@ -30,6 +32,8 @@ test("saves independent proxy URLs for testing and LLM traffic", async () => {
     expect(settingsApi.upsertUpstreamProxy).toHaveBeenCalledWith({
       scanner_proxy_url: "http://testing.local:9000",
       llm_proxy_url: "http://models.local:9001",
+      scanner_ca_bundle_path: null,
+      llm_ca_bundle_path: null,
       proxy_scanner: true,
       proxy_llm: true,
     }),
@@ -49,6 +53,22 @@ test("keeps a configured URL when its traffic toggle is disabled", async () => {
     expect(settingsApi.upsertUpstreamProxy).toHaveBeenCalledWith({
       ...config,
       proxy_scanner: false,
+    }),
+  );
+});
+
+test("saves separate CA bundle paths", async () => {
+  render(<UpstreamProxySettings />);
+  const scannerPath = await screen.findByLabelText("Testing traffic CA bundle path");
+  const llmPath = screen.getByLabelText("LLM CA bundle path");
+  fireEvent.change(scannerPath, { target: { value: " /etc/ssl/scanner.pem " } });
+  fireEvent.change(llmPath, { target: { value: "/etc/ssl/llm.pem" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    expect(settingsApi.upsertUpstreamProxy).toHaveBeenCalledWith({
+      ...config,
+      scanner_ca_bundle_path: "/etc/ssl/scanner.pem",
+      llm_ca_bundle_path: "/etc/ssl/llm.pem",
     }),
   );
 });

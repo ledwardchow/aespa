@@ -468,11 +468,13 @@ async def _do_crawl(run_id: int) -> None:
         upstream_proxy = get_upstream_proxy_config(s)
     llm_proxy_url = upstream_proxy.llm_proxy_url if upstream_proxy.proxy_llm else None
     llm_svc.set_llm_proxy(llm_proxy_url)
+    llm_svc.set_llm_ca_bundle(upstream_proxy.llm_ca_bundle_path)
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
     try:
         await _do_crawl_inner(run_id)
     finally:
         llm_svc.set_llm_proxy(None)
+        llm_svc.set_llm_ca_bundle(None)
         llm_svc.clear_run_context()
 
 

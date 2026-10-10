@@ -6,6 +6,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
+- **Custom CA bundles**: Set separate PEM CA bundle paths for LLM calls and scanner HTTP requests in Upstream Proxy settings. AESPA checks certificates against a configured bundle; browser based tests keep accepting certificate errors.
+
 - **Saved crawls**: A finished crawl can now be saved on its site and loaded into a new run, so repeat scans and benchmarks can skip crawling. Use **Save crawl to site** on a run with crawl data, then **Load saved crawl** on a new run. The site page lists saved crawls, where you can rename, download, or delete them, and add crawl export files you downloaded earlier. Saved crawls include the session cookies and tokens captured during the crawl, the same as crawl export files.
 
 - **Outdated JavaScript library checks**: Web scans now check the JavaScript files captured while crawling for library versions with known vulnerabilities, using the community-maintained Retire.js list (more than 70 libraries, including jQuery, jQuery UI, Bootstrap, AngularJS, Lodash, Moment.js, Handlebars, DOMPurify, CKEditor, and TinyMCE). Each outdated library version is reported once as a Vulnerable and Outdated Components finding that lists the matching CVEs, where the version was seen, the version to upgrade to, and the date of the list used. The check also runs in passive mode and can be turned off with the other deterministic checks.
@@ -16,11 +18,17 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Saved benchmark analyses**: Opening an analysis from a graph or results list now shows it on its own page, with a link back to Benchmark Lab. Findings can be grouped by OWASP category or severity.
+
+- **Benchmark cost charts**: The scanner and benchmark sites can compare scan cost with either matched finding count or a severity-weighted score. The sites show the score chart by default. Full and partial matches use the ground-truth severity: informational 0, low 1, medium 2, high 3, and critical 4. High and Critical matches in OWASP A01, A03, A04, and A07 earn double points. Point details show matched findings out of the ground-truth total for each OWASP category.
+
 - **Portable installation data**: AESPA now keeps its main, console-log, and reporting-debug databases in `aespa_data` alongside uploads and extension data. Existing databases are moved there on first start, and uploaded-file references are repaired when the folder is copied to another installation. The console's Data Folder setting lets source and desktop users choose where AESPA stores data on the next launch; an empty folder starts a new database, while existing data is left in place.
 
 - **Smaller console log database**: When console log saving is on, each LLM request and response is now stored once instead of twice. Agent conversations that continue an earlier logged call now save only the new messages, with a reference to that earlier call, instead of repeating the whole conversation on every step. Together these greatly reduce how fast the console log database grows during long scans.
 
 ### Fixes
+
+- **LLM scan startup**: Fixed scans failing immediately with an `http_client` error when using current Anthropic SDK releases. SDK requests now use the supported HTTP client, including Bedrock Mantle requests signed with AWS credentials.
 
 - **SAST deletion with older benchmarks**: Deleting a collection or campaign now reports a clear conflict when one of its SAST runs is still referenced by an older Benchmark Lab evaluation.
 
@@ -29,6 +37,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Console startup on occupied ports**: When the requested port is in use, AESPA starts on port 9000 or the next available higher port instead of exiting.
 
 ### Housekeeping
+
+- **BankOfEd benchmark data**: Added a guarded migration tool for applying revised ground truth to saved comparisons while keeping their finding matches and result IDs.
 
 - **SAST scan maintenance**: Light and Deep scans now share archive extraction, source file tools, and candidate-state helpers, keeping those behaviors consistent across both modes.
 

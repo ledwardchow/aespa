@@ -137,6 +137,7 @@ export function parseRoute(hash = "#/"): Route {
   if ((m = routeHash.match(/^#\/extensions\/([a-z0-9_.-]+)\/settings$/)))
     return { name: "extension-settings", extensionId: m[1] };
   if (routeHash === "#/reporting-debug") return { name: "reporting-debug" };
+  if (routeHash === "#/benchmark-lab/scoring-guide") return { name: "benchmark-scoring-guide" };
   if ((m = routeHash.match(/^#\/benchmark-lab\/results\/(\d+)$/)))
     return { name: "benchmark-lab", id: +m[1] };
   if (routeHash === "#/benchmark-lab" || routeHash === "#/sast-benchmarking")

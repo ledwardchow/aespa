@@ -29,6 +29,9 @@ def test_graph_export_keeps_only_summary_and_stable_identity(portable):
     assert one == two
     result = one["results"][0]
     assert result["summary"] == {"full": 1, "partial": 0, "missing": 0}
+    assert result["score"] is None
+    assert result["category_counts"] is None
+    assert result["category_totals"] is None
     assert result["scan_cost_usd"] == 0.42
     assert result["scan_started_at"] is None
     assert result["primary"] == {"model": "scanner", "name": None, "provider": None}
@@ -42,6 +45,66 @@ def test_graph_export_keeps_only_summary_and_stable_identity(portable):
     assert "SQL injection" not in serialized
     assert "ground_truth" not in result
     assert "findings" not in result
+
+
+def test_matched_score_weights_full_and_partial_matches():
+    result = {
+        "ground_truth": {
+            "items": [
+                {
+                    "external_id": str(index),
+                    "severity": severity,
+                    "category": "A01: Broken Access Control" if index < 3 else "A03: Injection",
+                }
+                for index, severity in enumerate(
+                    ("informational", "low", "medium", "high", "critical")
+                )
+            ]
+        },
+        "rows": [
+            {"external_id": str(index), "disposition": disposition}
+            for index, disposition in enumerate(
+                ("full", "partial", "full", "partial", "missing")
+            )
+        ],
+    }
+    scoring = importlib.import_module("aespa_external_aespa_benchmarking.scoring")
+    assert scoring.matched_score(result["ground_truth"], result["rows"]) == 9
+    assert scoring.matched_categories(result["ground_truth"], result["rows"]) == {
+        "A01: Broken Access Control": 3,
+        "A03: Injection": 1,
+    }
+    assert scoring.ground_truth_category_totals(result["ground_truth"]) == {
+        "A01: Broken Access Control": 3,
+        "A03: Injection": 2,
+    }
+    result["rows"][4]["disposition"] = "full"
+    assert scoring.matched_score(result["ground_truth"], result["rows"]) == 17
+    assert scoring.matched_categories(result["ground_truth"], result["rows"])[
+        "A03: Injection"
+    ] == 2
+    result["ground_truth"]["items"][4]["severity"] = "unknown"
+    assert scoring.matched_score(result["ground_truth"], result["rows"]) is None
+
+
+def test_matched_score_doubles_only_high_and_critical_in_selected_categories():
+    scoring = importlib.import_module("aespa_external_aespa_benchmarking.scoring")
+    items = [
+        {"external_id": str(index), "severity": severity, "category": category}
+        for index, (severity, category) in enumerate(
+            [
+                ("high", "A01: Broken Access Control"),
+                ("high", "A03: Injection"),
+                ("critical", "A04: Insecure Design"),
+                ("critical", "A07: Authentication"),
+                ("high", "A02: Cryptographic Failures"),
+                ("low", "A01: Broken Access Control"),
+                ("high", "A01-other"),
+            ]
+        )
+    ]
+    rows = [{"external_id": str(index), "disposition": "partial"} for index in range(7)]
+    assert scoring.matched_score({"items": items}, rows) == 35
 
 
 def test_published_tokens_include_linked_sast_run_without_names():

@@ -1059,6 +1059,8 @@ class ComponentMapperConfigOut(ComponentMapperConfigBase):
 class UpstreamProxyConfigBase(BaseModel):
     scanner_proxy_url: str | None = Field(default=None, max_length=500)
     llm_proxy_url: str | None = Field(default=None, max_length=500)
+    scanner_ca_bundle_path: str | None = Field(default=None, max_length=1000)
+    llm_ca_bundle_path: str | None = Field(default=None, max_length=1000)
     proxy_scanner: bool = False
     proxy_llm: bool = False
 
@@ -1076,7 +1078,22 @@ class UpstreamProxyConfigBase(BaseModel):
 
 
 class UpstreamProxyConfigIn(UpstreamProxyConfigBase):
-    pass
+    @field_validator("scanner_ca_bundle_path", "llm_ca_bundle_path")
+    @classmethod
+    def _validate_ca_bundle_path(cls, value):
+        if not value or not value.strip():
+            return None
+        import ssl
+        from pathlib import Path
+
+        path = Path(value.strip()).expanduser()
+        if not path.is_absolute() or not path.is_file():
+            raise ValueError("CA bundle must be an existing file on the AESPA computer")
+        try:
+            ssl.create_default_context(cafile=str(path))
+        except (OSError, ssl.SSLError) as exc:
+            raise ValueError("CA bundle must contain valid PEM certificates") from exc
+        return str(path)
 
 
 class UpstreamProxyConfigOut(UpstreamProxyConfigBase):

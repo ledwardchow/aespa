@@ -126,6 +126,9 @@ def graph_bundle(store) -> dict:
                     "scan_cost_usd": result.get("scan_cost_usd"),
                     "tokens": token_counts(core, row, models),
                     "summary": result["summary"],
+                    "score": result["score"],
+                    "category_counts": result["category_counts"],
+                    "category_totals": result["category_totals"],
                     "updated_at": timestamp(row.updated_at),
                 }
             )

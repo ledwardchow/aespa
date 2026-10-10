@@ -46,12 +46,14 @@ def _apply_upstream_proxy(session: Session) -> None:
     clients all read the proxy ContextVars set here; without this call they run in
     a fresh context with the vars unset and every request bypasses Burp/ZAP.
     """
-    from aespa.services.scanner import _scanner_proxy_var
+    from aespa.services.scanner import _scanner_ca_bundle_var, _scanner_proxy_var
     from aespa.services.settings import get_upstream_proxy_config
 
     cfg = get_upstream_proxy_config(session)
     _scanner_proxy_var.set(cfg.scanner_proxy_url if cfg.proxy_scanner else None)
+    _scanner_ca_bundle_var.set(cfg.scanner_ca_bundle_path)
     llm_svc.set_llm_proxy(cfg.llm_proxy_url if cfg.proxy_llm else None)
+    llm_svc.set_llm_ca_bundle(cfg.llm_ca_bundle_path)
     log.info(
         "ALICE upstream proxy: scanner_url=%s llm_url=%s scanner=%s llm=%s",
         cfg.scanner_proxy_url,
@@ -1054,7 +1056,6 @@ async def _execute_alice_tool(
             headers=req_headers,
             timeout=timeout,
             follow_redirects=True,
-            verify=False,
         ) as hx:
             try:
                 if isinstance(hx, traffic_svc.LoggingAsyncClient):
@@ -1568,7 +1569,6 @@ async def _execute_alice_tool(
             headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
             timeout=timeout,
             follow_redirects=False,
-            verify=False,
             provenance={"agent_id": "alice"},
         ) as hx:
             for cand in candidates[:20]:
@@ -1691,7 +1691,6 @@ async def _execute_alice_tool(
             headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
             timeout=timeout,
             follow_redirects=True,
-            verify=False,
             provenance={
                 "agent_id": "alice",
                 "purpose": traffic_svc.request_purpose(

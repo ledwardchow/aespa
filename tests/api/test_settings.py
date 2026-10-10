@@ -276,6 +276,32 @@ def test_upstream_proxy_config_rejects_invalid_url(client: TestClient, field: st
     assert response.status_code == 422
 
 
+def test_upstream_proxy_config_accepts_ca_bundle_paths(client: TestClient):
+    import certifi
+
+    bundle = certifi.where()
+    response = client.put(
+        "/api/settings/upstream-proxy",
+        json={
+            "scanner_ca_bundle_path": bundle,
+            "llm_ca_bundle_path": bundle,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["scanner_ca_bundle_path"] == bundle
+    assert response.json()["llm_ca_bundle_path"] == bundle
+    saved = client.get("/api/settings/upstream-proxy")
+    assert saved.json()["scanner_ca_bundle_path"] == bundle
+
+
+def test_upstream_proxy_config_rejects_missing_ca_bundle(client: TestClient):
+    response = client.put(
+        "/api/settings/upstream-proxy",
+        json={"llm_ca_bundle_path": "/missing/company-ca.pem"},
+    )
+    assert response.status_code == 422
+
+
 def test_cloudflare_access_config_round_trip(client: TestClient):
     # Defaults to no audience (legacy behaviour: audience check skipped).
     r = client.get("/api/settings/cloudflare-access")

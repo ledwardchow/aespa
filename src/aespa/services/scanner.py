@@ -202,13 +202,20 @@ def _persist_execution_snapshot(
 _scanner_proxy_var: _ContextVar[str | None] = _ContextVar(
     "_scanner_proxy", default=None
 )
+_scanner_ca_bundle_var: _ContextVar[str | None] = _ContextVar(
+    "_scanner_ca_bundle", default=None
+)
 _scanner_global_header_var: _ContextVar[dict[str, str]] = _ContextVar(
     "_scanner_global_header", default={}
 )
 
 
+def _scanner_tls_verify() -> str | bool:
+    return _scanner_ca_bundle_var.get() or False
+
+
 def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
-    kwargs.setdefault("verify", False)
+    kwargs.setdefault("verify", _scanner_tls_verify())
     if proxy := _scanner_proxy_var.get():
         kwargs["proxy"] = proxy
     if global_header := _scanner_global_header_var.get():
@@ -4742,7 +4749,6 @@ async def _run_specialist_agent(
                 if scanner_policy
                 else REQUEST_TIMEOUT,
                 follow_redirects=True,
-                verify=False,
             ) as _hx:
                 saved = await _persist_dynamic_finding(
                     run_id=run_id,
@@ -4909,7 +4915,6 @@ async def _run_specialist_agent(
                 if scanner_policy
                 else REQUEST_TIMEOUT,
                 follow_redirects=True,
-                verify=False,
                 provenance={
                     "agent_id": agent_id,
                     "agent_step": step,
@@ -6769,8 +6774,10 @@ async def _do_thinking_scan(
     browser_visible = bool(browser_debug_cfg.browser_visible)
 
     _scanner_proxy_var.set(scanner_proxy_url)
+    _scanner_ca_bundle_var.set(upstream_proxy.scanner_ca_bundle_path)
     _scanner_global_header_var.set(global_http_header)
     llm_svc.set_llm_proxy(llm_proxy_url)
+    llm_svc.set_llm_ca_bundle(upstream_proxy.llm_ca_bundle_path)
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
 
     base_url = str(site.base_url or "").strip()
@@ -6827,7 +6834,6 @@ async def _do_thinking_scan(
         # It only creates leads; the agent must confirm execution before reporting.
         async with _make_scanner_client(
             run_id=run_id,
-            verify=False,
             timeout=REQUEST_TIMEOUT,
             provenance={"purpose": "Test Lead: Analyze JavaScript sinks"},
         ) as _hx_sink:
@@ -7294,7 +7300,6 @@ async def _do_thinking_scan(
             if scanner_policy
             else REQUEST_TIMEOUT,
             follow_redirects=True,
-            verify=False,
             event_hooks=traffic_svc.make_httpx_hooks(
                 run_id, username=creds[0].username if creds else None
             ),
@@ -13133,7 +13138,6 @@ async def _fetch_matrix_url(
             cookies=cookies,
             headers=headers,
             follow_redirects=follow_redirects,
-            verify=False,
             timeout=timeout,
         ) as client:
             if (

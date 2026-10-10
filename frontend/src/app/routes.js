@@ -255,6 +255,14 @@ export const routes = {
     ),
     props: (route) => ({ initialResultId: route.id }),
   },
+  "benchmark-scoring-guide": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkScoringGuide.jsx"),
+      "BenchmarkScoringGuide",
+    ),
+    props: () => ({}),
+  },
   "benchmark-evaluation-new": {
     section: "benchmark-lab",
     Component: lazyNamed(

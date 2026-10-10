@@ -685,6 +685,8 @@ class UpstreamProxyConfig(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     scanner_proxy_url: Optional[str] = Field(default=None)
     llm_proxy_url: Optional[str] = Field(default=None)
+    scanner_ca_bundle_path: Optional[str] = Field(default=None)
+    llm_ca_bundle_path: Optional[str] = Field(default=None)
     proxy_scanner: bool = Field(default=False)
     proxy_llm: bool = Field(default=False)
     updated_at: datetime = Field(default_factory=_utcnow)

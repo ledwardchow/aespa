@@ -343,6 +343,8 @@ Singleton row (id = 1). Routes scanner and/or LLM traffic through independently 
 |---|---|---|
 | `scanner_proxy_url` | — | `http://host:port` proxy URL for testing traffic |
 | `llm_proxy_url` | — | `http://host:port` proxy URL for LLM traffic |
+| `scanner_ca_bundle_path` | — | PEM CA bundle for scanner HTTP certificate checks |
+| `llm_ca_bundle_path` | — | PEM CA bundle for built in LLM HTTP certificate checks |
 | `proxy_scanner` | `false` | Route scanner HTTP and Playwright traffic through proxy |
 | `proxy_llm` | `false` | Route LLM API calls through proxy |
 

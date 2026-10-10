@@ -252,8 +252,15 @@ def record_session_probe_result(
 async def _probe_session(
     url: str, headers: dict[str, Any], cookies: dict[str, Any]
 ) -> int:
+    from aespa.services.settings import get_upstream_proxy_config
+
+    with Session(get_engine()) as session:
+        ca_bundle = get_upstream_proxy_config(session).scanner_ca_bundle_path
     async with httpx.AsyncClient(
-        timeout=15.0, follow_redirects=True, verify=False, trust_env=False
+        timeout=15.0,
+        follow_redirects=True,
+        verify=ca_bundle or False,
+        trust_env=False,
     ) as client:
         response = await client.get(
             url,
