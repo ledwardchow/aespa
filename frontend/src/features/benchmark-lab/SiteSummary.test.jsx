@@ -143,7 +143,9 @@ test("plots severity score and leaves analyses without a score out of that view"
   render(<SiteSummary results={scored} onOpen={vi.fn()} />);
   expect(screen.getByRole("option", { name: "Scan cost/matched findings" })).toBeTruthy();
   await user.selectOptions(screen.getByLabelText("Compare by"), "score");
-  expect(screen.getByRole("img", { name: "Scan cost versus severity-weighted score" })).toBeTruthy();
+  expect(
+    screen.getByRole("img", { name: "Scan cost versus severity-weighted score" }),
+  ).toBeTruthy();
   expect(screen.getByText("Score", { selector: "text" })).toBeTruthy();
   expect(screen.getByRole("button", { name: /DAST only,.*0 score/ })).toBeTruthy();
   expect(screen.getByRole("button", { name: /Combined scan,.*5 score/ })).toBeTruthy();
@@ -155,6 +157,28 @@ test("plots severity score and leaves analyses without a score out of that view"
   expect(tooltip.textContent).toContain("Matched / ground truth by OWASP category");
   expect(tooltip.textContent).toContain("A01: Broken Access Control2/3");
   expect(tooltip.textContent).toContain("A03: Injection1/2");
+});
+
+test("plots score by scan date even when scan cost is unavailable", async () => {
+  const user = userEvent.setup();
+  const dated = results.map((result) => ({
+    ...result,
+    score: result.id + 2,
+    scan_cost_usd: null,
+    scan_started_at: `2026-09-30T0${result.id}:00:00Z`,
+  }));
+  render(<SiteSummary results={dated} onOpen={vi.fn()} />);
+  expect(screen.getByRole("option", { name: "Scan date/matched findings" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Scan date/score" })).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText("Compare by"), "date-score");
+  expect(screen.getByLabelText("Display").value).toBe("model");
+  expect(screen.getByRole("heading", { name: "Scan date and score" })).toBeTruthy();
+  expect(
+    screen.getByRole("img", { name: "Scan date versus severity-weighted score" }),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Combined scan,.*4 score/ })).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText("Display"), "optimal");
+  expect(screen.getByLabelText("Compare by").value).toBe("score");
 });
 
 test("groups model names by the last slash or dot segment", async () => {

@@ -84,8 +84,8 @@ export function BenchmarkScoringGuide() {
             a Full A02 High match scores 3. A Missing item scores 0. Together those items score 17.
           </p>
           <p>
-            The score is the sum across ground truth items. The cost/score chart plots that total
-            against the scan cost. The cost/matched findings chart instead counts Full and Partial
+            The score is the sum across ground truth items. Scan cost/score and Scan date/score plot
+            it against scan cost or start time. The matched findings views count Full and Partial
             items. A score is unavailable when a matched item has no usable severity, or when an
             older published result has no saved match details to recalculate it.
           </p>

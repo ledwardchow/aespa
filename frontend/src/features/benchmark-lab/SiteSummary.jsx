@@ -169,11 +169,12 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
       kinds[scanType(result.run_kind, result.scan_models)] &&
       !excludedModels.includes(modelName(result)),
   );
-  const scoreMode = axis === "score";
+  const dateMode = axis === "date" || axis === "date-score";
+  const scoreMode = axis === "score" || axis === "date-score";
   const metricValue = (result) =>
     scoreMode ? result.score : result.summary.full + result.summary.partial;
   const axisValue = (result) =>
-    axis !== "date"
+    !dateMode
       ? result.scan_cost_usd
       : result.scan_started_at
         ? new Date(result.scan_started_at).getTime()
@@ -182,7 +183,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
     (result) => Number.isFinite(axisValue(result)) && Number.isFinite(metricValue(result)),
   );
   const frontier =
-    display === "optimal" && axis !== "date"
+    display === "optimal" && !dateMode
       ? paretoFrontier(
           plotted.map((result) => ({
             id: result.id,
@@ -227,14 +228,14 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
     ]),
   );
   const values = plotted.map(axisValue);
-  let minValue = axis !== "date" ? 0 : Math.min(...values);
-  let maxValue = axis !== "date" ? Math.max(0.01, ...values) : Math.max(...values);
-  if (axis === "date" && minValue === maxValue) {
+  let minValue = !dateMode ? 0 : Math.min(...values);
+  let maxValue = !dateMode ? Math.max(0.01, ...values) : Math.max(...values);
+  if (dateMode && minValue === maxValue) {
     minValue -= 1800000;
     maxValue += 1800000;
   }
   const formatAxis = (value) =>
-    axis !== "date"
+    !dateMode
       ? money(value)
       : new Date(value).toLocaleString(undefined, {
           month: "short",
@@ -242,7 +243,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
           hour: "2-digit",
           minute: "2-digit",
         });
-  const axisLabel = axis !== "date" ? "Scan cost (USD)" : "Scan start date and time";
+  const axisLabel = !dateMode ? "Scan cost (USD)" : "Scan start date and time";
   const maxFindings = Math.max(1, ...plotted.map(metricValue));
   const findingTicks =
     maxFindings <= 4
@@ -351,13 +352,15 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
             value={axis}
             onChange={(event) => {
               setAxis(event.target.value);
-              if (event.target.value === "date" && display === "optimal") setDisplay("model");
+              if (event.target.value.startsWith("date") && display === "optimal")
+                setDisplay("model");
               setHovered(null);
             }}
           >
             <option value="cost">Scan cost/matched findings</option>
             <option value="score">Scan cost/score</option>
-            <option value="date">Scan date</option>
+            <option value="date">Scan date/matched findings</option>
+            <option value="date-score">Scan date/score</option>
           </select>
         </label>
       </div>
@@ -366,11 +369,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
           <div className={`benchmark-chart-header ${styles.chartHeader}`}>
             <div>
               <h2>
-                {scoreMode
-                  ? "Scan cost and score"
-                  : axis === "cost"
-                    ? "Scan cost and findings"
-                    : "Scan date and findings"}
+                {`${dateMode ? "Scan date" : "Scan cost"} and ${scoreMode ? "score" : "findings"}`}
               </h2>
               <a href="#/benchmark-lab/scoring-guide">How scoring and matching work</a>
               {display === "optimal" && (
@@ -390,7 +389,8 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                   setDisplay(event.target.value);
                   setHoveredLegend(null);
                   setFocusedLegend(null);
-                  if (event.target.value === "optimal" && axis === "date") setAxis("cost");
+                  if (event.target.value === "optimal" && dateMode)
+                    setAxis(scoreMode ? "score" : "cost");
                   setHovered(null);
                 }}
               >
@@ -409,7 +409,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                   <svg
                     viewBox="0 0 800 340"
                     role="img"
-                    aria-label={`${axis === "date" ? "Scan date" : "Scan cost"} versus ${scoreMode ? "severity-weighted score" : "full and partial findings"}`}
+                    aria-label={`${dateMode ? "Scan date" : "Scan cost"} versus ${scoreMode ? "severity-weighted score" : "full and partial findings"}`}
                     className={`benchmark-chart ${styles.chart}`}
                   >
                     <defs>
@@ -614,14 +614,14 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
               ) : (
                 <p className="subtle">
                   No analyses with {scoreMode ? "a score" : "findings"} and a recorded{" "}
-                  {axis === "date" ? "scan start time" : "scan cost"} match these filters.
+                  {dateMode ? "scan start time" : "scan cost"} match these filters.
                 </p>
               )}
-              {axis === "date" && unavailable.length > 0 && (
+              {dateMode && unavailable.length > 0 && (
                 <p className="subtle">
                   {unavailable.length} matching{" "}
                   {unavailable.length === 1 ? "analysis has" : "analyses have"} no recorded{" "}
-                  {axis === "date" ? "scan start time" : "scan cost"}
+                  {dateMode ? "scan start time" : "scan cost"}
                   and cannot be plotted.
                 </p>
               )}
