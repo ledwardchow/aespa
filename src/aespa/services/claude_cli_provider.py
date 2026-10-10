@@ -29,6 +29,10 @@ MODEL_ALIASES = {
 _ENV_KEYS = (
     "PATH",
     "HOME",
+    # On macOS the CLI looks up its Keychain sign-in by username; without
+    # USER it reports "Not logged in".
+    "USER",
+    "LOGNAME",
     "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME",
     "CLAUDE_CONFIG_DIR",
@@ -160,17 +164,31 @@ async def _invoke(
             process.kill()
             await process.communicate()
             raise
-    if process.returncode:
-        detail = stderr.decode(errors="replace").strip()[-1000:]
+    # With --output-format json the CLI reports most failures (bad model,
+    # auth, API errors) on stdout and exits 1, leaving stderr empty or terse.
+    try:
+        result = json.loads(stdout)
+    except (ValueError, UnicodeDecodeError):
+        result = None
+    if not isinstance(result, dict):
+        if process.returncode:
+            detail = stderr.decode(errors="replace").strip()[-1000:]
+            raise RuntimeError(
+                f"Claude CLI failed: {detail or f'exit {process.returncode}'}"
+            )
+        raise RuntimeError("Claude CLI returned invalid JSON")
+    if result.get("is_error") or process.returncode:
+        detail = str(result.get("result") or "").strip()
+        if not detail:
+            detail = stderr.decode(errors="replace").strip()[-1000:]
+        status = result.get("api_error_status")
+        if status:
+            detail = (
+                f"{detail} (API status {status})" if detail else f"API status {status}"
+            )
         raise RuntimeError(
             f"Claude CLI failed: {detail or f'exit {process.returncode}'}"
         )
-    try:
-        result = json.loads(stdout)
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise RuntimeError("Claude CLI returned invalid JSON") from exc
-    if result.get("is_error"):
-        raise RuntimeError(str(result.get("result") or "Claude CLI request failed"))
     _usage(result, MODEL_ALIASES.get(config.model, config.model) or "sonnet", callback)
     return result
 

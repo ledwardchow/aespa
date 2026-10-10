@@ -30,6 +30,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Claude Code CLI sign-in on macOS**: Fixed Claude Code CLI requests failing with "Not logged in" on macOS even when Claude Code was signed in.
+
+- **Claude Code CLI errors**: When a Claude Code CLI request fails, scan logs and error messages now show the reason reported by the CLI, such as an unavailable model or a sign-in problem, instead of only `exit 1`.
+
 - **LLM scan startup**: Fixed scans failing immediately with an `http_client` error when using current Anthropic SDK releases. SDK requests now use the supported HTTP client, including Bedrock Mantle requests signed with AWS credentials.
 
 - **SAST deletion with older benchmarks**: Deleting a collection or campaign now reports a clear conflict when one of its SAST runs is still referenced by an older Benchmark Lab evaluation.
