@@ -6,7 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **Benchmark result comments**: Add a comment to a saved Benchmark Lab analysis. Comments appear on graph cards and can be included in published benchmark summaries. The private benchmark site also lets the result uploader edit its comment, and the public graph site displays it.
+- **Benchmark result comments**: Add a comment to a saved Benchmark Lab analysis. Comments appear on graph cards and can be included in published benchmark summaries. Signed-in users with access to the private benchmark site can edit comments there, and the public graph site displays them.
 
 - **Custom CA bundles**: Set separate PEM CA bundle paths for application and testing traffic in Connectivity settings. LLM calls, model lists, sign-in requests, and Benchmark Lab use the application setting. Session checks and vulnerable-library list updates use the testing setting. AESPA checks certificates against a configured bundle; browser based tests keep accepting certificate errors. CLI providers receive the configured CA path through their environment.
 
