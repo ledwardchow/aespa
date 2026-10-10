@@ -33,6 +33,8 @@ export function UpstreamProxySettings() {
       const saved = await settingsApi.upsertUpstreamProxy({
         scanner_proxy_url: (form.scanner_proxy_url || "").trim() || null,
         llm_proxy_url: (form.llm_proxy_url || "").trim() || null,
+        scanner_ca_bundle_path: (form.scanner_ca_bundle_path || "").trim() || null,
+        llm_ca_bundle_path: (form.llm_ca_bundle_path || "").trim() || null,
         proxy_scanner: !!form.proxy_scanner,
         proxy_llm: !!form.proxy_llm,
       });
@@ -109,6 +111,35 @@ export function UpstreamProxySettings() {
               />
             </div>
           )}
+          <div className="divider" />
+          <div className="form-section-title">Certificate trust</div>
+          <p className="subtle">
+            Enter PEM CA bundle paths on the computer running AESPA. These files are
+            used to check HTTPS certificates for LLM and scanner HTTP requests.
+            Browser based tests still accept certificate errors.
+          </p>
+          <div className="field">
+            <label htmlFor="scanner-ca-bundle">Testing traffic CA bundle path</label>
+            <input
+              id="scanner-ca-bundle"
+              type="text"
+              value={form.scanner_ca_bundle_path || ""}
+              placeholder="/path/to/company-ca.pem"
+              onChange={(e) => upd({ scanner_ca_bundle_path: e.target.value })}
+            />
+            <span className="subtle">Leave empty to keep accepting certificate errors in HTTP tests.</span>
+          </div>
+          <div className="field">
+            <label htmlFor="llm-ca-bundle">LLM CA bundle path</label>
+            <input
+              id="llm-ca-bundle"
+              type="text"
+              value={form.llm_ca_bundle_path || ""}
+              placeholder="/path/to/company-ca.pem"
+              onChange={(e) => upd({ llm_ca_bundle_path: e.target.value })}
+            />
+            <span className="subtle">Applies to built in LLM HTTP clients. CLI providers use their own certificate settings.</span>
+          </div>
           <div className="divider" />
           <div className="row spread">
             <div>

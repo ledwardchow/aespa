@@ -27,6 +27,7 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 from urllib.parse import quote
 
 import httpx
+import httpx2
 
 from aespa.models import LLMConfig
 from aespa.services.prompts.login_action import LOGIN_ACTION_PROMPT
@@ -135,6 +136,7 @@ def _is_llm_refusal(exc: BaseException) -> bool:
 
 
 _llm_proxy_var: ContextVar[str | None] = ContextVar("_llm_proxy", default=None)
+_llm_ca_bundle_var: ContextVar[str | None] = ContextVar("_llm_ca_bundle", default=None)
 _run_id_var: ContextVar[int | None] = ContextVar("_run_id", default=None)
 _run_kind_var: ContextVar[str] = ContextVar("_run_kind", default="web")
 _emit_fn_var: ContextVar[Any | None] = ContextVar("_emit_fn", default=None)
@@ -1078,6 +1080,10 @@ def set_llm_proxy(url: str | None) -> None:
     _llm_proxy_var.set(url)
 
 
+def set_llm_ca_bundle(path: str | None) -> None:
+    _llm_ca_bundle_var.set(path)
+
+
 def _emit_run_event(event: dict) -> None:
     """Emit an event to whatever log is wired for the active run.
 
@@ -1165,8 +1171,8 @@ def _llm_client_kwargs() -> dict:
     """
     proxy = _llm_proxy_var.get()
     return {
-        "http_client": httpx.AsyncClient(
-            verify=proxy is None,
+        "http_client": httpx2.AsyncClient(
+            verify=_llm_ca_bundle_var.get() or proxy is None,
             headers=_LLM_HEADERS,
             **{"proxy": proxy} if proxy else {},
         )
@@ -1180,7 +1186,7 @@ def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
     configured (HTTPS interception). See ``_llm_client_kwargs`` for rationale.
     """
     proxy = _llm_proxy_var.get()
-    kwargs.setdefault("verify", proxy is None)
+    kwargs.setdefault("verify", _llm_ca_bundle_var.get() or proxy is None)
     kwargs["headers"] = {**_LLM_HEADERS, **kwargs.get("headers", {})}
     if proxy:
         kwargs["proxy"] = proxy
@@ -2114,6 +2120,7 @@ async def _stream_chat_completion_impl(
                 raise RuntimeError(f"Bedrock API key stream failed: {e}") from e
         else:
             _proxy_url = _llm_proxy_var.get()
+            _ca_bundle = _llm_ca_bundle_var.get()
             _model = config.model
             _messages = converse_messages
             _system = system_list
@@ -2134,7 +2141,7 @@ async def _stream_chat_completion_impl(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=_endpoint,
-                    verify=not _proxy_url,
+                    verify=_ca_bundle or not _proxy_url,
                     config=_boto_cfg,
                 )
                 return client.converse_stream(
@@ -2738,7 +2745,7 @@ def _make_google_client(config: LLMConfig):
     elif config.base_url:
         _g_http_opts["base_url"] = config.base_url
     _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=_g_proxy is None,
+        verify=_llm_ca_bundle_var.get() or _g_proxy is None,
         headers=_LLM_HEADERS,
         **({"proxy": _g_proxy} if _g_proxy else {}),
     )
@@ -4142,7 +4149,7 @@ def _bedrock_mantle_region_from_url(base_url: str) -> str:
     return match.group(1) if match else _bedrock_mantle_region()
 
 
-class _BedrockMantleSigV4Auth(httpx.Auth):
+class _BedrockMantleSigV4Auth(httpx2.Auth):
     """httpx auth flow that SigV4-signs Bedrock Mantle requests with AWS creds.
 
     Lets the OpenAI SDK reach the OpenAI-compatible Mantle endpoint using the
@@ -4179,7 +4186,7 @@ class _BedrockMantleSigV4Auth(httpx.Auth):
             self._credentials = creds
         return self._credentials
 
-    def _sign(self, request: httpx.Request) -> None:
+    def _sign(self, request: httpx2.Request) -> None:
         from botocore.auth import SigV4Auth
         from botocore.awsrequest import AWSRequest
 
@@ -4203,11 +4210,11 @@ class _BedrockMantleSigV4Auth(httpx.Auth):
         for key, value in aws_request.headers.items():
             request.headers[key] = value
 
-    def sync_auth_flow(self, request: httpx.Request):
+    def sync_auth_flow(self, request: httpx2.Request):
         self._sign(request)
         yield request
 
-    async def async_auth_flow(self, request: httpx.Request):
+    async def async_auth_flow(self, request: httpx2.Request):
         # botocore credential resolution / signing is synchronous and may touch
         # the filesystem or IMDS on first use; keep it off the event loop.
         await asyncio.get_running_loop().run_in_executor(None, self._sign, request)
@@ -4241,8 +4248,8 @@ def _make_bedrock_mantle_client(config: LLMConfig):
         region=_bedrock_mantle_region_from_url(base_url),
         profile=config.aws_profile or os.getenv("AWS_PROFILE"),
     )
-    http_client = httpx.AsyncClient(
-        verify=proxy is None,
+    http_client = httpx2.AsyncClient(
+        verify=_llm_ca_bundle_var.get() or proxy is None,
         headers=_LLM_HEADERS,
         auth=signer,
         **({"proxy": proxy} if proxy else {}),
@@ -4275,8 +4282,8 @@ def _make_bedrock_mantle_anthropic_client(config: LLMConfig):
         region=_bedrock_mantle_region_from_url(base_url),
         profile=config.aws_profile or os.getenv("AWS_PROFILE"),
     )
-    http_client = httpx.AsyncClient(
-        verify=proxy is None,
+    http_client = httpx2.AsyncClient(
+        verify=_llm_ca_bundle_var.get() or proxy is None,
         headers=_LLM_HEADERS,
         auth=signer,
         **({"proxy": proxy} if proxy else {}),
@@ -4325,6 +4332,7 @@ async def _bedrock(
         region = _bedrock_region(config)
         profile = config.aws_profile or os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
+        _ca_bundle = _llm_ca_bundle_var.get()
         _model = config.model
         _messages = payload["messages"]
         _infer = payload["inferenceConfig"]
@@ -4338,7 +4346,7 @@ async def _bedrock(
                 "bedrock-runtime",
                 region_name=region,
                 endpoint_url=_endpoint,
-                verify=not _proxy_url,
+                verify=_ca_bundle or not _proxy_url,
                 config=_boto_cfg,
             )
             return _client.converse(
@@ -6725,6 +6733,7 @@ async def _call_with_tools_impl(
             # Env-credential path (IAM role, ~/.aws/credentials, instance profile …).
             # Capture proxy URL now — ContextVar values are not inherited by threads.
             _proxy_url = _llm_proxy_var.get()
+            _ca_bundle = _llm_ca_bundle_var.get()
             _on_text_delta = _tool_text_delta_var.get()
             loop = _asyncio.get_event_loop()
 
@@ -6747,7 +6756,7 @@ async def _call_with_tools_impl(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=config.base_url or None,
-                    verify=not _proxy_url,
+                    verify=_ca_bundle or not _proxy_url,
                     config=_boto_cfg,
                 )
                 _infer_converse: dict = {"maxTokens": config.max_tokens}

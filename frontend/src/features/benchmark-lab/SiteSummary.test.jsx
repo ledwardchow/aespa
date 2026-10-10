@@ -132,6 +132,31 @@ test("hides zero findings and plots scan dates even when cost is unavailable", a
   expect(screen.queryByRole("button", { name: /^(?:Optimal, )?No findings,/ })).toBeNull();
 });
 
+test("plots severity score and leaves analyses without a score out of that view", async () => {
+  const user = userEvent.setup();
+  const scored = results.map((result, index) => ({
+    ...result,
+    score: index === 0 ? 0 : index === 1 ? 5 : null,
+    category_counts: index === 1 ? { "A01: Broken Access Control": 2, "A03: Injection": 1 } : null,
+    category_totals: index === 1 ? { "A01: Broken Access Control": 3, "A03: Injection": 2 } : null,
+  }));
+  render(<SiteSummary results={scored} onOpen={vi.fn()} />);
+  expect(screen.getByRole("option", { name: "Scan cost/matched findings" })).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText("Compare by"), "score");
+  expect(screen.getByRole("img", { name: "Scan cost versus severity-weighted score" })).toBeTruthy();
+  expect(screen.getByText("Score", { selector: "text" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /DAST only,.*0 score/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Combined scan,.*5 score/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Source scan,/ })).toBeNull();
+  expect(screen.getByText(/1 matching analysis has no saved score/)).toBeTruthy();
+  expect(screen.getByRole("img", { name: "Optimal: best score for cost" })).toBeTruthy();
+  await user.hover(screen.getByRole("button", { name: /Combined scan,.*5 score/ }));
+  const tooltip = screen.getByRole("tooltip");
+  expect(tooltip.textContent).toContain("Matched / ground truth by OWASP category");
+  expect(tooltip.textContent).toContain("A01: Broken Access Control2/3");
+  expect(tooltip.textContent).toContain("A03: Injection1/2");
+});
+
 test("groups model names by the last slash or dot segment", async () => {
   const user = userEvent.setup();
   const aliases = ["provider/region.sonnet", "global.vendor.sonnet", "sonnet"];

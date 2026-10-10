@@ -1287,6 +1287,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         _do_agentic_thinking_loop,
         _load_findings_snapshot,
         _make_scanner_client,
+        _scanner_ca_bundle_var,
         _scanner_global_header_var,
         _scanner_proxy_var,
     )
@@ -1324,8 +1325,10 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     }
 
     _scanner_proxy_var.set(scanner_proxy_url)
+    _scanner_ca_bundle_var.set(upstream_proxy.scanner_ca_bundle_path)
     _scanner_global_header_var.set(global_http_header)
     llm_svc.set_llm_proxy(llm_proxy_url)
+    llm_svc.set_llm_ca_bundle(upstream_proxy.llm_ca_bundle_path)
     llm_svc.set_run_context(
         api_run_id, lambda evt: events_svc.emit(api_run_id, evt), run_kind="api"
     )
@@ -1459,9 +1462,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             _save_deterministic_findings(api_run_id, tls_findings, is_api_run=True)
 
     # Run the agentic loop — no browser_ctx/pw_page needed for REST APIs.
-    async with _make_scanner_client(
-        run_id=None, api_run_id=api_run_id, verify=False
-    ) as hx:
+    async with _make_scanner_client(run_id=None, api_run_id=api_run_id) as hx:
         finding_count = await _do_agentic_thinking_loop(
             run_id=api_run_id,
             is_api_run=True,

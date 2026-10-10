@@ -156,7 +156,10 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
     setHovered({
       result,
       left: Math.max(8, Math.min(bounds.right + 12, window.innerWidth - 328)),
-      top: Math.max(8, Math.min(bounds.top, window.innerHeight - 250)),
+      top: Math.max(
+        8,
+        Math.min(bounds.top, window.innerHeight - (result.category_counts ? 480 : 250)),
+      ),
     });
   };
   const trendModels = models.filter((name) => !excludedModels.includes(name));
@@ -166,27 +169,37 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
       kinds[scanType(result.run_kind, result.scan_models)] &&
       !excludedModels.includes(modelName(result)),
   );
+  const scoreMode = axis === "score";
+  const metricValue = (result) =>
+    scoreMode ? result.score : result.summary.full + result.summary.partial;
   const axisValue = (result) =>
-    axis === "cost"
+    axis !== "date"
       ? result.scan_cost_usd
       : result.scan_started_at
         ? new Date(result.scan_started_at).getTime()
         : NaN;
-  const plotted = visible.filter((result) => Number.isFinite(axisValue(result)));
+  const plotted = visible.filter(
+    (result) => Number.isFinite(axisValue(result)) && Number.isFinite(metricValue(result)),
+  );
   const frontier =
-    display === "optimal" && axis === "cost"
+    display === "optimal" && axis !== "date"
       ? paretoFrontier(
           plotted.map((result) => ({
             id: result.id,
             name: modelName(result),
             x: result.scan_cost_usd,
-            y: result.summary.full + result.summary.partial,
+            y: metricValue(result),
           })),
         )
       : [];
   const optimalIds = new Set(frontier.map((point) => point.id));
   const optimalModels = new Set(frontier.map((point) => point.name));
   const unavailable = visible.filter((result) => !Number.isFinite(axisValue(result)));
+  const unscored = scoreMode
+    ? visible.filter(
+        (result) => Number.isFinite(axisValue(result)) && !Number.isFinite(result.score),
+      )
+    : [];
   const fits = new Map(
     models.map((name) => [
       name,
@@ -195,7 +208,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
           .filter((result) => modelName(result) === name)
           .map((result) => ({
             x: axisValue(result),
-            y: result.summary.full + result.summary.partial,
+            y: metricValue(result),
           })),
       ),
     ]),
@@ -208,20 +221,20 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
           .filter((result) => scanType(result.run_kind, result.scan_models) === type)
           .map((result) => ({
             x: axisValue(result),
-            y: result.summary.full + result.summary.partial,
+            y: metricValue(result),
           })),
       ),
     ]),
   );
   const values = plotted.map(axisValue);
-  let minValue = axis === "cost" ? 0 : Math.min(...values);
-  let maxValue = axis === "cost" ? Math.max(0.01, ...values) : Math.max(...values);
+  let minValue = axis !== "date" ? 0 : Math.min(...values);
+  let maxValue = axis !== "date" ? Math.max(0.01, ...values) : Math.max(...values);
   if (axis === "date" && minValue === maxValue) {
     minValue -= 1800000;
     maxValue += 1800000;
   }
   const formatAxis = (value) =>
-    axis === "cost"
+    axis !== "date"
       ? money(value)
       : new Date(value).toLocaleString(undefined, {
           month: "short",
@@ -229,11 +242,8 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
           hour: "2-digit",
           minute: "2-digit",
         });
-  const axisLabel = axis === "cost" ? "Scan cost (USD)" : "Scan start date and time";
-  const maxFindings = Math.max(
-    1,
-    ...plotted.map((result) => result.summary.full + result.summary.partial),
-  );
+  const axisLabel = axis !== "date" ? "Scan cost (USD)" : "Scan start date and time";
+  const maxFindings = Math.max(1, ...plotted.map(metricValue));
   const findingTicks =
     maxFindings <= 4
       ? Array.from({ length: maxFindings + 1 }, (_, index) => index)
@@ -271,7 +281,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
   const scanPoints = plotted.map((result) => ({
     name: modelName(result),
     x: x(axisValue(result)),
-    y: y(result.summary.full + result.summary.partial),
+    y: y(metricValue(result)),
   }));
   const trendLabels = placeTrendLabels(trends, scanPoints, plot);
   const optimalSegment = frontier
@@ -341,11 +351,12 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
             value={axis}
             onChange={(event) => {
               setAxis(event.target.value);
-              if (event.target.value !== "cost" && display === "optimal") setDisplay("model");
+              if (event.target.value === "date" && display === "optimal") setDisplay("model");
               setHovered(null);
             }}
           >
-            <option value="cost">Scan cost</option>
+            <option value="cost">Scan cost/matched findings</option>
+            <option value="score">Scan cost/score</option>
             <option value="date">Scan date</option>
           </select>
         </label>
@@ -354,11 +365,18 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
         <section className={`card benchmark-chart-card ${styles.chartCard}`}>
           <div className={`benchmark-chart-header ${styles.chartHeader}`}>
             <div>
-              <h2>{axis === "cost" ? "Scan cost and findings" : "Scan date and findings"}</h2>
+              <h2>
+                {scoreMode
+                  ? "Scan cost and score"
+                  : axis === "cost"
+                    ? "Scan cost and findings"
+                    : "Scan date and findings"}
+              </h2>
+              <a href="#/benchmark-lab/scoring-guide">How scoring and matching work</a>
               {display === "optimal" && (
                 <p className="subtle">
-                  Best findings for cost across visible scans. Outlined points and marked models are
-                  on the line.
+                  Best {scoreMode ? "score" : "findings"} for cost across visible scans. Outlined
+                  points and marked models are on the line.
                 </p>
               )}
             </div>
@@ -372,7 +390,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                   setDisplay(event.target.value);
                   setHoveredLegend(null);
                   setFocusedLegend(null);
-                  if (event.target.value === "optimal") setAxis("cost");
+                  if (event.target.value === "optimal" && axis === "date") setAxis("cost");
                   setHovered(null);
                 }}
               >
@@ -391,7 +409,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                   <svg
                     viewBox="0 0 800 340"
                     role="img"
-                    aria-label={`${axis === "cost" ? "Scan cost" : "Scan date"} versus full and partial findings`}
+                    aria-label={`${axis === "date" ? "Scan date" : "Scan cost"} versus ${scoreMode ? "severity-weighted score" : "full and partial findings"}`}
                     className={`benchmark-chart ${styles.chart}`}
                   >
                     <defs>
@@ -447,7 +465,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                       {axisLabel}
                     </text>
                     <text transform="translate(17 155) rotate(-90)" textAnchor="middle">
-                      Full + partial findings
+                      {scoreMode ? "Score" : "Full + partial findings"}
                     </text>
                     {trends.map((trend) => {
                       const { name } = trend;
@@ -495,7 +513,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                     {frontier.length > 0 && (
                       <g
                         role="img"
-                        aria-label="Optimal: best findings for cost"
+                        aria-label={`Optimal: best ${scoreMode ? "score" : "findings"} for cost`}
                         className={styles.trend}
                         style={{ opacity: activeLegend ? 0.15 : 1 }}
                       >
@@ -526,11 +544,11 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                         key={result.id}
                         shape={SCAN_TYPES.indexOf(scanType(result.run_kind, result.scan_models))}
                         x={x(axisValue(result))}
-                        y={y(result.summary.full + result.summary.partial)}
+                        y={y(metricValue(result))}
                         color={modelColor(modelName(result))}
                         opacity={pointMatchesLegend(result) ? 1 : 0.15}
                         optimal={optimalIds.has(result.id)}
-                        label={`${optimalIds.has(result.id) ? "Optimal, " : ""}${result.run_name}, ${scanType(result.run_kind, result.scan_models)}, ${modelName(result)}, ${money(result.scan_cost_usd)}, ${result.summary.full + result.summary.partial} findings`}
+                        label={`${optimalIds.has(result.id) ? "Optimal, " : ""}${result.run_name}, ${scanType(result.run_kind, result.scan_models)}, ${modelName(result)}, ${money(result.scan_cost_usd)}, ${metricValue(result)} ${scoreMode ? "score" : "findings"}`}
                         onOpen={() => {
                           setHovered(null);
                           onOpen(result.id);
@@ -595,16 +613,23 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
                 </div>
               ) : (
                 <p className="subtle">
-                  No analyses with findings and a recorded{" "}
-                  {axis === "cost" ? "scan cost" : "scan start time"} match these filters.
+                  No analyses with {scoreMode ? "a score" : "findings"} and a recorded{" "}
+                  {axis === "date" ? "scan start time" : "scan cost"} match these filters.
                 </p>
               )}
-              {axis !== "cost" && unavailable.length > 0 && (
+              {axis === "date" && unavailable.length > 0 && (
                 <p className="subtle">
                   {unavailable.length} matching{" "}
                   {unavailable.length === 1 ? "analysis has" : "analyses have"} no recorded{" "}
-                  {axis === "cost" ? "scan cost" : "scan start time"}
+                  {axis === "date" ? "scan start time" : "scan cost"}
                   and cannot be plotted.
+                </p>
+              )}
+              {unscored.length > 0 && (
+                <p className="subtle">
+                  {unscored.length} matching{" "}
+                  {unscored.length === 1 ? "analysis has" : "analyses have"} no saved score and
+                  cannot be plotted.
                 </p>
               )}
               <div className="benchmark-chart-legend" aria-label="Scan type legend">
@@ -696,11 +721,34 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
               )}
               <dt>Cost</dt>
               <dd>{money(hovered.result.scan_cost_usd)}</dd>
+              {hovered.result.score != null && (
+                <>
+                  <dt>Score</dt>
+                  <dd>{hovered.result.score}</dd>
+                </>
+              )}
               <dt>Findings</dt>
               <dd>
                 {hovered.result.summary.full} full · {hovered.result.summary.partial} partial
               </dd>
             </dl>
+            <div className={styles.categorySummary}>
+              <strong>Matched / ground truth by OWASP category</strong>
+              {hovered.result.category_counts && hovered.result.category_totals ? (
+                <dl>
+                  {Object.entries(hovered.result.category_counts).map(([category, count]) => (
+                    <div key={category} className={styles.categoryRow}>
+                      <dt>{category}</dt>
+                      <dd>
+                        {count}/{hovered.result.category_totals[category]}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : (
+                <span>Category counts unavailable.</span>
+              )}
+            </div>
             {hovered.result.run_kind !== "sast" &&
               (hovered.result.scan_models?.sast || []).map((source) => (
                 <div key={source.run_id} className={styles.tooltipSource}>

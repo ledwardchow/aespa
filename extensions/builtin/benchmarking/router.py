@@ -49,6 +49,7 @@ from .schemas import (
     BenchmarkGroundTruth,
     BenchmarkMatchReviewIn,
 )
+from .scoring import ground_truth_category_totals, matched_categories, matched_score
 from .transfer import Bundle, export_bundle, import_bundle
 
 _DISPOSITIONS = {
@@ -153,6 +154,7 @@ def combined_scan_cost(
 def result_out(row: ScanResult, core: Session | None = None) -> dict[str, Any]:
     saved = loads(row.rows_json, [])
     items = saved.get("rows", []) if isinstance(saved, dict) else saved
+    ground_truth = loads(row.ground_truth_json, {})
     comparison = saved.get("comparison", {}) if isinstance(saved, dict) else {}
     scan_models = saved.get("scan_models") if isinstance(saved, dict) else None
     cost_models = scan_models if isinstance(scan_models, dict) else {}
@@ -194,7 +196,7 @@ def result_out(row: ScanResult, core: Session | None = None) -> dict[str, Any]:
         "target_id": row.target_id,
         "target_name": row.target_name,
         "dataset_id": row.dataset_id,
-        "ground_truth": loads(row.ground_truth_json, {}),
+        "ground_truth": ground_truth,
         "findings": loads(row.findings_json, []),
         "rows": items,
         "comparison": comparison,
@@ -206,6 +208,9 @@ def result_out(row: ScanResult, core: Session | None = None) -> dict[str, Any]:
             key: sum(item["disposition"] == key for item in items)
             for key in ("full", "partial", "missing")
         },
+        "score": matched_score(ground_truth, items),
+        "category_counts": matched_categories(ground_truth, items),
+        "category_totals": ground_truth_category_totals(ground_truth),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }

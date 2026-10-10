@@ -60,6 +60,13 @@ Open **Settings > Global > Upstream Proxy** to send scanner traffic, LLM traffic
 or both through an HTTP or HTTPS proxy. Burp Suite settings are on the
 **Extensions** page.
 
+The same page accepts optional PEM CA bundle paths for LLM calls and scanner
+HTTP requests. Enter paths on the computer running AESPA. When a path is set,
+those requests check the server certificate against that bundle. The bundle
+must contain all CA certificates needed for the destinations it will reach.
+Browser based tests still accept HTTPS certificate errors. CLI based LLM
+providers use their own certificate settings.
+
 ## System Settings
 
 The **System Settings** page contains feature visibility, debug settings, browser

@@ -168,6 +168,21 @@
 .benchmark-scan-models p {
   margin: 4px 0;
 }
+.benchmark-group-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 8px;
+}
+.benchmark-group-control .select {
+  min-width: 180px;
+}
+.benchmark-group-row th {
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 600;
+  text-align: left;
+}
 .benchmark-page.benchmark-simple .subtle {
   font-size: 12px;
 }

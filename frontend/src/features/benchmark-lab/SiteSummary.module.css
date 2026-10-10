@@ -265,3 +265,15 @@
     font-size: 9px;
   }
 }
+
+.categorySummary {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.categorySummary > strong { display: block; margin-bottom: 4px; }
+.categorySummary > span { color: var(--muted); }
+.categorySummary dl { display: block; margin: 0; }
+.categoryRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; line-height: 1.3; padding: 2px 0; }
+.categoryRow dd { margin: 0; font-weight: 600; }
+
+.tooltip { max-height: calc(100vh - 16px); overflow-y: auto; }
