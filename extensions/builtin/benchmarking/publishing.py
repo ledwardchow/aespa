@@ -130,6 +130,7 @@ def graph_bundle(store) -> dict:
                     "score": result["score"],
                     "category_counts": result["category_counts"],
                     "category_totals": result["category_totals"],
+                    "comment": result["comment"],
                     "updated_at": timestamp(row.updated_at),
                 }
             )

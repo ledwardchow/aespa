@@ -2,6 +2,23 @@
   gap: 16px;
 }
 
+.benchmark-result-comment {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+}
+.benchmark-result-comment h3 {
+  margin: 0;
+}
+.benchmark-result-comment textarea {
+  width: 100%;
+  max-width: 720px;
+  resize: vertical;
+}
+.benchmark-result-comment button {
+  justify-self: start;
+}
+
 .benchmark-simple {
   display: flex;
   flex-direction: column;

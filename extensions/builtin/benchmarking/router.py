@@ -87,6 +87,10 @@ class ScanResultIn(BaseModel):
     rules_only: bool = False
 
 
+class ScanResultCommentIn(BaseModel):
+    comment: str = Field(max_length=2000)
+
+
 class BulkBenchmarkIn(BaseModel):
     run_ids: list[PositiveInt] = Field(min_length=1)
     run_kind: Literal["site", "api", "sast"]
@@ -202,6 +206,7 @@ def result_out(row: ScanResult, core: Session | None = None) -> dict[str, Any]:
         "findings": loads(row.findings_json, []),
         "rows": items,
         "comparison": comparison,
+        "comment": saved.get("comment", "") if isinstance(saved, dict) else "",
         "scan_models": scan_models,
         "scan_cost_usd": cost,
         "scan_cost_breakdown": breakdown,
@@ -831,6 +836,25 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
             row = session.get(ScanResult, result_id)
             if row is None:
                 raise HTTPException(404, "Benchmark result not found")
+            return result_out(row, core)
+
+    @router.put("/results/{result_id}/comment")
+    def save_scan_result_comment(
+        result_id: int, payload: ScanResultCommentIn
+    ) -> dict[str, Any]:
+        with store.session() as session, Session(get_engine()) as core:
+            row = session.get(ScanResult, result_id)
+            if row is None:
+                raise HTTPException(404, "Benchmark result not found")
+            saved = loads(row.rows_json, [])
+            if not isinstance(saved, dict):
+                saved = {"rows": saved}
+            saved["comment"] = payload.comment.strip()
+            row.rows_json = dumps(saved)
+            row.updated_at = now()
+            session.add(row)
+            session.commit()
+            session.refresh(row)
             return result_out(row, core)
 
     @router.delete("/results/{result_id}", status_code=204)

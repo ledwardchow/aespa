@@ -132,6 +132,27 @@ test("hides zero findings and plots scan dates even when cost is unavailable", a
   expect(screen.queryByRole("button", { name: /^(?:Optimal, )?No findings,/ })).toBeNull();
 });
 
+test("hides zero-cost scans until local model results are enabled", async () => {
+  const user = userEvent.setup();
+  const local = {
+    ...results[0],
+    id: 10,
+    run_name: "Local scan",
+    scan_cost_usd: 0,
+    scan_started_at: "2026-10-10T01:00:00Z",
+  };
+  render(<SiteSummary results={[...results, local]} onOpen={vi.fn()} />);
+  const toggle = screen.getByRole("checkbox", { name: "Show local model ($0) results" });
+  expect(toggle.checked).toBe(false);
+  expect(screen.queryByRole("button", { name: /Local scan,/ })).toBeNull();
+  await user.click(toggle);
+  expect(screen.getByRole("button", { name: /Local scan,/ })).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText("Compare by"), "date");
+  expect(screen.getByRole("button", { name: /Local scan,/ })).toBeTruthy();
+  await user.click(toggle);
+  expect(screen.queryByRole("button", { name: /Local scan,/ })).toBeNull();
+});
+
 test("plots severity score and leaves analyses without a score out of that view", async () => {
   const user = userEvent.setup();
   const scored = results.map((result, index) => ({

@@ -10,6 +10,7 @@ import { BenchmarkTransfer } from "./BenchmarkTransfer.jsx";
 import { GroundTruthDatasets } from "./GroundTruthDatasets.jsx";
 import { CompletedScanBenchmarks } from "./CompletedScanBenchmarks.jsx";
 import { SiteSummary, modelName, money } from "./SiteSummary.jsx";
+import { BenchmarkResultComment } from "./BenchmarkResultComment.jsx";
 
 import styles from "./BenchmarkSettings.module.css";
 import { scanType } from "./scanPresentation.js";
@@ -291,6 +292,15 @@ export function BenchmarkLabPage({ initialResultId }) {
       ) : (
         <p className="subtle">Scan model details were not saved for this older result.</p>
       )}
+      <BenchmarkResultComment
+        key={selectedResult.id}
+        result={selectedResult}
+        onSaved={(updated) =>
+          setResults((current) =>
+            current.map((result) => (result.id === updated.id ? updated : result)),
+          )
+        }
+      />
       <div className="benchmark-summary-grid benchmark-counts">
         {["full", "partial", "missing"].map((status) => (
           <div className="benchmark-stat" key={status}>

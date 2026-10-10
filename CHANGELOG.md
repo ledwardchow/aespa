@@ -6,6 +6,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
+- **Benchmark result comments**: Add a comment to a saved Benchmark Lab analysis. Comments appear on graph cards and can be included in published benchmark summaries. The private benchmark site also lets the result uploader edit its comment, and the public graph site displays it.
+
 - **Custom CA bundles**: Set separate PEM CA bundle paths for application and testing traffic in Connectivity settings. LLM calls, model lists, sign-in requests, and Benchmark Lab use the application setting. Session checks and vulnerable-library list updates use the testing setting. AESPA checks certificates against a configured bundle; browser based tests keep accepting certificate errors. CLI providers receive the configured CA path through their environment.
 
 - **Saved crawls**: A finished crawl can now be saved on its site and loaded into a new run, so repeat scans and benchmarks can skip crawling. Use **Save crawl to site** on a run with crawl data, then **Load saved crawl** on a new run. The site page lists saved crawls, where you can rename, download, or delete them, and add crawl export files you downloaded earlier. Saved crawls include the session cookies and tokens captured during the crawl, the same as crawl export files.
@@ -20,7 +22,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Saved benchmark analyses**: Opening an analysis from a graph or results list now shows it on its own page, with a link back to Benchmark Lab. Findings can be grouped by OWASP category or severity.
 
-- **Benchmark comparison charts**: The scanner and benchmark sites can compare either scan cost or scan date with matched finding count or a severity-weighted score. The sites show cost and score by default. Full and partial matches use the ground-truth severity: informational 0, low 1, medium 2, high 3, and critical 4. High and Critical matches in OWASP A01, A03, A04, and A07 earn double points. Point details show matched findings out of the ground-truth total for each OWASP category.
+- **Benchmark comparison charts**: The scanner and benchmark sites can compare either scan cost or scan date with matched finding count or a severity-weighted score. The sites show cost and score by default. Scans recorded at $0 are hidden from the graph by default and can be shown with **Show local model ($0) results**. Full and partial matches use the ground-truth severity: informational 0, low 1, medium 2, high 3, and critical 4. High and Critical matches in OWASP A01, A03, A04, and A07 earn double points. Point details show matched findings out of the ground-truth total for each OWASP category.
 
 - **Portable installation data**: AESPA now keeps its main, console-log, and reporting-debug databases in `aespa_data` alongside uploads and extension data. Existing databases are moved there on first start, and uploaded-file references are repaired when the folder is copied to another installation. The console's Data Folder setting lets source and desktop users choose where AESPA stores data on the next launch; an empty folder starts a new database, while existing data is left in place.
 
