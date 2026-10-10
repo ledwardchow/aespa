@@ -20,7 +20,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Saved benchmark analyses**: Opening an analysis from a graph or results list now shows it on its own page, with a link back to Benchmark Lab. Findings can be grouped by OWASP category or severity.
 
-- **Benchmark cost charts**: The scanner and benchmark sites can compare scan cost with either matched finding count or a severity-weighted score. The sites show the score chart by default. Full and partial matches use the ground-truth severity: informational 0, low 1, medium 2, high 3, and critical 4. High and Critical matches in OWASP A01, A03, A04, and A07 earn double points. Point details show matched findings out of the ground-truth total for each OWASP category.
+- **Benchmark comparison charts**: The scanner and benchmark sites can compare either scan cost or scan date with matched finding count or a severity-weighted score. The sites show cost and score by default. Full and partial matches use the ground-truth severity: informational 0, low 1, medium 2, high 3, and critical 4. High and Critical matches in OWASP A01, A03, A04, and A07 earn double points. Point details show matched findings out of the ground-truth total for each OWASP category.
 
 - **Portable installation data**: AESPA now keeps its main, console-log, and reporting-debug databases in `aespa_data` alongside uploads and extension data. Existing databases are moved there on first start, and uploaded-file references are repaired when the folder is copied to another installation. The console's Data Folder setting lets source and desktop users choose where AESPA stores data on the next launch; an empty folder starts a new database, while existing data is left in place.
 
