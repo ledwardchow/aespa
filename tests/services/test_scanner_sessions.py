@@ -3,7 +3,45 @@ import asyncio
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from aespa.models import UpstreamProxyConfig
 from aespa.services import scanner, scanner_sessions
+
+
+def test_session_probe_uses_testing_proxy_and_ca(db_session, monkeypatch):
+    db_session.add(
+        UpstreamProxyConfig(
+            id=1,
+            proxy_scanner=True,
+            scanner_proxy_url="http://proxy.example:8080",
+            scanner_ca_bundle_path="/tmp/testing-ca.pem",
+        )
+    )
+    db_session.commit()
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def get(self, *_args, **_kwargs):
+            class Response:
+                status_code = 200
+
+            return Response()
+
+    monkeypatch.setattr(scanner_sessions.httpx, "AsyncClient", FakeClient)
+    assert (
+        asyncio.run(scanner_sessions._probe_session("https://target.example", {}, {}))
+        == 200
+    )
+    assert captured["proxy"] == "http://proxy.example:8080"
+    assert captured["verify"] == "/tmp/testing-ca.pem"
 
 
 def test_upsert_session_reuses_label_and_loads_vault(monkeypatch):

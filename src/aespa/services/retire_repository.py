@@ -25,6 +25,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from sqlmodel import Session
+
+from aespa.db import get_engine
+from aespa.services.settings_integrations import get_upstream_proxy_config
 
 log = logging.getLogger(__name__)
 
@@ -214,7 +218,16 @@ async def ensure_fresh(
         if (directory / FILE_NAME).is_file() and _is_fresh(meta, max_age):
             return {**info(), "status": "fresh"}
         owns_client = client is None
-        http = client or httpx.AsyncClient(timeout=TIMEOUT_S, follow_redirects=True)
+        if client is None:
+            with Session(get_engine()) as session:
+                ca_bundle = get_upstream_proxy_config(session).scanner_ca_bundle_path
+            http = httpx.AsyncClient(
+                timeout=TIMEOUT_S,
+                follow_redirects=True,
+                verify=ca_bundle or True,
+            )
+        else:
+            http = client
         try:
             etag = meta.get("etag") if (directory / FILE_NAME).is_file() else None
             status, raw, new_etag = await _download(url, etag, http)

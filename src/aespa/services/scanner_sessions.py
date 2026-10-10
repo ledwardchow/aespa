@@ -255,11 +255,14 @@ async def _probe_session(
     from aespa.services.settings import get_upstream_proxy_config
 
     with Session(get_engine()) as session:
-        ca_bundle = get_upstream_proxy_config(session).scanner_ca_bundle_path
+        config = get_upstream_proxy_config(session)
+    ca_bundle = config.scanner_ca_bundle_path
+    proxy = config.scanner_proxy_url if config.proxy_scanner else None
     async with httpx.AsyncClient(
         timeout=15.0,
         follow_redirects=True,
         verify=ca_bundle or False,
+        proxy=proxy,
         trust_env=False,
     ) as client:
         response = await client.get(

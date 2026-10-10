@@ -19,6 +19,8 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import httpx
 import jwt
 
+from aespa.services.llm_network import httpx_options
+
 AUTH_URL = "https://auth.openai.com/api/accounts/authorize"
 TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token"
 JWKS_URL = "https://auth.openai.com/.well-known/jwks.json"
@@ -175,7 +177,7 @@ async def start_login(client_id: str | None = None) -> dict[str, str]:
                 issued_id = client_id or issued_id
                 if not code or not issued_id or issued_id == "dynamic_agent_client":
                     raise ValueError("ChatGPT did not complete registration")
-                async with httpx.AsyncClient(timeout=20) as http:
+                async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
                     response = await http.post(
                         TOKEN_URL,
                         data={
@@ -332,7 +334,7 @@ async def access_token(client_id: str | None = None) -> str:
                 )
             if account.get("expires_at", 0) > time.time() + 120:
                 return account["access_token"]
-            async with httpx.AsyncClient(timeout=20) as http:
+            async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
                 response = await http.post(
                     TOKEN_URL,
                     data={
@@ -361,7 +363,7 @@ async def access_token(client_id: str | None = None) -> str:
 
 async def discover_models(client_id: str | None = None) -> list[str]:
     token = await access_token(client_id)
-    async with httpx.AsyncClient(timeout=20) as http:
+    async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
         response = await http.get(
             f"{RESOURCE}/models", headers={"Authorization": f"Bearer {token}"}
         )
@@ -450,7 +452,7 @@ async def check_access(client_id: str, *, force: bool = False) -> dict[str, Any]
         if cached and not force and cached[0] > time.time():
             return cached[1]
         token = await access_token(client_id)
-        async with httpx.AsyncClient(timeout=30) as http:
+        async with httpx.AsyncClient(timeout=30, **httpx_options()) as http:
             limit = asyncio.Semaphore(2)
 
             async def check(model: str) -> dict[str, Any]:
@@ -513,7 +515,7 @@ async def sign_out(client_id: str) -> None:
                 raise ValueError("Saved ChatGPT account was not found")
             refresh_token = account.get("refresh_token")
             if refresh_token:
-                async with httpx.AsyncClient(timeout=20) as http:
+                async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
                     discovery = await http.get(
                         f"{ISSUER}/.well-known/openid-configuration"
                     )

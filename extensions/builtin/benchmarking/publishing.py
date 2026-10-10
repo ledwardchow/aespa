@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, SecretStr
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
+from aespa.services.settings import get_upstream_proxy_config
 
 from .models import Dataset, PublishingSettings, PublishingUploadToken, ScanResult
 from .transfer import dataset_key, identity
@@ -332,9 +333,23 @@ def register_publishing(router: APIRouter, store) -> None:
         if batch:
             batches.append(batch)
         stored = skipped = sent = 0
-        async with httpx.AsyncClient(
-            timeout=30, follow_redirects=False, trust_env=False
-        ) as client:
+        with Session(get_engine()) as core:
+            network = get_upstream_proxy_config(core)
+        client_options = {
+            "timeout": 30,
+            "follow_redirects": False,
+            "trust_env": False,
+            "verify": network.llm_ca_bundle_path or True,
+        }
+        if network.proxy_llm and network.llm_proxy_url:
+            client_options["proxy"] = network.llm_proxy_url
+        try:
+            client = httpx.AsyncClient(**client_options)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                502, "The configured CA bundle could not be loaded"
+            ) from exc
+        async with client:
             for batch in batches:
                 try:
                     response = await client.post(

@@ -115,10 +115,10 @@ async def _invoke(
     callback: Callable[..., None] | None = None,
     proxy_url: str | None = None,
 ) -> dict:
+    from aespa.services.llm_network import child_network_env
+
     env = {key: os.environ[key] for key in _ENV_KEYS if key in os.environ}
-    if proxy_url:
-        env["HTTP_PROXY"] = proxy_url
-        env["HTTPS_PROXY"] = proxy_url
+    env = child_network_env(env, proxy_url)
     # Running outside the target repository also prevents project instructions
     # or MCP settings from becoming part of a scan request.
     with tempfile.TemporaryDirectory(prefix="aespa-claude-") as workspace:

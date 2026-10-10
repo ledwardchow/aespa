@@ -54,19 +54,22 @@ The **Agent Settings** page is divided into these tabs:
   Docker image, allowed agent roles, time and resource limits, output limits,
   request limits, and concurrency.
 
-## Upstream Proxy
+## Connectivity
 
-Open **Settings > Global > Upstream Proxy** to send scanner traffic, LLM traffic,
+Open **Settings > Global > Connectivity** to send scanner traffic, LLM traffic,
 or both through an HTTP or HTTPS proxy. Burp Suite settings are on the
 **Extensions** page.
 
-The same page accepts optional PEM CA bundle paths for LLM calls and scanner
-HTTP requests. Enter paths on the computer running AESPA. When a path is set,
+The same page accepts optional PEM CA bundle paths for application traffic and
+testing traffic. Enter paths on the computer running AESPA. When a path is set,
 those requests check the server certificate against that bundle. The bundle
 must contain all CA certificates needed for the destinations it will reach.
-Benchmark Lab model comparisons use the LLM proxy and CA bundle settings.
-Browser based tests still accept HTTPS certificate errors. CLI based LLM
-providers use their own certificate settings.
+Model lists, ChatGPT sign-in requests, Benchmark Lab model comparisons, and
+result publishing use the LLM proxy and CA bundle settings. Session checks use
+the testing proxy and CA bundle. Vulnerable-library list updates use the
+testing CA bundle. CLI based LLM providers receive the LLM proxy and CA path
+through environment variables, but each CLI decides how to use them.
+Browser based tests still accept HTTPS certificate errors.
 
 ## System Settings
 

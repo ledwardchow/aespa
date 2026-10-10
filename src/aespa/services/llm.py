@@ -1218,6 +1218,23 @@ def _bedrock_botocore_config(proxy_url: str | None):
     return BotocoreConfig(**kwargs)
 
 
+def _bedrock_session(profile: str | None, proxy_url: str | None, ca_bundle: str | None):
+    """Give Bedrock and any AWS credential refresh the same network settings."""
+    import boto3
+
+    session_kwargs = {"profile_name": profile} if profile else {}
+    if ca_bundle or proxy_url:
+        import botocore.session
+
+        core_session = botocore.session.get_session()
+        if ca_bundle:
+            core_session.set_config_variable("ca_bundle", ca_bundle)
+        if proxy_url:
+            core_session.set_default_client_config(_bedrock_botocore_config(proxy_url))
+        session_kwargs["botocore_session"] = core_session
+    return boto3.Session(**session_kwargs)
+
+
 def _bedrock_http_timeout() -> httpx.Timeout:
     """Use the same long read allowance for bearer-token Bedrock requests."""
     return httpx.Timeout(
@@ -2142,12 +2159,9 @@ async def _stream_chat_completion_impl(
             _endpoint = config.base_url or None
 
             def _run_converse_stream():
-                import boto3
-
                 region = _bedrock_region(config)
                 profile = config.aws_profile or os.getenv("AWS_PROFILE")
-                session_kwargs = {"profile_name": profile} if profile else {}
-                session = boto3.Session(**session_kwargs)
+                session = _bedrock_session(profile, _proxy_url, _ca_bundle)
                 _boto_cfg = _bedrock_botocore_config(_proxy_url)
                 client = session.client(
                     "bedrock-runtime",
@@ -4181,12 +4195,13 @@ class _BedrockMantleSigV4Auth(httpx2.Auth):
 
     def _resolve_credentials(self):
         if self._credentials is None:
-            import boto3
+            from aespa.services.llm_network import configured_llm_network
 
-            session = (
-                boto3.Session(profile_name=self._profile)
-                if self._profile
-                else boto3.Session()
+            saved_proxy, saved_ca = configured_llm_network()
+            session = _bedrock_session(
+                self._profile,
+                _llm_proxy_var.get() or saved_proxy,
+                _llm_ca_bundle_var.get() or saved_ca,
             )
             creds = session.get_credentials()
             if creds is None:
@@ -4339,8 +4354,6 @@ async def _bedrock(
     if not config.api_key:
         import asyncio as _aio
 
-        import boto3
-
         region = _bedrock_region(config)
         profile = config.aws_profile or os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
@@ -4351,8 +4364,7 @@ async def _bedrock(
         _endpoint = config.base_url or None
 
         def _run_sync() -> dict:
-            _session_kwargs = {"profile_name": profile} if profile else {}
-            _session = boto3.Session(**_session_kwargs)
+            _session = _bedrock_session(profile, _proxy_url, _ca_bundle)
             _boto_cfg = _bedrock_botocore_config(_proxy_url)
             _client = _session.client(
                 "bedrock-runtime",
@@ -6757,12 +6769,9 @@ async def _call_with_tools_impl(
                     future.result()
 
             def _run_converse_stream():
-                import boto3
-
                 region = _bedrock_region(config)
                 profile = config.aws_profile or os.getenv("AWS_PROFILE")
-                session_kwargs = {"profile_name": profile} if profile else {}
-                session = boto3.Session(**session_kwargs)
+                session = _bedrock_session(profile, _proxy_url, _ca_bundle)
                 _boto_cfg = _bedrock_botocore_config(_proxy_url)
                 client = session.client(
                     "bedrock-runtime",

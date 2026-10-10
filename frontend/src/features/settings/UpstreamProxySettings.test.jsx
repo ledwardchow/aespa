@@ -60,7 +60,7 @@ test("keeps a configured URL when its traffic toggle is disabled", async () => {
 test("saves separate CA bundle paths", async () => {
   render(<UpstreamProxySettings />);
   const scannerPath = await screen.findByLabelText("Testing traffic CA bundle path");
-  const llmPath = screen.getByLabelText("LLM CA bundle path");
+  const llmPath = screen.getByLabelText("Application traffic CA bundle path");
   fireEvent.change(scannerPath, { target: { value: " /etc/ssl/scanner.pem " } });
   fireEvent.change(llmPath, { target: { value: "/etc/ssl/llm.pem" } });
   fireEvent.click(screen.getByRole("button", { name: "Save" }));

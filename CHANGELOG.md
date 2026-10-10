@@ -6,7 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **Custom CA bundles**: Set separate PEM CA bundle paths for LLM calls and scanner HTTP requests in Upstream Proxy settings. Benchmark Lab model comparisons also use the LLM proxy and CA bundle. AESPA checks certificates against a configured bundle; browser based tests keep accepting certificate errors.
+- **Custom CA bundles**: Set separate PEM CA bundle paths for application and testing traffic in Connectivity settings. LLM calls, model lists, sign-in requests, and Benchmark Lab use the application setting. Session checks and vulnerable-library list updates use the testing setting. AESPA checks certificates against a configured bundle; browser based tests keep accepting certificate errors. CLI providers receive the configured CA path through their environment.
 
 - **Saved crawls**: A finished crawl can now be saved on its site and loaded into a new run, so repeat scans and benchmarks can skip crawling. Use **Save crawl to site** on a run with crawl data, then **Load saved crawl** on a new run. The site page lists saved crawls, where you can rename, download, or delete them, and add crawl export files you downloaded earlier. Saved crawls include the session cookies and tokens captured during the crawl, the same as crawl export files.
 

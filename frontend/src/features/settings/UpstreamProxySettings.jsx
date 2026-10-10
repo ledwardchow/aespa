@@ -52,7 +52,7 @@ export function UpstreamProxySettings() {
       {error && <div className="alert error">{error}</div>}
       {form && (
         <form className="card" onSubmit={onSubmit}>
-          <div className="form-section-title">Upstream Proxy</div>
+          <div className="form-section-title">Upstream proxies</div>
           <label className="toggle-row">
             <input
               type="checkbox"
@@ -115,7 +115,7 @@ export function UpstreamProxySettings() {
           <div className="form-section-title">Certificate trust</div>
           <p className="subtle">
             Enter PEM CA bundle paths on the computer running AESPA. These files are
-            used to check HTTPS certificates for LLM and scanner HTTP requests.
+            used to check HTTPS certificates for application and testing requests.
             Browser based tests still accept certificate errors.
           </p>
           <div className="field">
@@ -130,7 +130,7 @@ export function UpstreamProxySettings() {
             <span className="subtle">Leave empty to keep accepting certificate errors in HTTP tests.</span>
           </div>
           <div className="field">
-            <label htmlFor="llm-ca-bundle">LLM CA bundle path</label>
+            <label htmlFor="llm-ca-bundle">Application traffic CA bundle path</label>
             <input
               id="llm-ca-bundle"
               type="text"
@@ -138,7 +138,7 @@ export function UpstreamProxySettings() {
               placeholder="/path/to/company-ca.pem"
               onChange={(e) => upd({ llm_ca_bundle_path: e.target.value })}
             />
-            <span className="subtle">Applies to built in LLM HTTP clients. CLI providers use their own certificate settings.</span>
+            <span className="subtle">Used for LLM calls, model lists, sign-in requests, and Benchmark Lab. CLI providers receive this path through their environment.</span>
           </div>
           <div className="divider" />
           <div className="row spread">

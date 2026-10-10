@@ -8,7 +8,14 @@ import httpx
 import pytest
 from sqlmodel import select
 
-from aespa.models import ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
+from aespa.models import (
+    ScanFinding,
+    Site,
+    TargetIntelItem,
+    TestRun,
+    TrafficEntry,
+    UpstreamProxyConfig,
+)
 from aespa.services import js_libraries, retire_repository
 from aespa.services.retire_repository import ensure_fresh as real_ensure_fresh
 from aespa.services.sast_parsers import extract_parser_facts
@@ -162,6 +169,29 @@ def _refresh(client, **kwargs):
             return await real_ensure_fresh(client=client, **kwargs)
 
     return asyncio.run(run())
+
+
+def test_list_download_uses_testing_ca_bundle(db_session, monkeypatch):
+    db_session.add(
+        UpstreamProxyConfig(id=1, scanner_ca_bundle_path="/tmp/testing-ca.pem")
+    )
+    db_session.commit()
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def stream(self, *_args, **_kwargs):
+            raise RuntimeError("offline test")
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(retire_repository.httpx, "AsyncClient", FakeClient)
+    result = asyncio.run(real_ensure_fresh())
+    assert result["status"] == "failed"
+    assert captured["verify"] == "/tmp/testing-ca.pem"
 
 
 def test_download_replaces_cached_copy_and_uses_etag(offline_retire_list):
