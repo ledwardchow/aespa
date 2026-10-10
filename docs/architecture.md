@@ -1972,6 +1972,8 @@ Each result also saves the Test Lead model for a Site or API scan, and the SAST
 model for a SAST scan. If a Site or API scan imported SAST leads, the result
 lists the model for each source SAST run. Imported leads are matched by run type
 and ID so Site and API runs with the same numeric ID stay separate.
+Benchmark Lab model comparisons use the saved LLM proxy and CA bundle in a
+request-local scope, including older SAST assisted evaluations.
 
 Ground truth and comparison results stay in the extension database. They are not
 included in scanner prompts, checkpoints, evidence receipts, SAST exports, or

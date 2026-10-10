@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1082,6 +1082,18 @@ def set_llm_proxy(url: str | None) -> None:
 
 def set_llm_ca_bundle(path: str | None) -> None:
     _llm_ca_bundle_var.set(path)
+
+
+@contextmanager
+def llm_transport_scope(proxy_url: str | None, ca_bundle_path: str | None):
+    """Use one request's LLM network settings without changing other tasks."""
+    proxy_token = _llm_proxy_var.set(proxy_url)
+    ca_token = _llm_ca_bundle_var.set(ca_bundle_path)
+    try:
+        yield
+    finally:
+        _llm_ca_bundle_var.reset(ca_token)
+        _llm_proxy_var.reset(proxy_token)
 
 
 def _emit_run_event(event: dict) -> None:

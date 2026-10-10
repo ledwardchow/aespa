@@ -64,6 +64,7 @@ The same page accepts optional PEM CA bundle paths for LLM calls and scanner
 HTTP requests. Enter paths on the computer running AESPA. When a path is set,
 those requests check the server certificate against that bundle. The bundle
 must contain all CA certificates needed for the destinations it will reach.
+Benchmark Lab model comparisons use the LLM proxy and CA bundle settings.
 Browser based tests still accept HTTPS certificate errors. CLI based LLM
 providers use their own certificate settings.
 
