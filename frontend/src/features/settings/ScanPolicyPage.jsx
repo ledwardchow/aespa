@@ -37,7 +37,7 @@ const DAST_TABS = [
 const GLOBAL_TABS = [
   { key: "features", label: "Feature Visibility" },
   { key: "debug", label: "Debug Settings" },
-  { key: "proxy", label: "Upstream Proxy" },
+  { key: "proxy", label: "Connectivity" },
   { key: "libraries", label: "Vulnerable Libraries" },
 ];
 

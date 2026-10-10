@@ -85,7 +85,7 @@ test("shows feature visibility and debug settings under Global", () => {
   fireEvent.click(screen.getByRole("tab", { name: "Debug Settings" }));
   expect(screen.getByText("debug settings")).toBeTruthy();
   expect(window.location.hash).toBe("#/scan-policy/global/debug");
-  fireEvent.click(screen.getByRole("tab", { name: "Upstream Proxy" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Connectivity" }));
   expect(screen.getByText("Proxy settings form")).toBeTruthy();
   expect(window.location.hash).toBe("#/scan-policy/global/proxy");
   expect(screen.queryByText("debug settings")).toBeNull();
@@ -94,7 +94,7 @@ test("shows feature visibility and debug settings under Global", () => {
 
 test("opens a nested tab from its URL", () => {
   render(<ScanPolicyPage initialTab="global" initialSubTab="proxy" />);
-  expect(screen.getByRole("tab", { name: "Upstream Proxy" }).getAttribute("aria-selected")).toBe(
+  expect(screen.getByRole("tab", { name: "Connectivity" }).getAttribute("aria-selected")).toBe(
     "true",
   );
   expect(screen.getByText("Proxy settings form")).toBeTruthy();

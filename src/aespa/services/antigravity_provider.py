@@ -118,11 +118,10 @@ def _workspace_directory() -> Path:
 
 
 def _child_env(proxy_url: str | None = None) -> dict[str, str]:
+    from aespa.services.llm_network import child_network_env
+
     env = {name: os.environ[name] for name in _ENV_ALLOWLIST if name in os.environ}
-    if proxy_url:
-        env["HTTP_PROXY"] = proxy_url
-        env["HTTPS_PROXY"] = proxy_url
-    return env
+    return child_network_env(env, proxy_url)
 
 
 def _find_agy_executable() -> str:

@@ -344,7 +344,7 @@ Singleton row (id = 1). Routes scanner and/or LLM traffic through independently 
 | `scanner_proxy_url` | — | `http://host:port` proxy URL for testing traffic |
 | `llm_proxy_url` | — | `http://host:port` proxy URL for LLM traffic |
 | `scanner_ca_bundle_path` | — | PEM CA bundle for scanner HTTP certificate checks |
-| `llm_ca_bundle_path` | — | PEM CA bundle for built in LLM HTTP certificate checks |
+| `llm_ca_bundle_path` | — | PEM CA bundle for application traffic, including LLM and Benchmark Lab requests |
 | `proxy_scanner` | `false` | Route scanner HTTP and Playwright traffic through proxy |
 | `proxy_llm` | `false` | Route LLM API calls through proxy |
 
@@ -1174,7 +1174,7 @@ The LLM service uses Anthropic prompt caching for large, repeated context blocks
 
 ### Upstream proxy
 
-All LLM SDK clients (GitHub Copilot, Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). Copilot receives this through its child-process `HTTP_PROXY` and `HTTPS_PROXY` environment. The direct HTTP clients use the proxy configuration described in `llm.py`.
+LLM SDK clients honour the saved application proxy and CA bundle. Bedrock credential refresh and model discovery use those settings too. Direct model discovery, model metadata, and ChatGPT sign-in requests use the same settings. CLI providers receive the proxy and CA path in their child-process environment. The CLI decides which certificate environment variables it supports. Scanner session checks use the testing proxy and CA bundle; Retire.js list updates use the testing CA bundle.
 
 ### Rate Limiting & Pacing
 
@@ -1973,7 +1973,8 @@ model for a SAST scan. If a Site or API scan imported SAST leads, the result
 lists the model for each source SAST run. Imported leads are matched by run type
 and ID so Site and API runs with the same numeric ID stay separate.
 Benchmark Lab model comparisons use the saved LLM proxy and CA bundle in a
-request-local scope, including older SAST assisted evaluations.
+request-local scope, including older SAST assisted evaluations. Result publishing
+uses the same settings for its HTTPS upload.
 
 Ground truth and comparison results stay in the extension database. They are not
 included in scanner prompts, checkpoints, evidence receipts, SAST exports, or

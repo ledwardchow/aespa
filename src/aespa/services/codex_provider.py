@@ -389,10 +389,12 @@ def _workspace() -> Path:
 
 
 def _child_env() -> dict[str, str]:
+    from aespa.services.llm_network import child_network_env
+
     current = os.environ
     env = {key: current[key] for key in _ENV_ALLOWLIST if current.get(key)}
     env["PATH"] = current.get("PATH", os.defpath)
-    return env
+    return child_network_env(env)
 
 
 def _is_open_file_limit_error(exc: BaseException) -> bool:

@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from aespa.services.llm_network import configured_llm_network, httpx_options
+
 log = logging.getLogger("aespa.llm.model_discovery")
 
 
@@ -35,9 +37,11 @@ async def discover_openai_model_options(
     if api_key and api_key.strip():
         headers["Authorization"] = f"Bearer {api_key.strip()}"
 
-    client_kwargs: dict[str, Any] = {"timeout": 10.0, "headers": headers}
-    if proxy_url:
-        client_kwargs["proxy"] = proxy_url
+    client_kwargs: dict[str, Any] = {
+        "timeout": 10.0,
+        "headers": headers,
+        **httpx_options(proxy_url),
+    }
 
     async with httpx.AsyncClient(**client_kwargs) as client:
         res = await client.get(url)
@@ -64,7 +68,11 @@ async def discover_bedrock_mantle_model_options(
             break
     url = f"{root}/v1/models"
     headers: dict[str, str] = {"Accept": "application/json"}
-    client_kwargs: dict[str, Any] = {"timeout": 10.0, "headers": headers}
+    client_kwargs: dict[str, Any] = {
+        "timeout": 10.0,
+        "headers": headers,
+        **httpx_options(proxy_url),
+    }
     if api_key and api_key.strip():
         headers["Authorization"] = f"Bearer {api_key.strip()}"
     else:
@@ -77,10 +85,6 @@ async def discover_bedrock_mantle_model_options(
             region=_bedrock_mantle_region_from_url(root),
             profile=profile or os.getenv("AWS_PROFILE"),
         )
-    if proxy_url:
-        client_kwargs["proxy"] = proxy_url
-        client_kwargs["verify"] = False
-
     async with httpx.AsyncClient(**client_kwargs) as client:
         response = await client.get(url)
         response.raise_for_status()
@@ -110,9 +114,11 @@ async def discover_azure_openai_model_options(
     if api_key and api_key.strip():
         headers["api-key"] = api_key.strip()
         headers["Authorization"] = f"Bearer {api_key.strip()}"
-    client_kwargs: dict[str, Any] = {"timeout": 10.0, "headers": headers}
-    if proxy_url:
-        client_kwargs["proxy"] = proxy_url
+    client_kwargs: dict[str, Any] = {
+        "timeout": 10.0,
+        "headers": headers,
+        **httpx_options(proxy_url),
+    }
     async with httpx.AsyncClient(**client_kwargs) as client:
         response = await client.get(url)
         response.raise_for_status()
@@ -152,9 +158,11 @@ async def discover_anthropic_model_options(
     if api_key and api_key.strip():
         headers["x-api-key"] = api_key.strip()
 
-    client_kwargs: dict[str, Any] = {"timeout": 10.0, "headers": headers}
-    if proxy_url:
-        client_kwargs["proxy"] = proxy_url
+    client_kwargs: dict[str, Any] = {
+        "timeout": 10.0,
+        "headers": headers,
+        **httpx_options(proxy_url),
+    }
 
     async with httpx.AsyncClient(**client_kwargs) as client:
         res = await client.get(url)
@@ -197,9 +205,8 @@ async def discover_google_model_options(
         "timeout": 10.0,
         "headers": headers,
         "params": params,
+        **httpx_options(proxy_url),
     }
-    if proxy_url:
-        client_kwargs["proxy"] = proxy_url
 
     async with httpx.AsyncClient(**client_kwargs) as client:
         res = await client.get(url)
@@ -253,7 +260,10 @@ async def discover_google_vertex_model_options(
         vertexai=True,
         project=project,
         location=region,
-        http_options=types.HttpOptions(api_version="v1"),
+        http_options=types.HttpOptions(
+            api_version="v1",
+            httpx_async_client=httpx.AsyncClient(**httpx_options()),
+        ),
     )
     async_client = client.aio
     records: list[dict[str, Any]] = []
@@ -298,8 +308,6 @@ async def discover_bedrock_models(
         import re
         from urllib.parse import urlparse
 
-        import boto3
-
         region = None
         endpoint_url = None
 
@@ -321,7 +329,15 @@ async def discover_bedrock_models(
             or "ap-southeast-2"
         )
 
-        client_kwargs: dict[str, Any] = {"region_name": region}
+        proxy, ca_bundle = configured_llm_network()
+        client_kwargs: dict[str, Any] = {
+            "region_name": region,
+            "verify": ca_bundle or not proxy,
+        }
+        if proxy:
+            from aespa.services.llm import _bedrock_botocore_config
+
+            client_kwargs["config"] = _bedrock_botocore_config(proxy)
         if endpoint_url:
             if "bedrock-runtime" in endpoint_url:
                 control_url = endpoint_url.replace("bedrock-runtime", "bedrock")
@@ -329,8 +345,11 @@ async def discover_bedrock_models(
             else:
                 client_kwargs["endpoint_url"] = endpoint_url
 
-        session_kwargs = {"profile_name": profile} if profile else {}
-        client = boto3.Session(**session_kwargs).client("bedrock", **client_kwargs)
+        from aespa.services.llm import _bedrock_session
+
+        client = _bedrock_session(profile, proxy, ca_bundle).client(
+            "bedrock", **client_kwargs
+        )
 
         # 1. System-defined inference profiles (includes global.*, us.*, eu.*, apac.*)
         profiles: list[str] = []

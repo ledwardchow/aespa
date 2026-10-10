@@ -175,12 +175,14 @@ def _copilot_login_command() -> list[str]:
 
 def _copilot_login_env() -> dict[str, str]:
     """Build a minimal login environment that cannot bypass OAuth with a host token."""
+    from aespa.services.llm_network import child_network_env
+
     allowed = (*_COPILOT_ENV_ALLOWLIST, "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
     child_env = {name: os.environ[name] for name in allowed if name in os.environ}
     for name in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
         child_env.pop(name, None)
     child_env["COPILOT_HOME"] = str(_copilot_home())
-    return child_env
+    return child_network_env(child_env)
 
 
 def _login_payload(flow: _LoginFlow) -> dict[str, Any]:
@@ -337,13 +339,18 @@ async def _cancel_login_flows() -> None:
 
 
 def _client_key(config: LLMConfig, proxy_url: str | None) -> str:
+    from aespa.services.llm_network import configured_llm_network
+
+    saved_proxy, ca_bundle = configured_llm_network()
     username = (getattr(config, "username", None) or "").strip()
     token_marker = config.api_key or (
         f"copilot-user:{username.casefold()}:{_copilot_home()}"
         if username
         else f"logged-in-user:{_copilot_home()}"
     )
-    material = f"{token_marker}\0{proxy_url or ''}".encode()
+    material = (
+        f"{token_marker}\0{proxy_url or saved_proxy or ''}\0{ca_bundle or ''}".encode()
+    )
     return hashlib.sha256(material).hexdigest()
 
 
@@ -421,9 +428,9 @@ async def _get_client(config: LLMConfig, proxy_url: str | None) -> Any:
             for name in _COPILOT_ENV_ALLOWLIST
             if name in os.environ
         }
-        if proxy_url:
-            child_env["HTTP_PROXY"] = proxy_url
-            child_env["HTTPS_PROXY"] = proxy_url
+        from aespa.services.llm_network import child_network_env
+
+        child_env = child_network_env(child_env, proxy_url)
 
         client = CopilotClient(
             mode=client_mode,

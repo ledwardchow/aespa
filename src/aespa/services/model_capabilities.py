@@ -458,7 +458,9 @@ async def fetch_openrouter_catalog(*, force: bool = False) -> list[dict[str, Any
             and now - _catalog_cache[0] < _CATALOG_TTL_S
         ):
             return _catalog_cache[1]
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        from aespa.services.llm_network import httpx_options
+
+        async with httpx.AsyncClient(timeout=10.0, **httpx_options()) as client:
             response = await client.get(
                 "https://openrouter.ai/api/v1/models",
                 headers={"Accept": "application/json"},

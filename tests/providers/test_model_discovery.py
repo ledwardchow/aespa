@@ -4,10 +4,21 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from aespa.models import UpstreamProxyConfig
 from aespa.services import model_discovery, settings
 
 
-def test_discover_openai_models():
+def test_discover_openai_models(db_session):
+    db_session.add(
+        UpstreamProxyConfig(
+            id=1,
+            proxy_llm=True,
+            llm_proxy_url="http://proxy.example:8080",
+            llm_ca_bundle_path="/tmp/company-ca.pem",
+        )
+    )
+    db_session.commit()
+    captured = {}
     mock_response = MagicMock()
     mock_response.json.return_value = {
         "data": [
@@ -19,7 +30,7 @@ def test_discover_openai_models():
 
     class _MockClient:
         def __init__(self, **kwargs):
-            pass
+            captured.update(kwargs)
 
         async def __aenter__(self):
             return self
@@ -34,6 +45,8 @@ def test_discover_openai_models():
     with patch("httpx.AsyncClient", _MockClient):
         models = asyncio.run(model_discovery.discover_openai_models(api_key="test-key"))
         assert models == ["gpt-4o", "gpt-4o-mini"]
+    assert captured["proxy"] == "http://proxy.example:8080"
+    assert captured["verify"] == "/tmp/company-ca.pem"
 
 
 def test_discover_bedrock_mantle_models_uses_v1_models_route():

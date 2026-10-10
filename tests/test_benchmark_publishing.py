@@ -4,11 +4,14 @@ import importlib
 import json
 from types import SimpleNamespace
 
+import certifi
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlmodel import Session
 
+from aespa.models import UpstreamProxyConfig
 from tests import test_benchmark_transfer as transfer_tests
 from tests.test_benchmark_lab import enabled_benchmarking  # noqa: F401
 from tests.test_benchmark_transfer import seed
@@ -155,7 +158,9 @@ def test_publishing_rejects_unrelated_destinations(value):
         modules().site_url(value)
 
 
-def test_publish_sends_service_header_and_masks_saved_token(portable, monkeypatch):
+def test_publish_sends_service_header_and_masks_saved_token(
+    portable, db_engine, monkeypatch
+):
     models, _, stores = portable
     seed(models, stores[0])
     publishing = modules()
@@ -166,6 +171,25 @@ def test_publish_sends_service_header_and_masks_saved_token(portable, monkeypatc
     publishing.register_publishing(router, stores[0])
     app.include_router(router)
     called = []
+    client_options = []
+    with Session(db_engine) as session:
+        session.add(
+            UpstreamProxyConfig(
+                id=1,
+                llm_proxy_url="http://company-proxy.local:8080",
+                proxy_llm=True,
+                llm_ca_bundle_path=certifi.where(),
+            )
+        )
+        session.commit()
+
+    original_init = httpx.AsyncClient.__init__
+
+    def capture_client_options(self, *args, **kwargs):
+        client_options.append(kwargs)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", capture_client_options)
 
     async def fake_post(self, url, **kwargs):
         called.append((url, kwargs))
@@ -202,6 +226,9 @@ def test_publish_sends_service_header_and_masks_saved_token(portable, monkeypatc
         )
         assert client.post("/publish").json()["stored"] == 1
     assert called[0][0] == "https://a.chatgpt.site/api/v1/results"
+    assert client_options[-1]["proxy"] == "http://company-proxy.local:8080"
+    assert client_options[-1]["verify"] == certifi.where()
+    assert client_options[-1]["trust_env"] is False
     assert called[0][1]["headers"]["OAI-Sites-Authorization"] == "Bearer secret-value"
     assert called[0][1]["headers"]["X-AESPA-Upload-Token"] == UPLOAD_TOKEN
     assert "saved proof" not in called[0][1]["content"].decode()
