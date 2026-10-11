@@ -31,7 +31,7 @@ You will need to provide:
 
 ## Performance
 
-Benchmarks are now on a dedicated website, [AESPABench](https://aespabench.maranthis.chatgpt.site)
+Benchmarks are now on a dedicated website, [AESPA Benchmark](https://bench.aespa.app).
 
 ## Documentation
 
