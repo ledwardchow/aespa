@@ -65,6 +65,12 @@ from aespa.services.prompts.validator import (
 log = logging.getLogger("aespa.llm")
 traffic_log = logging.getLogger("aespa.llm.traffic")
 
+
+def describe_exception(exc: Exception) -> str:
+    """Keep errors with no message useful in saved scan events."""
+    return str(exc).strip() or type(exc).__name__
+
+
 _tool_text_delta_var: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar(
     "llm_tool_text_delta", default=None
 )
@@ -2618,7 +2624,7 @@ def _bedrock_reasoning_fields(config: LLMConfig) -> dict[str, Any]:
         return {}
     return {
         "thinking": {"type": "adaptive"},
-        "outputConfig": {"effort": config.reasoning_effort},
+        "output_config": {"effort": config.reasoning_effort},
     }
 
 
@@ -3299,6 +3305,32 @@ async def _add_daybreak_access(config: LLMConfig, kwargs: dict[str, Any]) -> Non
         kwargs["extra_body"] = {"access_programs": {"cyber": program}}
 
 
+async def _create_chatgpt_plan_stream(client: Any, kwargs: dict[str, Any]) -> Any:
+    """Retry connection timeouts before the provider receives a request."""
+    from openai import APITimeoutError
+
+    for attempt in range(3):
+        try:
+            return await client.responses.create(**kwargs)
+        except (APITimeoutError, httpx.ConnectTimeout, httpx2.ConnectTimeout) as exc:
+            connect_timeout = isinstance(
+                exc, (httpx.ConnectTimeout, httpx2.ConnectTimeout)
+            )
+            if isinstance(exc, APITimeoutError):
+                connect_timeout = isinstance(
+                    exc.__cause__, (httpx.ConnectTimeout, httpx2.ConnectTimeout)
+                )
+            if not connect_timeout or attempt == 2:
+                raise
+            delay = 2**attempt
+            log.warning(
+                "ChatGPT connection timed out; retrying request %s/3 in %ss",
+                attempt + 2,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
 async def _chatgpt_plan_response(
     client: Any,
     kwargs: dict[str, Any],
@@ -3314,7 +3346,7 @@ async def _chatgpt_plan_response(
         completed = None
         output_items: list[Any] = []
         try:
-            stream = await client.responses.create(**kwargs)
+            stream = await _create_chatgpt_plan_stream(client, kwargs)
             async for event in stream:
                 event_type = getattr(event, "type", None)
                 if event_type == "response.output_text.delta" and on_text_delta:
@@ -5087,10 +5119,13 @@ async def normalize_finding_titles(
 
     existing_list = "\n".join(
         f"  {i + 1}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f['title']}"
+        + f"\n     url: {str(f.get('affected_url') or '')[:200]}"
+        + f"\n     desc: {str(f.get('description') or '')[:180]}"
         for i, f in enumerate(existing_findings[:60])
     )
     new_list = "\n".join(
         f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f.get('title', '?')}"
+        + f"\n     url: {str(f.get('affected_url') or '')[:200]}"
         + (
             f"\n     desc: {(f.get('description') or '')[:120]}"
             if f.get("description")
@@ -7846,10 +7881,11 @@ async def thinking_agentic_loop(
                             pass
                 content_blocks, stop_reason, raw_content = _llm_fut.result()
             except Exception as exc:
-                log.error(
+                error_message = describe_exception(exc)
+                log.exception(
                     "thinking_agentic_loop: API error at step %d: %s",
                     tool_call_count + 1,
-                    exc,
+                    error_message,
                 )
                 _is_refusal = _is_llm_refusal(exc)
                 _is_quota_pause = isinstance(exc, LLMQuotaPauseError)
@@ -7872,11 +7908,11 @@ async def thinking_agentic_loop(
                                 "Please refresh your AWS credentials and resume the pentest."
                             )
                         elif _is_refusal:
-                            _msg = f"Step {tool_call_count + 1}: LLM provider refused the scan request — {exc}"
+                            _msg = f"Step {tool_call_count + 1}: LLM provider refused the scan request — {error_message}"
                         elif _is_quota_pause:
-                            _msg = f"Step {tool_call_count + 1}: scan paused because the Codex allowance or rate-limit window is exhausted — {exc}"
+                            _msg = f"Step {tool_call_count + 1}: scan paused because the Codex allowance or rate-limit window is exhausted — {error_message}"
                         else:
-                            _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
+                            _msg = f"Step {tool_call_count + 1}: LLM API error — {error_message}"
                         emit_fn(
                             {
                                 "type": "scanner_phase",
@@ -7885,7 +7921,8 @@ async def thinking_agentic_loop(
                                 "message": _msg,
                                 "data": {
                                     "step": tool_call_count + 1,
-                                    "error": str(exc),
+                                    "error": error_message,
+                                    "error_type": type(exc).__name__,
                                 },
                             }
                         )

@@ -99,8 +99,11 @@ NEW candidate findings just discovered (normalize these):
 {new_list}
 
 Rules:
-- If a new finding is the same vulnerability class as an existing one (same OWASP category \
-and root cause, possibly on a different URL), set its title to EXACTLY the existing title.
+- If a new finding describes the same defect as an existing one, set its title to EXACTLY \
+the existing title. This includes a preliminary symptom followed by stronger proof of the \
+same defect, such as a SQL error followed by demonstrated SQL injection.
+- Keep findings for different parameters, operations, or root causes separate, even when \
+they share an OWASP category or URL. Do not match on category alone.
 - Preserve security qualifiers. Never add or remove claims such as "unauthenticated",
   "without authentication", "authenticated", or "admin-only" while normalising a title.
 - Return the title alone. Do not copy the displayed [OWASP] or [SEVERITY] prefixes into it.

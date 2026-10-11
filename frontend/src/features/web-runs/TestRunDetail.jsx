@@ -32,6 +32,8 @@ import { WebRunCrawlProgress } from "./WebRunCrawlProgress.jsx";
 import { WebRunHeader } from "./WebRunHeader.jsx";
 import { WebRunSastLeadsTab } from "../../shared/leads/RunLeadsTab.jsx";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
+import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
+import { SastSourceCosts } from "../../shared/ui/SastSourceCosts";
 
 export function TestRunDetail(props) {
   return (
@@ -90,6 +92,7 @@ function TestRunContent({
   const [wpReloadKey, setWpReloadKey] = useState(0); // bump to force workprogram reload
   const [checkpointStatus, setCheckpointStatus] = useState(null);
   const [trafficTotal, setTrafficTotal] = useState(0);
+  const [tokenExpanded, setTokenExpanded] = useState(false);
   const crawlImportInputRef = useRef(null);
 
   const [error, setError] = useState(null);
@@ -564,6 +567,15 @@ function TestRunContent({
           onGraphView={setGraphView}
         />
 
+        <div className="run-usage-bars">
+          <TokenUsageBar
+            tokenUsage={tokenUsage}
+            tokenExpanded={tokenExpanded}
+            setTokenExpanded={setTokenExpanded}
+          />
+          <SastSourceCosts runId={runId} />
+        </div>
+
         {activeTab === "sitemap" && run && (
           <>
             <WebRunSitemapMeta
@@ -655,7 +667,6 @@ function TestRunContent({
             thinkingStatus={thinkingStatus}
             activityLog={activityLog}
             agents={agents}
-            tokenUsage={tokenUsage}
             sitePlanData={sitePlanData}
             onClearLog={async () => {
               await webRunsApi.clearScanLog(runId);

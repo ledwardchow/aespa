@@ -1,6 +1,5 @@
 import { useState } from "react";
 
-import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { SastAgentGroupView, SastAgentRoster } from "./SastAgentRoster.jsx";
 import { sastGroupHasActiveAgent, sastGroupHasAgents } from "./sastAgentPresentation.js";
 
@@ -22,16 +21,7 @@ export function formatTime(value) {
   });
 }
 
-export function ActivityView({
-  logs,
-  agentLog,
-  scanRunning,
-  tokenUsage,
-  tokenExpanded,
-  setTokenExpanded,
-  runId,
-  analysisMode,
-}) {
+export function ActivityView({ logs, agentLog, scanRunning, runId, analysisMode }) {
   const [subTab, setSubTab] = useState("agents");
   const groupTabs = GROUP_TABS.filter(
     (item) => !item.legacy || sastGroupHasAgents(agentLog, item.key),
@@ -39,11 +29,6 @@ export function ActivityView({
   const selectedGroup = groupTabs.find((item) => item.key === subTab);
   return (
     <div className="sast-activity-panel">
-      <TokenUsageBar
-        tokenUsage={tokenUsage}
-        tokenExpanded={tokenExpanded}
-        setTokenExpanded={setTokenExpanded}
-      />
       <div className="sast-activity-toolbar">
         <div className="sast-activity-tabs">
           <button

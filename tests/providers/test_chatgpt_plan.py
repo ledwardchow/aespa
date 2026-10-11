@@ -7,10 +7,12 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import httpx2
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from openai import APITimeoutError
 
 from aespa.models import LLMConfig
 from aespa.services import chatgpt_plan, llm
@@ -339,6 +341,24 @@ def test_plan_access_check_verifies_unlisted_models_and_daybreak(monkeypatch):
     assert access["daybreak"] == {"blue": True, "red": False}
 
 
+def test_plan_access_check_names_model_when_probe_times_out(monkeypatch):
+    async def token(_client_id):
+        return "test-token"
+
+    async def timed_out(_http, _token, _model):
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(chatgpt_plan, "access_token", token)
+    monkeypatch.setattr(chatgpt_plan, "_probe_model", timed_out)
+    chatgpt_plan._access_checks.clear()
+
+    with pytest.raises(
+        RuntimeError, match="ChatGPT access check timed out while checking gpt-6-sol"
+    ) as error:
+        asyncio.run(chatgpt_plan.check_access("oaiapp_test", force=True))
+    assert isinstance(error.value.__cause__, httpx.ReadTimeout)
+
+
 def test_plan_sends_daybreak_program_for_supported_scan_models(monkeypatch):
     async def access(_client_id, *, force=False):
         return {"daybreak": {"blue": True, "red": True}}
@@ -477,6 +497,98 @@ def test_plan_stream_retries_missing_completion_without_reusing_partial_output(
     assert responses.calls == 2
     assert delays == [1]
     assert result.output == ["keep"]
+
+
+def test_plan_retries_connect_timeout_before_stream_starts(monkeypatch):
+    delays = []
+
+    async def record_delay(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr(llm.asyncio, "sleep", record_delay)
+    request = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+
+    class Responses:
+        calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                raise APITimeoutError(request) from httpx2.ConnectTimeout("")
+
+            async def stream():
+                yield SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(output=["ok"]),
+                )
+
+            return stream()
+
+    responses = Responses()
+    result = asyncio.run(
+        llm._chatgpt_plan_response(
+            SimpleNamespace(responses=responses),
+            {"stream": True},
+            on_text_delta=lambda _text: None,
+        )
+    )
+    assert result.output == ["ok"]
+    assert responses.calls == 3
+    assert delays == [1, 2]
+
+
+def test_plan_does_not_retry_read_timeout(monkeypatch):
+    delays = []
+
+    async def record_delay(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr(llm.asyncio, "sleep", record_delay)
+    request = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+
+    class Responses:
+        calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            raise APITimeoutError(request) from httpx2.ReadTimeout("")
+
+    responses = Responses()
+    with pytest.raises(APITimeoutError):
+        asyncio.run(
+            llm._chatgpt_plan_response(
+                SimpleNamespace(responses=responses), {"stream": True}
+            )
+        )
+    assert responses.calls == 1
+    assert delays == []
+
+
+def test_plan_stops_after_three_connect_timeouts(monkeypatch):
+    delays = []
+
+    async def record_delay(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr(llm.asyncio, "sleep", record_delay)
+    request = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+
+    class Responses:
+        calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            raise APITimeoutError(request) from httpx2.ConnectTimeout("")
+
+    responses = Responses()
+    with pytest.raises(APITimeoutError):
+        asyncio.run(
+            llm._chatgpt_plan_response(
+                SimpleNamespace(responses=responses), {"stream": True}
+            )
+        )
+    assert responses.calls == 3
+    assert delays == [1, 2]
 
 
 def test_id_token_checks_signature_audience_and_nonce():

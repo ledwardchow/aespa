@@ -1215,7 +1215,7 @@ Active scan tasks are tracked by run. Stopping a run or disabling the extension 
 Findings are deduplicated as they are written, on the dynamic finding-write path in `scanner.py`:
 
 1. **Title normalisation** — before a finding is persisted, `llm.normalize_finding_titles` asks the LLM to rewrite its title to a canonical form so near-identical findings (same vulnerability class, different parameter name) collapse to the same heading. ALICE findings skip this pass (`skip_normalize=True`) because they already carry specific, human-readable titles — see §15.
-2. **Exact-title deduplication** — `_dynamic_finding_exists` then rejects any finding whose (normalised) title already exists at the same URL for the run, so genuinely identical findings are not written twice.
+2. **Matching saved findings** — The scanner compares the normalised title and exact affected URL within the run. If the new finding has higher severity in the same OWASP category, it replaces the earlier report's title, evidence, rating, and write-up while keeping its finding ID and public reference. The updated finding is validated again. Lower-severity repeats are skipped. Specialist reports with matching severity can still add supporting evidence.
 
 ### Validation
 

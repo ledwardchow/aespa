@@ -457,7 +457,12 @@ async def check_access(client_id: str, *, force: bool = False) -> dict[str, Any]
 
             async def check(model: str) -> dict[str, Any]:
                 async with limit:
-                    return await _probe_model(http, token, model)
+                    try:
+                        return await _probe_model(http, token, model)
+                    except httpx.TimeoutException as exc:
+                        raise RuntimeError(
+                            f"ChatGPT access check timed out while checking {model}"
+                        ) from exc
 
             results = await asyncio.gather(
                 *(check(model) for model in _ACCESS_CHECK_MODELS)

@@ -4341,6 +4341,51 @@ def _canonical_finding_title(title: str) -> str:
     return " ".join(normalized.lower().split())
 
 
+_FINDING_SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def _upgrade_duplicate_finding(
+    existing: ScanFinding, candidate: ScanFinding, *, original_title: str
+) -> bool:
+    """Replace a preliminary report when the same issue has a stronger finding."""
+    if (
+        existing.owasp_category.strip().lower()
+        != candidate.owasp_category.strip().lower()
+    ):
+        return False
+    if _FINDING_SEVERITY_RANK.get(
+        candidate.severity.lower(), -1
+    ) <= _FINDING_SEVERITY_RANK.get(existing.severity.lower(), -1):
+        return False
+
+    for field in (
+        "description",
+        "impact",
+        "likelihood",
+        "recommendation",
+        "cvss_score",
+        "cvss_vector",
+        "severity",
+        "evidence",
+        "request_evidence",
+        "response_evidence",
+        "evidence_json",
+        "screenshot_b64",
+        "finding_source",
+    ):
+        setattr(existing, field, getattr(candidate, field))
+    # Title normalization is used to find the existing issue. Keep the more
+    # specific title from the new report when replacing its contents.
+    existing.title = original_title or candidate.title
+    existing.validation_status = "unvalidated"
+    existing.validation_note = None
+    existing.poc_command = ""
+    existing.poc_setup = ""
+    if candidate.page_id is not None:
+        existing.page_id = candidate.page_id
+    return True
+
+
 def _finding_exists(
     session: Session,
     *,
@@ -5587,6 +5632,7 @@ async def _persist_dynamic_finding(
     """Persist a dynamic finding as soon as the thinking loop has enough evidence."""
     affected = (raw.get("affected_url") or base_url).strip() or base_url
     raw = {**raw, "affected_url": affected}
+    original_title = _as_text(raw.get("title"))
 
     # normalize_finding_titles renames new findings to match existing titles when
     # they share the same OWASP category — useful for the automated scanner, but
@@ -5604,6 +5650,8 @@ async def _persist_dynamic_finding(
                         "title": f.title,
                         "owasp_category": f.owasp_category,
                         "severity": f.severity,
+                        "affected_url": f.affected_url,
+                        "description": f.description,
                     }
                     for f in existing
                 ]
@@ -5644,56 +5692,73 @@ async def _persist_dynamic_finding(
                 owasp_category=str(raw.get("owasp_category") or "A00"),
                 is_api_run=is_api_run,
             )
+            finding = None
             if duplicate is not None:
-                handoff_id = raw.get("_handoff_id")
-                source = str(raw.get("finding_source") or writeup_source or "")
-                if source == "specialist_agent" or str(writeup_source or "").startswith(
-                    "specialist:"
+                candidate = _finding_from_llm(
+                    run_id=run_id,
+                    page_id=page_id,
+                    page_url=affected,
+                    raw={**raw, "title": original_title or raw.get("title")},
+                    result_by_url=result_by_url,
+                    validation_status="unvalidated",
+                    validation_note=None,
+                    is_api_run=is_api_run,
+                )
+                if _upgrade_duplicate_finding(
+                    duplicate, candidate, original_title=original_title
                 ):
-                    additions = []
-                    for label, field in (
-                        ("Evidence", "evidence"),
-                        ("Request", "request_evidence"),
-                        ("Response", "response_evidence"),
-                    ):
-                        value = str(raw.get(field) or "").strip()
-                        current = str(getattr(duplicate, field) or "")
-                        if value and value not in current:
-                            setattr(
-                                duplicate,
-                                field,
-                                (
-                                    current
-                                    + f"\n\nSpecialist {label.lower()}:\n"
-                                    + value
-                                )[-EVIDENCE_TEXT_LIMIT:],
+                    finding = duplicate
+                else:
+                    handoff_id = raw.get("_handoff_id")
+                    source = str(raw.get("finding_source") or writeup_source or "")
+                    if source == "specialist_agent" or str(
+                        writeup_source or ""
+                    ).startswith("specialist:"):
+                        additions = []
+                        for label, field in (
+                            ("Evidence", "evidence"),
+                            ("Request", "request_evidence"),
+                            ("Response", "response_evidence"),
+                        ):
+                            value = str(raw.get(field) or "").strip()
+                            current = str(getattr(duplicate, field) or "")
+                            if value and value not in current:
+                                setattr(
+                                    duplicate,
+                                    field,
+                                    (
+                                        current
+                                        + f"\n\nSpecialist {label.lower()}:\n"
+                                        + value
+                                    )[-EVIDENCE_TEXT_LIMIT:],
+                                )
+                                additions.append(label.lower())
+                        if additions and duplicate.finding_source == "dynamic_scan":
+                            duplicate.finding_source = "test_lead+specialist_agent"
+                        s.add(duplicate)
+                        s.commit()
+                        if handoff_id is not None:
+                            handoff_svc.update_handoff(
+                                int(handoff_id),
+                                finding_id=duplicate.id,
+                                outcome=(
+                                    f"Corroborated existing finding #{duplicate.id}; "
+                                    f"merged {', '.join(additions) or 'matching evidence'}."
+                                ),
                             )
-                            additions.append(label.lower())
-                    if additions and duplicate.finding_source == "dynamic_scan":
-                        duplicate.finding_source = "test_lead+specialist_agent"
-                    s.add(duplicate)
-                    s.commit()
-                    if handoff_id is not None:
-                        handoff_svc.update_handoff(
-                            int(handoff_id),
-                            finding_id=duplicate.id,
-                            outcome=(
-                                f"Corroborated existing finding #{duplicate.id}; "
-                                f"merged {', '.join(additions) or 'matching evidence'}."
-                            ),
-                        )
-                return None
+                    return None
 
-            finding = _finding_from_llm(
-                run_id=run_id,
-                page_id=page_id,
-                page_url=affected,
-                raw=raw,
-                result_by_url=result_by_url,
-                validation_status="unvalidated",
-                validation_note=None,
-                is_api_run=is_api_run,
-            )
+            if finding is None:
+                finding = _finding_from_llm(
+                    run_id=run_id,
+                    page_id=page_id,
+                    page_url=affected,
+                    raw=raw,
+                    result_by_url=result_by_url,
+                    validation_status="unvalidated",
+                    validation_note=None,
+                    is_api_run=is_api_run,
+                )
             s.add(finding)
             ensure_finding_reference(s, finding)
             s.commit()
@@ -6363,7 +6428,7 @@ async def _thinking_scan_task(run_id: int) -> None:
         _emit_thinking_status(run_id)
         is_refusal = isinstance(exc, llm_svc.LLMRefusalError)
         failure_label = "LLM provider refusal" if is_refusal else "Scan failed"
-        failure_message = str(exc)[:2000]
+        failure_message = llm_svc.describe_exception(exc)[:2000]
         events_svc.emit(
             run_id,
             {
@@ -6383,7 +6448,10 @@ async def _thinking_scan_task(run_id: int) -> None:
                 "phase": "scan_failed",
                 "status": "error",
                 "message": f"{failure_label}: {failure_message}",
-                "data": {"reason": "provider_error" if is_refusal else "error"},
+                "data": {
+                    "reason": "provider_error" if is_refusal else "error",
+                    "error_type": type(exc).__name__,
+                },
             },
         )
         with Session(get_engine()) as _s:
@@ -8773,6 +8841,7 @@ async def _do_thinking_scan(
             )
             # Normalise titles against existing findings so the same vulnerability
             # class gets a consistent title regardless of which step found it.
+            original_titles = [str(raw.get("title") or "") for raw in raw_findings]
             if raw_findings:
                 with Session(get_engine()) as _s:
                     _existing = _s.exec(
@@ -8784,6 +8853,8 @@ async def _do_thinking_scan(
                             "title": f.title,
                             "owasp_category": f.owasp_category,
                             "severity": f.severity,
+                            "affected_url": f.affected_url,
+                            "description": f.description,
                         }
                         for f in _existing
                     ]
@@ -8802,7 +8873,7 @@ async def _do_thinking_scan(
                 rejected_count = 0
                 saved_finding_ids: list[int] = []
 
-                for raw in raw_findings:
+                for index, raw in enumerate(raw_findings):
                     affected = (raw.get("affected_url") or base_url).strip()
                     evidence_result_by_url = result_by_url
                     if _finding_claims_unauthenticated(raw):
@@ -8837,13 +8908,31 @@ async def _do_thinking_scan(
                         pages_snapshot=pages_snapshot,
                         first_page_id=first_page_id,
                     )
-                    if _dynamic_finding_exists(
+                    duplicate = _find_dynamic_duplicate(
                         s,
                         run_id=run_id,
                         title=str(raw.get("title") or "Untitled finding"),
                         affected_url=affected,
                         owasp_category=str(raw.get("owasp_category") or "A00"),
-                    ):
+                    )
+                    if duplicate is not None:
+                        candidate = _finding_from_llm(
+                            run_id=run_id,
+                            page_id=page_id,
+                            page_url=affected,
+                            raw={**raw, "title": original_titles[index]},
+                            result_by_url=evidence_result_by_url,
+                            validation_status="unvalidated",
+                            validation_note=None,
+                        )
+                        if _upgrade_duplicate_finding(
+                            duplicate, candidate, original_title=original_titles[index]
+                        ):
+                            s.add(duplicate)
+                            if duplicate.id is not None:
+                                saved_finding_ids.append(duplicate.id)
+                            saved_count += 1
+                            continue
                         duplicate_count += 1
                         continue
                     finding = _finding_from_llm(

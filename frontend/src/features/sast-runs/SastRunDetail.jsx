@@ -17,6 +17,7 @@ import { usePolling } from "../../shared/hooks/usePolling.js";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { DismissibleAlert } from "../../shared/ui/DismissibleAlert.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
+import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { jsonListValue } from "../../shared/ui/SastLeadDetails.jsx";
 
 const DEEP_PHASES = [
@@ -543,6 +544,11 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             </button>
           ))}
         </div>
+        <TokenUsageBar
+          tokenUsage={tokenUsage}
+          tokenExpanded={tokenExpanded}
+          setTokenExpanded={setTokenExpanded}
+        />
         <div
           className={"sast-run-content" + (tab === "activity" ? " sast-run-content--activity" : "")}
         >
@@ -669,9 +675,6 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               logs={logs}
               agentLog={agentLog}
               scanRunning={scanRunning}
-              tokenUsage={tokenUsage}
-              tokenExpanded={tokenExpanded}
-              setTokenExpanded={setTokenExpanded}
               runId={runId}
               analysisMode={run.analysis_mode}
             />

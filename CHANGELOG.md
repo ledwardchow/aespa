@@ -20,6 +20,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Scan usage on every tab**: Token usage stays visible while you switch between tabs in web, API, and source scan runs. Web runs also keep the cost of linked source scans visible.
+
+- **Python execution request limit**: New setups now allow up to 50 HTTP requests per Python execution by default. Existing saved settings can still be changed in Agent Settings.
+
 - **Saved benchmark analyses**: Opening an analysis from a graph or results list now shows it on its own page, with a link back to Benchmark Lab. Findings can be grouped by OWASP category or severity.
 
 - **Benchmark comparison charts**: The scanner and benchmark sites can compare either scan cost or scan date with matched finding count or a severity-weighted score. The sites show cost and score by default. Scans recorded at $0 are hidden from the graph by default and can be shown with **Show local model ($0) results**. Full and partial matches use the ground-truth severity: informational 0, low 1, medium 2, high 3, and critical 4. High and Critical matches in OWASP A01, A03, A04, and A07 earn double points. Point details show matched findings out of the ground-truth total for each OWASP category.
@@ -29,6 +33,12 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Smaller console log database**: When console log saving is on, each LLM request and response is now stored once instead of twice. Agent conversations that continue an earlier logged call now save only the new messages, with a reference to that earlier call, instead of repeating the whole conversation on every step. Together these greatly reduce how fast the console log database grows during long scans.
 
 ### Fixes
+
+- **Bedrock benchmark evaluation**: Fixed requests with a Claude reasoning level failing because Bedrock rejected the reasoning setting. This also affects scans using the same Bedrock model settings.
+
+- **LLM scan errors**: Scan logs now show the exception type when an LLM error has no message. ChatGPT access-check timeouts identify the model being checked. ChatGPT connections that time out before a request is sent now retry twice before failing the scan.
+
+- **Finding updates during scans**: When later testing provides stronger proof of an issue already reported, AESPA updates the saved finding with the new severity, evidence, and write-up. The finding keeps its reference and is validated again.
 
 - **Claude Code CLI sign-in on macOS**: Fixed Claude Code CLI requests failing with "Not logged in" on macOS even when Claude Code was signed in.
 

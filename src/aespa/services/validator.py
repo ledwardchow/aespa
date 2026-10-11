@@ -1108,6 +1108,7 @@ async def _validate_one(
             reasoning,
             validation_results=[],
             source="deterministic_validation",
+            expected_finding=finding,
         )
         if verdict == "confirmed":
             await _attach_poc_if_confirmed(
@@ -1136,6 +1137,7 @@ async def _validate_one(
             f"Not validated: severity '{finding.severity}' is below the configured threshold '{validator_cfg.min_severity}'.",
             validation_results=[],
             source="severity_threshold",
+            expected_finding=finding,
         )
         return
 
@@ -1178,6 +1180,7 @@ async def _validate_one(
             reasoning,
             validation_results=[],
             source="adversarial_validator",
+            expected_finding=finding,
         )
         if verdict == "confirmed":
             await _attach_poc_if_confirmed(
@@ -1276,6 +1279,7 @@ async def _validate_one(
         reasoning,
         validation_results=results,
         source="llm_validation",
+        expected_finding=finding,
     )
 
 
@@ -1403,6 +1407,7 @@ async def _persist_verdict(
     *,
     validation_results: list[dict] | None = None,
     source: str = "validation",
+    expected_finding: ScanFinding | None = None,
 ) -> None:
     allowed_verdicts = {
         "confirmed",
@@ -1423,6 +1428,13 @@ async def _persist_verdict(
     with Session(get_engine()) as s:
         row = s.get(ScanFinding, finding_id)
         if row:
+            if expected_finding is not None and (
+                row.title != expected_finding.title
+                or row.severity != expected_finding.severity
+                or row.evidence != expected_finding.evidence
+            ):
+                log.info("Ignoring stale validation for updated finding %s", finding_id)
+                return
             ensure_finding_reference(s, row)
             finding_reference = row.reference
             finding_title = row.title or finding_title
@@ -2065,6 +2077,13 @@ async def _attach_poc_if_confirmed(
     with Session(get_engine()) as s:
         row = s.get(ScanFinding, finding.id)
         if row is None:
+            return
+        if (
+            row.title != finding.title
+            or row.severity != finding.severity
+            or row.evidence != finding.evidence
+        ):
+            log.info("Ignoring stale PoC for updated finding %s", finding.id)
             return
         row.poc_command = command
         row.poc_setup = setup
