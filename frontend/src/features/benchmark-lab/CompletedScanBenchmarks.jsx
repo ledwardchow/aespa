@@ -166,6 +166,9 @@ export function CompletedScanBenchmarks({
         >
           {busy ? "Working..." : `Benchmark ${selectedRuns.length} selected scans`}
         </button>
+        {!!selectedRuns.length && !datasetId && (
+          <p className="subtle">Pick a ground truth file above to turn this on.</p>
+        )}
       </form>
       {error && (
         <div className="alert error" role="alert">

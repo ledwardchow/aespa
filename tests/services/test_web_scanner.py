@@ -945,6 +945,151 @@ def test_finding_title_dedup_ignores_reporting_prefixes():
     ) == scanner._canonical_finding_title("Unauthenticated Access to Account Data")
 
 
+def test_duplicate_finding_upgrade_keeps_identity_and_replaces_preliminary_report():
+    existing = ScanFinding(
+        id=42,
+        public_reference="WEB-042",
+        test_run_id=7,
+        owasp_category="A03",
+        severity="low",
+        title="Database error in search",
+        description="A search probe returned a database error.",
+        evidence="Database syntax error",
+        validation_status="confirmed",
+        validation_note="Confirmed error disclosure.",
+        poc_command="curl old",
+    )
+    candidate = ScanFinding(
+        test_run_id=7,
+        owasp_category="A03",
+        severity="high",
+        title="SQL injection in search",
+        description="A UNION query returned database rows.",
+        evidence="UNION result included another user's data",
+        request_evidence="GET /search?q=...UNION...",
+        response_evidence="HTTP 200 with another user's data",
+        cvss_score=8.1,
+    )
+
+    assert scanner._upgrade_duplicate_finding(
+        existing, candidate, original_title=candidate.title
+    )
+    assert existing.id == 42
+    assert existing.public_reference == "WEB-042"
+    assert existing.title == "SQL injection in search"
+    assert existing.description == candidate.description
+    assert existing.severity == "high"
+    assert existing.evidence == candidate.evidence
+    assert existing.validation_status == "unvalidated"
+    assert existing.validation_note is None
+    assert existing.poc_command == ""
+
+
+def test_duplicate_finding_upgrade_does_not_downgrade_or_cross_category():
+    existing = ScanFinding(
+        test_run_id=7,
+        owasp_category="A03",
+        severity="high",
+        title="SQL injection in search",
+        description="Confirmed injection.",
+    )
+    lower = ScanFinding(
+        test_run_id=7,
+        owasp_category="A03",
+        severity="low",
+        title="Database error in search",
+        description="A database error was returned.",
+    )
+    other_category = ScanFinding(
+        test_run_id=7,
+        owasp_category="A05",
+        severity="critical",
+        title="SQL injection in search",
+        description="Different category.",
+    )
+
+    assert not scanner._upgrade_duplicate_finding(
+        existing, lower, original_title=lower.title
+    )
+    assert not scanner._upgrade_duplicate_finding(
+        existing, other_category, original_title=other_category.title
+    )
+    assert existing.title == "SQL injection in search"
+    assert existing.severity == "high"
+
+
+def test_dynamic_finding_rewrites_matching_preliminary_finding(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+
+    async def normalize(_config, _existing, new):
+        return [{**item, "title": "Database error in search"} for item in new]
+
+    async def no_rewrite(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(scanner.llm_svc, "normalize_finding_titles", normalize)
+    monkeypatch.setattr(scanner.llm_svc, "rewrite_finding_writeup", no_rewrite)
+    monkeypatch.setattr(
+        scanner, "_capture_dynamic_writeup_if_enabled", lambda **_: None
+    )
+    with Session(engine) as session:
+        site = Site(name="target", base_url="https://target.local")
+        session.add(site)
+        session.flush()
+        run = TestRun(site_id=site.id, name="upgrade")
+        session.add(run)
+        session.flush()
+        preliminary = ScanFinding(
+            test_run_id=run.id,
+            owasp_category="A03",
+            severity="low",
+            title="Database error in search",
+            description="A database error appeared.",
+            affected_url="https://target.local/search",
+            validation_status="confirmed",
+        )
+        session.add(preliminary)
+        session.commit()
+        run_id, finding_id = run.id, preliminary.id
+
+    raw = {
+        "owasp_category": "A03",
+        "severity": "high",
+        "cvss_score": 8.1,
+        "title": "SQL injection in search",
+        "description": "A UNION query returned another user's data.",
+        "evidence": "UNION result included another user's data",
+        "affected_url": "https://target.local/search",
+    }
+    saved = asyncio.run(
+        scanner._persist_dynamic_finding(
+            run_id=run_id,
+            llm_cfg=object(),
+            raw=raw,
+            base_url="https://target.local",
+            pages_snapshot=[],
+            first_page_id=None,
+            result_by_url={},
+        )
+    )
+    with Session(engine) as session:
+        findings = session.exec(select(ScanFinding)).all()
+
+    assert saved is not None
+    assert saved.id == finding_id
+    assert len(findings) == 1
+    assert findings[0].title == "SQL injection in search"
+    assert findings[0].severity == "high"
+    assert findings[0].validation_status == "unvalidated"
+    assert "UNION" in findings[0].evidence
+
+
 def test_resolve_requested_scan_session_forces_anonymous_on_missing_label():
     use_session, selected, note = scanner._resolve_requested_scan_session(
         {"configured_primary": {"extra_headers": {"Authorization": "******"}}},

@@ -14,6 +14,25 @@ from aespa.services import llm
 from aespa.services.resolved_llm_config import ResolvedLLMConfig
 
 
+def test_bedrock_reasoning_uses_supported_output_config_field():
+    config = LLMConfig(
+        provider="bedrock",
+        model="anthropic.claude-sonnet-5",
+        reasoning_effort="high",
+    )
+    expected = {
+        "additionalModelRequestFields": {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
+        }
+    }
+
+    payload = {}
+    llm._add_bedrock_reasoning_fields(config, payload)
+    assert payload == expected
+    assert llm._bedrock_sdk_reasoning_kwargs(config) == expected
+
+
 @pytest.mark.parametrize("sdk", ["anthropic", "openai"])
 def test_sdk_clients_accept_shared_http_client(sdk):
     import httpx2
@@ -1537,6 +1556,38 @@ def test_agentic_loop_propagates_generic_api_error_instead_of_completing(monkeyp
     ]
     assert len(error_events) == 1
     assert "LLM API error" in error_events[0]["message"]
+
+
+def test_agentic_loop_names_api_errors_with_no_message(monkeypatch):
+    config = LLMConfig(
+        provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048
+    )
+    emitted: list[dict] = []
+
+    async def fake_call_with_tools(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                config,
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=lambda *args: None,
+                emit_fn=emitted.append,
+            )
+        )
+
+    error_events = [
+        event
+        for event in emitted
+        if event.get("phase") == "llm_response" and event.get("status") == "error"
+    ]
+    assert error_events[0]["message"].endswith("LLM API error — TimeoutError")
+    assert error_events[0]["data"]["error"] == "TimeoutError"
+    assert error_events[0]["data"]["error_type"] == "TimeoutError"
 
 
 def test_agentic_loop_reports_quota_pause_as_warning(monkeypatch):

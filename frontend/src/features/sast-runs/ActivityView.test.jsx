@@ -1,14 +1,11 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { expect, test, vi } from "vitest";
+import { expect, test } from "vitest";
 
 import { ActivityView } from "./ActivityView.jsx";
 
 const baseProps = {
   logs: [],
   scanRunning: true,
-  tokenUsage: null,
-  tokenExpanded: false,
-  setTokenExpanded: vi.fn(),
   runId: 14,
   analysisMode: "deep",
 };

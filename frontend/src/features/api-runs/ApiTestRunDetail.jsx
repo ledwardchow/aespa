@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { nav } from "../../shared/navigation/router.js";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { formatPhase, formatTerminalReason } from "../../shared/runs/presentation.jsx";
 import { ApiRunStatusTab } from "./ApiRunStatusTab.jsx";
 import { ApiRunFindingsTab } from "./ApiRunFindingsTab.jsx";
@@ -53,6 +54,8 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef, initial
   const [scanStatus, setScanStatus] = useState(null);
   const [scanBusy, setScanBusy] = useState(false);
   const [coverageMode, setCoverageMode] = useState("track");
+  const [tokenUsage, setTokenUsage] = useState(null);
+  const [tokenExpanded, setTokenExpanded] = useState(false);
   const tab = API_RUN_TABS.some((item) => item.key === initialTab) ? initialTab : "status";
   useEffect(() => {
     apiRunsApi
@@ -67,6 +70,23 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef, initial
       .then(setScanStatus)
       .catch(() => {});
   }, [runId]);
+
+  useEffect(() => {
+    let active = true;
+    const loadUsage = () =>
+      apiRunsApi
+        .getApiTokenUsage(runId)
+        .then((usage) => {
+          if (active) setTokenUsage(usage);
+        })
+        .catch(() => {});
+    loadUsage();
+    const timer = setInterval(loadUsage, scanStatus?.running ? 3000 : 30000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [runId, scanStatus?.running]);
 
   // Poll scan status while scanning.
   useEffect(() => {
@@ -247,6 +267,11 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef, initial
           </button>
         ))}
       </div>
+      <TokenUsageBar
+        tokenUsage={tokenUsage}
+        tokenExpanded={tokenExpanded}
+        setTokenExpanded={setTokenExpanded}
+      />
       <div
         className={
           "content no-padding" + (tab === "status" ? " flex-fill-noscroll" : " scroll-content")

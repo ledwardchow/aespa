@@ -8,6 +8,11 @@
   margin: 0 -28px;
 }
 
+.run-usage-bars {
+  flex-shrink: 0;
+  margin: 0 -28px;
+}
+
 /* Site plan card */
 .site-plan-card {
   flex-shrink: 0;

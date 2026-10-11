@@ -988,7 +988,7 @@ class CodeExecutionConfigBase(BaseModel):
     workspace_mb: int = Field(default=16, ge=4, le=64)
     output_limit_bytes: int = Field(default=65536, ge=8192, le=262144)
     artifact_limit_bytes: int = Field(default=10485760, ge=0, le=50 * 1024 * 1024)
-    max_requests_per_execution: int = Field(default=20, ge=0, le=100)
+    max_requests_per_execution: int = Field(default=50, ge=0, le=100)
     max_concurrent_requests: int = Field(default=5, ge=1, le=10)
     max_concurrent_executions: int = Field(default=2, ge=1, le=8)
     retain_redacted_source: bool = True

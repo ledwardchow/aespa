@@ -83,6 +83,14 @@ test("shows scanner events without reloading every SAST endpoint", async () => {
   expect(sastRunsApi.getSastHandoffTargets).toHaveBeenCalledTimes(1);
 });
 
+test("shows token usage on the coverage tab", async () => {
+  sastRunsApi.getSastTokenUsage.mockResolvedValue({ total_input: 1200, total_output: 300 });
+  render(<SastRunDetailExperience runId={249} initialTab="coverage" />);
+
+  expect(await screen.findByText("↑1.2K in")).toBeTruthy();
+  expect(screen.getByText("↓300 out")).toBeTruthy();
+});
+
 test("opens legacy security check links in the consolidated Threats view", async () => {
   sastRunsApi.getSastAnalysis.mockResolvedValue({
     phases: {

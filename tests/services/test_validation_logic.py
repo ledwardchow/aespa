@@ -823,6 +823,57 @@ def test_persist_verdict_appends_structured_validation_evidence(monkeypatch):
         engine.dispose()
 
 
+def test_stale_validation_does_not_replace_upgraded_finding(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    try:
+        monkeypatch.setattr(validator, "get_engine", lambda: engine)
+        with Session(engine) as session:
+            upgraded = ScanFinding(
+                test_run_id=1,
+                owasp_category="A03",
+                severity="high",
+                title="SQL injection in search",
+                description="UNION returned account data.",
+                evidence="account data from UNION query",
+                validation_status="unvalidated",
+            )
+            session.add(upgraded)
+            session.commit()
+            finding_id = upgraded.id
+
+        old_report = ScanFinding(
+            id=finding_id,
+            test_run_id=1,
+            owasp_category="A03",
+            severity="low",
+            title="Database error in search",
+            description="Database error returned.",
+            evidence="SQL syntax error",
+        )
+        asyncio.run(
+            validator._persist_verdict(
+                1,
+                finding_id,
+                "confirmed",
+                "Confirmed database error.",
+                expected_finding=old_report,
+            )
+        )
+        with Session(engine) as session:
+            saved = session.get(ScanFinding, finding_id)
+            assert saved.validation_status == "unvalidated"
+            assert saved.validation_note is None
+            assert saved.title == "SQL injection in search"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 class _ScannerCredWithLogin:
     login_url = "https://target.local/customer/login"
 

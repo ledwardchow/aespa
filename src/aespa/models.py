@@ -633,7 +633,7 @@ class CodeExecutionConfig(SQLModel, table=True):
     workspace_mb: int = Field(default=16)
     output_limit_bytes: int = Field(default=65536)
     artifact_limit_bytes: int = Field(default=10485760)
-    max_requests_per_execution: int = Field(default=20)
+    max_requests_per_execution: int = Field(default=50)
     max_concurrent_requests: int = Field(default=5)
     max_concurrent_executions: int = Field(default=2)
     retain_redacted_source: bool = Field(default=True)

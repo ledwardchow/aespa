@@ -2,8 +2,6 @@ import { ActivityAgents } from "./ActivityAgents.jsx";
 import { ActivitySpecialists } from "./ActivitySpecialists.jsx";
 import { useEffect, useState } from "react";
 import { ActivityLog } from "./ActivityLog.jsx";
-import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
-import { SastSourceCosts } from "../../shared/ui/SastSourceCosts";
 import { ActivityDeepQueue } from "./ActivityDeepQueue.jsx";
 
 const SPECIALIST_WORKERS = [{ prefix: "specialist-", label: "Specialist" }];
@@ -16,13 +14,11 @@ export function WebRunActivityTab(props) {
     thinkingStatus,
     activityLog,
     agents,
-    tokenUsage,
     sitePlanData,
     onClearLog,
     onError,
   } = props;
   const [activitySubTab, setActivitySubTab] = useState("agents");
-  const [tokenExpanded, setTokenExpanded] = useState(false);
   const isDeep = run?.coverage_mode === "deep";
   useEffect(() => {
     if (isDeep && activitySubTab === "workers") setActivitySubTab("deep-queue");
@@ -33,12 +29,6 @@ export function WebRunActivityTab(props) {
         {(() => {
           return (
             <>
-              <TokenUsageBar
-                tokenUsage={tokenUsage}
-                tokenExpanded={tokenExpanded}
-                setTokenExpanded={setTokenExpanded}
-              />
-              <SastSourceCosts runId={runId} />
               <div className="activity-sub-tab-bar">
                 <button
                   className={
