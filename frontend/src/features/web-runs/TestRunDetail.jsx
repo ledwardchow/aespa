@@ -307,10 +307,15 @@ function TestRunContent({
       setError(e.message);
     }
   };
-  const onStart = async () => {
+  const startCrawl = async (startPentestAfterCrawl = false) => {
     try {
       setCrawlStopRequested(false);
-      const body = crawlCredentialId ? { crawl_credential_id: crawlCredentialId } : undefined;
+      const body = {
+        ...(crawlCredentialId ? { crawl_credential_id: crawlCredentialId } : {}),
+        ...(startPentestAfterCrawl
+          ? { start_pentest_after_crawl: true, coverage_mode: coverageMode }
+          : {}),
+      };
       const r = await webRunsApi.startRun(runId, body);
       // Optimistically mark as running so the poll interval starts immediately.
       // Clear per_user_progress so stale data from the previous crawl is never
@@ -324,6 +329,8 @@ function TestRunContent({
       setError(e.message);
     }
   };
+  const onStart = () => startCrawl();
+  const onStartCrawlThenPentest = () => startCrawl(true);
   const onStop = async () => {
     try {
       setCrawlStopRequested(true);
@@ -456,6 +463,7 @@ function TestRunContent({
         showTeamScan={showTeamScan}
         onCoverageMode={setCoverageMode}
         onStart={onStart}
+        onStartCrawlThenPentest={onStartCrawlThenPentest}
         onStop={onStop}
         onStartScan={onStartThinkingScan}
         onStopScan={onStopThinkingScan}
