@@ -1,8 +1,8 @@
-"""Replace the local BankOfEd dataset and its saved result snapshots.
+"""Align local BankOfEd results with the 35-item published ground truth.
 
-This is a one-time migration for the October 2026 severity revision. It keeps
-result identities and finding matches, so the Sites publisher updates existing
-graphs under the revised dataset key.
+This guarded, one-time migration preserves result identities and the saved
+decisions for shared findings. It drops three retired findings from each result
+and updates severity from the reviewed file so scores use the accepted dataset.
 """
 
 from __future__ import annotations
@@ -16,7 +16,14 @@ from pathlib import Path
 
 DATASET_ID = 3
 RETIRED_DATASET_ID = 2
-OLD_DIGEST = "sha256:8ecd18567525c4b5cf36e508dec89c59653ae6218d1d734c993d6453086180ee"
+OLD_DIGESTS = {
+    "sha256:8ecd18567525c4b5cf36e508dec89c59653ae6218d1d734c993d6453086180ee": set(),
+    "sha256:20a5975180ba293bc3808980158019a4b8aa9a0e48f9301421aea5aaacd2c242": {
+        "GT-24",
+        "GT-25",
+        "GT-35",
+    },
+}
 NEW_DIGEST = "sha256:4d2f2e2ee132c086715bd8f1629d4a69ed28e84488bea80e5a6ac69959464ab3"
 
 
@@ -47,22 +54,34 @@ def migrate(database: Path, ground_truth_file: Path, backup: Path) -> dict[str, 
         original_json, original_digest = next(
             (row[1], row[2]) for row in datasets if row[0] == DATASET_ID
         )
-        if original_digest != OLD_DIGEST or (
-            "sha256:" + hashlib.sha256(original_json.encode()).hexdigest()
-        ) != OLD_DIGEST:
+        if (
+            original_digest not in OLD_DIGESTS
+            or ("sha256:" + hashlib.sha256(original_json.encode()).hexdigest())
+            != original_digest
+        ):
             raise ValueError("The saved BankOfEd ground truth changed")
         original = json.loads(original_json)
         original_items = {item["external_id"]: item for item in original["items"]}
         revised_items = {item["external_id"]: item for item in revised["items"]}
-        if set(original_items) != set(revised_items) or len(revised_items) != 35:
+        retired_ids = OLD_DIGESTS[original_digest]
+        if (
+            set(original_items) - set(revised_items) != retired_ids
+            or (set(revised_items) - set(original_items))
+            or len(revised_items) != 35
+        ):
             raise ValueError("Finding IDs changed")
         if any(
             {key: value for key, value in old.items() if key != "severity"}
-            != {key: value for key, value in revised_items[item_id].items() if key != "severity"}
+            != {
+                key: value
+                for key, value in revised_items[item_id].items()
+                if key != "severity"
+            }
             for item_id, old in original_items.items()
-        ) or {
-            key: value for key, value in original.items() if key != "items"
-        } != {key: value for key, value in revised.items() if key != "items"}:
+            if item_id in revised_items
+        ) or {key: value for key, value in original.items() if key != "items"} != {
+            key: value for key, value in revised.items() if key != "items"
+        }:
             raise ValueError("The revised file changes more than severity")
 
         results = connection.execute(
@@ -70,13 +89,19 @@ def migrate(database: Path, ground_truth_file: Path, backup: Path) -> dict[str, 
             "FROM benchmarking_scan_result ORDER BY id"
         ).fetchall()
         expected_ids = set(original_items)
+        updated_results = []
         for result_id, dataset_id, snapshot, rows_json, _ in results:
             if dataset_id != DATASET_ID or json.loads(snapshot) != original:
                 raise ValueError(f"Result {result_id} uses different ground truth")
             saved = json.loads(rows_json)
             rows = saved.get("rows", []) if isinstance(saved, dict) else saved
-            if {row["external_id"] for row in rows} != expected_ids or len(rows) != 35:
+            if {row["external_id"] for row in rows} != expected_ids or len(rows) != len(
+                expected_ids
+            ):
                 raise ValueError(f"Result {result_id} has different finding matches")
+            kept = [row for row in rows if row["external_id"] in revised_items]
+            updated = {**saved, "rows": kept} if isinstance(saved, dict) else kept
+            updated_results.append((canonical(updated), result_id))
         for table in (
             "benchmarking_ground_truth_binding",
             "benchmarking_evaluation",
@@ -99,22 +124,28 @@ def migrate(database: Path, ground_truth_file: Path, backup: Path) -> dict[str, 
                 "SELECT ground_truth_digest FROM benchmarking_dataset WHERE id = ?",
                 (DATASET_ID,),
             ).fetchone()
-            if current != (OLD_DIGEST,):
+            if current != (original_digest,):
                 raise ValueError("The dataset changed during backup")
-            if connection.execute(
-                "SELECT id, dataset_id, ground_truth_json, rows_json, updated_at "
-                "FROM benchmarking_scan_result ORDER BY id"
-            ).fetchall() != results:
+            if (
+                connection.execute(
+                    "SELECT id, dataset_id, ground_truth_json, rows_json, updated_at "
+                    "FROM benchmarking_scan_result ORDER BY id"
+                ).fetchall()
+                != results
+            ):
                 raise ValueError("Saved results changed during backup")
             connection.execute(
                 "UPDATE benchmarking_dataset SET ground_truth_json = ?, "
                 "ground_truth_digest = ?, updated_at = ? WHERE id = ?",
                 (revised_json, NEW_DIGEST, updated_at, DATASET_ID),
             )
-            connection.execute(
-                "UPDATE benchmarking_scan_result SET ground_truth_json = ?, updated_at = ? "
-                "WHERE dataset_id = ?",
-                (revised_json, updated_at, DATASET_ID),
+            connection.executemany(
+                "UPDATE benchmarking_scan_result SET ground_truth_json = ?, "
+                "rows_json = ?, updated_at = ? WHERE id = ? AND dataset_id = ?",
+                (
+                    (revised_json, rows_json, updated_at, result_id, DATASET_ID)
+                    for rows_json, result_id in updated_results
+                ),
             )
             connection.execute(
                 "DELETE FROM benchmarking_dataset_label WHERE dataset_id = ?",
@@ -131,6 +162,7 @@ def migrate(database: Path, ground_truth_file: Path, backup: Path) -> dict[str, 
         return {
             "dataset_id": DATASET_ID,
             "results_updated": len(results),
+            "retired_findings_per_result": len(retired_ids),
             "ground_truth_digest": NEW_DIGEST,
             "backup": str(backup),
         }
@@ -144,4 +176,8 @@ if __name__ == "__main__":
     parser.add_argument("ground_truth_file", type=Path)
     parser.add_argument("backup", type=Path)
     args = parser.parse_args()
-    print(json.dumps(migrate(args.database, args.ground_truth_file, args.backup), indent=2))
+    print(
+        json.dumps(
+            migrate(args.database, args.ground_truth_file, args.backup), indent=2
+        )
+    )

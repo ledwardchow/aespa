@@ -58,7 +58,9 @@ def test_matched_score_weights_full_and_partial_matches():
                 {
                     "external_id": str(index),
                     "severity": severity,
-                    "category": "A01: Broken Access Control" if index < 3 else "A03: Injection",
+                    "category": "A01: Broken Access Control"
+                    if index < 3
+                    else "A03: Injection",
                 }
                 for index, severity in enumerate(
                     ("informational", "low", "medium", "high", "critical")
@@ -84,9 +86,12 @@ def test_matched_score_weights_full_and_partial_matches():
     }
     result["rows"][4]["disposition"] = "full"
     assert scoring.matched_score(result["ground_truth"], result["rows"]) == 17
-    assert scoring.matched_categories(result["ground_truth"], result["rows"])[
-        "A03: Injection"
-    ] == 2
+    assert (
+        scoring.matched_categories(result["ground_truth"], result["rows"])[
+            "A03: Injection"
+        ]
+        == 2
+    )
     result["ground_truth"]["items"][4]["severity"] = "unknown"
     assert scoring.matched_score(result["ground_truth"], result["rows"]) is None
 
@@ -152,11 +157,65 @@ def test_published_tokens_include_linked_sast_run_without_names():
         "https://a.chatgpt.site/path",
         "https://user:pass@a.chatgpt.site",
         "https://a.chatgpt.site?x=1",
+        "http://benchmarks.aespa.app",
+        "https://benchmarks.aespa.app.evil.example",
+        "https://benchmarks.aespa.app/path",
     ],
 )
 def test_publishing_rejects_unrelated_destinations(value):
     with pytest.raises(ValueError):
         modules().site_url(value)
+
+
+def test_benchmark_domain_reuses_native_site_token(portable, db_engine, monkeypatch):
+    models, _, stores = portable
+    seed(models, stores[0])
+    publishing = modules()
+    app = FastAPI()
+    from fastapi import APIRouter
+
+    router = APIRouter()
+    publishing.register_publishing(router, stores[0])
+    app.include_router(router)
+    calls = []
+
+    async def fake_post(self, url, **kwargs):
+        calls.append((url, kwargs["headers"]))
+        return httpx.Response(
+            200, json={"received": 1, "stored": 1, "skipped_stale": 0}
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    native = "https://aespa-benchmarks.maranthis.chatgpt.site"
+    custom = "https://benchmarks.aespa.app"
+    token = publishing.connection_token(native, "service-secret", UPLOAD_TOKEN)
+    with TestClient(app) as client:
+        assert client.get("/publishing").json()["site_url"] == custom
+        assert (
+            client.put(
+                "/publishing", json={"site_url": custom, "token": token}
+            ).status_code
+            == 200
+        )
+        assert client.get("/publishing").json()["site_url"] == custom
+        assert publishing.decode_connection_token(
+            client.post("/publishing/token").json()["token"], native
+        ) == ("service-secret", UPLOAD_TOKEN)
+        assert client.put("/publishing", json={"site_url": native}).status_code == 200
+        assert client.put("/publishing", json={"site_url": custom}).status_code == 200
+        assert client.post("/publish").status_code == 200
+        assert calls[0][0] == f"{custom}/api/v1/results"
+        assert calls[0][1]["OAI-Sites-Authorization"] == "Bearer service-secret"
+        assert calls[0][1]["X-AESPA-Upload-Token"] == UPLOAD_TOKEN
+        assert (
+            client.put(
+                "/publishing", json={"site_url": "https://other.chatgpt.site"}
+            ).status_code
+            == 422
+        )
+        assert publishing.decode_connection_token(
+            publishing.connection_token(custom, "service-secret", UPLOAD_TOKEN), native
+        ) == ("service-secret", UPLOAD_TOKEN)
 
 
 def test_publish_sends_service_header_and_masks_saved_token(
@@ -421,6 +480,46 @@ def test_single_token_saves_and_sends_both_credentials(portable, monkeypatch):
             ).status_code
             == 422
         )
+
+
+def test_publish_reports_site_edited_results(portable, monkeypatch):
+    models, _, stores = portable
+    seed(models, stores[0])
+    from fastapi import APIRouter
+
+    publishing = modules()
+    app = FastAPI()
+    router = APIRouter()
+    publishing.register_publishing(router, stores[0])
+    app.include_router(router)
+
+    async def fake_post(self, url, **kwargs):
+        return httpx.Response(
+            200,
+            json={
+                "received": 1,
+                "stored": 0,
+                "skipped_stale": 0,
+                "skipped_site_edits": 1,
+            },
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    token = publishing.connection_token(
+        "https://benchmarks.aespa.app", "service-secret", UPLOAD_TOKEN
+    )
+    with TestClient(app) as client:
+        assert (
+            client.put(
+                "/publishing",
+                json={"site_url": "https://benchmarks.aespa.app", "token": token},
+            ).status_code
+            == 200
+        )
+        report = client.post("/publish")
+        assert report.status_code == 200
+        assert report.json()["skipped_site_edits"] == 1
+        assert report.json()["skipped_stale"] == 0
 
 
 @pytest.mark.parametrize(

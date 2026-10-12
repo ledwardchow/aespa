@@ -19,13 +19,25 @@ from aespa.services.settings import get_upstream_proxy_config
 from .models import Dataset, PublishingSettings, PublishingUploadToken, ScanResult
 from .transfer import dataset_key, identity
 
+DEFAULT_SITE_URL = "https://benchmarks.aespa.app"
+SITE_URL_ALIASES = frozenset(
+    {DEFAULT_SITE_URL, "https://aespa-benchmarks.maranthis.chatgpt.site"}
+)
+
+
+def same_site_url(left: str, right: str) -> bool:
+    return left == right or {left, right} == SITE_URL_ALIASES
+
 
 def site_url(value: str) -> str:
     parsed = urlsplit(value.strip())
     if (
         parsed.scheme != "https"
         or not parsed.hostname
-        or not parsed.hostname.endswith(".chatgpt.site")
+        or not (
+            parsed.hostname.endswith(".chatgpt.site")
+            or parsed.hostname == "benchmarks.aespa.app"
+        )
         or parsed.username
         or parsed.password
         or parsed.port not in (None, 443)
@@ -33,7 +45,9 @@ def site_url(value: str) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        raise ValueError("Enter an HTTPS Sites URL without a path")
+        raise ValueError(
+            "Enter the benchmarks.aespa.app URL or an HTTPS Sites URL without a path"
+        )
     return f"https://{parsed.hostname}"
 
 
@@ -172,7 +186,7 @@ def decode_connection_token(value: str, url: str) -> tuple[str, str]:
         or not all(isinstance(v, str) for v in data.values())
     ):
         raise ValueError(error)
-    if data["site_url"] != url:
+    if not same_site_url(data["site_url"], url):
         raise ValueError("This token was generated for a different site")
     service, upload = data["service_token"], data["upload_token"]
     if not re.fullmatch(r"[\x21-\x7e]{1,8192}", service) or not re.fullmatch(
@@ -195,7 +209,9 @@ def register_publishing(router: APIRouter, store) -> None:
         with store.session() as session:
             saved = session.get(PublishingSettings, 1)
             return {
-                "site_url": saved.site_url if saved else "",
+                "site_url": saved.site_url
+                if saved and saved.site_url
+                else DEFAULT_SITE_URL,
                 "token_saved": bool(saved and saved.service_token),
                 "upload_token_saved": bool(
                     (upload := session.get(PublishingUploadToken, 1)) and upload.token
@@ -252,9 +268,13 @@ def register_publishing(router: APIRouter, store) -> None:
                 except ValueError as exc:
                     raise HTTPException(422, str(exc)) from None
             # Never reuse a site's credential for a different site.
-            if saved.site_url and saved.site_url != url and not token:
+            if saved.site_url and not same_site_url(saved.site_url, url) and not token:
                 raise HTTPException(422, "Enter a token generated for the new site")
-            if saved.site_url and saved.site_url != url and not upload_token:
+            if (
+                saved.site_url
+                and not same_site_url(saved.site_url, url)
+                and not upload_token
+            ):
                 raise HTTPException(422, "Enter a token generated for the new site")
             if upload_token is not None:
                 if not re.fullmatch(r"aespa_upload_[a-f0-9]{64}", upload_token):
@@ -333,7 +353,7 @@ def register_publishing(router: APIRouter, store) -> None:
                 raise HTTPException(422, "A result is too large to publish")
         if batch:
             batches.append(batch)
-        stored = skipped = sent = 0
+        stored = skipped = protected = sent = 0
         with Session(get_engine()) as core:
             network = get_upstream_proxy_config(core)
         client_options = {
@@ -384,7 +404,12 @@ def register_publishing(router: APIRouter, store) -> None:
                             isinstance(report.get(key), int) and report[key] >= 0
                             for key in ("stored", "skipped_stale")
                         )
-                        or report["stored"] + report["skipped_stale"] != len(batch)
+                        or not isinstance(report.get("skipped_site_edits", 0), int)
+                        or report.get("skipped_site_edits", 0) < 0
+                        or report["stored"]
+                        + report["skipped_stale"]
+                        + report.get("skipped_site_edits", 0)
+                        != len(batch)
                     ):
                         raise ValueError("Invalid upload receipt")
                 except (httpx.HTTPError, ValueError, TypeError) as exc:
@@ -395,9 +420,11 @@ def register_publishing(router: APIRouter, store) -> None:
                 sent += len(batch)
                 stored += report["stored"]
                 skipped += report["skipped_stale"]
+                protected += report.get("skipped_site_edits", 0)
         return {
             "received": sent,
             "stored": stored,
             "skipped_stale": skipped,
+            "skipped_site_edits": protected,
             "site_url": url,
         }
