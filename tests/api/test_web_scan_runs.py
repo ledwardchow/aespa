@@ -122,6 +122,38 @@ def test_crawl_status_uses_crawler_task_state(client: TestClient, monkeypatch):
     assert response.json() == {"running": True}
 
 
+def test_start_crawl_then_pentest_saves_mode_and_schedules_handoff(
+    client: TestClient, monkeypatch
+):
+    from aespa.api import test_runs as test_runs_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    crawl_task = object()
+    scheduled = []
+
+    async def fake_start_crawl(run_id):
+        assert run_id == run["id"]
+        return crawl_task
+
+    monkeypatch.setattr(test_runs_api, "get_llm_config_for_run", lambda *_: object())
+    monkeypatch.setattr(test_runs_api.crawler_svc, "start_crawl", fake_start_crawl)
+    monkeypatch.setattr(
+        test_runs_api.crawl_then_pentest,
+        "schedule",
+        lambda run_id, task: scheduled.append((run_id, task)),
+    )
+
+    response = client.post(
+        f"/api/test-runs/{run['id']}/start",
+        json={"start_pentest_after_crawl": True, "coverage_mode": "standard"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["coverage_mode"] == "standard"
+    assert scheduled == [(run["id"], crawl_task)]
+
+
 def test_create_run_custom_name(client: TestClient):
     site = _make_site(client)
     r = _make_run(client, site["id"], name="Initial recon")

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import { WebRunHeader } from "./WebRunHeader.jsx";
 
@@ -19,6 +19,7 @@ const props = {
   coverageMode: "track",
   onCoverageMode: vi.fn(),
   onStart: vi.fn(),
+  onStartCrawlThenPentest: vi.fn(),
   onStop: vi.fn(),
   onStartScan: vi.fn(),
   onStopScan: vi.fn(),
@@ -28,6 +29,25 @@ const props = {
   aliceRunning: false,
   onStopAlice: vi.fn(),
 };
+
+test("offers crawl then pentest and invokes its own action", () => {
+  const onStartCrawlThenPentest = vi.fn();
+  render(
+    <WebRunHeader
+      {...props}
+      run={{ ...props.run, pages_discovered: 0 }}
+      canStart
+      onStartCrawlThenPentest={onStartCrawlThenPentest}
+    />,
+  );
+
+  expect(screen.getByRole("button", { name: "Start Crawl" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "More crawl and Pentest options" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Start Crawl then Pentest" }));
+  expect(onStartCrawlThenPentest).toHaveBeenCalledOnce();
+  expect(props.onStart).not.toHaveBeenCalled();
+  expect(props.onStartScan).not.toHaveBeenCalled();
+});
 
 test("only shows Deep mode when its feature preference is enabled", () => {
   const { rerender } = render(<WebRunHeader {...props} showDeepScan={false} />);

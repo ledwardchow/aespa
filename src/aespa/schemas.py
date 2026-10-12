@@ -1408,6 +1408,8 @@ class StartCrawlBody(BaseModel):
     """
 
     crawl_credential_id: int | None = None
+    start_pentest_after_crawl: bool = False
+    coverage_mode: WebCoverageModeLiteral | None = None
 
 
 class CredentialSummary(BaseModel):

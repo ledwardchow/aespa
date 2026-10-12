@@ -6,6 +6,10 @@ import { LoadSavedCrawlButton, SaveCrawlButton } from "./SavedCrawlControls.jsx"
 
 const RUN_ACTION_DETAILS = {
   [RUN_PRIMARY_ACTION.START_CRAWL]: { label: "Start Crawl", className: "run-start-action" },
+  [RUN_PRIMARY_ACTION.START_CRAWL_THEN_PENTEST]: {
+    label: "Start Crawl then Pentest",
+    className: "run-start-action",
+  },
   [RUN_PRIMARY_ACTION.START_PENTEST]: { label: "Start Pentest", className: "run-start-action" },
   [RUN_PRIMARY_ACTION.RESUME_PENTEST]: { label: "Resume Pentest", className: "run-resume-action" },
 };
@@ -17,6 +21,7 @@ function RunStartControl({
   canResumePentest,
   canExportCrawl,
   onStartCrawl,
+  onStartCrawlThenPentest,
   onStartPentest,
   onResumePentest,
   onExportCrawl,
@@ -42,6 +47,7 @@ function RunStartControl({
 
   const handlers = {
     [RUN_PRIMARY_ACTION.START_CRAWL]: onStartCrawl,
+    [RUN_PRIMARY_ACTION.START_CRAWL_THEN_PENTEST]: onStartCrawlThenPentest,
     [RUN_PRIMARY_ACTION.START_PENTEST]: onStartPentest,
     [RUN_PRIMARY_ACTION.RESUME_PENTEST]: onResumePentest,
   };
@@ -55,6 +61,7 @@ function RunStartControl({
     canStartCrawl &&
       primaryAction !== RUN_PRIMARY_ACTION.START_CRAWL &&
       RUN_PRIMARY_ACTION.START_CRAWL,
+    canStartCrawl && canStartPentest && RUN_PRIMARY_ACTION.START_CRAWL_THEN_PENTEST,
   ].filter(Boolean);
   const primary = RUN_ACTION_DETAILS[primaryAction];
   const hasMenu = menuActions.length > 0 || canExportCrawl;
@@ -135,6 +142,7 @@ export function WebRunHeader({
   showTeamScan = false,
   onCoverageMode,
   onStart,
+  onStartCrawlThenPentest,
   onStop,
   onStartScan,
   onStopScan,
@@ -257,6 +265,7 @@ export function WebRunHeader({
               canResumePentest={canResume}
               canExportCrawl={hasCrawlResult && !crawlStopping}
               onStartCrawl={onStart}
+              onStartCrawlThenPentest={onStartCrawlThenPentest}
               onStartPentest={onStartScan}
               onResumePentest={onResume}
               onExportCrawl={onExportCrawl}

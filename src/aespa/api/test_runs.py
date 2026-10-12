@@ -45,7 +45,7 @@ from aespa.schemas import (
     TestRunUpdate,
 )
 from aespa.services import active_jobs as active_jobs_svc
-from aespa.services import crawl_archives, run_cleanup
+from aespa.services import crawl_archives, crawl_then_pentest, run_cleanup
 from aespa.services import crawler as crawler_svc
 from aespa.services import recon_summary as recon_summary_svc
 from aespa.services import saved_crawls as saved_crawls_svc
@@ -261,6 +261,7 @@ def get_test_run(
 @router.delete("/api/test-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
+    crawl_then_pentest.cancel(run_id)
     from aespa.services import campaigns as campaigns_svc
 
     await campaigns_svc.stop_member_tasks_for_run("web", run_id)
@@ -503,6 +504,22 @@ async def start_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    if body and body.start_pentest_after_crawl:
+        from aespa.api.scan import _reject_incompatible_scan_mode
+
+        if scanner_svc.is_thinking_running(run_id):
+            raise HTTPException(status_code=409, detail="Dynamic Scan already running")
+        if body.coverage_mode is not None:
+            _reject_incompatible_scan_mode(session, run, body.coverage_mode)
+            run.coverage_mode = body.coverage_mode
+        if run.coverage_mode == "sast_validate":
+            from aespa.services.scan_leads import get_leads_for_run
+
+            if not get_leads_for_run("web", run_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail="No open imported SAST leads are available to validate",
+                )
     if body and body.crawl_credential_id is not None:
         from aespa.models import Credential
 
@@ -521,7 +538,9 @@ async def start_test_run(
     run.per_user_progress = None
     session.add(run)
     session.commit()
-    await crawler_svc.start_crawl(run_id)
+    crawl_task = await crawler_svc.start_crawl(run_id)
+    if body and body.start_pentest_after_crawl:
+        crawl_then_pentest.schedule(run_id, crawl_task)
     return _run_summary(run, session)
 
 
@@ -689,6 +708,7 @@ def stop_test_run(
     run = _get_run_or_404(session, run_id)
     if not crawler_svc.is_running(run_id):
         raise HTTPException(status_code=409, detail="Crawl is not currently running")
+    crawl_then_pentest.cancel(run_id)
     crawler_svc.request_stop(run_id)
     # The Dynamic Scan can run at the same time as the crawler and owns the
     # shared run status once its phase starts. Stopping the crawler must not

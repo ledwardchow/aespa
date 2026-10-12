@@ -194,9 +194,9 @@ def _crawl_seed_urls(
 # ── Public entry point ────────────────────────────────────────────────────────
 
 
-async def start_crawl(run_id: int) -> None:
+async def start_crawl(run_id: int) -> asyncio.Task[None]:
     if run_id in _active_tasks:
-        return
+        return _active_tasks[run_id]
     # Tag every event this crawl emits as run_kind='web'.  The scope is
     # snapshotted by create_task into the crawl task and its workers.
     # Without it, an unscoped agent_status emit for an id that was also a SAST/API
@@ -205,6 +205,7 @@ async def start_crawl(run_id: int) -> None:
         task = asyncio.create_task(_crawl_task(run_id), name=f"crawl-{run_id}")
     _active_tasks[run_id] = task
     task.add_done_callback(lambda _: _active_tasks.pop(run_id, None))
+    return task
 
 
 # ── Task wrapper ──────────────────────────────────────────────────────────────
