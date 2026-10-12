@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { req } from "../../shared/api/request.ts";
 
 const BASE = "/extension/aespa.benchmarking";
-const DEFAULT_SITE = "https://aespa-benchmarks.maranthis.chatgpt.site";
+const DEFAULT_SITE = "https://benchmarks.aespa.app";
 
 export function BenchmarkPublishing({ mode = "publish" }) {
   const [url, setUrl] = useState(DEFAULT_SITE);
@@ -52,7 +52,7 @@ export function BenchmarkPublishing({ mode = "publish" }) {
     setMessage("");
     try {
       const report = await req(`${BASE}/publish`, { method: "POST" });
-      setMessage(`${report.received} results sent. ${report.skipped_stale} older updates skipped.`);
+      setMessage(`${report.received} results sent. ${report.skipped_stale} older updates skipped.${report.skipped_site_edits ? ` ${report.skipped_site_edits} site-edited results protected.` : ""}`);
     } catch (err) {
       setError(err.message);
     } finally {

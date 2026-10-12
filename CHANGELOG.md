@@ -20,6 +20,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Hosted benchmark edits**: Results edited on the benchmark site are protected from later scanner uploads. Benchmark Lab reports how many site-edited results were skipped when publishing.
+
+- **Hosted benchmark connection**: Benchmark Lab now defaults to `benchmarks.aespa.app`. Existing upload tokens work with both that address and the site's original `chatgpt.site` address, so switching between them does not require a new token.
+
 - **Scan usage on every tab**: Token usage stays visible while you switch between tabs in web, API, and source scan runs. Web runs also keep the cost of linked source scans visible.
 
 - **Python execution request limit**: New setups now allow up to 50 HTTP requests per Python execution by default. Existing saved settings can still be changed in Agent Settings.
@@ -54,7 +58,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
-- **BankOfEd benchmark data**: Added a guarded migration tool for applying revised ground truth to saved comparisons while keeping their finding matches and result IDs.
+- **BankOfEd benchmark data**: Added the accepted 35-finding ground truth file and a guarded migration for saved comparisons. It keeps result IDs and decisions for shared findings, removes three retired findings, and updates scores using the revised severities.
 
 - **SAST scan maintenance**: Light and Deep scans now share archive extraction, source file tools, and candidate-state helpers, keeping those behaviors consistent across both modes.
 

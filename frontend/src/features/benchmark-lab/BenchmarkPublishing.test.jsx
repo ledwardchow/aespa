@@ -45,6 +45,14 @@ test("saving settings preserves the existing token when its field is blank", asy
   expect(screen.queryByRole("button", { name: "Publish results" })).toBeNull();
 });
 
+test("new connections default to the benchmark custom domain", async () => {
+  req.mockResolvedValue({ site_url: "", token_saved: false, upload_token_saved: false });
+  render(<BenchmarkPublishing mode="settings" />);
+  await waitFor(() =>
+    expect(screen.getByLabelText("Site URL").value).toBe("https://benchmarks.aespa.app"),
+  );
+});
+
 test("benchmark lab provides publishing and links to extension settings", async () => {
   render(<BenchmarkPublishing />);
   await waitFor(() =>
@@ -66,6 +74,16 @@ test("publishing stays disabled until an upload token has been saved", async () 
   await screen.findByRole("link", { name: "Connection settings" });
   await waitFor(() => expect(req).toHaveBeenCalled());
   expect(screen.getByRole("button", { name: "Publish results" }).disabled).toBe(true);
+});
+
+test("publishing reports results protected by site edits", async () => {
+  const user = userEvent.setup();
+  req.mockImplementation(async (url) => url.endsWith("/publish")
+    ? { received: 1, stored: 0, skipped_stale: 0, skipped_site_edits: 1 }
+    : { site_url: "https://benchmarks.aespa.app", token_saved: true, upload_token_saved: true });
+  render(<BenchmarkPublishing />);
+  await user.click(await screen.findByRole("button", { name: "Publish results" }));
+  expect(await screen.findByText(/1 site-edited results protected/)).toBeTruthy();
 });
 
 test("settings save one generated token and clear its field after saving", async () => {
