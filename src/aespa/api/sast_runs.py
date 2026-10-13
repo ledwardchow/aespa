@@ -15,6 +15,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     status,
@@ -1042,10 +1043,24 @@ def get_api_run_leads(
 def list_api_run_available_sast_runs(
     run_id: int,
     session: Session = Depends(get_session),
-) -> list[dict]:
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=10, ge=1, le=50),
+    q: str = Query(default="", max_length=200),
+) -> list[dict] | dict:
     """Completed standalone SAST runs available for explicit lead import."""
     if session.get(ApiTestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="API test run not found")
+    if page is not None:
+        from aespa.services.sast_imports import search_import_sources
+
+        return search_import_sources(
+            session,
+            run_kind="api",
+            run_id=run_id,
+            query=q,
+            page=page,
+            page_size=page_size,
+        )
     runs = session.exec(
         select(SastRun)
         .where(SastRun.status == "completed")

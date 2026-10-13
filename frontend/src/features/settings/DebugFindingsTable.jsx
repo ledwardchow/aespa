@@ -1,17 +1,13 @@
 import { renderMarkdown } from "../../shared/alice/markdown.jsx";
+import { normalizeSeverity, severityRank } from "../../shared/findings/severity.js";
 import { useState } from "react";
 
 export function DebugFindingsTable({ findings }) {
   const [expandedFinding, setExpandedFinding] = useState(null);
-  const SEV_ORDER = {
-    critical: 0,
-    high: 1,
-    medium: 2,
-    low: 3,
-    info: 4,
-  };
   const sorted = [...findings].sort(
-    (a, b) => (SEV_ORDER[a.severity] ?? 99) - (SEV_ORDER[b.severity] ?? 99),
+    (a, b) =>
+      severityRank(b.severity) - severityRank(a.severity) ||
+      String(a.title || "").localeCompare(String(b.title || "")),
   );
   return (
     <div className="findings-table-wrap">
@@ -45,8 +41,8 @@ export function DebugFindingsTable({ findings }) {
                 onClick={() => setExpandedFinding(expandedFinding === idx ? null : idx)}
               >
                 <td>
-                  <span className={"sev-badge sev-" + (f.severity || "info")}>
-                    {f.severity || "info"}
+                  <span className={"sev-badge sev-" + normalizeSeverity(f.severity)}>
+                    {normalizeSeverity(f.severity)}
                   </span>
                 </td>
                 <td

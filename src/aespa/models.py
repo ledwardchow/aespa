@@ -2019,7 +2019,7 @@ class SastDiscoveryTelemetry(SQLModel, table=True):
 
 
 class ScanLead(SQLModel, table=True):
-    """An unproven investigation lead (from a SAST scan). Distinct from ScanFinding."""
+    """An unproven static-analysis or imported report lead. Distinct from ScanFinding."""
 
     __tablename__ = "scan_lead"
 
@@ -2027,8 +2027,9 @@ class ScanLead(SQLModel, table=True):
     collection_id: Optional[int] = Field(default=None, index=True)
     producer_run_type: str = Field(
         default="sast", index=True
-    )  # "sast" (future: "recon")
-    producer_run_id: int = Field(index=True)  # SastRun.id that created it
+    )  # "sast" | "external" (future: "recon")
+    # Source SAST run, or destination run for an externally imported report.
+    producer_run_id: int = Field(index=True)
     source_work_item_id: Optional[int] = Field(default=None, index=True)
     source: str = Field(default="sast", index=True)
     classification: str = Field(default="exploitable", index=True)

@@ -1,12 +1,21 @@
+import { useState } from "react";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 
-import { CandidateTable, LeadEvidence } from "./CandidatesView.jsx";
+import { CandidateTable, CandidatesView, LeadEvidence } from "./CandidatesView.jsx";
 
 const leads = [
-  { id: 1, title: "Beta issue", severity: "low", confidence: 0.9, validation_status: "pending" },
+  {
+    id: 1,
+    reference: "ABCD-003",
+    title: "Beta issue",
+    severity: "low",
+    confidence: 0.9,
+    validation_status: "pending",
+  },
   {
     id: 2,
+    reference: "ABCD-001",
     title: "Alpha issue",
     severity: "critical",
     confidence: 0.4,
@@ -14,6 +23,7 @@ const leads = [
   },
   {
     id: 3,
+    reference: "ABCD-002",
     title: "Gamma issue",
     severity: "medium",
     confidence: 0.7,
@@ -22,12 +32,75 @@ const leads = [
 ];
 
 function titles() {
-  return within(screen.getByRole("table"))
-    .getAllByRole("button", { pressed: false })
-    .map((row) => within(row).getByText(/issue$/).textContent);
+  return [...screen.getByRole("table").querySelectorAll("tbody tr")].map(
+    (row) => row.querySelector(".sast-candidate-title").textContent,
+  );
 }
 
 beforeEach(() => localStorage.clear());
+
+test("opens full-width details and returns to the filtered, sorted findings list", () => {
+  function Findings() {
+    const [selectedId, setSelectedId] = useState(1);
+    return (
+      <CandidatesView
+        runId={249}
+        leads={leads}
+        selectedLead={leads.find((lead) => lead.id === selectedId)}
+        onSelect={setSelectedId}
+        targets={[]}
+        onQueue={vi.fn()}
+        queueBusy={false}
+        reportableCount={1}
+        onExport={vi.fn()}
+        canRevalidate={false}
+      />
+    );
+  }
+
+  render(<Findings />);
+  fireEvent.click(screen.getByRole("button", { name: "dismissed 1" }));
+  expect(titles()).toEqual(["Gamma issue", "Beta issue"]);
+
+  fireEvent.click(screen.getByRole("button", { name: /Gamma issue/ }));
+  expect(screen.queryByRole("table")).toBeNull();
+  expect(screen.getByRole("heading", { name: "Gamma issue" })).toBeTruthy();
+  expect(screen.getByText("1 of 2")).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "Next →" }));
+  expect(screen.getByRole("heading", { name: "Beta issue" })).toBeTruthy();
+  expect(screen.getByText("2 of 2")).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "← Back to findings" }));
+  expect(titles()).toEqual(["Gamma issue", "Beta issue"]);
+});
+
+test("offers Markdown and SARIF from the findings export control", () => {
+  const onExport = vi.fn();
+  render(
+    <CandidatesView
+      runId={249}
+      leads={leads}
+      selectedLead={leads[0]}
+      onSelect={vi.fn()}
+      targets={[]}
+      onQueue={vi.fn()}
+      queueBusy={false}
+      reportableCount={1}
+      onExport={onExport}
+      canRevalidate={false}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Export findings ↓" }));
+  expect(onExport).not.toHaveBeenCalled();
+  expect(screen.getByRole("menuitem", { name: "Export SARIF" }).getAttribute("href")).toBe(
+    "/api/sast-runs/249/sarif",
+  );
+  fireEvent.click(screen.getByRole("menuitem", { name: "Export Markdown" }));
+  expect(onExport).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("menuitem", { name: "Export SARIF" })).toBeNull();
+});
 
 test("re-validates the selected inconclusive finding", () => {
   const onRevalidate = vi.fn();
@@ -67,10 +140,13 @@ test("shows a re-validation action beside each inconclusive finding", () => {
 
 test("sorts findings when a column header is clicked", () => {
   render(<CandidateTable leads={leads} selectedId={null} onSelect={vi.fn()} />);
-  expect(titles()).toEqual(["Beta issue", "Alpha issue", "Gamma issue"]);
+  expect(titles()).toEqual(["Alpha issue", "Gamma issue", "Beta issue"]);
+  expect(screen.getByRole("table").querySelector("thead th").textContent).toContain("Reference");
+  expect(screen.getByRole("columnheader", { name: /Reference/ }).getAttribute("aria-sort")).toBe(
+    "ascending",
+  );
 
   fireEvent.click(screen.getByRole("button", { name: /^Severity/ }));
-  expect(titles()).toEqual(["Alpha issue", "Gamma issue", "Beta issue"]);
   expect(screen.getByRole("columnheader", { name: /Severity/ }).getAttribute("aria-sort")).toBe(
     "descending",
   );
@@ -80,6 +156,9 @@ test("sorts findings when a column header is clicked", () => {
 
   fireEvent.click(screen.getByRole("button", { name: /^Severity/ }));
   expect(titles()).toEqual(["Beta issue", "Alpha issue", "Gamma issue"]);
+
+  fireEvent.click(screen.getByRole("button", { name: /^Severity/ }));
+  expect(titles()).toEqual(["Alpha issue", "Gamma issue", "Beta issue"]);
 
   fireEvent.click(screen.getByRole("button", { name: /^Finding/ }));
   expect(titles()).toEqual(["Alpha issue", "Beta issue", "Gamma issue"]);
@@ -91,12 +170,86 @@ test("sorts findings when a column header is clicked", () => {
   expect(titles()).toEqual(["Gamma issue", "Beta issue", "Alpha issue"]);
 });
 
+test("sorts every severity consistently when labels vary or findings refresh", () => {
+  const mixed = [
+    { id: 1, title: "Low issue", severity: "low" },
+    { id: 2, title: "Zeta high issue", severity: "HIGH " },
+    { id: 3, title: "Info issue", severity: "informational" },
+    { id: 4, title: "Alpha high issue", severity: "high" },
+    { id: 5, title: "Critical issue", severity: "critical" },
+    { id: 6, title: "Medium issue", severity: "medium" },
+  ];
+  const { rerender } = render(
+    <CandidateTable leads={mixed} selectedId={null} onSelect={vi.fn()} />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: /^Severity/ }));
+  expect(titles()).toEqual([
+    "Critical issue",
+    "Alpha high issue",
+    "Zeta high issue",
+    "Medium issue",
+    "Low issue",
+    "Info issue",
+  ]);
+
+  rerender(<CandidateTable leads={[...mixed].reverse()} selectedId={null} onSelect={vi.fn()} />);
+  expect(titles()).toEqual([
+    "Critical issue",
+    "Alpha high issue",
+    "Zeta high issue",
+    "Medium issue",
+    "Low issue",
+    "Info issue",
+  ]);
+  expect(screen.getByText("INFO")).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: /^Severity/ }));
+  expect(titles()).toEqual([
+    "Info issue",
+    "Low issue",
+    "Medium issue",
+    "Alpha high issue",
+    "Zeta high issue",
+    "Critical issue",
+  ]);
+});
+
+test("sorts stored references by their number, then reverses that order", () => {
+  const referenced = [
+    { id: 10, reference: "WXYZ-010", title: "Tenth issue", severity: "critical" },
+    { id: 2, reference: "WXYZ-002", title: "Second issue", severity: "low" },
+    { id: 1, reference: "WXYZ-001", title: "First issue", severity: "high" },
+  ];
+  render(<CandidateTable leads={referenced} selectedId={null} onSelect={vi.fn()} />);
+  expect(titles()).toEqual(["First issue", "Second issue", "Tenth issue"]);
+  expect(
+    [...screen.getByRole("table").querySelectorAll("tbody .sast-candidate-reference")].map(
+      (cell) => cell.textContent,
+    ),
+  ).toEqual(["WXYZ-001", "WXYZ-002", "WXYZ-010"]);
+
+  fireEvent.click(screen.getByRole("button", { name: /^Reference/ }));
+  expect(titles()).toEqual(["Tenth issue", "Second issue", "First issue"]);
+  expect(screen.getByRole("columnheader", { name: /Reference/ }).getAttribute("aria-sort")).toBe(
+    "descending",
+  );
+});
+
+test("keeps saved column widths when the reference column is added", () => {
+  localStorage.setItem("sast-candidate-columns:v1", JSON.stringify([95, 290, 105, 200]));
+  render(<CandidateTable leads={leads} selectedId={null} onSelect={vi.fn()} />);
+  const widths = [...screen.getByRole("table").querySelectorAll("col")].map(
+    (column) => column.style.width,
+  );
+  expect(widths).toEqual(["112px", "95px", "290px", "105px", "200px"]);
+});
+
 test("hides findings by status and remembers the choice", () => {
   const { unmount } = render(<CandidateTable leads={leads} selectedId={null} onSelect={vi.fn()} />);
   const filter = screen.getByRole("group", { name: "Show findings by status" });
 
   fireEvent.click(within(filter).getByRole("button", { name: "dismissed 1" }));
-  expect(titles()).toEqual(["Beta issue", "Gamma issue"]);
+  expect(titles()).toEqual(["Gamma issue", "Beta issue"]);
   expect(screen.getByText("1 hidden")).toBeTruthy();
 
   fireEvent.click(within(filter).getByRole("button", { name: "pending 1" }));

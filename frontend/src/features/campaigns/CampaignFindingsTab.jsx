@@ -5,6 +5,7 @@ import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
 import { useColResize } from "../../shared/hooks/useColResize.js";
 import { severityClass } from "../../shared/runs/campaignPresentation.js";
+import { normalizeSeverity, severityRank } from "../../shared/findings/severity.js";
 import { ValidationCaseResults, validationCasesFromResponse } from "./ValidationCases.jsx";
 
 function TextBlock({ label, value, code = false }) {
@@ -148,8 +149,11 @@ export function CampaignFindingsTab({ systemId, campaignId, initialFindingRef })
       current.items.push(row);
       grouped.set(key, current);
     }
-    return [...grouped.values()].sort((a, b) =>
-      (a.items[0].severity || "").localeCompare(b.items[0].severity || ""),
+    return [...grouped.values()].sort(
+      (a, b) =>
+        severityRank(b.items[0].severity) - severityRank(a.items[0].severity) ||
+        a.title.localeCompare(b.title) ||
+        a.key.localeCompare(b.key),
     );
   }, [rows]);
 
@@ -237,8 +241,10 @@ export function CampaignFindingsTab({ systemId, campaignId, initialFindingRef })
                       <span className="finding-count-badge">{group.items.length}</span>
                     </td>
                     <td>
-                      <span className={`sev-badge ${severityClass(group.items[0].severity)}`}>
-                        {group.items[0].severity}
+                      <span
+                        className={`sev-badge ${severityClass(normalizeSeverity(group.items[0].severity))}`}
+                      >
+                        {normalizeSeverity(group.items[0].severity)}
                       </span>
                     </td>
                     <td>{group.items[0].status}</td>

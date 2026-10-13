@@ -6,7 +6,21 @@ import {
 } from "../lib/markdown.js";
 
 export function leadImportPayload(l) {
+  let external = null;
+  if (l.producer_run_type === "external") {
+    try {
+      const trace =
+        typeof l.source_trace_json === "string"
+          ? JSON.parse(l.source_trace_json)
+          : l.source_trace_json;
+      external = trace?.external_report;
+    } catch {
+      // Older exports may not have structured report provenance.
+    }
+  }
   return {
+    ...(external ? { scanner: external.scanner, rule_id: external.rule_id } : {}),
+    suggested_endpoint: l.suggested_endpoint,
     title: l.title,
     severity: l.severity,
     category: l.category,

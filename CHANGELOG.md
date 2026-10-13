@@ -6,6 +6,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
+- **External scanner leads**: Import SARIF 2.1.0 and structured Markdown reports into web or API runs, preview their leads before saving, and skip repeated findings. Imported reports keep their scanner, rule, location, and evidence details, and DAST treats them as unverified leads. Markdown import also accepts AESPA lead exports; a template is available in the import dialog.
+
 - **Crawl then pentest**: Start a web crawl and have AESPA begin the selected pentest mode automatically when the crawl finishes successfully.
 
 - **Benchmark result comments**: Add a comment to a saved Benchmark Lab analysis. Comments appear on graph cards and can be included in published benchmark summaries. Signed-in users with access to the private benchmark site can edit comments there, and the public graph site displays them.
@@ -21,6 +23,12 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Vulnerable JavaScript libraries in SAST**: Light and Deep SAST scans now check npm and Bower manifests, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, and JavaScript files copied into the repository against the same Retire.js list. Exact versions from lockfiles take priority over version ranges in `package.json`.
 
 ### Updates
+
+- **SAST lead import**: Web and API scans now use a searchable dialog to choose a source scan, with recent scans first, paginated results, source filenames and completion dates, and counts of new and already imported leads.
+
+- **SAST findings export**: Choose Markdown or SARIF from the Findings page export menu. The run actions menu still offers both formats.
+
+- **SAST finding details**: The findings list now uses the full page width and shows each finding's stored reference in the first column, sorted by reference by default. Open a finding to read its writeup, move between the visible findings, and return to the list with its sorting, filters, and scroll position intact.
 
 - **Hosted benchmark edits**: Results edited on the benchmark site are protected from later scanner uploads. Benchmark Lab reports how many site-edited results were skipped when publishing.
 
@@ -39,6 +47,10 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Smaller console log database**: When console log saving is on, each LLM request and response is now stored once instead of twice. Agent conversations that continue an earlier logged call now save only the new messages, with a reference to that earlier call, instead of repeating the whole conversation on every step. Together these greatly reduce how fast the console log database grows during long scans.
 
 ### Fixes
+
+- **Finding order**: SAST, campaign, and reporting debug findings handle severity labels with extra spacing or alternate wording and keep findings of the same severity in a consistent title order.
+
+- **Model order**: Reversing the provider sort now also reverses model name order within each provider.
 
 - **Bedrock benchmark evaluation**: Fixed requests with a Claude reasoning level failing because Bedrock rejected the reasoning setting. This also affects scans using the same Bedrock model settings.
 
