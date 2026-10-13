@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -300,12 +300,27 @@ async def delete_test_run(run_id: int, session: Session = Depends(get_session)) 
 
 @router.get("/api/test-runs/{run_id}/sast-runs/available")
 def list_available_sast_runs(
-    run_id: int, session: Session = Depends(get_session)
-) -> list[dict]:
-    """Completed SAST runs with leads — the dropdown source for importing leads."""
+    run_id: int,
+    session: Session = Depends(get_session),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=10, ge=1, le=50),
+    q: str = Query(default="", max_length=200),
+) -> list[dict] | dict:
+    """Completed SAST sources; opt into searchable pages with the page parameter."""
     from aespa.models import SastRun
 
     _get_run_or_404(session, run_id)
+    if page is not None:
+        from aespa.services.sast_imports import search_import_sources
+
+        return search_import_sources(
+            session,
+            run_kind="web",
+            run_id=run_id,
+            query=q,
+            page=page,
+            page_size=page_size,
+        )
     runs = session.exec(
         select(SastRun)
         .where(SastRun.status == "completed")

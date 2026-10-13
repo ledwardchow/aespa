@@ -2,6 +2,8 @@ import * as apiRunsApi from "../api/apiRuns.js";
 import * as webRunsApi from "../api/webRuns.js";
 import { useState, useEffect, useCallback, useRef } from "react";
 
+import { SastImportDialog } from "./SastImportDialog.tsx";
+
 import { leadsExportFilename, leadsToMarkdown } from "./files.js";
 import { downloadTextFile } from "../lib/download.js";
 import { usePolling } from "../hooks/usePolling.js";
@@ -10,10 +12,8 @@ import { LeadReferenceLink } from "../ui/FindingReferenceLink.jsx";
 
 export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initialLeadRef }) {
   const isApi = runKind === "api";
-  const [available, setAvailable] = useState([]);
   const [leads, setLeads] = useState([]);
-  const [selected, setSelected] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [clearBusy, setClearBusy] = useState(false);
   const [error, setError] = useState(null);
   const [msg, setMsg] = useState(null);
@@ -26,18 +26,7 @@ export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initia
         .catch(() => {}),
     [isApi, runId],
   );
-  const loadAvailable = useCallback(
-    () =>
-      (isApi
-        ? apiRunsApi.getApiRunAvailableSastRuns(runId)
-        : webRunsApi.getRunAvailableSastRuns(runId)
-      )
-        .then(setAvailable)
-        .catch(() => {}),
-    [isApi, runId],
-  );
   usePolling(loadLeads, { enabled: scanRunning, intervalMs: 3000 });
-  usePolling(loadAvailable, { enabled: false });
   // Final refresh when the scan stops so the last investigation outcomes appear.
   useEffect(() => {
     if (initialLeadRef) {
@@ -58,33 +47,10 @@ export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initia
       else n.add(id);
       return n;
     });
-  const onImport = async () => {
-    if (!selected) return;
-    setBusy(true);
-    setError(null);
-    setMsg(null);
-    try {
-      const r = await (isApi
-        ? apiRunsApi.importApiSastLeads(runId, {
-            sast_run_id: +selected,
-          })
-        : webRunsApi.importSastLeads(runId, {
-            sast_run_id: +selected,
-          }));
-      setMsg(
-        r.imported > 0 ? `Imported ${r.imported} lead(s).` : "Already imported (no new leads).",
-      );
-      await loadLeads();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
   const onClearAll = async () => {
     if (
       !confirm(
-        "Remove all imported SAST leads from this run?\nThe original SAST scan is not affected.",
+        "Remove all imported leads from this run?\nThe source scans and reports are not affected.",
       )
     )
       return;
@@ -129,6 +95,22 @@ export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initia
     })[s] || "neutral";
   return (
     <div className={"findings-panel" + (isApi ? " flush" : "")}>
+      {importOpen && (
+        <SastImportDialog
+          runId={runId}
+          runKind={runKind}
+          onClose={() => setImportOpen(false)}
+          onImported={async (count) => {
+            setError(null);
+            setMsg(
+              count > 0
+                ? `Imported ${count} lead${count === 1 ? "" : "s"}.`
+                : "Already imported (no new leads).",
+            );
+            await loadLeads();
+          }}
+        />
+      )}
       <div
         className="findings-status-bar"
         style={{
@@ -166,25 +148,8 @@ export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initia
             maxWidth: "100%",
           }}
         >
-          <select
-            value={selected}
-            onChange={(e) => setSelected(e.target.value)}
-            style={{
-              minWidth: 0,
-              width: 240,
-              maxWidth: "100%",
-              flex: "1 1 240px",
-            }}
-          >
-            <option value="">Import from SAST scan…</option>
-            {available.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.name} ({r.leads_count} lead{r.leads_count === 1 ? "" : "s"})
-              </option>
-            ))}
-          </select>
-          <button className="btn sm" disabled={!selected || busy} onClick={onImport}>
-            {busy ? "Importing…" : "Import leads"}
+          <button className="btn sm" onClick={() => setImportOpen(true)}>
+            Import SAST leads
           </button>
           {leads.length > 0 && (
             <button
@@ -238,9 +203,7 @@ export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initia
             textAlign: "center",
           }}
         >
-          {available.length === 0
-            ? "No completed SAST scans with leads yet. Run one from the SAST tab, then import its leads here."
-            : "No leads imported into this run yet. Pick a SAST scan above and click Import leads."}
+          No leads imported into this run yet. Click Import SAST leads to choose a source scan.
         </div>
       ) : (
         <div className="findings-table-wrap">

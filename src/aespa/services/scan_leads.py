@@ -631,7 +631,9 @@ def get_lead_detail_for_run(
         return {
             "id": lead.id,
             "reference": lead.reference,
-            "source_sast_run_id": lead.producer_run_id,
+            "source_sast_run_id": (
+                lead.producer_run_id if lead.producer_run_type == "sast" else None
+            ),
             "source": lead.source,
             "fingerprint": lead.fingerprint,
             "category": lead.category,

@@ -619,6 +619,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           ) : null}
           {tab === "candidates" && (
             <CandidatesView
+              runId={runId}
               leads={leads}
               selectedLead={selectedLead}
               onSelect={setSelectedLeadId}
@@ -630,6 +631,10 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               onRevalidate={onRevalidate}
               revalidatingLeadId={revalidatingLeadId}
               canRevalidate={run?.status === "completed" && !scanRunning && !resumableWork}
+              initialLeadRef={initialLeadRef}
+              onCloseDetail={() => {
+                if (initialLeadRef) nav(runHref({ runKind: "sast", runId }, "candidates"));
+              }}
             />
           )}
           {tab === "coverage" && (

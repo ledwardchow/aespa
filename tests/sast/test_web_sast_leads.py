@@ -24,6 +24,7 @@ from aespa.db import get_session, set_engine
 from aespa.main import create_app
 from aespa.models import (
     AgentLog,
+    ApiTestRun,
     ComponentFact,
     SastCodeCall,
     SastCodeSymbol,
@@ -531,3 +532,70 @@ def test_standalone_sast_upload_streams_and_enforces_limit(env, tmp_path, monkey
     )
     assert resp.status_code == 400
     assert "upload limit" in resp.text
+
+
+def test_import_source_search_paging_and_counts_are_run_kind_scoped(env):
+    client, engine = env
+    source_id = _make_completed_sast_run_with_leads(engine, n=2)
+    web_id = _make_web_run(engine)
+    collection = client.post(
+        "/api/api-collections",
+        json={"name": "Search test", "base_url": "http://target.test"},
+    ).json()
+    with Session(engine) as session:
+        api_run = ApiTestRun(collection_id=collection["id"], name="API scan")
+        session.add(api_run)
+        source = session.get(SastRun, source_id)
+        source.name = "Portal release"
+        source.source_filename = "portal-source.zip"
+        session.add(source)
+        session.add(SastRun(name="Other", status="completed", leads_count=1))
+        session.add(SastRun(name="Portal running", status="scanning", leads_count=2))
+        session.add(SastRun(name="Portal empty", status="completed", leads_count=0))
+        session.add(
+            ScanLead(producer_run_id=source_id, title="Hidden", reportable=False)
+        )
+        session.add(ScanLead(producer_run_id=source_id, title="Lead 0", category="A03"))
+        session.commit()
+        session.refresh(api_run)
+        api_id = api_run.id
+    url = f"/api/test-runs/{web_id}/sast-runs/available"
+    result = client.get(url, params={"page": 1, "page_size": 1}).json()
+    assert result["total"] == 2
+    assert len(result["items"]) == 1
+    second = client.get(url, params={"page": 2, "page_size": 1}).json()
+    assert result["items"][0]["id"] != second["items"][0]["id"]
+    for term in ("PORTAL", "source.zip", str(source_id)):
+        result = client.get(url, params={"page": 1, "q": term}).json()
+        assert result["total"] == 1
+        assert result["items"][0]["new_count"] == 2
+        assert result["items"][0]["imported_count"] == 0
+    client.post(
+        f"/api/test-runs/{web_id}/import-leads", json={"sast_run_id": source_id}
+    )
+    source = client.get(url, params={"page": 1, "q": "portal"}).json()["items"][0]
+    assert source["new_count"] == 0
+    assert source["imported_count"] == 2
+    # Also test a legacy overlapping ID without relying on the global ID allocator.
+    from aespa.services.sast_imports import search_import_sources
+
+    with Session(engine) as session:
+        overlapping = search_import_sources(
+            session, run_kind="api", run_id=web_id, query="portal", page=1, page_size=10
+        )["items"][0]
+        assert overlapping["new_count"] == 2
+        assert overlapping["imported_count"] == 0
+    api_source = client.get(
+        f"/api/api-test-runs/{api_id}/sast-runs/available",
+        params={"page": 1, "q": "portal"},
+    ).json()["items"][0]
+    assert api_source["new_count"] == 2
+    assert api_source["imported_count"] == 0
+    assert client.get(url, params={"page": 1, "q": "%"}).json()["total"] == 0
+    assert client.get(url, params={"page": 1, "q": "missing"}).json()["items"] == []
+    assert client.get(url, params={"page": 1, "q": "9" * 200}).json()["total"] == 0
+    assert client.get(url, params={"page": 0}).status_code == 422
+    assert client.get(url, params={"page_size": 100}).status_code == 422
+    assert (
+        client.get("/api/test-runs/999/sast-runs/available?page=1").status_code == 404
+    )
