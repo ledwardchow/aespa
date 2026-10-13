@@ -16,9 +16,6 @@ from sqlmodel import Session, select
 from aespa.models import (
     ApiCollection,
     ApiEndpoint,
-    System,
-    SystemComponent,
-    SystemTarget,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
@@ -30,6 +27,9 @@ from aespa.models import (
     ScanLead,
     ScanLeadComponentProvenance,
     Site,
+    System,
+    SystemComponent,
+    SystemTarget,
 )
 from aespa.services.correlation import (
     AmbiguousCall,
@@ -1133,12 +1133,8 @@ async def test_llm_correlation_skips_failed_source_scan(
         app = System(name="Partial mapping app")
         session.add(app)
         session.flush()
-        good_component = SystemComponent(
-            system_id=app.id, name="good-component"
-        )
-        failed_component = SystemComponent(
-            system_id=app.id, name="failed-component"
-        )
+        good_component = SystemComponent(system_id=app.id, name="good-component")
+        failed_component = SystemComponent(system_id=app.id, name="failed-component")
         session.add(good_component)
         session.add(failed_component)
         session.flush()

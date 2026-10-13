@@ -34,19 +34,23 @@ export function WebRunCrawlProgress({ run, crawlerTask, crawlerActive }) {
   );
 }
 
-export function WebRunUserCrawlProgress({ run, crawlerActive }) {
-  const [userProgressOpen, setUserProgressOpen] = useState(false);
-  const credentials = run?.credentials || [];
+export function WebRunUserCrawlProgress({ run, crawlerActive, activityLog = [] }) {
+  const [userProgressOpen, setUserProgressOpen] = useState(true);
+  const credentials = (run?.credentials || []).filter(
+    (credential) => !run.crawl_credential_id || credential.id === run.crawl_credential_id,
+  );
   const isRunning = crawlerActive;
-  if (credentials.length < 2) return null;
   const progress = run.per_user_progress || {};
-  const totalPages = credentials.reduce(
+  const users =
+    progress.unauthenticated || (isRunning && !run.crawl_credential_id)
+      ? [{ username: "unauthenticated", label: "Unauthenticated" }, ...credentials]
+      : credentials;
+  if (!users.length) return null;
+  const totalPages = users.reduce(
     (total, credential) => total + (progress[credential.username]?.pages_visited || 0),
     0,
   );
-  const completedUsers = credentials.filter(
-    (credential) => progress[credential.username]?.done,
-  ).length;
+  const completedUsers = users.filter((credential) => progress[credential.username]?.done).length;
   return (
     <>
       <div className="crawl-user-progress-panel">
@@ -62,7 +66,7 @@ export function WebRunUserCrawlProgress({ run, crawlerActive }) {
             User crawl progress
           </button>
           <span className="crawl-user-progress-count">
-            {credentials.length} users · {totalPages} pages
+            {users.length} users · {totalPages} pages
             {completedUsers > 0 ? ` · ${completedUsers} done` : ""}
           </span>
         </div>
@@ -71,9 +75,28 @@ export function WebRunUserCrawlProgress({ run, crawlerActive }) {
           className="crawl-user-progress"
           hidden={!userProgressOpen}
         >
-          {credentials.map((credential, index) => {
+          {users.map((credential, index) => {
             const userProgress = progress[credential.username] || {};
             const active = isRunning && !userProgress.done;
+            const loginEvent = [...activityLog]
+              .reverse()
+              .find(
+                (entry) =>
+                  entry.phase === "auth" &&
+                  entry.message?.includes(credential.username) &&
+                  ["start", "complete", "error"].includes(entry.status),
+              );
+            const loginStatus =
+              userProgress.login_status ||
+              { start: "pending", complete: "success", error: "failed" }[loginEvent?.status] ||
+              "unknown";
+            const loginLabel = {
+              pending: "Logging in",
+              success: "Login successful",
+              failed: "Login failed",
+              not_required: "No login needed",
+              unknown: "Login status unknown",
+            }[loginStatus];
             return (
               <div key={credential.username} className="crawl-user-row">
                 <span
@@ -83,7 +106,11 @@ export function WebRunUserCrawlProgress({ run, crawlerActive }) {
                 <span className="crawl-user-name" title={credential.username}>
                   {credential.label || credential.username}
                 </span>
-                <span className="crawl-user-pages">{userProgress.pages_visited || 0} pg</span>
+                {credential.username !== "unauthenticated" && (
+                  <span className={`crawl-login-status ${loginStatus}`} title={loginLabel}>
+                    {loginLabel}
+                  </span>
+                )}
                 <span className="crawl-user-url mono" title={userProgress.current_url || ""}>
                   {userProgress.current_url
                     ? truncUrl(userProgress.current_url, 42)

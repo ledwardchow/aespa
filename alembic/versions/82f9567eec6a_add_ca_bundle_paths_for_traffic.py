@@ -14,17 +14,31 @@ branch_labels = None
 depends_on = None
 
 
+_COLUMNS = ("scanner_ca_bundle_path", "llm_ca_bundle_path")
+
+
+def _existing_columns() -> set[str] | None:
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("upstream_proxy_config"):
+        return None
+    return {item["name"] for item in inspector.get_columns("upstream_proxy_config")}
+
+
 def upgrade() -> None:
-    op.add_column(
-        "upstream_proxy_config",
-        sa.Column("scanner_ca_bundle_path", sa.String(), nullable=True),
-    )
-    op.add_column(
-        "upstream_proxy_config",
-        sa.Column("llm_ca_bundle_path", sa.String(), nullable=True),
-    )
+    columns = _existing_columns()
+    if columns is None:
+        return
+    for name in _COLUMNS:
+        if name not in columns:
+            op.add_column(
+                "upstream_proxy_config", sa.Column(name, sa.String(), nullable=True)
+            )
 
 
 def downgrade() -> None:
-    op.drop_column("upstream_proxy_config", "llm_ca_bundle_path")
-    op.drop_column("upstream_proxy_config", "scanner_ca_bundle_path")
+    columns = _existing_columns()
+    if columns is None:
+        return
+    for name in reversed(_COLUMNS):
+        if name in columns:
+            op.drop_column("upstream_proxy_config", name)

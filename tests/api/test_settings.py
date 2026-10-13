@@ -2,8 +2,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
 
 def test_get_llm_config_initially_null(client: TestClient):
@@ -1014,69 +1013,60 @@ def test_write_only_api_keys_behavior(client: TestClient):
     assert "burp-secret-key" not in burp_get.text
 
 
-def test_run_llm_config_resolves_provider_fields_without_changing_session_instance():
-    from aespa import models as _models  # noqa: F401
+def test_run_llm_config_resolves_provider_fields_without_changing_session_instance(
+    engine,
+):
     from aespa.models import LLMConfig, LLMProviderConfig, Site, TestRun
     from aespa.services import settings as settings_service
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    try:
-        SQLModel.metadata.create_all(engine)
-        with Session(engine) as session:
-            provider = LLMProviderConfig(
-                name="Azure Claude",
-                api_format="azure_foundry_anthropic",
-                api_key="provider-key",
-                base_url="https://example.services.ai.azure.com/anthropic/v1",
-                models_json='["claude-sonnet-4-5"]',
-            )
-            profile = LLMConfig(
-                name="Claude profile",
-                is_active=True,
-                provider_id=1,
-                model="claude-sonnet-4-5",
-                api_key=None,
-                base_url=None,
-            )
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(provider)
-            session.add(profile)
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-            run = TestRun(site_id=site.id, name="Run", llm_config_id=profile.id)
-            session.add(run)
-            session.commit()
-            session.refresh(run)
+    with Session(engine) as session:
+        provider = LLMProviderConfig(
+            name="Azure Claude",
+            api_format="azure_foundry_anthropic",
+            api_key="provider-key",
+            base_url="https://example.services.ai.azure.com/anthropic/v1",
+            models_json='["claude-sonnet-4-5"]',
+        )
+        profile = LLMConfig(
+            name="Claude profile",
+            is_active=True,
+            provider_id=1,
+            model="claude-sonnet-4-5",
+            api_key=None,
+            base_url=None,
+        )
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(provider)
+        session.add(profile)
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        run = TestRun(site_id=site.id, name="Run", llm_config_id=profile.id)
+        session.add(run)
+        session.commit()
+        session.refresh(run)
 
-            cfg = settings_service.get_llm_config_for_run(session, run)
+        cfg = settings_service.get_llm_config_for_run(session, run)
 
-            assert inspect(cfg, raiseerr=False) is None
-            assert inspect(profile).session is session
-            assert session.is_modified(profile) is False
-            assert cfg.provider == "azure_foundry_anthropic"
-            assert cfg.api_key == "provider-key"
-            assert cfg.base_url == "https://example.services.ai.azure.com/anthropic/v1"
+        assert inspect(cfg, raiseerr=False) is None
+        assert inspect(profile).session is session
+        assert session.is_modified(profile) is False
+        assert cfg.provider == "azure_foundry_anthropic"
+        assert cfg.api_key == "provider-key"
+        assert cfg.base_url == "https://example.services.ai.azure.com/anthropic/v1"
 
-            settings_service.get_run_scanner_policy(session, run)
-            assert session.is_modified(profile) is False
-            assert profile.api_key is None
-            assert profile.base_url is None
-            profile_id = profile.id
-            session.expire_all()
-            assert cfg.api_key == "provider-key"
+        settings_service.get_run_scanner_policy(session, run)
+        assert session.is_modified(profile) is False
+        assert profile.api_key is None
+        assert profile.base_url is None
+        profile_id = profile.id
+        session.expire_all()
+        assert cfg.api_key == "provider-key"
 
-        with Session(engine) as session:
-            persisted = session.get(LLMConfig, profile_id)
-            assert persisted.api_key is None
-            assert persisted.base_url is None
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    with Session(engine) as session:
+        persisted = session.get(LLMConfig, profile_id)
+        assert persisted.api_key is None
+        assert persisted.base_url is None
 
 
 def test_profile_model_must_belong_to_provider(client: TestClient):

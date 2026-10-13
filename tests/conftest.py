@@ -47,6 +47,19 @@ def db_engine(isolated_db_engine):
 
 
 @pytest.fixture(scope="function")
+def engine(isolated_db_engine):
+    """The shared isolated engine; ``get_engine()`` already returns it."""
+    return isolated_db_engine
+
+
+@pytest.fixture
+def data_dir(tmp_path, monkeypatch):
+    """Isolate uploaded-file storage to a temp dir for the test."""
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    return tmp_path
+
+
+@pytest.fixture(scope="function")
 def isolated_client(isolated_db_engine):
     def _override_session():
         with Session(isolated_db_engine) as session:

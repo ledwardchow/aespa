@@ -857,74 +857,28 @@ def test_start_scan_accepts_standard_coverage_mode(client, db_engine, db_session
     assert db_session.get(TestRun, run["id"]).coverage_mode == "standard"
 
 
-def test_started_deep_scan_rejects_non_deep_mode(client, db_engine, db_session):
-    site = client.post(
-        "/api/sites", json={"name": "S", "base_url": "http://t.com"}
-    ).json()
-    run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
-    persisted = db_session.get(TestRun, run["id"])
-    persisted.coverage_mode = "deep"
-    db_session.add(persisted)
-    db_session.add(
-        ScanLog(
-            test_run_id=run["id"],
-            run_kind="web",
-            phase="scan_started",
-            status="start",
-        )
-    )
-    db_session.commit()
-
-    response = client.post(
-        f"/api/test-runs/{run['id']}/thinking-scan/start",
-        json={"coverage_mode": "track"},
-    )
-
-    assert response.status_code == 409
-    assert "cannot switch" in response.json()["detail"]
-    db_session.expire_all()
-    assert db_session.get(TestRun, run["id"]).coverage_mode == "deep"
-
-
-def test_started_non_deep_scan_rejects_deep_mode(client, db_engine, db_session):
-    site = client.post(
-        "/api/sites", json={"name": "S", "base_url": "http://t.com"}
-    ).json()
-    run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
-    persisted = db_session.get(TestRun, run["id"])
-    persisted.coverage_mode = "standard"
-    db_session.add(persisted)
-    db_session.add(
-        ScanLog(
-            test_run_id=run["id"],
-            run_kind="web",
-            phase="scan_started",
-            status="start",
-        )
-    )
-    db_session.commit()
-
-    response = client.post(
-        f"/api/test-runs/{run['id']}/thinking-scan/start",
-        json={"coverage_mode": "deep"},
-    )
-
-    assert response.status_code == 409
-    assert "cannot switch" in response.json()["detail"]
-    db_session.expire_all()
-    assert db_session.get(TestRun, run["id"]).coverage_mode == "standard"
-
-
-@pytest.mark.parametrize("requested_mode", ["track", "standard", "enforce", "deep"])
-def test_started_team_scan_is_locked_to_team_mode(
-    client, db_engine, db_session, requested_mode
+@pytest.mark.parametrize(
+    ("saved_mode", "requested_mode"),
+    [
+        ("deep", "track"),
+        ("standard", "deep"),
+        ("team", "track"),
+        ("team", "standard"),
+        ("team", "enforce"),
+        ("team", "deep"),
+        ("standard", "team"),
+        ("deep", "team"),
+    ],
+)
+def test_started_scan_cannot_switch_coverage_mode(
+    client, db_session, saved_mode, requested_mode
 ):
     site = client.post(
         "/api/sites", json={"name": "S", "base_url": "http://t.com"}
     ).json()
     run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
     persisted = db_session.get(TestRun, run["id"])
-    persisted.coverage_mode = "team"
+    persisted.coverage_mode = saved_mode
     db_session.add(persisted)
     db_session.add(
         ScanLog(
@@ -942,64 +896,9 @@ def test_started_team_scan_is_locked_to_team_mode(
     )
 
     assert response.status_code == 409
+    assert "cannot switch" in response.json()["detail"]
     db_session.expire_all()
-    assert db_session.get(TestRun, run["id"]).coverage_mode == "team"
-
-
-def test_started_ordinary_scan_rejects_team_mode(client, db_engine, db_session):
-    site = client.post(
-        "/api/sites", json={"name": "S", "base_url": "http://t.com"}
-    ).json()
-    run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
-    persisted = db_session.get(TestRun, run["id"])
-    persisted.coverage_mode = "standard"
-    db_session.add(persisted)
-    db_session.add(
-        ScanLog(
-            test_run_id=run["id"],
-            run_kind="web",
-            phase="scan_started",
-            status="start",
-        )
-    )
-    db_session.commit()
-
-    response = client.post(
-        f"/api/test-runs/{run['id']}/thinking-scan/start",
-        json={"coverage_mode": "team"},
-    )
-
-    assert response.status_code == 409
-    db_session.expire_all()
-    assert db_session.get(TestRun, run["id"]).coverage_mode == "standard"
-
-
-def test_started_deep_scan_rejects_team_mode(client, db_engine, db_session):
-    site = client.post(
-        "/api/sites", json={"name": "S", "base_url": "http://t.com"}
-    ).json()
-    run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
-    persisted = db_session.get(TestRun, run["id"])
-    persisted.coverage_mode = "deep"
-    db_session.add(persisted)
-    db_session.add(
-        ScanLog(
-            test_run_id=run["id"],
-            run_kind="web",
-            phase="scan_started",
-            status="start",
-        )
-    )
-    db_session.commit()
-
-    response = client.post(
-        f"/api/test-runs/{run['id']}/thinking-scan/start",
-        json={"coverage_mode": "team"},
-    )
-
-    assert response.status_code == 409
-    db_session.expire_all()
-    assert db_session.get(TestRun, run["id"]).coverage_mode == "deep"
+    assert db_session.get(TestRun, run["id"]).coverage_mode == saved_mode
 
 
 # ── 18. _clean_affected_url unit cases ────────────────────────────────────────

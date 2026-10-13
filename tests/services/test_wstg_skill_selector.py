@@ -1,5 +1,7 @@
 """Tests for the WSTG skill selector (issue #98 prompt-coverage improvements)."""
 
+import pytest
+
 from aespa.services.llm import build_wstg_skill_context, select_wstg_skills
 from aespa.services.prompts.test_lead import _SKILL_ORDER, WSTG_SKILLS
 
@@ -78,35 +80,31 @@ def test_no_auth_surface_omits_auth_robustness():
     assert "auth_robustness" not in selected
 
 
-def test_ssrf_selected_on_expanded_param_name():
-    # avatarurl is one of the newly-added SSRF-prone parameter names.
-    selected = select_wstg_skills(
-        pages=[],
-        intel_items=[{"kind": "input", "key": "avatarurl", "value": "", "url": ""}],
-    )
-    assert "ssrf" in selected
+def _input(key: str, value: str = "") -> dict:
+    return {"kind": "input", "key": key, "value": value, "url": ""}
 
 
-def test_ssrf_selected_on_feature_url_without_url_param():
-    # A PDF-export feature is an SSRF lead even with no url= parameter.
-    selected = select_wstg_skills(
-        pages=[{"url": "https://t/account/export/pdf"}],
-        intel_items=[],
-    )
-    assert "ssrf" in selected
-
-
-def test_ssrf_selected_on_import_feature_key():
-    selected = select_wstg_skills(
-        pages=[],
-        intel_items=[{"kind": "input", "key": "import_source", "value": "", "url": ""}],
-    )
-    assert "ssrf" in selected
-
-
-def test_ssrf_not_selected_on_unrelated_surface():
-    selected = select_wstg_skills(
-        pages=[{"url": "https://t/about"}],
-        intel_items=[{"kind": "input", "key": "comment", "value": "hi", "url": ""}],
-    )
-    assert "ssrf" not in selected
+@pytest.mark.parametrize(
+    ("pages", "intel_items", "selected"),
+    [
+        # avatarurl is one of the newly-added SSRF-prone parameter names.
+        pytest.param([], [_input("avatarurl")], True, id="expanded_param_name"),
+        # A PDF-export feature is an SSRF lead even with no url= parameter.
+        pytest.param(
+            [{"url": "https://t/account/export/pdf"}],
+            [],
+            True,
+            id="feature_url_without_url_param",
+        ),
+        pytest.param([], [_input("import_source")], True, id="import_feature_key"),
+        pytest.param(
+            [{"url": "https://t/about"}],
+            [_input("comment", "hi")],
+            False,
+            id="unrelated_surface",
+        ),
+    ],
+)
+def test_ssrf_selection(pages, intel_items, selected):
+    skills = select_wstg_skills(pages=pages, intel_items=intel_items)
+    assert ("ssrf" in skills) is selected

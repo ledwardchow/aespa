@@ -8,13 +8,13 @@ from sqlmodel import Session, SQLModel, select
 from aespa.models import (
     ApiCollection,
     ApiTestRun,
-    System,
     AssessmentCampaign,
     LLMProviderConfig,
     PublicReferenceNamespace,
     SastRun,
     ScannerPolicy,
     Site,
+    System,
     TestRun,
 )
 from aespa.services import database_operations
@@ -64,9 +64,7 @@ def test_clear_scans_keeps_targets_llm_and_settings(fk_engine, monkeypatch):
         web_run = TestRun(site_id=site.id, name="Web scan")
         api_run = ApiTestRun(collection_id=collection.id, name="API scan")
         sast_run = SastRun(name="SAST scan")
-        campaign = AssessmentCampaign(
-            system_id=system.id, name="Campaign scan"
-        )
+        campaign = AssessmentCampaign(system_id=system.id, name="Campaign scan")
         session.add(web_run)
         session.add(api_run)
         session.add(sast_run)

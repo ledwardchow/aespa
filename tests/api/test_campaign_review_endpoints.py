@@ -21,9 +21,6 @@ from aespa.models import (
     AgentLog,
     ApiCollection,
     ApiTestRun,
-    System,
-    SystemComponent,
-    SystemTarget,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
@@ -34,6 +31,9 @@ from aespa.models import (
     ScanLeadComponentProvenance,
     ScanLog,
     Site,
+    System,
+    SystemComponent,
+    SystemTarget,
     TestRun,
 )
 from aespa.schemas import CampaignFindingRow

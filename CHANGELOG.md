@@ -6,6 +6,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
+- **Grouped page crawl**: URL crawls can sample repeated pages, such as product catalogues, instead of visiting every link. Choose **Group similar pages** when creating a run. Site Map and Attack Surface show grouped routes, link counts, and the exact pages visited, and pentests are told which pages are examples of a larger route. If the examples behave differently, or need a login, AESPA crawls those links normally. Existing URL and Interactive SPA crawls keep their current behavior.
+
 - **External scanner leads**: Import SARIF 2.1.0 and structured Markdown reports into web or API runs, preview their leads before saving, and skip repeated findings. Imported reports keep their scanner, rule, location, and evidence details, and DAST treats them as unverified leads. Markdown import also accepts AESPA lead exports; a template is available in the import dialog.
 
 - **Crawl then pentest**: Start a web crawl and have AESPA begin the selected pentest mode automatically when the crawl finishes successfully.
@@ -34,7 +36,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Hosted benchmark connection**: Benchmark Lab now defaults to `benchmarks.aespa.app`. Existing upload tokens work with both that address and the site's original `chatgpt.site` address, so switching between them does not require a new token.
 
-- **Scan usage on every tab**: Token usage stays visible while you switch between tabs in web, API, and source scan runs. Web runs also keep the cost of linked source scans visible.
+- **Scan usage on every tab**: Token usage stays visible while you switch between tabs in web, API, and source scan runs. Web runs also keep the cost of linked source scans visible, without showing a source cost error when no linked source has been found.
 
 - **Python execution request limit**: New setups now allow up to 50 HTTP requests per Python execution by default. Existing saved settings can still be changed in Agent Settings.
 
@@ -48,6 +50,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Web crawl progress**: The site map now shows the unauthenticated crawl alongside saved accounts and shows whether account logins succeeded. Page counts appear in the progress summary without taking space in each user tile. Next.js page-data requests no longer fill the site map as separate API endpoints.
+
 - **GitHub Copilot CLI path**: The provider now respects `COPILOT_CLI_PATH` and automatically finds `copilot` on `PATH` for requests and sign-in, using the installed CLI instead of attempting an unnecessary download.
 
 - **Finding order**: SAST, campaign, and reporting debug findings handle severity labels with extra spacing or alternate wording and keep findings of the same severity in a consistent title order.
@@ -57,6 +61,12 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Bedrock benchmark evaluation**: Fixed requests with a Claude reasoning level failing because Bedrock rejected the reasoning setting. This also affects scans using the same Bedrock model settings.
 
 - **LLM scan errors**: Scan logs now show the exception type when an LLM error has no message. ChatGPT access-check timeouts identify the model being checked. ChatGPT connections that time out before a request is sent now retry twice before failing the scan.
+
+- **Upgrading older databases**: AESPA no longer fails to start when upgrading a database created before database versioning was introduced. Several recent upgrade steps assumed the LLM and connectivity settings tables already existed.
+
+- **Factory Droid tool approvals**: Droid scans could not use AESPA's testing tools with newer releases of the Droid SDK because the tool approval check failed. AESPA's own tools are approved again, and other tools are still refused.
+
+- **SAST duplicate merging**: Two confirmed SAST findings that share a fix location are no longer merged when the validators describe different root causes, so neither finding is hidden from the report.
 
 - **Finding updates during scans**: When later testing provides stronger proof of an issue already reported, AESPA updates the saved finding with the new severity, evidence, and write-up. The finding keeps its reference and is validated again.
 
@@ -73,6 +83,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Console startup on occupied ports**: When the requested port is in use, AESPA starts on port 9000 or the next available higher port instead of exiting.
 
 ### Housekeeping
+
+- **Test suite cleanup**: Combined repeated API run, validator, and campaign checks while keeping the same cases covered.
 
 - **BankOfEd benchmark data**: Added the accepted 35-finding ground truth file and a guarded migration for saved comparisons. It keeps result IDs and decisions for shared findings, removes three retired findings, and updates scores using the revised severities.
 

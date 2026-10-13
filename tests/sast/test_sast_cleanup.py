@@ -22,7 +22,6 @@ from __future__ import annotations
 from datetime import datetime, timezone  # noqa: F401  (datetime used in fixtures below)
 from pathlib import Path
 
-import pytest
 from sqlmodel import Session, select
 
 from aespa.config import get_settings
@@ -35,11 +34,6 @@ from aespa.models import RunPause, SastRun, ScanLog
 from aespa.sast_workspace import try_acquire_sast_workspace_lease
 
 _UTC = timezone.utc
-
-
-@pytest.fixture(name="engine")
-def engine_fixture(db_engine):
-    return db_engine
 
 
 def _write_run(status: str, **kwargs) -> int:

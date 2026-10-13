@@ -11,6 +11,7 @@ export function TestRunForm({ siteId }) {
     max_depth: 3,
     max_pages: 500,
     crawler_mode: "url",
+    page_selection: "each_url",
     llm_profile_id: null,
   });
   const [saving, setSaving] = useState(false);
@@ -41,6 +42,7 @@ export function TestRunForm({ siteId }) {
         max_depth: Number(form.max_depth),
         max_pages: Number(form.max_pages),
         crawler_mode: form.crawler_mode,
+        page_selection: form.page_selection,
         llm_profile_id: form.llm_profile_id || null,
       });
       nav(`#/runs/${run.id}`);
@@ -120,15 +122,32 @@ export function TestRunForm({ siteId }) {
             <select
               className="select"
               value={form.crawler_mode}
-              onChange={(e) => upd({ crawler_mode: e.target.value })}
+              onChange={(e) => upd({ crawler_mode: e.target.value, page_selection: "each_url" })}
             >
-              <option value="url">URL crawl — each URL is a page</option>
+              <option value="url">URL crawl</option>
               <option value="interactive">Interactive SPA - major UI change is a page</option>
             </select>
             <div className="field-hint">
               Use "Interactive SPA" mode if your site doesn't change the URL when you navigate.
             </div>
           </div>
+          {form.crawler_mode === "url" && (
+            <div className="field">
+              <label>Page selection</label>
+              <select
+                className="select"
+                value={form.page_selection}
+                onChange={(e) => upd({ page_selection: e.target.value })}
+              >
+                <option value="each_url">Visit each URL (current crawl)</option>
+                <option value="group_similar">Group similar pages</option>
+              </select>
+              <div className="field-hint">
+                Group similar pages samples repeated routes, such as large product catalogues. It
+                keeps example pages for testing.
+              </div>
+            </div>
+          )}
           <div
             className="alert"
             style={{

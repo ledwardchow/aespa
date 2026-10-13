@@ -612,6 +612,7 @@ function TestRunContent({
           crawlerActive={crawlerActive}
           runId={runId}
           run={run}
+          activityLog={activityLog}
           graph={graph}
           active={activeTab === "sitemap"}
           graphView={graphView}

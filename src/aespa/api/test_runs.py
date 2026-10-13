@@ -89,6 +89,11 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
         for c in (site.credentials if site else [])
     ]
     s = TestRunSummary.model_validate(run)
+    try:
+        groups = json.loads(run.route_groups_json or "[]")
+        s.route_groups = groups if isinstance(groups, list) else []
+    except (TypeError, ValueError):
+        s.route_groups = []
     s.credentials = creds
     policy = settings_service.get_run_scanner_policy(session, run)
     s.scanner_policy = policy.model_dump(mode="json")
@@ -143,6 +148,14 @@ def _auto_name(session: Session, site_id: int) -> str:
     return f"Run #{len(existing) + 1}"
 
 
+def _validate_page_selection(crawler_mode: str, page_selection: str) -> None:
+    if crawler_mode != "url" and page_selection != "each_url":
+        raise HTTPException(
+            status_code=422,
+            detail="Group similar pages is available only with URL crawl",
+        )
+
+
 def _clear_crawl_state(session: Session, run: TestRun) -> None:
     run_id = run.id
     if run_id is None:
@@ -182,6 +195,9 @@ def _clear_crawl_state(session: Session, run: TestRun) -> None:
     run.error_message = None
     run.current_url = None
     run.per_user_progress = None
+    run.crawl_started_once = False
+    run.route_groups_json = "[]"
+    run.route_sampling_state_json = "{}"
     session.add(run)
 
 
@@ -199,6 +215,7 @@ def create_test_run(
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     _get_site_or_404(session, site_id)
+    _validate_page_selection(payload.crawler_mode, payload.page_selection)
     if payload.llm_config_id is not None:
         from aespa.models import LLMConfig
 
@@ -217,6 +234,7 @@ def create_test_run(
         max_depth=payload.max_depth,
         max_pages=payload.max_pages,
         crawler_mode=payload.crawler_mode,
+        page_selection=payload.page_selection,
         scan_mode=policy.scan_mode,
         scanner_policy_json="{}",
         llm_config_id=payload.llm_config_id,
@@ -455,6 +473,17 @@ def update_test_run(
         raise HTTPException(
             status_code=409, detail="Cannot edit settings while crawl is running"
         )
+    next_crawler_mode = payload.crawler_mode or run.crawler_mode
+    next_page_selection = payload.page_selection or run.page_selection
+    _validate_page_selection(next_crawler_mode, next_page_selection)
+    if run.crawl_started_once and (
+        next_crawler_mode != run.crawler_mode
+        or next_page_selection != run.page_selection
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Clear or restart the crawl to change its mode or page selection",
+        )
     run.max_depth = payload.max_depth
     run.max_pages = payload.max_pages
     run.llm_max_concurrency = (
@@ -464,6 +493,8 @@ def update_test_run(
     )
     if payload.crawler_mode is not None:
         run.crawler_mode = payload.crawler_mode
+    if payload.page_selection is not None:
+        run.page_selection = payload.page_selection
     if payload.llm_config_id is not None:
         # Validate the model exists
         from aespa.models import LLMConfig
@@ -519,6 +550,21 @@ async def start_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    next_crawler_mode = (
+        body.crawler_mode if body and body.crawler_mode else run.crawler_mode
+    )
+    next_page_selection = (
+        body.page_selection if body and body.page_selection else run.page_selection
+    )
+    _validate_page_selection(next_crawler_mode, next_page_selection)
+    if run.crawl_started_once and (
+        next_crawler_mode != run.crawler_mode
+        or next_page_selection != run.page_selection
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Clear or restart the crawl to change its mode or page selection",
+        )
     if body and body.start_pentest_after_crawl:
         from aespa.api.scan import _reject_incompatible_scan_mode
 
@@ -551,6 +597,9 @@ async def start_test_run(
     # Clear stale per_user_progress synchronously so the response (and the
     # first poll) never contains data from a previous crawl.
     run.per_user_progress = None
+    run.crawler_mode = next_crawler_mode
+    run.page_selection = next_page_selection
+    run.crawl_started_once = True
     session.add(run)
     session.commit()
     crawl_task = await crawler_svc.start_crawl(run_id)
@@ -574,6 +623,13 @@ async def restart_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    next_crawler_mode = (
+        body.crawler_mode if body and body.crawler_mode else run.crawler_mode
+    )
+    next_page_selection = (
+        body.page_selection if body and body.page_selection else run.page_selection
+    )
+    _validate_page_selection(next_crawler_mode, next_page_selection)
     if body and body.crawl_credential_id is not None:
         from aespa.models import Credential
 
@@ -587,6 +643,9 @@ async def restart_test_run(
     else:
         run.crawl_credential_id = None
     _clear_crawl_state(session, run)
+    run.crawler_mode = next_crawler_mode
+    run.page_selection = next_page_selection
+    run.crawl_started_once = True
     session.commit()
     session.refresh(run)
     summary = _run_summary(run, session)

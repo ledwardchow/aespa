@@ -2089,6 +2089,23 @@ def _build_thinking_context_from_recon_summary(
             ),
         ]
 
+        route_groups = [
+            group
+            for group in summary.get("route_groups") or []
+            if isinstance(group, dict) and group.get("route_pattern")
+        ]
+        if route_groups:
+            sections.append(
+                "Grouped pages (the crawl visited examples, not every link):\n"
+                + "\n".join(
+                    f"  {group['route_pattern']}: {group.get('links_seen', 0)} links seen, "
+                    f"{group.get('pages_sampled', 0)} example pages visited"
+                    for group in route_groups[:10]
+                )
+                + "\nTest the example pages. Do not try to visit every link in these "
+                "routes; try another example only to compare access or ownership."
+            )
+
         gaps = [
             item for item in coverage.get("by_category") or [] if item.get("remaining")
         ]

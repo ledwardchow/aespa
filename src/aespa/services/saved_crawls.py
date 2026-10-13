@@ -22,6 +22,7 @@ def _store(
     notes: str | None,
     source_run_id: int | None,
     crawler_mode: str,
+    page_selection: str,
 ) -> SavedCrawl:
     blob = gzip.compress(json.dumps(archive).encode("utf-8"))
     saved = SavedCrawl(
@@ -30,6 +31,7 @@ def _store(
         notes=notes or None,
         source_run_id=source_run_id,
         crawler_mode=crawler_mode,
+        page_selection=page_selection,
         page_count=len(archive.get("crawl", {}).get("pages", [])),
         size_bytes=len(blob),
         archive_gz=blob,
@@ -61,6 +63,7 @@ def save_from_run(
         notes=notes,
         source_run_id=run.id,
         crawler_mode=run.crawler_mode,
+        page_selection=run.page_selection,
     )
 
 
@@ -73,6 +76,9 @@ def save_from_file(
     crawler_mode = source.get("crawler_mode") if isinstance(source, dict) else None
     if crawler_mode not in ("url", "interactive"):
         crawler_mode = "url"
+    page_selection = source.get("page_selection") if isinstance(source, dict) else None
+    if crawler_mode != "url" or page_selection != "group_similar":
+        page_selection = "each_url"
     return _store(
         session,
         site,
@@ -81,6 +87,7 @@ def save_from_file(
         notes=notes,
         source_run_id=None,
         crawler_mode=crawler_mode,
+        page_selection=page_selection,
     )
 
 

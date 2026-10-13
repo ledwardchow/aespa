@@ -398,29 +398,15 @@ def test_add_credential(client):
     ).json()
     r = client.post(
         f"/api/sites/{site['id']}/credentials",
-        json={"username": "newuser", "password": "newpass", "label": "tester"},
-    )
-    assert r.status_code == 201
-    assert r.json()["username"] == "newuser"
-
-
-def test_add_credential_accepts_login_url(client):
-    site = make_site(
-        client,
-        name="Auth Site",
-        requires_auth=True,
-        login_url="https://auth.local/login",
-    ).json()
-    r = client.post(
-        f"/api/sites/{site['id']}/credentials",
         json={
-            "username": "admin",
+            "username": "newuser",
             "password": "newpass",
+            "label": "tester",
             "login_url": "https://auth.local/admin/login",
         },
     )
-
     assert r.status_code == 201
+    assert r.json()["username"] == "newuser"
     assert r.json()["login_url"] == "https://auth.local/admin/login"
 
 

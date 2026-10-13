@@ -15,7 +15,12 @@ export function SastSourceCosts({ runId }: { runId: number }) {
         const sources = await getSastSourceCosts(runId, signal);
         if (!signal.aborted) setLoaded({ runId, sources, failed: false });
       } catch {
-        if (!signal.aborted) setLoaded({ runId, sources: [], failed: true });
+        if (!signal.aborted)
+          setLoaded((previous) => ({
+            runId,
+            sources: previous?.runId === runId ? previous.sources : [],
+            failed: previous?.runId === runId && previous.sources.length > 0,
+          }));
       }
     },
     [runId],

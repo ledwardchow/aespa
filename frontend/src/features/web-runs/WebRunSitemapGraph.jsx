@@ -16,6 +16,7 @@ import {
 import { useSelectedSitemapPage } from "./useSelectedSitemapPage.js";
 import { useSitemapGraph } from "./useSitemapGraph.js";
 import { WebRunUserCrawlProgress } from "./WebRunCrawlProgress.jsx";
+import { RouteGroupsPanel } from "./RouteGroupsPanel.jsx";
 import { WebRunSitemapTab } from "./WebRunSitemapTab.jsx";
 import { buildSitemapDisplayGraph } from "./sitemapGraph.js";
 
@@ -25,6 +26,7 @@ export function WebRunSitemapGraph({
   runId,
   run,
   crawlerActive,
+  activityLog,
   graph,
   active,
   graphView,
@@ -54,8 +56,15 @@ export function WebRunSitemapGraph({
     [excludedExtensionsInput],
   );
   const filteredGraph = useMemo(
-    () => buildSitemapDisplayGraph(graph, excludedExtensions, effectiveApiDisplay, pageDisplay),
-    [effectiveApiDisplay, excludedExtensions, graph, pageDisplay],
+    () =>
+      buildSitemapDisplayGraph(
+        graph,
+        excludedExtensions,
+        effectiveApiDisplay,
+        pageDisplay,
+        run?.route_groups,
+      ),
+    [effectiveApiDisplay, excludedExtensions, graph, pageDisplay, run?.route_groups],
   );
   const displayStats = filteredGraph?.displayStats;
   const [searchTerm, setSearchTerm] = useState("");
@@ -159,8 +168,13 @@ export function WebRunSitemapGraph({
   return (
     <div className="graph-layout" style={{ display: active ? "flex" : "none" }}>
       <div className="sitemap-graph-main">
+        <RouteGroupsPanel groups={run?.route_groups} />
         <div className="sitemap-filter-panel">
-          <WebRunUserCrawlProgress run={run} crawlerActive={crawlerActive} />
+          <WebRunUserCrawlProgress
+            run={run}
+            crawlerActive={crawlerActive}
+            activityLog={activityLog}
+          />
           <div className="sitemap-filter-summary">
             <button
               className="btn ghost sm sitemap-filter-toggle"
@@ -446,6 +460,13 @@ function SitemapPageGroupInspector({ node, onClose, onExpand }) {
         </button>
       </div>
       <div className="graph-panel-body">
+        {node.isCrawlRouteGroup && (
+          <div className="graph-panel-context">
+            {node.routeGroup.links_seen} links were found for this route.{" "}
+            {node.routeGroup.pages_sampled} example pages were visited. Testing and findings use
+            those exact URLs.
+          </div>
+        )}
         <div className="api-group-summary">
           <div>
             <strong>{node.variantCount}</strong>

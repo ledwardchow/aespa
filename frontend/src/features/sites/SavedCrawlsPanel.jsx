@@ -88,7 +88,10 @@ function SavedCrawlRow({ siteId, saved, onChanged, onDeleted, onError }) {
         )}
       </td>
       <td>{saved.page_count}</td>
-      <td>{CRAWLER_MODE_LABELS[saved.crawler_mode] || saved.crawler_mode}</td>
+      <td>
+        {CRAWLER_MODE_LABELS[saved.crawler_mode] || saved.crawler_mode}
+        {saved.page_selection === "group_similar" ? " - Group similar pages" : ""}
+      </td>
       <td>{fmtSize(saved.size_bytes)}</td>
       <td className="subtle">{fmtDate(saved.created_at)}</td>
       <td>

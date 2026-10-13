@@ -4,6 +4,7 @@ from enum import Enum
 from typing import List, Optional
 
 from sqlalchemy import (
+    Boolean,
     Column,
     ForeignKey,
     Integer,
@@ -132,6 +133,10 @@ class SavedCrawl(SQLModel, table=True):
     # Plain id with no foreign key: the source run may be deleted later.
     source_run_id: Optional[int] = Field(default=None)
     crawler_mode: str = Field(default="url")
+    page_selection: str = Field(
+        default="each_url",
+        sa_column=Column(String, nullable=False, server_default=text("'each_url'")),
+    )
     page_count: int = Field(default=0)
     size_bytes: int = Field(default=0)
     archive_gz: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
@@ -851,6 +856,22 @@ class TestRun(SQLModel, table=True):
     crawler_mode: str = Field(
         default="url",
         sa_column=Column(String, nullable=False, server_default=text("'url'")),
+    )
+    page_selection: str = Field(
+        default="each_url",
+        sa_column=Column(String, nullable=False, server_default=text("'each_url'")),
+    )
+    crawl_started_once: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default=text("0")),
+    )
+    route_groups_json: str = Field(
+        default="[]",
+        sa_column=Column(String, nullable=False, server_default=text("'[]'")),
+    )
+    route_sampling_state_json: str = Field(
+        default="{}",
+        sa_column=Column(String, nullable=False, server_default=text("'{}'")),
     )
     scan_mode: str = Field(default="aggressive")
     scanner_policy_json: str = Field(default="{}")

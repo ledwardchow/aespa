@@ -20,6 +20,7 @@ export function WebRunSitemapMeta({
   const [llmConcurrency, setLlmConcurrency] = useState("");
   const [profileId, setProfileId] = useState(null);
   const [crawlerMode, setCrawlerMode] = useState("url");
+  const [pageSelection, setPageSelection] = useState("each_url");
   const [showFlyout, setShowFlyout] = useState(false);
   const profile = profiles.find((item) => item.id === run.llm_profile_id);
   const multiUser = run.credentials?.length > 1;
@@ -56,6 +57,7 @@ export function WebRunSitemapMeta({
     setLlmConcurrency(run.llm_max_concurrency ? String(run.llm_max_concurrency) : "");
     setProfileId(run.llm_profile_id || null);
     setCrawlerMode(run.crawler_mode || "url");
+    setPageSelection(run.page_selection || "each_url");
     setEditing(true);
   };
   const save = async () => {
@@ -72,6 +74,7 @@ export function WebRunSitemapMeta({
           max_pages: maxPages,
           llm_max_concurrency: maxConcurrency,
           crawler_mode: crawlerMode,
+          page_selection: pageSelection,
           llm_profile_id: profileId || null,
         }),
       );
@@ -114,10 +117,26 @@ export function WebRunSitemapMeta({
             <select
               className="select"
               value={crawlerMode}
-              onChange={(event) => setCrawlerMode(event.target.value)}
+              disabled={run.crawl_started_once}
+              onChange={(event) => {
+                setCrawlerMode(event.target.value);
+                setPageSelection("each_url");
+              }}
             >
               <option value="url">URL</option>
               <option value="interactive">Interactive SPA</option>
+            </select>
+          </div>
+          <div className="run-stat-edit-field">
+            <label>Page selection</label>
+            <select
+              className="select"
+              value={pageSelection}
+              disabled={run.crawl_started_once || crawlerMode !== "url"}
+              onChange={(event) => setPageSelection(event.target.value)}
+            >
+              <option value="each_url">Visit each URL</option>
+              <option value="group_similar">Group similar pages</option>
             </select>
           </div>
           <div className="run-stat-edit-field">
@@ -169,6 +188,14 @@ export function WebRunSitemapMeta({
             </span>
             <span className="run-stat-lbl">Crawler</span>
           </div>
+          {run.crawler_mode === "url" && (
+            <div className="run-stat">
+              <span className="run-stat-val" style={{ fontSize: 12 }}>
+                {run.page_selection === "group_similar" ? "Group similar pages" : "Visit each URL"}
+              </span>
+              <span className="run-stat-lbl">Page selection</span>
+            </div>
+          )}
           <div className="run-stat">
             <span className="run-stat-val" style={{ fontSize: 12 }}>
               {run.llm_max_concurrency ? `${run.llm_max_concurrency} max` : "Unlimited"}

@@ -236,9 +236,7 @@ def test_delete_unreferenced_snapshot_succeeds(client, tmp_path, monkeypatch):
 # ── Same-system validation ──────────────────────────────────────────────
 
 
-def test_campaign_rejects_component_from_another_system(
-    client, tmp_path, monkeypatch
-):
+def test_campaign_rejects_component_from_another_system(client, tmp_path, monkeypatch):
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
     app_a = _create_system(client, "App A")
     app_b = _create_system(client, "App B")
@@ -357,9 +355,7 @@ def test_target_component_link_rejects_component_from_another_system(client):
     assert update.status_code == 400
 
 
-def test_system_delete_blocked_while_campaign_exists(
-    client, tmp_path, monkeypatch
-):
+def test_system_delete_blocked_while_campaign_exists(client, tmp_path, monkeypatch):
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
     app = _create_system(client)
     component = _create_component(client, app["id"])

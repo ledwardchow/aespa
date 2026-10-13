@@ -3,8 +3,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, SQLModel, select
 
 from aespa.models import (
     AgentLog,
@@ -91,14 +90,8 @@ def test_access_control_claim_still_uses_access_control_shortcut():
 
 def test_unauthenticated_access_claim_is_false_positive_when_anonymous_is_denied(
     monkeypatch,
+    engine,
 ):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-
     class FakeClient:
         def __init__(self, **kwargs):
             assert kwargs["cookies"] == {}
@@ -118,7 +111,6 @@ def test_unauthenticated_access_claim_is_false_positive_when_anonymous_is_denied
 
     from aespa.services import traffic
 
-    monkeypatch.setattr(validator, "get_engine", lambda: engine)
     monkeypatch.setattr(traffic, "LoggingAsyncClient", FakeClient)
     finding = ScanFinding(
         id=1,
@@ -135,168 +127,138 @@ def test_unauthenticated_access_claim_is_false_positive_when_anonymous_is_denied
         follow_redirects=True,
         response_body_read_limit_bytes=65536,
     )
-    try:
-        result = asyncio.run(
-            validator._deterministic_validate_finding(finding, {}, policy)
-        )
-        assert result is not None
-        assert result[0] == "false_positive"
-        assert "credential-free request" in result[1]
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    result = asyncio.run(validator._deterministic_validate_finding(finding, {}, policy))
+    assert result is not None
+    assert result[0] == "false_positive"
+    assert "credential-free request" in result[1]
 
 
 def test_unauthenticated_access_claim_is_confirmed_against_exact_route_baseline(
     monkeypatch,
+    engine,
 ):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
     protected_text = "Account owner amelia@example.test balance 12500"
-    try:
-        with Session(engine) as session:
-            page = CrawledPage(
-                test_run_id=1,
-                url="https://target.local/api/accounts",
-                title="Account records",
-                page_text=protected_text,
-            )
-            session.add(page)
-            session.commit()
-            session.refresh(page)
-            page_id = page.id
-
-        class FakeClient:
-            def __init__(self, **kwargs):
-                assert kwargs["cookies"] == {}
-                assert "Authorization" not in kwargs["headers"]
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-            async def request(self, method, url):
-                request = __import__("httpx").Request(method, url)
-                return __import__("httpx").Response(
-                    200,
-                    text=protected_text,
-                    headers={"content-type": "application/json"},
-                    request=request,
-                )
-
-        from aespa.services import traffic
-
-        monkeypatch.setattr(validator, "get_engine", lambda: engine)
-        monkeypatch.setattr(traffic, "LoggingAsyncClient", FakeClient)
-        finding = ScanFinding(
-            id=1,
+    with Session(engine) as session:
+        page = CrawledPage(
             test_run_id=1,
-            page_id=page_id,
-            owasp_category="A01",
-            severity="critical",
-            title="Unauthenticated access to account data",
-            description="Sensitive records returned without authentication.",
-            affected_url="https://target.local/api/accounts",
-            evidence="",
+            url="https://target.local/api/accounts",
+            title="Account records",
+            page_text=protected_text,
         )
-        policy = SimpleNamespace(
-            request_timeout_s=10,
-            follow_redirects=True,
-            response_body_read_limit_bytes=65536,
-        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+        page_id = page.id
 
-        result = asyncio.run(
-            validator._deterministic_validate_finding(finding, {}, policy)
-        )
-        assert result is not None
-        assert result[0] == "confirmed"
-        assert result[2]["poc_request"].get("use_session") is None
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["cookies"] == {}
+            assert "Authorization" not in kwargs["headers"]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def request(self, method, url):
+            request = __import__("httpx").Request(method, url)
+            return __import__("httpx").Response(
+                200,
+                text=protected_text,
+                headers={"content-type": "application/json"},
+                request=request,
+            )
+
+    from aespa.services import traffic
+
+    monkeypatch.setattr(traffic, "LoggingAsyncClient", FakeClient)
+    finding = ScanFinding(
+        id=1,
+        test_run_id=1,
+        page_id=page_id,
+        owasp_category="A01",
+        severity="critical",
+        title="Unauthenticated access to account data",
+        description="Sensitive records returned without authentication.",
+        affected_url="https://target.local/api/accounts",
+        evidence="",
+    )
+    policy = SimpleNamespace(
+        request_timeout_s=10,
+        follow_redirects=True,
+        response_body_read_limit_bytes=65536,
+    )
+
+    result = asyncio.run(validator._deterministic_validate_finding(finding, {}, policy))
+    assert result is not None
+    assert result[0] == "confirmed"
+    assert result[2]["poc_request"].get("use_session") is None
 
 
 def test_unauthenticated_access_claim_with_equivalent_public_views_is_not_auto_confirmed(
     monkeypatch,
+    engine,
 ):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
     page_text = "Open an account today. Total Balance $42,816.50"
-    try:
-        with Session(engine) as session:
-            page = CrawledPage(
-                test_run_id=1,
-                url="https://target.local/",
-                req_auth=False,
-                page_text=page_text,
-            )
-            session.add(page)
-            session.flush()
-            session.add_all(
-                [
-                    PageCredentialView(
-                        page_id=page.id,
-                        test_run_id=1,
-                        credential_id=None,
-                        username="unauthenticated",
-                        req_auth=False,
-                        page_text=page_text,
-                    ),
-                    PageCredentialView(
-                        page_id=page.id,
-                        test_run_id=1,
-                        credential_id=7,
-                        username="alice",
-                        req_auth=False,
-                        page_text=page_text,
-                    ),
-                ]
-            )
-            session.commit()
-            page_id = page.id
-
-        async def unexpected_request(*args, **kwargs):
-            raise AssertionError("equivalent public content must not be auto-confirmed")
-
-        monkeypatch.setattr(validator, "get_engine", lambda: engine)
-        monkeypatch.setattr(
-            validator, "_request_access_validation_actor", unexpected_request
-        )
-        finding = ScanFinding(
-            id=1,
+    with Session(engine) as session:
+        page = CrawledPage(
             test_run_id=1,
-            page_id=page_id,
-            owasp_category="A01",
-            severity="high",
-            title="Unauthenticated access to account data",
-            description="The public page returned account balances.",
-            affected_url="https://target.local/",
-            evidence="",
+            url="https://target.local/",
+            req_auth=False,
+            page_text=page_text,
         )
-        policy = SimpleNamespace(
-            request_timeout_s=10,
-            follow_redirects=True,
-            response_body_read_limit_bytes=65536,
+        session.add(page)
+        session.flush()
+        session.add_all(
+            [
+                PageCredentialView(
+                    page_id=page.id,
+                    test_run_id=1,
+                    credential_id=None,
+                    username="unauthenticated",
+                    req_auth=False,
+                    page_text=page_text,
+                ),
+                PageCredentialView(
+                    page_id=page.id,
+                    test_run_id=1,
+                    credential_id=7,
+                    username="alice",
+                    req_auth=False,
+                    page_text=page_text,
+                ),
+            ]
         )
+        session.commit()
+        page_id = page.id
 
-        result = asyncio.run(
-            validator._deterministic_validate_finding(finding, {}, policy)
-        )
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("equivalent public content must not be auto-confirmed")
 
-        assert result is None
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    monkeypatch.setattr(
+        validator, "_request_access_validation_actor", unexpected_request
+    )
+    finding = ScanFinding(
+        id=1,
+        test_run_id=1,
+        page_id=page_id,
+        owasp_category="A01",
+        severity="high",
+        title="Unauthenticated access to account data",
+        description="The public page returned account balances.",
+        affected_url="https://target.local/",
+        evidence="",
+    )
+    policy = SimpleNamespace(
+        request_timeout_s=10,
+        follow_redirects=True,
+        response_body_read_limit_bytes=65536,
+    )
+
+    result = asyncio.run(validator._deterministic_validate_finding(finding, {}, policy))
+
+    assert result is None
 
 
 def test_severity_threshold_skip_is_not_an_unconfirmed_verdict(monkeypatch):
@@ -612,60 +574,50 @@ def test_request_stop_cancels_inline_validations(monkeypatch):
         validator._stop_requested.discard(run_id)
 
 
-def test_resume_interrupted_validations_requeues_only_orphaned_work(monkeypatch):
-    from aespa import models as _models  # noqa: F401
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    try:
-        monkeypatch.setattr(validator, "get_engine", lambda: engine)
-        with Session(engine) as session:
-            session.add(
-                ScanFinding(
-                    test_run_id=42,
-                    page_id=None,
-                    owasp_category="A01",
-                    severity="high",
-                    title="Interrupted validation",
-                    description="A validation task was interrupted.",
-                    validation_status="unvalidated",
-                    validation_note=(
-                        "Validation was interrupted before a verdict (process restart); "
-                        "reset for re-validation."
-                    ),
-                )
+def test_resume_interrupted_validations_requeues_only_orphaned_work(
+    monkeypatch,
+    engine,
+):
+    with Session(engine) as session:
+        session.add(
+            ScanFinding(
+                test_run_id=42,
+                page_id=None,
+                owasp_category="A01",
+                severity="high",
+                title="Interrupted validation",
+                description="A validation task was interrupted.",
+                validation_status="unvalidated",
+                validation_note=(
+                    "Validation was interrupted before a verdict (process restart); "
+                    "reset for re-validation."
+                ),
             )
-            session.add(
-                ScanFinding(
-                    test_run_id=42,
-                    page_id=None,
-                    owasp_category="A01",
-                    severity="high",
-                    title="Ordinary unvalidated finding",
-                    description="This finding was not interrupted.",
-                    validation_status="unvalidated",
-                )
+        )
+        session.add(
+            ScanFinding(
+                test_run_id=42,
+                page_id=None,
+                owasp_category="A01",
+                severity="high",
+                title="Ordinary unvalidated finding",
+                description="This finding was not interrupted.",
+                validation_status="unvalidated",
             )
-            session.commit()
+        )
+        session.commit()
 
-        resumed = []
+    resumed = []
 
-        async def fake_start_validation(run_id, finding_ids=None):
-            resumed.append((run_id, finding_ids))
+    async def fake_start_validation(run_id, finding_ids=None):
+        resumed.append((run_id, finding_ids))
 
-        monkeypatch.setattr(validator, "start_validation", fake_start_validation)
-        asyncio.run(validator.resume_interrupted_validations())
+    monkeypatch.setattr(validator, "start_validation", fake_start_validation)
+    asyncio.run(validator.resume_interrupted_validations())
 
-        assert len(resumed) == 1
-        assert resumed[0][0] == 42
-        assert len(resumed[0][1]) == 1
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    assert len(resumed) == 1
+    assert resumed[0][0] == 42
+    assert len(resumed[0][1]) == 1
 
 
 def test_validator_merges_active_primary_with_stored_role_sessions(monkeypatch):
@@ -739,139 +691,114 @@ def test_validator_bootstraps_configured_users_when_auth_flag_is_stale(monkeypat
     assert sessions[7]["cookies"] == {"sid": "viewer"}
 
 
-def test_persist_verdict_appends_structured_validation_evidence(monkeypatch):
-    from aespa import models as _models  # noqa: F401
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+def test_persist_verdict_appends_structured_validation_evidence(monkeypatch, engine):
+    emitted = []
+    monkeypatch.setattr(
+        validator.events_svc, "emit", lambda run_id, event: emitted.append(event)
     )
-    SQLModel.metadata.create_all(engine)
 
-    try:
-        monkeypatch.setattr(validator, "get_engine", lambda: engine)
-        emitted = []
-        monkeypatch.setattr(
-            validator.events_svc, "emit", lambda run_id, event: emitted.append(event)
+    with Session(engine) as session:
+        finding = ScanFinding(
+            test_run_id=1,
+            page_id=None,
+            owasp_category="A01",
+            severity="high",
+            title="Authorization bypass",
+            description="Protected resource accessible.",
+            affected_url="https://target.local/admin",
+            evidence="original evidence",
         )
+        session.add(finding)
+        session.commit()
+        session.refresh(finding)
+        finding_id = finding.id
 
-        with Session(engine) as session:
-            finding = ScanFinding(
-                test_run_id=1,
-                page_id=None,
-                owasp_category="A01",
-                severity="high",
-                title="Authorization bypass",
-                description="Protected resource accessible.",
-                affected_url="https://target.local/admin",
-                evidence="original evidence",
-            )
-            session.add(finding)
-            session.commit()
-            session.refresh(finding)
-            finding_id = finding.id
-
-        asyncio.run(
-            validator._persist_verdict(
-                1,
-                finding_id,
-                "confirmed",
-                "Replay returned protected content.",
-                validation_results=[
-                    {
-                        "desc": "Replay protected resource",
-                        "url": "https://target.local/admin",
-                        "status": 200,
-                        "as_user": "alice",
-                        "request_evidence": "GET /admin HTTP/1.1\nAuthorization: Bearer secret-token",
-                        "response_evidence": "HTTP/1.1 200 OK\n\nadmin panel",
-                        "duration_ms": 35,
-                        "timing_delta_ms": 900,
-                        "body_diff": {"added_terms": ["admin", "panel"]},
-                        "action_outcome": "Replay returned protected content.",
-                    }
-                ],
-                source="test_validation",
-            )
+    asyncio.run(
+        validator._persist_verdict(
+            1,
+            finding_id,
+            "confirmed",
+            "Replay returned protected content.",
+            validation_results=[
+                {
+                    "desc": "Replay protected resource",
+                    "url": "https://target.local/admin",
+                    "status": 200,
+                    "as_user": "alice",
+                    "request_evidence": "GET /admin HTTP/1.1\nAuthorization: Bearer secret-token",
+                    "response_evidence": "HTTP/1.1 200 OK\n\nadmin panel",
+                    "duration_ms": 35,
+                    "timing_delta_ms": 900,
+                    "body_diff": {"added_terms": ["admin", "panel"]},
+                    "action_outcome": "Replay returned protected content.",
+                }
+            ],
+            source="test_validation",
         )
-
-        with Session(engine) as session:
-            saved = session.get(ScanFinding, finding_id)
-
-        item_types = {item["type"] for item in saved.evidence_items}
-        assert {
-            "validation_verdict",
-            "validation_reasoning",
-            "validation_probe",
-            "validation_request",
-            "validation_response",
-            "timing",
-            "timing_delta",
-            "body_diff",
-            "action_outcome",
-        } <= item_types
-        assert saved.validation_status == "confirmed"
-        assert saved.validation_note == "Replay returned protected content."
-        assert "secret-token" not in saved.evidence_json
-        update_event = next(
-            e for e in emitted if e.get("type") == "finding_validation_update"
-        )
-        assert update_event["evidence_items"]
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
-
-
-def test_stale_validation_does_not_replace_upgraded_finding(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
     )
-    SQLModel.metadata.create_all(engine)
-    try:
-        monkeypatch.setattr(validator, "get_engine", lambda: engine)
-        with Session(engine) as session:
-            upgraded = ScanFinding(
-                test_run_id=1,
-                owasp_category="A03",
-                severity="high",
-                title="SQL injection in search",
-                description="UNION returned account data.",
-                evidence="account data from UNION query",
-                validation_status="unvalidated",
-            )
-            session.add(upgraded)
-            session.commit()
-            finding_id = upgraded.id
 
-        old_report = ScanFinding(
-            id=finding_id,
+    with Session(engine) as session:
+        saved = session.get(ScanFinding, finding_id)
+
+    item_types = {item["type"] for item in saved.evidence_items}
+    assert {
+        "validation_verdict",
+        "validation_reasoning",
+        "validation_probe",
+        "validation_request",
+        "validation_response",
+        "timing",
+        "timing_delta",
+        "body_diff",
+        "action_outcome",
+    } <= item_types
+    assert saved.validation_status == "confirmed"
+    assert saved.validation_note == "Replay returned protected content."
+    assert "secret-token" not in saved.evidence_json
+    update_event = next(
+        e for e in emitted if e.get("type") == "finding_validation_update"
+    )
+    assert update_event["evidence_items"]
+
+
+def test_stale_validation_does_not_replace_upgraded_finding(engine):
+    with Session(engine) as session:
+        upgraded = ScanFinding(
             test_run_id=1,
             owasp_category="A03",
-            severity="low",
-            title="Database error in search",
-            description="Database error returned.",
-            evidence="SQL syntax error",
+            severity="high",
+            title="SQL injection in search",
+            description="UNION returned account data.",
+            evidence="account data from UNION query",
+            validation_status="unvalidated",
         )
-        asyncio.run(
-            validator._persist_verdict(
-                1,
-                finding_id,
-                "confirmed",
-                "Confirmed database error.",
-                expected_finding=old_report,
-            )
+        session.add(upgraded)
+        session.commit()
+        finding_id = upgraded.id
+
+    old_report = ScanFinding(
+        id=finding_id,
+        test_run_id=1,
+        owasp_category="A03",
+        severity="low",
+        title="Database error in search",
+        description="Database error returned.",
+        evidence="SQL syntax error",
+    )
+    asyncio.run(
+        validator._persist_verdict(
+            1,
+            finding_id,
+            "confirmed",
+            "Confirmed database error.",
+            expected_finding=old_report,
         )
-        with Session(engine) as session:
-            saved = session.get(ScanFinding, finding_id)
-            assert saved.validation_status == "unvalidated"
-            assert saved.validation_note is None
-            assert saved.title == "SQL injection in search"
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    )
+    with Session(engine) as session:
+        saved = session.get(ScanFinding, finding_id)
+        assert saved.validation_status == "unvalidated"
+        assert saved.validation_note is None
+        assert saved.title == "SQL injection in search"
 
 
 class _ScannerCredWithLogin:
@@ -888,107 +815,72 @@ def test_scanner_login_url_for_credential_prefers_override():
     )
 
 
-def test_dynamic_scan_creates_page_for_findings_without_crawl():
-    from aespa import models as _models  # noqa: F401
+def test_dynamic_scan_creates_page_for_findings_without_crawl(engine):
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
+        run = RunModel(site_id=site.id, name="Run #1")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
 
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
+        page_id = scanner._find_or_create_dynamic_page(
+            session,
+            run_id=run.id,
+            url="https://target.local/api/accounts/1",
+            base_url="https://target.local",
+        )
+        session.commit()
 
-            run = RunModel(site_id=site.id, name="Run #1")
-            session.add(run)
-            session.commit()
-            session.refresh(run)
+        page = session.get(CrawledPage, page_id)
+        refreshed_run = session.get(RunModel, run.id)
 
-            page_id = scanner._find_or_create_dynamic_page(
-                session,
-                run_id=run.id,
-                url="https://target.local/api/accounts/1",
-                base_url="https://target.local",
-            )
-            session.commit()
-
-            page = session.get(CrawledPage, page_id)
-            refreshed_run = session.get(RunModel, run.id)
-
-        assert page is not None
-        assert page.test_run_id == run.id
-        assert page.url == "https://target.local/api/accounts/1"
-        assert page.title == "Dynamic Scan target"
-        assert refreshed_run.pages_discovered == 1
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    assert page is not None
+    assert page.test_run_id == run.id
+    assert page.url == "https://target.local/api/accounts/1"
+    assert page.title == "Dynamic Scan target"
+    assert refreshed_run.pages_discovered == 1
 
 
-def test_dynamic_finding_reuses_canonical_page_for_query_payload():
-    from aespa import models as _models  # noqa: F401
+def test_dynamic_finding_reuses_canonical_page_for_query_payload(engine):
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        run = RunModel(site_id=site.id, name="Run #1")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/api/customers?page=1&per_page=15",
+            status="crawled",
+            in_scope=True,
+        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
+        page_id = scanner._dynamic_finding_page_id(
+            session,
+            run_id=run.id,
+            affected_url=(
+                "https://target.local/api/customers?page=1&per_page=5&search=%27"
+            ),
+            base_url=site.base_url,
+            pages_snapshot=[],
+            first_page_id=None,
+        )
 
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-            run = RunModel(site_id=site.id, name="Run #1")
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-            page = CrawledPage(
-                test_run_id=run.id,
-                url="https://target.local/api/customers?page=1&per_page=15",
-                status="crawled",
-                in_scope=True,
-            )
-            session.add(page)
-            session.commit()
-            session.refresh(page)
-
-            page_id = scanner._dynamic_finding_page_id(
-                session,
-                run_id=run.id,
-                affected_url=(
-                    "https://target.local/api/customers?page=1&per_page=5&search=%27"
-                ),
-                base_url=site.base_url,
-                pages_snapshot=[],
-                first_page_id=None,
-            )
-
-            assert page_id == page.id
-            assert len(session.exec(select(CrawledPage)).all()) == 1
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+        assert page_id == page.id
+        assert len(session.exec(select(CrawledPage)).all()) == 1
 
 
-def test_dynamic_scan_task_does_not_write_error_message(monkeypatch):
-    from aespa import models as _models  # noqa: F401
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-
+def test_dynamic_scan_task_does_not_write_error_message(monkeypatch, engine):
     async def fake_do_thinking_scan(run_id: int) -> None:
         scanner._thinking_scan_status[run_id] = "complete"
 
@@ -1022,16 +914,7 @@ def test_dynamic_scan_task_does_not_write_error_message(monkeypatch):
         engine.dispose()
 
 
-def test_cancelled_dynamic_scan_persists_stopped_run_state(monkeypatch):
-    from aespa import models as _models  # noqa: F401
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-
+def test_cancelled_dynamic_scan_persists_stopped_run_state(monkeypatch, engine):
     async def fake_do_thinking_scan(run_id: int) -> None:
         raise asyncio.CancelledError
 
@@ -1077,16 +960,9 @@ def test_cancelled_dynamic_scan_persists_stopped_run_state(monkeypatch):
         engine.dispose()
 
 
-def test_dynamic_scan_refusal_is_persisted_on_test_lead_log(monkeypatch):
+def test_dynamic_scan_refusal_is_persisted_on_test_lead_log(monkeypatch, engine):
     from aespa import db as db_module
-    from aespa import models as _models  # noqa: F401
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
     refusal = (
         "LLM provider refused the scan request at step 84: This content was "
         "flagged for possible cybersecurity risk (cyber_policy)"
@@ -1132,145 +1008,118 @@ def test_dynamic_scan_refusal_is_persisted_on_test_lead_log(monkeypatch):
         engine.dispose()
 
 
-def test_dynamic_scan_page_creation_reuses_existing_page():
-    from aespa import models as _models  # noqa: F401
+def test_dynamic_scan_page_creation_reuses_existing_page(engine):
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
+        run = RunModel(site_id=site.id, name="Run #1", pages_discovered=1)
+        session.add(run)
+        session.commit()
+        session.refresh(run)
 
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
+        existing = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/api/accounts/1",
+            title="Existing",
+        )
+        session.add(existing)
+        session.commit()
+        session.refresh(existing)
 
-            run = RunModel(site_id=site.id, name="Run #1", pages_discovered=1)
-            session.add(run)
-            session.commit()
-            session.refresh(run)
+        page_id = scanner._find_or_create_dynamic_page(
+            session,
+            run_id=run.id,
+            url="https://target.local/api/accounts/1",
+            base_url="https://target.local",
+        )
+        pages = session.exec(select(CrawledPage)).all()
+        refreshed_run = session.get(RunModel, run.id)
 
-            existing = CrawledPage(
-                test_run_id=run.id,
-                url="https://target.local/api/accounts/1",
-                title="Existing",
-            )
-            session.add(existing)
-            session.commit()
-            session.refresh(existing)
+    assert page_id == existing.id
+    assert len(pages) == 1
+    assert refreshed_run.pages_discovered == 1
 
-            page_id = scanner._find_or_create_dynamic_page(
-                session,
+
+def test_dynamic_finding_write_persists_immediately(engine):
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+
+        run = RunModel(site_id=site.id, name="Run #1")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/api/login",
+            title="API POST /api/login",
+            status="crawled",
+            in_scope=True,
+        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+
+        raw = {
+            "owasp_category": "A02",
+            "title": "Password hash exposed in login API response",
+            "description": "The login response exposes password_hash.",
+            "impact": "Attackers can use leaked hashes for offline cracking.",
+            "likelihood": "Likely for any user who can call the endpoint.",
+            "recommendation": "Remove password hashes from API responses.",
+            "cvss_score": 7.5,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+            "affected_url": page.url,
+            "evidence": "password_hash was present in the JSON response.",
+            "request_evidence": "POST /api/login",
+            "response_evidence": 'Status: 200\n{"password_hash":"..."}',
+        }
+        result_by_url = {
+            page.url: {
+                "url": page.url,
+                "request_evidence": raw["request_evidence"],
+                "response_evidence": raw["response_evidence"],
+            }
+        }
+
+        saved = asyncio.run(
+            scanner._persist_dynamic_finding(
                 run_id=run.id,
-                url="https://target.local/api/accounts/1",
+                llm_cfg=object(),
+                raw=raw,
                 base_url="https://target.local",
+                pages_snapshot=[{"id": page.id, "url": page.url}],
+                first_page_id=page.id,
+                result_by_url=result_by_url,
             )
-            pages = session.exec(select(CrawledPage)).all()
-            refreshed_run = session.get(RunModel, run.id)
-
-        assert page_id == existing.id
-        assert len(pages) == 1
-        assert refreshed_run.pages_discovered == 1
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
-
-
-def test_dynamic_finding_write_persists_immediately(monkeypatch):
-    from aespa import models as _models  # noqa: F401
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
-
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-
-            run = RunModel(site_id=site.id, name="Run #1")
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-
-            page = CrawledPage(
-                test_run_id=run.id,
-                url="https://target.local/api/login",
-                title="API POST /api/login",
-                status="crawled",
-                in_scope=True,
+        )
+        duplicate = asyncio.run(
+            scanner._persist_dynamic_finding(
+                run_id=run.id,
+                llm_cfg=object(),
+                raw=raw,
+                base_url="https://target.local",
+                pages_snapshot=[{"id": page.id, "url": page.url}],
+                first_page_id=page.id,
+                result_by_url=result_by_url,
             )
-            session.add(page)
-            session.commit()
-            session.refresh(page)
+        )
 
-            raw = {
-                "owasp_category": "A02",
-                "title": "Password hash exposed in login API response",
-                "description": "The login response exposes password_hash.",
-                "impact": "Attackers can use leaked hashes for offline cracking.",
-                "likelihood": "Likely for any user who can call the endpoint.",
-                "recommendation": "Remove password hashes from API responses.",
-                "cvss_score": 7.5,
-                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
-                "affected_url": page.url,
-                "evidence": "password_hash was present in the JSON response.",
-                "request_evidence": "POST /api/login",
-                "response_evidence": 'Status: 200\n{"password_hash":"..."}',
-            }
-            result_by_url = {
-                page.url: {
-                    "url": page.url,
-                    "request_evidence": raw["request_evidence"],
-                    "response_evidence": raw["response_evidence"],
-                }
-            }
+        findings = session.exec(select(ScanFinding)).all()
 
-            saved = asyncio.run(
-                scanner._persist_dynamic_finding(
-                    run_id=run.id,
-                    llm_cfg=object(),
-                    raw=raw,
-                    base_url="https://target.local",
-                    pages_snapshot=[{"id": page.id, "url": page.url}],
-                    first_page_id=page.id,
-                    result_by_url=result_by_url,
-                )
-            )
-            duplicate = asyncio.run(
-                scanner._persist_dynamic_finding(
-                    run_id=run.id,
-                    llm_cfg=object(),
-                    raw=raw,
-                    base_url="https://target.local",
-                    pages_snapshot=[{"id": page.id, "url": page.url}],
-                    first_page_id=page.id,
-                    result_by_url=result_by_url,
-                )
-            )
-
-            findings = session.exec(select(ScanFinding)).all()
-
-        assert saved is not None
-        assert saved.title == "Password hash exposed in login API response"
-        assert duplicate is None
-        assert len(findings) == 1
-        assert findings[0].validation_status == "unvalidated"
-        assert findings[0].validation_note is None
-        assert "password_hash" in findings[0].response_evidence
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    assert saved is not None
+    assert saved.title == "Password hash exposed in login API response"
+    assert duplicate is None
+    assert len(findings) == 1
+    assert findings[0].validation_status == "unvalidated"
+    assert findings[0].validation_note is None
+    assert "password_hash" in findings[0].response_evidence
 
 
 def test_followup_log_message_names_signal_and_hypothesis():
@@ -1629,15 +1478,8 @@ def test_request_stop_noops_when_validation_not_running(monkeypatch):
     assert reset_calls == []
 
 
-def test_reset_validating_findings_emits_ids_after_session_closes(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
+def test_reset_validating_findings_emits_ids_after_session_closes(monkeypatch, engine):
     emitted = []
-    monkeypatch.setattr(validator, "get_engine", lambda: engine)
     monkeypatch.setattr(
         validator.events_svc,
         "emit",
@@ -1792,71 +1634,59 @@ def test_deterministic_result_analysis_does_not_confirm_xss_from_reflection():
     assert findings == []
 
 
-def test_dynamic_deterministic_analysis_persists_findings(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
+def test_dynamic_deterministic_analysis_persists_findings(monkeypatch, engine):
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
 
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
+        run = RunModel(site_id=site.id, name="Run #1")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
 
-            run = RunModel(site_id=site.id, name="Run #1")
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-
-            page = CrawledPage(
-                test_run_id=run.id,
-                url="https://target.local/search",
-                status="crawled",
-                in_scope=True,
-            )
-            session.add(page)
-            session.commit()
-            session.refresh(page)
-
-            run_id = run.id
-            page_id = page.id
-
-        monkeypatch.setattr(scanner, "get_engine", lambda: engine)
-        monkeypatch.setattr(scanner.events_svc, "emit", lambda *args, **kwargs: None)
-
-        saved = scanner._run_deterministic_analysis_for_dynamic_results(
-            run_id=run_id,
-            base_url="https://target.local",
-            pages_snapshot=[{"id": page_id, "url": "https://target.local/search"}],
-            first_page_id=page_id,
-            results=[
-                {
-                    "desc": "SQLi in param 'q': ' OR '1'='1",
-                    "url": "https://target.local/search?q=%27",
-                    "status": 500,
-                    "headers": {"content-type": "text/html"},
-                    "body": "SQL syntax error near unexpected quote",
-                    "request_evidence": "GET /search?q='",
-                    "response_evidence": "HTTP/1.1 500\nSQL syntax error",
-                }
-            ],
+        page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/search",
+            status="crawled",
+            in_scope=True,
         )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
 
-        with Session(engine) as session:
-            findings = session.exec(select(ScanFinding)).all()
+        run_id = run.id
+        page_id = page.id
 
-        assert saved == 1
-        assert len(findings) == 1
-        assert findings[0].title == "SQL injection error disclosure"
-        assert findings[0].finding_source == "deterministic_probe"
-        assert findings[0].page_id == page_id
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    monkeypatch.setattr(scanner.events_svc, "emit", lambda *args, **kwargs: None)
+
+    saved = scanner._run_deterministic_analysis_for_dynamic_results(
+        run_id=run_id,
+        base_url="https://target.local",
+        pages_snapshot=[{"id": page_id, "url": "https://target.local/search"}],
+        first_page_id=page_id,
+        results=[
+            {
+                "desc": "SQLi in param 'q': ' OR '1'='1",
+                "url": "https://target.local/search?q=%27",
+                "status": 500,
+                "headers": {"content-type": "text/html"},
+                "body": "SQL syntax error near unexpected quote",
+                "request_evidence": "GET /search?q='",
+                "response_evidence": "HTTP/1.1 500\nSQL syntax error",
+            }
+        ],
+    )
+
+    with Session(engine) as session:
+        findings = session.exec(select(ScanFinding)).all()
+
+    assert saved == 1
+    assert len(findings) == 1
+    assert findings[0].title == "SQL injection error disclosure"
+    assert findings[0].finding_source == "deterministic_probe"
+    assert findings[0].page_id == page_id
 
 
 def test_deterministic_sessions_from_vault_merges_non_anonymous_sessions(monkeypatch):
@@ -1892,50 +1722,39 @@ def test_deterministic_sessions_from_vault_merges_non_anonymous_sessions(monkeyp
     assert sessions[synthetic[0]]["username"] == "bob"
 
 
-def test_auth_matrix_targets_repairs_stale_imported_access_ids(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
-    try:
-        with Session(engine) as session:
-            site = Site(name="target", base_url="https://target.local")
-            session.add(site)
-            session.flush()
-            admin = Credential(site_id=site.id, username="admin", password="admin-pass")
-            session.add(admin)
-            session.flush()
-            run = RunModel(site_id=site.id, name="run")
-            session.add(run)
-            session.flush()
-            page = CrawledPage(
+def test_auth_matrix_targets_repairs_stale_imported_access_ids(engine):
+    with Session(engine) as session:
+        site = Site(name="target", base_url="https://target.local")
+        session.add(site)
+        session.flush()
+        admin = Credential(site_id=site.id, username="admin", password="admin-pass")
+        session.add(admin)
+        session.flush()
+        run = RunModel(site_id=site.id, name="run")
+        session.add(run)
+        session.flush()
+        page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/admin",
+            accessible_by="[999]",
+        )
+        session.add(page)
+        session.flush()
+        session.add(
+            PageCredentialView(
+                page_id=page.id,
                 test_run_id=run.id,
-                url="https://target.local/admin",
-                accessible_by="[999]",
+                credential_id=admin.id,
+                username="admin",
             )
-            session.add(page)
-            session.flush()
-            session.add(
-                PageCredentialView(
-                    page_id=page.id,
-                    test_run_id=run.id,
-                    credential_id=admin.id,
-                    username="admin",
-                )
-            )
-            session.commit()
-            run_id = run.id
-            admin_id = admin.id
+        )
+        session.commit()
+        run_id = run.id
+        admin_id = admin.id
 
-        targets = scanner._auth_matrix_targets(run_id, "https://target.local")
+    targets = scanner._auth_matrix_targets(run_id, "https://target.local")
 
-        assert targets[0]["accessible_by"] == [admin_id]
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    assert targets[0]["accessible_by"] == [admin_id]
 
 
 def test_auth_matrix_role_probe_skips_unbound_tokens(monkeypatch):
@@ -1996,76 +1815,65 @@ def test_auth_matrix_role_probe_skips_unbound_tokens(monkeypatch):
     assert findings[0].title == "Unauthorized role access to admin endpoint"
 
 
-def test_idor_matrix_skips_unbound_tokens(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+def test_idor_matrix_skips_unbound_tokens(monkeypatch, engine):
     calls = []
-    try:
-        with Session(engine) as session:
-            site = Site(name="idor-target", base_url="https://target.local")
-            session.add(site)
-            session.flush()
-            user = Credential(site_id=site.id, username="user", password="pass")
-            admin = Credential(site_id=site.id, username="admin", password="pass")
-            session.add(user)
-            session.add(admin)
-            session.flush()
-            run = RunModel(site_id=site.id, name="run")
-            session.add(run)
-            session.flush()
-            page = CrawledPage(
-                test_run_id=run.id,
-                url="https://target.local/customers/123",
-                title="Protected customer record",
-                page_text="Unique protected customer statement reference ABC-12345",
-                accessible_by=json.dumps([admin.id]),
-            )
-            session.add(page)
-            session.commit()
-            run_id = run.id
-            user_id = user.id
-            admin_id = admin.id
-
-        async def fake_fetch(_run_id, url, *, session=None, **_kwargs):
-            calls.append(session["username"])
-            return {
-                "url": url,
-                "status": 200,
-                "headers": {"content-type": "text/html"},
-                "body": "Unique protected customer statement reference ABC-12345",
-                "request_evidence": "GET /customers/123",
-                "response_evidence": "HTTP/1.1 200",
-                "sent_authenticated": True,
-            }
-
-        async def no_sleep(_policy):
-            return None
-
-        monkeypatch.setattr(scanner, "_fetch_matrix_url", fake_fetch)
-        monkeypatch.setattr(scanner, "sleep_between_probes", no_sleep)
-
-        findings = asyncio.run(
-            scanner._run_idor_matrix_module(
-                run_id=run_id,
-                cred_sessions={
-                    -1: {"username": "unbound_admin_token"},
-                    user_id: {"username": "known_user"},
-                    admin_id: {"username": "known_admin"},
-                },
-            )
+    with Session(engine) as session:
+        site = Site(name="idor-target", base_url="https://target.local")
+        session.add(site)
+        session.flush()
+        user = Credential(site_id=site.id, username="user", password="pass")
+        admin = Credential(site_id=site.id, username="admin", password="pass")
+        session.add(user)
+        session.add(admin)
+        session.flush()
+        run = RunModel(site_id=site.id, name="run")
+        session.add(run)
+        session.flush()
+        page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/customers/123",
+            title="Protected customer record",
+            page_text="Unique protected customer statement reference ABC-12345",
+            accessible_by=json.dumps([admin.id]),
         )
+        session.add(page)
+        session.commit()
+        run_id = run.id
+        user_id = user.id
+        admin_id = admin.id
 
-        assert calls == ["known_user"]
-        assert len(findings) == 1
-        assert findings[0].title == "Insecure direct object reference"
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    async def fake_fetch(_run_id, url, *, session=None, **_kwargs):
+        calls.append(session["username"])
+        return {
+            "url": url,
+            "status": 200,
+            "headers": {"content-type": "text/html"},
+            "body": "Unique protected customer statement reference ABC-12345",
+            "request_evidence": "GET /customers/123",
+            "response_evidence": "HTTP/1.1 200",
+            "sent_authenticated": True,
+        }
+
+    async def no_sleep(_policy):
+        return None
+
+    monkeypatch.setattr(scanner, "_fetch_matrix_url", fake_fetch)
+    monkeypatch.setattr(scanner, "sleep_between_probes", no_sleep)
+
+    findings = asyncio.run(
+        scanner._run_idor_matrix_module(
+            run_id=run_id,
+            cred_sessions={
+                -1: {"username": "unbound_admin_token"},
+                user_id: {"username": "known_user"},
+                admin_id: {"username": "known_admin"},
+            },
+        )
+    )
+
+    assert calls == ["known_user"]
+    assert len(findings) == 1
+    assert findings[0].title == "Insecure direct object reference"
 
 
 def test_auth_matrix_does_not_call_authenticated_request_anonymous(monkeypatch):

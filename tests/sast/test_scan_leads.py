@@ -2,7 +2,6 @@
 
 import json
 
-import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
@@ -19,11 +18,6 @@ from aespa.services.scan_leads import (
     list_leads_for_run,
     update_lead,
 )
-
-
-@pytest.fixture(name="engine")
-def engine_fixture(db_engine):
-    return db_engine
 
 
 def _make_lead(engine, **overrides) -> int:
