@@ -37,6 +37,35 @@ const graph = {
 };
 
 describe("grouped sitemap API display", () => {
+  it("shows sampled product URLs as one crawl route with their exact links", () => {
+    const sampleGraph = {
+      nodes: [
+        { id: 1, url: "https://shop.test/", depth: 0 },
+        { id: 2, url: "https://shop.test/products/blue-shirt", depth: 1 },
+        { id: 3, url: "https://shop.test/products/red-shirt", depth: 1 },
+      ],
+      links: [
+        { source: 1, target: 2 },
+        { source: 1, target: 3 },
+      ],
+    };
+    const routes = [
+      {
+        route_pattern: "https://shop.test/products/{value}",
+        label: "Product pages",
+        links_seen: 40000,
+        pages_sampled: 5,
+        example_urls: sampleGraph.nodes.slice(1).map((node) => node.url),
+      },
+    ];
+    const result = buildSitemapDisplayGraph(sampleGraph, new Set(), "hidden", "grouped", routes);
+    const group = result.nodes.find((node) => node.isCrawlRouteGroup);
+    expect(group).toMatchObject({ title: "Product pages", variantCount: 2, routeGroup: routes[0] });
+    expect(result.links).toEqual([
+      expect.objectContaining({ source: 1, target: group.id, count: 2 }),
+    ]);
+  });
+
   it("groups API URL variants by method and normalized route", () => {
     const result = buildSitemapDisplayGraph(graph, new Set(), "grouped");
     const groups = result.nodes.filter((node) => node.isApiGroup);

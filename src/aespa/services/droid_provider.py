@@ -317,8 +317,8 @@ async def _handle_relay(
 
 
 def _permission_handler(params: dict[str, Any]) -> str:
-    from droid_sdk import ToolConfirmationOutcome
-
+    # Return the protocol values directly: the SDK has renamed the enum
+    # members between releases, but the values sent to Droid are stable.
     tool_uses = params.get("toolUses") or []
     aespa_only = bool(tool_uses) and all(
         isinstance(item, dict)
@@ -326,11 +326,7 @@ def _permission_handler(params: dict[str, Any]) -> str:
         and (item.get("details") or {}).get("serverName") == "aespa"
         for item in tool_uses
     )
-    return (
-        ToolConfirmationOutcome.ProceedOnce.value
-        if aespa_only
-        else ToolConfirmationOutcome.Cancel.value
-    )
+    return "proceed_once" if aespa_only else "cancel"
 
 
 async def _drain(conversation: _Conversation) -> None:

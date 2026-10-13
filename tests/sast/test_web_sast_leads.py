@@ -15,13 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
-from aespa import db as db_mod
-from aespa.db import get_session, set_engine
-from aespa.main import create_app
 from aespa.models import (
     AgentLog,
     ApiTestRun,
@@ -41,31 +36,9 @@ _UTC = timezone.utc
 
 
 @pytest.fixture(name="env")
-def env_fixture():
-    """Engine wired into both the get_session dependency and get_engine()."""
-    prev_engine = db_mod._engine
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)  # service layer uses get_engine() directly
-
-    def _override_session():
-        with Session(engine) as session:
-            yield session
-
-    app = create_app()
-    app.dependency_overrides[get_session] = _override_session
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c, engine
-
-    set_engine(prev_engine)
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
+def env_fixture(client, engine):
+    """Test client plus the engine its requests and get_engine() share."""
+    return client, engine
 
 
 def _zip_bytes() -> bytes:

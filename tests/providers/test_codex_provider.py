@@ -185,22 +185,18 @@ def test_codex_rate_limit_error_recognizes_full_numeric_window():
     assert codex_provider._rate_limit_error_has_full_window(payload) is True
 
 
-def test_codex_rate_limit_snapshot_detects_full_window():
-    assert codex_provider._rate_limit_is_exhausted(
-        {"rateLimits": {"primary": {"usedPercent": 100, "resetsAt": 123}}}
-    )
-    assert not codex_provider._rate_limit_is_exhausted(
-        {"rateLimits": {"primary": {"usedPercent": 74, "resetsAt": 123}}}
-    )
-
-
-def test_codex_rate_limit_snapshot_detects_numeric_full_window():
-    assert codex_provider._rate_limit_is_exhausted(
-        {"rateLimits": {"primary": {"limit": 40_000_000, "used": 40_000_000}}}
-    )
-    assert not codex_provider._rate_limit_is_exhausted(
-        {"rateLimits": {"primary": {"limit": 40_000_000, "used": 39_999_999}}}
-    )
+@pytest.mark.parametrize(
+    ("primary", "exhausted"),
+    [
+        ({"usedPercent": 100, "resetsAt": 123}, True),
+        ({"usedPercent": 74, "resetsAt": 123}, False),
+        ({"limit": 40_000_000, "used": 40_000_000}, True),
+        ({"limit": 40_000_000, "used": 39_999_999}, False),
+    ],
+)
+def test_codex_rate_limit_snapshot_detects_full_window(primary, exhausted):
+    snapshot = {"rateLimits": {"primary": primary}}
+    assert codex_provider._rate_limit_is_exhausted(snapshot) is exhausted
 
 
 def test_codex_rate_limit_scope_uses_regular_bucket_for_non_spark_model():

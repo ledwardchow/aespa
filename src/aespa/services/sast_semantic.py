@@ -912,11 +912,16 @@ def _validated_match(
         other_fix = str(candidate.get("fix_location") or "").strip()
         same_anchor = bool(fix and other_fix) and same_fix_anchor(fix, other_fix)
         # Two validators identifying different fixes, or different causes
-        # without a shared fix, outweigh a discovery-stage match based on
-        # similar titles and source paths.
+        # that neither share a fix nor describe the same weakness, outweigh a
+        # discovery-stage match based on similar titles and source paths.
         if fix and other_fix and not same_anchor:
             continue
-        if root and other_root and root != other_root and not same_anchor:
+        if (
+            root
+            and other_root
+            and root != other_root
+            and (not same_anchor or _token_overlap(root, other_root) < 0.3)
+        ):
             continue
         if find_existing_candidate([candidate], observation) is candidate:
             return candidate

@@ -97,6 +97,7 @@ export function SiteDetail({ siteId }) {
       max_depth: run.max_depth,
       max_pages: run.max_pages,
       crawler_mode: run.crawler_mode || "url",
+      page_selection: run.page_selection || "each_url",
       llm_profile_id: run.llm_profile_id || "",
     });
     setEditingRun(run);
@@ -108,6 +109,7 @@ export function SiteDetail({ siteId }) {
         max_depth: Number(editForm.max_depth),
         max_pages: Number(editForm.max_pages),
         crawler_mode: editForm.crawler_mode,
+        page_selection: editForm.page_selection,
         llm_profile_id: editForm.llm_profile_id ? Number(editForm.llm_profile_id) : null,
       });
       setRuns((rs) => rs.map((r) => (r.id === updated.id ? updated : r)));
@@ -205,10 +207,29 @@ export function SiteDetail({ siteId }) {
                 <select
                   className="select"
                   value={editForm.crawler_mode}
-                  onChange={(e) => setEditForm((f) => ({ ...f, crawler_mode: e.target.value }))}
+                  disabled={editingRun.crawl_started_once}
+                  onChange={(e) =>
+                    setEditForm((f) => ({
+                      ...f,
+                      crawler_mode: e.target.value,
+                      page_selection: "each_url",
+                    }))
+                  }
                 >
                   <option value="url">URL</option>
                   <option value="interactive">Interactive SPA</option>
+                </select>
+              </div>
+              <div className="field" style={{ margin: 0 }}>
+                <label>Page selection</label>
+                <select
+                  className="select"
+                  value={editForm.page_selection}
+                  disabled={editingRun.crawl_started_once || editForm.crawler_mode !== "url"}
+                  onChange={(e) => setEditForm((f) => ({ ...f, page_selection: e.target.value }))}
+                >
+                  <option value="each_url">Visit each URL</option>
+                  <option value="group_similar">Group similar pages</option>
                 </select>
               </div>
               <div

@@ -8,13 +8,13 @@ import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
-    System,
-    SystemComponent,
     AssessmentCampaign,
     CampaignSourceMember,
     ComponentFact,
     ComponentSnapshot,
     SastRun,
+    System,
+    SystemComponent,
 )
 from aespa.services import component_mapper
 from aespa.services.component_facts import extract_component_facts

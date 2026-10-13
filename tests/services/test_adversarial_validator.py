@@ -78,38 +78,23 @@ def test_adversarial_validator_config_update_round_trip(client: TestClient):
 # ── Validation ────────────────────────────────────────────────────────────────
 
 
-def test_min_severity_rejects_invalid(client: TestClient):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("min_severity", "extreme"),
+        ("max_steps", 0),
+        ("max_steps", 51),
+    ],
+)
+def test_invalid_validator_config_is_rejected(client: TestClient, field, value):
     payload = {
         "enabled": True,
         "max_steps": 20,
-        "min_severity": "extreme",
-        "auto_validate_inline": True,
-        "require_concrete_disproof": True,
-    }
-    resp = client.put("/api/settings/adversarial-validator-config", json=payload)
-    assert resp.status_code == 422
-
-
-def test_max_steps_rejects_zero(client: TestClient):
-    payload = {
-        "enabled": True,
-        "max_steps": 0,
         "min_severity": "low",
         "auto_validate_inline": True,
         "require_concrete_disproof": True,
     }
-    resp = client.put("/api/settings/adversarial-validator-config", json=payload)
-    assert resp.status_code == 422
-
-
-def test_max_steps_rejects_above_50(client: TestClient):
-    payload = {
-        "enabled": True,
-        "max_steps": 51,
-        "min_severity": "low",
-        "auto_validate_inline": True,
-        "require_concrete_disproof": True,
-    }
+    payload[field] = value
     resp = client.put("/api/settings/adversarial-validator-config", json=payload)
     assert resp.status_code == 422
 
@@ -258,19 +243,9 @@ def test_disproof_hints_with_year_suffix():
     assert hints
 
 
-def test_disproof_hints_unknown_category_returns_empty():
-    hints = _disproof_hints_for_finding("A99")
-    assert hints == ""
-
-
-def test_disproof_hints_empty_string():
-    hints = _disproof_hints_for_finding("")
-    assert hints == ""
-
-
-def test_disproof_hints_none():
-    hints = _disproof_hints_for_finding(None)
-    assert hints == ""
+@pytest.mark.parametrize("category", ["A99", "", None])
+def test_disproof_hints_missing_category_returns_empty(category):
+    assert _disproof_hints_for_finding(category) == ""
 
 
 def test_all_disproof_hint_keys_are_valid_owasp_prefixes():

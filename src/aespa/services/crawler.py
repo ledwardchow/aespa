@@ -34,6 +34,7 @@ from aespa.models import (
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
+from aespa.services.route_sampling import RouteSampler, page_features
 from aespa.services.settings import (
     get_browser_debug_config,
     get_crawler_config,
@@ -288,7 +289,12 @@ async def _crawl_task(run_id: int) -> None:
                 s.commit()
     finally:
         _stop_requested.discard(run_id)
-        _active_shared.pop(run_id, None)
+        shared = _active_shared.pop(run_id, None)
+        if shared is not None:
+            # Keep counts saved between timed saves for a stop, pause or error.
+            payload = shared.route_sampler.take_snapshot(force=True)
+            if payload is not None:
+                _write_route_sampler(run_id, *payload)
 
 
 # ── Dynamic LLM concurrency gate ─────────────────────────────────────────────
@@ -367,6 +373,7 @@ class _CrawlShared:
         state_keys: dict,
         pages_done: int,
         run_id: int,
+        route_sampler_snapshot: str | None = None,
     ) -> None:
         self.crawled_norms: dict[str, int] = crawled_norms  # norm_url → page_id
         self.state_keys: dict[str, int] = (
@@ -374,6 +381,9 @@ class _CrawlShared:
         )
         self.lock: asyncio.Lock = asyncio.Lock()
         self.pages_done: int = pages_done
+        self.route_sampler = RouteSampler(route_sampler_snapshot)
+        # Keeps grouped-page saves in order when they run off the event loop.
+        self.route_save_lock: asyncio.Lock = asyncio.Lock()
         # Absolute JS asset URLs already fetched+mined for endpoint/API-call
         # intelligence, shared across every phase/credential in this run so a
         # bundle referenced on every page (or repeatedly dynamically imported)
@@ -515,6 +525,11 @@ async def _do_crawl_inner(run_id: int) -> None:
     crawler_mode = (
         run.crawler_mode if run.crawler_mode in {"url", "interactive"} else "url"
     )
+    page_selection = (
+        run.page_selection
+        if crawler_mode == "url" and run.page_selection == "group_similar"
+        else "each_url"
+    )
     skip_dangerous_actions = bool(crawler_cfg.skip_dangerous_actions)
     suppress_form_submit_actions = bool(crawler_cfg.suppress_form_submit_actions)
     block_non_idempotent_interactive_replay = bool(
@@ -550,6 +565,9 @@ async def _do_crawl_inner(run_id: int) -> None:
         state_keys={ep.state_key: ep.id for ep in existing if ep.state_key},
         pages_done=len(existing),
         run_id=run_id,
+        route_sampler_snapshot=(
+            run.route_sampling_state_json if page_selection == "group_similar" else None
+        ),
     )
     _active_shared[run_id] = shared
 
@@ -624,6 +642,7 @@ async def _do_crawl_inner(run_id: int) -> None:
                 max_depth=max_depth,
                 max_pages=max_pages,
                 crawler_mode=crawler_mode,
+                page_selection=page_selection,
                 llm_cfg=llm_cfg,
                 base_netloc=base_netloc,
                 base_path=base_path,
@@ -942,6 +961,7 @@ async def _crawl_as_credential(
     max_depth: int,
     max_pages: int,
     crawler_mode: str,
+    page_selection: str,
     llm_cfg,
     base_netloc: str,
     base_path: str,
@@ -1007,6 +1027,17 @@ async def _crawl_as_credential(
 
     local_pages = 0  # pages actually navigated to by this credential
     llm_tasks: list[asyncio.Task] = []
+    _update_credential_progress(
+        run_id,
+        username,
+        None,
+        0,
+        stage="phase_start",
+        stage_label="Starting crawl",
+        phase_index=phase_idx + 1,
+        phase_total=total_phases,
+        login_status="pending" if requires_auth and cred else "not_required",
+    )
 
     async with async_playwright() as p:
         # <-loopback> removes Chromium's default proxy bypass for localhost so
@@ -1136,8 +1167,39 @@ async def _crawl_as_credential(
                     "_persist": True,
                 },
             )
-            await _authenticate(
-                page, credential_login_url, cred, run_id, llm_cfg=llm_cfg
+            try:
+                await _authenticate(
+                    page, credential_login_url, cred, run_id, llm_cfg=llm_cfg
+                )
+                login_blocked = await _page_requires_login(
+                    page, credential_login_url, settle_ms=1_500
+                ) or await _detect_mfa_prompt(page)
+                mode = getattr(cred, "auth_mode", None) or AuthMode.auto
+                if mode in (AuthMode.guided, AuthMode.entra_id):
+                    cached = _guided_session_cache.get((run_id, cred.id)) or {}
+                    login_blocked = login_blocked or not (
+                        cached.get("cookies") or cached.get("headers")
+                    )
+                login_status = "failed" if login_blocked else "success"
+            except Exception:
+                _update_credential_progress(
+                    run_id,
+                    username,
+                    None,
+                    local_pages,
+                    phase_index=phase_idx + 1,
+                    phase_total=total_phases,
+                    login_status="failed",
+                )
+                raise
+            _update_credential_progress(
+                run_id,
+                username,
+                None,
+                local_pages,
+                phase_index=phase_idx + 1,
+                phase_total=total_phases,
+                login_status=login_status,
             )
             authenticated_landing_url = page.url
             events_svc.emit(
@@ -1149,7 +1211,8 @@ async def _crawl_as_credential(
                     "status": "active",
                     "current_task": (
                         f"Phase {phase_idx + 1}/{total_phases} — "
-                        f"authenticated as {username}; starting page crawl"
+                        f"{'authenticated' if login_status == 'success' else 'login failed'} "
+                        f"as {username}; starting page crawl"
                     ),
                     "outcome": None,
                     "_persist": True,
@@ -1195,9 +1258,49 @@ async def _crawl_as_credential(
             (url, 0, None, None) for url in seed_urls
         )
         pending_interactive_edges: dict[str, list[dict]] = {}
+        phase_key = str(credential_id) if credential_id is not None else "anonymous"
 
-        while queue:
+        def enqueue_group_items(items: list[dict]) -> None:
+            for item in items:
+                url_value = item["url"]
+                normalized = _norm(url_value)
+                if normalized in queued:
+                    continue
+                queued.add(normalized)
+                queue.append(
+                    (
+                        url_value,
+                        item["depth"],
+                        item["parent_id"],
+                        item["incoming_action"],
+                    )
+                )
+
+        def route_is_queued(url_value: str) -> bool:
+            return _norm(url_value) in queued
+
+        async def record_route_example(url_value: str, features: dict | None) -> None:
+            async with shared.lock:
+                released = shared.route_sampler.observe(
+                    url_value, features, phase_key, route_is_queued
+                )
+            enqueue_group_items(released)
+            await _save_route_sampler(run_id, shared)
+
+        if page_selection == "group_similar":
+            enqueue_group_items(shared.route_sampler.resume_items(phase_key))
+
+        while True:
             if run_id in _stop_requested:
+                break
+            if not queue and page_selection == "group_similar":
+                # Examples the crawler skipped can never be checked. Release
+                # their held links to the normal crawl rather than drop them.
+                async with shared.lock:
+                    released = shared.route_sampler.drain(phase_key)
+                enqueue_group_items(released)
+                await _save_route_sampler(run_id, shared)
+            if not queue:
                 break
 
             url, depth, parent_id, incoming_action = queue.popleft()
@@ -1284,6 +1387,8 @@ async def _crawl_as_credential(
                     llm_cfg=llm_cfg,
                 )
             except Exception as nav_err:
+                if page_selection == "group_similar":
+                    await record_route_example(url, None)
                 if is_first:
                     _update_page(
                         page_id, status="failed", error_message=str(nav_err)[:500]
@@ -1306,6 +1411,13 @@ async def _crawl_as_credential(
                 continue
 
             if resp is not None and resp.status >= 400:
+                if page_selection == "group_similar":
+                    # Access denied is a real difference between pages; other
+                    # errors only mean another example should be tried.
+                    await record_route_example(
+                        url,
+                        {"kind": "blocked"} if resp.status in {401, 403} else None,
+                    )
                 if is_first:
                     _update_page(
                         page_id, status="failed", error_message=f"HTTP {resp.status}"
@@ -1414,6 +1526,8 @@ async def _crawl_as_credential(
             )
 
             if on_login:
+                if page_selection == "group_similar":
+                    await record_route_example(url, {"kind": "blocked"})
                 if is_first:
                     _update_page(
                         page_id,
@@ -1485,6 +1599,50 @@ async def _crawl_as_credential(
                 for r in raw_links
                 if _same_domain(r["href"], base_netloc)
             ]
+            if page_selection == "group_similar":
+                if shared.route_sampler.wants_observation(url, phase_key):
+                    page_calls_for_signature = [
+                        call
+                        for call in observed_api_calls
+                        if _norm(call.get("page_url") or "") in {norm, norm_final}
+                    ]
+                    await record_route_example(
+                        url, await page_features(page, page_calls_for_signature)
+                    )
+            if page_selection == "group_similar" and depth < max_depth:
+                link_items = [
+                    {
+                        "url": link_url,
+                        "depth": depth + 1,
+                        "parent_id": page_id,
+                        "incoming_action": {
+                            "link_text": link_text,
+                            "action_kind": "navigate",
+                        },
+                    }
+                    for link_url, link_text in same_domain_links
+                    if not _is_session_ending_url(link_url, link_text)
+                ]
+                async with shared.lock:
+                    admitted = shared.route_sampler.offer(
+                        link_items, phase_key, route_is_queued
+                    )
+                await _save_route_sampler(run_id, shared)
+                # Drop only held links. External links and admitted links are
+                # still recorded as page intelligence.
+                held_urls = {_norm(item["url"]) for item in link_items} - {
+                    _norm(item["url"]) for item in admitted
+                }
+                raw_links = [
+                    link
+                    for link in raw_links
+                    if _norm(link.get("href") or "") not in held_urls
+                ]
+                same_domain_links = [
+                    (link_url, link_text)
+                    for link_url, link_text in same_domain_links
+                    if _norm(link_url) not in held_urls
+                ]
             _update_credential_progress(
                 run_id,
                 username,
@@ -1550,6 +1708,34 @@ async def _crawl_as_credential(
             # only saving them as intel items.  Respects the same depth/page-cap
             # guards as same_domain_links below.
             if js_endpoint_discovery_enabled and depth < max_depth:
+                if page_selection == "group_similar":
+                    js_items = [
+                        {
+                            "url": nav_url,
+                            "depth": depth + 1,
+                            "parent_id": page_id,
+                            "incoming_action": {
+                                "link_text": "JS route",
+                                "action_kind": "navigate",
+                            },
+                        }
+                        for nav_url in js_nav_urls
+                        if _same_domain(nav_url, base_netloc)
+                        and not _is_session_ending_url(nav_url)
+                    ]
+                    async with shared.lock:
+                        admitted_js = shared.route_sampler.offer(
+                            js_items, phase_key, route_is_queued
+                        )
+                    await _save_route_sampler(run_id, shared)
+                    held_js = {_norm(item["url"]) for item in js_items} - {
+                        _norm(item["url"]) for item in admitted_js
+                    }
+                    js_nav_urls = [
+                        nav_url
+                        for nav_url in js_nav_urls
+                        if _norm(nav_url) not in held_js
+                    ]
                 for nav_url in js_nav_urls:
                     n = _norm(nav_url)
                     if (
@@ -5236,6 +5422,28 @@ def _update_run(run_id: int, **kwargs) -> None:
         s.commit()
 
 
+def _write_route_sampler(run_id: int, state_json: str, groups_json: str) -> None:
+    with Session(get_engine()) as session:
+        run = session.get(TestRun, run_id)
+        if run is None:
+            return
+        run.route_sampling_state_json = state_json
+        run.route_groups_json = groups_json
+        session.add(run)
+        session.commit()
+
+
+async def _save_route_sampler(
+    run_id: int, shared: _CrawlShared, *, force: bool = False
+) -> None:
+    """Save grouped-page state when its status changes, or every few seconds."""
+    async with shared.route_save_lock:
+        async with shared.lock:
+            payload = shared.route_sampler.take_snapshot(force=force)
+        if payload is not None:
+            await asyncio.to_thread(_write_route_sampler, run_id, *payload)
+
+
 def _update_credential_progress(
     run_id: int,
     username: Optional[str],
@@ -5247,6 +5455,7 @@ def _update_credential_progress(
     stage_label: str = "Crawling",
     phase_index: int = 1,
     phase_total: int = 1,
+    login_status: str | None = None,
 ) -> None:
     """Persist per-credential crawl progress so the UI can read it on load/refresh."""
     if not username:
@@ -5256,7 +5465,9 @@ def _update_credential_progress(
         if run is None:
             return
         progress = json.loads(run.per_user_progress or "{}")
+        previous = progress.get(username) or {}
         progress[username] = {
+            **previous,
             "current_url": current_url,
             "pages_visited": pages_visited,
             "done": done,
@@ -5266,6 +5477,8 @@ def _update_credential_progress(
             "phase_total": phase_total,
             "updated_at": _utcnow().isoformat(),
         }
+        if login_status is not None:
+            progress[username]["login_status"] = login_status
         run.per_user_progress = json.dumps(progress)
         s.add(run)
         s.commit()
@@ -5391,7 +5604,12 @@ def _is_api_page(url: str, text: str) -> bool:
 
 
 def _is_api_response_candidate(url: str, resource_type: str, content_type: str) -> bool:
-    path = urlparse(url).path.lower()
+    parsed = urlparse(url)
+    # Next.js fetches page data with an _rsc query value. These responses are
+    # navigation traffic, not separate API endpoints in the site map.
+    if "_rsc" in parse_qs(parsed.query):
+        return False
+    path = parsed.path.lower()
     if any(
         pat in path
         for pat in (

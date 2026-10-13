@@ -1373,6 +1373,7 @@ class SavedCrawlOut(BaseModel):
     source_run_id: int | None = None
     source_run_exists: bool = False
     crawler_mode: str
+    page_selection: str = "each_url"
     page_count: int
     size_bytes: int
     created_at: datetime
@@ -1387,6 +1388,7 @@ class TestRunCreate(BaseModel):
     max_pages: int = Field(default=500, ge=5, le=500)
     llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
     crawler_mode: Literal["url", "interactive"] = "url"
+    page_selection: Literal["each_url", "group_similar"] = "each_url"
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
 
@@ -1396,6 +1398,7 @@ class TestRunUpdate(BaseModel):
     max_pages: int = Field(ge=5, le=500)
     llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
     crawler_mode: Literal["url", "interactive"] | None = None
+    page_selection: Literal["each_url", "group_similar"] | None = None
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
 
@@ -1410,6 +1413,8 @@ class StartCrawlBody(BaseModel):
     crawl_credential_id: int | None = None
     start_pentest_after_crawl: bool = False
     coverage_mode: WebCoverageModeLiteral | None = None
+    crawler_mode: Literal["url", "interactive"] | None = None
+    page_selection: Literal["each_url", "group_similar"] | None = None
 
 
 class CredentialSummary(BaseModel):
@@ -1437,6 +1442,9 @@ class TestRunSummary(BaseModel):
     max_pages: int
     llm_max_concurrency: int | None = None
     crawler_mode: str = "url"
+    page_selection: str = "each_url"
+    crawl_started_once: bool = False
+    route_groups: list[dict] = Field(default_factory=list)
     scan_mode: str = "aggressive"
     coverage_mode: str = "track"
     scan_mode_locked: bool = False

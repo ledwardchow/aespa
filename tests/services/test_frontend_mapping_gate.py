@@ -7,14 +7,14 @@ import json
 from sqlmodel import Session, select
 
 from aespa.models import (
-    System,
-    SystemComponent,
     AssessmentCampaign,
     CampaignSourceMember,
     ComponentConnection,
     ComponentFact,
     ComponentSnapshot,
     ScanLead,
+    System,
+    SystemComponent,
 )
 from aespa.services.correlation import _build_component_connections, _has_frontend_trace
 from aespa.services.route_tracing import trace_lead_paths

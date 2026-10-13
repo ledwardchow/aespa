@@ -107,8 +107,10 @@ def build_archive(session: Session, run: TestRun) -> dict:
             "run_id": run.id,
             "run_name": run.name,
             "crawler_mode": run.crawler_mode,
+            "page_selection": run.page_selection,
         },
         "crawl": {
+            "route_groups": json.loads(run.route_groups_json or "[]"),
             "progress": {
                 "per_user_progress": run.per_user_progress,
                 "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -611,5 +613,19 @@ def import_into_run(
             status=409, message="Clear this run's crawl data before importing"
         )
     crawl = validate_archive(payload, site.base_url)
+    source = payload.get("source") if isinstance(payload, dict) else {}
+    source = source if isinstance(source, dict) else {}
+    crawler_mode = source.get("crawler_mode", "url")
+    page_selection = source.get("page_selection", "each_url")
+    run.crawler_mode = crawler_mode if crawler_mode in ("url", "interactive") else "url"
+    run.page_selection = (
+        "group_similar"
+        if run.crawler_mode == "url" and page_selection == "group_similar"
+        else "each_url"
+    )
+    groups = crawl.get("route_groups", [])
+    run.route_groups_json = json.dumps(groups if isinstance(groups, list) else [])
+    run.route_sampling_state_json = "{}"
+    run.crawl_started_once = True
     pages_by_url = restore_archive_records(session, run.id, crawl, site)
     return finish_archive_import(session, run, crawl, pages_by_url)

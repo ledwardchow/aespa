@@ -128,6 +128,7 @@ def build_recon_summary(
         access_counts = Counter(route["access"]["classification"] for route in routes)
         summary = {
             "schema_version": 2,
+            "route_groups": json.loads(run.route_groups_json or "[]") if run else [],
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "route_count": len(routes),
             "routes": routes,

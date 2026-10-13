@@ -19,12 +19,22 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "llm_provider_config", sa.Column("aws_profile", sa.String(), nullable=True)
-    )
-    op.add_column("llm_config", sa.Column("aws_profile", sa.String(), nullable=True))
+    inspector = sa.inspect(op.get_bind())
+    for table_name in ("llm_provider_config", "llm_config"):
+        if not inspector.has_table(table_name):
+            continue
+        columns = {item["name"] for item in inspector.get_columns(table_name)}
+        if "aws_profile" not in columns:
+            op.add_column(
+                table_name, sa.Column("aws_profile", sa.String(), nullable=True)
+            )
 
 
 def downgrade() -> None:
-    op.drop_column("llm_config", "aws_profile")
-    op.drop_column("llm_provider_config", "aws_profile")
+    inspector = sa.inspect(op.get_bind())
+    for table_name in ("llm_config", "llm_provider_config"):
+        if not inspector.has_table(table_name):
+            continue
+        columns = {item["name"] for item in inspector.get_columns(table_name)}
+        if "aws_profile" in columns:
+            op.drop_column(table_name, "aws_profile")

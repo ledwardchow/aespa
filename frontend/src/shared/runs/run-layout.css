@@ -814,7 +814,7 @@
 }
 .crawl-user-row {
   display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-template-columns: 8px minmax(0, 1fr);
   align-items: center;
   gap: 3px 7px;
   width: 200px;
@@ -855,6 +855,17 @@
   flex-shrink: 0;
   color: var(--text-2);
 }
+.crawl-login-status {
+  grid-column: 2 / -1;
+  color: var(--muted);
+  font-size: 10px;
+}
+.crawl-login-status.success {
+  color: var(--ok);
+}
+.crawl-login-status.failed {
+  color: var(--danger);
+}
 .crawl-user-bar {
   width: 120px;
   height: 4px;
@@ -867,13 +878,6 @@
   height: 100%;
   border-radius: 2px;
   transition: width 0.7s ease;
-}
-.crawl-user-pages {
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  flex-shrink: 0;
-  color: var(--muted);
-  font-size: 11px;
 }
 .crawl-user-url {
   grid-column: 2 / -1;

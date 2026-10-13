@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
 from aespa.models import ApiCollection, ApiTestRun, Site, TestRun
 from aespa.services import api_scanner, scope
@@ -46,14 +45,7 @@ def test_authority_scope_blocks_same_hostname_on_another_port():
     )
 
 
-def test_check_scope_and_auto_registration_are_port_aware(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(scope, "get_engine", lambda: engine)
+def test_check_scope_and_auto_registration_are_port_aware(monkeypatch, engine):
     monkeypatch.setattr(scope.events_svc, "emit", lambda *args, **kwargs: None)
 
     with Session(engine) as session:
@@ -73,9 +65,7 @@ def test_check_scope_and_auto_registration_are_port_aware(monkeypatch):
         run_id = run.id
 
     assert scope.check_scope("https://app.example.com/home", site_id, run_id) is None
-    rejection = scope.check_scope(
-        "https://app.example.com:8443/admin", site_id, run_id
-    )
+    rejection = scope.check_scope("https://app.example.com:8443/admin", site_id, run_id)
     assert rejection is not None
     assert "app.example.com:8443" in rejection
     assert not scope.register_scope_host_for_run(
@@ -87,15 +77,7 @@ def test_check_scope_and_auto_registration_are_port_aware(monkeypatch):
         assert json.loads(saved.scope_hosts) == ["app.example.com:443"]
 
 
-def test_api_scanner_fallback_scope_blocks_another_port(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(api_scanner, "get_engine", lambda: engine)
-
+def test_api_scanner_fallback_scope_blocks_another_port(engine):
     with Session(engine) as session:
         collection = ApiCollection(
             name="Port-aware API",
@@ -112,9 +94,9 @@ def test_api_scanner_fallback_scope_blocks_another_port(monkeypatch):
         session.refresh(run)
         run_id = run.id
 
-    assert api_scanner._api_check_scope(
-        "https://api.example.com/v1/users", run_id
-    ) is None
+    assert (
+        api_scanner._api_check_scope("https://api.example.com/v1/users", run_id) is None
+    )
     rejection = api_scanner._api_check_scope(
         "https://api.example.com:8443/admin", run_id
     )

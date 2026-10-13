@@ -19,12 +19,31 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("llm_profile", sa.Column("extension_ref", sa.String(), nullable=True))
-    op.create_index(
-        "ix_llm_profile_extension_ref", "llm_profile", ["extension_ref"], unique=True
-    )
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("llm_profile"):
+        return
+    columns = {item["name"] for item in inspector.get_columns("llm_profile")}
+    if "extension_ref" not in columns:
+        op.add_column(
+            "llm_profile", sa.Column("extension_ref", sa.String(), nullable=True)
+        )
+    indexes = {item["name"] for item in inspector.get_indexes("llm_profile")}
+    if "ix_llm_profile_extension_ref" not in indexes:
+        op.create_index(
+            "ix_llm_profile_extension_ref",
+            "llm_profile",
+            ["extension_ref"],
+            unique=True,
+        )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_llm_profile_extension_ref", table_name="llm_profile")
-    op.drop_column("llm_profile", "extension_ref")
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("llm_profile"):
+        return
+    indexes = {item["name"] for item in inspector.get_indexes("llm_profile")}
+    if "ix_llm_profile_extension_ref" in indexes:
+        op.drop_index("ix_llm_profile_extension_ref", table_name="llm_profile")
+    columns = {item["name"] for item in inspector.get_columns("llm_profile")}
+    if "extension_ref" in columns:
+        op.drop_column("llm_profile", "extension_ref")

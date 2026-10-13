@@ -5,7 +5,7 @@ import json
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from aespa.models import SavedCrawl
+from aespa.models import SavedCrawl, TestRun
 
 
 def _make_site(client: TestClient, **kw):
@@ -77,6 +77,40 @@ def test_save_list_and_load_saved_crawl(client: TestClient):
     # Loading again into the now-populated run is refused.
     again = client.post(f"/api/test-runs/{target['id']}/crawl/load/{body['id']}")
     assert again.status_code == 409
+
+
+def test_grouped_crawl_settings_and_summary_survive_save_and_load(
+    client: TestClient, db_session
+):
+    site = _make_site(client)
+    source = _seed_crawled_run(client, site["id"])
+    run = db_session.get(TestRun, source["id"])
+    run.page_selection = "group_similar"
+    run.route_groups_json = json.dumps(
+        [
+            {
+                "route_pattern": "https://target.local/products/{value}",
+                "links_seen": 40,
+                "example_urls": ["https://target.local/account"],
+                "pages_sampled": 1,
+                "label": "Product pages",
+            }
+        ]
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    saved = _save(client, source["id"])
+    assert saved.status_code == 201
+    assert saved.json()["page_selection"] == "group_similar"
+    target = _make_run(client, site["id"])
+    loaded = client.post(
+        f"/api/test-runs/{target['id']}/crawl/load/{saved.json()['id']}"
+    )
+    assert loaded.status_code == 200
+    assert loaded.json()["page_selection"] == "group_similar"
+    assert loaded.json()["crawl_started_once"] is True
+    assert loaded.json()["route_groups"][0]["links_seen"] == 40
 
 
 def test_saved_crawl_survives_source_run_deletion(client: TestClient):

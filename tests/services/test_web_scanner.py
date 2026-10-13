@@ -3,8 +3,7 @@ import json
 from types import SimpleNamespace
 
 import httpx
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
 from aespa.models import ScanFinding, Site, TestRun
 from aespa.services import scanner
@@ -42,14 +41,7 @@ def test_http_request_coverage_fields_follow_request_role() -> None:
     )
 
 
-def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+def test_execution_snapshot_records_reproducible_config_without_secrets(engine):
     with Session(engine) as session:
         site = Site(name="target", base_url="https://target.local")
         session.add(site)
@@ -352,66 +344,51 @@ def test_request_scope_checked_303_downgrades_post_to_get_and_drops_body(monkeyp
     assert "json" not in kwargs  # body dropped on the GET follow-up
 
 
-def test_persist_discovered_credential_refuses_out_of_scope_login(monkeypatch):
+def test_persist_discovered_credential_refuses_out_of_scope_login(monkeypatch, engine):
     """A credential whose login_url is on a different host than the site must
     NOT be saved into the site's credential store (the "Discovered by dynamic
     scan" foreign-credential bug)."""
     from aespa.models import Credential, Site, TestRun
-    from aespa.services import scope as scope_svc
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+    # Both the persister and check_scope must read the same DB.
+    monkeypatch.setattr(scanner.events_svc, "emit", lambda *a, **k: None)
+
+    with Session(engine) as session:
+        site = Site(name="Bank of Ed", base_url="https://bankofed.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        site.scope_hosts = '["bankofed.local"]'
+        session.add(site)
+        run = TestRun(site_id=site.id, name="run-1", status="scanning")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        site_id, run_id = site.id, run.id
+
+    # Off-host login → refused, nothing written.
+    created = scanner._maybe_persist_discovered_credential(
+        run_id,
+        username="attacker",
+        password="pw",
+        login_url="https://evil-other.com/login",
     )
-    try:
-        from aespa import models as _models  # noqa: F401
+    assert created is False
 
-        SQLModel.metadata.create_all(engine)
-        # Both the persister and check_scope must read the same DB.
-        monkeypatch.setattr(scanner, "get_engine", lambda: engine)
-        monkeypatch.setattr(scope_svc, "get_engine", lambda: engine)
-        monkeypatch.setattr(scanner.events_svc, "emit", lambda *a, **k: None)
+    # In-scope login → saved.
+    created = scanner._maybe_persist_discovered_credential(
+        run_id,
+        username="realuser",
+        password="pw",
+        login_url="https://bankofed.local/login",
+    )
+    assert created is True
 
-        with Session(engine) as session:
-            site = Site(name="Bank of Ed", base_url="https://bankofed.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-            site.scope_hosts = '["bankofed.local"]'
-            session.add(site)
-            run = TestRun(site_id=site.id, name="run-1", status="scanning")
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-            site_id, run_id = site.id, run.id
-
-        # Off-host login → refused, nothing written.
-        created = scanner._maybe_persist_discovered_credential(
-            run_id,
-            username="attacker",
-            password="pw",
-            login_url="https://evil-other.com/login",
-        )
-        assert created is False
-
-        # In-scope login → saved.
-        created = scanner._maybe_persist_discovered_credential(
-            run_id,
-            username="realuser",
-            password="pw",
-            login_url="https://bankofed.local/login",
-        )
-        assert created is True
-
-        with Session(engine) as session:
-            creds = session.exec(
-                select(Credential).where(Credential.site_id == site_id)
-            ).all()
-        assert [c.username for c in creds] == ["realuser"]
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    with Session(engine) as session:
+        creds = session.exec(
+            select(Credential).where(Credential.site_id == site_id)
+        ).all()
+    assert [c.username for c in creds] == ["realuser"]
 
 
 def test_compact_thinking_context_includes_all_existing_findings():
@@ -436,63 +413,49 @@ def test_compact_thinking_context_includes_all_existing_findings():
     assert "Finding 11 @ https://target.local/finding/11" in context
 
 
-def test_load_findings_snapshot_returns_existing_findings(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    try:
-        from aespa import models as _models  # noqa: F401
-
-        SQLModel.metadata.create_all(engine)
-        monkeypatch.setattr(scanner, "get_engine", lambda: engine)
-
-        with Session(engine) as session:
-            session.add(
-                ScanFinding(
-                    test_run_id=7,
-                    owasp_category="A03",
-                    severity="high",
-                    title="SQL injection in /search",
-                    affected_url="https://target.local/search",
-                    description="param is concatenated into the query",
-                )
+def test_load_findings_snapshot_returns_existing_findings(engine):
+    with Session(engine) as session:
+        session.add(
+            ScanFinding(
+                test_run_id=7,
+                owasp_category="A03",
+                severity="high",
+                title="SQL injection in /search",
+                affected_url="https://target.local/search",
+                description="param is concatenated into the query",
             )
-            # A finding for a different run must not leak in.
-            session.add(
-                ScanFinding(
-                    test_run_id=99,
-                    owasp_category="A01",
-                    severity="low",
-                    title="Other run finding",
-                    affected_url="https://other.local",
-                    description="unrelated",
-                )
-            )
-            session.commit()
-
-        snapshot = scanner._load_findings_snapshot(7)
-
-        assert len(snapshot) == 1
-        assert snapshot[0]["id"] == 1
-        assert snapshot[0]["title"] == "SQL injection in /search"
-        assert snapshot[0]["owasp"] == "A03"
-
-        # finding_list over the loaded snapshot must surface the finding rather
-        # than the empty-list regression that returned count 0 (issue #124).
-        result = scanner._run_thinking_context_tool(
-            "finding_list",
-            {"category": "sqli"},
-            pages_snapshot=[],
-            findings_snapshot=snapshot,
-            history=[],
-            run_id=7,
         )
-        assert result["count"] == 1
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+        # A finding for a different run must not leak in.
+        session.add(
+            ScanFinding(
+                test_run_id=99,
+                owasp_category="A01",
+                severity="low",
+                title="Other run finding",
+                affected_url="https://other.local",
+                description="unrelated",
+            )
+        )
+        session.commit()
+
+    snapshot = scanner._load_findings_snapshot(7)
+
+    assert len(snapshot) == 1
+    assert snapshot[0]["id"] == 1
+    assert snapshot[0]["title"] == "SQL injection in /search"
+    assert snapshot[0]["owasp"] == "A03"
+
+    # finding_list over the loaded snapshot must surface the finding rather
+    # than the empty-list regression that returned count 0 (issue #124).
+    result = scanner._run_thinking_context_tool(
+        "finding_list",
+        {"category": "sqli"},
+        pages_snapshot=[],
+        findings_snapshot=snapshot,
+        history=[],
+        run_id=7,
+    )
+    assert result["count"] == 1
 
 
 def _finding_list(args, snapshot):
@@ -620,43 +583,30 @@ def test_burp_investigation_candidate_detects_additional_active_scan_classes():
         assert candidate.vulnerability_class == expected
 
 
-def test_dynamic_finding_can_be_saved_without_page_assignment():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+def test_dynamic_finding_can_be_saved_without_page_assignment(engine):
+    finding = scanner._finding_from_llm(
+        run_id=1,
+        page_id=None,
+        page_url="https://target.local",
+        raw={
+            "owasp_category": "A05",
+            "title": "Global security header missing",
+            "affected_url": "global application configuration",
+        },
+        result_by_url={},
+        validation_status="unvalidated",
+        validation_note=None,
     )
-    try:
-        from aespa import models as _models  # noqa: F401
 
-        SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(finding)
+        session.commit()
+        saved = session.get(ScanFinding, finding.id)
 
-        finding = scanner._finding_from_llm(
-            run_id=1,
-            page_id=None,
-            page_url="https://target.local",
-            raw={
-                "owasp_category": "A05",
-                "title": "Global security header missing",
-                "affected_url": "global application configuration",
-            },
-            result_by_url={},
-            validation_status="unvalidated",
-            validation_note=None,
-        )
-
-        with Session(engine) as session:
-            session.add(finding)
-            session.commit()
-            saved = session.get(ScanFinding, finding.id)
-
-        assert saved is not None
-        assert saved.page_id is None
-        assert saved.affected_url == "global application configuration"
-        assert saved.finding_source == "dynamic_scan"
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    assert saved is not None
+    assert saved.page_id is None
+    assert saved.affected_url == "global application configuration"
+    assert saved.finding_source == "dynamic_scan"
 
 
 def test_finding_from_llm_preserves_explicit_url_and_matching_evidence():
@@ -1018,15 +968,7 @@ def test_duplicate_finding_upgrade_does_not_downgrade_or_cross_category():
     assert existing.severity == "high"
 
 
-def test_dynamic_finding_rewrites_matching_preliminary_finding(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
-
+def test_dynamic_finding_rewrites_matching_preliminary_finding(monkeypatch, engine):
     async def normalize(_config, _existing, new):
         return [{**item, "title": "Database error in search"} for item in new]
 
@@ -1167,31 +1109,18 @@ def test_finding_from_llm_preserves_prebuilt_probe_evidence_items():
     assert finding.finding_source == "dynamic_scan"
 
 
-def test_dynamic_page_assignment_returns_none_for_non_page_finding():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    try:
-        from aespa import models as _models  # noqa: F401
+def test_dynamic_page_assignment_returns_none_for_non_page_finding(engine):
+    with Session(engine) as session:
+        page_id = scanner._dynamic_finding_page_id(
+            session,
+            run_id=1,
+            affected_url="global application configuration",
+            base_url="https://target.local",
+            pages_snapshot=[],
+            first_page_id=None,
+        )
 
-        SQLModel.metadata.create_all(engine)
-
-        with Session(engine) as session:
-            page_id = scanner._dynamic_finding_page_id(
-                session,
-                run_id=1,
-                affected_url="global application configuration",
-                base_url="https://target.local",
-                pages_snapshot=[],
-                first_page_id=None,
-            )
-
-        assert page_id is None
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    assert page_id is None
 
 
 def test_cvss_score_calculator():
@@ -1316,71 +1245,57 @@ def test_calibrate_finding_rating():
     assert severity == "high"
 
 
-def test_calibrate_all_findings_for_run():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    try:
-        from aespa import models as _models  # noqa: F401
+def test_calibrate_all_findings_for_run(engine):
+    with Session(engine) as session:
+        # Add one CORS finding (should calibrate to Low) and one SQLi finding (should remain High)
+        cors = ScanFinding(
+            test_run_id=1,
+            owasp_category="A05",
+            severity="medium",
+            title="CORS arbitrary Origin reflection",
+            description="",
+            cvss_score=6.5,
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+        )
+        sqli = ScanFinding(
+            test_run_id=1,
+            owasp_category="A03",
+            severity="high",
+            title="SQL injection error disclosure",
+            description="",
+            cvss_score=7.1,
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
+        )
+        explicit = ScanFinding(
+            test_run_id=1,
+            owasp_category="A01",
+            severity="high",
+            title="Authorization bypass",
+            description="",
+            cvss_score=0.0,
+            cvss_vector="",
+        )
+        session.add(cors)
+        session.add(sqli)
+        session.add(explicit)
+        session.commit()
 
-        SQLModel.metadata.create_all(engine)
+    # Monkeypatch get_engine to use our memory db
+    from unittest import mock
 
-        with Session(engine) as session:
-            # Add one CORS finding (should calibrate to Low) and one SQLi finding (should remain High)
-            cors = ScanFinding(
-                test_run_id=1,
-                owasp_category="A05",
-                severity="medium",
-                title="CORS arbitrary Origin reflection",
-                description="",
-                cvss_score=6.5,
-                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
-            )
-            sqli = ScanFinding(
-                test_run_id=1,
-                owasp_category="A03",
-                severity="high",
-                title="SQL injection error disclosure",
-                description="",
-                cvss_score=7.1,
-                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
-            )
-            explicit = ScanFinding(
-                test_run_id=1,
-                owasp_category="A01",
-                severity="high",
-                title="Authorization bypass",
-                description="",
-                cvss_score=0.0,
-                cvss_vector="",
-            )
-            session.add(cors)
-            session.add(sqli)
-            session.add(explicit)
-            session.commit()
+    with mock.patch("aespa.services.scanner.get_engine", return_value=engine):
+        scanner.calibrate_all_findings_for_run(1)
 
-        # Monkeypatch get_engine to use our memory db
-        from unittest import mock
-
-        with mock.patch("aespa.services.scanner.get_engine", return_value=engine):
-            scanner.calibrate_all_findings_for_run(1)
-
-        with Session(engine) as session:
-            findings = session.exec(select(ScanFinding)).all()
-            for f in findings:
-                if "CORS" in f.title:
-                    assert f.severity == "low"
-                    assert f.cvss_score == 3.1
-                    assert "AC:H" in f.cvss_vector
-                elif f.title == "Authorization bypass":
-                    assert f.severity == "high"
-                    assert f.cvss_score == 8.0
-                else:
-                    assert f.severity == "high"
-                    assert f.cvss_score == 7.1
-
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    with Session(engine) as session:
+        findings = session.exec(select(ScanFinding)).all()
+        for f in findings:
+            if "CORS" in f.title:
+                assert f.severity == "low"
+                assert f.cvss_score == 3.1
+                assert "AC:H" in f.cvss_vector
+            elif f.title == "Authorization bypass":
+                assert f.severity == "high"
+                assert f.cvss_score == 8.0
+            else:
+                assert f.severity == "high"
+                assert f.cvss_score == 7.1

@@ -1,5 +1,7 @@
 """Tests for Phase 1 recon summary: build_recon_summary and context builder fallback."""
 
+import json
+
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -498,6 +500,45 @@ def test_thinking_context_uses_summary_when_present(monkeypatch):
     assert "Recon brief" in context
     assert "Actionable route sample" in context
     assert "priority order" not in context
+    assert "Grouped pages" not in context
+
+
+def test_thinking_context_lists_grouped_pages(monkeypatch):
+    engine = _make_engine()
+    monkeypatch.setattr(recon_summary_svc, "get_engine", lambda: engine)
+
+    import aespa.services.scanner as scanner_mod
+
+    monkeypatch.setattr(scanner_mod, "get_engine", lambda: engine)
+
+    with Session(engine) as s:
+        run = _seed_run(s, engine)
+        run.route_groups_json = json.dumps(
+            [
+                {
+                    "route_pattern": "https://target.local/products/{value}",
+                    "label": "Product pages",
+                    "links_seen": 4000,
+                    "example_urls": ["https://target.local/products/a"],
+                    "pages_sampled": 5,
+                }
+            ]
+        )
+        s.add(run)
+        run_id = run.id
+        s.commit()
+
+    recon_summary_svc.build_recon_summary(run_id)
+
+    context = scanner._build_thinking_context_from_recon_summary(
+        run_id,
+        base_url="https://target.local",
+        findings_snapshot=[],
+    )
+    assert (
+        "https://target.local/products/{value}: 4000 links seen, "
+        "5 example pages visited" in context
+    )
 
 
 def test_thinking_context_includes_confirmed_findings(monkeypatch):
