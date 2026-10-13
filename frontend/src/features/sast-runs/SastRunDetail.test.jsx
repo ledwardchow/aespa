@@ -44,7 +44,7 @@ beforeEach(() => {
   sastRunsApi.getSastAgentLog.mockResolvedValue([]);
   sastRunsApi.getSastLeads.mockResolvedValue([]);
   sastRunsApi.getSastTokenUsage.mockResolvedValue({});
-  sastRunsApi.getSastHandoffTargets.mockResolvedValue([]);
+  sastRunsApi.getSastLiveTargets.mockResolvedValue([]);
   settingsApi.listLLMProfiles.mockResolvedValue([]);
 });
 
@@ -80,7 +80,7 @@ test("shows scanner events without reloading every SAST endpoint", async () => {
   expect(sastRunsApi.getSastAgentLog).toHaveBeenCalledTimes(1);
   expect(sastRunsApi.getSastLeads).toHaveBeenCalledTimes(1);
   expect(sastRunsApi.getSastTokenUsage).toHaveBeenCalledTimes(1);
-  expect(sastRunsApi.getSastHandoffTargets).toHaveBeenCalledTimes(1);
+  expect(sastRunsApi.getSastLiveTargets).toHaveBeenCalledTimes(1);
 });
 
 test("shows token usage on the coverage tab", async () => {

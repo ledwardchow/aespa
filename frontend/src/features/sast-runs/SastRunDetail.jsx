@@ -127,7 +127,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           sastRunsApi.getSastAgentLog(runId),
           sastRunsApi.getSastLeads(runId),
           sastRunsApi.getSastTokenUsage(runId),
-          sastRunsApi.getSastHandoffTargets(runId),
+          sastRunsApi.getSastLiveTargets(runId),
         ]);
       setRun(runData);
       setScanRunning(status.running);
@@ -314,13 +314,11 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     setError(null);
     setNotice(null);
     try {
-      const result = await sastRunsApi.handoffSastLead(runId, lead.id, {
-        run_type: target.run_type,
-        run_id: target.run_id,
+      const result = await sastRunsApi.createSastLiveTestRun(runId, lead.id, {
+        target_type: target.target_type,
+        target_id: target.target_id,
       });
-      setNotice(
-        `Lead ${lead.reference || `#${lead.id}`} queued as ${result.lead_reference || `#${result.lead_id}`} in ${target.run_type.toUpperCase()} run #${target.run_id}.`,
-      );
+      nav(runHref({ runKind: result.run_type, runId: result.run_id }));
     } catch (err) {
       setError(err.message);
     } finally {

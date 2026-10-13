@@ -15,6 +15,11 @@ export const getSastAnalysis = (id) => req(`/api/sast-runs/${id}/analysis`);
 
 export const getSastHandoffTargets = (id) => req(`/api/sast-runs/${id}/handoff-targets`);
 
+export const getSastLiveTargets = (id) => req(`/api/sast-runs/${id}/live-targets`);
+
+export const createSastLiveTestRun = (id, lid, body) =>
+  req(`/api/sast-runs/${id}/leads/${lid}/live-test-runs`, { method: "POST", body });
+
 export const handoffSastLead = (id, lid, b) =>
   req(`/api/sast-runs/${id}/leads/${lid}/handoff`, { method: "POST", body: b });
 

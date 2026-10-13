@@ -120,6 +120,28 @@ test("re-validates the selected inconclusive finding", () => {
   expect(onRevalidate).toHaveBeenCalledWith(lead);
 });
 
+test("creates a live test run from a selected site or API collection", () => {
+  const onQueue = vi.fn();
+  const lead = {
+    id: 8,
+    title: "Confirmed issue",
+    validation_status: "confirmed",
+    reportable: true,
+  };
+  const targets = [
+    { target_type: "site", target_id: 2, name: "Store", url: "https://store.test" },
+    { target_type: "api_collection", target_id: 3, name: "Orders API", url: "https://api.test" },
+  ];
+  render(<LeadEvidence lead={lead} targets={targets} onQueue={onQueue} queueBusy={false} />);
+
+  const selector = screen.getByRole("combobox", { name: "Application for live testing" });
+  expect(within(selector).getByRole("group", { name: "Sites" })).toBeTruthy();
+  expect(within(selector).getByRole("group", { name: "API collections" })).toBeTruthy();
+  fireEvent.change(selector, { target: { value: "api_collection:3" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create test run" }));
+  expect(onQueue).toHaveBeenCalledWith(lead, targets[1]);
+});
+
 test("shows a re-validation action beside each inconclusive finding", () => {
   const onRevalidate = vi.fn();
   const onSelect = vi.fn();
