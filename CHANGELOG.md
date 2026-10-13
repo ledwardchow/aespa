@@ -48,6 +48,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **GitHub Copilot CLI path**: The provider now respects `COPILOT_CLI_PATH` and automatically finds `copilot` on `PATH` for requests and sign-in, using the installed CLI instead of attempting an unnecessary download.
+
 - **Finding order**: SAST, campaign, and reporting debug findings handle severity labels with extra spacing or alternate wording and keep findings of the same severity in a consistent title order.
 
 - **Model order**: Reversing the provider sort now also reverses model name order within each provider.

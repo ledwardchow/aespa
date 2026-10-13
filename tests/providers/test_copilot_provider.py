@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -227,6 +228,67 @@ def test_explicit_token_client_is_isolated_and_filters_environment(monkeypatch):
     assert client.kwargs["env"]["SYSTEMROOT"] == r"C:\Windows"
     assert client.kwargs["env"]["HTTPS_PROXY"] == "http://proxy.local:8080"
     assert not copilot_provider.Path(base_directory).exists()
+
+
+@pytest.mark.parametrize("api_key", [None, "explicit-user-token"])
+@pytest.mark.parametrize("cli_source", ["configured", "path", "sdk"])
+def test_cli_resolution(monkeypatch, tmp_path, api_key, cli_source):
+    from copilot import CopilotClient, _cli_download
+
+    cli_path = tmp_path / "copilot"
+    cli_path.write_text("#!/bin/sh\nexit 0\n")
+    cli_path.chmod(0o755)
+    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    if cli_source == "configured":
+        configured_path = tmp_path / "custom-copilot"
+        configured_path.write_text("#!/bin/sh\nexit 0\n")
+        configured_path.chmod(0o755)
+        cli_path = configured_path
+        monkeypatch.setenv("COPILOT_CLI_PATH", str(cli_path))
+    elif cli_source == "sdk":
+        cli_path.unlink()
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot-home"))
+    monkeypatch.setattr(copilot_provider, "_clients", {})
+    download = (
+        Mock(return_value=str(cli_path))
+        if cli_source == "sdk"
+        else Mock(side_effect=AssertionError("Installed CLI must skip downloads"))
+    )
+    monkeypatch.setattr(_cli_download, "ensure_runtime_wrapper", download)
+    monkeypatch.setattr(CopilotClient, "start", AsyncMock())
+    monkeypatch.setattr(CopilotClient, "stop", AsyncMock())
+    config = _config()
+    config.api_key = api_key
+
+    async def exercise():
+        try:
+            client = await copilot_provider._get_client(config, None)
+            # Keep the real SDK constructor so this checks runtime selection,
+            # not just the environment passed to a fake client.
+            assert client._connection.path == str(cli_path)
+            if cli_source == "sdk":
+                download.assert_called_once_with()
+            else:
+                download.assert_not_called()
+        finally:
+            await copilot_provider.close_clients()
+
+    asyncio.run(exercise())
+
+
+def test_login_uses_cli_on_path(monkeypatch, tmp_path):
+    cli_path = tmp_path / "copilot"
+    cli_path.write_text("#!/bin/sh\nexit 0\n")
+    cli_path.chmod(0o755)
+    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert copilot_provider._copilot_login_command() == [
+        str(cli_path),
+        "login",
+        "--device-code",
+    ]
 
 
 def test_logged_in_client_uses_copilot_home_for_default_account(monkeypatch, tmp_path):
