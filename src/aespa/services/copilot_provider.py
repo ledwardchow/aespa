@@ -106,6 +106,7 @@ _COPILOT_ENV_ALLOWLIST = (
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS",
+    "COPILOT_CLI_PATH",
     "COPILOT_GITHUB_TOKEN",
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -148,10 +149,15 @@ def list_accounts() -> list[dict[str, Any]]:
     return accounts
 
 
+def _installed_copilot_cli() -> str | None:
+    """Prefer an explicit CLI path, then an executable on the process PATH."""
+    configured = (os.environ.get("COPILOT_CLI_PATH") or "").strip()
+    return str(Path(configured).expanduser()) if configured else shutil.which("copilot")
+
+
 def _copilot_login_command() -> list[str]:
     """Resolve the CLI bundled with the SDK for its supported login command."""
-    configured = (os.environ.get("COPILOT_CLI_PATH") or "").strip()
-    cli_path: str | None = configured or None
+    cli_path = _installed_copilot_cli()
     if cli_path is None:
         try:
             from copilot.client import _get_or_download_cli
@@ -431,6 +437,9 @@ async def _get_client(config: LLMConfig, proxy_url: str | None) -> Any:
         from aespa.services.llm_network import child_network_env
 
         child_env = child_network_env(child_env, proxy_url)
+        cli_path = _installed_copilot_cli()
+        if cli_path:
+            child_env["COPILOT_CLI_PATH"] = cli_path
 
         client = CopilotClient(
             mode=client_mode,
