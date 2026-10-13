@@ -44,6 +44,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Resuming SAST runs from a repository or extension source**: A failed or cancelled SAST run whose source code was already downloaded now offers the normal resume and start actions. Previously, AESPA always showed **Resume source preparation** for these runs, even when the source was ready.
+
 - **Error and status messages**: Errors from actions such as saving, deleting or importing now appear in the lower-right corner of the window and can be dismissed, instead of staying at the top of the page and pushing its content down. This applies across sites, systems, campaigns, API collections, all run types, Benchmark Lab, Settings and Extensions. Confirmations such as imported issues, imported settings and purged data appear the same way and close on their own, replacing browser pop-ups. Form errors now appear next to the Save button. Pages that could not load still show their error in place.
 
 - **Expired ChatGPT sign-in**: When ChatGPT rejects a saved sign-in, AESPA now stops the affected web, API, or SAST run, marks it failed, and shows a message asking you to sign in again in LLM settings. Previously, every request in the run kept failing with a raw `400 Bad Request` error. The account now shows as signed out, and AESPA no longer sends further requests with the rejected sign-in. A temporary ChatGPT outage still shows an error but keeps your sign-in.
