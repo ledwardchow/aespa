@@ -89,7 +89,6 @@ export function ScanProfileForm({ mode, profile, models, onSaved, onCancel }) {
   ));
   return (
     <>
-      {error && <div className="alert error">{error}</div>}
       <form className="card" onSubmit={onSubmit}>
         <div className="form-section-title">Profile</div>
         <div className="field">
@@ -213,6 +212,11 @@ export function ScanProfileForm({ mode, profile, models, onSaved, onCancel }) {
               </span>
             )}
           </div>
+          {error && (
+            <div className="alert error form-error" role="alert">
+              {error}
+            </div>
+          )}
           <div className="row">
             {onCancel && (
               <button type="button" className="btn ghost" onClick={onCancel}>

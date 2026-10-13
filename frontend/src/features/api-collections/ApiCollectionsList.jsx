@@ -6,6 +6,7 @@ import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function ApiCollectionsList() {
   const [collections, setCollections] = useState(null);
@@ -135,16 +136,7 @@ export function ApiCollectionsList() {
         }
       />
       <div className="content scroll-content">
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 16,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <PageError error={error} inline={!collections} onDismiss={() => setError(null)} />
         {collections === null && <div className="subtle">Loading…</div>}
         {collections !== null && collections.length === 0 && (
           <EmptyState

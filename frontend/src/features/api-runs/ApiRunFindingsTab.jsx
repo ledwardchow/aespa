@@ -14,11 +14,13 @@ import {
 import { downloadTextFile } from "../../shared/lib/download.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
+import { Notice, PageError } from "../../shared/ui/Notice.jsx";
 
 export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }) {
   const [findings, setFindings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [message, setMessage] = useState(null);
   const [expanded, setExpanded] = useState(new Set());
   const [clearBusy, setClearBusy] = useState(false);
   const [dedupeBusy, setDedupeBusy] = useState(false);
@@ -65,7 +67,7 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
       if (!imported.length) throw new Error("No issues found in the selected file.");
       const result = await apiRunsApi.importApiFindings(runId, imported);
       setFindings(await apiRunsApi.getApiFindings(runId));
-      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+      setMessage(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
     } catch (e) {
       setError(e.message);
     }
@@ -235,15 +237,11 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
         padding: "16px 24px",
       }}
     >
-      {error && (
-        <div
-          className="alert error"
-          style={{
-            marginBottom: 12,
-          }}
-        >
-          {error}
-        </div>
+      <PageError error={error} onDismiss={() => setError(null)} />
+      {message && (
+        <Notice variant="success" onDismiss={() => setMessage(null)}>
+          {message}
+        </Notice>
       )}
       <div
         style={{

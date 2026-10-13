@@ -54,7 +54,6 @@ export function ApiTestRunForm({ collectionId }) {
         }
       />
       <div className="content scroll-content">
-        {error && <div className="alert error">{error}</div>}
         <form
           className="card"
           style={{
@@ -112,6 +111,11 @@ export function ApiTestRunForm({ collectionId }) {
               <option value="sast_validate">SAST Validate — test only imported SAST leads</option>
             </select>
           </div>
+          {error && (
+            <div className="alert error form-error" role="alert">
+              {error}
+            </div>
+          )}
           <div
             className="row spread"
             style={{

@@ -9,6 +9,7 @@ import { downloadTextFile } from "../lib/download.js";
 import { usePolling } from "../hooks/usePolling.js";
 import { SastLeadDetails } from "../ui/SastLeadDetails.jsx";
 import { LeadReferenceLink } from "../ui/FindingReferenceLink.jsx";
+import { Notice, PageError } from "../ui/Notice.jsx";
 
 export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initialLeadRef }) {
   const isApi = runKind === "api";
@@ -175,25 +176,11 @@ export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initia
           )}
         </div>
       </div>
-      {error && (
-        <div
-          className="alert error"
-          style={{
-            margin: "8px 16px",
-          }}
-        >
-          {error}
-        </div>
-      )}
+      <PageError error={error} onDismiss={() => setError(null)} />
       {msg && (
-        <div
-          className="subtle"
-          style={{
-            margin: "8px 16px",
-          }}
-        >
+        <Notice variant="success" onDismiss={() => setMsg(null)}>
           {msg}
-        </div>
+        </Notice>
       )}
       {leads.length === 0 ? (
         <div

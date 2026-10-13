@@ -8,6 +8,7 @@ import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { Notice, PageError } from "../../shared/ui/Notice.jsx";
 
 const API_COLLECTION_TABS = [
   {
@@ -33,6 +34,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
   const [apiRuns, setApiRuns] = useState(null);
   const [credentials, setCredentials] = useState(null);
   const [error, setError] = useState(null);
+  const [message, setMessage] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [assessing, setAssessing] = useState(false);
   const [purging, setPurging] = useState(false);
@@ -141,7 +143,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
       setEndpoints([]);
       setReadiness(null);
       setCredentials([]);
-      alert(
+      setMessage(
         `Purged: ${result.endpoints_deleted} endpoints and ${result.credentials_deleted} credentials removed.`,
       );
     } catch (e) {
@@ -281,7 +283,12 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
         ))}
       </div>
       <div className="content scroll-content stack">
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!collection} onDismiss={() => setError(null)} />
+        {message && (
+          <Notice variant="success" onDismiss={() => setMessage(null)}>
+            {message}
+          </Notice>
+        )}
         {collection && (
           <>
             {activeTab === "endpoints" && (

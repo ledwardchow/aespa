@@ -11,6 +11,7 @@ import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { usePolling } from "../../shared/hooks/usePolling.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function SastRunsListPage() {
   const [runs, setRuns] = useState(null);
@@ -146,16 +147,7 @@ export function SastRunsListPage() {
         }
       />
       <div className="content scroll-content">
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 16,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <PageError error={error} inline={!runs} onDismiss={() => setError(null)} />
         {runs === null && <div className="subtle">Loading…</div>}
         {runs !== null && runs.length === 0 && (
           <EmptyState

@@ -258,9 +258,6 @@
 .sast-run-content.sast-run-content--activity {
   padding: 0;
 }
-.sast-inline-notice {
-  margin-bottom: 10px;
-}
 .sast-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

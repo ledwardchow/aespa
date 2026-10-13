@@ -5,6 +5,7 @@ import { fmtDate } from "../../shared/lib/dates.js";
 import { DebugFindingsTable } from "./DebugFindingsTable.jsx";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function ReportingDebugPage() {
   const [tab, setTab] = useState("prompt");
@@ -248,7 +249,7 @@ export function ReportingDebugPage() {
             Debug Findings
           </button>
         </div>
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} onDismiss={() => setError(null)} />
 
         {tab === "prompt" && (
           <div className="card">

@@ -2,6 +2,7 @@ import * as apiRunsApi from "../../shared/api/apiRuns.js";
 import { useState, useCallback, useEffect, useRef } from "react";
 
 import { usePolling } from "../../shared/hooks/usePolling.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const LOG_PAGE_SIZE = 200;
 
@@ -100,16 +101,7 @@ export function ApiRunLogTab({ runId, scanRunning }) {
           </button>
         )}
       </div>
-      {error && (
-        <div
-          className="alert error"
-          style={{
-            margin: "0 16px 8px",
-          }}
-        >
-          {error}
-        </div>
-      )}
+      <PageError error={error} onDismiss={() => setError(null)} />
       {log.length === 0 ? (
         <div
           className="subtle"

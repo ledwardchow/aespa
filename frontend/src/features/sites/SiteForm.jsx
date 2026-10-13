@@ -194,7 +194,6 @@ export function SiteForm({ siteId }) {
         {loading && <div className="subtle">Loading…</div>}
         {!loading && (
           <form className="card" onSubmit={onSubmit}>
-            {error && <div className="alert error">{error}</div>}
             <div className="form-section-title">Site</div>
             <div className="field">
               <label>Name</label>
@@ -550,6 +549,11 @@ export function SiteForm({ siteId }) {
               </>
             )}
             <div className="divider" />
+            {error && (
+              <div className="alert error form-error" role="alert">
+                {error}
+              </div>
+            )}
             <div className="row spread">
               <button
                 type="button"

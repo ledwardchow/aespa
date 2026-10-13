@@ -23,9 +23,7 @@ test("shows anonymous crawl progress with account progress", () => {
   expect(screen.queryByText("No login")).toBeNull();
   expect(screen.getByText("Login successful")).toBeTruthy();
   expect(document.querySelector(".crawl-user-pages")).toBeNull();
-  expect(
-    screen.getByRole("button", { name: /User crawl progress/ }).getAttribute("aria-expanded"),
-  ).toBe("true");
+  expect(screen.getByRole("button", { name: /Users/ }).getAttribute("aria-expanded")).toBe("true");
 });
 
 test("shows failed login from the saved activity log", () => {

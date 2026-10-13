@@ -79,7 +79,6 @@ export function ApiCollectionForm({ collectionId }) {
         {loading && <div className="subtle">Loading…</div>}
         {!loading && (
           <form className="card" onSubmit={onSubmit}>
-            {error && <div className="alert error">{error}</div>}
             <div className="form-section-title">API collection</div>
             <div className="field">
               <label>Name</label>
@@ -122,6 +121,11 @@ export function ApiCollectionForm({ collectionId }) {
               />
             </div>
             <div className="divider" />
+            {error && (
+              <div className="alert error form-error" role="alert">
+                {error}
+              </div>
+            )}
             <div className="row spread">
               <button
                 type="button"

@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function fmtBytes(n) {
   if (n === null || n === undefined) return "—";
@@ -171,7 +172,7 @@ export function ApiFilesManager({ collectionId }) {
         }
       />
       <div className="content scroll-content stack">
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!collection} onDismiss={() => setError(null)} />
         <div
           className={"upload-dropzone" + (dragOver ? " dragover" : "")}
           onDragOver={(e) => {

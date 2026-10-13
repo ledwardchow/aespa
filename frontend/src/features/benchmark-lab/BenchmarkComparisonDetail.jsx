@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import { Crumb, PageHeader, Sep } from "../../shared/ui/PageHeader.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const parseObject = (value) => {
   if (value && typeof value === "object") return value;
@@ -62,7 +63,7 @@ export function BenchmarkComparisonDetail({ comparisonId }) {
         }
       />
       <div className="content scroll-content benchmark-page">
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} onDismiss={() => setError(null)} />
         <div className="benchmark-meta">
           <StatusBadge status={comparison.status} />
           <span>{metrics.eligible_count || 0} eligible runs</span>

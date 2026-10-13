@@ -4,6 +4,7 @@ import { ScannerPolicyFields } from "./ScannerPolicyFields.jsx";
 
 import { policyToForm, policyPayload, SCAN_MODE_OPTIONS } from "../../shared/runs/policy.js";
 import { IconCheck } from "../../shared/ui/Icons.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const SCAN_MODE_DETAILS = {
   passive: "Read-only requests for low-impact reconnaissance.",
@@ -297,7 +298,7 @@ function GlobalHttpHeadersSettings() {
         Add headers to every request made by the scanner and crawler (Playwright and HTTPX). These
         do not affect requests sent to LLMs.
       </div>
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={hdrCfg === null} onDismiss={() => setError(null)} />
       {hdrCfg !== null && (
         <form onSubmit={saveHeader}>
           <div className="table-wrap global-header-table-wrap">
@@ -449,7 +450,7 @@ export function PolicySettings({ Fields }) {
   return (
     <>
       {!form && !error && <div className="subtle">Loading…</div>}
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={!form} onDismiss={() => setError(null)} />
       {form && (
         <form className="card" onSubmit={onSubmit}>
           <Fields form={form} upd={upd} />

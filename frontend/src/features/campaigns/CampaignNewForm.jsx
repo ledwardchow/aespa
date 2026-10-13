@@ -6,6 +6,7 @@ import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { useCampaignWizardData } from "./useCampaignWizardData.js";
 import { formatBytes, shortHash } from "../../shared/runs/campaignPresentation.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 // ── CampaignNewForm ──────────────────────────────────────────────────────────
 // A short guided setup rather than one giant form: pick snapshots, pick
@@ -172,11 +173,7 @@ export function CampaignNewForm({ systemId }) {
         }
       />
       <div className="content scroll-content">
-        {error && (
-          <div className="alert error" style={{ marginBottom: 16 }}>
-            {error}
-          </div>
-        )}
+        <PageError error={error} onDismiss={() => setError(null)} />
         {step === "configure" && (
           <div
             className="card"

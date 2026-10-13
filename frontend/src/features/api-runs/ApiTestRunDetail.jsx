@@ -13,6 +13,7 @@ import { ApiRunSessionsTab } from "./ApiRunSessionsTab.jsx";
 import { ApiRunTrafficTab } from "./ApiRunTrafficTab.jsx";
 import { ApiRunEndpointsTab } from "./ApiRunEndpointsTab.jsx";
 import { ApiRunWorkProgramTab } from "./ApiRunWorkProgramTab.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const API_RUN_TABS = [
   {
@@ -287,7 +288,7 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef, initial
           "content no-padding" + (tab === "status" ? " flex-fill-noscroll" : " scroll-content")
         }
       >
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} onDismiss={() => setError(null)} />
         {run?.status === "failed" && run.error_message ? (
           <div className="alert error">{run.error_message}</div>
         ) : null}

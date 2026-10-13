@@ -5,6 +5,7 @@ import * as settingsApi from "../../shared/api/settings.js";
 import * as sitesApi from "../../shared/api/sites.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 
+import { Notice } from "../../shared/ui/Notice.jsx";
 import { ScopeHostsPanel } from "../../shared/runs/ScopeHostsPanel.jsx";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
@@ -495,16 +496,7 @@ function TestRunContent({
           minHeight: 0,
         }}
       >
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 12,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        {error && <Notice onDismiss={() => setError(null)}>{error}</Notice>}
 
         <GuidedLoginNotices
           runId={runId}
@@ -587,19 +579,19 @@ function TestRunContent({
 
         {activeTab === "sitemap" && run && (
           <>
-            <WebRunSitemapMeta
-              run={run}
-              graph={graph}
-              crawlUsername={crawlUsername}
-              profiles={runProfiles}
-              onRunUpdate={setRun}
-              onError={setError}
-              crawlCredentialId={crawlCredentialId}
-              onCrawlCredentialChange={setCrawlCredentialId}
-            />
-            {activeTab === "sitemap" && run && (
+            <div className="sitemap-toolbar">
+              <WebRunSitemapMeta
+                run={run}
+                graph={graph}
+                crawlUsername={crawlUsername}
+                profiles={runProfiles}
+                onRunUpdate={setRun}
+                onError={setError}
+                crawlCredentialId={crawlCredentialId}
+                onCrawlCredentialChange={setCrawlCredentialId}
+              />
               <ScopeHostsPanel siteId={run.site_id} hosts={scopeHosts} onChange={setScopeHosts} />
-            )}
+            </div>
             <WebRunCrawlProgress
               run={run}
               crawlerTask={crawlerTask}

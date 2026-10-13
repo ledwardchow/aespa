@@ -64,7 +64,6 @@ export function TestRunForm({ siteId }) {
       />
       <div className="content scroll-content">
         <form className="card" onSubmit={onSubmit}>
-          {error && <div className="alert error">{error}</div>}
           <div className="form-section-title">Run Configuration</div>
           <div className="field">
             <label>
@@ -182,6 +181,11 @@ export function TestRunForm({ siteId }) {
               ))}
             </select>
           </div>
+          {error && (
+            <div className="alert error form-error" role="alert">
+              {error}
+            </div>
+          )}
           <div className="row spread">
             <button type="button" className="btn ghost" onClick={() => nav(`#/sites/${siteId}`)}>
               Cancel

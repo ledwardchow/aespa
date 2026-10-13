@@ -14,6 +14,7 @@ import { BenchmarkResultComment } from "./BenchmarkResultComment.jsx";
 
 import styles from "./BenchmarkSettings.module.css";
 import { scanType } from "./scanPresentation.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const EMPTY = { sites: [], apis: [], sast_runs: [] };
 const modelLabel = (model) => {
@@ -487,7 +488,7 @@ export function BenchmarkLabPage({ initialResultId }) {
           }
         />
         <div className="content scroll-content benchmark-page benchmark-simple">
-          {error && <div className="alert error">{error}</div>}
+          <PageError error={error} inline={!loaded} onDismiss={() => setError(null)} />
           {loaded && !error && !selectedResult && <p className="subtle">Analysis not found.</p>}
           {!loaded && <p className="subtle">Loading analysis...</p>}
           {resultDetails}
@@ -578,7 +579,7 @@ export function BenchmarkLabPage({ initialResultId }) {
             <GroundTruthDatasets datasets={datasets} targets={targets} onChange={load} />
           </div>
         )}
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!loaded} onDismiss={() => setError(null)} />
         {tab === "site" && siteTab !== "summary" && siteSelector}
         {tab === "site" && siteTab === "summary" && (
           <SiteSummary

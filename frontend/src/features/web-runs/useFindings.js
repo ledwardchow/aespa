@@ -56,6 +56,7 @@ export function useFindings(
     setValidateBusy,
   } = useFindingsData();
   const [dedupeBusy, setDedupeBusy] = useState(false);
+  const [importMessage, setImportMessage] = useState(null);
   const [expandedFinding, setExpandedFinding] = useState(null);
   const [expandedGroups, setExpandedGroups] = useState(new Set(["__unconfirmed__"]));
   const toggleGroup = (title) =>
@@ -220,7 +221,7 @@ export function useFindings(
       const [r, g] = await Promise.all([webRunsApi.getRun(runId), webRunsApi.getGraph(runId)]);
       setRun(r);
       setGraph(g);
-      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+      setImportMessage(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
     } catch (err) {
       setError(err.message);
     }
@@ -300,6 +301,8 @@ export function useFindings(
     onDeduplicateFindings,
     onExportFindingsMarkdown,
     onImportFindingsFile,
+    importMessage,
+    clearImportMessage: () => setImportMessage(null),
     onValidateFinding,
     onEditFinding,
     onStopValidation,
