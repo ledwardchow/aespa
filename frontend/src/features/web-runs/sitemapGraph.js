@@ -225,7 +225,11 @@ function groupPageRoutes(pageNodes, pageDisplay, routeGroups = []) {
       group.isCrawlRouteGroup = true;
       group.routeGroup = sampledRoute;
       group.title = sampledRoute.label;
-      group.context = `${sampledRoute.links_seen} links seen; ${sampledRoute.pages_sampled} example pages visited.`;
+      group.context =
+        `${sampledRoute.links_seen} links seen; ${sampledRoute.pages_sampled} example pages visited` +
+        (sampledRoute.examples_different
+          ? `; ${sampledRoute.examples_different} looked different.`
+          : ".");
     }
     groups.push(group);
     for (const member of members) nodeToGroup.set(member.id, group.id);

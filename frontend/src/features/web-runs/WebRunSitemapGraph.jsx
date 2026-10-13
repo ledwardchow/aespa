@@ -16,7 +16,7 @@ import {
 import { useSelectedSitemapPage } from "./useSelectedSitemapPage.js";
 import { useSitemapGraph } from "./useSitemapGraph.js";
 import { WebRunUserCrawlProgress } from "./WebRunCrawlProgress.jsx";
-import { RouteGroupsPanel } from "./RouteGroupsPanel.jsx";
+import { RouteGroupsSummary } from "./RouteGroupsPanel.jsx";
 import { WebRunSitemapTab } from "./WebRunSitemapTab.jsx";
 import { buildSitemapDisplayGraph } from "./sitemapGraph.js";
 
@@ -67,6 +67,13 @@ export function WebRunSitemapGraph({
     [effectiveApiDisplay, excludedExtensions, graph, pageDisplay, run?.route_groups],
   );
   const displayStats = filteredGraph?.displayStats;
+  const selectRouteExample = (url) => {
+    const nodes = filteredGraph?.nodes || [];
+    const node =
+      nodes.find((candidate) => candidate.url === url) ||
+      nodes.find((candidate) => (candidate.memberNodes || []).some((m) => m.url === url));
+    if (node) setSelectedNode(node);
+  };
   const [searchTerm, setSearchTerm] = useState("");
   const searchMatches = useMemo(
     () =>
@@ -168,13 +175,13 @@ export function WebRunSitemapGraph({
   return (
     <div className="graph-layout" style={{ display: active ? "flex" : "none" }}>
       <div className="sitemap-graph-main">
-        <RouteGroupsPanel groups={run?.route_groups} />
         <div className="sitemap-filter-panel">
           <WebRunUserCrawlProgress
             run={run}
             crawlerActive={crawlerActive}
             activityLog={activityLog}
           />
+          <RouteGroupsSummary groups={run?.route_groups} onSelectExample={selectRouteExample} />
           <div className="sitemap-filter-summary">
             <button
               className="btn ghost sm sitemap-filter-toggle"

@@ -5,7 +5,6 @@ import { usePolling } from "../../shared/hooks/usePolling.js";
 import { AttackSurfacePanel, CoverageGapsPanel } from "./AttackSurfacePanel.jsx";
 import { WebRunIntelligenceTab } from "./WebRunIntelligenceTab.jsx";
 import { WebRunWorkProgramTab } from "./WebRunWorkProgramTab.jsx";
-import { RouteGroupsPanel } from "./RouteGroupsPanel.jsx";
 
 export function WebRunAttackSurfaceTab({
   runId,
@@ -89,10 +88,10 @@ export function WebRunAttackSurfaceTab({
           </div>
         </div>
       ) : subTab === "attack-surface" ? (
-        <>
-          <RouteGroupsPanel groups={summary?.route_groups || run?.route_groups} />
-          <AttackSurfacePanel summary={summary} />
-        </>
+        <AttackSurfacePanel
+          summary={summary}
+          routeGroups={summary?.route_groups || run?.route_groups}
+        />
       ) : null}
       <WebRunIntelligenceTab
         runId={runId}

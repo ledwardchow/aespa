@@ -2100,6 +2100,11 @@ def _build_thinking_context_from_recon_summary(
                 + "\n".join(
                     f"  {group['route_pattern']}: {group.get('links_seen', 0)} links seen, "
                     f"{group.get('pages_sampled', 0)} example pages visited"
+                    + (
+                        f" ({group['examples_different']} looked different)"
+                        if group.get("examples_different")
+                        else ""
+                    )
                     for group in route_groups[:10]
                 )
                 + "\nTest the example pages. Do not try to visit every link in these "

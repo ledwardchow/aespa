@@ -6,7 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **Grouped page crawl**: URL crawls can sample repeated pages, such as product catalogues, instead of visiting every link. Choose **Group similar pages** when creating a run. Site Map and Attack Surface show grouped routes, link counts, and the exact pages visited, and pentests are told which pages are examples of a larger route. If the examples behave differently, or need a login, AESPA crawls those links normally. Existing URL and Interactive SPA crawls keep their current behavior.
+- **Grouped page crawl**: URL crawls can sample repeated pages, such as product catalogues, news articles and archive pages, instead of visiting every link. Choose **Group similar pages** when creating a run. AESPA recognises repeated pages from their URL shape and page layout, without site-specific settings, and visits a few examples of each route. Once a page layout is known, other sections that use it are checked from a single page. Site Map and Attack Surface show grouped routes, link counts, the exact pages visited, and any examples that looked different, and pentests are told which pages are examples of a larger route. If the examples do not match, or some need a login, AESPA crawls those links normally. Existing URL and Interactive SPA crawls keep their current behavior.
 
 - **External scanner leads**: Import SARIF 2.1.0 and structured Markdown reports into web or API runs, preview their leads before saving, and skip repeated findings. Imported reports keep their scanner, rule, location, and evidence details, and DAST treats them as unverified leads. Markdown import also accepts AESPA lead exports; a template is available in the import dialog.
 
@@ -49,6 +49,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Smaller console log database**: When console log saving is on, each LLM request and response is now stored once instead of twice. Agent conversations that continue an earlier logged call now save only the new messages, with a reference to that earlier call, instead of repeating the whole conversation on every step. Together these greatly reduce how fast the console log database grows during long scans.
 
 ### Fixes
+
+- **Expired ChatGPT sign-in**: When ChatGPT rejects a saved sign-in, AESPA now stops the affected web, API, or SAST run, marks it failed, and shows a message asking you to sign in again in LLM settings. Previously, every request in the run kept failing with a raw `400 Bad Request` error. The account now shows as signed out, and AESPA no longer sends further requests with the rejected sign-in. A temporary ChatGPT outage still shows an error but keeps your sign-in.
 
 - **Web crawl progress**: The site map now shows the unauthenticated crawl alongside saved accounts and shows whether account logins succeeded. Page counts appear in the progress summary without taking space in each user tile. Next.js page-data requests no longer fill the site map as separate API endpoints.
 

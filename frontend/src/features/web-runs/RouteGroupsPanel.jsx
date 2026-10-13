@@ -1,33 +1,139 @@
-export function RouteGroupsPanel({ groups = [] }) {
+import { useState } from "react";
+
+function routePath(url) {
+  return String(url || "").replace(/^[a-z]+:\/\/[^/]+/i, "") || "/";
+}
+
+export function routeGroupTotals(groups = []) {
+  return groups.reduce(
+    (totals, group) => ({
+      links: totals.links + (group.links_seen || 0),
+      visited: totals.visited + (group.pages_sampled || 0),
+    }),
+    { links: 0, visited: 0 },
+  );
+}
+
+export function routeGroupCountText(groups = []) {
+  const totals = routeGroupTotals(groups);
+  return (
+    `${groups.length} ${groups.length === 1 ? "route" : "routes"} · ` +
+    `${totals.links} links found · ${totals.visited} pages visited`
+  );
+}
+
+function RouteGroupTile({ group, onSelectExample }) {
+  const examples = group.example_urls || [];
+  return (
+    <div className="route-group-tile">
+      <span className="route-group-label">{group.label}</span>
+      <span className="route-group-path mono" title={group.route_pattern}>
+        {routePath(group.route_pattern)}
+      </span>
+      <span className="route-group-counts">
+        {group.links_seen} links found · {group.pages_sampled} visited
+        {group.examples_different ? (
+          <span className="route-group-different">
+            {" "}
+            · {group.examples_different} looked different
+          </span>
+        ) : null}
+      </span>
+      {examples.length ? (
+        <ul className="route-group-examples" aria-label={`Visited ${group.label.toLowerCase()}`}>
+          {examples.slice(0, 5).map((url) => (
+            <li key={url}>
+              <button
+                type="button"
+                className="route-group-example mono"
+                title={url}
+                onClick={() => onSelectExample?.(url)}
+              >
+                {routePath(url)}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/** Grouped pages row for the site map, styled like User crawl progress. */
+export function RouteGroupsSummary({ groups = [], onSelectExample }) {
+  const [open, setOpen] = useState(false);
   if (!groups.length) return null;
   return (
-    <section
-      className="route-groups-panel"
-      aria-label="Grouped pages"
-      style={{ padding: "10px 16px", borderBottom: "1px solid var(--border)" }}
-    >
-      <strong>Grouped pages</strong>
-      {groups.map((group) => (
-        <details key={group.route_pattern} style={{ marginTop: 8 }}>
-          <summary>
-            {group.label}: {group.route_pattern} - {group.links_seen} links seen,{" "}
-            {group.pages_sampled} pages visited
-          </summary>
-          <div className="subtle">
-            The count is links found during this crawl. Testing and findings use the visited example
-            URLs.
-          </div>
-          <ul>
-            {(group.example_urls || []).map((url) => (
-              <li key={url}>
-                <a href={url} target="_blank" rel="noreferrer">
-                  {url}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ))}
-    </section>
+    <div className="route-groups-panel">
+      <div className="route-groups-summary">
+        <button
+          className="btn ghost sm crawl-user-progress-toggle"
+          type="button"
+          aria-expanded={open}
+          aria-controls="route-groups-details"
+          onClick={() => setOpen((value) => !value)}
+        >
+          <span aria-hidden="true">{open ? "▾" : "▸"}</span>
+          Grouped pages
+        </button>
+        <span className="crawl-user-progress-count">{routeGroupCountText(groups)}</span>
+      </div>
+      <div id="route-groups-details" className="route-groups-details" hidden={!open}>
+        <p className="route-groups-note">
+          Only a few pages of each route were visited. Testing uses these pages.
+        </p>
+        {groups.map((group) => (
+          <RouteGroupTile
+            key={group.route_pattern}
+            group={group}
+            onSelectExample={onSelectExample}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Grouped pages table for the Attack Surface tab. */
+export function RouteGroupsTable({ groups = [] }) {
+  return (
+    <div className="surface-route-table-wrap">
+      <table className="surface-route-table">
+        <thead>
+          <tr>
+            <th>Pages</th>
+            <th>Route</th>
+            <th>Links found</th>
+            <th>Pages visited</th>
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((group) => (
+            <tr key={group.route_pattern}>
+              <td>{group.label}</td>
+              <td>
+                <span className="mono surface-route-url" title={group.route_pattern}>
+                  {routePath(group.route_pattern)}
+                </span>
+              </td>
+              <td>{group.links_seen}</td>
+              <td>
+                {group.pages_sampled}
+                {group.examples_different ? (
+                  <span className="subtle surface-route-note">
+                    {group.examples_different} looked different
+                  </span>
+                ) : null}
+                {(group.example_urls || []).map((url) => (
+                  <span key={url} className="mono subtle surface-route-note" title={url}>
+                    {routePath(url)}
+                  </span>
+                ))}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

@@ -176,6 +176,7 @@ function TestRunContent({
     setGuidedLoginErrors,
     setEntraPrompts,
     setCheckpointStatus,
+    onRunError: setError,
   });
 
   // Fetch checkpoint status whenever dynamic scan transitions to an inactive status (stopped/complete/failed/idle)

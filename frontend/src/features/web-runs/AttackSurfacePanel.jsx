@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { RouteGroupsTable, routeGroupCountText } from "./RouteGroupsPanel.jsx";
 import { truncUrl } from "../../shared/lib/urls.js";
 
 const STATUS_LABELS = {
@@ -38,9 +39,10 @@ function CoverageBadges({ statuses = {} }) {
   );
 }
 
-export function AttackSurfacePanel({ summary }) {
+export function AttackSurfacePanel({ summary, routeGroups = [] }) {
   const [expanded, setExpanded] = useState({
     meta: true,
+    groups: true,
     routes: true,
     access: false,
     signals: true,
@@ -131,6 +133,21 @@ export function AttackSurfacePanel({ summary }) {
           ))}
         </div>
       </Section>
+
+      {routeGroups.length ? (
+        <Section
+          id="groups"
+          title="Grouped pages"
+          detail={routeGroupCountText(routeGroups)}
+          expanded={expanded.groups}
+          onToggle={toggle}
+        >
+          <p className="subtle surface-section-note">
+            Only a few pages of each route were visited. Testing and coverage use these pages.
+          </p>
+          <RouteGroupsTable groups={routeGroups} />
+        </Section>
+      ) : null}
 
       <Section
         id="routes"

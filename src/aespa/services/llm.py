@@ -3285,10 +3285,16 @@ def _make_responses_client(config: LLMConfig) -> Any:
 async def _make_chatgpt_plan_client(config: LLMConfig) -> Any:
     from openai import AsyncOpenAI
 
-    from aespa.services import chatgpt_plan
+    from aespa.services import chatgpt_plan, llm_sign_in_stop
 
+    try:
+        api_key = await chatgpt_plan.access_token(getattr(config, "username", None))
+    except chatgpt_plan.ChatGPTSignInRequired as exc:
+        # Every later call would fail the same way, so stop the whole run.
+        llm_sign_in_stop.schedule_stop(_run_kind_var.get(), _run_id_var.get(), str(exc))
+        raise
     return AsyncOpenAI(
-        api_key=await chatgpt_plan.access_token(getattr(config, "username", None)),
+        api_key=api_key,
         base_url="https://api.openai.com/v1",
         max_retries=0,
         **_llm_client_kwargs(),
