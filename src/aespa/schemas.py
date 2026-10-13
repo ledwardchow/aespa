@@ -386,6 +386,7 @@ class SastRunSummary(BaseModel):
     collection_id: int | None
     document_id: int | None
     source_filename: str | None
+    source_archive_path: str | None = None
     source_provider: str = "upload"
     source_locator: str | None = None
     source_requested_ref: str | None = None
