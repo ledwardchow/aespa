@@ -4,6 +4,7 @@ import { useHints } from "./useHints.js";
 import { MultiSelectSearch } from "./MultiSelectSearch.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { IconPlus } from "../../shared/ui/Icons.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 // ── TargetsTab ───────────────────────────────────────────────────────────────
 // Attach/detach existing Sites and API Collections via a searchable
@@ -44,11 +45,7 @@ export function TargetsTab({ systemId, components, onChanged }) {
 
   return (
     <div>
-      {error && (
-        <div className="alert error" style={{ marginBottom: 16 }}>
-          {error}
-        </div>
-      )}
+      <PageError error={error} inline={!targets} onDismiss={() => setError(null)} />
       <div className="row spread" style={{ marginBottom: 14 }}>
         <div className="form-section-title" style={{ margin: 0, border: "none", padding: 0 }}>
           Live targets

@@ -4,6 +4,7 @@ import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { fmtDate } from "../../shared/lib/dates.js";
 import { formatBytes, shortHash } from "../../shared/runs/campaignPresentation.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 // ── ComponentsTab ────────────────────────────────────────────────────────────
 // Cards for each code component: role, latest snapshot filename/hash/date,
@@ -26,11 +27,7 @@ export function ComponentsTab({ systemId, onChanged }) {
 
   return (
     <div>
-      {error && (
-        <div className="alert error" style={{ marginBottom: 16 }}>
-          {error}
-        </div>
-      )}
+      <PageError error={error} inline={!components} onDismiss={() => setError(null)} />
       <div className="row spread" style={{ marginBottom: 14 }}>
         <div className="form-section-title" style={{ margin: 0, border: "none", padding: 0 }}>
           Code components

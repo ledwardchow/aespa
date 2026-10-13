@@ -15,7 +15,7 @@ import { downloadTextFile } from "../../shared/lib/download.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
-import { DismissibleAlert } from "../../shared/ui/DismissibleAlert.jsx";
+import { Notice, PageError } from "../../shared/ui/Notice.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { jsonListValue } from "../../shared/ui/SastLeadDetails.jsx";
@@ -552,22 +552,14 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         <div
           className={"sast-run-content" + (tab === "activity" ? " sast-run-content--activity" : "")}
         >
-          {error ? (
-            <DismissibleAlert variant="error" onDismiss={() => setError(null)}>
-              {error}
-            </DismissibleAlert>
-          ) : null}
+          <PageError error={error} onDismiss={() => setError(null)} />
           {run.error_message && ["failed", "cancelled"].includes(run.status) ? (
             <div className="alert error">{run.error_message}</div>
           ) : null}
           {notice ? (
-            <DismissibleAlert
-              variant="info"
-              className="sast-inline-notice"
-              onDismiss={() => setNotice(null)}
-            >
+            <Notice variant="info" onDismiss={() => setNotice(null)}>
               {notice}
-            </DismissibleAlert>
+            </Notice>
           ) : null}
           {tab === "coverage" ? (
             <div className="sast-summary-grid sast-run-summary-grid">

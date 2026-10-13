@@ -9,6 +9,7 @@ import React from "react";
 import { sourceLabel } from "../../shared/findings/files.js";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
 import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
+import { Notice } from "../../shared/ui/Notice.jsx";
 export function WebRunFindingsTab({
   runId,
   activeTab,
@@ -32,6 +33,8 @@ export function WebRunFindingsTab({
     findings,
     onExportFindingsMarkdown,
     onImportFindingsFile,
+    importMessage,
+    clearImportMessage,
     validateBusy,
     onValidateAll,
     onDeduplicateFindings,
@@ -60,6 +63,11 @@ export function WebRunFindingsTab({
   });
   return (
     <>
+      {importMessage && (
+        <Notice variant="success" onDismiss={clearImportMessage}>
+          {importMessage}
+        </Notice>
+      )}
       <div className="findings-panel">
         <div className="findings-status-bar">
           <div className="findings-status-summary">

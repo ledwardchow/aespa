@@ -25,7 +25,7 @@ import {
 // state lifecycle is duplicated here — the campaign record (already loaded by
 // the shell) is the only source of truth; this only additionally resolves
 // component/target names for readability.
-export function CampaignRunsTab({ systemId, campaign, error, resumeSource, resumeTarget, busy }) {
+export function CampaignRunsTab({ systemId, campaign, resumeSource, resumeTarget, busy }) {
   const [tokenUsage, setTokenUsage] = useState(null);
   const [tokenExpanded, setTokenExpanded] = useState(false);
   const [componentNames, setComponentNames] = useState({});
@@ -157,7 +157,6 @@ export function CampaignRunsTab({ systemId, campaign, error, resumeSource, resum
         />
       </div>
 
-      {error && <div className="alert error">{error}</div>}
       {campaign.error_message && isTerminalPause(campaignDisplayStatus(campaign)) && (
         <div className="alert error">{campaign.error_message}</div>
       )}

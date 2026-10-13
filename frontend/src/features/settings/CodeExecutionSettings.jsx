@@ -1,6 +1,7 @@
 import * as settingsApi from "../../shared/api/settings.js";
 import { useEffect, useState } from "react";
 import { IconCheck } from "../../shared/ui/Icons.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const ROLE_OPTIONS = [
   ["alice", "A.L.I.C.E."],
@@ -73,7 +74,7 @@ export function CodeExecutionSettings() {
           and bounded workflows. Code runs in a locked-down Docker container with no network. Target
           requests must use the AESPA runtime API and appear in the Traffic Log.
         </div>
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!form} onDismiss={() => setError(null)} />
         <div className={"alert " + (runtime?.available ? "success" : "warning")}>
           <strong>{runtime?.available ? "Runtime ready" : "Runtime unavailable"}</strong>
           <div>{runtime?.message || "Checking Docker runtime…"}</div>

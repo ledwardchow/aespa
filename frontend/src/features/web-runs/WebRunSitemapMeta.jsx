@@ -89,15 +89,6 @@ export function WebRunSitemapMeta({
       <div className="run-stat sitemap-pages-stat">
         <span className="run-stat-val">{run.pages_discovered}</span>
         <span className="run-stat-lbl">Pages found</span>
-        {run.status !== "running" && !editing && (
-          <button
-            className="btn ghost sm sitemap-edit-button"
-            title="Edit depth / pages / LLM concurrency"
-            onClick={edit}
-          >
-            ✎
-          </button>
-        )}
       </div>
       {editing ? (
         <div className="run-stat-edit">
@@ -175,41 +166,36 @@ export function WebRunSitemapMeta({
       ) : (
         <>
           <div className="run-stat">
-            <span className="run-stat-val">{run.max_depth}</span>
-            <span className="run-stat-lbl">Max depth</span>
-          </div>
-          <div className="run-stat">
-            <span className="run-stat-val">{run.max_pages}</span>
-            <span className="run-stat-lbl">Max pages</span>
-          </div>
-          <div className="run-stat">
-            <span className="run-stat-val" style={{ fontSize: 12 }}>
-              {run.crawler_mode === "interactive" ? "Interactive SPA" : "URL"}
+            <span className="run-stat-val">
+              Depth {run.max_depth} · {run.max_pages} pages
             </span>
-            <span className="run-stat-lbl">Crawler</span>
           </div>
-          {run.crawler_mode === "url" && (
-            <div className="run-stat">
-              <span className="run-stat-val" style={{ fontSize: 12 }}>
-                {run.page_selection === "group_similar" ? "Group similar pages" : "Visit each URL"}
-              </span>
-              <span className="run-stat-lbl">Page selection</span>
-            </div>
-          )}
           <div className="run-stat">
-            <span className="run-stat-val" style={{ fontSize: 12 }}>
-              {run.llm_max_concurrency ? `${run.llm_max_concurrency} max` : "Unlimited"}
+            <span className="run-stat-val">
+              {run.crawler_mode === "interactive" ? "Interactive SPA crawl" : "URL crawl"}
+              {run.crawler_mode === "url"
+                ? run.page_selection === "group_similar"
+                  ? " · Group similar pages"
+                  : " · Visit each URL"
+                : ""}
             </span>
-            <span className="run-stat-lbl">LLM Concurrency</span>
           </div>
-          {run.llm_profile_id && profiles.length > 0 && (
-            <div className="run-stat">
-              <span className="run-stat-val" style={{ fontSize: 12 }}>
-                {profile?.name || "#" + run.llm_profile_id}
-              </span>
-              <span className="run-stat-lbl">LLM profile</span>
-            </div>
-          )}
+          <div className="run-stat sitemap-llm-stat">
+            <span
+              className="run-stat-val"
+              title={
+                run.llm_max_concurrency
+                  ? `Up to ${run.llm_max_concurrency} page analyses at once`
+                  : "No limit on page analyses at once"
+              }
+            >
+              {run.llm_profile_id && profiles.length > 0
+                ? profile?.name || "#" + run.llm_profile_id
+                : "Default profile"}
+              {run.llm_max_concurrency ? ` · ${run.llm_max_concurrency} at once` : ""}
+            </span>
+            <span className="run-stat-lbl">LLM</span>
+          </div>
         </>
       )}
       {!multiUser && (
@@ -232,10 +218,19 @@ export function WebRunSitemapMeta({
       )}
       {credentials.length > 0 && run.status !== "running" && (
         <div className="run-stat sitemap-crawl-identity">
-          <span className="run-stat-lbl">Next crawl as</span>
+          <span className="run-stat-lbl">Crawl as</span>
           <select
             className="select"
             style={{ fontSize: 12 }}
+            aria-label="Crawl as"
+            title={(() => {
+              const chosen = credentials.find((c) => c.id === crawlCredentialId);
+              return chosen
+                ? chosen.label
+                  ? `${chosen.label} (${chosen.username})`
+                  : chosen.username
+                : "All users";
+            })()}
             value={crawlCredentialId || ""}
             onChange={(e) =>
               onCrawlCredentialChange &&
@@ -244,12 +239,21 @@ export function WebRunSitemapMeta({
           >
             <option value="">All users</option>
             {credentials.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.label ? `${c.label} (${c.username})` : c.username}
+              <option key={c.id} value={c.id} title={c.username}>
+                {c.label || c.username}
               </option>
             ))}
           </select>
         </div>
+      )}
+      {run.status !== "running" && !editing && (
+        <button
+          className="btn ghost sm sitemap-edit-button"
+          title="Edit depth, page limit, crawler and LLM concurrency"
+          onClick={edit}
+        >
+          ✎ Edit
+        </button>
       )}
       {run.error_message && (
         <div style={{ color: "var(--danger)", fontSize: 12, flex: 1 }}>{run.error_message}</div>

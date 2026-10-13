@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { SidePanelSection } from "./SitemapSidePanel.jsx";
 
 function routePath(url) {
   return String(url || "").replace(/^[a-z]+:\/\/[^/]+/i, "") || "/";
@@ -59,38 +59,23 @@ function RouteGroupTile({ group, onSelectExample }) {
   );
 }
 
-/** Grouped pages row for the site map, styled like User crawl progress. */
+/** Grouped pages section of the site map side panel. */
 export function RouteGroupsSummary({ groups = [], onSelectExample }) {
-  const [open, setOpen] = useState(false);
   if (!groups.length) return null;
+  const totals = routeGroupTotals(groups);
   return (
-    <div className="route-groups-panel">
-      <div className="route-groups-summary">
-        <button
-          className="btn ghost sm crawl-user-progress-toggle"
-          type="button"
-          aria-expanded={open}
-          aria-controls="route-groups-details"
-          onClick={() => setOpen((value) => !value)}
-        >
-          <span aria-hidden="true">{open ? "▾" : "▸"}</span>
-          Grouped pages
-        </button>
-        <span className="crawl-user-progress-count">{routeGroupCountText(groups)}</span>
-      </div>
-      <div id="route-groups-details" className="route-groups-details" hidden={!open}>
-        <p className="route-groups-note">
-          Only a few pages of each route were visited. Testing uses these pages.
-        </p>
-        {groups.map((group) => (
-          <RouteGroupTile
-            key={group.route_pattern}
-            group={group}
-            onSelectExample={onSelectExample}
-          />
-        ))}
-      </div>
-    </div>
+    <SidePanelSection
+      id="route-groups"
+      title="Grouped pages"
+      count={`${groups.length} ${groups.length === 1 ? "route" : "routes"} · ${totals.visited} visited`}
+    >
+      <p className="route-groups-note">
+        Only a few pages of each route were visited. Testing uses these pages.
+      </p>
+      {groups.map((group) => (
+        <RouteGroupTile key={group.route_pattern} group={group} onSelectExample={onSelectExample} />
+      ))}
+    </SidePanelSection>
   );
 }
 

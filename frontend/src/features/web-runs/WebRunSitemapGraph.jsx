@@ -17,6 +17,7 @@ import { useSelectedSitemapPage } from "./useSelectedSitemapPage.js";
 import { useSitemapGraph } from "./useSitemapGraph.js";
 import { WebRunUserCrawlProgress } from "./WebRunCrawlProgress.jsx";
 import { RouteGroupsSummary } from "./RouteGroupsPanel.jsx";
+import { SidePanelSection, SitemapSidePanel } from "./SitemapSidePanel.jsx";
 import { WebRunSitemapTab } from "./WebRunSitemapTab.jsx";
 import { buildSitemapDisplayGraph } from "./sitemapGraph.js";
 
@@ -49,7 +50,6 @@ export function WebRunSitemapGraph({
   const [pageDisplay, setPageDisplay] = useState("grouped");
   const [apiDisplay, setApiDisplay] = useState("grouped");
   const [displayApis, setDisplayApis] = useState(false);
-  const [displaySettingsOpen, setDisplaySettingsOpen] = useState(false);
   const effectiveApiDisplay = displayApis ? apiDisplay : "hidden";
   const excludedExtensions = useMemo(
     () => parseExcludedExtensions(excludedExtensionsInput),
@@ -175,72 +175,64 @@ export function WebRunSitemapGraph({
   return (
     <div className="graph-layout" style={{ display: active ? "flex" : "none" }}>
       <div className="sitemap-graph-main">
-        <div className="sitemap-filter-panel">
+        <SitemapSidePanel>
           <WebRunUserCrawlProgress
             run={run}
             crawlerActive={crawlerActive}
             activityLog={activityLog}
           />
           <RouteGroupsSummary groups={run?.route_groups} onSelectExample={selectRouteExample} />
-          <div className="sitemap-filter-summary">
-            <button
-              className="btn ghost sm sitemap-filter-toggle"
-              type="button"
-              aria-expanded={displaySettingsOpen}
-              aria-controls="sitemap-display-settings"
-              onClick={() => setDisplaySettingsOpen((open) => !open)}
-            >
-              <span aria-hidden="true">{displaySettingsOpen ? "▾" : "▸"}</span>
-              Display settings
-            </button>
-            <SitemapDisplaySummary
-              filteredGraph={filteredGraph}
-              pageDisplay={pageDisplay}
-              apiDisplay={effectiveApiDisplay}
-              displayStats={displayStats}
-            />
-          </div>
-          <div
-            id="sitemap-display-settings"
-            className="sitemap-filter-controls"
-            hidden={!displaySettingsOpen}
+          <SidePanelSection
+            id="display"
+            title="Display"
+            count={`${filteredGraph?.nodes.length || 0} shown`}
+            defaultOpen={false}
           >
-            <label className="traffic-filter-ext">
-              <span>Exclude extensions</span>
-              <input
-                className="traffic-filter"
-                type="text"
-                aria-label="Exclude site map extensions"
-                placeholder=".svg, .png, .woff2"
-                value={excludedExtensionsInput}
-                onInput={(event) => setExcludedExtensionsInput(event.target.value)}
+            <p className="route-groups-note">
+              <SitemapDisplaySummary
+                filteredGraph={filteredGraph}
+                pageDisplay={pageDisplay}
+                apiDisplay={effectiveApiDisplay}
+                displayStats={displayStats}
               />
-            </label>
-            <label className="traffic-filter-ext sitemap-api-display">
-              <span>Page display</span>
-              <select
-                aria-label="Page display"
-                value={pageDisplay}
-                onChange={(event) => setPageDisplay(event.target.value)}
-              >
-                <option value="grouped">Grouped routes</option>
-                <option value="individual">Individual pages</option>
-              </select>
-            </label>
-            <label className="traffic-filter-ext sitemap-api-display">
-              <span>API display</span>
-              <select
-                aria-label="API display"
-                value={apiDisplay}
-                onChange={(event) => setApiDisplay(event.target.value)}
-                disabled={!displayApis}
-              >
-                <option value="grouped">Grouped endpoints</option>
-                <option value="individual">Individual requests</option>
-              </select>
-            </label>
-          </div>
-        </div>
+            </p>
+            <div className="side-display-controls">
+              <label>
+                <span>Exclude extensions</span>
+                <input
+                  type="text"
+                  aria-label="Exclude site map extensions"
+                  placeholder=".svg, .png, .woff2"
+                  value={excludedExtensionsInput}
+                  onInput={(event) => setExcludedExtensionsInput(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Page display</span>
+                <select
+                  aria-label="Page display"
+                  value={pageDisplay}
+                  onChange={(event) => setPageDisplay(event.target.value)}
+                >
+                  <option value="grouped">Grouped routes</option>
+                  <option value="individual">Individual pages</option>
+                </select>
+              </label>
+              <label>
+                <span>API display</span>
+                <select
+                  aria-label="API display"
+                  value={apiDisplay}
+                  onChange={(event) => setApiDisplay(event.target.value)}
+                  disabled={!displayApis}
+                >
+                  <option value="grouped">Grouped endpoints</option>
+                  <option value="individual">Individual requests</option>
+                </select>
+              </label>
+            </div>
+          </SidePanelSection>
+        </SitemapSidePanel>
         <div className="graph-canvas-wrap">
           <div className="sitemap-search">
             <div className="sitemap-search-row">

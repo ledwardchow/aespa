@@ -2,6 +2,7 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect } from "react";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function UpstreamProxySettings() {
   const [form, setForm] = useState(null);
@@ -49,7 +50,7 @@ export function UpstreamProxySettings() {
   return (
     <>
       {!form && !error && <div className="subtle">Loading…</div>}
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={!form} onDismiss={() => setError(null)} />
       {form && (
         <form className="card" onSubmit={onSubmit}>
           <div className="form-section-title">Upstream proxies</div>
@@ -114,9 +115,9 @@ export function UpstreamProxySettings() {
           <div className="divider" />
           <div className="form-section-title">Certificate trust</div>
           <p className="subtle">
-            Enter PEM CA bundle paths on the computer running AESPA. These files are
-            used to check HTTPS certificates for application and testing requests.
-            Browser based tests still accept certificate errors.
+            Enter PEM CA bundle paths on the computer running AESPA. These files are used to check
+            HTTPS certificates for application and testing requests. Browser based tests still
+            accept certificate errors.
           </p>
           <div className="field">
             <label htmlFor="scanner-ca-bundle">Testing traffic CA bundle path</label>
@@ -127,7 +128,9 @@ export function UpstreamProxySettings() {
               placeholder="/path/to/company-ca.pem"
               onChange={(e) => upd({ scanner_ca_bundle_path: e.target.value })}
             />
-            <span className="subtle">Leave empty to keep accepting certificate errors in HTTP tests.</span>
+            <span className="subtle">
+              Leave empty to keep accepting certificate errors in HTTP tests.
+            </span>
           </div>
           <div className="field">
             <label htmlFor="llm-ca-bundle">Application traffic CA bundle path</label>
@@ -138,7 +141,10 @@ export function UpstreamProxySettings() {
               placeholder="/path/to/company-ca.pem"
               onChange={(e) => upd({ llm_ca_bundle_path: e.target.value })}
             />
-            <span className="subtle">Used for LLM calls, model lists, sign-in requests, and Benchmark Lab. CLI providers receive this path through their environment.</span>
+            <span className="subtle">
+              Used for LLM calls, model lists, sign-in requests, and Benchmark Lab. CLI providers
+              receive this path through their environment.
+            </span>
           </div>
           <div className="divider" />
           <div className="row spread">

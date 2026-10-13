@@ -2,6 +2,7 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect } from "react";
 import { PolicySettings } from "./ScannerPolicySettings.jsx";
 import styles from "./RetireListSettings.module.css";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const REFRESH_MESSAGES = {
   updated: "Downloaded the latest list.",
@@ -53,16 +54,14 @@ function RetireListStatus() {
     <div className={`card ${styles.statusCard}`}>
       <div className="form-section-title">Vulnerable JavaScript library list</div>
       <div className="subtle" style={{ marginBottom: "10px" }}>
-        Web and SAST scans check JavaScript libraries against the Retire.js list of known
-        vulnerable versions.
+        Web and SAST scans check JavaScript libraries against the Retire.js list of known vulnerable
+        versions.
       </div>
       {!status && !error && <div className="subtle">Loading…</div>}
       {status && (
         <dl className={styles.facts}>
           <dt>List in use</dt>
-          <dd>
-            {status.copy === "downloaded" ? "Downloaded copy" : "Copy included with AESPA"}
-          </dd>
+          <dd>{status.copy === "downloaded" ? "Downloaded copy" : "Copy included with AESPA"}</dd>
           <dt>Last updated</dt>
           <dd>{formatDate(status.fetched_at)}</dd>
           <dt>Coverage</dt>
@@ -73,14 +72,14 @@ function RetireListStatus() {
             <>
               <dt>Skipped patterns</dt>
               <dd>
-                {status.skipped_patterns} of {status.patterns} detection patterns can't be used
-                and are skipped.
+                {status.skipped_patterns} of {status.patterns} detection patterns can't be used and
+                are skipped.
               </dd>
             </>
           )}
         </dl>
       )}
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={!status} onDismiss={() => setError(null)} />
       <div className="divider" />
       <div className="row spread">
         <div>{message && <span className="save-confirm">{message}</span>}</div>

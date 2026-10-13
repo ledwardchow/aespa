@@ -5,6 +5,7 @@ import { nav } from "../../shared/navigation/router.js";
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 // ── Sites list ────────────────────────────────────────────────────────────────
 
@@ -132,16 +133,7 @@ export function SitesList() {
         </div>
       </div>
       <div className="content scroll-content">
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 16,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <PageError error={error} inline={!sites} onDismiss={() => setError(null)} />
         {sites === null && <div className="subtle">Loading…</div>}
         {sites !== null && sites.length === 0 && (
           <EmptyState

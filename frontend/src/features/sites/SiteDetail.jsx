@@ -16,6 +16,7 @@ import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { SavedCrawlsPanel } from "./SavedCrawlsPanel.jsx";
 
 import { workflowBadge } from "../../shared/runs/presentation.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function SiteDetail({ siteId }) {
   const benchmarkLinks = useBenchmarkLinks();
@@ -153,7 +154,7 @@ export function SiteDetail({ siteId }) {
         }
       />
       <div className="content scroll-content stack site-detail-content">
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!site} onDismiss={() => setError(null)} />
 
         {editingRun && (
           <div

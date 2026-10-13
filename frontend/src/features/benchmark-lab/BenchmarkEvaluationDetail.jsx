@@ -7,6 +7,7 @@ import { MatchReviewPanel } from "./MatchReviewPanel.jsx";
 import { nav } from "../../shared/navigation/router.js";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const TABS = ["summary", "ground-truth", "additional-findings", "coverage", "efficiency", "audit"];
 const normaliseTab = (tab) => (TABS.includes(tab) ? tab : "summary");
@@ -164,7 +165,7 @@ export function BenchmarkEvaluationDetail({ evaluationId, initialTab }) {
           ))}
         </div>
         <div className="benchmark-detail-content">
-          {error && <div className="alert error">{error}</div>}
+          <PageError error={error} onDismiss={() => setError(null)} />
           {tab === "summary" && (
             <>
               <BenchmarkSummary evaluation={evaluation} />

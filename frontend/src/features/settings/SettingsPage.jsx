@@ -8,6 +8,7 @@ import { nav } from "../../shared/navigation/router.js";
 import { LLMProviderForm } from "./LLMProviderForm.jsx";
 import { LLMModelForm } from "./LLMModelForm.jsx";
 import { ScanProfileForm } from "./ScanProfileForm.jsx";
+import { Notice, PageError } from "../../shared/ui/Notice.jsx";
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -32,6 +33,7 @@ export function SettingsPage({
   const [providers, setProviders] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(null);
+  const [message, setMessage] = useState(null);
   const [importing, setImporting] = useState(false);
   const importRef = useRef(null);
 
@@ -185,7 +187,7 @@ export function SettingsPage({
       }
       const result = await settingsApi.importLLMConfig(parsed);
       await load();
-      alert(
+      setMessage(
         `Import complete: ${result.providers_created} provider(s) created, ${result.providers_updated} updated; ${result.profiles_created} model(s) created, ${result.profiles_updated} updated.`,
       );
     } catch (e) {
@@ -242,7 +244,12 @@ export function SettingsPage({
           onChange={switchTab}
         />
         {!loaded && !error && <div className="subtle">Loading…</div>}
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!loaded} onDismiss={() => setError(null)} />
+        {message && (
+          <Notice variant="success" onDismiss={() => setMessage(null)}>
+            {message}
+          </Notice>
+        )}
         {missingItem && (
           <div className="alert error">The requested {noun.toLowerCase()} was not found.</div>
         )}

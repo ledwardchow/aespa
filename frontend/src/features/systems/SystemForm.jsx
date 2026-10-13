@@ -72,7 +72,6 @@ export function SystemForm({ systemId }) {
       <div className="content scroll-content">
         <form className="card" style={{ maxWidth: 560 }} onSubmit={onSubmit}>
           <div className="form-section-title">{editing ? "Edit system" : "New system"}</div>
-          {error && <div className="alert error">{error}</div>}
           <div className="field">
             <label>
               Name <span className="field-required">*</span>
@@ -96,6 +95,11 @@ export function SystemForm({ systemId }) {
               placeholder="What this system is and how its parts fit together."
             />
           </div>
+          {error && (
+            <div className="alert error form-error" role="alert">
+              {error}
+            </div>
+          )}
           <div className="row spread" style={{ marginTop: 16 }}>
             <button
               type="button"

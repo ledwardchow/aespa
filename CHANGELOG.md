@@ -6,7 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **Grouped page crawl**: URL crawls can sample repeated pages, such as product catalogues, news articles and archive pages, instead of visiting every link. Choose **Group similar pages** when creating a run. AESPA recognises repeated pages from their URL shape and page layout, without site-specific settings, and visits a few examples of each route. Once a page layout is known, other sections that use it are checked from a single page. Site Map and Attack Surface show grouped routes, link counts, the exact pages visited, and any examples that looked different, and pentests are told which pages are examples of a larger route. If the examples do not match, or some need a login, AESPA crawls those links normally. Existing URL and Interactive SPA crawls keep their current behavior.
+- **Grouped page crawl**: Previously, the crawler was not good at working on sites which had a lot of content of the same category - for example, a storefront with a lot of products (which are different but all substantially offer the same application functionality) or a CMS (which has a lot of articles which have different content but from an application perspective are all the same idea). The crawler would note each individual page as a new page, rapidly cap out its budget, and miss actual functionality. The crawler now recognises content which is substantially similar, collapses these into a single item on the site map and terminates crawling items which are in the same category. This is a separate crawl setting accessible under URL crawl --> Group similar pages and is not the default setting.
 
 - **External scanner leads**: Import SARIF 2.1.0 and structured Markdown reports into web or API runs, preview their leads before saving, and skip repeated findings. Imported reports keep their scanner, rule, location, and evidence details, and DAST treats them as unverified leads. Markdown import also accepts AESPA lead exports; a template is available in the import dialog.
 
@@ -20,11 +20,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Outdated JavaScript library checks**: Web scans now check the JavaScript files captured while crawling for library versions with known vulnerabilities, using the community-maintained Retire.js list (more than 70 libraries, including jQuery, jQuery UI, Bootstrap, AngularJS, Lodash, Moment.js, Handlebars, DOMPurify, CKEditor, and TinyMCE). Each outdated library version is reported once as a Vulnerable and Outdated Components finding that lists the matching CVEs, where the version was seen, the version to upgrade to, and the date of the list used. The check also runs in passive mode and can be turned off with the other deterministic checks.
 
-- **Up-to-date vulnerable library list**: AESPA ships with a copy of the Retire.js list and, by default, downloads the latest version from GitHub at most once a day when a scan starts. **Settings → Global → Vulnerable Libraries** shows which copy is in use and when it was last updated, and has a **Refresh now** button to download the latest list immediately. Turn off automatic updates there for offline use; scans then use the last downloaded copy, or the copy included with AESPA.
-
-- **Vulnerable JavaScript libraries in SAST**: Light and Deep SAST scans now check npm and Bower manifests, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, and JavaScript files copied into the repository against the same Retire.js list. Exact versions from lockfiles take priority over version ranges in `package.json`.
+- **Up-to-date vulnerable library list**: AESPA now ships with outdated dependency detection courtesy of Retire.js. A copy is bundled and (by default) downloaded just prior to a scan starting. Configure this in Settings --> Global --> Vulnerable Libraries.
 
 ### Updates
+- **Site map layout**: Run settings and attack scope now share one row above the site map, and the crawl stage shows on a single line. Users, grouped pages and display settings have moved to a side panel beside the graph, giving the graph most of the screen height. Collapse the panel to a narrow strip to give the graph almost the full width; AESPA remembers this choice in your browser. On narrow windows the panel starts collapsed and opens over the graph.
 
 - **SAST lead import**: Web and API scans now use a searchable dialog to choose a source scan, with recent scans first, paginated results, source filenames and completion dates, and counts of new and already imported leads.
 
@@ -49,6 +48,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Smaller console log database**: When console log saving is on, each LLM request and response is now stored once instead of twice. Agent conversations that continue an earlier logged call now save only the new messages, with a reference to that earlier call, instead of repeating the whole conversation on every step. Together these greatly reduce how fast the console log database grows during long scans.
 
 ### Fixes
+
+- **Error and status messages**: Errors from actions such as saving, deleting or importing now appear in the lower-right corner of the window and can be dismissed, instead of staying at the top of the page and pushing its content down. This applies across sites, systems, campaigns, API collections, all run types, Benchmark Lab, Settings and Extensions. Confirmations such as imported issues, imported settings and purged data appear the same way and close on their own, replacing browser pop-ups. Form errors now appear next to the Save button. Pages that could not load still show their error in place.
 
 - **Expired ChatGPT sign-in**: When ChatGPT rejects a saved sign-in, AESPA now stops the affected web, API, or SAST run, marks it failed, and shows a message asking you to sign in again in LLM settings. Previously, every request in the run kept failing with a raw `400 Bad Request` error. The account now shows as signed out, and AESPA no longer sends further requests with the rejected sign-in. A temporary ChatGPT outage still shows an error but keeps your sign-in.
 

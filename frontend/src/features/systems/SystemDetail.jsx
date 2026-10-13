@@ -6,6 +6,7 @@ import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { ComponentsTab } from "./ComponentsTab.jsx";
 import { TargetsTab } from "./TargetsTab.jsx";
 import { CampaignsTab } from "../campaigns/public.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const APP_TABS = [
   { key: "campaigns", label: "Campaigns" },
@@ -115,11 +116,7 @@ export function SystemDetail({ systemId, initialTab }) {
         ))}
       </div>
       <div className="content scroll-content">
-        {error && (
-          <div className="alert error" style={{ marginBottom: 16 }}>
-            {error}
-          </div>
-        )}
+        <PageError error={error} onDismiss={() => setError(null)} />
         {tab === "components" && <ComponentsTab systemId={systemId} onChanged={bumpComposition} />}
         {tab === "targets" && (
           <TargetsTab systemId={systemId} components={components} onChanged={bumpComposition} />
