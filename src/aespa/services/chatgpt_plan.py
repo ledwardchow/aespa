@@ -32,6 +32,14 @@ _pending: dict[str, dict[str, Any]] = {}
 _access_check_lock = asyncio.Lock()
 _access_checks: dict[str, tuple[float, dict[str, Any]]] = {}
 
+# OAuth error codes meaning the saved refresh token can never work again.
+_DEAD_REFRESH_ERRORS = {"invalid_grant", "invalid_client", "unauthorized_client"}
+
+
+class ChatGPTSignInRequired(RuntimeError):
+    """The saved ChatGPT sign-in is missing or was rejected; sign in again."""
+
+
 _ACCESS_CHECK_MODELS = (
     "gpt-6-sol",
     "gpt-6.1-sol",
@@ -322,6 +330,17 @@ def login_status(login_id: str) -> dict[str, str]:
     return {"status": attempt["status"], "error": attempt.get("error", "")}
 
 
+def _oauth_error_code(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        error = error.get("code")
+    return str(error) if isinstance(error, str) else ""
+
+
 async def access_token(client_id: str | None = None) -> str:
     async with _lock:
         async with _credential_lock():
@@ -329,23 +348,49 @@ async def access_token(client_id: str | None = None) -> str:
             client_id = client_id or data.get("active")
             account = data.get("accounts", {}).get(client_id) if client_id else None
             if not account or not account.get("refresh_token"):
-                raise RuntimeError(
+                raise ChatGPTSignInRequired(
                     "Sign in with ChatGPT in LLM settings before starting a scan"
                 )
             if account.get("expires_at", 0) > time.time() + 120:
                 return account["access_token"]
-            async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
-                response = await http.post(
-                    TOKEN_URL,
-                    data={
-                        "grant_type": "refresh_token",
-                        "client_id": client_id,
-                        "refresh_token": account["refresh_token"],
-                        "resource": RESOURCE,
-                    },
+            try:
+                async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
+                    response = await http.post(
+                        TOKEN_URL,
+                        data={
+                            "grant_type": "refresh_token",
+                            "client_id": client_id,
+                            "refresh_token": account["refresh_token"],
+                            "resource": RESOURCE,
+                        },
+                    )
+            except httpx.HTTPError as exc:
+                raise RuntimeError(
+                    f"Could not reach ChatGPT to renew sign-in: {exc}"
+                ) from exc
+            if response.status_code >= 400:
+                code = _oauth_error_code(response)
+                if response.status_code == 401 or code in _DEAD_REFRESH_ERRORS:
+                    # Drop the dead tokens so later calls fail at once
+                    # instead of each sending another doomed refresh.
+                    for key in (
+                        "access_token",
+                        "refresh_token",
+                        "id_token",
+                        "expires_at",
+                    ):
+                        account.pop(key, None)
+                    _write(data)
+                    _access_checks.pop(client_id, None)
+                    raise ChatGPTSignInRequired(
+                        "ChatGPT sign-in has expired or was revoked. "
+                        "Sign in again in LLM settings."
+                    )
+                raise RuntimeError(
+                    "ChatGPT sign-in could not be renewed "
+                    f"(HTTP {response.status_code}{f', {code}' if code else ''})"
                 )
-                response.raise_for_status()
-                tokens = response.json()
+            tokens = response.json()
             scopes = set(tokens.get("scope", "").split()) or set(
                 account.get("scopes", [])
             )

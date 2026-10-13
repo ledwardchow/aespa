@@ -889,6 +889,138 @@
   font-size: 11px;
 }
 
+/* Grouped pages row in the site map filter panel. It sits between
+   User crawl progress and Display settings and opens like them. */
+.route-groups-panel {
+  display: contents;
+}
+.route-groups-summary {
+  min-width: 0;
+  align-content: center;
+  grid-column: 2;
+  grid-row: 1;
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-height: 34px;
+  padding: 3px 14px;
+  border-left: 1px solid var(--border);
+}
+.sitemap-filter-panel:has(.route-groups-summary) {
+  grid-template-columns: fit-content(440px) fit-content(440px) minmax(0, 1fr);
+}
+.sitemap-filter-panel:has(.route-groups-summary) .sitemap-filter-summary {
+  grid-column: 3;
+  border-left: 1px solid var(--border);
+}
+.sitemap-filter-panel:has(.route-groups-summary):not(:has(.crawl-user-progress-summary)) {
+  grid-template-columns: fit-content(440px) minmax(0, 1fr);
+}
+.sitemap-filter-panel:not(:has(.crawl-user-progress-summary)) .route-groups-summary {
+  grid-column: 1;
+  border-left: 0;
+}
+.sitemap-filter-panel:has(.route-groups-summary):not(:has(.crawl-user-progress-summary))
+  .sitemap-filter-summary {
+  grid-column: 2;
+}
+.sitemap-filter-panel:has(.route-groups-summary) .sitemap-filter-controls {
+  grid-row: 4;
+}
+.route-groups-details {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 14px 8px;
+}
+.route-groups-details[hidden] {
+  display: none;
+}
+.route-groups-note {
+  flex-basis: 100%;
+  margin: 0 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.route-group-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 260px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  font-size: 11px;
+}
+.route-group-label {
+  color: var(--text-2);
+  font-weight: 500;
+}
+.route-group-path,
+.route-group-example {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.route-group-path {
+  color: var(--text);
+}
+.route-group-counts {
+  color: var(--muted);
+}
+.route-group-different {
+  color: var(--warn);
+}
+.route-group-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.route-group-example {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+}
+.route-group-example:hover {
+  text-decoration: underline;
+}
+.route-group-example:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (max-width: 1100px) {
+  .route-groups-summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    align-items: start;
+    gap: 0;
+    padding: 5px 14px 7px;
+  }
+}
+@media (max-width: 640px) {
+  .route-groups-summary {
+    padding-inline: 10px;
+  }
+}
+
 @keyframes crawl-shimmer {
   0% {
     transform: translateX(-100%);

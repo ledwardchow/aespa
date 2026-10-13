@@ -1260,6 +1260,16 @@ async def _crawl_as_credential(
         pending_interactive_edges: dict[str, list[dict]] = {}
         phase_key = str(credential_id) if credential_id is not None else "anonymous"
 
+        def push(entry: tuple[str, int, Optional[int], Optional[dict]]) -> None:
+            # An example page decides whether thousands of held links need
+            # visiting, so it goes ahead of ordinary links.
+            if page_selection == "group_similar" and (
+                shared.route_sampler.wants_observation(entry[0], phase_key)
+            ):
+                queue.appendleft(entry)
+            else:
+                queue.append(entry)
+
         def enqueue_group_items(items: list[dict]) -> None:
             for item in items:
                 url_value = item["url"]
@@ -1267,7 +1277,7 @@ async def _crawl_as_credential(
                 if normalized in queued:
                     continue
                 queued.add(normalized)
-                queue.append(
+                push(
                     (
                         url_value,
                         item["depth"],
@@ -1744,7 +1754,7 @@ async def _crawl_as_credential(
                         and not _is_session_ending_url(nav_url)
                     ):
                         queued.add(n)
-                        queue.append(
+                        push(
                             (
                                 nav_url,
                                 depth + 1,
@@ -2000,7 +2010,7 @@ async def _crawl_as_credential(
                         and not _is_session_ending_url(link_url, link_text)
                     ):
                         queued.add(n)
-                        queue.append(
+                        push(
                             (
                                 link_url,
                                 depth + 1,

@@ -108,6 +108,16 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef, initial
     }, 3000);
     return () => clearInterval(t);
   }, [scanStatus?.running, runId]);
+
+  // Reload the run once a scan ends so its final status and any error show.
+  const scanEnded = scanStatus != null && !scanStatus.running;
+  useEffect(() => {
+    if (!scanEnded) return;
+    apiRunsApi
+      .getApiRun(runId)
+      .then(setRun)
+      .catch(() => {});
+  }, [scanEnded, runId]);
   const onStartScan = async () => {
     setScanBusy(true);
     try {
@@ -278,6 +288,9 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef, initial
         }
       >
         {error && <div className="alert error">{error}</div>}
+        {run?.status === "failed" && run.error_message ? (
+          <div className="alert error">{run.error_message}</div>
+        ) : null}
         {tab === "status" && <ApiRunStatusTab runId={runId} scanRunning={scanRunning} />}
         {tab === "findings" && (
           <ApiRunFindingsTab

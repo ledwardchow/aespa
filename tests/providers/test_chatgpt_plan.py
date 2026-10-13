@@ -762,6 +762,7 @@ def test_expired_token_refreshes_once_for_concurrent_calls(monkeypatch, tmp_path
         async def post(self, url, data):
             calls.append((url, data))
             return SimpleNamespace(
+                status_code=200,
                 raise_for_status=lambda: None,
                 json=lambda: {
                     "access_token": "new-access",
@@ -874,3 +875,93 @@ def test_login_callback_saves_validated_tokens_without_exposing_them(
         chatgpt_plan._read()["accounts"]["oaiapp_test"]["refresh_token"]
         == "secret-refresh"
     )
+
+
+def _saved_expired_account(tmp_path, monkeypatch):
+    monkeypatch.setattr(chatgpt_plan, "_storage_path", lambda: tmp_path / "plan.json")
+    chatgpt_plan._write(
+        {
+            "host_id": "urn:uuid:12345678-1234-4123-8123-123456789abc",
+            "active": "oaiapp_test",
+            "accounts": {
+                "oaiapp_test": {
+                    "email": "user@example.com",
+                    "access_token": "expired",
+                    "refresh_token": "old-refresh",
+                    "expires_at": 0,
+                    "scopes": ["chatgpt.tokens.use.direct"],
+                }
+            },
+        }
+    )
+
+
+def _token_endpoint(monkeypatch, status_code, body):
+    calls = []
+
+    class Http:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def post(self, url, data):
+            calls.append(url)
+            return httpx.Response(
+                status_code, json=body, request=httpx.Request("POST", url)
+            )
+
+    monkeypatch.setattr(chatgpt_plan.httpx, "AsyncClient", lambda **_kwargs: Http())
+    return calls
+
+
+def test_rejected_refresh_signs_account_out_and_stops_retrying(monkeypatch, tmp_path):
+    _saved_expired_account(tmp_path, monkeypatch)
+    calls = _token_endpoint(monkeypatch, 400, {"error": "invalid_grant"})
+
+    for _ in range(2):
+        with pytest.raises(chatgpt_plan.ChatGPTSignInRequired, match="Sign in"):
+            asyncio.run(chatgpt_plan.access_token("oaiapp_test"))
+
+    # Only the first call reaches OpenAI; the dead tokens are then removed.
+    assert len(calls) == 1
+    account = chatgpt_plan._read()["accounts"]["oaiapp_test"]
+    assert "refresh_token" not in account and "access_token" not in account
+    assert account["email"] == "user@example.com"
+    assert chatgpt_plan.status()["accounts"][0]["signed_in"] is False
+
+
+def test_refresh_server_error_keeps_sign_in(monkeypatch, tmp_path):
+    _saved_expired_account(tmp_path, monkeypatch)
+    _token_endpoint(monkeypatch, 503, {"error": "temporarily_unavailable"})
+
+    with pytest.raises(RuntimeError, match="HTTP 503") as raised:
+        asyncio.run(chatgpt_plan.access_token("oaiapp_test"))
+
+    assert not isinstance(raised.value, chatgpt_plan.ChatGPTSignInRequired)
+    account = chatgpt_plan._read()["accounts"]["oaiapp_test"]
+    assert account["refresh_token"] == "old-refresh"
+
+
+def test_sign_in_error_stops_the_run_using_the_provider(monkeypatch):
+    stops = []
+    monkeypatch.setattr(
+        "aespa.services.llm_sign_in_stop.schedule_stop",
+        lambda kind, run_id, message: stops.append((kind, run_id, message)),
+    )
+
+    async def rejected(_client_id=None):
+        raise chatgpt_plan.ChatGPTSignInRequired("Sign in again")
+
+    monkeypatch.setattr(chatgpt_plan, "access_token", rejected)
+    config = LLMConfig(provider="openai_chatgpt_plan", model="gpt-6-luna")
+
+    async def call():
+        llm._run_id_var.set(42)
+        llm._run_kind_var.set("api")
+        await llm._make_chatgpt_plan_client(config)
+
+    with pytest.raises(chatgpt_plan.ChatGPTSignInRequired):
+        asyncio.run(call())
+    assert stops == [("api", 42, "Sign in again")]
