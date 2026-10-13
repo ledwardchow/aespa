@@ -12,36 +12,29 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Crawl then pentest**: Start a web crawl and have AESPA begin the selected pentest mode automatically when the crawl finishes successfully.
 
-- **Benchmark result comments**: Add a comment to a saved Benchmark Lab analysis. Comments appear on graph cards and can be included in published benchmark summaries. Signed-in users with access to the private benchmark site can edit comments there, and the public graph site displays them.
+- **Saved benchmark analyses**: Open an analysis from a graph or results list on its own page, group findings by OWASP category or severity, and return to Benchmark Lab. Add comments to saved analyses; they appear on graph cards and can be included in published summaries. Signed-in users can edit comments on the private benchmark site, and the public graph site displays them.
 
 - **Custom CA bundles**: Set separate PEM CA bundle paths for application and testing traffic in Connectivity settings. LLM calls, model lists, sign-in requests, and Benchmark Lab use the application setting. Session checks and vulnerable-library list updates use the testing setting. AESPA checks certificates against a configured bundle; browser based tests keep accepting certificate errors. CLI providers receive the configured CA path through their environment.
 
 - **Saved crawls**: A finished crawl can now be saved on its site and loaded into a new run, so repeat scans and benchmarks can skip crawling. Use **Save crawl to site** on a run with crawl data, then **Load saved crawl** on a new run. The site page lists saved crawls, where you can rename, download, or delete them, and add crawl export files you downloaded earlier. Saved crawls include the session cookies and tokens captured during the crawl, the same as crawl export files.
 
-- **Outdated JavaScript library checks**: Web scans now check the JavaScript files captured while crawling for library versions with known vulnerabilities, using the community-maintained Retire.js list (more than 70 libraries, including jQuery, jQuery UI, Bootstrap, AngularJS, Lodash, Moment.js, Handlebars, DOMPurify, CKEditor, and TinyMCE). Each outdated library version is reported once as a Vulnerable and Outdated Components finding that lists the matching CVEs, where the version was seen, the version to upgrade to, and the date of the list used. The check also runs in passive mode and can be turned off with the other deterministic checks.
-
-- **Up-to-date vulnerable library list**: AESPA now ships with outdated dependency detection courtesy of Retire.js. A copy is bundled and (by default) downloaded just prior to a scan starting. Configure this in Settings --> Global --> Vulnerable Libraries.
+- **Outdated JavaScript library checks**: Web scans check JavaScript files captured during crawling for libraries with known vulnerabilities, using the Retire.js list. Findings show the affected version, where it was seen, matching CVEs, and the version to upgrade to. The check also runs in passive mode and can be turned off with the other automatic checks. AESPA includes a copy of the list and checks for updates before scans by default; manage this under Settings → Global → Vulnerable Libraries.
 
 ### Updates
+
 - **Site map layout**: Run settings and attack scope now share one row above the site map, and the crawl stage shows on a single line. Users, grouped pages and display settings have moved to a side panel beside the graph, giving the graph most of the screen height. Collapse the panel to a narrow strip to give the graph almost the full width; AESPA remembers this choice in your browser. On narrow windows the panel starts collapsed and opens over the graph.
 
-- **SAST lead import**: Web and API scans now use a searchable dialog to choose a source scan, with recent scans first, paginated results, source filenames and completion dates, and counts of new and already imported leads.
+- **SAST findings in live tests**: Web and API scans use a searchable, paginated dialog to import leads from a source scan, showing recent scans first, source filenames, completion dates, and counts of new and already imported leads. You can also choose a saved Site or API collection from a SAST finding to create and open a SAST Validate run with that finding.
 
 - **SAST findings export**: Choose Markdown or SARIF from the Findings page export menu. The run actions menu still offers both formats.
 
 - **SAST finding details**: The findings list now uses the full page width, larger text, and each finding's stored reference in the first column, sorted by reference by default. Open a finding to read its full-width writeup in larger text, move between the visible findings, and return to the list with its sorting, filters, and scroll position intact.
 
-- **Live testing from SAST findings**: Choose a saved Site or API collection in the finding header to create a new SAST Validate run with that finding. The new run opens so you can start its live test.
-
-- **Hosted benchmark edits**: Results edited on the benchmark site are protected from later scanner uploads. Benchmark Lab reports how many site-edited results were skipped when publishing.
-
-- **Hosted benchmark connection**: Benchmark Lab now defaults to `benchmarks.aespa.app`. Existing upload tokens work with both that address and the site's original `chatgpt.site` address, so switching between them does not require a new token.
+- **Hosted benchmark publishing**: Benchmark Lab now defaults to `benchmarks.aespa.app`; existing upload tokens also work with the original `chatgpt.site` address. Results edited on the site are protected from later scanner uploads, and Benchmark Lab reports how many were skipped when publishing.
 
 - **Scan usage on every tab**: Token usage stays visible while you switch between tabs in web, API, and source scan runs. Web runs also keep the cost of linked source scans visible, without showing a source cost error when no linked source has been found.
 
 - **Python execution request limit**: New setups now allow up to 50 HTTP requests per Python execution by default. Existing saved settings can still be changed in Agent Settings.
-
-- **Saved benchmark analyses**: Opening an analysis from a graph or results list now shows it on its own page, with a link back to Benchmark Lab. Findings can be grouped by OWASP category or severity.
 
 - **Benchmark comparison charts**: The scanner and benchmark sites can compare either scan cost or scan date with matched finding count or a severity-weighted score. The sites show cost and score by default. Scans recorded at $0 are hidden from the graph by default and can be shown with **Show local model ($0) results**. Full and partial matches use the ground-truth severity: informational 0, low 1, medium 2, high 3, and critical 4. High and Critical matches in OWASP A01, A03, A04, and A07 earn double points. Point details show matched findings out of the ground-truth total for each OWASP category.
 
@@ -75,9 +68,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Finding updates during scans**: When later testing provides stronger proof of an issue already reported, AESPA updates the saved finding with the new severity, evidence, and write-up. The finding keeps its reference and is validated again.
 
-- **Claude Code CLI sign-in on macOS**: Fixed Claude Code CLI requests failing with "Not logged in" on macOS even when Claude Code was signed in.
-
-- **Claude Code CLI errors**: When a Claude Code CLI request fails, scan logs and error messages now show the reason reported by the CLI, such as an unavailable model or a sign-in problem, instead of only `exit 1`.
+- **Claude Code CLI requests**: On macOS, signed-in accounts no longer fail with a false "Not logged in" error. When a CLI request does fail, scan logs show its reported reason, such as an unavailable model or a sign-in problem, instead of only `exit 1`.
 
 - **LLM scan startup**: Fixed scans failing immediately with an `http_client` error when using current Anthropic SDK releases. SDK requests now use the supported HTTP client, including Bedrock Mantle requests signed with AWS credentials.
 
@@ -90,8 +81,6 @@ All pull requests merged to `main`, in reverse chronological order.
 ### Housekeeping
 
 - **Test suite cleanup**: Combined repeated API run, validator, and campaign checks while keeping the same cases covered.
-
-- **BankOfEd benchmark data**: Added the accepted 35-finding ground truth file and a guarded migration for saved comparisons. It keeps result IDs and decisions for shared findings, removes three retired findings, and updates scores using the revised severities.
 
 - **SAST scan maintenance**: Light and Deep scans now share archive extraction, source file tools, and candidate-state helpers, keeping those behaviors consistent across both modes.
 
