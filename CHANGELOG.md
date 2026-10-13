@@ -29,7 +29,9 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **SAST findings export**: Choose Markdown or SARIF from the Findings page export menu. The run actions menu still offers both formats.
 
-- **SAST finding details**: The findings list now uses the full page width and shows each finding's stored reference in the first column, sorted by reference by default. Open a finding to read its writeup, move between the visible findings, and return to the list with its sorting, filters, and scroll position intact.
+- **SAST finding details**: The findings list now uses the full page width, larger text, and each finding's stored reference in the first column, sorted by reference by default. Open a finding to read its full-width writeup in larger text, move between the visible findings, and return to the list with its sorting, filters, and scroll position intact.
+
+- **Live testing from SAST findings**: Choose a saved Site or API collection in the finding header to create a new SAST Validate run with that finding. The new run opens so you can start its live test.
 
 - **Hosted benchmark edits**: Results edited on the benchmark site are protected from later scanner uploads. Benchmark Lab reports how many site-edited results were skipped when publishing.
 

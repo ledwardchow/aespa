@@ -11,6 +11,8 @@ from sqlmodel import Session, select
 
 from aespa.models import (
     AgentLog,
+    ApiCollection,
+    ApiTestRun,
     LLMConfig,
     LLMProfile,
     PhaseCheckpoint,
@@ -1207,6 +1209,107 @@ def test_handoff_requires_validation_and_is_idempotent(client, isolated_db_engin
         ).all()
     assert len(copies) == 1
     assert copies[0].attack_path_json != "{}"
+
+
+@pytest.mark.parametrize("target_type", ["site", "api_collection"])
+def test_live_testing_creates_a_new_run_with_one_finding(
+    client, isolated_db_engine, target_type
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        site = session.exec(select(Site).where(Site.name == "Target")).one()
+        collection = ApiCollection(
+            name="Orders API", base_url="https://api.target.test"
+        )
+        session.add(collection)
+        session.commit()
+        session.refresh(collection)
+        target_id = site.id if target_type == "site" else collection.id
+
+    lead = create_lead(
+        producer_run_id=sast_run_id,
+        title="Missing access check",
+        description="A confirmed access issue",
+        category="A01",
+        severity="high",
+        confidence=0.95,
+        location="orders.py:20",
+        reportable=True,
+        validation_status="confirmed",
+    )
+    listed = client.get(f"/api/sast-runs/{sast_run_id}/live-targets")
+    assert listed.status_code == 200
+    assert any(
+        item["target_type"] == target_type and item["target_id"] == target_id
+        for item in listed.json()
+    )
+
+    created = client.post(
+        f"/api/sast-runs/{sast_run_id}/leads/{lead.id}/live-test-runs",
+        json={"target_type": target_type, "target_id": target_id},
+    )
+    assert created.status_code == 201, created.text
+    result = created.json()
+    expected_run_type = "web" if target_type == "site" else "api"
+    assert result["run_type"] == expected_run_type
+    with Session(isolated_db_engine) as session:
+        run_cls = WebTestRun if target_type == "site" else ApiTestRun
+        run = session.get(run_cls, result["run_id"])
+        copy = session.get(ScanLead, result["lead_id"])
+        source = session.get(ScanLead, lead.id)
+        assert run.coverage_mode == "sast_validate"
+        assert run.status == "pending"
+        assert copy.origin_lead_id == lead.id
+        assert copy.imported_into_run_type == expected_run_type
+        assert copy.imported_into_run_id == run.id
+        assert copy.validation_status == "confirmed"
+        assert source.imported_into_run_id is None
+
+
+def test_live_testing_rejects_unconfirmed_findings_and_unknown_apps(
+    client, isolated_db_engine
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    pending = create_lead(
+        producer_run_id=sast_run_id,
+        title="Possible issue",
+        description="Needs validation",
+        category="A01",
+        severity="medium",
+        confidence=0.7,
+        location="orders.py:20",
+        reportable=False,
+        validation_status="pending",
+    )
+    endpoint = f"/api/sast-runs/{sast_run_id}/leads/{pending.id}/live-test-runs"
+    assert (
+        client.post(
+            endpoint, json={"target_type": "site", "target_id": 999}
+        ).status_code
+        == 409
+    )
+    confirmed = create_lead(
+        producer_run_id=sast_run_id,
+        title="Possible issue",
+        description="Validated",
+        category="A01",
+        severity="medium",
+        confidence=0.9,
+        location="orders.py:20",
+        reportable=True,
+        validation_status="confirmed",
+    )
+    assert confirmed.id == pending.id
+    assert (
+        client.post(
+            endpoint, json={"target_type": "site", "target_id": 999}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(endpoint, json={"target_type": "run", "target_id": 1}).status_code
+        == 422
+    )
 
 
 def test_review_executor_records_independent_verdict_and_attack_path(

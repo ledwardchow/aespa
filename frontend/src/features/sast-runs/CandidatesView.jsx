@@ -516,8 +516,9 @@ export function LeadEvidence({
       </section>
     );
   const selectedTarget = targets.find(
-    (target) => `${target.run_type}:${target.run_id}` === targetKey,
+    (target) => `${target.target_type}:${target.target_id}` === targetKey,
   );
+  const canTestLive = lead.reportable && lead.validation_status === "confirmed";
   return (
     <section className="sast-evidence-panel">
       <div className="sast-panel-header sast-finding-header">
@@ -540,7 +541,7 @@ export function LeadEvidence({
             />
           </div>
         </div>
-        <div className="sast-lead-validation-actions">
+        <div className="sast-finding-header-actions">
           {lead.validation_status === "inconclusive" && onRevalidate && (
             <button
               type="button"
@@ -551,41 +552,57 @@ export function LeadEvidence({
               {revalidatingLeadId === lead.id ? "Starting…" : "Re-validate"}
             </button>
           )}
+          <div className="sast-live-testing">
+            <strong>Live testing</strong>
+            <span>
+              {canTestLive
+                ? "Create a run for this finding. You can start the test from the new run."
+                : "Confirm this finding before testing it live."}
+            </span>
+            <div className="sast-live-testing-controls">
+              <select
+                aria-label="Application for live testing"
+                value={targetKey}
+                disabled={!canTestLive || queueBusy}
+                onChange={(event) => setTargetKey(event.target.value)}
+              >
+                <option value="">Select app…</option>
+                <optgroup label="Sites">
+                  {targets
+                    .filter((target) => target.target_type === "site")
+                    .map((target) => (
+                      <option key={`site:${target.target_id}`} value={`site:${target.target_id}`}>
+                        {target.name} · {target.url}
+                      </option>
+                    ))}
+                </optgroup>
+                <optgroup label="API collections">
+                  {targets
+                    .filter((target) => target.target_type === "api_collection")
+                    .map((target) => (
+                      <option
+                        key={`api_collection:${target.target_id}`}
+                        value={`api_collection:${target.target_id}`}
+                      >
+                        {target.name} · {target.url}
+                      </option>
+                    ))}
+                </optgroup>
+              </select>
+              <button
+                type="button"
+                className="btn sm"
+                disabled={!canTestLive || !selectedTarget || queueBusy}
+                onClick={() => onQueue(lead, selectedTarget)}
+              >
+                {queueBusy ? "Creating…" : "Create test run"}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
       <div className="sast-evidence-body">
         <SastLeadDetails lead={lead} showSummary={false} />
-        <aside className="sast-handoff-box">
-          <strong>Live testing</strong>
-          <span>
-            {lead.reportable
-              ? "Send this confirmed finding to a web or API run to test it against the live app."
-              : "Only confirmed, reportable findings can be sent for live testing."}
-          </span>
-          <select
-            aria-label="Dynamic target run"
-            value={targetKey}
-            disabled={!lead.reportable || queueBusy}
-            onChange={(event) => setTargetKey(event.target.value)}
-          >
-            <option value="">Select target run…</option>
-            {targets.map((target) => (
-              <option
-                key={`${target.run_type}:${target.run_id}`}
-                value={`${target.run_type}:${target.run_id}`}
-              >
-                {target.run_type.toUpperCase()} · {target.target} · {target.name}
-              </option>
-            ))}
-          </select>
-          <button
-            className="btn sm"
-            disabled={!lead.reportable || !selectedTarget || queueBusy}
-            onClick={() => onQueue(lead, selectedTarget)}
-          >
-            {queueBusy ? "Queuing…" : "Queue live test"}
-          </button>
-        </aside>
       </div>
     </section>
   );

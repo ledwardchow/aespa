@@ -38,6 +38,19 @@ test("SAST findings use one full-width reading area", async ({ page }) => {
       ],
     }),
   );
+  await page.route("**/api/sast-runs/1/live-targets", (route) =>
+    route.fulfill({
+      json: [
+        { target_type: "site", target_id: 4, name: "Shop", url: "https://shop.test" },
+        {
+          target_type: "api_collection",
+          target_id: 5,
+          name: "Shop API",
+          url: "https://api.shop.test",
+        },
+      ],
+    }),
+  );
 
   await page.goto("/#/sast-runs/1/candidates");
   const content = page.locator(".sast-run-content");
@@ -64,10 +77,28 @@ test("SAST findings use one full-width reading area", async ({ page }) => {
   const detail = page.locator(".sast-evidence-panel");
   const detailBounds = await detail.boundingBox();
   expect(detailBounds.width).toBeGreaterThan(contentBounds.width - 40);
+  const bodyBounds = await page.locator(".sast-evidence-body").boundingBox();
+  const writeupBounds = await page.locator(".sast-lead-details").boundingBox();
+  expect(writeupBounds.width).toBeGreaterThan(bodyBounds.width - 50);
+  await expect(page.getByRole("combobox", { name: "Application for live testing" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create test run" })).toBeDisabled();
+  await page.getByRole("combobox", { name: "Application for live testing" }).selectOption("site:4");
+  await expect(page.getByRole("button", { name: "Create test run" })).toBeEnabled();
   await page.screenshot({ path: path.join(tmpdir(), "aespa-sast-finding-detail.png") });
 
   await page.getByRole("button", { name: "Next →" }).click();
   await expect(page.getByRole("heading", { name: "Untrusted redirect URL" })).toBeVisible();
   await page.getByRole("button", { name: "← Back to findings" }).click();
   await expect(list).toBeVisible();
+
+  let createdFor = null;
+  await page.route("**/api/sast-runs/1/leads/1/live-test-runs", async (route) => {
+    createdFor = route.request().postDataJSON();
+    await route.fulfill({ status: 201, json: { run_type: "web", run_id: 42, lead_id: 10 } });
+  });
+  await page.getByRole("button", { name: /Authorization check missing on order lookup/ }).click();
+  await page.getByRole("combobox", { name: "Application for live testing" }).selectOption("site:4");
+  await page.getByRole("button", { name: "Create test run" }).click();
+  await expect(page).toHaveURL(/#\/runs\/42/);
+  expect(createdFor).toEqual({ target_type: "site", target_id: 4 });
 });
