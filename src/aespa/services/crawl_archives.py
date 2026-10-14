@@ -235,6 +235,7 @@ def build_archive(session: Session, run: TestRun) -> dict:
             "activity": {
                 "scan_log": [
                     {
+                        "id": entry.id,
                         "phase": entry.phase,
                         "status": entry.status,
                         "message": entry.message,
@@ -245,7 +246,12 @@ def build_archive(session: Session, run: TestRun) -> dict:
                         select(ScanLog)
                         .where(ScanLog.test_run_id == run.id)
                         .where(ScanLog.run_kind == "web")
-                        .where(ScanLog.phase.in_(("crawl", "auth")))
+                        .where(
+                            ScanLog.phase.in_(
+                                ("crawl", "auth", "crawl_workflow", "crawl_note")
+                            )
+                        )
+                        .order_by(ScanLog.id)
                     )
                 ],
                 "agent_log": [
@@ -501,20 +507,37 @@ def restore_archive_records(
             )
         activity = crawl.get("activity")
         if isinstance(activity, dict):
+            note_ids: dict[int, int] = {}
+            restored_notes: list[tuple[ScanLog, dict]] = []
             for item in activity.get("scan_log", []):
                 if not isinstance(item, dict) or not isinstance(item.get("phase"), str):
                     continue
-                session.add(
-                    ScanLog(
-                        test_run_id=run_id,
-                        run_kind="web",
-                        phase=item["phase"],
-                        status=item.get("status") or "",
-                        message=item.get("message") or "",
-                        page_url=item.get("page_url"),
-                        data_json=item.get("data_json"),
-                    )
+                row = ScanLog(
+                    test_run_id=run_id,
+                    run_kind="web",
+                    phase=item["phase"],
+                    status=item.get("status") or "",
+                    message=item.get("message") or "",
+                    page_url=item.get("page_url"),
+                    data_json=item.get("data_json"),
                 )
+                session.add(row)
+                if item["phase"] == "crawl_note":
+                    session.flush()
+                    if isinstance(item.get("id"), int):
+                        note_ids[item["id"]] = row.id
+                    try:
+                        note_data = json.loads(item.get("data_json") or "{}")
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(note_data, dict):
+                        restored_notes.append((row, note_data))
+            for row, note_data in restored_notes:
+                note = note_data.get("note")
+                if isinstance(note, dict) and isinstance(note.get("retry_of"), int):
+                    note["retry_of"] = note_ids.get(note["retry_of"])
+                    row.data_json = json.dumps(note_data)
+                    session.add(row)
             for item in activity.get("agent_log", []):
                 if not isinstance(item, dict) or not isinstance(
                     item.get("agent_id"), str

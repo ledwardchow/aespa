@@ -8,6 +8,7 @@ import * as webRunsApi from "../../shared/api/webRuns.js";
 import { Notice } from "../../shared/ui/Notice.jsx";
 import { ScopeHostsPanel } from "../../shared/runs/ScopeHostsPanel.jsx";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { usePolling } from "../../shared/hooks/usePolling.js";
 
 import { nav } from "../../shared/navigation/router.js";
 import { WebRunChatProvider, useWebRunChat } from "./WebRunChat.jsx";
@@ -35,6 +36,17 @@ import { WebRunSastLeadsTab } from "../../shared/leads/RunLeadsTab.jsx";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { SastSourceCosts } from "../../shared/ui/SastSourceCosts";
+
+function dismissedWorkflowNoticeIds(runId) {
+  try {
+    const saved = JSON.parse(
+      window.sessionStorage.getItem(`aespa-workflow-notices-${runId}`) || "[]",
+    );
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+}
 
 export function TestRunDetail(props) {
   return (
@@ -75,6 +87,44 @@ function TestRunContent({
   const [guidedLoginPending, setGuidedLoginPending] = useState([]);
   const [guidedLoginErrors, setGuidedLoginErrors] = useState([]);
   const [entraPrompts, setEntraPrompts] = useState([]);
+  const [workflowNotes, setWorkflowNotes] = useState([]);
+  const [workflowRetryStatus, setWorkflowRetryStatus] = useState({ status: "idle" });
+  const [notificationFocus, setNotificationFocus] = useState(0);
+  const [focusedNotificationId, setFocusedNotificationId] = useState(null);
+  const [workflowFocus, setWorkflowFocus] = useState(null);
+  const [dismissedWorkflowIds, setDismissedWorkflowIds] = useState(() =>
+    dismissedWorkflowNoticeIds(runId),
+  );
+
+  const loadWorkflowNotes = useCallback(async () => {
+    const [result, retry] = await Promise.all([
+      webRunsApi.getWorkflowNotes(runId),
+      webRunsApi.getWorkflowRetryStatus(runId),
+    ]);
+    setWorkflowNotes(result?.notes || []);
+    setWorkflowRetryStatus(retry || { status: "idle" });
+  }, [runId]);
+  usePolling(loadWorkflowNotes, { intervalMs: 5000 });
+  const waitingWorkflows = workflowNotes.filter(
+    (note) =>
+      note.needs_input &&
+      !(
+        workflowRetryStatus.note_id === note.id &&
+        ["submitting", "running"].includes(workflowRetryStatus.status)
+      ),
+  );
+  const viewWorkflow = (noteId) => {
+    setWorkflowFocus((current) => ({ noteId, sequence: (current?.sequence || 0) + 1 }));
+    setActiveTab("attack");
+  };
+  const viewWorkflowNotification = (noteId) => {
+    setFocusedNotificationId(noteId);
+    setNotificationFocus((value) => value + 1);
+    setActiveTab("activity");
+  };
+  const unseenWorkflows = waitingWorkflows.filter(
+    (note) => !dismissedWorkflowIds.includes(note.id),
+  );
 
   // Load LLM profiles once so the read-only display and edit dropdown both work.
   useEffect(() => {
@@ -546,6 +596,44 @@ function TestRunContent({
           }
         />
 
+        {unseenWorkflows.length > 0 && (
+          <div className="workflow-notification-banner" role="status">
+            <span className="workflow-notification-icon" aria-hidden="true">
+              !
+            </span>
+            <span>
+              <strong>
+                {unseenWorkflows.length === 1
+                  ? "A workflow needs your input"
+                  : `${unseenWorkflows.length} workflows need your input`}
+              </strong>
+            </span>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => {
+                const next = [
+                  ...new Set([...dismissedWorkflowIds, ...waitingWorkflows.map((note) => note.id)]),
+                ];
+                setDismissedWorkflowIds(next);
+                try {
+                  window.sessionStorage.setItem(
+                    `aespa-workflow-notices-${runId}`,
+                    JSON.stringify(next),
+                  );
+                } catch {
+                  // The notice still dismisses for this page if browser storage is unavailable.
+                }
+                setNotificationFocus((value) => value + 1);
+                setFocusedNotificationId(null);
+                setActiveTab("activity");
+              }}
+            >
+              View notifications
+            </button>
+          </div>
+        )}
+
         <WebRunNavigation
           activeTab={activeTab}
           onSelect={(tab) => {
@@ -637,6 +725,10 @@ function TestRunContent({
 
         <WebRunAttackSurfaceTab
           runId={runId}
+          workflowFocus={workflowFocus}
+          onWorkflowNotesChange={setWorkflowNotes}
+          onWorkflowRetryStatusChange={setWorkflowRetryStatus}
+          onOpenWorkflowNotification={viewWorkflowNotification}
           run={run}
           active={activeTab === "attack"}
           scanActive={isDynamicScanActive(thinkingStatus?.status)}
@@ -665,6 +757,12 @@ function TestRunContent({
           <WebRunActivityTab
             activeTab={activeTab}
             runId={runId}
+            notificationFocus={notificationFocus}
+            focusedNotificationId={focusedNotificationId}
+            workflowNotificationCount={waitingWorkflows.length}
+            onWorkflowNotesChange={setWorkflowNotes}
+            onWorkflowRetryStatusChange={setWorkflowRetryStatus}
+            onViewWorkflow={viewWorkflow}
             run={run}
             thinkingStatus={thinkingStatus}
             activityLog={activityLog}

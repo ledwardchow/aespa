@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from sqlmodel import Session, select
 
 from aespa.models import Credential, Site
-from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate
+from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate, SiteWorkflowInput
 
 
 def _parse_datetimes(data: dict, *fields: str) -> dict:
@@ -73,6 +73,44 @@ def _credential_values(payload: CredentialIn) -> dict:
     }
 
 
+def workflow_data_for_site(site: Site) -> list[dict]:
+    try:
+        data = json.loads(site.workflow_data_json or "[]")
+    except (TypeError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_site_workflow_data(
+    session: Session, site_id: int, workflow: dict, instructions: str
+) -> None:
+    site = get_site(session, site_id)
+    item = SiteWorkflowInput(
+        name=workflow["name"],
+        goal=workflow.get("goal") or workflow["name"],
+        start_url=workflow.get("start_url") or workflow.get("url"),
+        instructions=instructions,
+    ).model_dump(mode="json")
+    items = workflow_data_for_site(site)
+    key = (item["name"].casefold(), item["start_url"].rstrip("/").casefold())
+    for index, existing in enumerate(items):
+        existing_key = (
+            str(existing.get("name") or "").casefold(),
+            str(existing.get("start_url") or "").rstrip("/").casefold(),
+        )
+        if existing_key == key:
+            items[index] = item
+            break
+    else:
+        if len(items) >= 20:
+            raise ValueError("A site can save up to 20 workflows.")
+        items.append(item)
+    site.workflow_data_json = json.dumps(items)
+    site.updated_at = _utcnow()
+    session.add(site)
+    session.commit()
+
+
 def list_sites(session: Session) -> list[Site]:
     return list(session.exec(select(Site).order_by(Site.name)).all())
 
@@ -114,6 +152,9 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
         login_url=str(payload.login_url) if payload.login_url else None,
         notes=payload.notes,
         scan_guidance=payload.scan_guidance,
+        workflow_data_json=json.dumps(
+            [item.model_dump(mode="json") for item in payload.workflow_data or []]
+        ),
         scope_hosts=json.dumps(
             normalize_scope_entries(payload.scope_hosts, default_url=base_url)
         ),
@@ -140,6 +181,10 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     site.login_url = str(payload.login_url) if payload.login_url else None
     site.notes = payload.notes
     site.scan_guidance = payload.scan_guidance
+    if payload.workflow_data is not None:
+        site.workflow_data_json = json.dumps(
+            [item.model_dump(mode="json") for item in payload.workflow_data]
+        )
     site.scope_hosts = json.dumps(
         normalize_scope_entries(payload.scope_hosts, default_url=site.base_url)
     )

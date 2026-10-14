@@ -1,5 +1,6 @@
 import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect, useCallback } from "react";
+import { useHashTab } from "../../shared/navigation/useHashTab.js";
 import { truncUrl } from "../../shared/lib/urls.js";
 import { fmtDate } from "../../shared/lib/dates.js";
 import { DebugFindingsTable } from "./DebugFindingsTable.jsx";
@@ -8,7 +9,7 @@ import { IconCheck } from "../../shared/ui/Icons.jsx";
 import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function ReportingDebugPage() {
-  const [tab, setTab] = useState("prompt");
+  const [tab, setTab] = useHashTab("tab", ["prompt", "replay", "findings"], "prompt");
   const [promptKey, setPromptKey] = useState("reporting.analyse");
   const [promptVersions, setPromptVersions] = useState([]);
   const [selectedPromptVersionId, setSelectedPromptVersionId] = useState("");

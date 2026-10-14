@@ -81,6 +81,27 @@ export const validateScannerSessions = (id) =>
 
 export const getReconSummary = (id) => req(`/api/test-runs/${id}/recon-summary`);
 
+export const getWorkflowNotes = (id) => req(`/api/test-runs/${id}/crawl/workflows`);
+
+export const getWorkflowRetryStatus = (id) =>
+  req(`/api/test-runs/${id}/crawl/workflows/retry/status`);
+
+export const retryWorkflow = (
+  id,
+  noteId,
+  instructions,
+  saveToSite = false,
+  generateSampleData = false,
+) =>
+  req(`/api/test-runs/${id}/crawl/workflows/${noteId}/retry`, {
+    method: "POST",
+    body: {
+      instructions,
+      save_to_site: saveToSite,
+      generate_sample_data: generateSampleData,
+    },
+  });
+
 export const setPageScope = (runId, pgId, b) =>
   req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method: "PATCH", body: b });
 

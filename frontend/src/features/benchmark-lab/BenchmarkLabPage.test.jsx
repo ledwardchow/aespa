@@ -217,7 +217,7 @@ test("completed scans use parent tabs while Sites keeps its existing views", asy
   expect(screen.queryByRole("tab", { name: "Summary" })).toBeNull();
   expect(screen.queryByLabelText("Site")).toBeNull();
   await user.click(screen.getByRole("button", { name: "Open benchmark for Shop scan" }));
-  expect(window.location.hash).toBe("#/benchmark-lab/results/4");
+  expect(window.location.hash).toBe("#/benchmark-lab/results/4?subtab=analyses");
   await user.click(screen.getByRole("tab", { name: "APIs" }));
   expect(screen.getByRole("region", { name: "API finished scans" })).toBeTruthy();
   expect(screen.queryByLabelText("API")).toBeNull();

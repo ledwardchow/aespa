@@ -93,6 +93,10 @@ class Site(SQLModel, table=True):
     login_url: Optional[str] = Field(default=None)
     notes: Optional[str] = Field(default=None)
     scan_guidance: Optional[str] = Field(default=None)  # Test Lead guidance
+    workflow_data_json: str = Field(
+        default="[]",
+        sa_column=Column(String, nullable=False, server_default=text("'[]'")),
+    )
     scope_hosts: Optional[str] = Field(
         default=None
     )  # JSON list of host:port authorities

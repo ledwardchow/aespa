@@ -59,6 +59,7 @@ def _to_detail(site: Site) -> SiteDetail:
         login_url=site.login_url,
         notes=site.notes,
         scan_guidance=site.scan_guidance,
+        workflow_data=sites_service.workflow_data_for_site(site),
         created_at=site.created_at,
         updated_at=site.updated_at,
         credentials=[CredentialOut.model_validate(c) for c in site.credentials],

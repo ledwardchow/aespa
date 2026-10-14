@@ -286,6 +286,23 @@ legend {
   border: 1px solid var(--border);
   border-radius: 7px;
 }
+.workflow-site-item {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+.workflow-site-item .btn {
+  align-self: flex-start;
+}
+@media (max-width: 700px) {
+  .site-form-card {
+    padding: 10px;
+  }
+  .workflow-site-item {
+    padding: 8px;
+  }
+}
 .cred-row .credential-login-field {
 }
 .cred-row .credential-remove-cell {

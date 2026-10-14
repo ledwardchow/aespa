@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useHashTab } from "../../shared/navigation/useHashTab.js";
 
 import { SastAgentGroupView, SastAgentRoster } from "./SastAgentRoster.jsx";
 import { sastGroupHasActiveAgent, sastGroupHasAgents } from "./sastAgentPresentation.js";
@@ -22,9 +22,13 @@ export function formatTime(value) {
 }
 
 export function ActivityView({ logs, agentLog, scanRunning, runId, analysisMode }) {
-  const [subTab, setSubTab] = useState("agents");
   const groupTabs = GROUP_TABS.filter(
     (item) => !item.legacy || sastGroupHasAgents(agentLog, item.key),
+  );
+  const [subTab, setSubTab] = useHashTab(
+    "subtab",
+    ["agents", ...groupTabs.map((item) => item.key), "log"],
+    "agents",
   );
   const selectedGroup = groupTabs.find((item) => item.key === subTab);
   return (

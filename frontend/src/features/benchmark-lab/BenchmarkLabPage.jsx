@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import * as settingsApi from "../../shared/api/settings.js";
 import { nav } from "../../shared/navigation/router.js";
+import { useHashTab } from "../../shared/navigation/useHashTab.js";
 import { Crumb, PageHeader, Sep } from "../../shared/ui/PageHeader.jsx";
 import { parseGroundTruthText } from "./groundTruthImport.js";
 import { BenchmarkModelSettings } from "./BenchmarkModelSettings.jsx";
@@ -58,8 +59,12 @@ function groupGroundTruth(items, groupBy) {
 }
 
 export function BenchmarkLabPage({ initialResultId }) {
-  const [tab, setTab] = useState("site");
-  const [siteTab, setSiteTab] = useState("summary");
+  const [routeTab] = useHashTab("tab", ["site", "dast", "api", "sast", "datasets"], "site");
+  const [routeSiteTab, setSiteTab] = useHashTab(
+    "subtab",
+    ["summary", "analyses", "new"],
+    initialResultId ? "analyses" : "summary",
+  );
   const [targets, setTargets] = useState(EMPTY);
   const [datasets, setDatasets] = useState([]);
   const [results, setResults] = useState([]);
@@ -75,6 +80,9 @@ export function BenchmarkLabPage({ initialResultId }) {
   const [error, setError] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [groupBy, setGroupBy] = useState("none");
+  const selectedResult = results.find((item) => item.id === selectedResultId);
+  const tab = initialResultId && selectedResult ? selectedResult.run_kind : routeTab;
+  const siteTab = initialResultId && selectedResult ? "analyses" : routeSiteTab;
 
   const load = useCallback(async () => {
     try {
@@ -92,8 +100,6 @@ export function BenchmarkLabPage({ initialResultId }) {
       setResults(resultData);
       const linkedResult = resultData.find((item) => item.id === initialResultId);
       if (linkedResult) {
-        setTab(linkedResult.run_kind);
-        setSiteTab("analyses");
         setTargetId(String(linkedResult.target_id || ""));
         setSelectedResultId(linkedResult.id);
       }
@@ -114,7 +120,6 @@ export function BenchmarkLabPage({ initialResultId }) {
   const category = tab === "dast" ? "site" : tab;
   const target = targets.sites.find((item) => String(item.id) === String(targetId));
   const defaultModel = models.find((item) => item.id === benchmarkSettings?.default_model_id);
-  const selectedResult = results.find((item) => item.id === selectedResultId);
   const groupedGroundTruth = useMemo(
     () => groupGroundTruth(selectedResult?.ground_truth.items || [], groupBy),
     [selectedResult, groupBy],
@@ -138,9 +143,12 @@ export function BenchmarkLabPage({ initialResultId }) {
     [results, tab, category, targetId, target, targets],
   );
   const findingsById = new Map((selectedResult?.findings || []).map((item) => [item.id, item]));
-  const openResult = (id) => nav(`#/benchmark-lab/results/${id}`);
+  const openResult = (id) =>
+    nav(
+      `#/benchmark-lab/results/${id}${routeSiteTab === "summary" ? "" : `?subtab=${routeSiteTab}`}`,
+    );
   const changeTab = (next) => {
-    setTab(next);
+    nav(`#/benchmark-lab?tab=${next}&subtab=${routeSiteTab}`);
     setTargetId("");
     setRunId("");
     setSelectedResultId(null);

@@ -46,6 +46,7 @@ from aespa.schemas import (
 )
 from aespa.services import active_jobs as active_jobs_svc
 from aespa.services import crawl_archives, crawl_then_pentest, run_cleanup
+from aespa.services import crawl_workflows as crawl_workflows_svc
 from aespa.services import crawler as crawler_svc
 from aespa.services import recon_summary as recon_summary_svc
 from aespa.services import saved_crawls as saved_crawls_svc
@@ -59,6 +60,13 @@ from aespa.services.run_graph import build_run_graph
 from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["test_runs"])
+
+
+class WorkflowRetryBody(BaseModel):
+    instructions: str
+    save_to_site: bool = False
+    generate_sample_data: bool = False
+
 
 _CRAWL_OWNED_PHASES = {"created", "crawling", "reconciling", "finalizing"}
 
@@ -1124,6 +1132,57 @@ def get_recon_summary(
     # The tab polls while a scan is active. Rebuild from canonical rows so routes,
     # access observations, findings, and coverage never lag behind stored JSON.
     return recon_summary_svc.build_recon_summary(run_id, session=session, persist=False)
+
+
+@router.get("/api/test-runs/{run_id}/crawl/workflows")
+def get_crawl_workflows(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    return {"notes": crawl_workflows_svc.list_workflow_notes(session, run_id)}
+
+
+@router.get("/api/test-runs/{run_id}/crawl/workflows/retry/status")
+def get_crawl_workflow_retry_status(
+    run_id: int, session: Session = Depends(get_session)
+) -> dict:
+    _get_run_or_404(session, run_id)
+    return crawl_workflows_svc.workflow_retry_status(run_id)
+
+
+@router.post("/api/test-runs/{run_id}/crawl/workflows/{note_id}/retry")
+async def retry_crawl_workflow(
+    run_id: int,
+    note_id: int,
+    body: WorkflowRetryBody,
+    session: Session = Depends(get_session),
+) -> dict:
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running:
+        raise HTTPException(status_code=409, detail="Wait for the run to finish first.")
+    note = next(
+        (
+            item
+            for item in crawl_workflows_svc.list_workflow_notes(session, run_id)
+            if item["id"] == note_id
+        ),
+        None,
+    )
+    if note is None:
+        raise HTTPException(status_code=404, detail="Workflow note not found.")
+    if not crawl_workflows_svc.can_retry_workflow(note):
+        raise HTTPException(
+            status_code=409,
+            detail="This workflow cannot be retried.",
+        )
+    try:
+        return crawl_workflows_svc.start_workflow_retry(
+            run_id,
+            note,
+            body.instructions,
+            save_to_site=body.save_to_site,
+            generate_sample_data=body.generate_sample_data,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 # ── Scope management ──────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ from aespa.models import (
     Credential,
     PageCredentialView,
     PageOwaspTest,
+    ScanLog,
     TargetIntelItem,
     TestRun,
     TrafficEntry,
@@ -109,6 +110,29 @@ def build_recon_summary(
         coverage = _build_coverage(cells, pages, routes)
         signals = _build_signals(pages, intel_items)
         technologies = _detect_technologies(s, run_id, pages, intel_items)
+        crawl_notes_checked = (
+            s.exec(
+                select(ScanLog.id)
+                .where(ScanLog.test_run_id == run_id)
+                .where(ScanLog.run_kind == "web")
+                .where(ScanLog.phase == "crawl_workflow")
+                .where(ScanLog.status == "complete")
+            ).first()
+            is not None
+        )
+        crawl_notes_failed = (
+            s.exec(
+                select(ScanLog.id)
+                .where(ScanLog.test_run_id == run_id)
+                .where(ScanLog.run_kind == "web")
+                .where(ScanLog.phase == "crawl_workflow")
+                .where(ScanLog.status == "error")
+            ).first()
+            is not None
+        )
+        from aespa.services.crawl_workflows import list_workflow_notes
+
+        crawl_notes = list_workflow_notes(s, run_id)
         waf = _build_waf_summary(run)
         if waf is not None:
             # Surface the WAF alongside the other detected technologies too, so
@@ -129,6 +153,9 @@ def build_recon_summary(
         summary = {
             "schema_version": 2,
             "route_groups": json.loads(run.route_groups_json or "[]") if run else [],
+            "crawl_notes": crawl_notes,
+            "crawl_notes_checked": crawl_notes_checked,
+            "crawl_notes_failed": crawl_notes_failed,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "route_count": len(routes),
             "routes": routes,
