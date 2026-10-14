@@ -101,6 +101,21 @@ export function AttackSurfacePanel({ summary, routeGroups = [] }) {
         </div>
       </div>
 
+      {routeGroups.length ? (
+        <Section
+          id="groups"
+          title="Grouped pages"
+          detail={routeGroupCountText(routeGroups)}
+          expanded={expanded.groups}
+          onToggle={toggle}
+        >
+          <p className="subtle surface-section-note">
+            Only a few pages of each route were visited. Testing and coverage use these pages.
+          </p>
+          <RouteGroupsTable groups={routeGroups} />
+        </Section>
+      ) : null}
+
       <Section
         id="meta"
         title="Observed Technologies"
@@ -133,21 +148,6 @@ export function AttackSurfacePanel({ summary, routeGroups = [] }) {
           ))}
         </div>
       </Section>
-
-      {routeGroups.length ? (
-        <Section
-          id="groups"
-          title="Grouped pages"
-          detail={routeGroupCountText(routeGroups)}
-          expanded={expanded.groups}
-          onToggle={toggle}
-        >
-          <p className="subtle surface-section-note">
-            Only a few pages of each route were visited. Testing and coverage use these pages.
-          </p>
-          <RouteGroupsTable groups={routeGroups} />
-        </Section>
-      ) : null}
 
       <Section
         id="routes"

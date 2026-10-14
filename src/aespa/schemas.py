@@ -112,6 +112,15 @@ class CredentialOut(BaseModel):
         return data
 
 
+class SiteWorkflowInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    goal: str = Field(min_length=1, max_length=220)
+    start_url: HttpUrl
+    instructions: str = Field(min_length=1, max_length=4000)
+
+
 class SiteBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -121,12 +130,22 @@ class SiteBase(BaseModel):
     login_url: HttpUrl | None = None
     notes: str | None = None
     scan_guidance: str | None = None
+    workflow_data: list[SiteWorkflowInput] | None = Field(default=None, max_length=20)
     scope_hosts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_auth_consistency(self) -> "SiteBase":
         if not self.requires_auth and self.login_url is not None:
             raise ValueError("login_url must be omitted when requires_auth is false")
+        site_port = self.base_url.port or (
+            443 if self.base_url.scheme == "https" else 80
+        )
+        for workflow in self.workflow_data or []:
+            start_port = workflow.start_url.port or (
+                443 if workflow.start_url.scheme == "https" else 80
+            )
+            if workflow.start_url.host != self.base_url.host or start_port != site_port:
+                raise ValueError("workflow starting pages must be on the site host")
         return self
 
 
@@ -180,6 +199,7 @@ class SiteDetail(BaseModel):
     login_url: str | None
     notes: str | None
     scan_guidance: str | None
+    workflow_data: list[SiteWorkflowInput] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     credentials: list[CredentialOut]

@@ -5,7 +5,7 @@ import json
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from aespa.models import SavedCrawl, TestRun
+from aespa.models import SavedCrawl, ScanLog, TestRun
 
 
 def _make_site(client: TestClient, **kw):
@@ -111,6 +111,99 @@ def test_grouped_crawl_settings_and_summary_survive_save_and_load(
     assert loaded.json()["page_selection"] == "group_similar"
     assert loaded.json()["crawl_started_once"] is True
     assert loaded.json()["route_groups"][0]["links_seen"] == 40
+
+
+def test_workflows_survive_file_export_and_site_save(client: TestClient, db_session):
+    site = _make_site(client)
+    source = _seed_crawled_run(client, site["id"])
+    root_note = {
+        "name": "Checkout",
+        "goal": "Reach checkout",
+        "reason": "Found a cart",
+        "start_url": "https://target.local/orders",
+        "status": "not_attempted",
+        "needs_input": True,
+        "request": "Enter a shipping address",
+        "instructions": "",
+    }
+    root = ScanLog(
+        test_run_id=source["id"],
+        run_kind="web",
+        phase="crawl_note",
+        status="info",
+        message="Checkout needs input",
+        data_json=json.dumps({"stage": "workflow_note", "note": root_note}),
+    )
+    db_session.add(root)
+    db_session.flush()
+    retry_note = {
+        **root_note,
+        "status": "crawled",
+        "needs_input": False,
+        "retry_of": root.id,
+        "instructions": "Use 1 Test Street",
+    }
+    db_session.add(
+        ScanLog(
+            test_run_id=source["id"],
+            run_kind="web",
+            phase="crawl_note",
+            status="complete",
+            message="Checkout reached",
+            data_json=json.dumps({"stage": "workflow_note", "note": retry_note}),
+        )
+    )
+    db_session.add(
+        ScanLog(
+            test_run_id=source["id"],
+            run_kind="web",
+            phase="crawl_workflow",
+            status="complete",
+            message="Finished checking workflows",
+        )
+    )
+    db_session.commit()
+
+    exported = client.get(f"/api/test-runs/{source['id']}/crawl/export")
+    assert exported.status_code == 200
+    entries = exported.json()["crawl"]["activity"]["scan_log"]
+    assert [
+        entry["phase"] for entry in entries if entry["phase"].startswith("crawl_")
+    ] == [
+        "crawl_note",
+        "crawl_note",
+        "crawl_workflow",
+    ]
+    saved = _save(client, source["id"])
+    assert saved.status_code == 201
+    saved_export = client.get(
+        f"/api/sites/{site['id']}/saved-crawls/{saved.json()['id']}/export"
+    )
+    assert saved_export.json()["crawl"]["activity"]["scan_log"] == entries
+
+    for load_from_file in (True, False):
+        target = _make_run(client, site["id"])
+        if load_from_file:
+            loaded = client.post(
+                f"/api/test-runs/{target['id']}/crawl/import",
+                files={"file": ("crawl.json", exported.content, "application/json")},
+            )
+        else:
+            loaded = client.post(
+                f"/api/test-runs/{target['id']}/crawl/load/{saved.json()['id']}"
+            )
+        assert loaded.status_code == 200
+        notes = client.get(f"/api/test-runs/{target['id']}/crawl/workflows").json()[
+            "notes"
+        ]
+        assert len(notes) == 2
+        assert notes[0]["id"] != root.id
+        assert notes[0]["resolved"] is True
+        assert notes[1]["retry_of"] == notes[0]["id"]
+        assert notes[1]["instructions"] == "Use 1 Test Street"
+        summary = client.get(f"/api/test-runs/{target['id']}/recon-summary").json()
+        assert summary["crawl_notes_checked"] is True
+        assert len(summary["crawl_notes"]) == 2
 
 
 def test_saved_crawl_survives_source_run_deletion(client: TestClient):

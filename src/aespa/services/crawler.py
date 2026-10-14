@@ -669,6 +669,45 @@ async def _do_crawl_inner(run_id: int) -> None:
         if isinstance(r, Exception):
             log.error("Crawl task raised: %s", r)
 
+    if run_id not in _stop_requested:
+        from aespa.services.crawl_workflows import explore_after_crawl
+
+        _update_run(run_id, phase="exploring_workflows", current_url=None)
+        _crawl_log(
+            run_id,
+            "crawl_workflow",
+            "start",
+            "Checking for workflows that the page crawl did not reach",
+        )
+        try:
+            await explore_after_crawl(
+                run_id,
+                llm_cfg=llm_cfg,
+                site=site,
+                creds=creds,
+                shared=shared,
+                max_pages=max_pages,
+                browser_engine=browser_engine,
+                browser_visible=browser_visible,
+                pw_proxy=_pw_proxy,
+                global_http_header=_global_http_header,
+            )
+        except Exception:
+            log.warning("Post-crawl workflow exploration failed", exc_info=True)
+            _crawl_log(
+                run_id,
+                "crawl_workflow",
+                "error",
+                "Could not finish checking for additional workflows",
+            )
+        else:
+            _crawl_log(
+                run_id,
+                "crawl_workflow",
+                "complete",
+                "Finished checking for additional workflows",
+            )
+
     if enable_access_reconciliation:
         _update_run(run_id, phase="reconciling", current_url=None)
         events_svc.emit(

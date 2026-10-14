@@ -517,13 +517,41 @@ start_crawl(run_id)
                  v.   Enqueue new URLs (in-scope, within depth/page limits)
                  vi.  Persist CrawledPage + PageLinks + TrafficEntries
        3. Extract TargetIntelItems (endpoints, forms, inputs, IDs, scripts, JWT hints)
-       4. Update TestRun status → crawled
+       4. Ask the crawler model about workflows suggested by the page inventory but not reached
+          • Try a few visible browser actions to reach them, except deletion
+          • Save newly reached pages with replay steps and record workflow notes
+          • Record deletion or blocked workflows without exercising them
+       5. Update TestRun status → crawled
 ```
 
 The run view reports the crawl in plain-language stages. Each page event includes
 the credential in use, the phase number, the URL, and the current step: opening
 the page, checking access, analyzing content and links, or moving to the next
 URL. Navigation errors and login-blocked pages are recorded too.
+
+The Workflows subtab under Attack Surface & Coverage groups retry attempts under
+their original workflow and shows live retry progress. Status
+shows a notice when a workflow needs input and has a Notifications subtab for
+workflows that stopped because the crawler lacked
+sample data or instructions. Users can supply test data there to continue one
+workflow. Submitting the data opens Workflows so the user can watch the retry.
+The retry keeps the same deletion checks and adds its result
+to the workflow notes. The retry status endpoint reports the current browser
+step, page path, completed actions, and final result. A completed retry clears the earlier notification. If
+the crawler needs more information, it adds a new notification with the specific
+request and the submitted instructions ready to edit. The user can also choose
+Generate for me on one notification, allowing the crawler to make up ordinary
+test values for that retry. Generated values are added to the editable
+instructions. The action guard checks the chosen control and its target for
+deletion, and the browser blocks DELETE requests and delete paths. Other state
+changes, including reviews and orders, are allowed. The crawler still requires
+user-provided payment details and secrets.
+The Site saves the instructions and generated values only after the workflow is
+reached. Site
+configuration lists these saved workflows and lets the user edit or remove
+them. Future crawls load the saved instructions and try those workflows again,
+even if the normal page crawl did not rediscover their starting URL. The URL
+must still belong to the site's host, and deletion remains blocked.
 
 For authenticated sites with multiple credentials, an optional **cross-user
 access check** can follow the crawl. AESPA loads known pages again for each
@@ -641,7 +669,7 @@ crawler substitutes the real values locally.
 
 ### Reusing a crawl (export, import, and saved crawls)
 
-`services/crawl_archives.py` serializes a run's crawl into an `aespa-crawl-export` archive. The archive holds pages, links, per-credential views, target intelligence, traffic, scanner sessions, OWASP applicability, and crawl activity. `import_into_run()` restores an archive into a new pending run with no crawl data. It checks that the archive's base URL matches the site, rebuilds the recon summary, and seeds a fresh coverage workprogram. Coverage results are not copied.
+`services/crawl_archives.py` serializes a run's crawl into an `aespa-crawl-export` archive. The archive holds pages, links, per-credential views, target intelligence, traffic, scanner sessions, OWASP applicability, and crawl activity, including workflow notes and retries. `import_into_run()` restores an archive into a new pending run with no crawl data. It checks that the archive's base URL matches the site, reconnects workflow retries to their original notes, rebuilds the recon summary, and seeds a fresh coverage workprogram. Coverage results are not copied.
 
 Saved crawls (`SavedCrawl`, `services/saved_crawls.py`) store such an archive, gzip-compressed, on the **site** instead of in a file. They are created from a run (`POST /api/test-runs/{id}/crawl/save`) or from an uploaded export file (`POST /api/sites/{id}/saved-crawls/upload`), and loaded with `POST /api/test-runs/{id}/crawl/load/{saved_id}`. A saved crawl keeps `source_run_id` only as a plain reference, so it outlives the run it came from. Saved crawls are deleted when their site is deleted. List endpoints never return the archive itself.
 

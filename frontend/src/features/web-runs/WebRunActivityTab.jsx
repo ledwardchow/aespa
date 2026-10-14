@@ -1,8 +1,10 @@
 import { ActivityAgents } from "./ActivityAgents.jsx";
 import { ActivitySpecialists } from "./ActivitySpecialists.jsx";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { ActivityLog } from "./ActivityLog.jsx";
 import { ActivityDeepQueue } from "./ActivityDeepQueue.jsx";
+import { WebRunNotificationsTab } from "./WebRunNotificationsTab.jsx";
+import { useHashTab } from "../../shared/navigation/useHashTab.js";
 
 const SPECIALIST_WORKERS = [{ prefix: "specialist-", label: "Specialist" }];
 
@@ -10,6 +12,12 @@ export function WebRunActivityTab(props) {
   const {
     activeTab,
     runId,
+    notificationFocus,
+    focusedNotificationId,
+    workflowNotificationCount,
+    onWorkflowNotesChange,
+    onWorkflowRetryStatusChange,
+    onViewWorkflow,
     run,
     thinkingStatus,
     activityLog,
@@ -18,11 +26,18 @@ export function WebRunActivityTab(props) {
     onClearLog,
     onError,
   } = props;
-  const [activitySubTab, setActivitySubTab] = useState("agents");
+  const [activitySubTab, setActivitySubTab] = useHashTab(
+    "subtab",
+    ["agents", "workers", "deep-queue", "notifications", "log"],
+    "agents",
+  );
   const isDeep = run?.coverage_mode === "deep";
   useEffect(() => {
     if (isDeep && activitySubTab === "workers") setActivitySubTab("deep-queue");
-  }, [activitySubTab, isDeep]);
+  }, [activitySubTab, isDeep, setActivitySubTab]);
+  useEffect(() => {
+    if (notificationFocus) setActivitySubTab("notifications");
+  }, [notificationFocus, setActivitySubTab]);
   return (
     <>
       <div className="activity-panel">
@@ -65,6 +80,19 @@ export function WebRunActivityTab(props) {
                   </button>
                 )}
                 <button
+                  className={
+                    "activity-sub-tab-btn" + (activitySubTab === "notifications" ? " active" : "")
+                  }
+                  onClick={() => setActivitySubTab("notifications")}
+                >
+                  Notifications
+                  {workflowNotificationCount > 0 && (
+                    <span className="workflow-notification-badge" aria-hidden="true">
+                      {workflowNotificationCount}
+                    </span>
+                  )}
+                </button>
+                <button
                   className={"activity-sub-tab-btn" + (activitySubTab === "log" ? " active" : "")}
                   onClick={() => setActivitySubTab("log")}
                 >
@@ -89,6 +117,16 @@ export function WebRunActivityTab(props) {
         )}
         {activitySubTab === "deep-queue" && (
           <ActivityDeepQueue runId={runId} thinkingStatus={thinkingStatus} agents={agents} />
+        )}
+        {activitySubTab === "notifications" && (
+          <WebRunNotificationsTab
+            runId={runId}
+            onNotesChange={onWorkflowNotesChange}
+            onRetryStatusChange={onWorkflowRetryStatusChange}
+            onViewWorkflow={onViewWorkflow}
+            focusedNoteId={focusedNotificationId}
+            focusSequence={notificationFocus}
+          />
         )}
         {activitySubTab === "agents" && (
           <ActivityAgents

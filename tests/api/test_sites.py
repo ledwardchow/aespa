@@ -79,6 +79,78 @@ def test_scan_guidance_round_trips(client):
     assert upd.json()["scan_guidance"] == "Updated steps."
 
 
+def test_site_workflow_data_can_be_edited_without_a_run(client):
+    workflow = {
+        "name": "Checkout",
+        "goal": "Open checkout form",
+        "start_url": "https://juice.local/cart",
+        "instructions": "Add the sample product",
+    }
+    created = make_site(client, name="With workflow", workflow_data=[workflow])
+    assert created.status_code == 201
+    site_id = created.json()["id"]
+    assert created.json()["workflow_data"][0] == workflow
+
+    detail = client.get(f"/api/sites/{site_id}")
+    assert detail.json()["workflow_data"] == [workflow]
+    updated = client.put(
+        f"/api/sites/{site_id}",
+        json={
+            "name": "With workflow",
+            "base_url": "https://juice.local",
+            "requires_auth": False,
+            "workflow_data": [{**workflow, "instructions": "Use a sample keyboard"}],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["workflow_data"][0]["instructions"] == "Use a sample keyboard"
+
+    # Clients that do not send workflow_data leave the site-level data alone.
+    unchanged = client.put(
+        f"/api/sites/{site_id}",
+        json={"name": "With workflow", "base_url": "https://juice.local"},
+    )
+    assert unchanged.status_code == 200
+    assert (
+        unchanged.json()["workflow_data"][0]["instructions"] == "Use a sample keyboard"
+    )
+
+
+def test_site_export_keeps_saved_workflow_data(session):
+    workflow = {
+        "name": "Checkout",
+        "goal": "Open checkout form",
+        "start_url": "https://juice.local/cart",
+        "instructions": "Add a sample keyboard",
+    }
+    site = Site(
+        name="With workflow",
+        base_url="https://juice.local",
+        workflow_data_json=json.dumps([workflow]),
+    )
+    session.add(site)
+    session.commit()
+    imported = sites_service.import_site(
+        session, sites_service.export_site(session, site.id)
+    )
+    assert sites_service.workflow_data_for_site(imported) == [workflow]
+
+
+def test_site_rejects_workflow_data_for_another_host(client):
+    response = make_site(
+        client,
+        workflow_data=[
+            {
+                "name": "Other",
+                "goal": "Open external form",
+                "start_url": "https://other.test/form",
+                "instructions": "Use test data",
+            }
+        ],
+    )
+    assert response.status_code == 422
+
+
 def test_create_site_with_auth_and_credentials(client):
     r = make_site(
         client,

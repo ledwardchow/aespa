@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
-import { installFixtures, model, profile, provider, run } from "./fixtures.js";
+import { installFixtures, model, profile, provider, run, site } from "./fixtures.js";
 
 const screens = [
   ["#/", "Fixture site"],
@@ -1008,6 +1008,350 @@ test("OWASP coverage cells filter the rendered traffic rows", async ({ page }) =
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(errors).toEqual([]);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-coverage-traffic-filter.png") });
+});
+
+test("Workflows shows crawl notes outside Attack Surface", async ({ page }) => {
+  await installFixtures(page);
+  await page.route("**/api/test-runs/1/recon-summary", (route) =>
+    route.fulfill({
+      json: {
+        route_groups: [
+          {
+            label: "Products",
+            route_pattern: "/products/:id",
+            links_seen: 2,
+            pages_sampled: 1,
+            example_urls: ["http://example.test/products/1"],
+          },
+        ],
+        technologies: [{ name: "React", source: "page", category: "framework" }],
+        crawl_notes_checked: true,
+        crawl_notes: [
+          {
+            name: "Checkout",
+            reason: "The product page has an Add to cart button.",
+            status: "crawled",
+            steps: ["click Add to cart", "click Secure Checkout"],
+            detail: "Reached the checkout page.",
+            url: "http://example.test/checkout",
+          },
+        ],
+      },
+    }),
+  );
+  await page.goto("/#/runs/1/attack");
+  await page.getByRole("button", { name: "Attack Surface", exact: true }).click();
+  await expect(page.locator(".attack-surface-section-title")).toContainText([
+    "Grouped pages",
+    "Observed Technologies",
+  ]);
+  await expect(page.locator(".surface-crawl-note")).toHaveCount(0);
+  await page.getByRole("button", { name: /Workflows/ }).click();
+  await expect(page.getByRole("button", { name: /Workflows/ })).toHaveClass(/active/);
+  await expect(page.getByRole("button", { name: "Attack Surface", exact: true })).not.toHaveClass(
+    /active/,
+  );
+  await expect(page.locator(".surface-crawl-note")).toContainText("click Add to cart");
+  await expect(page.locator(".surface-crawl-note")).toContainText("Reached the checkout page.");
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflows-desktop.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflows-narrow.png") });
+});
+
+test("a workflow needing input opens its matching notification", async ({ page }) => {
+  await installFixtures(page);
+  await page.route("**/api/test-runs/1/crawl/workflows", (route) =>
+    route.fulfill({
+      json: {
+        notes: [
+          {
+            id: 23,
+            name: "Address",
+            status: "needs_input",
+            needs_input: true,
+            request: "Provide a test address.",
+          },
+          {
+            id: 24,
+            name: "Checkout",
+            status: "needs_input",
+            needs_input: true,
+            request: "Provide a delivery method.",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/test-runs/1/crawl/workflows/retry/status", (route) =>
+    route.fulfill({ json: { status: "idle" } }),
+  );
+  await page.goto("/#/runs/1/attack");
+  await page.getByRole("button", { name: /Workflows/ }).click();
+  const checkout = page.locator(".surface-crawl-note").filter({ hasText: "Checkout" });
+  await checkout.getByRole("button", { name: "Provide input" }).click();
+  await expect(page.getByRole("button", { name: "Notifications", exact: true })).toHaveClass(
+    /active/,
+  );
+  await expect(page.locator("#workflow-input-24")).toBeFocused();
+});
+
+test("Status collects sample data for a stopped workflow", async ({ page }) => {
+  await installFixtures(page);
+  let completed = false;
+  let needsName = false;
+  let retryState = { status: "idle" };
+  await page.route("**/api/test-runs/1/crawl/workflows", (route) =>
+    route.fulfill({
+      json: {
+        notes: [
+          {
+            id: 23,
+            name: "Add a delivery address",
+            reason: "The address page offers an Add an address button.",
+            status: "needs_input",
+            detail: "No sample address was provided.",
+            needs_input: !completed && !needsName,
+          },
+          ...(needsName && !completed
+            ? [
+                {
+                  id: 25,
+                  retry_of: 23,
+                  name: "Add a delivery address",
+                  status: "needs_input",
+                  reason: "The address page offers an Add an address button.",
+                  detail: "The address form requires a full name, but none was provided.",
+                  request: "Please provide the full name for this delivery address.",
+                  instructions: "Use 1 Example Street, Sydney NSW 2000",
+                  save_to_site_requested: true,
+                  needs_input: true,
+                },
+              ]
+            : []),
+          ...(completed
+            ? [
+                {
+                  id: 25,
+                  retry_of: 23,
+                  name: "Add a delivery address",
+                  status: "needs_input",
+                  needs_input: false,
+                  detail: "The address form requires a full name, but none was provided.",
+                },
+                {
+                  id: 26,
+                  retry_of: 25,
+                  name: "Add a delivery address",
+                  status: "crawled",
+                  needs_input: false,
+                  detail: "Reached the address form.",
+                },
+              ]
+            : []),
+          {
+            id: 24,
+            name: "Ship a pending order",
+            status: "not_attempted",
+            detail: "Not tried because this workflow appears destructive.",
+            needs_input: false,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/test-runs/1/crawl/workflows/retry/status", (route) =>
+    route.fulfill({ json: retryState }),
+  );
+  let submitted = null;
+  await page.route(/\/api\/test-runs\/1\/crawl\/workflows\/(23|25)\/retry$/, async (route) => {
+    submitted = route.request().postDataJSON();
+    retryState = {
+      status: "running",
+      note_id: Number(
+        route
+          .request()
+          .url()
+          .match(/\/(23|25)\/retry$/)[1],
+      ),
+      save_to_site_requested: true,
+      saved_to_site: false,
+      message: "Opening browser",
+      action_limit: 18,
+      actions_done: 0,
+      actions: [],
+    };
+    await route.fulfill({ json: retryState });
+  });
+  await page.goto("/#/runs/1/activity");
+  await expect(page.getByText("A workflow needs your input")).toBeVisible();
+  await expect(page.locator(".workflow-notification-badge")).toHaveText("1");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-notice-narrow.png") });
+  await page.setViewportSize({ width: 1440, height: 1024 });
+  await page.getByRole("button", { name: "View notifications" }).click();
+  await expect(page.getByText("A workflow needs your input")).toHaveCount(0);
+  await expect(page.locator(".workflow-notification-badge")).toHaveText("1");
+  await expect(page.getByRole("button", { name: "Notifications", exact: true })).toHaveClass(
+    /active/,
+  );
+  await expect(page.getByText("Add a delivery address")).toBeVisible();
+  await expect(page.getByText("Ship a pending order")).toHaveCount(0);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-input-desktop.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-input-narrow.png") });
+  await page
+    .getByLabel("Sample data or instructions")
+    .fill("Use 1 Example Street, Sydney NSW 2000");
+  await page.getByLabel("Save to site").check();
+  await page.getByRole("button", { name: "Continue workflow" }).click();
+  await expect
+    .poll(() => submitted)
+    .toEqual({
+      instructions: "Use 1 Example Street, Sydney NSW 2000",
+      save_to_site: true,
+      generate_sample_data: false,
+    });
+  await expect(page.getByRole("button", { name: /^Workflows/ })).toHaveClass(/active/);
+  await expect(page.locator(".workflow-notification-badge")).toHaveCount(0);
+  await expect(page.getByText("Continuing workflow")).toBeVisible();
+  await expect(page.getByText("Opening browser")).toBeVisible();
+  await expect(page.getByText("Will save to site if reached")).toBeVisible();
+  retryState = {
+    ...retryState,
+    message: "Checking the result",
+    current_path: "/account/addresses",
+    actions_done: 1,
+    actions: ["click Add an address"],
+  };
+  await expect(page.getByText("click Add an address")).toBeVisible();
+  await expect(
+    page.locator(".surface-crawl-note").filter({ hasText: "Add a delivery address" }),
+  ).toHaveCount(1);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-progress.png") });
+  needsName = true;
+  retryState = {
+    ...retryState,
+    status: "complete",
+    result_status: "needs_input",
+    message: "The address form requires a full name, but none was provided.",
+  };
+  await expect(page.getByText("Retry 1: Needs input")).toBeVisible();
+  await expect(page.getByText("A workflow needs your input")).toBeVisible();
+  await page.getByRole("button", { name: "View notifications" }).click();
+  await expect(page.locator(".workflow-notification-badge")).toHaveText("1");
+  await expect(
+    page.getByText("Please provide the full name for this delivery address."),
+  ).toBeVisible();
+  await expect(page.getByText("This attempt was not saved to the site.")).toBeVisible();
+  await expect(page.getByLabel("Sample data or instructions")).toHaveValue(
+    "Use 1 Example Street, Sydney NSW 2000",
+  );
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-needs-name.png") });
+  await page
+    .getByLabel("Sample data or instructions")
+    .fill("Use Test User, 1 Example Street, Sydney NSW 2000");
+  await page.getByLabel("Save to site").check();
+  await page.getByRole("button", { name: "Continue workflow" }).click();
+  await expect
+    .poll(() => submitted?.instructions)
+    .toBe("Use Test User, 1 Example Street, Sydney NSW 2000");
+  expect(submitted.generate_sample_data).toBe(false);
+  completed = true;
+  retryState = {
+    ...retryState,
+    status: "complete",
+    result_status: "crawled",
+    saved_to_site: true,
+    message: "Reached the address form.",
+  };
+  await expect(page.getByRole("button", { name: /^Workflows/ })).toHaveClass(/active/);
+  await expect(
+    page.locator(".surface-crawl-note").filter({ hasText: "Add a delivery address" }),
+  ).toHaveCount(1);
+  await expect(page.getByText("Reached the address form.").first()).toBeVisible();
+  await expect(page.getByText("A workflow needs your input")).toHaveCount(0);
+  await expect(page.locator(".workflow-notification-badge")).toHaveCount(0);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-result.png") });
+  await page.setViewportSize({ width: 1440, height: 1024 });
+  await page.getByRole("button", { name: "Status", exact: true }).click();
+  await expect(page.getByText("You're all caught up")).toBeVisible();
+});
+
+test("a workflow notification can authorize generated sample data", async ({ page }) => {
+  await installFixtures(page);
+  let submitted = null;
+  let retryState = { status: "idle" };
+  await page.route("**/api/test-runs/1/crawl/workflows", (route) =>
+    route.fulfill({
+      json: {
+        notes: [
+          {
+            id: 23,
+            name: "Add a delivery address",
+            detail: "An address is needed.",
+            needs_input: true,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/test-runs/1/crawl/workflows/retry/status", (route) =>
+    route.fulfill({ json: retryState }),
+  );
+  await page.route("**/api/test-runs/1/crawl/workflows/23/retry", async (route) => {
+    submitted = route.request().postDataJSON();
+    retryState = {
+      status: "running",
+      note_id: 23,
+      generate_sample_data: true,
+      message: "Opening browser",
+      actions_done: 0,
+      actions: [],
+    };
+    await route.fulfill({ json: retryState });
+  });
+  await page.goto("/#/runs/1/activity");
+  await page.getByRole("button", { name: "View notifications" }).click();
+  await expect(page.getByRole("button", { name: "Continue workflow" })).toBeDisabled();
+  await page.getByRole("button", { name: "Generate for me" }).click();
+  await expect
+    .poll(() => submitted)
+    .toEqual({
+      instructions: "",
+      save_to_site: false,
+      generate_sample_data: true,
+    });
+  await expect(page.getByText("Generating test data and continuing")).toBeVisible();
+});
+
+test("site settings edit saved workflow data", async ({ page }) => {
+  await installFixtures(page);
+  const savedWorkflow = {
+    name: "Checkout",
+    goal: "Open checkout form",
+    start_url: "http://example.test/cart",
+    instructions: "Add a test keyboard",
+  };
+  let updated = null;
+  await page.route("**/api/sites/1", (route) => {
+    if (route.request().method() === "PUT") {
+      updated = route.request().postDataJSON();
+      return route.fulfill({ json: { ...site, ...updated } });
+    }
+    return route.fulfill({ json: { ...site, workflow_data: [savedWorkflow] } });
+  });
+  await page.goto("/#/sites/1/edit");
+  await expect(page.getByText("Saved workflow data")).toBeVisible();
+  await expect(page.getByLabel("Workflow name")).toHaveValue("Checkout");
+  await page.getByLabel("Sample data or instructions").fill("Add a test mouse");
+  await page.getByLabel("Starting page URL").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-workflow-data.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByLabel("Starting page URL").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-workflow-data-narrow.png") });
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect.poll(() => updated).not.toBeNull();
+  expect(updated.workflow_data[0].instructions).toBe("Add a test mouse");
 });
 
 test("SAST summary cards only appear on the Coverage tab", async ({ page }) => {

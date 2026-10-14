@@ -10,6 +10,7 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
+import { useHashTab } from "../../shared/navigation/useHashTab.js";
 import { sastCandidatesToMarkdown, sastReportFilename } from "../../shared/leads/files.js";
 import { downloadTextFile } from "../../shared/lib/download.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
@@ -102,7 +103,11 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const [profiles, setProfiles] = useState([]);
   const [tokenUsage, setTokenUsage] = useState(null);
   const tab = normaliseTab(initialTab);
-  const [activePhase, setActivePhase] = useState(null);
+  const [activePhase] = useHashTab(
+    "phase",
+    DEEP_PHASES.map((phase) => phase.key),
+    null,
+  );
   const [selectedLeadId, setSelectedLeadId] = useState(null);
   const [scanRunning, setScanRunning] = useState(false);
   const [resumableWork, setResumableWork] = useState(false);
@@ -209,7 +214,9 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       ? "report"
       : phases.find((phase) => statuses[phase.key] === "pending")?.key) ||
     "report";
-  const displayedPhase = activePhase || TAB_PHASES[tab] || currentPhase;
+  const displayedPhase = phases.some((phase) => phase.key === activePhase)
+    ? activePhase
+    : TAB_PHASES[tab] || currentPhase;
   const selectedLead = useMemo(
     () => leads.find((lead) => lead.id === selectedLeadId) || leads[0] || null,
     [leads, selectedLeadId],
@@ -236,7 +243,6 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const efficiencyTelemetry = analysis.report?.efficiency_telemetry || [];
   const semanticStatus = scanRunning ? "running" : run?.status;
   const goTab = (nextTab) => {
-    setActivePhase(null);
     nav(runHref({ runKind: "sast", runId }, nextTab));
   };
   const onStart = async () => {
@@ -244,7 +250,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     setError(null);
     try {
       await sastRunsApi.startSastScan(runId);
-      setActivePhase(null);
+      if (activePhase) nav(runHref({ runKind: "sast", runId }, tab));
       setScanRunning(true);
       await loadData();
     } catch (err) {
@@ -492,8 +498,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               key={phase.key}
               className={`sast-phase-step ${displayedPhase === phase.key ? "active" : ""} status-${statuses[phase.key]}`}
               onClick={() => {
-                setActivePhase(phase.key);
-                nav(runHref({ runKind: "sast", runId }, phase.view));
+                nav(`${runHref({ runKind: "sast", runId }, phase.view)}?phase=${phase.key}`);
               }}
               role="tab"
               aria-selected={displayedPhase === phase.key}
