@@ -44,6 +44,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Docker image**: Docker Hub images build and publish again; none had been published since late August. The image now includes the web interface, database migrations, and built-in extensions, so it starts correctly. It no longer downloads Chromium or development tools on each container start.
+
 - **Resuming SAST runs from a repository or extension source**: A failed or cancelled SAST run whose source code was already downloaded now offers the normal resume and start actions. Previously, AESPA always showed **Resume source preparation** for these runs, even when the source was ready.
 
 - **Error and status messages**: Errors from actions such as saving, deleting or importing now appear in the lower-right corner of the window and can be dismissed, instead of staying at the top of the page and pushing its content down. This applies across sites, systems, campaigns, API collections, all run types, Benchmark Lab, Settings and Extensions. Confirmations such as imported issues, imported settings and purged data appear the same way and close on their own, replacing browser pop-ups. Form errors now appear next to the Save button. Pages that could not load still show their error in place.
