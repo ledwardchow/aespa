@@ -590,10 +590,6 @@
 .web-run-coverage-tab .intel-panel {
   margin: 0;
 }
-.coverage-sub-tab-bar {
-  gap: 0;
-  padding: 0 28px;
-}
 .activity-sub-tab-btn {
   flex: 0 0 auto;
   background: none;
@@ -609,9 +605,6 @@
   transition:
     color 0.15s,
     border-color 0.15s;
-}
-.coverage-sub-tab-btn {
-  padding-inline: 16px;
 }
 .activity-sub-tab-btn:hover {
   color: var(--text);

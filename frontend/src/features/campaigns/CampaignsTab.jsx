@@ -48,9 +48,6 @@ export function CampaignsTab({ systemId }) {
         <div className="form-section-title" style={{ margin: 0, border: "none", padding: 0 }}>
           Campaigns
         </div>
-        <button className="btn" onClick={() => nav(`#/systems/${systemId}/campaigns/new`)}>
-          <IconPlus /> New campaign
-        </button>
       </div>
       {campaigns === null && <div className="subtle">Loading…</div>}
       {campaigns !== null && campaigns.length === 0 && (

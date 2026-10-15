@@ -404,7 +404,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         title={
           <span className="sast-header-title">
             <span className="sast-header-main">
-              <Crumb href="#/sast-runs">SAST</Crumb>
+              <Crumb href="#/sast-runs">SAST Scans</Crumb>
               <Sep />
               <span className="sast-header-name">{run.name}</span>
               <span className="badge neutral">
@@ -434,7 +434,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             />
             {canStart && (
               <button className="btn" disabled={startBusy} onClick={onStart}>
-                {startBusy ? "Starting…" : "Start SAST Scan"}
+                {startBusy ? "Starting…" : "Start scan"}
               </button>
             )}
             {canResume && (
@@ -442,8 +442,8 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                 {startBusy
                   ? "Resuming…"
                   : run.status === "paused"
-                    ? "Resume SAST Scan"
-                    : "Resume Failed Work"}
+                    ? "Resume scan"
+                    : "Resume failed work"}
               </button>
             )}
             {canResumeSource && (

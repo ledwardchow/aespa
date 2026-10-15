@@ -77,23 +77,33 @@ export function ProfilesList({ visible, profiles, models, busyId, onActivate, on
               {p.default_model_name || (p.default_model_id ? `#${p.default_model_id}` : "—")}
             </div>
             <div>
-              {Object.keys(p.role_models || {}).length || <span className="subtle">none</span>}
+              {Object.keys(p.role_models || {}).length || <span className="subtle">—</span>}
             </div>
             <div className="row settings-list-actions">
-              <button
-                className="btn sm secondary"
-                disabled={p.is_active || busyId === p.id}
-                onClick={() => onActivate(p)}
-              >
-                {p.is_active ? "Is currently default" : "Set as default"}
-              </button>
+              {p.is_active ? (
+                <span className="badge ok" title="Runs use this profile unless they pick another">
+                  default
+                </span>
+              ) : (
+                <button
+                  className="btn sm secondary"
+                  disabled={busyId === p.id}
+                  onClick={() => onActivate(p)}
+                >
+                  Set as default
+                </button>
+              )}
               {p.extension_id ? (
                 <span className="subtle" title="Edit this profile in its extension">
                   Managed by extension
                 </span>
               ) : (
                 <>
-                  <button className="btn sm" disabled={busyId === p.id} onClick={() => onEdit(p)}>
+                  <button
+                    className="btn sm secondary"
+                    disabled={busyId === p.id}
+                    onClick={() => onEdit(p)}
+                  >
                     Edit
                   </button>
                   <button

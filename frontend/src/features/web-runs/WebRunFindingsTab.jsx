@@ -122,7 +122,7 @@ export function WebRunFindingsTab({
             {dedupeBusy && (
               <span className="val-status-badge val-running dedupe-status">
                 <span className="inline-spinner"></span>
-                A.L.I.C.E. is reviewing issues…
+                A.L.I.C.E. is reviewing findings…
               </span>
             )}
           </div>
@@ -138,12 +138,12 @@ export function WebRunFindingsTab({
                 disabled={validateBusy || validateStatus?.status === "running"}
                 onClick={onValidateAll}
               >
-                ✓ Validate Issues
+                Validate findings
               </button>
             )}
             {findings.length > 0 && (
               <button
-                className="btn sm"
+                className="btn secondary sm"
                 disabled={
                   dedupeBusy ||
                   validateBusy ||
@@ -153,7 +153,7 @@ export function WebRunFindingsTab({
                 onClick={onDeduplicateFindings}
               >
                 {dedupeBusy && <span className="inline-spinner"></span>}
-                {dedupeBusy ? "Reviewing…" : "AI Review Issues"}
+                {dedupeBusy ? "Reviewing…" : "Review with AI"}
               </button>
             )}
             {findings.length > 0 && (
@@ -327,10 +327,10 @@ export function WebRunFindingsTab({
                         <span className="val-badge val-skipped">not validated</span>
                       )}
                       {f.validation_status === "false_positive" && (
-                        <span className="val-badge val-fp">low conf</span>
+                        <span className="val-badge val-fp">low confidence</span>
                       )}
                       {f.validation_status === "low_confidence" && (
-                        <span className="val-badge val-fp">low conf</span>
+                        <span className="val-badge val-fp">low confidence</span>
                       )}
                       {f.validation_status === "validating" && (
                         <span className="val-badge val-validating">…</span>
@@ -607,7 +607,7 @@ export function WebRunFindingsTab({
                     <React.Fragment key={groupKey}>
                       <tr
                         key={groupKey}
-                        className="finding-group-row"
+                        className="finding-group-row finding-group-row--nested"
                         onClick={() => toggleGroup(groupKey)}
                       >
                         <td>
@@ -720,23 +720,16 @@ export function WebRunFindingsTab({
                       <>
                         <tr
                           key={UNCONFIRMED_GROUP_KEY}
-                          className="finding-group-row"
+                          className="finding-section-row"
                           onClick={() => toggleGroup(UNCONFIRMED_GROUP_KEY)}
                         >
-                          <td>
-                            <span className="val-badge val-unconfirmed">unconfirmed</span>
-                          </td>
-                          <td></td>
-                          <td className="finding-title">
+                          <td colSpan={5}>
                             <span className="group-chevron">
                               {expandedGroups.has(UNCONFIRMED_GROUP_KEY) ? "▾" : "▸"}
                             </span>
-                            Unconfirmed Findings
-                          </td>
-                          <td>
+                            Unconfirmed
                             <span className="finding-count-badge">{unconfirmedCount}</span>
                           </td>
-                          <td></td>
                         </tr>
                         {expandedGroups.has(UNCONFIRMED_GROUP_KEY) && unconfirmedRows}
                       </>
@@ -745,23 +738,16 @@ export function WebRunFindingsTab({
                       <>
                         <tr
                           key={FP_GROUP_KEY}
-                          className="finding-group-row"
+                          className="finding-section-row"
                           onClick={() => toggleGroup(FP_GROUP_KEY)}
                         >
-                          <td>
-                            <span className="val-badge val-fp">low conf</span>
-                          </td>
-                          <td></td>
-                          <td className="finding-title">
+                          <td colSpan={5}>
                             <span className="group-chevron">
                               {expandedGroups.has(FP_GROUP_KEY) ? "▾" : "▸"}
                             </span>
-                            Low Confidence
-                          </td>
-                          <td>
+                            Low confidence
                             <span className="finding-count-badge">{fpCount}</span>
                           </td>
-                          <td></td>
                         </tr>
                         {expandedGroups.has(FP_GROUP_KEY) && fpRows}
                       </>
@@ -770,23 +756,16 @@ export function WebRunFindingsTab({
                       <>
                         <tr
                           key={DETERMINISTIC_GROUP_KEY}
-                          className="finding-group-row"
+                          className="finding-section-row"
                           onClick={() => toggleGroup(DETERMINISTIC_GROUP_KEY)}
                         >
-                          <td>
-                            <span className="val-badge val-fp">deterministic</span>
-                          </td>
-                          <td></td>
-                          <td className="finding-title">
+                          <td colSpan={5}>
                             <span className="group-chevron">
                               {expandedGroups.has(DETERMINISTIC_GROUP_KEY) ? "▾" : "▸"}
                             </span>
-                            Deterministic Findings
-                          </td>
-                          <td>
+                            Deterministic checks
                             <span className="finding-count-badge">{deterministicCount}</span>
                           </td>
-                          <td></td>
                         </tr>
                         {expandedGroups.has(DETERMINISTIC_GROUP_KEY) && deterministicRows}
                       </>

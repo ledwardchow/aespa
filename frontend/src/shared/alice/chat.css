@@ -728,6 +728,19 @@
   transition: all 0.15s ease;
   user-select: none;
 }
+.alice-chat-tab-busy {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: #c084fc;
+  animation: alice-chat-tab-busy-pulse 1.2s ease-in-out infinite;
+}
+@keyframes alice-chat-tab-busy-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
 .alice-chat-tab-pill:hover {
   background: rgba(255, 255, 255, 0.06);
   color: var(--text);

@@ -50,6 +50,25 @@
   color: var(--muted);
   font-weight: 400;
 }
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  white-space: nowrap;
+}
+.breadcrumbs-item {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.breadcrumbs .breadcrumb-sep {
+  margin: 0 8px;
+}
+.breadcrumbs-current {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .topbar-actions {
   min-width: 0;
   display: flex;

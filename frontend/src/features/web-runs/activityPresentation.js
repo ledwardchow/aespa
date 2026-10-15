@@ -10,7 +10,7 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
     if (agent?.id === "team-primary") return "Primary Tester";
     if (agent?.id === "team-independent") return "Pair Tester";
     if (agent?.id === "team-closer") return "QA Tester";
-    if (agent?.id === "alice") return "A.L.I.C.E";
+    if (agent?.id === "alice") return "A.L.I.C.E.";
     return agent?.role || "Agent";
   };
   const normalizeAgentForRun = (agent) => {
@@ -20,7 +20,7 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
   const defaultAgentRoster = () => [
     {
       id: "alice",
-      role: "A.L.I.C.E",
+      role: "A.L.I.C.E.",
       status: aliceIsThinking ? "active" : "idle",
       currentTask: aliceIsThinking ? "Processing directive..." : "Waiting for instruction",
     },

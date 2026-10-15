@@ -15,6 +15,7 @@ export function WebRunNotificationsTab({
   const [drafts, setDrafts] = useState({});
   const [saveToSite, setSaveToSite] = useState({});
   const [error, setError] = useState("");
+  const [expandedId, setExpandedId] = useState(null);
   const [loading, setLoading] = useState(true);
   const requestVersion = useRef(0);
   const focusedInput = useRef(null);
@@ -47,6 +48,10 @@ export function WebRunNotificationsTab({
   usePolling(load, {
     intervalMs: ["submitting", "running"].includes(retryStatus.status) ? 1000 : 15000,
   });
+
+  useEffect(() => {
+    if (focusSequence) setExpandedId(null);
+  }, [focusSequence]);
 
   useEffect(() => {
     if (!focusedNoteId || !focusSequence || !focusedInput.current) return;
@@ -96,12 +101,19 @@ export function WebRunNotificationsTab({
     !waiting.some((note) => note.id === recentNote.id)
       ? [recentNote, ...waiting]
       : waiting;
+  const openId = visibleNotes.some((note) => note.id === expandedId)
+    ? expandedId
+    : visibleNotes.some((note) => note.id === focusedNoteId)
+      ? focusedNoteId
+      : visibleNotes[0]?.id;
   return (
     <div className="workflow-input-panel">
       <div className="workflow-notifications-head">
         <div>
-          <h3>Notifications</h3>
-          <p className="subtle">Workflows waiting for your input appear here.</p>
+          <h3>Needs input</h3>
+          <p className="subtle">
+            The crawler stopped at these workflows. Add sample data or instructions to continue.
+          </p>
         </div>
         {!loading && visibleNotes.length > 0 ? (
           <span className="workflow-notification-count">{visibleNotes.length} waiting</span>
@@ -120,6 +132,7 @@ export function WebRunNotificationsTab({
               note.needs_input &&
               !busy &&
               !(progress?.status === "complete" && result === "crawled");
+            const expanded = note.id === openId;
             return (
               <article className="workflow-notification" key={note.id}>
                 <div className="workflow-notification-main">
@@ -127,13 +140,18 @@ export function WebRunNotificationsTab({
                     !
                   </span>
                   <div>
-                    <div className="workflow-notification-title">
+                    <button
+                      type="button"
+                      className="workflow-notification-title"
+                      aria-expanded={expanded}
+                      onClick={() => setExpandedId(note.id)}
+                    >
                       <strong>{note.name}</strong>
                       <span>{busy ? "In progress" : "Input needed"}</span>
-                    </div>
-                    {note.reason ? <p className="subtle">{note.reason}</p> : null}
-                    {canProvideMore ? <p>{note.request || note.detail}</p> : null}
-                    {canProvideMore && note.save_to_site_requested ? (
+                    </button>
+                    {expanded && note.reason ? <p className="subtle">{note.reason}</p> : null}
+                    {expanded && canProvideMore ? <p>{note.request || note.detail}</p> : null}
+                    {expanded && canProvideMore && note.save_to_site_requested ? (
                       <p className="subtle">This attempt was not saved to the site.</p>
                     ) : null}
                   </div>
@@ -150,7 +168,7 @@ export function WebRunNotificationsTab({
                 {progress?.status === "error" ? (
                   <p className="notice error">{progress.error}</p>
                 ) : null}
-                {canProvideMore ? (
+                {expanded && canProvideMore ? (
                   <div className="workflow-notification-action">
                     <p className="subtle">
                       What you provide goes to the crawler model and target site. Generate for me

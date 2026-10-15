@@ -1286,6 +1286,9 @@ def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
             )
 
     candidates.sort(key=lambda item: item[0])
+    from aespa.services.workflow_workprogram import remaining_workflow_tests
+
+    workflow_gaps = remaining_workflow_tests(run_id)
     return {
         "tool": "coverage_gaps",
         "run_id": run_id,
@@ -1293,6 +1296,21 @@ def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
         "next_actions": [item[1] for item in candidates[:limit]],
         "remaining": len(candidates),
         "truncated": len(candidates) > limit,
+        "workflow_actions": [
+            {
+                "item_id": item["id"],
+                "name": item["name"],
+                "goal": item["goal"],
+                "url": item["reached_page_url"],
+                "owasp_category": item["owasp_category"],
+                "test_kind": item["test_kind"],
+                "test_guidance": item["test_guidance"],
+                "status": item["status"],
+            }
+            for item in workflow_gaps[:limit]
+        ],
+        "workflow_remaining": len(workflow_gaps),
+        "workflow_truncated": len(workflow_gaps) > limit,
     }
 
 
@@ -1304,7 +1322,10 @@ def _build_web_enforce_directive(run_id: int) -> str:
     ``http_request`` with the ``owasp_category`` it exercises.
     """
     obligations = _uncovered_web_obligations(run_id)
-    if not obligations:
+    from aespa.services.workflow_workprogram import remaining_workflow_tests
+
+    workflow_gaps = remaining_workflow_tests(run_id)
+    if not obligations and not workflow_gaps:
         return ""
     # Group by page
     grouped: dict[int, tuple[CrawledPage, list[str]]] = {}
@@ -1334,6 +1355,28 @@ def _build_web_enforce_directive(run_id: int) -> str:
         lines.append(
             f"  … and {len(items) - 60} more pages (use context_tool page_list)."
         )
+    if workflow_gaps:
+        lines.extend(
+            [
+                "",
+                "Workflow checks still to cover:",
+                "Run the listed test on each named workflow. Use "
+                "context_tool workflow_detail to inspect its reached state and "
+                "record_workflow_test to save the outcome with scan traffic. "
+                "A concrete blocker may be recorded as blocked; crawler traffic "
+                "and generic page probes do not cover a workflow check.",
+            ]
+        )
+        for item in workflow_gaps[:60]:
+            lines.append(
+                f"  id={item['id']} {item['owasp_category']} {item['name']} "
+                f"({item['test_kind']}, {item['status']}): {item['test_guidance']}"
+            )
+        if len(workflow_gaps) > 60:
+            lines.append(
+                f"  … and {len(workflow_gaps) - 60} more workflow checks "
+                "(use context_tool workflow_list)."
+            )
     return "\n".join(lines)
 
 

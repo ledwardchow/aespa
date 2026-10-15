@@ -1,8 +1,6 @@
-export function fmtUsd(value) {
-  if (value === null || value === undefined) return "—";
-  const number = Number(value);
-  return `$${number.toFixed(number >= 100 ? 0 : number >= 1 ? 2 : 4)}`;
-}
+import { fmtUsd } from "../../shared/lib/money.ts";
+
+export { fmtUsd };
 
 export function fmtPercent(value) {
   if (value === null || value === undefined) return "—";

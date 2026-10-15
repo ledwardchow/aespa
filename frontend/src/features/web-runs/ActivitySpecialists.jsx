@@ -97,7 +97,7 @@ export function ActivitySpecialists({
                   "agent-badge" + (saActive ? " agent-badge-active" : " agent-badge-complete")
                 }
               >
-                {saActive ? "ACTIVE" : "DONE"}
+                {saActive ? "ACTIVE" : "COMPLETE"}
               </span>
               <span className="agent-current-task" title={saTask}>
                 {saTask.length > 90 ? saTask.slice(0, 89) + "…" : saTask}

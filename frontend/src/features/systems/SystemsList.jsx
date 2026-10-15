@@ -2,7 +2,7 @@ import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useEffect, useCallback } from "react";
 import { nav } from "../../shared/navigation/router.js";
 
-import { IconPlus, IconSystems } from "../../shared/ui/Icons.jsx";
+import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
@@ -31,9 +31,7 @@ export function SystemsList() {
   return (
     <>
       <div className="topbar">
-        <div className="topbar-title">
-          <IconSystems /> Systems
-        </div>
+        <div className="topbar-title">Systems</div>
         <div className="topbar-actions">
           <button className="btn" onClick={() => nav("#/systems/new")}>
             <IconPlus /> New system

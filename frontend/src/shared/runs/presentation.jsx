@@ -79,12 +79,12 @@ export function runWorkflowStatus(run, opts = {}) {
   if (thinkingStatus === "complete")
     return {
       key: "ok",
-      label: "Dynamic Scan complete",
+      label: "Dynamic Scan completed",
     };
   if (run.status === "complete")
     return {
       key: "ok",
-      label: "complete",
+      label: "completed",
     };
   return {
     key: "neutral",

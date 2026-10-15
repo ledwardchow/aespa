@@ -817,8 +817,8 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
     "the target. Available sub-commands: site_map, page_detail, history_search, "
     "finding_list, lead_list, lead_detail, target_inventory, traffic_search, extract_entities, specialist_status, "
-    "coverage_gaps. coverage_gaps returns a compact live list of uncovered "
-    "route/category cells; use it when choosing the next distinct surface or before done. "
+    "coverage_gaps, workflow_list, workflow_detail. coverage_gaps returns a compact live list of uncovered "
+    "page/category cells and named workflow checks; use it when choosing the next test or before done. "
     "After 3 consecutive calls, either execute a probe/write a finding or "
     "include context_budget_reason with a concrete summary and why one more targeted "
     "scan round will change the next action.\n"
@@ -871,6 +871,16 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "  that exact state. It tries a URL directly first for URL-addressable pages and\n"
     "  only uses the saved recipe when the functional state does not load. Never use\n"
     "  replay to execute a mutating crawler recipe.\n"
+    "- Named workflows have separate security checks. Prioritize them in Standard mode. "
+    "Call workflow_list and workflow_detail "
+    "to see their goals and reached states. Each check has a test type: sequence "
+    "(skip or reorder steps), access (another account or signed out), replay (resubmit "
+    "or send copies at once), tampering (change amounts, prices, IDs, or hidden values), "
+    "csrf (state change without a valid token or from another origin), or reauth "
+    "(sensitive change without a fresh sign-in). Run the test its test_guidance describes, then "
+    "call record_workflow_test with the expected and observed behavior and scan traffic IDs. "
+    "The crawler reaching the workflow and a generic page probe do not cover it. "
+    "If a sequence cannot be tested safely, record blocked with the concrete reason.\n"
     "\n"
     "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
     "so the Work Program matrix fills accurately. Probe each applicable page × category pair\n"
@@ -1098,6 +1108,31 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "note": {"type": "string"},
             },
             "required": ["steps"],
+        },
+    },
+    {
+        "name": "record_workflow_test",
+        "description": (
+            "Record the outcome of a named workflow security check after testing it. "
+            "A covered result needs a targeted sequence, expected and observed behavior, "
+            "and traffic IDs from this scan. Crawl traffic does not count."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "integer"},
+                "status": {
+                    "type": "string",
+                    "enum": ["passed", "finding", "inconclusive", "blocked"],
+                },
+                "attempted_sequence": {"type": "array", "items": {"type": "string"}},
+                "expected_behavior": {"type": "string"},
+                "observed_behavior": {"type": "string"},
+                "evidence_traffic_ids": {"type": "array", "items": {"type": "integer"}},
+                "finding_id": {"type": "integer"},
+                "blocked_reason": {"type": "string"},
+            },
+            "required": ["item_id", "status"],
         },
     },
     {

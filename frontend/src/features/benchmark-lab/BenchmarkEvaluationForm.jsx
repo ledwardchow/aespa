@@ -1,3 +1,4 @@
+import { fmtDate } from "../../shared/lib/dates.js";
 import { useEffect, useMemo, useState } from "react";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import * as sastApi from "../../shared/api/sastRuns.js";
@@ -154,11 +155,11 @@ export function BenchmarkEvaluationForm() {
                     </span>
                     <span>
                       {selectedRun.started_at
-                        ? new Date(selectedRun.started_at).toLocaleString()
+                        ? fmtDate(selectedRun.started_at)
                         : "Start time unavailable"}{" "}
                       →{" "}
                       {selectedRun.completed_at
-                        ? new Date(selectedRun.completed_at).toLocaleString()
+                        ? fmtDate(selectedRun.completed_at)
                         : "Completion time unavailable"}
                     </span>
                   </div>

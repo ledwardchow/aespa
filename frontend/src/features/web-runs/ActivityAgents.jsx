@@ -23,7 +23,9 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
     aliceExpandedThinkIds,
     setAliceExpandedThinkIds,
     aliceThinkingTabId,
+    aliceThinkingTabIds,
     aliceIsThinking,
+    aliceGlobalRunning,
     startAliceResize,
     aliceInputText,
     handleAliceSend,
@@ -40,12 +42,17 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
     agentCrawlEvents,
     agentTaskHistory,
     agentStatusLabel,
-  } = activityPresentation({ run, thinkingStatus, aliceIsThinking, activityLog });
+  } = activityPresentation({
+    run,
+    thinkingStatus,
+    aliceIsThinking: aliceGlobalRunning,
+    activityLog,
+  });
   const hasActiveNonAliceAgent =
     agents.some((agent) => agent.id !== "alice" && agent.status === "active") ||
     defaultAgentRoster().some((agent) => agent.id !== "alice" && agent.status === "active");
   const hasAliceChatActivity =
-    aliceIsThinking ||
+    aliceGlobalRunning ||
     aliceChats.some((chat) =>
       (chat.messages || []).some((message) => !isAliceWelcomeMessage(message)),
     );
@@ -232,7 +239,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                               (saActive ? " agent-badge-active" : " agent-badge-complete")
                             }
                           >
-                            {saActive ? "ACTIVE" : "DONE"}
+                            {saActive ? "ACTIVE" : "COMPLETE"}
                           </span>
                           <span className="agent-current-task" title={saTask}>
                             {saTask.length > 90 ? saTask.slice(0, 89) + "…" : saTask}
@@ -326,7 +333,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                               (vaActive ? " agent-badge-active" : " agent-badge-complete")
                             }
                           >
-                            {vaActive ? "ACTIVE" : "DONE"}
+                            {vaActive ? "ACTIVE" : "COMPLETE"}
                           </span>
                           <span className="agent-current-task" title={vaTask}>
                             {vaTask.length > 90 ? vaTask.slice(0, 89) + "…" : vaTask}
@@ -417,7 +424,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                               (baActive ? " agent-badge-active" : " agent-badge-complete")
                             }
                           >
-                            {baActive ? "ACTIVE" : ba.status === "failed" ? "FAILED" : "DONE"}
+                            {baActive ? "ACTIVE" : ba.status === "failed" ? "FAILED" : "COMPLETE"}
                           </span>
                           <span className="agent-current-task" title={baTask}>
                             {baTask.length > 90 ? baTask.slice(0, 89) + "…" : baTask}
@@ -477,6 +484,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                     setAliceInputText={setAliceInputText}
                     isActiveThinking={aliceThinkingTabId === activeAliceTabId}
                     aliceIsThinking={aliceIsThinking}
+                    busyTabIds={aliceThinkingTabIds}
                     handleAliceSend={handleAliceSend}
                     handleAliceStop={handleAliceStop}
                     submitAliceDirective={submitAliceDirective}

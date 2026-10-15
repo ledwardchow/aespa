@@ -227,11 +227,12 @@ async def start_alice_run(
 async def alice_stream(
     run_id: int,
     cursor: int = Query(default=0, ge=0),
+    tab_id: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> StreamingResponse:
     _get_run_or_404(session, run_id)
     return StreamingResponse(
-        alice_tasks.stream_events(run_id, cursor, run_type="api"),
+        alice_tasks.stream_events(run_id, cursor, run_type="api", tab_id=tab_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -242,9 +243,13 @@ async def alice_stream(
 
 
 @router.delete("/{run_id}/alice/run")
-async def stop_alice_run(run_id: int, session: Session = Depends(get_session)) -> dict:
+async def stop_alice_run(
+    run_id: int,
+    tab_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+) -> dict:
     _get_run_or_404(session, run_id)
-    stopped = await alice_tasks.stop(run_id, run_type="api")
+    stopped = await alice_tasks.stop(run_id, run_type="api", tab_id=tab_id)
     return {"ok": True, "stopped": stopped}
 
 
@@ -255,16 +260,22 @@ async def steer_alice_goal(
     session: Session = Depends(get_session),
 ) -> dict:
     _get_run_or_404(session, run_id)
-    accepted = await alice_tasks.steer_goal(run_id, req.message, run_type="api")
+    accepted = await alice_tasks.steer_goal(
+        run_id, req.message, run_type="api", tab_id=req.tab_id
+    )
     if not accepted:
         raise HTTPException(status_code=409, detail="No active ALICE goal")
     return {"ok": True}
 
 
 @router.get("/{run_id}/alice/status")
-def alice_status(run_id: int, session: Session = Depends(get_session)) -> dict:
+def alice_status(
+    run_id: int,
+    tab_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+) -> dict:
     _get_run_or_404(session, run_id)
-    return alice_tasks.status(run_id, run_type="api")
+    return alice_tasks.status(run_id, run_type="api", tab_id=tab_id)
 
 
 # ── Events alias ───────────────────────────────────────────────────────────────

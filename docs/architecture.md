@@ -535,6 +535,10 @@ shows a notice when a workflow needs input and has a Notifications subtab for
 workflows that stopped because the crawler lacked
 sample data or instructions. Users can supply test data there to continue one
 workflow. Submitting the data opens Workflows so the user can watch the retry.
+Successful, safe workflow notes also seed security checks. Each check belongs to
+the original note, so a retry updates the same workflow. A04 covers the sequence;
+an authenticated or object-specific workflow also gets an A01 access check. The
+crawler reaching a workflow does not count as a security test.
 The retry keeps the same deletion checks and adds its result
 to the workflow notes. The retry status endpoint reports the current browser
 step, page path, completed actions, and final result. A completed retry clears the earlier notification. If
@@ -1008,6 +1012,17 @@ Input-bearing A03 cells additionally persist class-level states in `test_classes
 - `web_route_inventory.enrich_dynamic_route` classifies routes first observed during the dynamic scan from their request/response evidence. It OR-merges deterministic and LLM-derived applicability into the canonical `CrawledPage`, reseeds newly applicable cells, and leaves the current probe hook to mark the exercised category `in_progress`. Browser-observed routes are enriched too; passive JavaScript route literals remain target intelligence until actively reached.
 - `TestRun.coverage_mode` selects **Quick** (`track`), **Standard** (`standard`), **Full** (`enforce`), or **SAST Validate** (`sast_validate`). Standard requires the configured coverage percentage. In Full mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop. SAST Validate does not use the work program; it validates only open imported SAST leads and retains the HTTPS TLS posture check.
 - `get_web_coverage_matrix(run_id)` powers the coverage view inside the **Attack Surface & Coverage** tab (`GET /api/test-runs/{id}/coverage`).
+
+OWASP Coverage has **Pages** and **Workflows** tabs. The Pages tab keeps the
+page-by-category matrix and its existing percentage. The Workflows tab reads
+`WorkflowCoverageItem` rows from `GET /api/test-runs/{id}/workflow-coverage`.
+The Test Lead records a workflow result with expected and observed behavior and
+scan traffic IDs. Full mode keeps an untested or inconclusive workflow check
+open; a concrete blocker can close the check without counting it as covered.
+Standard mode lists the checks for the Test Lead but keeps its page coverage
+percentage unchanged. Deep mode creates named workflow testers from these same
+rows. The Test Lead's `coverage_gaps` view includes remaining workflow checks
+alongside page gaps, and the Full mode checklist names those checks.
 
 ### Outdated JavaScript libraries (Retire.js)
 

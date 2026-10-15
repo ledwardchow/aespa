@@ -222,7 +222,7 @@ export function WebRunWorkflowsTab({
                       </button>
                     ) : (
                       <p className="subtle">
-                        Add or correct sample data in Status → Notifications.
+                        Add or correct sample data from Needs input at the top of the run.
                       </p>
                     )}
                   </>

@@ -1,3 +1,4 @@
+import { fmtDate } from "../../shared/lib/dates.js";
 import { useId, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import styles from "./SiteSummary.module.css";
@@ -742,7 +743,7 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
               {hovered.result.scan_started_at && (
                 <>
                   <dt>Started</dt>
-                  <dd>{new Date(hovered.result.scan_started_at).toLocaleString()}</dd>
+                  <dd>{fmtDate(hovered.result.scan_started_at)}</dd>
                 </>
               )}
               <dt>Cost</dt>

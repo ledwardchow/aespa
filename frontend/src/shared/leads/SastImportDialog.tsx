@@ -1,3 +1,4 @@
+import { fmtDate } from "../lib/dates.js";
 import { useEffect, useRef, useState } from "react";
 import {
   importSastSource,
@@ -253,7 +254,7 @@ export function SastImportDialog({ runId, runKind, onClose, onImported }: Props)
                       <span>
                         #{scan.id} ·{" "}
                         {scan.completed_at
-                          ? new Date(scan.completed_at).toLocaleString()
+                          ? fmtDate(scan.completed_at)
                           : "Completion date unavailable"}
                       </span>
                     </span>

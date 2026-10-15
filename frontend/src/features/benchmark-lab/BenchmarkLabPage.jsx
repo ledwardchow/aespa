@@ -1,3 +1,4 @@
+import { fmtDate } from "../../shared/lib/dates.js";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import * as settingsApi from "../../shared/api/settings.js";
@@ -274,7 +275,7 @@ export function BenchmarkLabPage({ initialResultId }) {
       </div>
       <p className="subtle">
         Compared with {selectedResult.ground_truth.name || "ground truth"} on{" "}
-        {new Date(selectedResult.created_at).toLocaleString()}
+        {fmtDate(selectedResult.created_at)}
       </p>
       <p className="subtle">
         {selectedResult.comparison?.method === "model"
@@ -625,7 +626,7 @@ export function BenchmarkLabPage({ initialResultId }) {
                         <td>{modelName(result)}</td>
                         <td>{money(result.scan_cost_usd)}</td>
                         <td>{result.summary.full + result.summary.partial}</td>
-                        <td>{new Date(result.created_at).toLocaleString()}</td>
+                        <td>{fmtDate(result.created_at)}</td>
                         <td>
                           <a className="btn ghost sm" href={`#/benchmark-lab/results/${result.id}`}>
                             Open {result.run_name}
@@ -714,7 +715,7 @@ export function BenchmarkLabPage({ initialResultId }) {
               <option value="">Select a result...</option>
               {relevantResults.map((result) => (
                 <option key={result.id} value={result.id}>
-                  {result.run_name} - {new Date(result.created_at).toLocaleString()}
+                  {result.run_name} - {fmtDate(result.created_at)}
                 </option>
               ))}
             </select>

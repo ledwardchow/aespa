@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
+import * as webRunsApi from "../../shared/api/webRuns.js";
 import { WebRunHeader } from "./WebRunHeader.jsx";
 
 const props = {
@@ -24,7 +25,6 @@ const props = {
   onStartScan: vi.fn(),
   onStopScan: vi.fn(),
   onResume: vi.fn(),
-  onExportCrawl: vi.fn(),
   onImportCrawl: vi.fn(),
   aliceRunning: false,
   onStopAlice: vi.fn(),
@@ -41,9 +41,9 @@ test("offers crawl then pentest and invokes its own action", () => {
     />,
   );
 
-  expect(screen.getByRole("button", { name: "Start Crawl" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "More crawl and Pentest options" }));
-  fireEvent.click(screen.getByRole("menuitem", { name: "Start Crawl then Pentest" }));
+  expect(screen.getByRole("button", { name: "Start crawl" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "More crawl and scan options" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Start crawl then scan" }));
   expect(onStartCrawlThenPentest).toHaveBeenCalledOnce();
   expect(props.onStart).not.toHaveBeenCalled();
   expect(props.onStartScan).not.toHaveBeenCalled();
@@ -125,4 +125,16 @@ test("prevents a started non-Deep run from selecting Deep", () => {
   expect(screen.getByRole("option", { name: "Deep" }).disabled).toBe(true);
   expect(screen.getByRole("option", { name: "Team" }).disabled).toBe(true);
   expect(screen.getByRole("option", { name: "Standard" }).disabled).toBe(false);
+});
+
+test("downloads a crawl file from the Save crawl popover", () => {
+  const exportCrawl = vi.spyOn(webRunsApi, "exportCrawl").mockImplementation(() => {});
+  render(<WebRunHeader {...props} onError={vi.fn()} />);
+
+  expect(screen.queryByRole("button", { name: "More crawl and scan options" })).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "Save crawl" }));
+  fireEvent.click(screen.getByRole("button", { name: "Download file" }));
+  expect(exportCrawl).toHaveBeenCalledWith(1);
+  exportCrawl.mockRestore();
 });

@@ -62,7 +62,7 @@ Frontend refactoring notes:
 ### Frontend layout and visual QA
 
 - Reusable tab bars depend on their parent layout. For example, Attack Surface and Coverage use `.activity-sub-tab-bar` with `.coverage-sub-tab-bar` inside a full-width wrapper. Do not copy only the child tab classes into a padded container.
-- The Agent Settings page has padded content: its scroll area has 16px top padding and the content column has 16px left padding. A full-width inner tab bar must be a sibling above the overflowed scroll area, or live inside a wrapper that owns the full-bleed layout. Negative margins inside `.scroll-content` do not work because its `overflow-x: hidden` clips the bar. Otherwise dark gutters appear along the top or left edge.
+- The Agent Settings page has padded content: its scroll area has 16px top padding and the content column has the standard 28px left page gutter. A full-width inner tab bar must be a sibling above the overflowed scroll area, or live inside a wrapper that owns the full-bleed layout. Negative margins inside `.scroll-content` do not work because its `overflow-x: hidden` clips the bar. Otherwise dark gutters appear along the top or left edge.
 - When changing a nested tab bar or panel, inspect the computed bounds of the bar and its parent after the build. Check the real route in a screenshot at desktop width and confirm that the bar reaches the same edges as its surrounding panel before finishing.
 
 ## Configuration

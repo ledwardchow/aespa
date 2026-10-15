@@ -960,6 +960,7 @@ def _record_note(
     detail: str,
     url: str = "",
     *,
+    page_id: int | None = None,
     needs_input: bool = False,
     request: str = "",
     instructions: str = "",
@@ -982,6 +983,7 @@ def _record_note(
         "steps": steps,
         "detail": detail[:500],
         "url": url[:1000],
+        "page_id": page_id,
     }
     _crawl_log(
         run_id,
@@ -1131,6 +1133,7 @@ async def explore_after_crawl(
                 submission_errors: dict[str, int] = {}
                 detail = "Stopped before the workflow was reached."
                 status = "not_reached"
+                saved_id = None
                 needs_input = False
                 request = ""
                 attempted_action = "opening the starting page"
@@ -1392,6 +1395,7 @@ async def explore_after_crawl(
                         descriptions,
                         detail,
                         page.url if page.url.startswith("http") else "",
+                        page_id=saved_id if status == "crawled" else None,
                         needs_input=needs_input,
                         request=request,
                         instructions=_instructions_with_generated_values(workflow),
@@ -1546,6 +1550,9 @@ async def _run_workflow_retry(
         )
         if "result_status" not in _retry_results.get(run_id, {}):
             raise ValueError("The workflow did not produce a result")
+        from aespa.services.workflow_workprogram import seed_workflow_tests
+
+        seed_workflow_tests(run_id)
         effective_instructions = _instructions_with_generated_values(workflow)
         if (
             save_to_site

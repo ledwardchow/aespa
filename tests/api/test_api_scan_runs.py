@@ -772,5 +772,5 @@ def test_alice_tasks_do_not_cross_colliding_ids():
         asyncio.run(alice_tasks.stop(1, run_type="api"))
     finally:
         at_mod._run = orig_run
-        alice_tasks._registry.pop(("site", 1), None)
-        alice_tasks._registry.pop(("api", 1), None)
+        alice_tasks._registry.pop(("site", 1, "tab-web"), None)
+        alice_tasks._registry.pop(("api", 1, "tab-api"), None)

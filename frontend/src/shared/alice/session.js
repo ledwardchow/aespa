@@ -78,7 +78,7 @@ export async function aliceSessionConnect(
   const controller = new AbortController();
   session.abortController = controller;
   try {
-    const response = await fetch(aliceTransport(identity).streamUrl(cursor), {
+    const response = await fetch(aliceTransport(identity).streamUrl(cursor, tabId), {
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`HTTP error ${response.status}`);

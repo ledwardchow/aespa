@@ -105,6 +105,7 @@ export function AliceChatPopout({ runId }) {
         setAliceInputText={alice.setAliceInputText}
         isActiveThinking={alice.aliceThinkingTabId === alice.activeAliceTabId}
         aliceIsThinking={alice.aliceIsThinking}
+        busyTabIds={alice.aliceThinkingTabIds}
         handleAliceSend={alice.handleAliceSend}
         handleAliceStop={alice.handleAliceStop}
         submitAliceDirective={alice.submitAliceDirective}

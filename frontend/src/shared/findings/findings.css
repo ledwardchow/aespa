@@ -471,3 +471,28 @@
   background: var(--accent);
   color: #fff;
 }
+
+/* Unconfirmed / Low confidence / Deterministic checks: section headers below the
+   main findings, with their own findings indented underneath. */
+.finding-section-row {
+  cursor: pointer;
+}
+.finding-section-row td {
+  padding: 14px 12px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.finding-section-row:hover td {
+  color: var(--text-2);
+}
+.finding-section-row .finding-count-badge {
+  margin-left: 8px;
+  text-transform: none;
+}
+.finding-group-row--nested .finding-title {
+  padding-left: 28px;
+}

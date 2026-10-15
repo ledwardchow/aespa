@@ -1,12 +1,12 @@
 """Server-side registry of ALICE background tasks.
 
-Each TestRun can have at most one active ALICE task.  Tasks are fully
-decoupled from HTTP connections — the agent loop keeps running even when the
-browser refreshes or navigates away.
+Each chat tab on a run can have one active ALICE task, so several tabs can
+work at the same time.  Tasks are fully decoupled from HTTP connections — the
+agent loop keeps running even when the browser refreshes or navigates away.
 
-Clients reconnect via GET /api/test-runs/{id}/alice/stream?cursor=N which
-replays buffered events from position N and then streams live events as they
-arrive.
+Clients reconnect via GET /api/test-runs/{id}/alice/stream?tab_id=T&cursor=N
+which replays buffered events from position N and then streams live events as
+they arrive.
 """
 
 from __future__ import annotations
@@ -49,27 +49,69 @@ class AliceTask:
     accumulated_message: str = ""
 
 
-# One entry per (run_type, run_id).
-_registry: dict[tuple[str, int], AliceTask] = {}
+# One entry per (run_type, run_id, tab_id).
+_registry: dict[tuple[str, int, str], AliceTask] = {}
+
+
+def _run_tasks(run_id: int, run_type: str) -> list[AliceTask]:
+    return [
+        t
+        for (rt, rid, _tab), t in _registry.items()
+        if rt == run_type and rid == run_id
+    ]
+
+
+def _resolve(run_id: int, run_type: str, tab_id: str | None) -> Optional[AliceTask]:
+    """Return the task for one tab, or, without a tab, a running task for the run."""
+    if tab_id is not None:
+        return _registry.get((run_type, run_id, tab_id))
+    tasks = _run_tasks(run_id, run_type)
+    running = [t for t in tasks if not t.done]
+    if running:
+        return running[-1]
+    return tasks[-1] if tasks else None
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
-def get(run_id: int, run_type: str = "site") -> Optional[AliceTask]:
-    return _registry.get((run_type, run_id))
+def get(
+    run_id: int, run_type: str = "site", tab_id: str | None = None
+) -> Optional[AliceTask]:
+    return _resolve(run_id, run_type, tab_id)
 
 
-def status(run_id: int, run_type: str = "site") -> dict[str, Any]:
+def is_running(run_id: int, run_type: str = "site") -> bool:
+    return any(not t.done for t in _run_tasks(run_id, run_type))
+
+
+def status(
+    run_id: int, run_type: str = "site", tab_id: str | None = None
+) -> dict[str, Any]:
     from aespa.services import alice_goals
 
     run_kind = "api" if run_type == "api" else "web"
-    t = _registry.get((run_type, run_id))
+    running_tabs = [
+        {
+            "tab_id": t.tab_id,
+            "think_msg_id": t.think_msg_id,
+            "reply_msg_id": t.reply_msg_id,
+            "goal": alice_goals.goal_out(
+                alice_goals.get_goal(run_kind, run_id, t.tab_id)
+            ),
+        }
+        for t in _run_tasks(run_id, run_type)
+        if not t.done
+    ]
+    t = _resolve(run_id, run_type, tab_id)
     if t is None:
         return {
             "running": False,
             "done": False,
-            "goal": alice_goals.goal_out(alice_goals.get_goal(run_kind, run_id)),
+            "running_tabs": running_tabs,
+            "goal": alice_goals.goal_out(
+                alice_goals.get_goal(run_kind, run_id, tab_id)
+            ),
         }
     return {
         "running": not t.done,
@@ -78,7 +120,10 @@ def status(run_id: int, run_type: str = "site") -> dict[str, Any]:
         "think_msg_id": t.think_msg_id,
         "reply_msg_id": t.reply_msg_id,
         "event_count": len(t.events),
-        "goal": alice_goals.goal_out(alice_goals.get_goal(run_kind, run_id)),
+        "running_tabs": running_tabs,
+        "goal": alice_goals.goal_out(
+            alice_goals.get_goal(run_kind, run_id, tab_id or t.tab_id)
+        ),
     }
 
 
@@ -92,11 +137,15 @@ async def start(
     history: list[dict],
     run_type: str = "site",
 ) -> AliceTask:
-    """Start a new ALICE background task, cancelling any existing one first."""
+    """Start a new ALICE task for one chat tab, cancelling that tab's existing task.
+
+    Tasks in other chat tabs on the same run keep running.
+    """
     from aespa.services import alice_goals
 
     run_kind = "api" if run_type == "api" else "web"
-    existing = _registry.get((run_type, run_id))
+    key = (run_type, run_id, tab_id)
+    existing = _registry.get(key)
     command = re.fullmatch(r"/goal(?:\s+(.*))?", message.strip(), re.I | re.S)
     goal: dict[str, Any] | None = None
     control_message: str | None = None
@@ -125,7 +174,7 @@ async def start(
             if current is None:
                 control_message = "No goal is set for this chat."
             else:
-                await stop(run_id, run_type=run_type)
+                await stop(run_id, run_type=run_type, tab_id=tab_id)
                 current = alice_goals.update_goal(
                     current.id, status="paused", pause_reason="Paused by user."
                 )
@@ -134,7 +183,7 @@ async def start(
             if current is None:
                 control_message = "No goal is set for this chat."
             else:
-                await stop(run_id, run_type=run_type)
+                await stop(run_id, run_type=run_type, tab_id=tab_id)
                 current = alice_goals.update_goal(current.id, status="cleared")
                 control_message = "Goal cleared."
         elif action == "resume":
@@ -148,13 +197,13 @@ async def start(
                 message = current.objective
         else:
             if existing and existing.asyncio_task and not existing.asyncio_task.done():
-                await stop(run_id, run_type=run_type)
+                await stop(run_id, run_type=run_type, tab_id=tab_id)
             current = alice_goals.create_goal(run_kind, run_id, tab_id, argument)
             current = alice_goals.update_goal(current.id, increment_cycle=True)
             goal = alice_goals.goal_out(current)
             message = argument
 
-    existing = _registry.get((run_type, run_id))
+    existing = _registry.get(key)
     if existing and existing.asyncio_task and not existing.asyncio_task.done():
         existing.asyncio_task.cancel()
         try:
@@ -171,7 +220,7 @@ async def start(
         goal_id=(goal or {}).get("id"),
         goal=goal,
     )
-    _registry[(run_type, run_id)] = task
+    _registry[key] = task
     if control_message is not None:
         task.asyncio_task = asyncio.create_task(
             _run_control(task, control_message),
@@ -185,13 +234,28 @@ async def start(
     return task
 
 
-async def stop(run_id: int, run_type: str = "site") -> bool:
-    """Cancel the running task for this run.  Returns True if one was active."""
-    from aespa.services.code_execution import cancel_run_executions
+async def stop(run_id: int, run_type: str = "site", tab_id: str | None = None) -> bool:
+    """Cancel running ALICE work.  Returns True if a task was active.
 
-    cancel_run_executions("api" if run_type == "api" else "web", run_id)
-    task = _registry.get((run_type, run_id))
-    if task is None or task.done:
+    With ``tab_id`` only that chat tab is stopped; without it every tab on the
+    run is stopped (used when a run is deleted or stopped as a whole).
+    """
+    if tab_id is None:
+        from aespa.services.code_execution import cancel_run_executions
+
+        cancel_run_executions("api" if run_type == "api" else "web", run_id)
+        results = [
+            await _stop_task(t) for t in _run_tasks(run_id, run_type) if not t.done
+        ]
+        return any(results)
+    task = _registry.get((run_type, run_id, tab_id))
+    if task is None:
+        return False
+    return await _stop_task(task)
+
+
+async def _stop_task(task: AliceTask) -> bool:
+    if task.done:
         return False
     if task.goal_id is not None:
         from aespa.services import alice_goals
@@ -209,15 +273,17 @@ async def stop(run_id: int, run_type: str = "site") -> bool:
     return False
 
 
-async def steer_goal(run_id: int, message: str, run_type: str = "site") -> bool:
+async def steer_goal(
+    run_id: int, message: str, run_type: str = "site", tab_id: str | None = None
+) -> bool:
     """Queue user guidance for the next safe boundary in an active goal."""
-    task = _registry.get((run_type, run_id))
+    task = _resolve(run_id, run_type, tab_id)
     if task is None or task.done or task.goal_id is None or not message.strip():
         return False
     from aespa.services import alice_goals
 
     run_kind = "api" if run_type == "api" else "web"
-    current = alice_goals.get_goal(run_kind, run_id, task.tab_id)
+    current = alice_goals.get_goal(run_kind, task.run_id, task.tab_id)
     if current is None or current.status != "active":
         return False
     task.goal = alice_goals.goal_out(current)
@@ -230,10 +296,10 @@ async def steer_goal(run_id: int, message: str, run_type: str = "site") -> bool:
 
 
 async def stream_events(
-    run_id: int, cursor: int = 0, run_type: str = "site"
+    run_id: int, cursor: int = 0, run_type: str = "site", tab_id: str | None = None
 ) -> AsyncGenerator[str, None]:
     """Yield SSE lines: buffered events from *cursor*, then live events."""
-    task = _registry.get((run_type, run_id))
+    task = _resolve(run_id, run_type, tab_id)
 
     if task is None:
         # No task — send an empty done so the client knows there's nothing.
@@ -335,6 +401,10 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
     # the stream.  The scope remains authoritative for the surface marker; child
     # tasks spawned during the turn inherit it.
     run_kind = "api" if task.run_type == "api" else "web"
+
+    # Give this tab its own live browser so concurrent tabs don't share or
+    # close each other's pages. The context var is local to this asyncio task.
+    alice_svc.alice_browser_scope.set(task.tab_id)
 
     try:
         if task.goal is not None:

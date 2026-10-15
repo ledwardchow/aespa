@@ -25,3 +25,28 @@ export function Crumb({ href, children }) {
 export function Sep() {
   return <span className="breadcrumb-sep"> / </span>;
 }
+
+// Section / parent / current page. Each item is { label, href } and the last one
+// (the current page) is plain text. Spacing comes from CSS so it survives flex
+// containers, which drop the plain-text spaces Sep relies on.
+export function Breadcrumbs({ items }) {
+  const shown = items.filter(Boolean);
+  return (
+    <nav className="breadcrumbs" aria-label="Breadcrumb">
+      {shown.map((item, index) => (
+        <span className="breadcrumbs-item" key={`${index}-${item.href || ""}`}>
+          {index > 0 && (
+            <span className="breadcrumb-sep" aria-hidden="true">
+              /
+            </span>
+          )}
+          {item.href && index < shown.length - 1 ? (
+            <Crumb href={item.href}>{item.label}</Crumb>
+          ) : (
+            <span className="breadcrumbs-current">{item.label}</span>
+          )}
+        </span>
+      ))}
+    </nav>
+  );
+}

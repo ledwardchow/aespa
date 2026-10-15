@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { Notice } from "../ui/Notice.jsx";
 import { useColResize } from "../hooks/useColResize.js";
-import { parseDate } from "../lib/dates.js";
+import { fmtDate } from "../lib/dates.js";
 
 export function ScannerSessionsPanel({ data, refresh, onUpdate, onValidate }) {
   const [validating, setValidating] = useState(false);
@@ -30,7 +30,7 @@ export function ScannerSessionsPanel({ data, refresh, onUpdate, onValidate }) {
   const fmtAge = (iso) => {
     if (!iso) return "—";
     try {
-      return parseDate(iso).toLocaleString();
+      return fmtDate(iso);
     } catch {
       return iso;
     }
