@@ -66,7 +66,7 @@ test("web finding drafts survive tab switches and activity layout stays flush", 
   await page.goto("/#/runs/1/findings?finding=WEB-7");
   await expect(page).toHaveTitle("AESPA");
   await expect(page.getByText("Fixture description", { exact: true })).toBeVisible();
-  await page.getByTitle("Edit", { exact: true }).click();
+  await page.getByTitle("Edit finding", { exact: true }).click();
   await page.getByLabel("Title", { exact: true }).fill("Retained draft");
   await page.locator(".web-run-tab-bar .tab-btn").filter({ hasText: "Status" }).click();
   await expect(page.getByRole("button", { name: "Log", exact: true })).toBeVisible();
@@ -113,7 +113,7 @@ test("matching web and API IDs keep editing separate and API cancellation works 
   const errors = checkConsole(page);
   const { saves } = await findingFixtures(page);
   await page.goto("/#/runs/1/findings?finding=WEB-7");
-  await page.getByTitle("Edit", { exact: true }).click();
+  await page.getByTitle("Edit finding", { exact: true }).click();
   await page.getByLabel("Title", { exact: true }).fill("Unsaved web draft");
   await page.evaluate(() => {
     window.location.hash = "#/api-runs/1/findings?finding=API-7";

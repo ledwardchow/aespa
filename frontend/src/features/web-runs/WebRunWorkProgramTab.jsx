@@ -15,7 +15,13 @@ import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
 import { nav } from "../../shared/navigation/router.js";
 import { runHref } from "../../shared/navigation/links.ts";
 
-export function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
+export function WebRunWorkProgramTab({
+  runId,
+  run,
+  scanRunning,
+  reloadKey = 0,
+  pagesProgress = null,
+}) {
   const [coverageTab, setCoverageTab] = useState("pages");
   const [matrix, setMatrix] = useState(null);
   const [workflowCoverage, setWorkflowCoverage] = useState(null);
@@ -208,6 +214,7 @@ export function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 })
           Workflows
         </button>
       </div>
+      {coverageTab === "pages" && pagesProgress}
       {coverageTab === "pages" &&
         (loading ? (
           <LoadingState label="Loading page coverage…" />

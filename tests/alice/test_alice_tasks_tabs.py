@@ -60,3 +60,45 @@ def test_chat_tabs_on_same_run_work_concurrently(monkeypatch):
                 alice_tasks._registry.pop(key, None)
 
     asyncio.run(scenario())
+
+
+def test_finding_hook_stays_until_last_alice_turn_finishes():
+    """Overlapping turns share the workprogram hook; finish order doesn't matter."""
+    from aespa.services import alice
+    from aespa.services.scanner import _finding_hooks
+
+    run_id = 4243
+    try:
+        alice._acquire_alice_finding_hook(run_id)  # tab A starts
+        hook = _finding_hooks[run_id]
+        alice._acquire_alice_finding_hook(run_id)  # tab B starts
+        assert _finding_hooks[run_id] is hook
+
+        alice._release_alice_finding_hook(run_id)  # tab B finishes first
+        assert _finding_hooks.get(run_id) is hook
+
+        alice._release_alice_finding_hook(run_id)  # tab A finishes
+        assert run_id not in _finding_hooks
+        assert run_id not in alice._alice_finding_hooks
+    finally:
+        _finding_hooks.pop(run_id, None)
+        alice._alice_finding_hooks.pop(run_id, None)
+
+
+def test_finding_hook_release_keeps_hook_installed_by_another_component():
+    from aespa.services import alice
+    from aespa.services.scanner import _finding_hooks
+
+    run_id = 4244
+
+    def scanner_hook(finding):
+        return None
+
+    try:
+        alice._acquire_alice_finding_hook(run_id)
+        _finding_hooks[run_id] = scanner_hook  # e.g. a scan started afterwards
+        alice._release_alice_finding_hook(run_id)
+        assert _finding_hooks[run_id] is scanner_hook
+    finally:
+        _finding_hooks.pop(run_id, None)
+        alice._alice_finding_hooks.pop(run_id, None)

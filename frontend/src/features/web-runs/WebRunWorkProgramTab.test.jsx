@@ -92,3 +92,24 @@ test("shows a workflow coverage load error in its tab", async () => {
     expect(within(panel).getByRole("alert").textContent).toContain("Request failed"),
   );
 });
+
+test("shows page progress only on the Pages view", async () => {
+  webRunsApi.getWebCoverageMatrix.mockResolvedValue({ seeded: true, pages: [], totals: {} });
+  webRunsApi.getWorkflowCoverage.mockResolvedValue({ items: [] });
+
+  render(
+    <WebRunWorkProgramTab
+      runId={9}
+      run={{ name: "Shop" }}
+      scanRunning={false}
+      pagesProgress={<div>Page progress</div>}
+    />,
+  );
+
+  expect(screen.getByText("Page progress")).toBeTruthy();
+  fireEvent.click(screen.getByRole("tab", { name: "Workflows" }));
+  await screen.findByRole("tabpanel", { name: "Workflow coverage" });
+  expect(screen.queryByText("Page progress")).toBeNull();
+  fireEvent.click(screen.getByRole("tab", { name: "Pages" }));
+  expect(screen.getByText("Page progress")).toBeTruthy();
+});
