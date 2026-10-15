@@ -3,6 +3,8 @@ import { req } from "./request.ts";
 
 export const getWebCoverageMatrix = (id) => req(`/api/test-runs/${id}/coverage`);
 
+export const getWorkflowCoverage = (id) => req(`/api/test-runs/${id}/workflow-coverage`);
+
 export const seedWebWorkprogram = (id) =>
   req(`/api/test-runs/${id}/coverage/seed`, { method: "POST" });
 
@@ -144,7 +146,11 @@ export const getAliceStatus = (id) => req(`/api/test-runs/${id}/alice/status`);
 export const startAliceRun = (id, b) =>
   req(`/api/test-runs/${id}/alice/run`, { method: "POST", body: b });
 
-export const stopAliceRun = (id) => req(`/api/test-runs/${id}/alice/run`, { method: "DELETE" });
+// Without a tab id this stops ALICE work in every chat tab on the run.
+export const stopAliceRun = (id, tabId) =>
+  req(`/api/test-runs/${id}/alice/run` + (tabId ? `?tab_id=${encodeURIComponent(tabId)}` : ""), {
+    method: "DELETE",
+  });
 
 export const steerAliceGoal = (id, b) =>
   req(`/api/test-runs/${id}/alice/goal/steer`, { method: "POST", body: b });

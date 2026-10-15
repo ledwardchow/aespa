@@ -146,22 +146,22 @@ table {
   min-width: 1050px;
 }
 .stats-table .stats-provider-col {
-  width: 25%;
+  width: 28%;
 }
 .stats-table .stats-calls-col {
-  width: 6%;
+  width: 7%;
 }
 .stats-table .stats-token-col {
-  width: 7%;
+  width: 9%;
 }
 .stats-table .stats-credit-col {
-  width: 10%;
+  width: 11%;
 }
 .stats-table .stats-cost-col {
-  width: 8%;
+  width: 10%;
 }
 .stats-table .stats-action-col {
-  width: 7%;
+  width: 8%;
 }
 .stats-table th,
 .stats-table td {
@@ -257,4 +257,20 @@ td.url,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Delete inside a table row stays available but quiet: one red outline per row
+   drew more attention than the rows themselves. It turns red on hover/focus. */
+td .btn.danger-outline.sm,
+.settings-list-actions .btn.danger-outline.sm {
+  color: var(--muted);
+  border-color: var(--border-2);
+}
+td .btn.danger-outline.sm:hover,
+td .btn.danger-outline.sm:focus-visible,
+.settings-list-actions .btn.danger-outline.sm:hover,
+.settings-list-actions .btn.danger-outline.sm:focus-visible {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-bg);
 }

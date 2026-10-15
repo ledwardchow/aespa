@@ -139,10 +139,10 @@ export function SaveCrawlButton({ run, onError }) {
         aria-expanded={open}
         onClick={toggle}
       >
-        Save crawl to site
+        Save crawl
       </button>
       {open && (
-        <div className="saved-crawl-popover" role="dialog" aria-label="Save crawl to site">
+        <div className="saved-crawl-popover" role="dialog" aria-label="Save crawl">
           {savedName ? (
             <div className="saved-crawl-popover-note">
               Saved as <strong>{savedName}</strong>. Load it into a new run from that run's page.
@@ -178,12 +178,24 @@ export function SaveCrawlButton({ run, onError }) {
                   onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
                 />
               </div>
-              <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+              <div className="row" style={{ gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn secondary sm"
+                  title="Download this crawl as a file"
+                  onClick={() => {
+                    setOpen(false);
+                    webRunsApi.exportCrawl(run.id);
+                  }}
+                >
+                  Download file
+                </button>
+                <span style={{ flex: 1 }} />
                 <button type="button" className="btn ghost sm" onClick={() => setOpen(false)}>
                   Cancel
                 </button>
                 <button type="submit" className="btn sm" disabled={busy || !form.name.trim()}>
-                  {busy ? "Saving…" : "Save"}
+                  {busy ? "Saving…" : "Save to site"}
                 </button>
               </div>
             </form>

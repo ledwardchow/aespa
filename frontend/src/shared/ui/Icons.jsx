@@ -2,10 +2,22 @@
 
 export const IconSites = () => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-    <rect x="1" y="1" width="6" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-    <rect x="9" y="1" width="6" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-    <rect x="1" y="9" width="6" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-    <rect x="9" y="9" width="6" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+    <circle
+      cx="8"
+      cy="8"
+      r="6.5"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M1.5 8h13M8 1.5c1.8 1.8 2.7 4 2.7 6.5S9.8 12.7 8 14.5C6.2 12.7 5.3 10.5 5.3 8S6.2 3.3 8 1.5Z"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
   </svg>
 );
 export const IconApis = () => (
@@ -194,10 +206,138 @@ export const IconBrain = () => (
 // grouping of several repos/targets into one product.
 export const IconSystems = () => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-    <rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.3" />
-    <rect x="3.3" y="3.3" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3" />
-    <rect x="8.7" y="3.3" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3" />
-    <rect x="3.3" y="8.7" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3" />
-    <rect x="8.7" y="8.7" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3" />
+    <path
+      d="M8 1.5 14.5 5 8 8.5 1.5 5 8 1.5Z"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M1.5 8 8 11.5 14.5 8M1.5 11 8 14.5 14.5 11"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+export const IconCpu = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+    <rect
+      x="3.5"
+      y="3.5"
+      width="9"
+      height="9"
+      rx="1.5"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <rect
+      x="6"
+      y="6"
+      width="4"
+      height="4"
+      rx="0.5"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M6 1.5v2M10 1.5v2M6 12.5v2M10 12.5v2M1.5 6h2M1.5 10h2M12.5 6h2M12.5 10h2"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+export const IconPuzzle = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+    <path
+      d="M2.5 5h2.7a1.6 1.6 0 1 1 3.1 0H11v2.7a1.6 1.6 0 1 1 0 3.1v2.7H2.5V10a1.6 1.6 0 1 0 0-3.1V5Z"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+export const IconSliders = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+    <path
+      d="M2 4h7M12 4h2M2 8h2M7 8h7M2 12h5M10 12h4"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle
+      cx="10.5"
+      cy="4"
+      r="1.5"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle
+      cx="5.5"
+      cy="8"
+      r="1.5"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle
+      cx="8.5"
+      cy="12"
+      r="1.5"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+export const IconGauge = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+    <path
+      d="M2.2 12.5A6.5 6.5 0 1 1 13.8 12.5"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M8 9.5 11 5.5"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle cx="8" cy="9.5" r="1" fill="currentColor" />
+  </svg>
+);
+export const IconFlask = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+    <path
+      d="M6 1.5h4M6.7 1.5v4.3L2.6 12.6a1.3 1.3 0 0 0 1.1 1.9h8.6a1.3 1.3 0 0 0 1.1-1.9L9.3 5.8V1.5"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M4.3 10h7.4"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
   </svg>
 );

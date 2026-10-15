@@ -198,7 +198,7 @@ export function SavedCrawlsPanel({ siteId }) {
       )}
       {expanded && items && count === 0 && (
         <div className="subtle" style={{ marginTop: 10, fontSize: 13 }}>
-          No saved crawls yet. Open a run with crawl data and choose Save crawl to site.
+          No saved crawls yet. Open a run with crawl data and choose Save crawl.
         </div>
       )}
       {expanded && count > 0 && (

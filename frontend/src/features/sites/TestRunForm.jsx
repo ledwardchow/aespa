@@ -3,7 +3,8 @@ import * as sitesApi from "../../shared/api/sites.js";
 import { useState, useEffect } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
-import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { PageHeader, Breadcrumbs } from "../../shared/ui/PageHeader.jsx";
+import { useRecordName } from "../../shared/hooks/useRecordName.ts";
 
 export function TestRunForm({ siteId }) {
   const [form, setForm] = useState({
@@ -22,6 +23,7 @@ export function TestRunForm({ siteId }) {
       ...f,
       ...p,
     }));
+  const siteName = useRecordName(sitesApi.getSite, siteId);
   useEffect(() => {
     (async () => {
       try {
@@ -56,9 +58,13 @@ export function TestRunForm({ siteId }) {
       <PageHeader
         title={
           <>
-            <Crumb href={`#/sites/${siteId}`}>Site</Crumb>
-            <Sep />
-            New test run
+            <Breadcrumbs
+              items={[
+                { label: "Sites", href: "#/" },
+                { label: siteName || "Site", href: `#/sites/${siteId}` },
+                { label: "New test run" },
+              ]}
+            />
           </>
         }
       />

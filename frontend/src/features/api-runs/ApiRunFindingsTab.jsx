@@ -283,7 +283,7 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
             flex: 1,
           }}
         ></div>
-        <button className="btn sm" onClick={load}>
+        <button className="btn secondary sm" onClick={load}>
           Refresh
         </button>
         <FindingFileControls
@@ -293,12 +293,12 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
         />
         {findings.length > 0 && (
           <button
-            className="btn sm"
+            className="btn secondary sm"
             disabled={dedupeBusy || scanRunning}
             onClick={onDeduplicateFindings}
           >
             {dedupeBusy && <span className="inline-spinner"></span>}
-            {dedupeBusy ? "Reviewing…" : "AI Review Issues"}
+            {dedupeBusy ? "Reviewing…" : "Review with AI"}
           </button>
         )}
         {findings.length > 0 && (
@@ -374,7 +374,7 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
               )}
               {(f.validation_status === "false_positive" ||
                 f.validation_status === "low_confidence") && (
-                <span className="val-badge val-fp">low conf</span>
+                <span className="val-badge val-fp">low confidence</span>
               )}
               {f.owasp_api_category && (
                 <span

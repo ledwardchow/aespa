@@ -501,7 +501,7 @@ async def test_active_goal_accepts_steering(test_data):
         goal_id=goal.id,
         goal=alice_goals.goal_out(goal),
     )
-    at._registry[("site", test_data["run"].id)] = task
+    at._registry[("site", test_data["run"].id, task.tab_id)] = task
     try:
         assert (
             await at.steer_goal(test_data["run"].id, "Focus on the reset token") is True
@@ -509,7 +509,7 @@ async def test_active_goal_accepts_steering(test_data):
         assert task.steering.get_nowait() == "Focus on the reset token"
         assert task.events[-1]["type"] == "goal_steered"
     finally:
-        at._registry.pop(("site", test_data["run"].id), None)
+        at._registry.pop(("site", test_data["run"].id, task.tab_id), None)
 
 
 def test_alice_run_status_prefers_live_scan_state(db_session, test_data):
@@ -1583,7 +1583,7 @@ def test_stream_events_replays_exactly_from_cursor_after_trim():
     for i in range(total):
         at._append(task, {"type": "x", "i": i})
     task.done = True
-    at._registry[("site", 42)] = task
+    at._registry[("site", 42, task.tab_id)] = task
     try:
         cursor = total - 5
 
@@ -1596,7 +1596,7 @@ def test_stream_events_replays_exactly_from_cursor_after_trim():
         got = [json.loads(line[6:]) for line in asyncio.run(_drain())]
         assert [e["i"] for e in got] == list(range(cursor, total))
     finally:
-        at._registry.pop(("site", 42), None)
+        at._registry.pop(("site", 42, task.tab_id), None)
 
 
 def test_stream_events_sends_snapshot_when_cursor_was_trimmed():
@@ -1604,7 +1604,7 @@ def test_stream_events_sends_snapshot_when_cursor_was_trimmed():
     for i in range(at.BUFFER_LIMIT + 1):
         at._append(task, {"type": "message_chunk", "delta": str(i % 10)})
     task.done = True
-    at._registry[("site", 43)] = task
+    at._registry[("site", 43, task.tab_id)] = task
     try:
 
         async def _drain():
@@ -1617,4 +1617,4 @@ def test_stream_events_sends_snapshot_when_cursor_was_trimmed():
         assert got[0]["type"] == "state_snapshot"
         assert got[0]["message"] == task.accumulated_message
     finally:
-        at._registry.pop(("site", 43), None)
+        at._registry.pop(("site", 43, task.tab_id), None)

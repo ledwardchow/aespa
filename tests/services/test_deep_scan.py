@@ -18,9 +18,11 @@ from aespa.models import (
     LLMConfig,
     PageOwaspTest,
     ScanLead,
+    ScanLog,
     ScanObligation,
     Site,
     TestRun,
+    TrafficEntry,
 )
 from aespa.services.deep_scan import get_queue, seed_deep_tasks
 
@@ -56,8 +58,35 @@ def _run_with_page(db_session) -> TestRun:
     return run
 
 
+def _add_workflow_note(db_session, run_id: int, name: str) -> None:
+    page = db_session.exec(
+        select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+    ).first()
+    db_session.add(
+        ScanLog(
+            test_run_id=run_id,
+            run_kind="web",
+            phase="crawl_note",
+            data_json=json.dumps(
+                {
+                    "stage": "workflow_note",
+                    "note": {
+                        "name": name,
+                        "goal": f"Complete {name}",
+                        "status": "crawled",
+                        "page_id": page.id,
+                        "url": page.url,
+                    },
+                }
+            ),
+        )
+    )
+    db_session.commit()
+
+
 def test_deep_task_seeding_is_idempotent_and_includes_recon(db_session):
     run = _run_with_page(db_session)
+    _add_workflow_note(db_session, run.id, "Transfer")
 
     first = seed_deep_tasks(run.id)
     second = seed_deep_tasks(run.id)
@@ -78,6 +107,117 @@ def test_deep_task_seeding_is_idempotent_and_includes_recon(db_session):
         for check in task["checks"]
     )
     assert queue["checks_total"] >= queue["total"]
+
+
+def test_deep_workflow_tasks_keep_same_url_workflows_separate(db_session):
+    run = _run_with_page(db_session)
+    _add_workflow_note(db_session, run.id, "Transfer")
+    _add_workflow_note(db_session, run.id, "Refund")
+
+    seed_deep_tasks(run.id)
+
+    queue = get_queue(run.id)
+    workflows = [task for task in queue["tasks"] if task["task_kind"] == "workflow"]
+    # Each workflow reaches a signed-in transfer form: sequence, access, replay,
+    # csrf, and reauth checks.
+    assert len(workflows) == 10
+    assert {task["title"].split(" [")[0] for task in workflows} == {
+        "Test workflow: Transfer",
+        "Test workflow: Refund",
+    }
+    assert queue["workflow_selection"] == {
+        "eligible": 10,
+        "selected": 10,
+        "excluded": 0,
+        "excluded_items": [],
+    }
+
+
+def test_deep_queue_reports_workflows_excluded_by_task_limit(db_session):
+    run = _run_with_page(db_session)
+    _add_workflow_note(db_session, run.id, "Transfer")
+    config = DeepScanConfig(id=1, max_tasks=1, max_total_variants=4)
+    db_session.add(config)
+    db_session.commit()
+
+    seed_deep_tasks(run.id)
+
+    selection = get_queue(run.id)["workflow_selection"]
+    assert selection["eligible"] == 5
+    assert selection["selected"] == 0
+    assert selection["excluded"] == 5
+    assert {item["test_kind"] for item in selection["excluded_items"]} == {
+        "sequence",
+        "access",
+        "replay",
+        "csrf",
+        "reauth",
+    }
+
+
+def test_deep_workflow_result_requires_attack_variant_evidence(db_session):
+    from aespa.services.deep_scan import _record_deep_workflow_result
+    from aespa.services.workflow_workprogram import list_workflow_tests
+
+    run = _run_with_page(db_session)
+    _add_workflow_note(db_session, run.id, "Transfer")
+    seed_deep_tasks(run.id)
+    task = db_session.exec(
+        select(DeepScanTask)
+        .where(DeepScanTask.run_id == run.id)
+        .where(DeepScanTask.task_kind == "workflow")
+    ).first()
+    task.status = "inconclusive"
+    db_session.add(task)
+    db_session.commit()
+
+    _record_deep_workflow_result(task.id)
+    item = next(
+        item
+        for item in list_workflow_tests(run.id)["items"]
+        if item["id"] == task.workflow_test_id
+    )
+    assert item["status"] == "not_started"
+
+    variant = DeepScanVariant(
+        run_id=run.id,
+        task_id=task.id,
+        fingerprint="workflow-attack",
+        purpose="Skip the transfer confirmation step",
+        status="inconclusive",
+        outcome="Request rejected; ownership remains unclear",
+    )
+    traffic = TrafficEntry(
+        test_run_id=run.id,
+        method="POST",
+        url="https://target.local/api/accounts/1",
+        status=403,
+        source="deep_scan",
+    )
+    db_session.add(variant)
+    db_session.add(traffic)
+    db_session.commit()
+    db_session.add(
+        DeepScanAttempt(
+            run_id=run.id,
+            task_id=task.id,
+            variant_id=variant.id,
+            worker_id="deep-test",
+            status="inconclusive",
+            traffic_ids_json=json.dumps([traffic.id]),
+        )
+    )
+    db_session.commit()
+
+    _record_deep_workflow_result(task.id)
+    item = next(
+        item
+        for item in list_workflow_tests(run.id)["items"]
+        if item["id"] == task.workflow_test_id
+    )
+    assert item["status"] == "inconclusive"
+    assert item["evidence_traffic_ids"] == [traffic.id]
+    assert item["attempted_sequence"] == ["Skip the transfer confirmation step"]
 
 
 def test_deep_baselines_reuse_matching_crawl_traffic(db_session):

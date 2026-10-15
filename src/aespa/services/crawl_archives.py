@@ -42,6 +42,18 @@ def _json_dict(value: str | None) -> dict:
         return {}
 
 
+def _archive_scan_log_data(
+    entry: ScanLog, page_state_keys: dict[int, str | None]
+) -> str | None:
+    if entry.phase != "crawl_note":
+        return entry.data_json
+    data = _json_dict(entry.data_json)
+    note = data.get("note")
+    if isinstance(note, dict) and isinstance(note.get("page_id"), int):
+        note["page_state_key"] = page_state_keys.get(note["page_id"])
+    return json.dumps(data)
+
+
 def _redacted_metadata(value: dict) -> dict:
     sensitive_terms = ("password", "secret", "token", "cookie", "authorization")
     redacted: dict = {}
@@ -240,7 +252,7 @@ def build_archive(session: Session, run: TestRun) -> dict:
                         "status": entry.status,
                         "message": entry.message,
                         "page_url": entry.page_url,
-                        "data_json": entry.data_json,
+                        "data_json": _archive_scan_log_data(entry, page_state_keys),
                     }
                     for entry in session.exec(
                         select(ScanLog)
@@ -534,8 +546,14 @@ def restore_archive_records(
                         restored_notes.append((row, note_data))
             for row, note_data in restored_notes:
                 note = note_data.get("note")
-                if isinstance(note, dict) and isinstance(note.get("retry_of"), int):
-                    note["retry_of"] = note_ids.get(note["retry_of"])
+                if isinstance(note, dict):
+                    if isinstance(note.get("retry_of"), int):
+                        note["retry_of"] = note_ids.get(note["retry_of"])
+                    state_key = note.pop("page_state_key", None)
+                    restored_page = (
+                        pages_by_identity.get(state_key) if state_key else None
+                    )
+                    note["page_id"] = restored_page.id if restored_page else None
                     row.data_json = json.dumps(note_data)
                     session.add(row)
             for item in activity.get("agent_log", []):

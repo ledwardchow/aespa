@@ -9,7 +9,8 @@ export function aliceTransport({ runKind, runId }) {
   const base = paths[runKind]?.(runId);
   if (!base) throw new Error(`Unsupported ALICE run kind: ${runKind}`);
   return {
-    streamUrl: (cursor) => `${base}/stream?cursor=${cursor}`,
+    streamUrl: (cursor, tabId) =>
+      `${base}/stream?cursor=${cursor}` + (tabId ? `&tab_id=${encodeURIComponent(tabId)}` : ""),
     runUrl: `${base}/run`,
   };
 }

@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { ComponentsTab } from "./ComponentsTab.jsx";
 import { TargetsTab } from "./TargetsTab.jsx";
 import { CampaignsTab } from "../campaigns/public.js";
@@ -96,7 +97,7 @@ export function SystemDetail({ systemId, initialTab }) {
               Edit
             </button>
             <button className="btn" onClick={() => nav(`#/systems/${systemId}/campaigns/new`)}>
-              Start campaign
+              <IconPlus /> New campaign
             </button>
             <button className="btn danger-outline" onClick={onDelete}>
               Delete

@@ -13,12 +13,12 @@ export function FindingFileControls({
   return (
     <>
       {hasFindings && (
-        <button className="btn sm" onClick={onExport}>
-          Export Issues
+        <button className="btn secondary sm" onClick={onExport}>
+          Export findings
         </button>
       )}
-      <button className="btn sm" onClick={() => input.current?.click()}>
-        Import Issues
+      <button className="btn secondary sm" onClick={() => input.current?.click()}>
+        Import findings
       </button>
       <input
         ref={input}

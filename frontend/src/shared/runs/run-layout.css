@@ -617,15 +617,6 @@
 .run-start-menu button.run-resume-action:hover {
   background: #ffb638;
 }
-.run-start-menu button.run-export-action {
-  color: var(--text-2);
-  background: transparent;
-  border: 1px solid var(--border);
-}
-.run-start-menu button.run-export-action:hover {
-  color: var(--text);
-  background: var(--hover);
-}
 
 /* Per-credential crawl progress */
 

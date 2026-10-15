@@ -32,21 +32,11 @@ import { WebRunSitemapMeta } from "./WebRunSitemapMeta.jsx";
 import { WebRunSitemapGraph } from "./WebRunSitemapGraph.jsx";
 import { WebRunCrawlProgress } from "./WebRunCrawlProgress.jsx";
 import { WebRunHeader } from "./WebRunHeader.jsx";
+import { WorkflowInputDrawer } from "./WorkflowInputDrawer.jsx";
 import { WebRunSastLeadsTab } from "../../shared/leads/RunLeadsTab.jsx";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { SastSourceCosts } from "../../shared/ui/SastSourceCosts";
-
-function dismissedWorkflowNoticeIds(runId) {
-  try {
-    const saved = JSON.parse(
-      window.sessionStorage.getItem(`aespa-workflow-notices-${runId}`) || "[]",
-    );
-    return Array.isArray(saved) ? saved : [];
-  } catch {
-    return [];
-  }
-}
 
 export function TestRunDetail(props) {
   return (
@@ -92,9 +82,7 @@ function TestRunContent({
   const [notificationFocus, setNotificationFocus] = useState(0);
   const [focusedNotificationId, setFocusedNotificationId] = useState(null);
   const [workflowFocus, setWorkflowFocus] = useState(null);
-  const [dismissedWorkflowIds, setDismissedWorkflowIds] = useState(() =>
-    dismissedWorkflowNoticeIds(runId),
-  );
+  const [workflowInputOpen, setWorkflowInputOpen] = useState(false);
 
   const loadWorkflowNotes = useCallback(async () => {
     const [result, retry] = await Promise.all([
@@ -114,17 +102,16 @@ function TestRunContent({
       ),
   );
   const viewWorkflow = (noteId) => {
+    setWorkflowInputOpen(false);
     setWorkflowFocus((current) => ({ noteId, sequence: (current?.sequence || 0) + 1 }));
     setActiveTab("attack");
   };
-  const viewWorkflowNotification = (noteId) => {
+  const openWorkflowInput = (noteId = null) => {
     setFocusedNotificationId(noteId);
     setNotificationFocus((value) => value + 1);
-    setActiveTab("activity");
+    setWorkflowInputOpen(true);
   };
-  const unseenWorkflows = waitingWorkflows.filter(
-    (note) => !dismissedWorkflowIds.includes(note.id),
-  );
+  const closeWorkflowInput = useCallback(() => setWorkflowInputOpen(false), []);
 
   // Load LLM profiles once so the read-only display and edit dropdown both work.
   useEffect(() => {
@@ -133,7 +120,7 @@ function TestRunContent({
       .then(setRunProfiles)
       .catch(() => {});
   }, []);
-  const { aliceIsThinking, aliceGlobalRunning, handleAliceStop, submitAliceDirective } =
+  const { aliceIsThinking, aliceGlobalRunning, handleAliceStopAll, submitAliceDirective } =
     useWebRunChat();
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState(null);
@@ -165,7 +152,7 @@ function TestRunContent({
   const { agentCurrentTask } = activityPresentation({
     run,
     thinkingStatus,
-    aliceIsThinking,
+    aliceIsThinking: aliceGlobalRunning,
     activityLog,
   });
 
@@ -411,7 +398,6 @@ function TestRunContent({
       setError(e.message);
     }
   };
-  const onExportCrawl = () => webRunsApi.exportCrawl(runId);
   const onImportCrawlClick = () => crawlImportInputRef.current?.click();
   const showImportedCrawl = async (imported) => {
     const importedGraph = await webRunsApi.getGraph(runId);
@@ -520,12 +506,26 @@ function TestRunContent({
         onStartScan={onStartThinkingScan}
         onStopScan={onStopThinkingScan}
         onResume={onResumeThinkingScan}
-        onExportCrawl={onExportCrawl}
         onImportCrawl={onImportCrawlClick}
         onSavedCrawlLoaded={showImportedCrawl}
         onError={setError}
         aliceRunning={aliceGlobalRunning}
-        onStopAlice={handleAliceStop}
+        onStopAlice={handleAliceStopAll}
+        workflowInputCount={waitingWorkflows.length}
+        workflowInputOpen={workflowInputOpen}
+        onToggleWorkflowInput={() =>
+          workflowInputOpen ? closeWorkflowInput() : openWorkflowInput()
+        }
+      />
+      <WorkflowInputDrawer
+        open={workflowInputOpen}
+        runId={runId}
+        onClose={closeWorkflowInput}
+        onNotesChange={setWorkflowNotes}
+        onRetryStatusChange={setWorkflowRetryStatus}
+        onViewWorkflow={viewWorkflow}
+        focusedNoteId={focusedNotificationId}
+        focusSequence={notificationFocus}
       />
       <input
         ref={crawlImportInputRef}
@@ -595,43 +595,6 @@ function TestRunContent({
             )
           }
         />
-
-        {unseenWorkflows.length > 0 && (
-          <div className="workflow-notification-banner" role="status">
-            <span className="workflow-notification-icon" aria-hidden="true">
-              !
-            </span>
-            <span>
-              <strong>
-                {unseenWorkflows.length === 1
-                  ? "A workflow needs your input"
-                  : `${unseenWorkflows.length} workflows need your input`}
-              </strong>
-            </span>
-            <button
-              type="button"
-              className="btn sm"
-              onClick={() => {
-                const next = [
-                  ...new Set([...dismissedWorkflowIds, ...waitingWorkflows.map((note) => note.id)]),
-                ];
-                setDismissedWorkflowIds(next);
-                try {
-                  window.sessionStorage.setItem(
-                    `aespa-workflow-notices-${runId}`,
-                    JSON.stringify(next),
-                  );
-                } catch {
-                }
-                setNotificationFocus((value) => value + 1);
-                setFocusedNotificationId(null);
-                setActiveTab("activity");
-              }}
-            >
-              View notifications
-            </button>
-          </div>
-        )}
 
         <WebRunNavigation
           activeTab={activeTab}
@@ -727,7 +690,7 @@ function TestRunContent({
           workflowFocus={workflowFocus}
           onWorkflowNotesChange={setWorkflowNotes}
           onWorkflowRetryStatusChange={setWorkflowRetryStatus}
-          onOpenWorkflowNotification={viewWorkflowNotification}
+          onOpenWorkflowNotification={openWorkflowInput}
           run={run}
           active={activeTab === "attack"}
           scanActive={isDynamicScanActive(thinkingStatus?.status)}
@@ -756,12 +719,6 @@ function TestRunContent({
           <WebRunActivityTab
             activeTab={activeTab}
             runId={runId}
-            notificationFocus={notificationFocus}
-            focusedNotificationId={focusedNotificationId}
-            workflowNotificationCount={waitingWorkflows.length}
-            onWorkflowNotesChange={setWorkflowNotes}
-            onWorkflowRetryStatusChange={setWorkflowRetryStatus}
-            onViewWorkflow={viewWorkflow}
             run={run}
             thinkingStatus={thinkingStatus}
             activityLog={activityLog}

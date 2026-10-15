@@ -3,7 +3,8 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
-import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { PageHeader, Breadcrumbs } from "../../shared/ui/PageHeader.jsx";
+import { useRecordName } from "../../shared/hooks/useRecordName.ts";
 
 export function ApiTestRunForm({ collectionId }) {
   const [form, setForm] = useState({
@@ -19,6 +20,7 @@ export function ApiTestRunForm({ collectionId }) {
       ...f,
       ...p,
     }));
+  const collectionName = useRecordName(apiCollectionsApi.getApiCollection, collectionId);
   useEffect(() => {
     settingsApi
       .listLLMProfiles()
@@ -47,9 +49,13 @@ export function ApiTestRunForm({ collectionId }) {
       <PageHeader
         title={
           <>
-            <Crumb href={`#/apis/${collectionId}`}>API collection</Crumb>
-            <Sep />
-            New test run
+            <Breadcrumbs
+              items={[
+                { label: "APIs", href: "#/apis" },
+                { label: collectionName || "API collection", href: `#/apis/${collectionId}` },
+                { label: "New test run" },
+              ]}
+            />
           </>
         }
       />

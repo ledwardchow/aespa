@@ -152,27 +152,27 @@ export function SitesList() {
               <colgroup>
                 <col
                   style={{
+                    width: "30%",
+                  }}
+                />
+                <col
+                  style={{
+                    width: "32%",
+                  }}
+                />
+                <col
+                  style={{
+                    width: "8%",
+                  }}
+                />
+                <col
+                  style={{
+                    width: "12%",
+                  }}
+                />
+                <col
+                  style={{
                     width: "18%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "42%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "10%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "10%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "20%",
                   }}
                 />
               </colgroup>

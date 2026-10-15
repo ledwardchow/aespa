@@ -89,6 +89,11 @@ _TECHNIQUE_TO_ATTACK_CLASS = {
     "ssrf_canary": "ssrf",
 }
 
+_WORKFLOW_ATTACK_CLASS = {
+    "access": "idor",
+    "reauth": "auth_bypass",
+}
+
 
 def _fingerprint(*parts: object) -> str:
     material = "|".join(str(part or "").strip().lower() for part in parts)
@@ -298,6 +303,8 @@ def _task_dict(
 
 
 def get_queue(run_id: int) -> dict:
+    from aespa.services.workflow_workprogram import list_workflow_tests
+
     with Session(get_engine()) as session:
         rows = list(
             session.exec(
@@ -344,12 +351,32 @@ def get_queue(run_id: int) -> dict:
         if variant.kind != "baseline" or _planning_is_complete(variant)
     }
     active_planning = len(_planning_active_task_ids.get(run_id, set()))
+    workflow_items = [
+        item
+        for item in list_workflow_tests(run_id)["items"]
+        if item["status"] != "blocked"
+    ]
+    selected_workflow_ids = {
+        row.workflow_test_id for row in rows if row.workflow_test_id is not None
+    }
+    excluded_workflows = [
+        {"id": item["id"], "name": item["name"], "test_kind": item["test_kind"]}
+        for item in workflow_items
+        if item["id"] not in selected_workflow_ids
+        and item["status"] not in {"passed", "finding"}
+    ]
     return {
         "run_id": run_id,
         "total": len(rows),
         "counts": dict(counts),
         "checks_total": len(checks),
         "variants_total": len(variants),
+        "workflow_selection": {
+            "eligible": len(workflow_items),
+            "selected": len(selected_workflow_ids),
+            "excluded": len(excluded_workflows),
+            "excluded_items": excluded_workflows,
+        },
         "planning": {
             "total": len(rows),
             "complete": len(planned_task_ids),
@@ -393,6 +420,7 @@ def _persist_campaign(session: Session, run_id: int, campaign: dict) -> None:
             campaign["route_template"],
             campaign["http_method"],
             campaign.get("lead_id"),
+            campaign.get("workflow_test_id"),
             campaign["source"],
             campaign["title"],
         ),
@@ -432,9 +460,15 @@ def seed_deep_tasks(run_id: int) -> int:
         seed_scan_obligations,
         seed_web_workprogram,
     )
+    from aespa.services.workflow_workprogram import (
+        list_workflow_tests,
+        seed_workflow_tests,
+    )
 
     seed_web_workprogram(run_id)
     seed_scan_obligations(run_id, scan_mode="full", run_kind="web")
+    seed_workflow_tests(run_id)
+    workflow_items = list_workflow_tests(run_id)["items"]
     with Session(get_engine()) as session:
         run = session.get(TestRun, run_id)
         if run is None:
@@ -620,37 +654,47 @@ def seed_deep_tasks(run_id: int) -> int:
                         "priority": priority,
                     },
                 )
-            for page in pages:
-                if page.state_kind == "interactive" or page.has_business_logic:
-                    add_group(
-                        ("workflow", page.id),
-                        {
-                            "source": "workflow_recon",
-                            "task_kind": "workflow",
-                            "route_template": _canonical_route(page.url),
-                            "page_id": page.id,
-                            "attack_class": "business_logic",
-                            "owasp_category": "A04",
-                            "target_url": page.url,
-                            "http_method": "POST",
-                            "title": f"Replay and test workflow: {page.state_label or page.url}",
-                            "priority": 8,
-                            "risk_level": "safe_active",
-                        },
-                        {
-                            "source": "workflow_recon",
-                            "attack_class": "business_logic",
-                            "owasp_category": "A04",
-                            "parameter": None,
-                            "parameter_location": "",
-                            "session_label": None,
-                            "hypothesis": (
-                                "Replay the saved interactive state, identify the workflow's "
-                                "captured request, and test safe ordering, replay, and authorization variants."
-                            ),
-                            "priority": 8,
-                        },
-                    )
+
+        for item in workflow_items:
+            if item["status"] in {"blocked", "passed", "finding"}:
+                continue
+            page_url = item.get("reached_page_url") or site.base_url
+            category = item["owasp_category"]
+            test_kind = item["test_kind"]
+            attack_class = _WORKFLOW_ATTACK_CLASS.get(test_kind, "business_logic")
+            add_group(
+                ("workflow", item["id"]),
+                {
+                    "source": "workflow_recon",
+                    "task_kind": "workflow",
+                    "route_template": _canonical_route(page_url),
+                    "workflow_test_id": item["id"],
+                    "page_id": item.get("reached_page_id"),
+                    "attack_class": attack_class,
+                    "owasp_category": category,
+                    "target_url": page_url,
+                    "http_method": "GET",
+                    "title": f"Test workflow: {item['name']} [{test_kind}]",
+                    "priority": 8,
+                    "risk_level": "safe_active",
+                },
+                {
+                    "source": "workflow_recon",
+                    "attack_class": attack_class,
+                    "owasp_category": category,
+                    "parameter": None,
+                    "parameter_location": "",
+                    "session_label": None,
+                    "hypothesis": (
+                        f"Workflow check {item['id']} ({test_kind}), crawl note "
+                        f"{item['latest_note_id']}. Goal: {item['goal']}. "
+                        f"Test: {item.get('test_guidance') or 'Test the workflow.'} "
+                        "Inspect that workflow note and captured requests. Test a safe "
+                        "security variant; the crawler replay alone does not count."
+                    )[:4000],
+                    "priority": 8,
+                },
+            )
 
         campaigns = list(groups.values())
         for campaign in campaigns:
@@ -1349,6 +1393,97 @@ def _refresh_campaign_state(session: Session, task: DeepScanTask) -> None:
                 session.add(obligation)
 
 
+def _record_deep_workflow_result(task_id: int) -> None:
+    from aespa.services.workflow_workprogram import (
+        list_workflow_tests,
+        record_workflow_test,
+    )
+
+    with Session(get_engine()) as session:
+        task = session.get(DeepScanTask, task_id)
+        if task is None or task.workflow_test_id is None:
+            return
+        if task.status not in {"finding", "inconclusive", "failed"}:
+            return
+        variants = list(
+            session.exec(
+                select(DeepScanVariant)
+                .where(DeepScanVariant.task_id == task_id)
+                .where(DeepScanVariant.kind != "baseline")
+            ).all()
+        )
+        if not variants or any(row.status in {"queued", "running"} for row in variants):
+            return
+        attempts = list(
+            session.exec(
+                select(DeepScanAttempt)
+                .where(DeepScanAttempt.task_id == task_id)
+                .where(DeepScanAttempt.variant_id.is_not(None))
+            ).all()
+        )
+        attack_variant_ids = {row.id for row in variants}
+        traffic_ids = sorted(
+            {
+                int(value)
+                for attempt in attempts
+                if attempt.variant_id in attack_variant_ids
+                and attempt.status in {"finding", "inconclusive", "complete"}
+                for value in _json_list(attempt.traffic_ids_json)
+                if value.isdigit()
+            }
+        )[:30]
+        checks = list(
+            session.exec(
+                select(DeepScanCheck).where(DeepScanCheck.task_id == task_id)
+            ).all()
+        )
+        finding_id = task.finding_id if traffic_ids else None
+        blocked_reason = (
+            (task.error_message or task.outcome or "Deep workflow tester failed")
+            if task.status == "failed" and not traffic_ids
+            else None
+        )
+        status = (
+            "finding"
+            if finding_id is not None
+            else "blocked"
+            if blocked_reason
+            else "inconclusive"
+        )
+        attempted_sequence = [
+            row.purpose[:240]
+            for row in variants
+            if row.status != "failed" and row.purpose
+        ][:20]
+        expected_behavior = "\n".join(check.hypothesis for check in checks)[:4000]
+        observed_behavior = "\n".join(row.outcome for row in variants if row.outcome)[
+            :4000
+        ]
+        run_id = task.run_id
+        workflow_test_id = task.workflow_test_id
+    current_item = next(
+        (
+            item
+            for item in list_workflow_tests(run_id)["items"]
+            if item["id"] == workflow_test_id
+        ),
+        None,
+    )
+    if current_item is None or current_item["status"] in {"passed", "finding"}:
+        return
+    record_workflow_test(
+        run_id,
+        workflow_test_id,
+        status=status,
+        attempted_sequence=attempted_sequence,
+        expected_behavior=expected_behavior,
+        observed_behavior=observed_behavior,
+        evidence_traffic_ids=traffic_ids,
+        finding_id=finding_id,
+        blocked_reason=blocked_reason,
+    )
+
+
 def _finish_variant(
     variant_id: int,
     attempt_id: int,
@@ -1523,6 +1658,15 @@ def _finish_variant(
         task.updated_at = now
         session.add(task)
         session.commit()
+        if task.workflow_test_id is not None:
+            try:
+                _record_deep_workflow_result(task.id)
+            except Exception:
+                log.exception(
+                    "Could not record Deep workflow result: run=%s task=%s",
+                    task.run_id,
+                    task.id,
+                )
         return strongest, len(finding_links)
 
 

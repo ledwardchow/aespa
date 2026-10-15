@@ -1019,6 +1019,38 @@ class PageOwaspTest(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class WorkflowCoverageItem(SQLModel, table=True):
+    """One security check for a named crawler workflow in a web run."""
+
+    __tablename__ = "workflow_coverage_item"
+    __table_args__ = (
+        UniqueConstraint(
+            "test_run_id",
+            "root_note_id",
+            "test_kind",
+            name="uq_workflow_coverage_item_run_note_kind",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
+    root_note_id: int = Field(index=True)
+    latest_note_id: int = Field(index=True)
+    reached_page_id: Optional[int] = Field(default=None, foreign_key="crawled_page.id")
+    name: str
+    goal: str = Field(default="")
+    reached_page_url: str = Field(default="")
+    crawl_traffic_max_id: int = Field(default=0)
+    test_kind: str = Field(index=True)  # sequence | access
+    owasp_category: str = Field(index=True)  # A04 | A01
+    status: str = Field(default="not_started", index=True)
+    reason: str = Field(default="")
+    evidence_json: str = Field(default="{}")
+    finding_id: Optional[int] = Field(default=None, foreign_key="scan_finding.id")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class PageLink(SQLModel, table=True):
     """Directed edge in the crawl graph: source page → target page."""
 
@@ -2622,6 +2654,9 @@ class DeepScanTask(SQLModel, table=True):
     identities_json: str = Field(default="[]")
     obligation_id: Optional[int] = Field(
         default=None, foreign_key="scan_obligation.id", index=True
+    )
+    workflow_test_id: Optional[int] = Field(
+        default=None, foreign_key="workflow_coverage_item.id", index=True
     )
     lead_id: Optional[int] = Field(default=None, foreign_key="scan_lead.id", index=True)
     page_id: Optional[int] = Field(

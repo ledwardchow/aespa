@@ -5,7 +5,7 @@ import json
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from aespa.models import SavedCrawl, ScanLog, TestRun
+from aespa.models import CrawledPage, SavedCrawl, ScanLog, TestRun
 
 
 def _make_site(client: TestClient, **kw):
@@ -114,6 +114,16 @@ def test_grouped_crawl_settings_and_summary_survive_save_and_load(
 def test_workflows_survive_file_export_and_site_save(client: TestClient, db_session):
     site = _make_site(client)
     source = _seed_crawled_run(client, site["id"])
+    reached_page = db_session.exec(
+        select(CrawledPage).where(
+            CrawledPage.test_run_id == source["id"],
+            CrawledPage.url == "https://target.local/orders",
+        )
+    ).one()
+    reached_page.state_kind = "interactive"
+    reached_page.state_key = "checkout-state"
+    db_session.add(reached_page)
+    db_session.commit()
     root_note = {
         "name": "Checkout",
         "goal": "Reach checkout",
@@ -140,6 +150,7 @@ def test_workflows_survive_file_export_and_site_save(client: TestClient, db_sess
         "needs_input": False,
         "retry_of": root.id,
         "instructions": "Use 1 Test Street",
+        "page_id": reached_page.id,
     }
     db_session.add(
         ScanLog(
@@ -199,6 +210,13 @@ def test_workflows_survive_file_export_and_site_save(client: TestClient, db_sess
         assert notes[0]["resolved"] is True
         assert notes[1]["retry_of"] == notes[0]["id"]
         assert notes[1]["instructions"] == "Use 1 Test Street"
+        restored_page = db_session.exec(
+            select(CrawledPage).where(
+                CrawledPage.test_run_id == target["id"],
+                CrawledPage.state_key == "checkout-state",
+            )
+        ).one()
+        assert notes[1]["page_id"] == restored_page.id
         summary = client.get(f"/api/test-runs/{target['id']}/recon-summary").json()
         assert summary["crawl_notes_checked"] is True
         assert len(summary["crawl_notes"]) == 2

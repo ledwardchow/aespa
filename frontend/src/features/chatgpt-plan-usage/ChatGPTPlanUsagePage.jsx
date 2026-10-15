@@ -285,7 +285,7 @@ export function ChatGPTPlanUsagePage() {
   return (
     <>
       <div className="topbar">
-        <div className="topbar-title">ChatGPT plan usage</div>
+        <div className="topbar-title">ChatGPT Plan Usage</div>
         <div className="topbar-actions">
           <button className="btn secondary" type="button" onClick={load}>
             Refresh

@@ -41,6 +41,7 @@ export function AliceChatPanel({
   setAliceInputText,
   isActiveThinking,
   aliceIsThinking = isActiveThinking,
+  busyTabIds,
   handleAliceSend,
   handleAliceStop,
   submitAliceDirective,
@@ -80,6 +81,9 @@ export function AliceChatPanel({
               }
               onClick={() => setActiveAliceTabId(tab.id)}
             >
+              {busyTabIds?.has(tab.id) && (
+                <span className="alice-chat-tab-busy" title="Working" aria-label="Working" />
+              )}
               <span>{tab.title}</span>
               <span
                 className="alice-chat-tab-close"

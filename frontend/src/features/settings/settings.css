@@ -278,8 +278,11 @@
 
 .settings-list {
   overflow-x: auto;
-  margin-top: 14px;
+  margin: 14px 28px 28px;
   min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
 }
 
 .settings-list-head,
@@ -287,8 +290,8 @@
   display: grid;
   align-items: center;
   gap: 12px;
-  padding-left: 28px;
-  padding-right: 28px;
+  padding-left: 16px;
+  padding-right: 16px;
 }
 
 .settings-list-profiles .settings-list-head,
@@ -315,8 +318,10 @@
 }
 
 .settings-list-head {
-  padding-top: 0;
-  padding-bottom: 9px;
+  padding-top: 11px;
+  padding-bottom: 11px;
+  background: var(--panel-2);
+  border-radius: 10px 10px 0 0;
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;

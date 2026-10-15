@@ -1,3 +1,4 @@
+import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { Tabs } from "../../shared/ui/Tabs.tsx";
 import { ProfilesList } from "./ProfilesList.jsx";
 import { ProvidersList } from "./ProvidersList.jsx";
@@ -206,7 +207,11 @@ export function SettingsPage({
   };
   const noun = TAB_NOUN[section];
   const title =
-    screen === "new" ? `New LLM ${noun}` : screen === "edit" ? `Edit LLM ${noun}` : `LLM ${noun}s`;
+    screen === "new"
+      ? `New LLM ${noun}`
+      : screen === "edit"
+        ? `Edit LLM ${noun}`
+        : "LLM Configuration";
   const canCreateProfile = savedModels.length > 0;
   const newDisabled = section === "profiles" && !canCreateProfile;
   const visibleTab = section === "models" ? "providers" : section;
@@ -216,10 +221,10 @@ export function SettingsPage({
       <div className="topbar">
         <div className="topbar-title">{title}</div>
         <div className="topbar-actions">
-          <button className="btn secondary sm" disabled={importing} onClick={onExport}>
+          <button className="btn secondary" disabled={importing} onClick={onExport}>
             Export
           </button>
-          <button className="btn secondary sm" disabled={importing} onClick={onImportClick}>
+          <button className="btn secondary" disabled={importing} onClick={onImportClick}>
             {importing ? "Importing…" : "Import"}
           </button>
           <input
@@ -233,7 +238,7 @@ export function SettingsPage({
           />
           {screen === "list" && section !== "models" && (
             <button className="btn" disabled={newDisabled} onClick={onNew}>
-              New {noun.toLowerCase()}
+              <IconPlus /> New {noun.toLowerCase()}
             </button>
           )}
         </div>

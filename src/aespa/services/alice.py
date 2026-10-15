@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import inspect
 import json
@@ -202,25 +203,36 @@ _FINDING_MANAGEMENT_TOOL_NAMES = {
 }
 
 
-# Live Playwright browsers for ALICE's interactive `browser` tool, keyed by run_id.
-# One headless browser per run, launched lazily on first browser action and closed
-# when the turn ends. ponytail: per-run global, no pooling/limits — fine for a
-# localhost single-user tool; revisit if ALICE ever runs many concurrent turns.
-_alice_browsers: dict[int, dict] = {}
+# Live Playwright browsers for ALICE's interactive `browser` tool. One headless
+# browser per chat tab, launched lazily on first browser action and closed when
+# that tab's turn ends. Several tabs on the same run can work at once, so the
+# key includes the chat tab (set by alice_tasks for each background turn) and
+# the run kind, because web and API run ids share the same integer space.
+alice_browser_scope: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "alice_browser_scope", default=""
+)
+_alice_browsers: dict[tuple[str, int, str], dict] = {}
+
+
+def _alice_browser_key(run_id: int, api_run_id: int | None) -> tuple[str, int, str]:
+    if api_run_id is not None:
+        return ("api", api_run_id, alice_browser_scope.get())
+    return ("web", run_id, alice_browser_scope.get())
 
 
 async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
-    """Return a live (page, context) for ``run_id``, launching one if needed.
+    """Return a live (page, context) for this run and chat tab, launching one if needed.
 
     Pass ``api_run_id`` for API-collection runs so browser traffic is keyed on
     the API owner column.
     """
-    entry = _alice_browsers.get(run_id)
+    key = _alice_browser_key(run_id, api_run_id)
+    entry = _alice_browsers.get(key)
     if entry:
         page = entry.get("page")
         if page is not None and not page.is_closed():
             return page, entry["ctx"]
-        await _close_alice_browser(run_id)
+        await _close_alice_browser(run_id, api_run_id=api_run_id)
 
     from playwright.async_api import async_playwright
 
@@ -250,13 +262,13 @@ async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
         api_run_id=api_run_id,
     )
     page = await ctx.new_page()
-    _alice_browsers[run_id] = {"pw": pw, "browser": browser, "ctx": ctx, "page": page}
+    _alice_browsers[key] = {"pw": pw, "browser": browser, "ctx": ctx, "page": page}
     return page, ctx
 
 
-async def _close_alice_browser(run_id: int) -> None:
-    """Tear down the live browser for ``run_id`` (best-effort)."""
-    entry = _alice_browsers.pop(run_id, None)
+async def _close_alice_browser(run_id: int, api_run_id: int | None = None) -> None:
+    """Tear down the live browser for this run and chat tab (best-effort)."""
+    entry = _alice_browsers.pop(_alice_browser_key(run_id, api_run_id), None)
     if not entry:
         return
     for key in ("ctx", "browser"):
@@ -2966,8 +2978,11 @@ async def run_alice_turn_stream(
             await provider_adapter.close_conversation(messages)
         # Always unregister the workprogram finding hook, even on early exit
         # or exception — mirrors scanner._do_thinking_scan cleanup.
+        # Another chat tab on this run may have replaced the hook with its own;
+        # leave that one in place while its turn is still running.
         try:
-            _finding_hooks.pop(run_id, None)
+            if _finding_hooks.get(run_id) is _web_post_finding_fn:
+                _finding_hooks.pop(run_id, None)
         except Exception:
             pass
         # Close the live browser opened for any `browser` tool calls this turn.

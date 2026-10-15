@@ -57,6 +57,16 @@
   top: 0;
   z-index: 1;
 }
+/* Category headers wrap onto two lines instead of being clipped. */
+.coverage-matrix thead th {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.coverage-matrix thead th > div + div {
+  text-transform: none;
+  letter-spacing: 0;
+}
 
 .coverage-matrix td.coverage-traffic-cell:hover {
   background: color-mix(in srgb, var(--accent) 9%, transparent);

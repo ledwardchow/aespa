@@ -825,6 +825,18 @@ def seed_web_coverage(run_id: int, session: Session = Depends(get_session)) -> d
     return {"ok": True, "created": created}
 
 
+@router.get("/api/test-runs/{run_id}/workflow-coverage")
+def get_workflow_coverage(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services.workflow_workprogram import (
+        list_workflow_tests,
+        seed_workflow_tests,
+    )
+
+    seed_workflow_tests(run_id)
+    return list_workflow_tests(run_id)
+
+
 # ── Pages + graph ─────────────────────────────────────────────────────────────
 
 

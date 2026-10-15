@@ -774,6 +774,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         from aespa.services.web_workprogram import (
             seed_web_workprogram,
         )  # ponytail: local import avoids circular
+        from aespa.services.workflow_workprogram import seed_workflow_tests
 
         try:
             seeded = seed_web_workprogram(run_id)
@@ -784,6 +785,10 @@ async def _do_crawl_inner(run_id: int) -> None:
             log.warning(
                 "workprogram seed failed after crawl (non-fatal)", exc_info=True
             )
+        try:
+            seed_workflow_tests(run_id)
+        except Exception:
+            log.warning("workflow coverage seed failed after crawl", exc_info=True)
 
     final_status = (
         TestRunStatus.stopped if run_id in _stop_requested else TestRunStatus.complete

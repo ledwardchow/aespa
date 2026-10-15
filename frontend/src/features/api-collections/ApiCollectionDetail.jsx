@@ -1,3 +1,5 @@
+import { IconPlus } from "../../shared/ui/Icons.jsx";
+import { fmtDate } from "../../shared/lib/dates.js";
 import { useBenchmarkLinks } from "../../shared/hooks/useBenchmarkLinks.js";
 import { BenchmarkBadge } from "../../shared/ui/BenchmarkBadge.jsx";
 import * as apiCollectionsApi from "../../shared/api/apiCollections.js";
@@ -246,6 +248,11 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
         actions={
           <>
             {collection && (
+              <button className="btn secondary" onClick={() => nav(`#/apis/${collectionId}/edit`)}>
+                Edit collection
+              </button>
+            )}
+            {collection && (
               <button className="btn secondary" onClick={() => nav(`#/apis/${collectionId}/files`)}>
                 Manage files
               </button>
@@ -256,13 +263,13 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
               </button>
             )}
             {collection && (
-              <button className="btn secondary" onClick={() => nav(`#/apis/${collectionId}/edit`)}>
-                Edit collection
+              <button className="btn danger-outline" onClick={onDelete}>
+                Delete
               </button>
             )}
             {collection && (
-              <button className="btn danger-outline" onClick={onDelete}>
-                Delete
+              <button className="btn" onClick={() => nav(`#/apis/${collectionId}/runs/new`)}>
+                <IconPlus /> New test run
               </button>
             )}
           </>
@@ -455,9 +462,9 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                           color: "var(--muted)",
                         }}
                       >
-                        Assessed {new Date(readiness.assessed_at).toLocaleString()}· Auth
-                        understood: {readiness.overall.auth_method_understood ? "✓" : "✗"}·
-                        Credentials: {readiness.overall.has_credentials ? "✓" : "✗"}· Test data:{" "}
+                        Assessed {fmtDate(readiness.assessed_at)}· Auth understood:{" "}
+                        {readiness.overall.auth_method_understood ? "✓" : "✗"}· Credentials:{" "}
+                        {readiness.overall.has_credentials ? "✓" : "✗"}· Test data:{" "}
                         {readiness.overall.has_sufficient_test_data ? "✓" : "✗"}
                       </div>
                     </div>
@@ -562,7 +569,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                                     color: "var(--muted)",
                                   }}
                                 >
-                                  {new Date(c.created_at).toLocaleString()}
+                                  {fmtDate(c.created_at)}
                                 </td>
                               </tr>
                             ))}
@@ -801,23 +808,8 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
 
             {activeTab === "runs" && (
               <>
-                <div className="card">
-                  <div
-                    className="form-section-title"
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                    }}
-                  >
-                    <span>Test Runs</span>
-                    <button
-                      className="btn sm"
-                      onClick={() => nav(`#/apis/${collectionId}/runs/new`)}
-                    >
-                      + New test run
-                    </button>
-                  </div>
+                <div>
+                  <div className="section-label">Test runs</div>
                   {apiRuns === null && <div className="subtle">Loading…</div>}
                   {apiRuns !== null && apiRuns.length === 0 && (
                     <div
@@ -826,7 +818,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                         padding: "12px 0",
                       }}
                     >
-                      No test runs yet. Click <strong>+ New test run</strong> to start one.
+                      No test runs yet. Click <strong>New test run</strong> to start one.
                     </div>
                   )}
                   {apiRuns !== null && apiRuns.length > 0 && (
@@ -901,7 +893,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                                   color: "var(--muted)",
                                 }}
                               >
-                                {new Date(r.created_at).toLocaleString()}
+                                {fmtDate(r.created_at)}
                               </td>
                               <td>
                                 <a href={`#/api-runs/${r.id}/status`} className="btn secondary sm">

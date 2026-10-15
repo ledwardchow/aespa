@@ -148,7 +148,7 @@ export function SiteDetail({ siteId }) {
               </button>
             )}
             <button className="btn" onClick={() => nav(`#/sites/${siteId}/runs/new`)}>
-              <IconPlus /> New run
+              <IconPlus /> New test run
             </button>
           </>
         }
@@ -467,7 +467,7 @@ export function SiteDetail({ siteId }) {
               sub="Create a new run to start crawling this site."
               action={
                 <button className="btn" onClick={() => nav(`#/sites/${siteId}/runs/new`)}>
-                  <IconPlus /> New run
+                  <IconPlus /> New test run
                 </button>
               }
             />
@@ -536,7 +536,9 @@ export function SiteDetail({ siteId }) {
                     <NavigationRow key={r.id} href={`#/runs/${r.id}`} label={`Open ${r.name}`}>
                       <td>
                         <span className="run-name">
-                          <strong>{r.name}</strong>
+                          <a href={`#/runs/${r.id}`} style={{ fontWeight: 600 }}>
+                            {r.name}
+                          </a>
                           {r.coverage_mode === "deep" && <span className="badge deep">Deep</span>}
                           {r.coverage_mode === "team" && <span className="badge">Team</span>}
                         </span>

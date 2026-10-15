@@ -6,9 +6,9 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **ChatGPT plan usage**: An optional extension estimates the API value of ChatGPT plan usage for the ChatGPT plan and Codex CLI providers. It tracks tokens used in AESPA and reads the plan's 5-hour and weekly usage percentages from the Codex CLI, including when a scan using either provider starts and ends. Readings where the percentage changed while AESPA used no tokens are left out. Stats → ChatGPT plan shows usage over time, estimated cost, and tokens per percentage point. Reading intervals are configurable. Usage outside AESPA affects the estimates; prices come from the Usage page.
+- **ChatGPT plan usage**: An optional extension estimates the API value of ChatGPT plan usage for the ChatGPT plan and Codex CLI providers. It tracks tokens used in AESPA and reads the plan's 5-hour and weekly usage percentages from the Codex CLI, including when a scan using either provider starts and ends. Readings where the percentage changed while AESPA used no tokens are left out. Stats → ChatGPT Plan Usage shows usage over time, estimated cost, and tokens per percentage point. Reading intervals are configurable. Usage outside AESPA affects the estimates; prices come from the Usage page.
 
-- **Crawler workflows**: Prior to this, crawls did not execute state-changing/irreversible functionality, i.e. checking out a shopping cart. With this change, the crawler will specifically discover and index workflows which it didn't use during the crawl and ask the user for the information/permission to auto-generate data to submit in those workflows and execute them, allowing these workflows to be added to the sitemap. 
+- **Crawler workflows**: After the page crawl, AESPA tries to reach useful workflows it missed. When a workflow needs test data, a **Needs input** button appears at the top of the run on every tab. It opens a side panel where you can supply the data without leaving the tab you're on, and save successful instructions for later crawls. Reached workflows become checks in the Test Lead's coverage work and appear in the Workflows tab of OWASP Coverage, laid out like the page table. Each workflow is checked for skipped or reordered steps. Depending on what it does, it can also be checked for access by another account, repeated or simultaneous submission, changed amounts or prices, cross-site request forgery, and sensitive changes made without signing in again. Full scans require each check to be tested or marked blocked with a reason.
 
 - **Grouped page crawl**: The crawler was really bad at making a sitemap of websites which had a large amount of "content" i.e. a shopping site, or a CMS, it would blow its page budget on content instead of functionality. The optional **Group similar pages** setting makes the crawler work out that pages such as products or articles are substantially the same thing from a functionality perspective, group them on the site map and limit crawling of more of those pages. This leaves more of the crawl budget for distinct site features. The setting is off by default.
 
@@ -22,7 +22,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Custom CA bundles**: Connectivity settings now accept separate PEM CA bundles for application and testing traffic. Application requests include LLM calls and Benchmark Lab; testing requests include session checks and vulnerable-library updates. CLI providers receive the application CA path. Browser tests continue accepting certificate errors.
 
-- **Saved crawls**: Save a finished crawl to its site and load it into a new run to skip crawling again. The site page lets you rename, import, download, or delete saved crawls. Saved crawls include workflow history and captured session data.
+- **Saved crawls**: Save a finished crawl to its site and load it into a new run to skip crawling again. The site page lets you rename, import, download, or delete saved crawls. Saved crawls include workflow history and captured session data. On a run, **Save crawl** saves the crawl to its site or downloads it as a file; this replaces the separate Export crawl menu item.
 
 - **Outdated JavaScript library checks**: Web scans use the Retire.js list to flag captured libraries with known vulnerabilities. Findings show the affected version, location, CVEs, and upgrade version. The check runs in passive mode too and can be managed under Settings → Global → Vulnerable Libraries.
 
@@ -54,7 +54,21 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Smaller console log database**: LLM requests and responses are stored once when console logging is on. Continued agent conversations save only new messages, reducing log growth during long scans.
 
+- **More consistent screens**: Each sidebar item has its own icon, and sidebar names now match page titles (Usage, SAST Scans, ChatGPT Plan Usage, LLM Configuration). Web, API, and SAST runs share the same breadcrumb (for example, Sites / Bank of Ed / run name), button wording (Start scan, Resume scan, Stop scan), and tab order. An API run's phase and end reason now appear when you hover over its status. Every list puts its create button in the page header in the same style, row Delete buttons stay muted until you point at them, and the default LLM profile is marked with a badge.
+
+- **Findings lists**: The findings buttons now read Export findings, Import findings, Validate findings, and Review with AI, with Validate findings as the main action. Unconfirmed, low-confidence, and deterministic-check findings appear in labelled sections below the main list.
+
+- **Dates, costs, and statuses**: Lists use one short date and time format, costs show two decimal places with thousands separators, and finished runs read "completed" on every run type.
+
 ### Fixes
+
+- **Dark form fields**: Number fields and most drop-down menus appeared as bright white boxes in the dark theme. They now match the other form fields.
+
+- **Sidebar**: Items no longer shift slightly when you move between sections.
+
+- **Cut-off text**: Column headings, site names, status labels, and OWASP coverage headings that were cut off despite available space are now shown in full.
+
+- **A.L.I.C.E. chat tabs**: Each chat tab now works on its own. Sending a message in one tab no longer locks the others or cancels A.L.I.C.E.'s work there, so you can run several requests on the same run at once. A dot marks tabs that are still working, the chat stop button stops only the open tab, and Stop A.L.I.C.E. at the top of the run stops all of them.
 
 - **Site credentials**: If you updated a site configuration (i.e. notes, credentials) while a scan was in progress, it would break currently running scans, they would no longer be able to find the saved credentials. This was because the credential records were re-created with new IDs. Saving site settings now keeps the IDs of existing credentials, so pages and runs linked to those accounts continue to recognize them.
 
@@ -99,6 +113,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Existing Benchmark Lab data**: Older Benchmark Lab extension databases now load saved dates correctly when reused from another installation.
 
 - **Console startup on occupied ports**: When the requested port is in use, AESPA starts on port 9000 or the next available higher port instead of exiting.
+
+- **Coverage tab spacing**: The OWASP, Attack Surface, Workflows, and Intelligence tabs in a web run now line up with the Status tab's Agents, Workers, and Log tabs and use the same spacing.
 
 ### Housekeeping
 

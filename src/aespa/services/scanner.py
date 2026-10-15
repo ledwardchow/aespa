@@ -2921,6 +2921,30 @@ def _run_thinking_context_tool(
 
         return get_web_coverage_gaps(run_id, limit=limit)
 
+    if tool_name in {"workflow_list", "workflow_detail"}:
+        if run_id is None or api_run_id is not None:
+            return {"tool": tool_name, "error": "web run unavailable"}
+        from aespa.services.workflow_workprogram import list_workflow_tests
+
+        data = list_workflow_tests(run_id)
+        if tool_name == "workflow_list":
+            return {"tool": tool_name, **data}
+        try:
+            item_id = int(args.get("item_id"))
+        except (TypeError, ValueError):
+            return {"tool": tool_name, "error": "item_id is required"}
+        item = next((item for item in data["items"] if item["id"] == item_id), None)
+        if item is None:
+            return {"tool": tool_name, "error": "workflow test not found"}
+        with Session(get_engine()) as s:
+            page = s.get(CrawledPage, item["reached_page_id"])
+            if page is not None and page.test_run_id == run_id:
+                item = {
+                    **item,
+                    "replay_steps": _loads_json_dict(page.replay_steps_json),
+                }
+        return {"tool": tool_name, "item": item}
+
     return {
         "tool": tool_name,
         "error": "unknown tool",
@@ -2940,6 +2964,8 @@ def _run_thinking_context_tool(
             "auth_matrix",
             "extract_entities",
             "coverage_gaps",
+            "workflow_list",
+            "workflow_detail",
         ],
     }
 
@@ -7014,6 +7040,11 @@ async def _do_thinking_scan(
     )
 
     if coverage_mode != "sast_validate":
+        from aespa.services.workflow_workprogram import (
+            list_workflow_tests,
+            seed_workflow_tests,
+        )
+
         try:
             seed_web_workprogram(run_id)
         except Exception as _wp_exc:
@@ -7026,6 +7057,24 @@ async def _do_thinking_scan(
             )
         except Exception as _obligation_exc:
             log.warning("seed_scan_obligations failed (non-fatal): %s", _obligation_exc)
+        try:
+            seed_workflow_tests(run_id)
+            workflow_items = list_workflow_tests(run_id)["items"]
+            if workflow_items:
+                workflow_lines = [
+                    f"  id={item['id']} {item['owasp_category']} {item['name']} "
+                    f"({item['test_kind']}, {item['status']}): {item['goal']}"
+                    for item in workflow_items[:12]
+                ]
+                crawl_context += (
+                    "\n\nNamed workflow security checks:\n"
+                    + "\n".join(workflow_lines)
+                    + "\nUse context_tool workflow_list for the full current list and "
+                    "workflow_detail for the reached state. Record a result only "
+                    "after a targeted security test, with scan traffic as evidence."
+                )
+        except Exception as workflow_exc:
+            log.warning("workflow coverage seed failed: %s", workflow_exc)
         if coverage_mode == "enforce":
             try:
                 reopen_unjustified_web_skips(run_id)
@@ -9071,6 +9120,13 @@ async def _do_thinking_scan(
             await _run_post_scan_llm_review(run_id, llm_cfg, _pre_scan_max_id)
         except Exception as _rev_exc:
             log.warning("Post-scan review failed (non-fatal): %s", _rev_exc)
+    workflow_gaps_remaining: list[dict] = []
+    if not stopped and coverage_mode == "enforce":
+        from aespa.services.workflow_workprogram import remaining_workflow_tests
+
+        workflow_gaps_remaining = remaining_workflow_tests(run_id)
+        if workflow_gaps_remaining:
+            has_unresolved_obligations = True
     if team_assignment is not None and not team_assignment.get("final", False):
         if stopped:
             llm_svc.clear_run_context()
@@ -9118,7 +9174,7 @@ async def _do_thinking_scan(
                 "_persist": True,
             },
         )
-    elif standard_target_unmet:
+    elif standard_target_unmet or workflow_gaps_remaining:
         events_svc.emit(
             run_id,
             {
@@ -9126,13 +9182,21 @@ async def _do_thinking_scan(
                 "agent_id": test_lead_agent_id,
                 "role": test_lead_role,
                 "status": "incomplete",
-                "current_task": "Standard coverage target not reached",
+                "current_task": (
+                    "Workflow checks remain"
+                    if workflow_gaps_remaining
+                    else "Standard coverage target not reached"
+                ),
                 "outcome": (
-                    f"Exercised {standard_progress['exercised']}/"
-                    f"{standard_progress['total']} applicable coverage cells "
-                    f"({standard_progress['percent']}%)"
-                    if standard_progress
-                    else "Coverage progress could not be verified"
+                    f"{len(workflow_gaps_remaining)} workflow check(s) remain"
+                    if workflow_gaps_remaining
+                    else (
+                        f"Exercised {standard_progress['exercised']}/"
+                        f"{standard_progress['total']} applicable coverage cells "
+                        f"({standard_progress['percent']}%)"
+                        if standard_progress
+                        else "Coverage progress could not be verified"
+                    )
                 ),
                 "_persist": True,
             },
@@ -9150,7 +9214,11 @@ async def _do_thinking_scan(
             elif has_unresolved_obligations:
                 _run.status = "incomplete"
                 _run.outcome = "incomplete"
-                _run.terminal_reason = "coverage_budget_exhausted"
+                _run.terminal_reason = (
+                    "workflow_coverage_incomplete"
+                    if workflow_gaps_remaining
+                    else "coverage_budget_exhausted"
+                )
             elif coverage_mode in {"track", "standard", "sast_validate"}:
                 from aespa.services.scan_leads import get_all_leads_for_run
 
@@ -9623,6 +9691,22 @@ async def _do_agentic_thinking_loop(
                 f"{progress['percent']}% ({progress['exercised']}/{progress['total']} cells)."
             )
 
+        if not is_api_run and coverage_mode == "enforce":
+            from aespa.services.workflow_workprogram import remaining_workflow_tests
+
+            workflow_gaps = remaining_workflow_tests(run_id)
+            if workflow_gaps:
+                names = "; ".join(
+                    f"{item['name']} ({item['owasp_category']} {item['test_kind']})"
+                    for item in workflow_gaps[:6]
+                )
+                message = (
+                    f"{len(workflow_gaps)} workflow security check(s) remain. "
+                    f"Test them or record a concrete blocker: {names}."
+                )
+                _emit_completion_log(f"Step {step}: {message}", status="warning")
+                return False, message
+
         def _get_coverage_gaps() -> dict[str, Any]:
             if is_api_run:
                 return {}
@@ -9847,6 +9931,30 @@ async def _do_agentic_thinking_loop(
                 post_probe_fn=post_probe_fn,
                 requested_timeout_s=tool_input.get("timeout_s"),
             )
+
+        if tool_name == "record_workflow_test":
+            if is_api_run or coverage_mode == "sast_validate":
+                return "Workflow tests are available only in web coverage scans."
+            from aespa.services.workflow_workprogram import record_workflow_test
+
+            try:
+                result = record_workflow_test(
+                    run_id,
+                    int(tool_input.get("item_id")),
+                    status=str(tool_input.get("status") or ""),
+                    attempted_sequence=tool_input.get("attempted_sequence") or [],
+                    expected_behavior=str(tool_input.get("expected_behavior") or ""),
+                    observed_behavior=str(tool_input.get("observed_behavior") or ""),
+                    evidence_traffic_ids=tool_input.get("evidence_traffic_ids") or [],
+                    finding_id=tool_input.get("finding_id"),
+                    blocked_reason=tool_input.get("blocked_reason"),
+                )
+            except (TypeError, ValueError) as exc:
+                return f"record_workflow_test rejected: {exc}"
+            completion_policy.record_progress(
+                f"workflow:{result['id']}:{result['status']}"
+            )
+            return json.dumps(result, separators=(",", ":"))
 
         # ── skip_coverage ─────────────────────────────────────────────────────
         if tool_name == "skip_coverage":

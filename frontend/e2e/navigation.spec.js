@@ -7,7 +7,7 @@ const screens = [
   ["#/", "Fixture site"],
   ["#/sites/1", "Fixture site"],
   ["#/sites/new", "New Site"],
-  ["#/settings", "LLM Profiles"],
+  ["#/settings", "LLM Configuration"],
   ["#/scan-policy", "Settings"],
   ["#/external-integrations", "Upstream Proxy"],
   ["#/apis", "Fixture API"],
@@ -184,11 +184,17 @@ test("settings tabs, edit cancellation, and sidebar history work", async ({ page
   await expect(page.getByText("Edit LLM Provider", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page).toHaveURL(/#\/settings\/providers$/);
-  await expect(page.getByText("LLM Providers", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Providers", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await page.getByRole("link", { name: "Sites", exact: true }).click();
   await expect(page.getByText("Fixture site", { exact: true }).first()).toBeVisible();
   await page.goBack();
-  await expect(page.getByText("LLM Providers", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Providers", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
 });
 
 test("provider list shows and sorts configured model counts", async ({ page }) => {
@@ -239,10 +245,10 @@ test("provider list shows and sorts configured model counts", async ({ page }) =
 test("each LLM settings page loads from its URL without a Models tab", async ({ page }) => {
   await installFixtures(page);
   const pages = [
-    ["/#/settings/profiles", "LLM Profiles"],
+    ["/#/settings/profiles", "LLM Configuration"],
     ["/#/settings/profiles/new", "New LLM Profile"],
     ["/#/settings/profiles/1/edit", "Edit LLM Profile"],
-    ["/#/settings/providers", "LLM Providers"],
+    ["/#/settings/providers", "LLM Configuration"],
     ["/#/settings/providers/new", "New LLM Provider"],
     ["/#/settings/providers/1/edit", "Edit LLM Provider"],
     ["/#/settings/models/1/edit", "Edit LLM Model"],
@@ -250,7 +256,7 @@ test("each LLM settings page loads from its URL without a Models tab", async ({ 
   ];
   for (const [url, title] of pages) {
     await page.goto(url);
-    await expect(page.getByText(title, { exact: true })).toBeVisible();
+    await expect(page.locator(".topbar-title").getByText(title, { exact: true })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Models", exact: true })).toHaveCount(0);
     await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   }
@@ -393,7 +399,7 @@ test("site and SAST navigation rows open from their non-interactive cells", asyn
   await expect(page.getByText("Test Runs", { exact: true })).toBeVisible();
 
   await page.goto("/#/sast-runs");
-  const sastRow = page.getByRole("row", { name: /View Fixture SAST/ });
+  const sastRow = page.getByRole("row", { name: /Open Fixture SAST/ });
   await expect(sastRow).toBeVisible();
   await sastRow.locator("td").nth(1).click();
   await expect(page).toHaveURL(/#\/sast-runs\/1\/progress$/);
@@ -1089,9 +1095,8 @@ test("a workflow needing input opens its matching notification", async ({ page }
   await page.getByRole("button", { name: /Workflows/ }).click();
   const checkout = page.locator(".surface-crawl-note").filter({ hasText: "Checkout" });
   await checkout.getByRole("button", { name: "Provide input" }).click();
-  await expect(page.getByRole("button", { name: "Notifications", exact: true })).toHaveClass(
-    /active/,
-  );
+  await expect(page.getByRole("dialog", { name: "Needs input" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Workflows/ })).toHaveClass(/active/);
   await expect(page.locator("#workflow-input-24")).toBeFocused();
 });
 
@@ -1183,17 +1188,12 @@ test("Status collects sample data for a stopped workflow", async ({ page }) => {
     await route.fulfill({ json: retryState });
   });
   await page.goto("/#/runs/1/activity");
-  await expect(page.getByText("A workflow needs your input")).toBeVisible();
-  await expect(page.locator(".workflow-notification-badge")).toHaveText("1");
+  await expect(page.getByRole("button", { name: "1 needs input" })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-notice-narrow.png") });
   await page.setViewportSize({ width: 1440, height: 1024 });
-  await page.getByRole("button", { name: "View notifications" }).click();
-  await expect(page.getByText("A workflow needs your input")).toHaveCount(0);
-  await expect(page.locator(".workflow-notification-badge")).toHaveText("1");
-  await expect(page.getByRole("button", { name: "Notifications", exact: true })).toHaveClass(
-    /active/,
-  );
+  await page.getByRole("button", { name: "1 needs input" }).click();
+  await expect(page.getByRole("dialog", { name: "Needs input" })).toBeVisible();
   await expect(page.getByText("Add a delivery address")).toBeVisible();
   await expect(page.getByText("Ship a pending order")).toHaveCount(0);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-input-desktop.png") });
@@ -1212,7 +1212,8 @@ test("Status collects sample data for a stopped workflow", async ({ page }) => {
       generate_sample_data: false,
     });
   await expect(page.getByRole("button", { name: /^Workflows/ })).toHaveClass(/active/);
-  await expect(page.locator(".workflow-notification-badge")).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Needs input" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /needs? input$/ })).toHaveCount(0);
   await expect(page.getByText("Continuing workflow")).toBeVisible();
   await expect(page.getByText("Opening browser")).toBeVisible();
   await expect(page.getByText("0 actions completed")).toBeVisible();
@@ -1247,13 +1248,13 @@ test("Status collects sample data for a stopped workflow", async ({ page }) => {
     message: "The address form requires a full name, but none was provided.",
   };
   await expect(page.getByText("Retry 1: Needs input")).toBeVisible();
-  await expect(page.getByText("A workflow needs your input")).toBeVisible();
-  await page.getByRole("button", { name: "View notifications" }).click();
-  await expect(page.locator(".workflow-notification-badge")).toHaveText("1");
+  await page.getByRole("button", { name: "1 needs input" }).click();
+  await expect(page.getByRole("dialog", { name: "Needs input" })).toBeVisible();
+  const drawer = page.getByRole("dialog", { name: "Needs input" });
   await expect(
-    page.getByText("Please provide the full name for this delivery address."),
+    drawer.getByText("Please provide the full name for this delivery address."),
   ).toBeVisible();
-  await expect(page.getByText("This attempt was not saved to the site.")).toBeVisible();
+  await expect(drawer.getByText("This attempt was not saved to the site.")).toBeVisible();
   await expect(page.getByLabel("Sample data or instructions")).toHaveValue(
     "Use 1 Example Street, Sydney NSW 2000",
   );
@@ -1280,13 +1281,10 @@ test("Status collects sample data for a stopped workflow", async ({ page }) => {
     page.locator(".surface-crawl-note").filter({ hasText: "Add a delivery address" }),
   ).toHaveCount(1);
   await expect(page.getByText("Reached the address form.").first()).toBeVisible();
-  await expect(page.getByText("A workflow needs your input")).toHaveCount(0);
-  await expect(page.locator(".workflow-notification-badge")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /needs? input$/ })).toHaveCount(0);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-result.png") });
   await page.setViewportSize({ width: 1440, height: 1024 });
-  await page.getByRole("button", { name: "Status", exact: true }).click();
-  await page.getByRole("button", { name: "Notifications", exact: true }).click();
-  await expect(page.getByText("You're all caught up")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Needs input" })).toHaveCount(0);
 });
 
 test("a workflow notification can authorize generated sample data", async ({ page }) => {
@@ -1323,7 +1321,7 @@ test("a workflow notification can authorize generated sample data", async ({ pag
     await route.fulfill({ json: retryState });
   });
   await page.goto("/#/runs/1/activity");
-  await page.getByRole("button", { name: "View notifications" }).click();
+  await page.getByRole("button", { name: "1 needs input" }).click();
   await expect(page.getByRole("button", { name: "Continue workflow" })).toBeDisabled();
   await page.getByRole("button", { name: "Generate for me" }).click();
   await expect

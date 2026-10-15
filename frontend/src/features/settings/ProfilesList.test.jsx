@@ -41,19 +41,18 @@ function ProfilesListHarness({ onActivate }) {
   );
 }
 
-test("shows the default action in place of a status column", async () => {
+test("shows a default badge in place of a status column", async () => {
   const user = userEvent.setup();
   const onActivate = vi.fn();
   render(<ProfilesListHarness onActivate={onActivate} />);
 
   expect(screen.queryByText("Status")).toBeNull();
-  expect(screen.getByRole("button", { name: "Is currently default" }).disabled).toBe(true);
+  expect(screen.getByText("default", { selector: ".badge" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /currently default/i })).toBeNull();
 
   await user.click(screen.getByRole("button", { name: "Set as default" }));
 
   expect(onActivate).toHaveBeenCalledWith(initialProfiles[1]);
-  const defaultButtons = screen.getAllByRole("button", { name: "Is currently default" });
-  expect(defaultButtons).toHaveLength(1);
-  expect(defaultButtons[0].disabled).toBe(true);
+  expect(screen.getAllByText("default", { selector: ".badge" })).toHaveLength(1);
   expect(screen.getByRole("button", { name: "Set as default" })).toBeTruthy();
 });

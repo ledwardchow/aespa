@@ -35,10 +35,10 @@ beforeEach(() => {
 
 afterEach(() => vi.unstubAllGlobals());
 
-test("shows delete beside View without a Linked scan column", async () => {
+test("shows delete beside Open without a Linked scan column", async () => {
   render(<SastRunsListPage />);
 
-  expect(await screen.findByRole("link", { name: "View →" })).toBeTruthy();
+  expect(await screen.findByRole("link", { name: "Open" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
   expect(screen.queryByRole("columnheader", { name: /Linked scan/ })).toBeNull();
 });
