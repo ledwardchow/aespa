@@ -86,7 +86,6 @@ def _license_texts(dist: metadata.Distribution) -> list[tuple[str, str]]:
     return out
 
 
-# Non-Python data shipped with AESPA: (name, license id, license file).
 _BUNDLED_DATA = (
     (
         "Retire.js vulnerable-library list (jsrepository-v6.json)",

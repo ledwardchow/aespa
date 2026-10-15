@@ -20,9 +20,6 @@ config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = SQLModel.metadata
 
-# These historical tables are read only during the Benchmark Lab extension's
-# one-time import. Keep them on existing installations without treating their
-# absence from core ORM metadata as an instruction to drop saved data.
 _LEGACY_BENCHMARK_TABLES = {
     "benchmark_lab_config",
     "benchmark_dataset",

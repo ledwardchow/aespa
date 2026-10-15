@@ -19,6 +19,7 @@ from aespa.schemas import (
     LLMProfileOut,
 )
 from aespa.services.model_capabilities import (
+    has_effort_list,
     validate_effort,
     validate_service_tier,
 )
@@ -57,18 +58,35 @@ def get_llm_profile(session: Session, profile_id: int) -> LLMConfig:
     return cfg
 
 
-def create_llm_profile(session: Session, payload: LLMConfigIn) -> LLMConfig:
+def create_llm_profile(
+    session: Session,
+    payload: LLMConfigIn,
+    discovered_capability: dict | None = None,
+) -> LLMConfig:
     cfg = LLMConfig()
     return _apply_llm_config(
-        session, cfg, payload, activate=(len(list_llm_profiles(session)) == 0)
+        session,
+        cfg,
+        payload,
+        activate=(len(list_llm_profiles(session)) == 0),
+        discovered_capability=discovered_capability,
     )
 
 
 def update_llm_profile(
-    session: Session, profile_id: int, payload: LLMConfigIn
+    session: Session,
+    profile_id: int,
+    payload: LLMConfigIn,
+    discovered_capability: dict | None = None,
 ) -> LLMConfig:
     cfg = get_llm_profile(session, profile_id)
-    return _apply_llm_config(session, cfg, payload, activate=cfg.is_active)
+    return _apply_llm_config(
+        session,
+        cfg,
+        payload,
+        activate=cfg.is_active,
+        discovered_capability=discovered_capability,
+    )
 
 
 def activate_llm_profile(session: Session, profile_id: int) -> LLMConfig:
@@ -344,8 +362,18 @@ def llm_profile_out(session: Session, prof: LLMProfile) -> LLMProfileOut:
 
 
 def _apply_llm_config(
-    session: Session, cfg: LLMConfig, payload: LLMConfigIn, activate: bool
+    session: Session,
+    cfg: LLMConfig,
+    payload: LLMConfigIn,
+    activate: bool,
+    discovered_capability: dict | None = None,
 ) -> LLMConfig:
+    """Apply a model profile.
+
+    ``discovered_capability`` holds levels found by a live lookup.  It is used
+    only when the provider has no saved levels for the model, matching the
+    levels the model form offered.
+    """
     provider = get_llm_provider(session, payload.provider_id)
     if payload.model not in _provider_models(provider):
         raise HTTPException(
@@ -425,8 +453,11 @@ def _apply_llm_config(
         and isinstance(capability, dict)
     ):
         effort = capability.get("default_effort")
+    effort_capability = capability
+    if not has_effort_list(capability) and discovered_capability is not None:
+        effort_capability = discovered_capability
     try:
-        cfg.reasoning_effort = validate_effort(capability, effort)
+        cfg.reasoning_effort = validate_effort(effort_capability, effort)
         cfg.service_tier = validate_service_tier(
             provider.api_format, capability, payload.service_tier
         )

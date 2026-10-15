@@ -567,8 +567,6 @@ function CopilotConnectionCard({ value, onSelect }) {
   );
 }
 
-// The edit screen remounts after a new provider saves itself while loading
-// models. Carry the load result across briefly so it stays visible there.
 const createdProviderMessages = new Map();
 const CREATED_MESSAGE_TTL_MS = 10000;
 
@@ -758,8 +756,6 @@ export function LLMProviderForm({
           setSaved(true);
           onProviderUpdated?.(savedProvider);
         } else {
-          // Save a new provider right away so its models can be configured
-          // without leaving and reopening the provider.
           if (!nextForm.name.trim()) {
             const taken = new Set(providerNames.map((name) => name.trim().toLowerCase()));
             const label = API_FORMAT_LABELS[nextForm.api_format] || nextForm.api_format;

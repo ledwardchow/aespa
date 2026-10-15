@@ -25,7 +25,6 @@ def _make_run(client: TestClient, site_id: int):
 
 def _seed_crawled_run(client: TestClient, site_id: int) -> dict:
     run = _make_run(client, site_id)
-    # The finding-import endpoint creates a crawled page without Playwright.
     created = client.post(
         f"/api/test-runs/{run['id']}/findings/import",
         json=[
@@ -74,7 +73,6 @@ def test_save_list_and_load_saved_crawl(client: TestClient):
         "https://target.local/orders",
     }
 
-    # Loading again into the now-populated run is refused.
     again = client.post(f"/api/test-runs/{target['id']}/crawl/load/{body['id']}")
     assert again.status_code == 409
 

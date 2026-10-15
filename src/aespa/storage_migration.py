@@ -59,8 +59,6 @@ def _copy_database(source: Path, destination: Path) -> None:
                 original.backup(copy)
                 if copy.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise sqlite3.DatabaseError(f"Invalid SQLite backup: {source}")
-        # Linking in the same directory publishes the copy atomically without
-        # replacing a database another process may have already installed.
         try:
             os.link(temporary, destination)
         except FileExistsError:

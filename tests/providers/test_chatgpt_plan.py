@@ -1032,7 +1032,6 @@ def test_rejected_refresh_signs_account_out_and_stops_retrying(monkeypatch, tmp_
         with pytest.raises(chatgpt_plan.ChatGPTSignInRequired, match="Sign in"):
             asyncio.run(chatgpt_plan.access_token("oaiapp_test"))
 
-    # Only the first call reaches OpenAI; the dead tokens are then removed.
     assert len(calls) == 1
     account = chatgpt_plan._read()["accounts"]["oaiapp_test"]
     assert "refresh_token" not in account and "access_token" not in account

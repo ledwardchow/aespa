@@ -134,7 +134,6 @@ class SavedCrawl(SQLModel, table=True):
     )
     name: str
     notes: Optional[str] = Field(default=None)
-    # Plain id with no foreign key: the source run may be deleted later.
     source_run_id: Optional[int] = Field(default=None)
     crawler_mode: str = Field(default="url")
     page_selection: str = Field(
@@ -548,8 +547,6 @@ class LLMConfig(SQLModel, table=True):
     temperature: Optional[float] = Field(default=None)
     # Explicit reasoning/thinking level. None means provider default (legacy behavior).
     reasoning_effort: Optional[str] = Field(default=None, nullable=True)
-    # Provider speed tier, such as ChatGPT plan "priority" (Fast). None means
-    # the provider's standard speed.
     service_tier: Optional[str] = Field(default=None, nullable=True)
     # Whether to include page screenshots in LLM prompts (requires vision model)
     use_vision: bool = Field(default=False)
@@ -615,7 +612,6 @@ class ScannerPolicy(SQLModel, table=True):
     sast_audit_logging_findings: bool = Field(default=True)
     sast_defense_in_depth_findings: bool = Field(default=False)
     sast_dependency_findings: bool = Field(default=True)
-    # Download the latest Retire.js vulnerable-library list at scan start.
     retire_auto_update: bool = Field(default=True)
     sast_min_severity: str = Field(default="low")
     sast_budget_mode: str = Field(default="adaptive")
@@ -2055,8 +2051,7 @@ class ScanLead(SQLModel, table=True):
     collection_id: Optional[int] = Field(default=None, index=True)
     producer_run_type: str = Field(
         default="sast", index=True
-    )  # "sast" | "external" (future: "recon")
-    # Source SAST run, or destination run for an externally imported report.
+    )
     producer_run_id: int = Field(index=True)
     source_work_item_id: Optional[int] = Field(default=None, index=True)
     source: str = Field(default="sast", index=True)

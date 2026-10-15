@@ -56,7 +56,6 @@ class Reading(ExtensionModel, table=True):
     observed_at: datetime = Field(index=True)
     resets_at: datetime | None = None
     note: str = ""
-    # "manual" for readings typed in, "codex" for readings from Codex.
     source: str = "manual"
     created_at: datetime = Field(default_factory=now)
 

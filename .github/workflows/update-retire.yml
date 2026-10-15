@@ -1,13 +1,9 @@
 name: Update Retire.js list
 
-# Keeps the Retire.js vulnerable-library list shipped with AESPA current.
-# Opens (or refreshes) a pull request against develop when the list changes.
-# Requires "Allow GitHub Actions to create and approve pull requests" in the
-# repository's Actions settings.
 
 on:
   schedule:
-    - cron: "17 3 * * 1"  # Mondays 03:17 UTC
+    - cron: "17 3 * * 1"
   workflow_dispatch: {}
 
 permissions:

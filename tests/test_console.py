@@ -1158,7 +1158,6 @@ def test_llm_traffic_logs_only_new_messages_for_continued_conversations(
     }
     third = [*second, {"role": "user", "content": "more"}]
     assert llm._traffic_request_payload("system", third, 12)["continues_call"] == 11
-    # A different system prompt or a rewritten history is logged in full.
     assert "messages" in llm._traffic_request_payload("other", second, 13)
     rewritten = [{"role": "user", "content": "summary"}, *second[1:]]
     assert "messages" in llm._traffic_request_payload("system", rewritten, 14)

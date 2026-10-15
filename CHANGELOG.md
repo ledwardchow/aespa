@@ -6,7 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **ChatGPT plan usage**: An optional extension estimates the API value of ChatGPT plan usage for the ChatGPT plan and Codex CLI providers. It tracks tokens used in AESPA and reads the plan's 5-hour and weekly usage percentages from the Codex CLI, with manual readings available. Stats → ChatGPT plan shows usage over time, estimated cost, and tokens per percentage point. Reading intervals are configurable. Usage outside AESPA affects the estimates; prices come from the Usage page.
+- **ChatGPT plan usage**: An optional extension estimates the API value of ChatGPT plan usage for the ChatGPT plan and Codex CLI providers. It tracks tokens used in AESPA and reads the plan's 5-hour and weekly usage percentages from the Codex CLI, including when a scan using either provider starts and ends. Readings where the percentage changed while AESPA used no tokens are left out. Stats → ChatGPT plan shows usage over time, estimated cost, and tokens per percentage point. Reading intervals are configurable. Usage outside AESPA affects the estimates; prices come from the Usage page.
 
 - **Crawler workflows**: Prior to this, crawls did not execute state-changing/irreversible functionality, i.e. checking out a shopping cart. With this change, the crawler will specifically discover and index workflows which it didn't use during the crawl and ask the user for the information/permission to auto-generate data to submit in those workflows and execute them, allowing these workflows to be added to the sitemap. 
 
@@ -60,7 +60,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Subtab links**: Web, API, and source scan subtabs, SAST phases, Benchmark Lab tabs, and Reporting Lab tabs now keep the selected view in the URL, so refreshing or using browser history returns to that view.
 
-- **Docker image**: Docker Hub images build and publish again; none had been published since late August. The image now includes the web interface, database migrations, and built-in extensions, so it starts correctly. It no longer downloads Chromium or development tools on each container start.
+- **Docker image**: Fixed the Docker image build, new images are published with the binary images again.
 
 - **Resuming SAST runs from a repository or extension source**: A failed or cancelled SAST run whose source code was already downloaded now offers the normal resume and start actions. Previously, AESPA always showed **Resume source preparation** for these runs, even when the source was ready.
 
@@ -90,7 +90,9 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Claude Code CLI requests**: On macOS, signed-in accounts no longer fail with a false "Not logged in" error. When a CLI request does fail, scan logs show its reported reason, such as an unavailable model or a sign-in problem, instead of only `exit 1`.
 
-- **LLM scan startup**: Fixed scans failing immediately with an `http_client` error when using current Anthropic SDK releases. SDK requests now use the supported HTTP client, including Bedrock Mantle requests signed with AWS credentials.
+- **Thinking levels for new models**: Adding a model from a provider's model list no longer copies the thinking level from another model. Previously this could save a level the model does not accept, such as `xhigh` for Nemotron on Bedrock Mantle, and every LLM request in the scan then failed. AESPA now refuses to save a thinking level the model does not list. Models with no listed levels must use Default, so an existing model with an unsupported level must be changed to Default the next time it is edited.
+
+- **LLM scan startup**: Fixed scans failing immediately with an `http_client` error when using current Anthropic SDK releases. SDK requests now use the supported HTTP client, including Bedrock Mantle requests and model lookups signed with AWS credentials.
 
 - **SAST deletion with older benchmarks**: Deleting a collection or campaign now reports a clear conflict when one of its SAST runs is still referenced by an older Benchmark Lab evaluation.
 
@@ -100,17 +102,13 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
-- **Test suite cleanup**: Combined repeated API run, validator, and campaign checks while keeping the same cases covered.
+- **Code cleanup**: Removed redundant comments and replaced several lint suppressions with explicit database comparisons and a non-security SHA-1 call for Retire.js matching.
 
-- **Faster tests**: The backend test suite runs across all CPU cores and builds the test database once per worker instead of once per test, cutting a full run from about six minutes to about half a minute. Use `uv run pytest -n 0` to run tests one at a time, for example when debugging.
-
-- **Deprecation warnings**: Custom CA bundles now reach HTTP clients in the form current versions of the HTTP library expect, with the same certificate checks as before. Older database migrations and tests no longer use deprecated database calls, so a full test run reports no warnings.
+- **Test suite cleanup**: Made tests run faster. Very interesting stuff.
 
 - **SAST scan maintenance**: Light and Deep scans now share archive extraction, source file tools, and candidate-state helpers, keeping those behaviors consistent across both modes.
 
 - **Benchmark Lab extension cleanup**: Removed the retired core Benchmark Lab API and scan service. Existing evaluations still import into the extension when it is enabled.
-
-- **GitHub Actions**: Fixed the broken build actions and rebuilt the Oct 8 release. Frontend checks now use current browser fixtures and labels. Desktop release jobs build the web app before packaging the Windows and macOS apps, this was broken because the frontend build used to be committed and was removed.
 
 ## [PR #278] October 8 - Public Benchmarking, Claude CLI and ChatGPT plan LLM providerse
 

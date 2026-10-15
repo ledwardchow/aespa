@@ -26,7 +26,7 @@ def _store(
 ) -> SavedCrawl:
     blob = gzip.compress(json.dumps(archive).encode("utf-8"))
     saved = SavedCrawl(
-        site_id=site.id,  # type: ignore[arg-type]
+        site_id=site.id,
         name=name,
         notes=notes or None,
         source_run_id=source_run_id,
@@ -96,8 +96,8 @@ def list_for_site(session: Session, site_id: int) -> list[SavedCrawl]:
         session.exec(
             select(SavedCrawl)
             .where(SavedCrawl.site_id == site_id)
-            .options(defer(SavedCrawl.archive_gz))  # type: ignore[arg-type]
-            .order_by(SavedCrawl.created_at.desc())  # type: ignore[attr-defined]
+            .options(defer(SavedCrawl.archive_gz))
+            .order_by(SavedCrawl.created_at.desc())
         )
     )
 

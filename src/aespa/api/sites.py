@@ -239,9 +239,6 @@ async def import_site(
     return _to_detail(site)
 
 
-# ── Saved crawls ─────────────────────────────────────────────────────────────
-
-
 def _site_or_404(session: Session, site_id: int) -> Site:
     site = session.get(Site, site_id)
     if site is None:

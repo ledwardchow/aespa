@@ -169,9 +169,9 @@ def poll(store, note: str = "", force: bool = False) -> dict[str, Any]:
                 "same_account": same,
                 "windows": parsed["windows"],
             }
-            # Count AESPA's usage up to this moment before saving readings.
             usage.sample(store, at)
             result["added"] = record(store, parsed, at, note, force)
+            result["removed"] = usage.prune_readings(store)
         except Exception as exc:
             message = str(exc).strip() or type(exc).__name__
             result["error"] = message[:300]

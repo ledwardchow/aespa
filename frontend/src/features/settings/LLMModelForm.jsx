@@ -1,7 +1,7 @@
 import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect, useMemo } from "react";
 import { llmProfileToForm, llmPayload, modelDefaults } from "./modelForm.js";
-import { API_FORMAT_LABELS } from "./providerMetadata.js";
+import { API_FORMAT_LABELS, DEFAULT_LLM_FORM } from "./providerMetadata.js";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
 import { sortModelNames } from "../../shared/lib/modelSorting.js";
@@ -21,7 +21,7 @@ export function LLMModelForm({
     if (mode !== "new" || !initialProviderId || !initialModel) return initialForm;
     const initialProvider = providers.find((item) => item.id === initialProviderId);
     return {
-      ...initialForm,
+      ...DEFAULT_LLM_FORM,
       ...modelDefaults(initialProvider, initialModel),
       name: initialProvider?.name ? `${initialProvider.name}/${initialModel}` : initialModel,
       provider_id: initialProviderId,

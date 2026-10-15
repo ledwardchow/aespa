@@ -549,7 +549,6 @@ def test_import_source_search_paging_and_counts_are_run_kind_scoped(env):
     source = client.get(url, params={"page": 1, "q": "portal"}).json()["items"][0]
     assert source["new_count"] == 0
     assert source["imported_count"] == 2
-    # Also test a legacy overlapping ID without relying on the global ID allocator.
     from aespa.services.sast_imports import search_import_sources
 
     with Session(engine) as session:

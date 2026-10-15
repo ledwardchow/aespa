@@ -15,7 +15,6 @@ export function leadImportPayload(l) {
           : l.source_trace_json;
       external = trace?.external_report;
     } catch {
-      // Older exports may not have structured report provenance.
     }
   }
   return {

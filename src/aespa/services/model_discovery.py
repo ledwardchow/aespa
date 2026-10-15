@@ -8,6 +8,7 @@ import os
 from typing import Any
 
 import httpx
+import httpx2
 
 from aespa.services.llm_network import configured_llm_network, httpx_options
 
@@ -85,7 +86,9 @@ async def discover_bedrock_mantle_model_options(
             region=_bedrock_mantle_region_from_url(root),
             profile=profile or os.getenv("AWS_PROFILE"),
         )
-    async with httpx.AsyncClient(**client_kwargs) as client:
+    # The SigV4 signer is an httpx2 auth flow (it is shared with the OpenAI SDK
+    # client), so this request must go through httpx2 rather than httpx.
+    async with httpx2.AsyncClient(**client_kwargs) as client:
         response = await client.get(url)
         response.raise_for_status()
         payload = response.json()

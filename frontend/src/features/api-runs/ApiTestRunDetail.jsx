@@ -110,7 +110,6 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef, initial
     return () => clearInterval(t);
   }, [scanStatus?.running, runId]);
 
-  // Reload the run once a scan ends so its final status and any error show.
   const scanEnded = scanStatus != null && !scanStatus.running;
   useEffect(() => {
     if (!scanEnded) return;

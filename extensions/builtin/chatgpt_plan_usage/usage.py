@@ -32,11 +32,7 @@ WINDOWS: dict[str, timedelta] = {
     "five_hour": timedelta(hours=5),
     "weekly": timedelta(days=7),
 }
-# How far apart two reset times can be and still mean the same window. ChatGPT
-# shows reset times rounded to minutes or hours.
 RESET_TOLERANCE = timedelta(minutes=15)
-# Readings are copied by hand and shown as whole numbers, so allow a small
-# drop before treating a lower reading as a new window.
 PERCENT_TOLERANCE = 0.5
 TIMELINE_SPAN = {"five_hour": timedelta(hours=24), "weekly": timedelta(days=14)}
 BUCKET_SIZE = {"five_hour": timedelta(minutes=30), "weekly": timedelta(hours=6)}
@@ -100,13 +96,10 @@ def sample(store, at: datetime | None = None) -> int:
             state = states.get(key)
             if state is None:
                 state = CounterState(provider=provider, model=model)
-                # The first sample is the starting point: earlier usage has no
-                # time, so it cannot be compared with any reading.
                 previous = current if first else zeros
             else:
                 previous = {key: getattr(state, key) for key in COUNTERS}
             if any(current[key] < previous[key] for key in COUNTERS):
-                # Usage statistics were reset; everything now counted is new.
                 previous = zeros
             delta = {name: current[name] - previous[name] for name in COUNTERS}
             if any(delta.values()):
@@ -312,6 +305,10 @@ def segments(
                 continue
             totals = usage.between(start, end)
             change = round(after - before, 4)
+            if change != 0 and not any(getattr(totals, key) for key in TOKENS):
+                # The plan was used outside AESPA, so the change says nothing
+                # about AESPA's tokens.
+                continue
             result.append(
                 {
                     "start": iso(start),
@@ -357,80 +354,6 @@ def estimate(items: list[dict[str, Any]]) -> dict[str, Any] | None:
             for key in TOKENS
         },
         "unpriced_segments": len(items) - len(priced),
-    }
-
-
-def _solve(matrix: list[list[float]], vector: list[float]) -> list[float] | None:
-    """Solve a small linear system with Gaussian elimination."""
-    size = len(vector)
-    rows = [list(matrix[i]) + [vector[i]] for i in range(size)]
-    for col in range(size):
-        pivot = max(range(col, size), key=lambda r: abs(rows[r][col]))
-        if abs(rows[pivot][col]) < 1e-12:
-            return None
-        rows[col], rows[pivot] = rows[pivot], rows[col]
-        for r in range(size):
-            if r != col:
-                factor = rows[r][col] / rows[col][col]
-                rows[r] = [a - factor * b for a, b in zip(rows[r], rows[col])]
-    return [rows[i][size] / rows[i][i] for i in range(size)]
-
-
-FIT_TOKENS = ("input_tokens", "output_tokens", "cache_read_tokens")
-
-
-def fit(items: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Fit % = a·input + b·output + c·cached (per million) with a, b, c ≥ 0.
-
-    This shows how much each token type moves the percentage without relying
-    on API prices. It needs several readings with different token mixes.
-    """
-    data = [
-        (
-            [
-                (item["usage"]["input_tokens"] + item["usage"]["cache_write_tokens"])
-                / 1_000_000,
-                item["usage"]["output_tokens"] / 1_000_000,
-                item["usage"]["cache_read_tokens"] / 1_000_000,
-            ],
-            item["percent_change"],
-        )
-        for item in items
-    ]
-    if len(data) < 4 or sum(y for _, y in data) <= 0:
-        return None
-    best: tuple[float, list[float]] | None = None
-    for size in range(1, 4):
-        for chosen in itertools.combinations(range(3), size):
-            if len(data) <= size:
-                continue
-            gram = [[sum(x[i] * x[j] for x, _ in data) for j in chosen] for i in chosen]
-            moment = [sum(x[i] * y for x, y in data) for i in chosen]
-            solution = _solve(gram, moment)
-            if solution is None or any(value < 0 for value in solution):
-                continue
-            weights = [0.0, 0.0, 0.0]
-            for index, value in zip(chosen, solution):
-                weights[index] = value
-            error = sum(
-                (y - sum(w * v for w, v in zip(weights, x))) ** 2 for x, y in data
-            )
-            if best is None or error < best[0] - 1e-12:
-                best = (error, weights)
-    if best is None:
-        return None
-    error, weights = best
-    total = sum(y * y for _, y in data)
-    return {
-        "segments": len(data),
-        "percent_per_million": {
-            key: round(value, 6) for key, value in zip(FIT_TOKENS, weights)
-        },
-        "millions_for_full_window": {
-            key: (round(100 / value, 3) if value > 0 else None)
-            for key, value in zip(FIT_TOKENS, weights)
-        },
-        "fit_quality": round(1 - error / total, 4) if total > 0 else None,
     }
 
 
@@ -515,6 +438,56 @@ def timeline(
     }
 
 
+def _no_tokens(totals: Totals) -> bool:
+    return not any(getattr(totals, key) for key in TOKENS)
+
+
+def prune_readings(store) -> int:
+    """Delete readings taken while only something outside AESPA used the plan.
+
+    A reading is removed when AESPA used no tokens since the previous reading
+    or before the next one, and the percentage changed on either side. Each
+    remaining reading still marks the edge of every interval with AESPA usage,
+    so removing these does not change the estimate. The first and last reading
+    of each window are kept.
+    """
+    removed = 0
+    with store.session() as session, Session(get_engine()) as core:
+        covered_from = coverage_since(session)
+        if covered_from is None:
+            return 0
+        readings = list(session.exec(select(Reading).order_by(Reading.observed_at)))
+        if not readings:
+            return 0
+        usage = load_usage(session, core, None)
+        for window, length in WINDOWS.items():
+            rows = [row for row in readings if row.window == window]
+            for period in periods(rows, length):
+                kept = [period.readings[0]]
+                items = period.readings[1:]
+                for index, row in enumerate(items[:-1]):
+                    before, after = kept[-1], items[index + 1]
+                    if (
+                        before.observed_at >= covered_from
+                        and _no_tokens(
+                            usage.between(before.observed_at, row.observed_at)
+                        )
+                        and _no_tokens(
+                            usage.between(row.observed_at, after.observed_at)
+                        )
+                        and (
+                            row.used_percent != before.used_percent
+                            or after.used_percent != row.used_percent
+                        )
+                    ):
+                        session.delete(row)
+                        removed += 1
+                    else:
+                        kept.append(row)
+        session.commit()
+    return removed
+
+
 def reading_out(row: Reading) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -563,7 +536,6 @@ def summary(
         "readings": [reading_out(row) for row in reversed(readings)],
         "segments": list(reversed(items)),
         "estimate": result,
-        "fit": fit(items),
         "timeline": timeline(
             window, readings, covered_from, usage, usd_per_percent, at
         ),

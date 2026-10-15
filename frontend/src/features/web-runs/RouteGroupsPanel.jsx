@@ -59,7 +59,6 @@ function RouteGroupTile({ group, onSelectExample }) {
   );
 }
 
-/** Grouped pages section of the site map side panel. */
 export function RouteGroupsSummary({ groups = [], onSelectExample }) {
   if (!groups.length) return null;
   const totals = routeGroupTotals(groups);
@@ -79,7 +78,6 @@ export function RouteGroupsSummary({ groups = [], onSelectExample }) {
   );
 }
 
-/** Grouped pages table for the Attack Surface tab. */
 export function RouteGroupsTable({ groups = [] }) {
   return (
     <div className="surface-route-table-wrap">

@@ -15,14 +15,7 @@ function noticeStack() {
   return stack;
 }
 
-/**
- * A message in the lower-right corner of the window. It never moves the page
- * content. Errors stay until dismissed; other messages also close on their own
- * after a few seconds.
- */
 export function Notice({ variant = "error", onDismiss, children }) {
-  // Parents usually pass a new callback on every render; keep the latest one
-  // so polling pages do not restart the timer.
   const dismissRef = useRef(onDismiss);
   dismissRef.current = onDismiss;
   useEffect(() => {
@@ -39,10 +32,6 @@ export function Notice({ variant = "error", onDismiss, children }) {
   );
 }
 
-/**
- * A page's error. When nothing has loaded, the error is the page's content and
- * stays inline; otherwise it is a dismissible notice in the corner.
- */
 export function PageError({ error, inline = false, onDismiss }) {
   if (!error) return null;
   if (inline) {

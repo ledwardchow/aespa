@@ -107,7 +107,7 @@ def test_anonymous_session_is_first_class(engine):
 
 
 def test_record_session_probe_result_does_not_evict_anonymous(engine):
-    from aespa import models as _models  # noqa: F401
+    from aespa import models as _models
 
     anon = scanner_sessions.ensure_anonymous_session(99, source="dynamic_scan")
     scanner_sessions.record_session_probe_result(99, "anonymous", 401)
@@ -175,7 +175,7 @@ def test_disposable_account_payload_redacts_password(monkeypatch):
 
 
 def test_validate_active_sessions_evicts_only_explicit_rejections(engine):
-    from aespa import models as _models  # noqa: F401
+    from aespa import models as _models
 
     valid = scanner_sessions.upsert_session(
         12,
@@ -258,7 +258,7 @@ def test_upsert_session_deduplicates_the_same_bearer_token(engine):
 
 
 def test_validate_active_sessions_preserves_tokens_on_transport_error(engine):
-    from aespa import models as _models  # noqa: F401
+    from aespa import models as _models
 
     record = scanner_sessions.upsert_session(
         8,

@@ -70,9 +70,6 @@ def _safe_unzip(archive_path: str, target_dir: str) -> None:
                 log.warning("_safe_unzip: skipping symlink entry %r", member)
                 continue
             dest = (target / member).resolve()
-            # Use is_relative_to rather than string-prefix matching: a prefix
-            # check treats ``…/extract/55`` as inside ``…/extract/5`` and lets a
-            # crafted entry escape into a sibling directory.
             if dest != target and not dest.is_relative_to(target):
                 log.warning("_safe_unzip: skipping path-traversal entry %r", member)
                 continue
@@ -88,8 +85,6 @@ def _jail(root: Path, rel: str) -> Path:
     if not rel:
         return root
     candidate = (root / rel).resolve()
-    # is_relative_to, not a string-prefix check: ``…/extract/55`` must not be
-    # treated as living inside ``…/extract/5``.
     if candidate != root and not candidate.is_relative_to(root):
         raise ValueError(f"Path escape attempt: {rel!r}")
     return candidate
@@ -109,7 +104,6 @@ def _tool_list_files(root: Path, path: str = "", max_depth: int = 3) -> str:
             if depth >= max_depth:
                 dirnames.clear()
                 continue
-            # Sort for determinism.
             dirnames.sort()
             filenames.sort()
             rel_dir = str(Path(dirpath).relative_to(root))
@@ -183,7 +177,6 @@ def _tool_grep(
                 continue
             fp = Path(dirpath) / fn
             try:
-                # Skip binary-looking files.
                 if fp.stat().st_size > _MAX_INSPECT_FILE_BYTES:
                     continue
                 raw = fp.read_bytes()
@@ -389,7 +382,6 @@ def _run_read_tool(
     return result
 
 
-# Stable public API for other source-analysis services.
 safe_unzip = _safe_unzip
 jail = _jail
 list_files = _tool_list_files

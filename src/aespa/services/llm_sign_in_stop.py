@@ -81,7 +81,6 @@ async def _stop_workers(run_kind: str, run_id: int) -> None:
         from aespa.services import scanner as scanner_svc
         from aespa.services import validator as validator_svc
 
-        # A finished crawl must not start a pentest that would fail the same way.
         crawl_then_pentest.cancel(run_id)
         if crawler_svc.is_running(run_id):
             await crawler_svc.stop_and_wait(run_id)

@@ -122,13 +122,12 @@ def _crawl_inventory(run_id: int) -> tuple[list[dict], dict[str, CrawledPage]]:
             session.exec(
                 select(CrawledPage)
                 .where(CrawledPage.test_run_id == run_id)
-                .where(CrawledPage.in_scope != False)  # noqa: E712
+                .where(CrawledPage.in_scope.is_(True))
                 .where(CrawledPage.status == "crawled")
             )
         )
         for page in pages:
             session.expunge(page)
-    # Keep the model's input small while retaining different page functions.
     pages.sort(
         key=lambda page: (
             not bool(page.has_business_logic or page.takes_input),
@@ -797,9 +796,6 @@ async def _apply_action(page, decision: dict, observation: dict) -> dict:
         try:
             await locator.fill(value, timeout=8000)
         except PlaywrightTimeoutError:
-            # A field can remain in the DOM while Playwright's actionability
-            # check waits for it. Only fall back if exactly one matching field
-            # is still visible and editable.
             filled = await page.evaluate(
                 """({selector, value}) => {
                   const matches = Array.from(document.querySelectorAll(selector))

@@ -528,12 +528,21 @@ def validate_effort(
     value = effort.strip().lower()
     if value not in EFFORT_ORDER:
         raise ValueError(f"Unknown reasoning level: {effort}")
-    if capability is not None and capability.get("supported_efforts") is not None:
-        if value not in capability["supported_efforts"]:
-            raise ValueError(
-                f"Reasoning level '{effort}' is not supported by this model"
-            )
+    supported = capability.get("supported_efforts") if capability else None
+    if not isinstance(supported, list):
+        raise ValueError(
+            "This model does not list any thinking levels. "
+            "Set Thinking level to Default."
+        )
+    if value not in supported:
+        raise ValueError(f"Reasoning level '{effort}' is not supported by this model")
     return value
+
+
+def has_effort_list(capability: dict[str, Any] | None) -> bool:
+    return isinstance(capability, dict) and isinstance(
+        capability.get("supported_efforts"), list
+    )
 
 
 SERVICE_TIER_PROVIDERS = {"openai_chatgpt_plan"}

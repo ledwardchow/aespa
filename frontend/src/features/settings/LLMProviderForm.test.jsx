@@ -176,7 +176,6 @@ test("creates a new provider when models are loaded from the provider API", asyn
   expect(onProviderCreated.mock.calls[0][0].id).toBe(12);
   expect(settingsApi.updateLLMProvider).not.toHaveBeenCalled();
 
-  // The edit screen that opens next keeps the load result visible.
   render(
     <LLMProviderForm
       mode="edit"
