@@ -8,27 +8,27 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.0",
-    "anthropic>=1.11.0",
-    "boto3>=1.43.108",
-    "fastapi>=0.142.2",
-    "google-genai>=2.28.0",
+    "anthropic>=1.13.0",
+    "boto3>=1.43.111",
+    "fastapi>=0.143.0",
+    "google-genai>=2.29.0",
     "httpx>=0.28.1",
     "httpx2>=2.13.1",
-    "openai>=3.24.0",
+    "openai>=3.29.0",
     "playwright>=1.63.0",
     "pydantic-settings>=2.15.0",
     "python-multipart>=0.0.32",
-    "sqlmodel>=0.0.47",
+    "sqlmodel>=0.0.48",
     "uvicorn[standard]>=0.54.0",
     "cryptography>=50.0.2",
     "pyjwt>=2.15.1",
     "pyotp>=2.10.0",
     "prance>=26.7.19.0",
-    "github-copilot-sdk>=1.0.16",
+    "github-copilot-sdk>=1.0.19",
     "droid-sdk>=0.5.0",
     "tiktoken>=0.14.0",
     "tree-sitter>=0.26,<0.27",
-    "tree-sitter-php>=0.24.1,<0.25",
+    "tree-sitter-php>=0.25.1,<0.26",
     "tree-sitter-javascript>=0.25.0,<0.26",
     "tree-sitter-typescript>=0.23.2,<0.24",
     "tree-sitter-python>=0.25.0,<0.26",
@@ -42,7 +42,7 @@ dependencies = [
 aespa = "aespa:main"
 
 [build-system]
-requires = ["uv_build>=0.12.23,<0.13.0"]
+requires = ["uv_build>=0.13.0,<0.14.0"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]
@@ -67,5 +67,5 @@ dev = [
     "httpx>=0.28.1",
     "pytest>=9.1.1",
     "pytest-xdist>=3.8.0",
-    "ruff>=0.16.10",
+    "ruff>=0.17.0",
 ]
