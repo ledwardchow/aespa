@@ -56,7 +56,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
-- **Site credentials**: Saving site settings keeps the IDs of existing credentials, so pages and runs linked to those accounts continue to recognize them.
+- **Site credentials**: If you updated a site configuration (i.e. notes, credentials) while a scan was in progress, it would break currently running scans, they would no longer be able to find the saved credentials. This was because the credential records were re-created with new IDs. Saving site settings now keeps the IDs of existing credentials, so pages and runs linked to those accounts continue to recognize them.
 
 - **Subtab links**: Web, API, and source scan subtabs, SAST phases, Benchmark Lab tabs, and Reporting Lab tabs now keep the selected view in the URL, so refreshing or using browser history returns to that view.
 
