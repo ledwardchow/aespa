@@ -24,6 +24,7 @@ from aespa.services.model_capabilities import (
     documented_model_capability,
     enrich_model_options,
     validate_effort,
+    validate_service_tier,
 )
 from aespa.services.resolved_llm_config import ResolvedLLMConfig
 from aespa.services.settings_integrations import (
@@ -278,6 +279,7 @@ def llm_profile_out_model(
         use_vision=resolved.use_vision,
         force_tool_choice=resolved.force_tool_choice,
         reasoning_effort=resolved.reasoning_effort,
+        service_tier=resolved.service_tier,
         updated_at=resolved.updated_at,
     )
 
@@ -432,8 +434,15 @@ async def discover_model_options_for_format(
 
         client_id = username or chatgpt_plan.status().get("active")
         catalog_complete = True
+        speed_tiers: dict[str, list[dict[str, str]]] = {}
         try:
-            discovered = await chatgpt_plan.discover_models(client_id)
+            options = await chatgpt_plan.discover_model_options(client_id)
+            discovered = [item["id"] for item in options]
+            speed_tiers = {
+                item["id"]: item["service_tiers"]
+                for item in options
+                if item.get("service_tiers")
+            }
         except Exception:
             discovered = []
             catalog_complete = False
@@ -452,8 +461,16 @@ async def discover_model_options_for_format(
             "capabilities": {
                 model: capability
                 for model in discovered
-                if (capability := documented_model_capability(api_format, model))
-                is not None
+                if (
+                    capability := {
+                        **(documented_model_capability(api_format, model) or {}),
+                        **(
+                            {"service_tiers": speed_tiers[model]}
+                            if model in speed_tiers
+                            else {}
+                        ),
+                    }
+                )
             },
         }
     elif api_format == "google_antigravity":
@@ -679,6 +696,7 @@ def export_llm_config(
             max_context_tokens=c.max_context_tokens,
             temperature=c.temperature,
             reasoning_effort=c.reasoning_effort,
+            service_tier=c.service_tier,
             use_vision=c.use_vision,
             force_tool_choice=c.force_tool_choice,
             is_active=c.is_active,
@@ -865,6 +883,11 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             cfg.reasoning_effort = validate_effort(
                 _provider_capabilities(provider).get(item.model),
                 item.reasoning_effort,
+            )
+            cfg.service_tier = validate_service_tier(
+                provider.api_format,
+                _provider_capabilities(provider).get(item.model),
+                item.service_tier,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

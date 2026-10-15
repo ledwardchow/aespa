@@ -1,6 +1,6 @@
 [project]
 name = "aespa"
-version = "0.7.20261014.20"
+version = "0.7.20261015.12"
 description = "AI-Enabled Security Pentesting Agent"
 authors = [
     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
@@ -47,10 +47,15 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Run across all CPU cores (pytest-xdist). Pass `-n 0` to run serially, e.g.
+# when debugging with breakpoints or print output.
+addopts = "-n auto"
 filterwarnings = [
     # SQLModel domain classes named `Test*` (e.g. TestRun) collide with pytest's
     # test-class naming heuristic; they aren't tests. Pure noise.
     "ignore:cannot collect test class:pytest.PytestCollectionWarning",
+    # Raised inside google-genai on import under Python 3.14; not our code.
+    "ignore:'_UnionGenericAlias' is deprecated:DeprecationWarning:google.genai.types",
 ]
 
 [tool.ruff.lint]
@@ -63,5 +68,6 @@ ignore = ["E501"]
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.16.10",
 ]

@@ -138,6 +138,81 @@ test("saves models loaded from the provider API", async () => {
   expect(screen.getByRole("button", { name: "loaded-model" })).toBeTruthy();
 });
 
+test("creates a new provider when models are loaded from the provider API", async () => {
+  const user = userEvent.setup();
+  const capabilities = { "loaded-model": { context_window_tokens: 128000 } };
+  settingsApi.getDefaultModels.mockResolvedValue({});
+  settingsApi.discoverModelOptions.mockResolvedValue({
+    models: ["loaded-model"],
+    capabilities,
+  });
+  settingsApi.createLLMProvider.mockImplementation(async (payload) => ({
+    ...provider,
+    id: 12,
+    name: payload.name,
+    models: payload.models,
+    model_capabilities: payload.model_capabilities,
+  }));
+  const onProviderCreated = vi.fn();
+
+  render(
+    <LLMProviderForm
+      mode="new"
+      models={[]}
+      profiles={[]}
+      providerNames={["Anthropic API"]}
+      onProviderCreated={onProviderCreated}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Load models from API" }));
+
+  await waitFor(() => expect(onProviderCreated).toHaveBeenCalledTimes(1));
+  expect(settingsApi.createLLMProvider.mock.calls[0][0]).toMatchObject({
+    name: "Anthropic API 2",
+    models: ["loaded-model"],
+    model_capabilities: capabilities,
+  });
+  expect(onProviderCreated.mock.calls[0][0].id).toBe(12);
+  expect(settingsApi.updateLLMProvider).not.toHaveBeenCalled();
+
+  // The edit screen that opens next keeps the load result visible.
+  render(
+    <LLMProviderForm
+      mode="edit"
+      provider={onProviderCreated.mock.calls[0][0]}
+      models={[]}
+      profiles={[]}
+      onConfigureModel={vi.fn()}
+    />,
+  );
+  expect(screen.getAllByText("Loaded 1 model(s) from the API.")).toHaveLength(2);
+});
+
+test("keeps loaded models when a new provider cannot be saved", async () => {
+  const user = userEvent.setup();
+  settingsApi.getDefaultModels.mockResolvedValue({});
+  settingsApi.discoverModelOptions.mockResolvedValue({
+    models: ["loaded-model"],
+    capabilities: {},
+  });
+  settingsApi.createLLMProvider.mockRejectedValue(new Error("Name already in use"));
+  const onProviderCreated = vi.fn();
+
+  render(
+    <LLMProviderForm mode="new" models={[]} profiles={[]} onProviderCreated={onProviderCreated} />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Load models from API" }));
+
+  expect(await screen.findByRole("alert")).toHaveProperty(
+    "textContent",
+    "Loaded models, but could not save the provider: Name already in use",
+  );
+  expect(screen.getByText("loaded-model")).toBeTruthy();
+  expect(onProviderCreated).not.toHaveBeenCalled();
+});
+
 test("keeps profile models when loading models from the provider API", async () => {
   const user = userEvent.setup();
   const configuredModel = {

@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 
 from aespa.db import get_engine
 from aespa.services.settings import get_upstream_proxy_config
+from aespa.services.tls import httpx_verify
 
 from .models import Dataset, PublishingSettings, PublishingUploadToken, ScanResult
 from .transfer import dataset_key, identity
@@ -108,13 +109,16 @@ def token_counts(core, row, models: dict) -> dict | None:
     return totals if recorded else None
 
 
-def graph_bundle(store) -> dict:
+def graph_bundle(store, dataset_ids: set[int] | None = None) -> dict:
     from .router import result_out
 
     output = []
     with store.session() as session, Session(get_engine()) as core:
         session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        for row in session.exec(select(ScanResult).order_by(ScanResult.id)):
+        query = select(ScanResult).order_by(ScanResult.id)
+        if dataset_ids is not None:
+            query = query.where(ScanResult.dataset_id.in_(sorted(dataset_ids)))
+        for row in session.exec(query):
             result = result_out(row, core)
             dataset = session.get(Dataset, row.dataset_id)
             if dataset is None:
@@ -201,6 +205,11 @@ class PublishingIn(BaseModel):
     token: SecretStr | None = Field(default=None)
     service_token: SecretStr | None = Field(default=None)
     upload_token: SecretStr | None = Field(default=None)
+
+
+class PublishIn(BaseModel):
+    # None publishes every ground truth; the UI always sends an explicit choice.
+    dataset_ids: list[int] | None = Field(default=None, max_length=1000)
 
 
 def register_publishing(router: APIRouter, store) -> None:
@@ -307,8 +316,23 @@ def register_publishing(router: APIRouter, store) -> None:
         return graph_bundle(store)
 
     @router.post("/publish")
-    async def publish_graphs() -> dict:
+    async def publish_graphs(payload: PublishIn | None = None) -> dict:
+        dataset_ids = (
+            set(payload.dataset_ids)
+            if payload is not None and payload.dataset_ids is not None
+            else None
+        )
+        if dataset_ids is not None and not dataset_ids:
+            raise HTTPException(422, "Choose at least one application to publish")
         with store.session() as session:
+            if dataset_ids is not None:
+                found = set(
+                    session.exec(
+                        select(Dataset.id).where(Dataset.id.in_(sorted(dataset_ids)))
+                    )
+                )
+                if found != dataset_ids:
+                    raise HTTPException(422, "A selected ground truth no longer exists")
             saved = session.get(PublishingSettings, 1)
             if not saved or not saved.site_url or not saved.service_token:
                 raise HTTPException(422, "Save the site connection first")
@@ -324,7 +348,11 @@ def register_publishing(router: APIRouter, store) -> None:
                 )
             token = saved.service_token
             upload_token = upload.token
-        results = graph_bundle(store)["results"]
+        results = graph_bundle(store, dataset_ids)["results"]
+        if dataset_ids is not None and not results:
+            raise HTTPException(
+                422, "The selected applications have no results to publish"
+            )
         batches, batch = [], []
         for result in results:
             candidate = [*batch, result]
@@ -360,11 +388,11 @@ def register_publishing(router: APIRouter, store) -> None:
             "timeout": 30,
             "follow_redirects": False,
             "trust_env": False,
-            "verify": network.llm_ca_bundle_path or True,
         }
         if network.proxy_llm and network.llm_proxy_url:
             client_options["proxy"] = network.llm_proxy_url
         try:
+            client_options["verify"] = httpx_verify(network.llm_ca_bundle_path, True)
             client = httpx.AsyncClient(**client_options)
         except (OSError, ValueError) as exc:
             raise HTTPException(

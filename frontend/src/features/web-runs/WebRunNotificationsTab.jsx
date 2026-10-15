@@ -67,7 +67,6 @@ export function WebRunNotificationsTab({
       message: generateSampleData ? "Starting with generated test data" : "Starting the workflow",
       generate_sample_data: generateSampleData,
       actions_done: 0,
-      action_limit: 18,
       actions: [],
     });
     try {

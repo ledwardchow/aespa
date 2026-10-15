@@ -44,8 +44,6 @@ export function AttackSurfacePanel({ summary, routeGroups = [] }) {
     meta: true,
     groups: true,
     routes: true,
-    access: false,
-    signals: true,
   });
   const [query, setQuery] = useState("");
   const [accessFilter, setAccessFilter] = useState("all");
@@ -75,8 +73,6 @@ export function AttackSurfacePanel({ summary, routeGroups = [] }) {
 
   const coverage = summary.coverage || {};
   const inputs = summary.input_surface || {};
-  const access = summary.access || {};
-  const signals = summary.signals || { items: [] };
   const technologies = summary.technologies || [];
   const shownRoutes = filteredRoutes.slice(0, 100);
 
@@ -118,7 +114,7 @@ export function AttackSurfacePanel({ summary, routeGroups = [] }) {
 
       <Section
         id="meta"
-        title="Observed Technologies"
+        title="Tech Stack"
         detail={`${technologies.length} detected`}
         expanded={expanded.meta}
         onToggle={toggle}
@@ -251,79 +247,6 @@ export function AttackSurfacePanel({ summary, routeGroups = [] }) {
           <div className="subtle">
             Showing the first 100 of {filteredRoutes.length} matching routes. Refine the filter to
             narrow the inventory.
-          </div>
-        ) : null}
-      </Section>
-
-      <Section
-        id="signals"
-        title="Evidence-backed Signals"
-        detail={`${signals.shown || 0} of ${signals.total || 0} shown`}
-        expanded={expanded.signals}
-        onToggle={toggle}
-      >
-        {(signals.items || []).length ? (
-          <div className="surface-signal-grid">
-            {signals.items.map((signal, index) => (
-              <div
-                className="surface-signal"
-                key={`${signal.type}-${signal.url}-${signal.label}-${index}`}
-              >
-                <div>
-                  <span className="surface-signal-type">{signal.type.replace(/_/g, " ")}</span>
-                  <strong>{signal.label}</strong>
-                  <span className="subtle">
-                    {Math.round((signal.confidence || 0) * 100)}% ·{" "}
-                    {signal.source.replace(/_/g, " ")}
-                    {signal.observations > 1 ? ` · ${signal.observations} observations` : ""}
-                  </span>
-                </div>
-                <span className="mono" title={signal.url}>
-                  {truncUrl(signal.url, 80)}
-                </span>
-                <span className="surface-signal-evidence">{signal.evidence}</span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="subtle">No high-value evidence signals have been observed.</div>
-        )}
-      </Section>
-
-      <Section
-        id="access"
-        title="Access Observations"
-        detail={`${(access.profiles || []).length} credential profiles`}
-        expanded={expanded.access}
-        onToggle={toggle}
-      >
-        <div className="surface-access-counts">
-          {Object.entries(access.counts || {}).map(([classification, count]) => (
-            <span key={classification} className={`surface-access access-${classification}`}>
-              {classification}: {count}
-            </span>
-          ))}
-        </div>
-        {(access.profiles || []).length ? (
-          <div className="surface-profile-list">
-            {access.profiles.map((profile, index) => (
-              <span
-                key={`${profile.credential_id}-${profile.username}-${index}`}
-                className="surface-chip"
-              >
-                {profile.label}
-                {profile.username && profile.label !== profile.username
-                  ? ` (${profile.username})`
-                  : ""}
-              </span>
-            ))}
-          </div>
-        ) : null}
-        {(access.mixed_routes || []).length ? (
-          <div className="surface-callout">
-            {access.mixed_routes.length} routes were observed in both anonymous and authenticated
-            contexts. This is evidence to investigate, not an automatic vulnerability
-            classification.
           </div>
         ) : null}
       </Section>

@@ -534,3 +534,28 @@ def validate_effort(
                 f"Reasoning level '{effort}' is not supported by this model"
             )
     return value
+
+
+SERVICE_TIER_PROVIDERS = {"openai_chatgpt_plan"}
+
+
+def validate_service_tier(
+    api_format: str, capability: dict[str, Any] | None, tier: str | None
+) -> str | None:
+    """Return a supported speed tier, or None for the provider's standard speed."""
+    if tier is None or not tier.strip():
+        return None
+    value = tier.strip().lower()
+    if api_format not in SERVICE_TIER_PROVIDERS:
+        raise ValueError("This provider does not support speed settings")
+    tiers = (capability or {}).get("service_tiers")
+    if not isinstance(tiers, list):
+        raise ValueError(
+            "Speed options for this model are unknown. "
+            "Load models for the provider again."
+        )
+    if value not in {
+        str(item.get("id", "")).lower() for item in tiers if isinstance(item, dict)
+    }:
+        raise ValueError(f"Speed '{tier}' is not supported by this model")
+    return value

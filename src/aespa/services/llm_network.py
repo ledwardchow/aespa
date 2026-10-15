@@ -8,6 +8,7 @@ from sqlmodel import Session
 
 from aespa.db import get_engine
 from aespa.services.settings_integrations import get_upstream_proxy_config
+from aespa.services.tls import httpx_verify
 
 
 def configured_llm_network() -> tuple[str | None, str | None]:
@@ -22,7 +23,7 @@ def httpx_options(proxy_url: str | None = None) -> dict[str, Any]:
     """Use the same TLS policy as built in LLM calls."""
     saved_proxy, ca_bundle = configured_llm_network()
     proxy = proxy_url if proxy_url is not None else saved_proxy
-    options: dict[str, Any] = {"verify": ca_bundle or proxy is None}
+    options: dict[str, Any] = {"verify": httpx_verify(ca_bundle, proxy is None)}
     if proxy:
         options["proxy"] = proxy
     return options

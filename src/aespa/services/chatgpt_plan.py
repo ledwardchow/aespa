@@ -406,7 +406,27 @@ async def access_token(client_id: str | None = None) -> str:
             return account["access_token"]
 
 
-async def discover_models(client_id: str | None = None) -> list[str]:
+def _service_tiers(row: dict[str, Any]) -> list[dict[str, str]]:
+    """Return the optional speed tiers, such as Fast, offered for one model."""
+    tiers: list[dict[str, str]] = []
+    for item in row.get("service_tiers") or []:
+        if isinstance(item, str):
+            item = {"id": item}
+        if not isinstance(item, dict):
+            continue
+        tier_id = str(item.get("id") or "").strip()
+        if not tier_id or any(tier["id"] == tier_id for tier in tiers):
+            continue
+        tier = {"id": tier_id, "name": str(item.get("name") or tier_id).strip()}
+        if isinstance(item.get("description"), str) and item["description"].strip():
+            tier["description"] = item["description"].strip()
+        tiers.append(tier)
+    return tiers
+
+
+async def discover_model_options(
+    client_id: str | None = None,
+) -> list[dict[str, Any]]:
     token = await access_token(client_id)
     async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
         response = await http.get(
@@ -415,10 +435,14 @@ async def discover_models(client_id: str | None = None) -> list[str]:
         response.raise_for_status()
         rows = response.json().get("models", [])
     return [
-        str(row["slug"])
+        {"id": str(row["slug"]), "service_tiers": _service_tiers(row)}
         for row in rows
-        if row.get("visibility") == "list" and row.get("slug")
+        if isinstance(row, dict) and row.get("visibility") == "list" and row.get("slug")
     ]
+
+
+async def discover_models(client_id: str | None = None) -> list[str]:
+    return [row["id"] for row in await discover_model_options(client_id)]
 
 
 async def _probe_model(

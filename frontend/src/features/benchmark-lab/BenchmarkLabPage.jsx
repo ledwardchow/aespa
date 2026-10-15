@@ -581,7 +581,7 @@ export function BenchmarkLabPage({ initialResultId }) {
         )}
         {tab === "datasets" && (
           <div className={styles.settings}>
-            <BenchmarkPublishing />
+            <BenchmarkPublishing datasets={datasets} results={results} />
             <BenchmarkTransfer onChange={load} />
             <BenchmarkModelSettings models={models} settings={benchmarkSettings} onChange={load} />
             <GroundTruthDatasets datasets={datasets} targets={targets} onChange={load} />

@@ -2,9 +2,18 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from sqlmodel import Session
 
-from aespa.models import CrawledPage, ScanLog, Site, TestRun
+from aespa.models import (
+    CrawledPage,
+    Credential,
+    PageCredentialView,
+    ScanLog,
+    Site,
+    TestRun,
+)
 from aespa.services import crawl_workflows, recon_summary, sites
 
 
@@ -51,6 +60,75 @@ def test_inferred_workflow_must_start_on_an_observed_page(monkeypatch):
         "Submit a product review",
     ]
     assert proposals[1]["destructive"] is False
+
+
+def test_workflow_reuses_saved_account_after_credential_ids_change():
+    page = CrawledPage(
+        test_run_id=298,
+        url="https://bank.test/accounts",
+        accessible_by="[34, 35]",
+        req_auth=True,
+    )
+    credentials = [
+        Credential(id=43, site_id=1, username="amelia", password="saved"),
+        Credential(id=44, site_id=1, username="zoe", password="saved"),
+    ]
+    selected, required = crawl_workflows._workflow_credential(
+        page, credentials, {34: {"amelia"}, 35: {"zoe"}}
+    )
+    assert required is True
+    assert selected.id == 43
+    assert selected.password == "saved"
+
+    selected, required = crawl_workflows._workflow_credential(page, credentials, {})
+    assert selected is None
+    assert required is True
+
+    public_page = CrawledPage(
+        test_run_id=298, url="https://bank.test/help", accessible_by="[]"
+    )
+    assert crawl_workflows._workflow_credential(public_page, credentials, {}) == (
+        None,
+        False,
+    )
+
+    duplicate_usernames = [
+        Credential(id=43, site_id=1, username="amelia", password="first"),
+        Credential(id=44, site_id=1, username="amelia", password="second"),
+    ]
+    selected, required = crawl_workflows._workflow_credential(
+        page, duplicate_usernames, {34: {"amelia"}}
+    )
+    assert selected is None
+    assert required is True
+
+
+def test_workflow_reads_old_credential_identity_from_page_views(isolated_db_engine):
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Bank", base_url="https://bank.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(site_id=site.id, name="Crawl")
+        session.add(run)
+        session.flush()
+        page = CrawledPage(
+            test_run_id=run.id,
+            url="https://bank.test/accounts",
+            accessible_by="[34]",
+        )
+        session.add(page)
+        session.flush()
+        session.add(
+            PageCredentialView(
+                test_run_id=run.id,
+                page_id=page.id,
+                credential_id=34,
+                username="amelia",
+            )
+        )
+        session.commit()
+        run_id = run.id
+    assert crawl_workflows._historical_credential_usernames(run_id) == {34: {"amelia"}}
 
 
 def test_state_change_guard_allows_cart_setup_and_payment():
@@ -279,6 +357,106 @@ def test_generated_values_do_not_fill_payment_or_secret_fields():
         assert reason == "Payment or secret fields need user-supplied test data."
 
 
+def test_radio_choices_use_field_indexes_and_keep_sensitive_fields_guarded():
+    observation = {
+        "url": "https://shop.test/feedback",
+        "controls": [{"index": 0, "kind": "link", "name": "Offers"}],
+        "fields": [
+            {
+                "index": 0,
+                "name": "rating",
+                "fieldName": "rating",
+                "type": "radio",
+                "choice_value": "5",
+                "checked": False,
+            }
+        ],
+    }
+    assert crawl_workflows._action_allowed(
+        {"action": "select", "index": 0, "value": "5"},
+        observation,
+        generate_sample_data=True,
+    ) == (False, "Use check to choose a radio option.")
+    assert crawl_workflows._action_allowed(
+        {"action": "check", "index": 0},
+        observation,
+        generate_sample_data=True,
+    )[0]
+    assert not crawl_workflows._action_allowed(
+        {"action": "check", "index": 0}, observation
+    )[0]
+    sensitive = {
+        **observation,
+        "fields": [
+            {
+                **observation["fields"][0],
+                "name": "payment_method",
+                "fieldName": "payment_method",
+            }
+        ],
+    }
+    assert (
+        crawl_workflows._action_allowed(
+            {"action": "check", "index": 0},
+            sensitive,
+            generate_sample_data=True,
+        )[1]
+        == "Payment or secret fields need user-supplied test data."
+    )
+
+
+def test_completed_field_action_is_rejected_when_value_is_still_present():
+    observation = {
+        "url": "https://shop.test/form",
+        "controls": [],
+        "fields": [
+            {
+                "index": 0,
+                "name": "title",
+                "fieldName": "title",
+                "fieldId": "title",
+                "type": "text",
+                "has_value": True,
+                "invalid": False,
+            }
+        ],
+    }
+    decision = {"action": "fill", "index": 0, "value": "Test title"}
+    prior = {crawl_workflows._field_action_key(decision, observation)}
+    assert crawl_workflows._action_allowed(
+        decision, observation, generate_sample_data=True, prior_actions=prior
+    ) == (False, "This field already has that value.")
+    observation["fields"][0]["has_value"] = False
+    assert crawl_workflows._action_allowed(
+        decision, observation, generate_sample_data=True, prior_actions=prior
+    )[0]
+
+
+def test_multiline_field_can_use_more_than_100_characters():
+    observation = {
+        "url": "https://shop.test/form",
+        "controls": [],
+        "fields": [
+            {
+                "fieldName": "details",
+                "type": "textarea",
+                "value_limit": 2000,
+            }
+        ],
+    }
+    decision = {"action": "fill", "index": 0, "value": "detail: value\n" * 15}
+    assert crawl_workflows._action_allowed(
+        decision, observation, generate_sample_data=True
+    )[0]
+    observation["fields"][0]["value_limit"] = 80
+    assert (
+        crawl_workflows._action_allowed(
+            decision, observation, generate_sample_data=True
+        )[1]
+        == "The proposed field value is too long."
+    )
+
+
 def test_generated_values_are_ready_to_edit_and_reuse():
     workflow = {"user_instructions": "Use 1 Test Street", "generate_sample_data": True}
     observation = {
@@ -321,6 +499,240 @@ def test_crawler_model_gets_generation_permission_only_for_requested_retry(monke
     )
     assert "explicitly authorized you to generate" in prompts[0]
     assert "do not invent names" in prompts[1]
+
+
+def test_workflow_corrects_long_generated_value_without_stopping(monkeypatch):
+    prompts = []
+    responses = [
+        {"action": "fill", "index": 0, "value": "x" * 101},
+        {"action": "fill", "index": 0, "value": "Short test description"},
+    ]
+
+    async def fake_decide(_cfg, _workflow, _observation, history):
+        prompts.append(history)
+        return responses.pop(0)
+
+    monkeypatch.setattr(crawl_workflows, "_decide_action", fake_decide)
+    decision = asyncio.run(
+        crawl_workflows._decide_with_corrections(
+            object(),
+            {"generate_sample_data": True},
+            {
+                "url": "https://shop.test/admin/products/new",
+                "fields": [{"name": "description", "fieldName": "description"}],
+                "controls": [],
+            },
+            ["fill sku"],
+        )
+    )
+    assert decision["value"] == "Short test description"
+    assert "value_limit" in prompts[1][-1]
+    assert prompts[1][0] == "fill sku"
+
+
+def test_workflow_reminds_model_of_generation_approval(monkeypatch):
+    prompts = []
+    responses = [
+        {
+            "action": "stop",
+            "needs_input": True,
+            "request": "Please provide the missing product description and stock.",
+        },
+        {"action": "fill", "index": 0, "value": "Test product"},
+    ]
+
+    async def fake_decide(_cfg, _workflow, _observation, history):
+        prompts.append(history)
+        return responses.pop(0)
+
+    monkeypatch.setattr(crawl_workflows, "_decide_action", fake_decide)
+    decision = asyncio.run(
+        crawl_workflows._decide_with_corrections(
+            object(),
+            {"generate_sample_data": True},
+            {
+                "url": "https://shop.test/admin/products/new",
+                "fields": [{"name": "description", "fieldName": "description"}],
+                "controls": [],
+            },
+            [],
+        )
+    )
+    assert decision["action"] == "fill"
+    assert "already approved" in prompts[1][-1]
+
+
+def test_workflow_corrects_radio_selection_and_repeated_field(monkeypatch):
+    prompts = []
+    responses = [
+        {"action": "select", "index": 0, "value": "5"},
+        {"action": "fill", "index": 1, "value": "Already set"},
+        {"action": "check", "index": 0},
+    ]
+
+    async def fake_decide(_cfg, _workflow, _observation, history):
+        prompts.append(history)
+        return responses.pop(0)
+
+    monkeypatch.setattr(crawl_workflows, "_decide_action", fake_decide)
+    observation = {
+        "url": "https://shop.test/feedback",
+        "controls": [],
+        "fields": [
+            {"fieldName": "rating", "type": "radio", "choice_value": "5"},
+            {"fieldName": "title", "type": "text", "has_value": True},
+        ],
+    }
+    prior = {("https://shop.test/feedback", "title", "fill", "Already set")}
+    decision = asyncio.run(
+        crawl_workflows._decide_with_corrections(
+            object(), {"generate_sample_data": True}, observation, [], prior
+        )
+    )
+    assert decision["action"] == "check"
+    assert "Radio choices" in prompts[1][-1]
+    assert "already has" in prompts[2][-1]
+
+
+def test_long_link_uses_href_and_radio_uses_choice_value():
+    class Locator:
+        def __init__(self, selector):
+            self.selector = selector
+            self.first = self
+            self.called = None
+
+        async def click(self, **kwargs):
+            self.called = ("click", kwargs)
+
+        async def check(self, **kwargs):
+            self.called = ("check", kwargs)
+
+    class Page:
+        def __init__(self):
+            self.locators = []
+
+        def locator(self, selector):
+            locator = Locator(selector)
+            self.locators.append(locator)
+            return locator
+
+    page = Page()
+    long_name = "Product details " + "x" * 130
+    observation = {
+        "controls": [
+            {
+                "kind": "link",
+                "name": long_name[:100],
+                "href": "https://shop.test/product",
+                "rawHref": "/product",
+            }
+        ],
+        "fields": [{"fieldName": "rating", "type": "radio", "choice_value": "5"}],
+    }
+    asyncio.run(
+        crawl_workflows._apply_action(
+            page, {"action": "click", "index": 0}, observation
+        )
+    )
+    assert page.locators[0].selector == 'a[href="/product"]:visible'
+    assert page.locators[0].called[0] == "click"
+    step = asyncio.run(
+        crawl_workflows._apply_action(
+            page, {"action": "check", "index": 0}, observation
+        )
+    )
+    assert page.locators[1].selector == '[name="rating"][value="5"]:visible'
+    assert page.locators[1].called == ("check", {"force": True, "timeout": 8000})
+    assert step["value"] == "5"
+
+
+def test_long_control_uses_verified_dom_index():
+    class Locator:
+        def __init__(self, expected):
+            self.expected = expected
+            self.index = None
+            self.clicked = False
+
+        def nth(self, index):
+            self.index = index
+            return self
+
+        async def evaluate(self, _script, expected):
+            return expected == self.expected
+
+        async def click(self, **_kwargs):
+            self.clicked = True
+
+    class Page:
+        def __init__(self, matches=True):
+            self.locator_obj = Locator(
+                {"name": "Long button" + "x" * 89, "kind": "button", "href": ""}
+                if matches
+                else {}
+            )
+
+        def locator(self, selector):
+            assert selector == crawl_workflows._CONTROL_SELECTOR
+            return self.locator_obj
+
+    item = {
+        "domIndex": 12,
+        "kind": "button",
+        "name": "Long button" + "x" * 89,
+        "href": "",
+    }
+    observation = {"controls": [item]}
+    page = Page()
+    asyncio.run(
+        crawl_workflows._apply_action(
+            page, {"action": "click", "index": 0}, observation
+        )
+    )
+    assert page.locator_obj.index == 12
+    assert page.locator_obj.clicked
+    with pytest.raises(ValueError, match="control changed"):
+        asyncio.run(
+            crawl_workflows._apply_action(
+                Page(False), {"action": "click", "index": 0}, observation
+            )
+        )
+
+
+def test_timed_out_fill_uses_visible_editable_field():
+    class Locator:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        async def fill(self, _value, *, timeout):
+            assert timeout == 8000
+            raise PlaywrightTimeoutError("field did not become actionable")
+
+    class Page:
+        def __init__(self, filled):
+            self.filled = filled
+            self.arguments = None
+
+        def locator(self, _selector):
+            return Locator()
+
+        async def evaluate(self, _script, arguments):
+            self.arguments = arguments
+            return self.filled
+
+    decision = {"action": "fill", "index": 0, "value": "Test description"}
+    observation = {"fields": [{"fieldName": "description", "fieldId": "description"}]}
+    page = Page(True)
+    step = asyncio.run(crawl_workflows._apply_action(page, decision, observation))
+    assert step["selector"] == '[name="description"]'
+    assert page.arguments == {
+        "selector": '[name="description"]',
+        "value": "Test description",
+    }
+
+    with pytest.raises(PlaywrightTimeoutError):
+        asyncio.run(crawl_workflows._apply_action(Page(False), decision, observation))
 
 
 def test_saved_site_workflow_data_is_reused_by_later_crawls(isolated_db_engine):
@@ -435,6 +847,15 @@ def test_retry_checkbox_waits_for_success_before_saving(
         await crawl_workflows._retry_tasks[run_id]
 
     asyncio.run(generate())
+    assert attempts[-1] == (False, True, "")
+
+    async def retry_approved_note():
+        crawl_workflows.start_workflow_retry(
+            run_id, {**note, "generate_sample_data": True}, ""
+        )
+        await crawl_workflows._retry_tasks[run_id]
+
+    asyncio.run(retry_approved_note())
     assert attempts[-1] == (False, True, "")
     crawl_workflows._retry_tasks.pop(run_id, None)
     crawl_workflows._retry_results.pop(run_id, None)
@@ -870,3 +1291,62 @@ def test_invalid_supplied_form_value_requests_a_correction():
         )
         == "Check the form data: This address is not valid."
     )
+
+
+def test_generated_form_data_can_use_server_validation_before_asking_for_input():
+    seen_errors = {}
+    initial = {"form_errors": []}
+    rejected = {"form_errors": ["Specs must include: Screen Size, CPU Brand."]}
+    assert crawl_workflows._submission_validation_action(
+        initial, generate_sample_data=True, seen_errors=seen_errors
+    ) == ("ok", "")
+    assert crawl_workflows._submission_validation_action(
+        rejected, generate_sample_data=True, seen_errors=seen_errors
+    ) == ("retry", "Check the form data: Specs must include: Screen Size, CPU Brand.")
+    assert (
+        crawl_workflows._submission_validation_action(
+            rejected, generate_sample_data=True, seen_errors=seen_errors
+        )[0]
+        == "needs_input"
+    )
+    assert (
+        crawl_workflows._submission_validation_action(
+            rejected, generate_sample_data=False, seen_errors={}
+        )[0]
+        == "needs_input"
+    )
+
+
+def test_model_reconsiders_missing_generated_data_after_server_error(monkeypatch):
+    decisions = [
+        {
+            "action": "stop",
+            "needs_input": True,
+            "request": "Required specs are missing.",
+        },
+        {"action": "fill", "index": 0, "value": "Screen Size: 14 inches"},
+    ]
+    histories = []
+
+    async def fake_decide(_cfg, _workflow, _observation, history):
+        histories.append(history)
+        return decisions.pop(0)
+
+    monkeypatch.setattr(crawl_workflows, "_decide_action", fake_decide)
+    result = asyncio.run(
+        crawl_workflows._decide_with_corrections(
+            object(),
+            {"generate_sample_data": True},
+            {
+                "url": "https://shop.test/admin/products/new",
+                "fields": [
+                    {"fieldName": "specs", "type": "textarea", "has_value": True}
+                ],
+                "controls": [],
+                "form_errors": ["Specs must include: Screen Size."],
+            },
+            ["click Create product"],
+        )
+    )
+    assert result["action"] == "fill"
+    assert "already approved" in histories[1][-1]

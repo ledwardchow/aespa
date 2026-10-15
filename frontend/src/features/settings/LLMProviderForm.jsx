@@ -1,6 +1,10 @@
 import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect, useCallback } from "react";
-import { PROVIDER_MODEL_PLACEHOLDERS, PROVIDER_BASE_URL_PLACEHOLDERS } from "./providerMetadata.js";
+import {
+  API_FORMAT_LABELS,
+  PROVIDER_MODEL_PLACEHOLDERS,
+  PROVIDER_BASE_URL_PLACEHOLDERS,
+} from "./providerMetadata.js";
 import { providerPayload, providerToForm } from "./providerForm.js";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
@@ -563,6 +567,11 @@ function CopilotConnectionCard({ value, onSelect }) {
   );
 }
 
+// The edit screen remounts after a new provider saves itself while loading
+// models. Carry the load result across briefly so it stays visible there.
+const createdProviderMessages = new Map();
+const CREATED_MESSAGE_TTL_MS = 10000;
+
 export function LLMProviderForm({
   mode,
   provider,
@@ -570,6 +579,8 @@ export function LLMProviderForm({
   profiles,
   onConfigureModel,
   onProviderUpdated,
+  onProviderCreated,
+  providerNames = [],
   onSaved,
   onCancel,
 }) {
@@ -577,7 +588,11 @@ export function LLMProviderForm({
   const [newModelName, setNewModelName] = useState("");
   const [saving, setSaving] = useState(false);
   const [addingModel, setAddingModel] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [createdMessage] = useState(() => {
+    const created = createdProviderMessages.get(provider?.id);
+    return created && Date.now() - created.at < CREATED_MESSAGE_TTL_MS ? created.message : null;
+  });
+  const [saved, setSaved] = useState(createdMessage !== null);
   const [error, setError] = useState(null);
   const upd = useCallback((p) => {
     setSaved(false);
@@ -594,7 +609,7 @@ export function LLMProviderForm({
   );
   const [loadingModels, setLoadingModels] = useState(false);
   const [daybreakReloadKey, setDaybreakReloadKey] = useState(0);
-  const [loadMessage, setLoadMessage] = useState(null);
+  const [loadMessage, setLoadMessage] = useState(createdMessage);
   const [loadFailed, setLoadFailed] = useState(false);
   const configuredModelsByName = new Map(
     (models || [])
@@ -724,6 +739,15 @@ export function LLMProviderForm({
           models: nextModelNames.join("\n"),
           model_capabilities: nextCapabilities,
         };
+        const message = `${catalogFailed ? "Could not load the full model list." : `Loaded ${discoveredModelNames.length} model(s) ${isChatGPTPlan ? "for this account" : "from the API"}.`}${
+          extraModelNames.length > 0
+            ? ` Verified ${extraModelNames.join(" and ")} for this account.`
+            : ""
+        }${
+          retainedModelNames.length > 0
+            ? ` Kept ${retainedModelNames.length} model(s) used by scan profiles.`
+            : ""
+        }`;
         if (mode === "edit" && provider?.id) {
           setSaved(false);
           const savedProvider = await settingsApi.updateLLMProvider(
@@ -734,22 +758,35 @@ export function LLMProviderForm({
           setSaved(true);
           onProviderUpdated?.(savedProvider);
         } else {
+          // Save a new provider right away so its models can be configured
+          // without leaving and reopening the provider.
+          if (!nextForm.name.trim()) {
+            const taken = new Set(providerNames.map((name) => name.trim().toLowerCase()));
+            const label = API_FORMAT_LABELS[nextForm.api_format] || nextForm.api_format;
+            let name = label;
+            for (let count = 2; taken.has(name.toLowerCase()); count += 1) {
+              name = `${label} ${count}`;
+            }
+            nextForm.name = name;
+          }
           upd(nextForm);
+          try {
+            const savedProvider = await settingsApi.createLLMProvider(providerPayload(nextForm));
+            setForm(providerToForm(savedProvider));
+            setSaved(true);
+            if (onProviderCreated) {
+              createdProviderMessages.clear();
+              createdProviderMessages.set(savedProvider.id, { message, at: Date.now() });
+              onProviderCreated(savedProvider);
+            }
+          } catch (e) {
+            setError(`Loaded models, but could not save the provider: ${e.message}`);
+          }
         }
         if (isChatGPTPlan) {
           setDaybreakReloadKey((count) => count + 1);
         }
-        setLoadMessage(
-          `${catalogFailed ? "Could not load the full model list." : `Loaded ${discoveredModelNames.length} model(s) ${isChatGPTPlan ? "for this account" : "from the API"}.`}${
-            extraModelNames.length > 0
-              ? ` Verified ${extraModelNames.join(" and ")} for this account.`
-              : ""
-          }${
-            retainedModelNames.length > 0
-              ? ` Kept ${retainedModelNames.length} model(s) used by scan profiles.`
-              : ""
-          }`,
-        );
+        setLoadMessage(message);
       } else {
         setLoadFailed(true);
         setLoadMessage("The API returned no models. Enter the model names manually.");

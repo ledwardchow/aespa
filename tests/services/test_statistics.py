@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from sqlmodel import Session
+from sqlmodel import Session, func, select
 
 from aespa.models import LLMConfig, LLMPriceCatalog, LLMUsageMonth, Site, TestRun
 from aespa.services import llm, statistics
@@ -15,7 +15,7 @@ def test_provider_usage_is_isolated_without_requesting_a_database_fixture():
     assert engine.url.database == ":memory:"
     llm._record_usage("isolation-test-model", 10, 5, provider="unknown")
     with Session(engine) as session:
-        row = session.query(LLMUsageMonth).one()
+        row = session.exec(select(LLMUsageMonth)).one()
         assert row.model == "isolation-test-model"
         assert row.requests == 1
 
@@ -42,7 +42,7 @@ def test_records_all_calls_without_run_context(isolated_db_engine, monkeypatch):
         base_url="https://api.openai.com/v1",
     )
     with Session(isolated_db_engine) as session:
-        row = session.query(LLMUsageMonth).one()
+        row = session.exec(select(LLMUsageMonth)).one()
         assert row.input_tokens == 700
         assert row.output_tokens == 200
         assert row.cache_read_tokens == 300
@@ -145,7 +145,7 @@ def test_bedrock_input_is_not_subtracted(isolated_db_engine):
         month="2026-08",
     )
     with Session(isolated_db_engine) as session:
-        row = session.query(LLMUsageMonth).one()
+        row = session.exec(select(LLMUsageMonth)).one()
         assert row.input_tokens == 1000
 
 
@@ -219,7 +219,7 @@ def test_usage_keeps_first_observed_base_url(isolated_db_engine):
         month="2026-08",
     )
     with Session(isolated_db_engine) as session:
-        row = session.query(LLMUsageMonth).one()
+        row = session.exec(select(LLMUsageMonth)).one()
         assert row.base_url == "https://first.example/v1"
 
 
@@ -239,10 +239,15 @@ def test_monthly_price_override_and_reset_keep_catalog(isolated_db_engine):
                 "apply_to_future": True,
             },
         )
-        assert session.query(LLMPriceCatalog).one().credit_price_usd_per_million == 9
+        assert (
+            session.exec(select(LLMPriceCatalog)).one().credit_price_usd_per_million
+            == 9
+        )
         statistics.reset_statistics(session)
-        assert session.query(LLMUsageMonth).count() == 0
-        assert session.query(LLMPriceCatalog).count() == 1
+        assert session.exec(select(func.count()).select_from(LLMUsageMonth)).one() == 0
+        assert (
+            session.exec(select(func.count()).select_from(LLMPriceCatalog)).one() == 1
+        )
 
 
 def test_statistics_api_is_independent_and_reset_is_explicit(client):
@@ -372,7 +377,7 @@ def test_run_cost_is_recalculated_from_totals_on_each_usage_update(
             provider="openai",
         )
         with Session(isolated_db_engine) as session:
-            price = session.query(LLMPriceCatalog).one()
+            price = session.exec(select(LLMPriceCatalog)).one()
             price.input_price_usd_per_million = 2
             price.output_price_usd_per_million = 4
             session.add(price)

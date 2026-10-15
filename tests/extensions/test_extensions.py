@@ -112,6 +112,7 @@ def create_extension():
         "aespa.burpsuite",
         "aespa.githubrepository",
         "aespa.benchmarking",
+        "aespa.chatgptplanusage",
         "example.source",
     }
     assert set(manager.source_providers) == {"aespa.githubrepository", "example.source"}

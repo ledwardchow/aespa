@@ -1,0 +1,68 @@
+.plan-usage-windows {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.plan-usage-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+.plan-usage-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  min-width: 0;
+}
+.plan-usage-form input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.plan-usage-chart {
+  width: 100%;
+  overflow: hidden;
+}
+.plan-usage-chart svg {
+  display: block;
+}
+.plan-usage-grid {
+  stroke: var(--border-2);
+  stroke-width: 1;
+}
+.plan-usage-axis {
+  fill: var(--muted);
+  font-size: 10px;
+}
+.plan-usage-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.plan-usage-dot {
+  fill: var(--text);
+  stroke: var(--panel);
+  stroke-width: 2;
+}
+.plan-usage-bar {
+  fill: var(--accent);
+  opacity: 0.45;
+}
+.plan-usage-bar-label {
+  margin: 8px 0 2px 44px;
+  font-size: 11px;
+}
+.plan-usage-table th,
+.plan-usage-table td {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.plan-usage-table--wide {
+  min-width: 760px;
+}
+.plan-usage-header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}

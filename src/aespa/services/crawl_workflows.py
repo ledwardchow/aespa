@@ -7,6 +7,7 @@ import re
 from collections.abc import Callable
 from urllib.parse import urlparse
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from sqlmodel import Session, select
 
 from aespa.browser import (
@@ -15,7 +16,15 @@ from aespa.browser import (
     protect_playwright_context,
 )
 from aespa.db import get_engine
-from aespa.models import AuthMode, CrawledPage, Credential, ScanLog, Site, TestRun
+from aespa.models import (
+    AuthMode,
+    CrawledPage,
+    Credential,
+    PageCredentialView,
+    ScanLog,
+    Site,
+    TestRun,
+)
 from aespa.schemas import SiteWorkflowInput
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
@@ -25,7 +34,10 @@ log = logging.getLogger("aespa.crawl_workflows")
 _MAX_WORKFLOWS = 4
 _MAX_ACTIONS = 7
 _MAX_RETRY_ACTIONS = 18
+_MAX_DECISION_CORRECTIONS = 2
+_MAX_SAME_FORM_ERROR = 2
 _FIELD_SELECTOR = 'input:not([type="hidden"]),textarea,select'
+_CONTROL_SELECTOR = 'a[href],button,input[type="submit"],[role="button"]'
 _DELETE_ACTION = re.compile(r"\b(?:delete|remove|destroy|erase|purge)\b", re.I)
 _MISSING_DATA = re.compile(
     r"\b(?:no|none|without|missing|lack)\b.{0,150}"
@@ -33,7 +45,7 @@ _MISSING_DATA = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_SAMPLE_FIELD = re.compile(
-    r"card|cvc|cvv|security.?code|bank|iban|routing|account.?number|"
+    r"payment|card|cvc|cvv|security.?code|bank|iban|routing|account.?number|"
     r"password|passcode|one.?time|otp|pin\b",
     re.IGNORECASE,
 )
@@ -169,6 +181,52 @@ def _crawl_inventory(run_id: int) -> tuple[list[dict], dict[str, CrawledPage]]:
         if key not in known_pages or known_pages[key].state_kind == "interactive":
             known_pages[key] = page
     return inventory, known_pages
+
+
+def _historical_credential_usernames(run_id: int) -> dict[int, set[str]]:
+    usernames: dict[int, set[str]] = {}
+    with Session(get_engine()) as session:
+        views = session.exec(
+            select(PageCredentialView.credential_id, PageCredentialView.username).where(
+                PageCredentialView.test_run_id == run_id
+            )
+        )
+        for credential_id, username in views:
+            if credential_id is not None and username:
+                usernames.setdefault(credential_id, set()).add(username)
+    return usernames
+
+
+def _workflow_credential(
+    start_page: CrawledPage | None,
+    creds: list[Credential],
+    historical_usernames: dict[int, set[str]],
+) -> tuple[Credential | None, bool]:
+    if start_page is None:
+        return (creds[0] if creds else None), bool(creds)
+    candidate_ids = []
+    if start_page.replay_credential_id is not None:
+        candidate_ids.append(start_page.replay_credential_id)
+    try:
+        candidate_ids.extend(json.loads(start_page.accessible_by or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    candidate_ids = list(
+        dict.fromkeys(cid for cid in candidate_ids if isinstance(cid, int))
+    )
+    current_by_id = {cred.id: cred for cred in creds}
+    current_by_username: dict[str, list[Credential]] = {}
+    for cred in creds:
+        current_by_username.setdefault(cred.username, []).append(cred)
+    for old_id in candidate_ids:
+        if old_id in current_by_id:
+            return current_by_id[old_id], True
+        old_names = historical_usernames.get(old_id, set())
+        if len(old_names) == 1:
+            matches = current_by_username.get(next(iter(old_names)), [])
+            if len(matches) == 1:
+                return matches[0], True
+    return None, bool(candidate_ids or start_page.req_auth)
 
 
 def _prior_workflow_names(run_id: int) -> set[str]:
@@ -316,6 +374,7 @@ async def _observe(page) -> dict:
                   (el.type === 'submit' ||
                    (el.tagName.toLowerCase() === 'button' && !el.type)),
                 href: el.tagName.toLowerCase() === 'a' ? el.href : '',
+                rawHref: el.tagName.toLowerCase() === 'a' ? el.getAttribute('href') : '',
                 form: formContext(el),
                 formAction: el.getAttribute('formaction') ||
                   (el.form || el.closest('form'))?.getAttribute('action') || ''
@@ -327,6 +386,16 @@ async def _observe(page) -> dict:
                 index, domIndex, name: el.name || el.id || label(el),
                 fieldName: el.name || '', fieldId: el.id || '',
                 type: (el.type || el.tagName).toLowerCase(),
+                label: (el.labels?.[0]?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 100),
+                has_value: el.type === 'radio' || el.type === 'checkbox'
+                  ? el.checked : Boolean(el.value?.trim()),
+                checked: Boolean(el.checked),
+                choice_value: el.type === 'radio' ? el.value : '',
+                selected_value: el.tagName === 'SELECT' ? el.value : '',
+                invalid: !el.validity?.valid || el.getAttribute('aria-invalid') === 'true',
+                value_limit: el.tagName === 'TEXTAREA'
+                  ? Math.min(el.maxLength > 0 ? el.maxLength : 2000, 2000)
+                  : Math.min(el.maxLength > 0 ? el.maxLength : 100, 100),
                 options: el.tagName === 'SELECT'
                   ? Array.from(el.options).filter(o => !o.disabled).slice(0, 12)
                     .map(o => ({value:o.value, label:o.textContent?.trim()})) : []
@@ -371,16 +440,25 @@ async def _decide_action(
     prompt = (
         "You are a web crawler trying to reach a workflow suggested by the earlier "
         "crawl. Choose one action from the current visible controls or fields. "
-        "You may click, fill, select, declare reached, or stop. Use the supplied "
-        "index; do not invent selectors or URLs. Do not delete or remove anything. "
+        "You may click a control, fill a text field, select a dropdown option, "
+        "check a radio choice, declare reached, or stop. Click indexes refer "
+        "to controls. Fill, select, and check indexes refer to fields. For a "
+        "radio group, choose the field index with the desired choice_value and "
+        "use action=check. Use only supplied indexes, options, and URLs. "
+        "Do not delete or remove anything. "
         "Other state changes, including submitting reviews, placing orders, and "
         "payments, are allowed. Stop if the next action would delete something. "
         + sample_data_rule
-        + "If required "
-        "data is missing, stop with needs_input=true and state what to ask for in "
-        "request. If the site rejects supplied form data, stop with "
-        "needs_input=true and explain which value the user should correct. "
-        "Use visible validation messages when available. Do not repeat "
+        + "If required data is missing and cannot be generated under the rule "
+        "above, stop with needs_input=true and state what to ask for in "
+        "request. If the site rejects a value explicitly supplied by the user, "
+        "stop with needs_input=true and explain which value to correct. "
+        "Keep each proposed value within its field's value_limit. Fields expose has_value "
+        "and checked but omit text values for privacy. Do not refill a field "
+        "that already has a valid value or repeat a completed action. "
+        "Use visible validation messages when available. After a form rejects "
+        "generated data, correct the affected field even if it still has a value. "
+        "Keep values supplied by the user unchanged. Do not repeat "
         "supplied values in reason or evidence. Adding an "
         "item to a cart is a setup action. "
         "Return only JSON with action, index, value, reason, evidence, "
@@ -393,6 +471,76 @@ async def _decide_action(
         f"Current page: {json.dumps(observation, ensure_ascii=False)}"
     )
     return _parse_json_object(await llm_svc.plain_completion(llm_cfg, prompt))
+
+
+async def _decide_with_corrections(
+    llm_cfg,
+    workflow: dict,
+    observation: dict,
+    history: list[str],
+    prior_actions: set[tuple[str, str, str, str]] | None = None,
+) -> dict:
+    decision = await _decide_action(llm_cfg, workflow, observation, history)
+    for _ in range(_MAX_DECISION_CORRECTIONS):
+        if decision.get("action") == "stop":
+            request_text = " ".join(
+                str(decision.get(key) or "") for key in ("request", "reason")
+            )
+            if not (
+                workflow.get("generate_sample_data")
+                and decision.get("needs_input") is True
+                and re.search(
+                    r"\b(?:missing|provide|supply|need|required)\b",
+                    request_text,
+                    re.I,
+                )
+                and not _SENSITIVE_SAMPLE_FIELD.search(request_text)
+                and (
+                    not _invalid_supplied_input(observation)
+                    or observation.get("form_errors")
+                )
+            ):
+                break
+            feedback = (
+                "The user already approved generating ordinary test values for "
+                "missing fields. Choose the next form action instead of asking "
+                "for those values."
+            )
+        else:
+            allowed, why = _action_allowed(
+                decision,
+                observation,
+                workflow.get("user_instructions") or "",
+                generate_sample_data=bool(workflow.get("generate_sample_data")),
+                prior_actions=prior_actions,
+            )
+            if allowed or why not in {
+                "The proposed field value is too long.",
+                "Use check to choose a radio option.",
+                "The chosen option was not visible.",
+                "This field already has that value.",
+            }:
+                break
+            feedback = {
+                "The proposed field value is too long.": (
+                    "That field value exceeded its value_limit. "
+                    "Choose a shorter value for the same field."
+                ),
+                "Use check to choose a radio option.": (
+                    "Radio choices use action=check and a field index, not select."
+                ),
+                "The chosen option was not visible.": (
+                    "Choose an option value from the selected field's visible options."
+                ),
+                "This field already has that value.": (
+                    "That field already has the value you set. Choose an unfinished "
+                    "field or submit the form."
+                ),
+            }[why]
+        decision = await _decide_action(
+            llm_cfg, workflow, observation, [*history, feedback]
+        )
+    return decision
 
 
 def _invalid_supplied_input(observation: dict) -> str:
@@ -412,15 +560,45 @@ def _invalid_supplied_input(observation: dict) -> str:
     return ""
 
 
+def _submission_validation_action(
+    observation: dict, *, generate_sample_data: bool, seen_errors: dict[str, int]
+) -> tuple[str, str]:
+    request = _invalid_supplied_input(observation)
+    if not request:
+        return "ok", ""
+    if not generate_sample_data:
+        return "needs_input", request
+    seen_errors[request] = seen_errors.get(request, 0) + 1
+    if seen_errors[request] >= _MAX_SAME_FORM_ERROR:
+        return "needs_input", request
+    return "retry", request
+
+
+def _field_action_key(decision: dict, observation: dict) -> tuple[str, str, str, str]:
+    item = observation["fields"][int(decision["index"])]
+    value = (
+        item.get("choice_value")
+        if decision["action"] == "check"
+        else decision.get("value")
+    )
+    return (
+        str(observation.get("url") or ""),
+        str(item.get("fieldId") or item.get("fieldName") or ""),
+        str(decision["action"]),
+        str(value or ""),
+    )
+
+
 def _action_allowed(
     decision: dict,
     observation: dict,
     user_instructions: str = "",
     *,
     generate_sample_data: bool = False,
+    prior_actions: set[tuple[str, str, str, str]] | None = None,
 ) -> tuple[bool, str]:
     action = decision.get("action")
-    if action not in {"click", "fill", "select"}:
+    if action not in {"click", "fill", "select", "check"}:
         return False, "The model did not choose a browser action."
     group = "controls" if action == "click" else "fields"
     try:
@@ -428,15 +606,13 @@ def _action_allowed(
     except (IndexError, TypeError, ValueError):
         return False, "The chosen control was not visible."
     if action == "click":
-        if (
-            not item.get("name")
-            or sum(
-                control.get("kind") == item.get("kind")
-                and control.get("name") == item.get("name")
-                for control in observation["controls"]
-            )
-            != 1
-        ):
+        if not item.get("name"):
+            return False, "The chosen control could not be identified uniquely."
+        if sum(
+            control.get("kind") == item.get("kind")
+            and control.get("name") == item.get("name")
+            for control in observation["controls"]
+        ) != 1 and not isinstance(item.get("domIndex"), int):
             return False, "The chosen control could not be identified uniquely."
         direct_action = " ".join(
             str(item.get(key) or "") for key in ("name", "href", "formAction")
@@ -448,6 +624,20 @@ def _action_allowed(
         if href and urlparse(href).netloc != urlparse(observation["url"]).netloc:
             return False, "The next action leaves the target site."
     else:
+        field_type = str(item.get("type") or "")
+        if action in {"fill", "select"} and field_type == "radio":
+            return False, "Use check to choose a radio option."
+        if action == "check":
+            if field_type != "radio" or not item.get("choice_value"):
+                return False, "The chosen field is not a radio option."
+            if decision.get("value") not in (None, "") and str(
+                decision["value"]
+            ) != str(item["choice_value"]):
+                return False, "The chosen radio value did not match the field."
+            value = str(item["choice_value"])
+            supplied = " ".join(user_instructions.split())
+            if value.casefold() not in supplied.casefold() and not generate_sample_data:
+                return False, "The field needs a value supplied by the user."
         if action == "fill":
             value = " ".join(str(decision.get("value") or "").split())
             supplied = " ".join(user_instructions.split())
@@ -465,16 +655,47 @@ def _action_allowed(
                 or re.search(r"payment|payment-method|card", observation["url"], re.I)
             ):
                 return False, "Payment or secret fields need user-supplied test data."
+        if (
+            action == "check"
+            and value.casefold() not in supplied.casefold()
+            and (
+                _SENSITIVE_SAMPLE_FIELD.search(
+                    " ".join(
+                        str(item.get(key) or "")
+                        for key in ("name", "fieldName", "fieldId", "label")
+                    )
+                )
+                or re.search(r"payment|payment-method|card", observation["url"], re.I)
+            )
+        ):
+            return False, "Payment or secret fields need user-supplied test data."
         if not item.get("fieldName") and not item.get("fieldId"):
             return False, "The chosen field has no stable identifier."
         if item.get("type") == "file":
             return False, "The field needs a file upload."
-        if len(str(decision.get("value") or "")) > 100:
+        value_limit = item.get("value_limit") or (
+            2000 if field_type == "textarea" else 100
+        )
+        if (
+            action in {"fill", "select"}
+            and len(str(decision.get("value") or "")) > value_limit
+        ):
             return False, "The proposed field value is too long."
+        if action == "select" and field_type not in {"select-one", "select-multiple"}:
+            return False, "The chosen field is not a dropdown."
         if action == "select" and str(decision.get("value")) not in {
             str(option.get("value")) for option in item.get("options") or []
         }:
             return False, "The chosen option was not visible."
+        if prior_actions and _field_action_key(decision, observation) in prior_actions:
+            if action == "check" and item.get("checked"):
+                return False, "This field already has that value."
+            if action == "select" and str(item.get("selected_value")) == str(
+                decision.get("value")
+            ):
+                return False, "This field already has that value."
+            if action == "fill" and item.get("has_value") and not item.get("invalid"):
+                return False, "This field already has that value."
     return True, ""
 
 
@@ -506,13 +727,18 @@ def _remember_generated_value(
     if not workflow.get("generate_sample_data") or decision.get("action") not in {
         "fill",
         "select",
+        "check",
     }:
         return
-    value = str(decision.get("value") or "").strip()
+    field = observation["fields"][int(decision["index"])]
+    value = str(
+        field.get("choice_value")
+        if decision["action"] == "check"
+        else decision.get("value") or ""
+    ).strip()
     supplied = str(workflow.get("user_instructions") or "")
     if not value or value.casefold() in supplied.casefold():
         return
-    field = observation["fields"][int(decision["index"])]
     field_name = str(
         field.get("name") or field.get("fieldName") or field.get("fieldId") or "field"
     )[:100]
@@ -526,27 +752,89 @@ async def _apply_action(page, decision: dict, observation: dict) -> dict:
     group = "controls" if action == "click" else "fields"
     item = observation[group][int(decision["index"])]
     if action == "click":
-        await page.get_by_role(item["kind"], name=item["name"], exact=True).first.click(
-            timeout=8000
-        )
+        if isinstance(item.get("domIndex"), int):
+            locator = page.locator(_CONTROL_SELECTOR).nth(item["domIndex"])
+            matches = await locator.evaluate(
+                """(el, expected) => {
+                  const name = (el.getAttribute('aria-label') || el.innerText
+                    || el.textContent || el.getAttribute('name') || el.value || '')
+                    .replace(/\\s+/g, ' ').trim().slice(0, 100);
+                  const kind = el.tagName.toLowerCase() === 'a' ? 'link' : 'button';
+                  return name === expected.name && kind === expected.kind
+                    && (kind !== 'link' || el.href === expected.href);
+                }""",
+                {"name": item["name"], "kind": item["kind"], "href": item.get("href")},
+            )
+            if not matches:
+                raise ValueError(
+                    "The chosen page control changed before it could be clicked."
+                )
+            await locator.click(timeout=8000)
+        elif item.get("kind") == "link" and item.get("rawHref"):
+            await page.locator(
+                f"a[href={json.dumps(item['rawHref'])}]:visible"
+            ).first.click(timeout=8000)
+        else:
+            await page.get_by_role(
+                item["kind"], name=item["name"], exact=True
+            ).first.click(timeout=8000)
         return {"kind": "click", "role": item["kind"], "name": item["name"]}
     if item.get("fieldName"):
         selector = f"[name={json.dumps(item['fieldName'])}]"
-        locator = page.locator(selector).first
+        if action == "check":
+            selector += f"[value={json.dumps(item['choice_value'])}]"
+        locator = page.locator(f"{selector}:visible").first
     elif item.get("fieldId"):
         selector = f"[id={json.dumps(item['fieldId'])}]"
-        locator = page.locator(selector).first
+        locator = page.locator(f"{selector}:visible").first
     else:
         selector = ""
         locator = page.locator(_FIELD_SELECTOR).nth(item["domIndex"])
-    if action == "fill":
-        await locator.fill(str(decision.get("value") or ""), timeout=8000)
+    if action == "check":
+        await locator.check(force=True, timeout=8000)
+    elif action == "fill":
+        value = str(decision.get("value") or "")
+        try:
+            await locator.fill(value, timeout=8000)
+        except PlaywrightTimeoutError:
+            # A field can remain in the DOM while Playwright's actionability
+            # check waits for it. Only fall back if exactly one matching field
+            # is still visible and editable.
+            filled = await page.evaluate(
+                """({selector, value}) => {
+                  const matches = Array.from(document.querySelectorAll(selector))
+                    .filter(el => {
+                      const rect = el.getBoundingClientRect();
+                      const style = getComputedStyle(el);
+                      return rect.width > 0 && rect.height > 0 && !el.disabled
+                        && !el.readOnly && style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && (el instanceof HTMLInputElement
+                          || el instanceof HTMLTextAreaElement);
+                    });
+                  if (matches.length !== 1) return false;
+                  const field = matches[0];
+                  const prototype = field instanceof HTMLTextAreaElement
+                    ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                  Object.getOwnPropertyDescriptor(prototype, 'value').set.call(field, value);
+                  field.dispatchEvent(new Event('input', {bubbles: true}));
+                  field.dispatchEvent(new Event('change', {bubbles: true}));
+                  return field.value === value;
+                }""",
+                {"selector": selector, "value": value},
+            )
+            if not filled:
+                raise
     else:
         await locator.select_option(str(decision["value"]), timeout=8000)
     return {
         "kind": "select_option" if action == "select" else action,
         "selector": selector,
-        "value": str(decision.get("value") or ""),
+        "value": str(
+            item.get("choice_value")
+            if action == "check"
+            else decision.get("value") or ""
+        ),
     }
 
 
@@ -772,7 +1060,7 @@ async def explore_after_crawl(
     if not proposals:
         return
 
-    credential_by_id = {credential.id: credential for credential in creds}
+    historical_usernames = _historical_credential_usernames(run_id)
     report("Opening browser", stage="browser")
     async with async_playwright() as playwright:
         browser = await launch_playwright_browser(
@@ -800,18 +1088,20 @@ async def explore_after_crawl(
                         "Not tried because this workflow appears to delete something.",
                     )
                     continue
-                credential_id = start_page.replay_credential_id if start_page else None
-                if credential_id is None and start_page:
-                    try:
-                        credential_id = next(
-                            iter(json.loads(start_page.accessible_by or "[]")), None
-                        )
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        credential_id = None
-                credential = credential_by_id.get(credential_id)
-                if credential is None and start_page is None and creds:
-                    credential = creds[0]
-                    credential_id = credential.id
+                credential, requires_credential = _workflow_credential(
+                    start_page, creds, historical_usernames
+                )
+                if credential is None and requires_credential:
+                    _record_note(
+                        run_id,
+                        workflow,
+                        "not_attempted",
+                        [],
+                        "The saved account for this page is no longer available. "
+                        "Update the site credentials and retry this workflow.",
+                    )
+                    continue
+                credential_id = credential.id if credential else None
                 if credential and credential.auth_mode in {
                     AuthMode.guided,
                     AuthMode.entra_id,
@@ -840,20 +1130,39 @@ async def explore_after_crawl(
                 page = await context.new_page()
                 steps: list[dict] = []
                 descriptions: list[str] = []
+                decision_feedback: list[str] = []
+                prior_actions: set[tuple[str, str, str, str]] = set()
+                submission_errors: dict[str, int] = {}
                 detail = "Stopped before the workflow was reached."
                 status = "not_reached"
                 needs_input = False
                 request = ""
+                attempted_action = "opening the starting page"
                 try:
                     if credential:
                         report("Signing in", stage="sign_in")
-                        await _authenticate(
-                            page,
-                            _login_url_for_credential(site.login_url or "", credential),
-                            credential,
-                            run_id,
-                            llm_cfg=llm_cfg,
-                        )
+                        try:
+                            await _authenticate(
+                                page,
+                                _login_url_for_credential(
+                                    site.login_url or "", credential
+                                ),
+                                credential,
+                                run_id,
+                                llm_cfg=llm_cfg,
+                            )
+                        except Exception:
+                            log.warning(
+                                "Could not sign in for workflow %s",
+                                workflow["name"],
+                                exc_info=True,
+                            )
+                            detail = (
+                                "Could not sign in with the saved site credential. "
+                                "Update it and retry this workflow."
+                            )
+                            status = "not_attempted"
+                            continue
                     report(
                         "Opening the starting page",
                         stage="opening_page",
@@ -883,6 +1192,7 @@ async def explore_after_crawl(
                         actions=[],
                     )
                     for _ in range(action_limit):
+                        attempted_action = "checking the page"
                         if run_id in _stop_requested:
                             detail = "Stopped by the user."
                             break
@@ -892,8 +1202,12 @@ async def explore_after_crawl(
                             stage="deciding",
                             current_path=urlparse(page.url).path or "/",
                         )
-                        decision = await _decide_action(
-                            llm_cfg, workflow, observation, descriptions
+                        decision = await _decide_with_corrections(
+                            llm_cfg,
+                            workflow,
+                            observation,
+                            [*descriptions, *decision_feedback],
+                            prior_actions,
                         )
                         action = decision.get("action")
                         if action == "reached":
@@ -933,9 +1247,11 @@ async def explore_after_crawl(
                             needs_input = decision.get("needs_input") is True
                             request = str(decision.get("request") or "")[:300]
                             detail = str(decision.get("reason") or detail)[:500]
-                            if workflow.get(
-                                "user_instructions"
-                            ) and _invalid_supplied_input(observation):
+                            if (
+                                workflow.get("user_instructions")
+                                and not workflow.get("generate_sample_data")
+                                and _invalid_supplied_input(observation)
+                            ):
                                 needs_input = True
                                 request = _invalid_supplied_input(observation)
                             if needs_input:
@@ -950,6 +1266,7 @@ async def explore_after_crawl(
                             generate_sample_data=bool(
                                 workflow.get("generate_sample_data")
                             ),
+                            prior_actions=prior_actions,
                         )
                         if not allowed:
                             needs_input = why in {
@@ -970,10 +1287,25 @@ async def explore_after_crawl(
                             "click": "Clicking a page control",
                             "fill": "Filling a field",
                             "select": "Choosing an option",
+                            "check": "Choosing a radio option",
                         }.get(action, "Using a page control")
                         report(action_label, stage="acting")
+                        if action == "click":
+                            attempted_action = "clicking a page control"
+                        else:
+                            field = observation["fields"][int(decision["index"])]
+                            field_name = str(field.get("name") or "field")[:80]
+                            attempted_action = (
+                                f"filling {field_name}"
+                                if action == "fill"
+                                else f"selecting {field_name}"
+                                if action == "select"
+                                else f"checking {field_name}"
+                            )
                         step = await _apply_action(page, decision, observation)
                         steps.append(step)
+                        if action in {"fill", "select", "check"}:
+                            prior_actions.add(_field_action_key(decision, observation))
                         _remember_generated_value(workflow, decision, observation)
                         descriptions.append(
                             f"{decision['action']} {step.get('name') or step.get('selector')}"
@@ -983,34 +1315,45 @@ async def explore_after_crawl(
                             stage="checking_page",
                             current_path=urlparse(page.url).path or "/",
                             actions_done=len(descriptions),
-                            actions=descriptions[-8:],
+                            actions=descriptions.copy(),
                         )
                         await _wait_for_content_settle(page, max_wait_ms=1200)
-                        if (
-                            action == "click"
-                            and (
+                        if action == "click" and (
+                            observation["controls"][int(decision["index"])].get(
+                                "submits"
+                            )
+                            or re.search(
+                                r"\b(?:save|submit|continue|confirm|apply|next)\b",
                                 observation["controls"][int(decision["index"])].get(
-                                    "submits"
-                                )
-                                or re.search(
-                                    r"\b(?:save|submit|continue|confirm|apply|next)\b",
-                                    observation["controls"][int(decision["index"])].get(
-                                        "name", ""
-                                    ),
-                                    re.I,
-                                )
+                                    "name", ""
+                                ),
+                                re.I,
                             )
-                            and workflow.get("user_instructions")
                         ):
-                            validation_request = _invalid_supplied_input(
-                                await _observe(page)
+                            submitted_observation = await _observe(page)
+                            validation_action, validation_request = (
+                                _submission_validation_action(
+                                    submitted_observation,
+                                    generate_sample_data=bool(
+                                        workflow.get("generate_sample_data")
+                                    ),
+                                    seen_errors=submission_errors,
+                                )
                             )
-                            if validation_request:
+                            if validation_action == "needs_input":
                                 needs_input = True
                                 status = "needs_input"
                                 request = validation_request
-                                detail = "The site rejected a supplied form value."
+                                detail = (
+                                    "The site kept rejecting the generated form data."
+                                    if workflow.get("generate_sample_data")
+                                    else "The site rejected a supplied form value."
+                                )
                                 break
+                            if validation_action == "retry":
+                                decision_feedback.append(
+                                    f"Form error after submit: {validation_request}"
+                                )
                         if not _same_domain(page.url, base_netloc):
                             detail = "The action left the target site."
                             break
@@ -1032,6 +1375,14 @@ async def explore_after_crawl(
                                 break
                     else:
                         detail = "Stopped after the workflow exploration limit."
+                except PlaywrightTimeoutError as exc:
+                    log.warning(
+                        "Timed out while %s in workflow %s: %s",
+                        attempted_action,
+                        workflow["name"],
+                        exc,
+                    )
+                    detail = f"Timed out while {attempted_action}."
                 except Exception as exc:
                     log.warning(
                         "Could not explore workflow %s: %s", workflow["name"], exc
@@ -1054,7 +1405,7 @@ async def explore_after_crawl(
                         stage="finished",
                         current_path=urlparse(page.url).path or "/",
                         actions_done=len(descriptions),
-                        actions=descriptions[-8:],
+                        actions=descriptions.copy(),
                         result_status=status,
                     )
                     await context.close()
@@ -1087,6 +1438,9 @@ def start_workflow_retry(
     instructions = instructions.strip()
     if len(instructions) > 4000:
         raise ValueError("Enter up to 4000 characters of sample data or instructions.")
+    generate_sample_data = (
+        generate_sample_data or note.get("generate_sample_data") is True
+    )
     workflow = {
         "name": str(note.get("name") or "Workflow")[:100],
         "goal": str(note.get("goal") or note.get("name") or "Workflow")[:220],

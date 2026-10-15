@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import secrets
+import ssl
 import time
 from contextvars import ContextVar as _ContextVar
 from datetime import datetime, timezone
@@ -84,6 +85,7 @@ from aespa.services.settings import (
     get_specialist_agent_config,
     get_upstream_proxy_config,
 )
+from aespa.services.tls import httpx_verify
 
 log = logging.getLogger("aespa.scanner")
 
@@ -210,8 +212,8 @@ _scanner_global_header_var: _ContextVar[dict[str, str]] = _ContextVar(
 )
 
 
-def _scanner_tls_verify() -> str | bool:
-    return _scanner_ca_bundle_var.get() or False
+def _scanner_tls_verify() -> ssl.SSLContext | bool:
+    return httpx_verify(_scanner_ca_bundle_var.get(), False)
 
 
 def _make_scanner_client(**kwargs) -> httpx.AsyncClient:

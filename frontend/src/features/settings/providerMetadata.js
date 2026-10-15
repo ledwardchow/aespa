@@ -46,6 +46,7 @@ export const DEFAULT_LLM_FORM = {
   use_vision: false,
   force_tool_choice: false,
   reasoning_effort: "",
+  service_tier: "",
   max_tpm: "",
   max_rpm: "",
 };

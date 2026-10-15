@@ -171,7 +171,9 @@ def _refresh(client, **kwargs):
     return asyncio.run(run())
 
 
-def test_list_download_uses_testing_ca_bundle(db_session, monkeypatch):
+def test_list_download_uses_testing_ca_bundle(
+    db_session, monkeypatch, fake_ssl_context
+):
     db_session.add(
         UpstreamProxyConfig(id=1, scanner_ca_bundle_path="/tmp/testing-ca.pem")
     )
@@ -191,7 +193,7 @@ def test_list_download_uses_testing_ca_bundle(db_session, monkeypatch):
     monkeypatch.setattr(retire_repository.httpx, "AsyncClient", FakeClient)
     result = asyncio.run(real_ensure_fresh())
     assert result["status"] == "failed"
-    assert captured["verify"] == "/tmp/testing-ca.pem"
+    assert captured["verify"] == fake_ssl_context("/tmp/testing-ca.pem")
 
 
 def test_download_replaces_cached_copy_and_uses_etag(offline_retire_list):

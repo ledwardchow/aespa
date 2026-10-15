@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event
@@ -9,27 +11,54 @@ from aespa.db import _migrate, get_session, set_engine
 from aespa.main import create_app
 
 
-@pytest.fixture(scope="function", autouse=True)
-def isolated_db_engine():
-    """Keep every test, including mocked provider calls, off the local database."""
-    prev_engine = aespa.db._engine
-    engine = create_engine(
+def _memory_engine():
+    return create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
 
+
+@pytest.fixture(scope="session")
+def _template_db_engine():
+    """Build and migrate the schema once per test process.
+
+    Creating 90-odd tables and running every migration costs far more than the
+    average test, so each test gets a copy of this database instead.
+    """
     # ensure models are registered with metadata before create_all
     from aespa import models as _models  # noqa: F401
 
+    engine = _memory_engine()
     SQLModel.metadata.create_all(engine)
     _migrate(engine)
+    yield engine
+    engine.dispose()
+
+
+def _copy_template_into(template, engine) -> None:
+    """Copy the migrated template into ``engine`` with SQLite's backup API."""
+    source = template.raw_connection()
+    target = engine.raw_connection()
+    try:
+        source.driver_connection.backup(target.driver_connection)
+    finally:
+        # StaticPool keeps the single underlying connection open on close().
+        source.close()
+        target.close()
+
+
+@pytest.fixture(scope="function", autouse=True)
+def isolated_db_engine(_template_db_engine):
+    """Keep every test, including mocked provider calls, off the local database."""
+    prev_engine = aespa.db._engine
+    engine = _memory_engine()
+    _copy_template_into(_template_db_engine, engine)
     set_engine(engine)
 
     yield engine
 
     set_engine(prev_engine)
-    SQLModel.metadata.drop_all(engine)
     engine.dispose()
 
 
@@ -78,7 +107,7 @@ def client(isolated_client):
 
 
 @pytest.fixture(scope="function")
-def fk_engine():
+def fk_engine(_template_db_engine):
     """A fresh in-memory engine with SQLite foreign-key enforcement genuinely
     ON — mirrors ``db._build_engine``'s "connect" pragma, which the plain
     ``isolated_db_engine`` fixture above does not set. Use this whenever a
@@ -89,11 +118,7 @@ def fk_engine():
     explicitly, matching the pattern already used by other test files with
     their own local ``engine`` fixture.
     """
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    engine = _memory_engine()
 
     @event.listens_for(engine, "connect")
     def _enforce_fk(dbapi_connection, _record):
@@ -101,10 +126,7 @@ def fk_engine():
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-    _migrate(engine)
+    _copy_template_into(_template_db_engine, engine)
 
     prev_engine = aespa.db._engine
     set_engine(engine)
@@ -112,8 +134,23 @@ def fk_engine():
     yield engine
 
     set_engine(prev_engine)
-    SQLModel.metadata.drop_all(engine)
     engine.dispose()
+
+
+@pytest.fixture
+def fake_ssl_context(monkeypatch):
+    """Turn CA bundle paths into comparable stand-ins instead of loading them.
+
+    Returns a function giving the value ``httpx_verify`` produces for a path,
+    so tests can check which bundle reached a client without a real file.
+    """
+    from aespa.services import tls
+
+    def _context(cafile=None, capath=None):
+        return ("ssl-context", cafile or capath)
+
+    monkeypatch.setattr(tls, "ssl", SimpleNamespace(create_default_context=_context))
+    return lambda path: ("ssl-context", path)
 
 
 @pytest.fixture(autouse=True)

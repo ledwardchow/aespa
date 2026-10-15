@@ -6,7 +6,9 @@ from aespa.models import UpstreamProxyConfig
 from aespa.services import scanner, scanner_sessions
 
 
-def test_session_probe_uses_testing_proxy_and_ca(db_session, monkeypatch):
+def test_session_probe_uses_testing_proxy_and_ca(
+    db_session, monkeypatch, fake_ssl_context
+):
     db_session.add(
         UpstreamProxyConfig(
             id=1,
@@ -40,7 +42,7 @@ def test_session_probe_uses_testing_proxy_and_ca(db_session, monkeypatch):
         == 200
     )
     assert captured["proxy"] == "http://proxy.example:8080"
-    assert captured["verify"] == "/tmp/testing-ca.pem"
+    assert captured["verify"] == fake_ssl_context("/tmp/testing-ca.pem")
 
 
 def test_upsert_session_reuses_label_and_loads_vault(engine):

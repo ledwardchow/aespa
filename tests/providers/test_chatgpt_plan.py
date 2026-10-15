@@ -66,7 +66,7 @@ def test_plan_model_discovery_reports_signed_out_account(
     async def unavailable(_client_id):
         raise RuntimeError("Sign in with ChatGPT")
 
-    monkeypatch.setattr(chatgpt_plan, "discover_models", unavailable)
+    monkeypatch.setattr(chatgpt_plan, "discover_model_options", unavailable)
     response = client.post(
         "/api/settings/llm/discover-model-options",
         json={"api_format": "openai_chatgpt_plan", "username": "oaiapp_test"},
@@ -79,7 +79,15 @@ def test_plan_discovery_adds_verified_models_and_documented_limits(
     client: TestClient, monkeypatch
 ):
     async def catalog(_client_id):
-        return ["gpt-6-astra", "gpt-5.6-sol"]
+        return [
+            {
+                "id": "gpt-6-astra",
+                "service_tiers": [
+                    {"id": "priority", "name": "Fast", "description": "2x speed"}
+                ],
+            },
+            {"id": "gpt-5.6-sol", "service_tiers": []},
+        ]
 
     async def access(_client_id, *, force=False):
         return {
@@ -87,7 +95,7 @@ def test_plan_discovery_adds_verified_models_and_documented_limits(
             "daybreak": {"blue": True, "red": True},
         }
 
-    monkeypatch.setattr(chatgpt_plan, "discover_models", catalog)
+    monkeypatch.setattr(chatgpt_plan, "discover_model_options", catalog)
     monkeypatch.setattr(chatgpt_plan, "check_access", access)
     response = client.post(
         "/api/settings/llm/discover-model-options",
@@ -103,6 +111,10 @@ def test_plan_discovery_adds_verified_models_and_documented_limits(
         "gpt-daybreak-red-latest",
     ]
     assert result["catalog_complete"] is True
+    assert result["capabilities"]["gpt-6-astra"]["service_tiers"] == [
+        {"id": "priority", "name": "Fast", "description": "2x speed"}
+    ]
+    assert "service_tiers" not in result["capabilities"]["gpt-5.6-sol"]
     assert result["capabilities"]["gpt-6-sol"]["context_window_tokens"] == 1_050_000
     assert result["capabilities"]["gpt-6-sol"]["max_output_tokens"] == 128_000
     assert result["capabilities"]["gpt-6-sol"]["default_effort"] == "medium"
@@ -115,7 +127,7 @@ def test_plan_discovery_adds_verified_models_and_documented_limits(
     async def catalog_unavailable(_client_id):
         raise RuntimeError("catalog unavailable")
 
-    monkeypatch.setattr(chatgpt_plan, "discover_models", catalog_unavailable)
+    monkeypatch.setattr(chatgpt_plan, "discover_model_options", catalog_unavailable)
     partial = client.post(
         "/api/settings/llm/discover-model-options",
         json={"api_format": "openai_chatgpt_plan", "username": "oaiapp_test"},
@@ -261,6 +273,102 @@ def test_plan_request_uses_supported_streaming_shape():
     assert result["include"] == ["reasoning.encrypted_content"]
     assert "temperature" not in result
     assert "max_output_tokens" not in result
+    assert "service_tier" not in result
+
+    fast = llm._responses_request_kwargs(
+        SimpleNamespace(**{**vars(config), "service_tier": "priority"}),
+        input="hello",
+    )
+    assert fast["service_tier"] == "priority"
+
+
+def test_plan_catalog_keeps_model_speed_tiers(monkeypatch):
+    async def token(_client_id=None):
+        return "token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "slug": "gpt-6-astra",
+                        "visibility": "list",
+                        "service_tiers": [
+                            {"id": "priority", "name": "Fast", "description": "2x"},
+                            "ultrafast",
+                            {"name": "missing id"},
+                        ],
+                    },
+                    {"slug": "gpt-hidden", "visibility": "hide"},
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(chatgpt_plan, "access_token", token)
+    monkeypatch.setattr(
+        chatgpt_plan.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=transport),
+    )
+    options = asyncio.run(chatgpt_plan.discover_model_options("oaiapp_test"))
+    assert options == [
+        {
+            "id": "gpt-6-astra",
+            "service_tiers": [
+                {"id": "priority", "name": "Fast", "description": "2x"},
+                {"id": "ultrafast", "name": "ultrafast"},
+            ],
+        }
+    ]
+
+
+def test_plan_model_speed_is_saved_per_model(client: TestClient):
+    provider = client.post(
+        "/api/settings/llm/providers",
+        json={
+            "name": "ChatGPT speed test",
+            "api_format": "openai_chatgpt_plan",
+            "username": "oaiapp_test",
+            "models": ["gpt-6-astra", "gpt-5.6-sol"],
+            "model_capabilities": {
+                "gpt-6-astra": {"service_tiers": [{"id": "priority", "name": "Fast"}]}
+            },
+        },
+    ).json()
+    models = client.get("/api/settings/llm/model-configs").json()
+    astra = next(item for item in models if item["model"] == "gpt-6-astra")
+    sol = next(item for item in models if item["model"] == "gpt-5.6-sol")
+    assert astra["service_tier"] is None
+
+    def save(model, tier):
+        return client.put(
+            f"/api/settings/llm/model-configs/{model['id']}",
+            json={
+                "name": model["name"],
+                "provider_id": provider["id"],
+                "model": model["model"],
+                "service_tier": tier,
+            },
+        )
+
+    fast = save(astra, "priority")
+    assert fast.status_code == 200
+    assert fast.json()["service_tier"] == "priority"
+    refreshed = client.get("/api/settings/llm/model-configs").json()
+    assert next(i for i in refreshed if i["id"] == sol["id"])["service_tier"] is None
+
+    unsupported = save(sol, "priority")
+    assert unsupported.status_code == 422
+    assert "Load models" in unsupported.json()["detail"]
+    assert save(astra, "ultrafast").status_code == 422
+
+    exported = client.get("/api/settings/llm/export").json()
+    tiers = {item["model"]: item["service_tier"] for item in exported["profiles"]}
+    assert tiers == {"gpt-6-astra": "priority", "gpt-5.6-sol": None}
+    assert save(astra, None).json()["service_tier"] is None
 
 
 def test_plan_response_counts_one_request(monkeypatch):

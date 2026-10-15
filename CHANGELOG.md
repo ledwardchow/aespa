@@ -6,31 +6,41 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **Crawler workflows**: After crawling, AESPA checks for workflows suggested by the pages it saw but did not reach. It can use the site's controls to reach them, including submitting forms and changing state. Delete actions remain blocked. Workflows under Attack Surface & Coverage shows each workflow once, with retry attempts and live progress inside it. You can retry an unfinished workflow there. A workflow that needs input links directly to its notification, where the relevant form is ready to edit. A notice on the run page also links to Status → Notifications when a workflow needs sample data or instructions, including when the site rejects a supplied form value. Opening it dismisses the notice, while a count beside the tab shows pending requests. You can correct the data or choose Generate for me to let the crawler make up missing ordinary form values, then watch the retry in Workflows. Payment details and secrets still need user-provided test values. Submitted and generated values remain ready to edit and retry. Data is saved to the site for future tests only after the workflow is reached. You can also edit saved data in site settings.
+- **ChatGPT plan usage**: An optional extension estimates the API value of ChatGPT plan usage for the ChatGPT plan and Codex CLI providers. It tracks tokens used in AESPA and reads the plan's 5-hour and weekly usage percentages from the Codex CLI, with manual readings available. Stats → ChatGPT plan shows usage over time, estimated cost, and tokens per percentage point. Reading intervals are configurable. Usage outside AESPA affects the estimates; prices come from the Usage page.
 
-- **Grouped page crawl**: Previously, the crawler was not good at working on sites which had a lot of content of the same category - for example, a storefront with a lot of products (which are different but all substantially offer the same application functionality) or a CMS (which has a lot of articles which have different content but from an application perspective are all the same idea). The crawler would note each individual page as a new page, rapidly cap out its budget, and miss actual functionality. The crawler now recognises content which is substantially similar, collapses these into a single item on the site map and terminates crawling items which are in the same category. This is a separate crawl setting accessible under URL crawl --> Group similar pages and is not the default setting.
+- **Crawler workflows**: Prior to this, crawls did not execute state-changing/irreversible functionality, i.e. checking out a shopping cart. With this change, the crawler will specifically discover and index workflows which it didn't use during the crawl and ask the user for the information/permission to auto-generate data to submit in those workflows and execute them, allowing these workflows to be added to the sitemap. 
+
+- **Grouped page crawl**: The crawler was really bad at making a sitemap of websites which had a large amount of "content" i.e. a shopping site, or a CMS, it would blow its page budget on content instead of functionality. The optional **Group similar pages** setting makes the crawler work out that pages such as products or articles are substantially the same thing from a functionality perspective, group them on the site map and limit crawling of more of those pages. This leaves more of the crawl budget for distinct site features. The setting is off by default.
 
 - **External scanner leads**: Import SARIF 2.1.0 and structured Markdown reports into web or API runs, preview their leads before saving, and skip repeated findings. Imported reports keep their scanner, rule, location, and evidence details, and DAST treats them as unverified leads. Markdown import also accepts AESPA lead exports; a template is available in the import dialog.
 
+- **Fast mode for ChatGPT plan models**: Models that offer faster responses on your ChatGPT plan show a Speed setting in their model settings. Choose Fast (or another speed the model lists) for each model separately; it uses your plan's usage limits more quickly. Load models for an existing ChatGPT plan provider again to see the speed options.
+
 - **Crawl then pentest**: Start a web crawl and have AESPA begin the selected pentest mode automatically when the crawl finishes successfully.
 
-- **Saved benchmark analyses**: Open an analysis from a graph or results list on its own page, group findings by OWASP category or severity, and return to Benchmark Lab. Add comments to saved analyses; they appear on graph cards and can be included in published summaries. Signed-in users can edit comments on the private benchmark site, and the public graph site displays them.
+- **Saved benchmark analyses**: Open analyses from graphs or results lists and group findings by OWASP category or severity. Comments appear on graph cards and can be included in published summaries. Signed-in users can edit comments on the private benchmark site; the public graph site displays them.
 
-- **Custom CA bundles**: Set separate PEM CA bundle paths for application and testing traffic in Connectivity settings. LLM calls, model lists, sign-in requests, and Benchmark Lab use the application setting. Session checks and vulnerable-library list updates use the testing setting. AESPA checks certificates against a configured bundle; browser based tests keep accepting certificate errors. CLI providers receive the configured CA path through their environment.
+- **Custom CA bundles**: Connectivity settings now accept separate PEM CA bundles for application and testing traffic. Application requests include LLM calls and Benchmark Lab; testing requests include session checks and vulnerable-library updates. CLI providers receive the application CA path. Browser tests continue accepting certificate errors.
 
-- **Saved crawls**: A finished crawl can now be saved on its site and loaded into a new run, so repeat scans and benchmarks can skip crawling. Use **Save crawl to site** on a run with crawl data, then **Load saved crawl** on a new run. The site page lists saved crawls, where you can rename, download, or delete them, and add crawl export files you downloaded earlier. Saved crawls and downloaded crawl files keep workflow notes and retry history along with the session cookies and tokens captured during the crawl.
+- **Saved crawls**: Save a finished crawl to its site and load it into a new run to skip crawling again. The site page lets you rename, import, download, or delete saved crawls. Saved crawls include workflow history and captured session data.
 
-- **Outdated JavaScript library checks**: Web scans check JavaScript files captured during crawling for libraries with known vulnerabilities, using the Retire.js list. Findings show the affected version, where it was seen, matching CVEs, and the version to upgrade to. The check also runs in passive mode and can be turned off with the other automatic checks. AESPA includes a copy of the list and checks for updates before scans by default; manage this under Settings → Global → Vulnerable Libraries.
+- **Outdated JavaScript library checks**: Web scans use the Retire.js list to flag captured libraries with known vulnerabilities. Findings show the affected version, location, CVEs, and upgrade version. The check runs in passive mode too and can be managed under Settings → Global → Vulnerable Libraries.
 
 ### Updates
 
-- **Site map layout**: Run settings and attack scope now share one row above the site map, and the crawl stage shows on a single line. Users, grouped pages and display settings have moved to a side panel beside the graph, giving the graph most of the screen height. Collapse the panel to a narrow strip to give the graph almost the full width; AESPA remembers this choice in your browser. On narrow windows the panel starts collapsed and opens over the graph.
+- **Benchmark publishing**: Choose which applications to publish before sending results to AESPA Benchmarks Online. Benchmark Lab lists each ground truth that has saved results, with a result count, and only the selected ones are uploaded.
 
-- **SAST findings in live tests**: Web and API scans use a searchable, paginated dialog to import leads from a source scan, showing recent scans first, source filenames, completion dates, and counts of new and already imported leads. You can also choose a saved Site or API collection from a SAST finding to create and open a SAST Validate run with that finding.
+- **Loading models for a new provider**: Load models from API now saves a new provider straight away, so you can open and configure its models without saving and reopening the provider first.
+
+- **Attack Surface**: Removed the Signals and Access Observations sections from the display and renamed Observed Technologies to Tech Stack. Route access is still shown in the route inventory.
+
+- **Site map layout**: Run settings and attack scope now sit above the site map. Users, grouped pages, and display settings have moved to a collapsible side panel, giving the graph more room. AESPA remembers the panel setting; on narrow windows it starts collapsed.
+
+- **SAST findings in live tests**: Web and API scans now have a searchable dialog for importing source scan leads, with scan details and counts of new leads. You can also start a SAST Validate run from a finding using a saved Site or API collection.
 
 - **SAST findings export**: Choose Markdown or SARIF from the Findings page export menu. The run actions menu still offers both formats.
 
-- **SAST finding details**: The findings list now uses the full page width, larger text, and each finding's stored reference in the first column, sorted by reference by default. Open a finding to read its full-width writeup in larger text, move between the visible findings, and return to the list with its sorting, filters, and scroll position intact.
+- **SAST finding details**: The wider findings list shows each finding's reference and sorts by it by default. Finding writeups use a full-width view with larger text. You can move between findings and return to the list without losing its filters, sort order, or scroll position.
 
 - **Hosted benchmark publishing**: Benchmark Lab now defaults to `benchmarks.aespa.app`; existing upload tokens also work with the original `chatgpt.site` address. Results edited on the site are protected from later scanner uploads, and Benchmark Lab reports how many were skipped when publishing.
 
@@ -38,13 +48,15 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Python execution request limit**: New setups now allow up to 50 HTTP requests per Python execution by default. Existing saved settings can still be changed in Agent Settings.
 
-- **Benchmark comparison charts**: The scanner and benchmark sites can compare either scan cost or scan date with matched finding count or a severity-weighted score. The sites show cost and score by default. Scans recorded at $0 are hidden from the graph by default and can be shown with **Show local model ($0) results**. Full and partial matches use the ground-truth severity: informational 0, low 1, medium 2, high 3, and critical 4. High and Critical matches in OWASP A01, A03, A04, and A07 earn double points. Point details show matched findings out of the ground-truth total for each OWASP category.
+- **Benchmark comparison charts**: Compare scan cost or date with matched findings or a severity-weighted score. Charts default to cost and score and hide $0 scans unless you choose **Show local model ($0) results**. Scores use ground-truth severity and give extra weight to High and Critical matches in selected OWASP categories. Point details show matches by category.
 
-- **Portable installation data**: AESPA now keeps its main, console-log, and reporting-debug databases in `aespa_data` alongside uploads and extension data. Existing databases are moved there on first start, and uploaded-file references are repaired when the folder is copied to another installation. The console's Data Folder setting lets source and desktop users choose where AESPA stores data on the next launch; an empty folder starts a new database, while existing data is left in place.
+- **Portable installation data**: AESPA keeps databases, uploads, and extension data together in `aespa_data` and moves existing databases there on first start. The console's Data Folder setting lets source and desktop users choose another location on the next launch. Copying the folder to another installation preserves uploaded-file references.
 
-- **Smaller console log database**: When console log saving is on, each LLM request and response is now stored once instead of twice. Agent conversations that continue an earlier logged call now save only the new messages, with a reference to that earlier call, instead of repeating the whole conversation on every step. Together these greatly reduce how fast the console log database grows during long scans.
+- **Smaller console log database**: LLM requests and responses are stored once when console logging is on. Continued agent conversations save only new messages, reducing log growth during long scans.
 
 ### Fixes
+
+- **Site credentials**: Saving site settings keeps the IDs of existing credentials, so pages and runs linked to those accounts continue to recognize them.
 
 - **Subtab links**: Web, API, and source scan subtabs, SAST phases, Benchmark Lab tabs, and Reporting Lab tabs now keep the selected view in the URL, so refreshing or using browser history returns to that view.
 
@@ -52,9 +64,9 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Resuming SAST runs from a repository or extension source**: A failed or cancelled SAST run whose source code was already downloaded now offers the normal resume and start actions. Previously, AESPA always showed **Resume source preparation** for these runs, even when the source was ready.
 
-- **Error and status messages**: Errors from actions such as saving, deleting or importing now appear in the lower-right corner of the window and can be dismissed, instead of staying at the top of the page and pushing its content down. This applies across sites, systems, campaigns, API collections, all run types, Benchmark Lab, Settings and Extensions. Confirmations such as imported issues, imported settings and purged data appear the same way and close on their own, replacing browser pop-ups. Form errors now appear next to the Save button. Pages that could not load still show their error in place.
+- **Error and status messages**: Action errors and confirmations now appear in the lower-right corner across the app instead of shifting page content or opening browser pop-ups. Form errors appear beside Save, and page-load errors remain on the page.
 
-- **Expired ChatGPT sign-in**: When ChatGPT rejects a saved sign-in, AESPA now stops the affected web, API, or SAST run, marks it failed, and shows a message asking you to sign in again in LLM settings. Previously, every request in the run kept failing with a raw `400 Bad Request` error. The account now shows as signed out, and AESPA no longer sends further requests with the rejected sign-in. A temporary ChatGPT outage still shows an error but keeps your sign-in.
+- **Expired ChatGPT sign-in**: When ChatGPT rejects a saved sign-in, AESPA stops the affected run, marks the account signed out, and asks you to sign in again in LLM settings. Temporary ChatGPT outages still show an error without signing you out.
 
 - **Web crawl progress**: The site map now shows the unauthenticated crawl alongside saved accounts and shows whether account logins succeeded. Page counts appear in the progress summary without taking space in each user tile. Next.js page-data requests no longer fill the site map as separate API endpoints.
 
@@ -89,6 +101,10 @@ All pull requests merged to `main`, in reverse chronological order.
 ### Housekeeping
 
 - **Test suite cleanup**: Combined repeated API run, validator, and campaign checks while keeping the same cases covered.
+
+- **Faster tests**: The backend test suite runs across all CPU cores and builds the test database once per worker instead of once per test, cutting a full run from about six minutes to about half a minute. Use `uv run pytest -n 0` to run tests one at a time, for example when debugging.
+
+- **Deprecation warnings**: Custom CA bundles now reach HTTP clients in the form current versions of the HTTP library expect, with the same certificate checks as before. Older database migrations and tests no longer use deprecated database calls, so a full test run reports no warnings.
 
 - **SAST scan maintenance**: Light and Deep scans now share archive extraction, source file tools, and candidate-state helpers, keeping those behaviors consistent across both modes.
 

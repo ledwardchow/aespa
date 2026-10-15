@@ -100,6 +100,9 @@ export function SettingsPage({
     },
     [load],
   );
+  const onProviderCreated = (savedProvider) => {
+    nav(settingsEditHref("providers", savedProvider.id));
+  };
   const onCancel = () => {
     if (section === "models") {
       const providerId = editing?.provider_id || initialProviderId;
@@ -317,6 +320,8 @@ export function SettingsPage({
             mode="new"
             models={savedModels}
             profiles={profiles.filter((item) => !item.extension_id)}
+            onProviderCreated={onProviderCreated}
+            providerNames={providers.map((item) => item.name)}
             onSaved={onSaved}
             onCancel={providers.length ? onCancel : null}
           />

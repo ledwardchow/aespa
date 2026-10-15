@@ -8,7 +8,7 @@ from aespa.models import UpstreamProxyConfig
 from aespa.services import model_discovery, settings
 
 
-def test_discover_openai_models(db_session):
+def test_discover_openai_models(db_session, fake_ssl_context):
     db_session.add(
         UpstreamProxyConfig(
             id=1,
@@ -46,7 +46,7 @@ def test_discover_openai_models(db_session):
         models = asyncio.run(model_discovery.discover_openai_models(api_key="test-key"))
         assert models == ["gpt-4o", "gpt-4o-mini"]
     assert captured["proxy"] == "http://proxy.example:8080"
-    assert captured["verify"] == "/tmp/company-ca.pem"
+    assert captured["verify"] == fake_ssl_context("/tmp/company-ca.pem")
 
 
 def test_discover_bedrock_mantle_models_uses_v1_models_route():
