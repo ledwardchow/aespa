@@ -31,6 +31,7 @@ class ResolvedLLMConfig(BaseModel):
     context_limit_source: str
     temperature: float | None
     reasoning_effort: str | None
+    service_tier: str | None = None
     use_vision: bool
     force_tool_choice: bool
     updated_at: datetime

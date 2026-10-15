@@ -73,6 +73,7 @@ export function SiteForm({ siteId }) {
           scan_guidance: d.scan_guidance || "",
           workflow_data: d.workflow_data || [],
           credentials: d.credentials.map((c) => ({
+            id: c.id,
             username: c.username,
             password: c.password,
             login_fields: (c.login_fields?.length ? c.login_fields : defaultLoginFields()).map(
@@ -161,6 +162,7 @@ export function SiteForm({ siteId }) {
               selector: field.selector?.trim() || null,
             }));
             const base = {
+              ...(c.id ? { id: c.id } : {}),
               login_fields: loginFields,
               label: c.label || null,
               login_url: c.login_url?.trim() || null,

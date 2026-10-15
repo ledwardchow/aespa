@@ -9,7 +9,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from aespa.models import UpstreamProxyConfig
 from tests import test_benchmark_transfer as transfer_tests
@@ -219,7 +219,7 @@ def test_benchmark_domain_reuses_native_site_token(portable, db_engine, monkeypa
 
 
 def test_publish_sends_service_header_and_masks_saved_token(
-    portable, db_engine, monkeypatch
+    portable, db_engine, monkeypatch, fake_ssl_context
 ):
     models, _, stores = portable
     seed(models, stores[0])
@@ -287,13 +287,66 @@ def test_publish_sends_service_header_and_masks_saved_token(
         assert client.post("/publish").json()["stored"] == 1
     assert called[0][0] == "https://a.chatgpt.site/api/v1/results"
     assert client_options[-1]["proxy"] == "http://company-proxy.local:8080"
-    assert client_options[-1]["verify"] == certifi.where()
+    assert client_options[-1]["verify"] == fake_ssl_context(certifi.where())
     assert client_options[-1]["trust_env"] is False
     assert called[0][1]["headers"]["OAI-Sites-Authorization"] == "Bearer secret-value"
     assert called[0][1]["headers"]["X-AESPA-Upload-Token"] == UPLOAD_TOKEN
     assert "saved proof" not in called[0][1]["content"].decode()
     assert "run_name" not in called[0][1]["content"].decode()
     assert "tokens" in called[0][1]["content"].decode()
+
+
+def test_publish_sends_only_selected_ground_truths(portable, monkeypatch):
+    models, _, stores = portable
+    seed(models, stores[0], name="First")
+    seed(models, stores[0], name="Second")
+    with stores[0].session() as session:
+        first, second = [
+            row.id
+            for row in session.exec(select(models.Dataset).order_by(models.Dataset.id))
+        ]
+    publishing = modules()
+    every = publishing.graph_bundle(stores[0])["results"]
+    keys = {
+        row["dataset"]["key"]
+        for row in publishing.graph_bundle(stores[0], {second})["results"]
+    }
+    assert len(every) == 2 and len(keys) == 1
+    app = FastAPI()
+    from fastapi import APIRouter
+
+    router = APIRouter()
+    publishing.register_publishing(router, stores[0])
+    app.include_router(router)
+    sent = []
+
+    async def fake_post(self, url, **kwargs):
+        batch = json.loads(kwargs["content"])["results"]
+        sent.extend(batch)
+        return httpx.Response(
+            200,
+            json={"received": len(batch), "stored": len(batch), "skipped_stale": 0},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    with TestClient(app) as client:
+        client.put(
+            "/publishing",
+            json={
+                "site_url": "https://a.chatgpt.site",
+                "service_token": "secret-value",
+                "upload_token": UPLOAD_TOKEN,
+            },
+        )
+        response = client.post("/publish", json={"dataset_ids": [second]})
+        assert response.json()["received"] == 1
+        assert {row["dataset"]["key"] for row in sent} == keys
+        assert client.post("/publish", json={"dataset_ids": []}).status_code == 422
+        assert (
+            client.post("/publish", json={"dataset_ids": [first, 9999]}).status_code
+            == 422
+        )
+    assert len(sent) == 1
 
 
 def test_failed_publish_does_not_leak_response_or_credential(portable, monkeypatch):

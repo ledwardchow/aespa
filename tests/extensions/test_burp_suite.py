@@ -76,7 +76,7 @@ def test_existing_burp_configuration_migrates_to_extension(tmp_path):
                 "(extension_id, enabled, schema_version, settings_json, updated_at) "
                 "VALUES ('github.repository', 0, 1, '{\"git_executable\": \"/usr/bin/git\"}', :now)"
             ),
-            {"now": now},
+            {"now": now.isoformat(" ")},
         )
         connection.execute(
             sa.text(
@@ -86,7 +86,7 @@ def test_existing_burp_configuration_migrates_to_extension(tmp_path):
                 "VALUES (999, 'Existing GitHub run', 'completed', 0, 'full', "
                 "'github.repository', :now, :now)"
             ),
-            {"now": now},
+            {"now": now.isoformat(" ")},
         )
     command.upgrade(config, "head")
 

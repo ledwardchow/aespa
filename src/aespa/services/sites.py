@@ -190,11 +190,36 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     )
     site.updated_at = _utcnow()
 
-    # Replace credentials list wholesale.
-    site.credentials.clear()
-    session.flush()
-    for cred in payload.credentials:
-        site.credentials.append(Credential(**_credential_values(cred)))
+    existing_by_id = {cred.id: cred for cred in site.credentials}
+    existing_by_username: dict[str, list[Credential]] = {}
+    for cred in site.credentials:
+        existing_by_username.setdefault(cred.username, []).append(cred)
+    requested_usernames = [cred.username for cred in payload.credentials]
+    retained_ids: set[int] = set()
+    updated_credentials: list[Credential] = []
+    for incoming in payload.credentials:
+        current = None
+        if incoming.id is not None:
+            current = existing_by_id.get(incoming.id)
+            if current is None or current.id in retained_ids:
+                raise SiteServiceError(
+                    "A credential does not belong to this site or appears twice."
+                )
+        elif requested_usernames.count(incoming.username) == 1:
+            matches = existing_by_username.get(incoming.username or "", [])
+            if len(matches) == 1 and matches[0].id not in retained_ids:
+                current = matches[0]
+        values = _credential_values(incoming)
+        if current is None:
+            current = Credential(**values)
+        else:
+            retained_ids.add(current.id)
+            for key, value in values.items():
+                if key == "totp_seed" and value is None:
+                    continue
+                setattr(current, key, value)
+        updated_credentials.append(current)
+    site.credentials = updated_credentials
 
     session.add(site)
     session.commit()

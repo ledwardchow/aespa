@@ -1686,3 +1686,28 @@ async def read_rate_limits() -> dict[str, Any]:
     client = await _get_client()
     result = await client.request("account/rateLimits/read", {})
     return result if isinstance(result, dict) else {}
+
+
+async def read_account_usage(
+    executable_path: str | None = None, timeout: float = 30
+) -> dict[str, Any]:
+    """Read the signed-in account and plan usage with a separate app-server.
+
+    The shared client belongs to the event loop that started it. This uses its
+    own short-lived process, so it can run from any thread or event loop.
+    """
+    executable = resolve_executable(executable_path)
+    if not executable:
+        raise CodexUnavailableError("Codex CLI is not installed")
+    client = _JsonRpcClient(executable)
+    try:
+        async with asyncio.timeout(timeout):
+            await client.start()
+            account = await client.request("account/read", {})
+            limits = await client.request("account/rateLimits/read", {})
+    finally:
+        await client.close()
+    return {
+        "account": account if isinstance(account, dict) else {},
+        "rate_limits": limits if isinstance(limits, dict) else {},
+    }

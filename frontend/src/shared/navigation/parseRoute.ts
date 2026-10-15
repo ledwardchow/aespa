@@ -95,6 +95,7 @@ export function parseRoute(hash = "#/"): Route {
   if (routeHash === "#/systems") return { name: "system-list" };
   if (routeHash === "#/active-jobs") return { name: "active-jobs" };
   if (routeHash === "#/stats" || routeHash === "#/stats/usage") return { name: "stats" };
+  if (routeHash === "#/stats/chatgpt-plan") return { name: "chatgpt-plan-usage" };
   if (routeHash === "#/settings" || routeHash === "#/settings/profiles")
     return { name: "settings", tab: "profiles", screen: "list" };
   if (routeHash === "#/settings/profiles/new")

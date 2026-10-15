@@ -548,6 +548,9 @@ class LLMConfig(SQLModel, table=True):
     temperature: Optional[float] = Field(default=None)
     # Explicit reasoning/thinking level. None means provider default (legacy behavior).
     reasoning_effort: Optional[str] = Field(default=None, nullable=True)
+    # Provider speed tier, such as ChatGPT plan "priority" (Fast). None means
+    # the provider's standard speed.
+    service_tier: Optional[str] = Field(default=None, nullable=True)
     # Whether to include page screenshots in LLM prompts (requires vision model)
     use_vision: bool = Field(default=False)
     # Whether to force tool choice using the wire format tool_choice: required/any

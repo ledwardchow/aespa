@@ -452,7 +452,7 @@ def _rebuild_with_run_fks(table: str, run_columns: dict[str, bool]) -> None:
                 )
             )
         else:
-            new_columns.append(column.copy())
+            new_columns.append(column._copy())
 
     new = sa.Table(
         temp_name,

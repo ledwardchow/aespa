@@ -61,6 +61,7 @@ from aespa.services.prompts.validator import (
     _VALIDATION_VERDICT_PROMPT,
     VALIDATOR_AGENT_TOOLS,  # noqa: F401 — re-exported via aespa.services.llm
 )
+from aespa.services.tls import httpx_verify
 
 log = logging.getLogger("aespa.llm")
 traffic_log = logging.getLogger("aespa.llm.traffic")
@@ -1190,7 +1191,7 @@ def _llm_client_kwargs() -> dict:
     proxy = _llm_proxy_var.get()
     return {
         "http_client": httpx2.AsyncClient(
-            verify=_llm_ca_bundle_var.get() or proxy is None,
+            verify=httpx_verify(_llm_ca_bundle_var.get(), proxy is None),
             headers=_LLM_HEADERS,
             **{"proxy": proxy} if proxy else {},
         )
@@ -2777,7 +2778,7 @@ def _make_google_client(config: LLMConfig):
     elif config.base_url:
         _g_http_opts["base_url"] = config.base_url
     _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=_llm_ca_bundle_var.get() or _g_proxy is None,
+        verify=httpx_verify(_llm_ca_bundle_var.get(), _g_proxy is None),
         headers=_LLM_HEADERS,
         **({"proxy": _g_proxy} if _g_proxy else {}),
     )
@@ -3489,6 +3490,8 @@ def _responses_request_kwargs(
             ]
         if config.reasoning_effort:
             kwargs["reasoning"] = {"effort": config.reasoning_effort}
+        if getattr(config, "service_tier", None):
+            kwargs["service_tier"] = config.service_tier
         return kwargs
     prompt_cache_key = _grok_prompt_cache_key(
         config,
@@ -4314,7 +4317,7 @@ def _make_bedrock_mantle_client(config: LLMConfig):
         profile=config.aws_profile or os.getenv("AWS_PROFILE"),
     )
     http_client = httpx2.AsyncClient(
-        verify=_llm_ca_bundle_var.get() or proxy is None,
+        verify=httpx_verify(_llm_ca_bundle_var.get(), proxy is None),
         headers=_LLM_HEADERS,
         auth=signer,
         **({"proxy": proxy} if proxy else {}),
@@ -4348,7 +4351,7 @@ def _make_bedrock_mantle_anthropic_client(config: LLMConfig):
         profile=config.aws_profile or os.getenv("AWS_PROFILE"),
     )
     http_client = httpx2.AsyncClient(
-        verify=_llm_ca_bundle_var.get() or proxy is None,
+        verify=httpx_verify(_llm_ca_bundle_var.get(), proxy is None),
         headers=_LLM_HEADERS,
         auth=signer,
         **({"proxy": proxy} if proxy else {}),

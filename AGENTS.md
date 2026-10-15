@@ -21,7 +21,8 @@ uv sync                              # install deps
 uv run playwright install chromium   # one-time, required for web crawl/scan
 uv run aespa                         # run the server -> http://127.0.0.1:8000
 
-uv run pytest                        # full suite, in-memory SQLite; requires local ports
+uv run pytest                        # full suite in parallel (pytest-xdist), in-memory SQLite; requires local ports
+uv run pytest -n 0                   # run serially, e.g. for breakpoints or print debugging
 uv run pytest tests/test_scanner_service.py            # one file
 uv run pytest tests/test_scanner_service.py::test_name # one test
 uv run pytest -k "validator and not api"               # by keyword

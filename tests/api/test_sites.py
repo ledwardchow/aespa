@@ -406,6 +406,93 @@ def test_update_site_replaces_credentials(client):
     assert usernames == {"x", "y"}
 
 
+def test_update_site_keeps_existing_credential_ids(client, session):
+    created = make_site(
+        client,
+        name="Stable credentials",
+        requires_auth=True,
+        login_url="https://auth.local/login",
+        credentials=[
+            {
+                "username": "same-user",
+                "password": "old-1",
+                "label": "first",
+                "totp_seed": "JBSWY3DPEHPK3PXP",
+            },
+            {"username": "same-user", "password": "old-2", "label": "second"},
+        ],
+    ).json()
+    first, second = created["credentials"]
+    updated = client.put(
+        f"/api/sites/{created['id']}",
+        json={
+            "name": "Stable credentials",
+            "base_url": "https://auth.local",
+            "requires_auth": True,
+            "login_url": "https://auth.local/login",
+            "credentials": [
+                {
+                    "id": first["id"],
+                    "username": "renamed",
+                    "password": "new-1",
+                    "label": "first",
+                },
+                {
+                    "id": second["id"],
+                    "username": "same-user",
+                    "password": "old-2",
+                    "label": "second",
+                },
+            ],
+        },
+    )
+    assert updated.status_code == 200
+    assert {c["id"] for c in updated.json()["credentials"]} == {
+        first["id"],
+        second["id"],
+    }
+    assert session.get(Credential, first["id"]).password == "new-1"
+    assert session.get(Credential, first["id"]).totp_seed == "JBSWY3DPEHPK3PXP"
+
+    invalid = client.put(
+        f"/api/sites/{created['id']}",
+        json={
+            "name": "Stable credentials",
+            "base_url": "https://auth.local",
+            "requires_auth": True,
+            "login_url": "https://auth.local/login",
+            "credentials": [{"id": 99999, "username": "bad", "password": "bad"}],
+        },
+    )
+    assert invalid.status_code == 400
+    assert {
+        c["id"] for c in client.get(f"/api/sites/{created['id']}").json()["credentials"]
+    } == {first["id"], second["id"]}
+
+
+def test_update_site_matches_unique_username_without_id(client):
+    created = make_site(
+        client,
+        name="Older API client",
+        requires_auth=True,
+        login_url="https://auth.local/login",
+        credentials=[{"username": "a", "password": "old"}],
+    ).json()
+    old_id = created["credentials"][0]["id"]
+    updated = client.put(
+        f"/api/sites/{created['id']}",
+        json={
+            "name": "Older API client",
+            "base_url": "https://auth.local",
+            "requires_auth": True,
+            "login_url": "https://auth.local/login",
+            "credentials": [{"username": "a", "password": "new"}],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["credentials"][0]["id"] == old_id
+
+
 def test_update_site_not_found(client):
     r = client.put(
         "/api/sites/9999",

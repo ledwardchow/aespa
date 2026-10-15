@@ -1215,6 +1215,7 @@ test("Status collects sample data for a stopped workflow", async ({ page }) => {
   await expect(page.locator(".workflow-notification-badge")).toHaveCount(0);
   await expect(page.getByText("Continuing workflow")).toBeVisible();
   await expect(page.getByText("Opening browser")).toBeVisible();
+  await expect(page.getByText("0 actions completed")).toBeVisible();
   await expect(page.getByText("Will save to site if reached")).toBeVisible();
   retryState = {
     ...retryState,
@@ -1224,10 +1225,20 @@ test("Status collects sample data for a stopped workflow", async ({ page }) => {
     actions: ["click Add an address"],
   };
   await expect(page.getByText("click Add an address")).toBeVisible();
+  await expect(page.getByText("1 action completed")).toBeVisible();
   await expect(
     page.locator(".surface-crawl-note").filter({ hasText: "Add a delivery address" }),
   ).toHaveCount(1);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-progress.png") });
+  retryState = {
+    ...retryState,
+    actions_done: 18,
+    actions: Array.from({ length: 18 }, (_, index) => `action ${index + 1}`),
+  };
+  const actionList = page.locator(".workflow-retry-actions");
+  await expect(actionList.locator("li")).toHaveCount(18);
+  await expect(actionList.locator("li").last()).toHaveText("action 18");
+  expect(await actionList.evaluate((list) => list.scrollHeight > list.clientHeight)).toBe(true);
   needsName = true;
   retryState = {
     ...retryState,
@@ -1274,6 +1285,7 @@ test("Status collects sample data for a stopped workflow", async ({ page }) => {
   await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-result.png") });
   await page.setViewportSize({ width: 1440, height: 1024 });
   await page.getByRole("button", { name: "Status", exact: true }).click();
+  await page.getByRole("button", { name: "Notifications", exact: true }).click();
   await expect(page.getByText("You're all caught up")).toBeVisible();
 });
 
@@ -1326,6 +1338,23 @@ test("a workflow notification can authorize generated sample data", async ({ pag
 
 test("site settings edit saved workflow data", async ({ page }) => {
   await installFixtures(page);
+  const siteWithCredential = {
+    ...site,
+    requires_auth: true,
+    login_url: "http://example.test/login",
+    credentials: [
+      {
+        id: 23,
+        username: "tester",
+        password: "saved",
+        auth_mode: "auto",
+        login_fields: [
+          { key: "username", label: "Username", value: "tester", sensitive: false },
+          { key: "password", label: "Password", value: "saved", sensitive: true },
+        ],
+      },
+    ],
+  };
   const savedWorkflow = {
     name: "Checkout",
     goal: "Open checkout form",
@@ -1336,9 +1365,9 @@ test("site settings edit saved workflow data", async ({ page }) => {
   await page.route("**/api/sites/1", (route) => {
     if (route.request().method() === "PUT") {
       updated = route.request().postDataJSON();
-      return route.fulfill({ json: { ...site, ...updated } });
+      return route.fulfill({ json: { ...siteWithCredential, ...updated } });
     }
-    return route.fulfill({ json: { ...site, workflow_data: [savedWorkflow] } });
+    return route.fulfill({ json: { ...siteWithCredential, workflow_data: [savedWorkflow] } });
   });
   await page.goto("/#/sites/1/edit");
   await expect(page.getByText("Saved workflow data")).toBeVisible();
@@ -1352,6 +1381,7 @@ test("site settings edit saved workflow data", async ({ page }) => {
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect.poll(() => updated).not.toBeNull();
   expect(updated.workflow_data[0].instructions).toBe("Add a test mouse");
+  expect(updated.credentials[0].id).toBe(23);
 });
 
 test("SAST summary cards only appear on the Coverage tab", async ({ page }) => {

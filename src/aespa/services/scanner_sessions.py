@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 from aespa.db import get_engine
 from aespa.models import ScannerSession
 from aespa.schemas import ScannerSessionValidationItem, ScannerSessionValidationResult
+from aespa.services.tls import httpx_verify
 
 _INVALID_SESSION_STATUSES = {401, 419, 440}
 
@@ -261,7 +262,7 @@ async def _probe_session(
     async with httpx.AsyncClient(
         timeout=15.0,
         follow_redirects=True,
-        verify=ca_bundle or False,
+        verify=httpx_verify(ca_bundle, False),
         proxy=proxy,
         trust_env=False,
     ) as client:

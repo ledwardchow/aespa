@@ -1,0 +1,9 @@
+id = "aespa.chatgptplanusage"
+name = "ChatGPT plan usage"
+author = "aespa"
+version = "1.0.0"
+aespa_api = "1"
+entrypoint = "extension.py:create_extension"
+capabilities = ["api.routes"]
+data_namespace = "planusage"
+enabled_by_default = false

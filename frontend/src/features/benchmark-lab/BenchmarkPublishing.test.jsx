@@ -6,6 +6,16 @@ import { BenchmarkPublishing } from "./BenchmarkPublishing.jsx";
 
 vi.mock("../../shared/api/request.ts", () => ({ req: vi.fn() }));
 const BASE = "/extension/aespa.benchmarking";
+const DATASETS = [
+  { id: 1, name: "Bank truth", label: "Bank app" },
+  { id: 2, name: "Shop truth", label: "" },
+  { id: 3, name: "Unused truth", label: "" },
+];
+const RESULTS = [
+  { id: 10, dataset_id: 1 },
+  { id: 11, dataset_id: 1 },
+  { id: 12, dataset_id: 2 },
+];
 beforeEach(() => {
   vi.clearAllMocks();
   req.mockImplementation(async (url) =>
@@ -54,7 +64,9 @@ test("new connections default to the benchmark custom domain", async () => {
 });
 
 test("benchmark lab provides publishing and links to extension settings", async () => {
-  render(<BenchmarkPublishing />);
+  const user = userEvent.setup();
+  render(<BenchmarkPublishing datasets={DATASETS} results={RESULTS} />);
+  await user.click(await screen.findByLabelText("Bank app (2 results)"));
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Publish results" }).disabled).toBe(false),
   );
@@ -70,8 +82,9 @@ test("publishing stays disabled until an upload token has been saved", async () 
     token_saved: true,
     upload_token_saved: false,
   });
-  render(<BenchmarkPublishing />);
+  render(<BenchmarkPublishing datasets={DATASETS} results={RESULTS} />);
   await screen.findByRole("link", { name: "Connection settings" });
+  await userEvent.click(screen.getByLabelText("Bank app (2 results)"));
   await waitFor(() => expect(req).toHaveBeenCalled());
   expect(screen.getByRole("button", { name: "Publish results" }).disabled).toBe(true);
 });
@@ -81,7 +94,8 @@ test("publishing reports results protected by site edits", async () => {
   req.mockImplementation(async (url) => url.endsWith("/publish")
     ? { received: 1, stored: 0, skipped_stale: 0, skipped_site_edits: 1 }
     : { site_url: "https://benchmarks.aespa.app", token_saved: true, upload_token_saved: true });
-  render(<BenchmarkPublishing />);
+  render(<BenchmarkPublishing datasets={DATASETS} results={RESULTS} />);
+  await user.click(await screen.findByRole("button", { name: "Select all" }));
   await user.click(await screen.findByRole("button", { name: "Publish results" }));
   expect(await screen.findByText(/1 site-edited results protected/)).toBeTruthy();
 });
@@ -100,4 +114,24 @@ test("settings save one generated token and clear its field after saving", async
     }),
   );
   expect(screen.getByLabelText("Upload token").value).toBe("");
+});
+
+test("publishing sends only the chosen applications", async () => {
+  const user = userEvent.setup();
+  req.mockImplementation(async (url) =>
+    url.endsWith("/publish")
+      ? { received: 1, stored: 1, skipped_stale: 0 }
+      : { site_url: "https://benchmarks.aespa.app", token_saved: true, upload_token_saved: true },
+  );
+  render(<BenchmarkPublishing datasets={DATASETS} results={RESULTS} />);
+  const publish = await screen.findByRole("button", { name: "Publish results" });
+  await waitFor(() => expect(req).toHaveBeenCalled());
+  expect(publish.disabled).toBe(true);
+  expect(screen.queryByLabelText(/Unused truth/)).toBeNull();
+  await user.click(screen.getByLabelText("Shop truth (1 result)"));
+  await user.click(publish);
+  expect(req).toHaveBeenCalledWith(`${BASE}/publish`, {
+    method: "POST",
+    body: { dataset_ids: [2] },
+  });
 });

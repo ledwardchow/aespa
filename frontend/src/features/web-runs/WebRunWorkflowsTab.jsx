@@ -69,7 +69,6 @@ export function WebRunWorkflowsTab({
       note_id: note.id,
       message: "Starting the workflow",
       actions_done: 0,
-      action_limit: 18,
       actions: [],
     };
     setRetry(pending);
@@ -163,10 +162,10 @@ export function WebRunWorkflowsTab({
                     {activeRetry.current_path ? (
                       <p className="subtle mono">Page: {activeRetry.current_path}</p>
                     ) : null}
-                    {busy && activeRetry.action_limit ? (
+                    {busy ? (
                       <p className="subtle">
-                        {activeRetry.actions_done || 0} of {activeRetry.action_limit} actions
-                        completed
+                        {activeRetry.actions_done || 0}{" "}
+                        {activeRetry.actions_done === 1 ? "action" : "actions"} completed
                       </p>
                     ) : null}
                     {(activeRetry.actions || []).length ? (

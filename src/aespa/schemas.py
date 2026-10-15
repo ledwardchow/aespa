@@ -28,6 +28,7 @@ class LoginField(BaseModel):
 class CredentialIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    id: int | None = None
     username: str | None = None
     password: str | None = None
     login_fields: list[LoginField] = Field(default_factory=list)
@@ -791,6 +792,7 @@ class LLMConfigIn(BaseModel):
     detected_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
     temperature: Optional[float] = Field(default=None)
     reasoning_effort: str | None = Field(default=None, max_length=32)
+    service_tier: str | None = Field(default=None, max_length=32)
     use_vision: bool = False
     force_tool_choice: bool = False
 
@@ -835,6 +837,7 @@ class LLMConfigOut(BaseModel):
     context_limit_source: str = "configured"
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
     use_vision: bool
     force_tool_choice: bool
     updated_at: datetime
@@ -1348,6 +1351,7 @@ class LLMExportProfileItem(BaseModel):
     max_context_tokens: int | None = None
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
     use_vision: bool = False
     force_tool_choice: bool = False
     is_active: bool = False

@@ -5,7 +5,9 @@ from aespa.services.llm import _bedrock_session
 from aespa.services.llm_network import child_network_env, httpx_options
 
 
-def test_saved_llm_proxy_and_ca_reach_http_and_cli_clients(db_session):
+def test_saved_llm_proxy_and_ca_reach_http_and_cli_clients(
+    db_session, fake_ssl_context
+):
     db_session.add(
         UpstreamProxyConfig(
             id=1,
@@ -18,7 +20,7 @@ def test_saved_llm_proxy_and_ca_reach_http_and_cli_clients(db_session):
 
     assert httpx_options() == {
         "proxy": "http://proxy.example:8080",
-        "verify": "/tmp/company-ca.pem",
+        "verify": fake_ssl_context("/tmp/company-ca.pem"),
     }
     assert httpx_options("http://override.example:9000")["proxy"] == (
         "http://override.example:9000"

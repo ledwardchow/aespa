@@ -11,8 +11,15 @@ import {
   IconSystems,
 } from "../shared/ui/Icons.jsx";
 export function Sidebar({ section, collapsed, onToggle, preferences }) {
-  const { appVersion, username, showUsername, showSystems, reportingDebugCfg, benchmarkLabCfg } =
-    preferences;
+  const {
+    appVersion,
+    username,
+    showUsername,
+    showSystems,
+    reportingDebugCfg,
+    benchmarkLabCfg,
+    planUsageCfg,
+  } = preferences;
   const onSites = section === "sites";
   const onApis = section === "apis";
   const onSystems = section === "systems";
@@ -24,6 +31,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
   const onReportingDebug = section === "reporting-debug";
   const onBenchmarkLab = section === "benchmark-lab";
   const onStats = section === "stats";
+  const onPlanUsage = section === "chatgpt-plan-usage";
 
   return (
     <aside className={"sidebar" + (collapsed ? " sidebar--collapsed" : "")}>
@@ -155,6 +163,18 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           </span>
           {!collapsed && " Usage"}
         </a>
+        {planUsageCfg?.panel_enabled && (
+          <a
+            href="#/stats/chatgpt-plan"
+            className={"nav-item" + (onPlanUsage ? " active" : "")}
+            title="ChatGPT plan usage"
+          >
+            <span className="nav-icon">
+              <IconChart />
+            </span>
+            {!collapsed && " ChatGPT plan"}
+          </a>
+        )}
         {!collapsed && (
           <div
             className="nav-section-label"

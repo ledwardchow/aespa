@@ -20,6 +20,7 @@ from aespa.schemas import (
 )
 from aespa.services.model_capabilities import (
     validate_effort,
+    validate_service_tier,
 )
 from aespa.services.settings_providers import (
     _provider_capabilities,
@@ -426,6 +427,9 @@ def _apply_llm_config(
         effort = capability.get("default_effort")
     try:
         cfg.reasoning_effort = validate_effort(capability, effort)
+        cfg.service_tier = validate_service_tier(
+            provider.api_format, capability, payload.service_tier
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     cfg.updated_at = _utcnow()

@@ -29,6 +29,7 @@ from sqlmodel import Session
 
 from aespa.db import get_engine
 from aespa.services.settings_integrations import get_upstream_proxy_config
+from aespa.services.tls import httpx_verify
 
 log = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ async def ensure_fresh(
             http = httpx.AsyncClient(
                 timeout=TIMEOUT_S,
                 follow_redirects=True,
-                verify=ca_bundle or True,
+                verify=httpx_verify(ca_bundle, True),
             )
         else:
             http = client

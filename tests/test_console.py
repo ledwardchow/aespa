@@ -128,7 +128,9 @@ def test_switch_clears_screen_and_replays_selected_buffer() -> None:
 
 def test_agent_is_initial_view_and_number_keys_switch_all_views() -> None:
     output = io.StringIO()
-    console = InteractiveConsole(input_stream=io.StringIO(), output_stream=output)
+    console = InteractiveConsole(
+        input_stream=io.StringIO(), output_stream=output, terminal_size=(120, 30)
+    )
 
     assert console.handler.mode == AGENT
     console.handler.start_screen()

@@ -67,6 +67,7 @@ test.each([
   ["#/debug", { name: "scan-policy" }],
   ["#/reporting-debug", { name: "reporting-debug" }],
   ["#/benchmark-lab", { name: "benchmark-lab" }],
+  ["#/stats/chatgpt-plan", { name: "chatgpt-plan-usage" }],
   ["#/benchmark-lab/evaluations/new", { name: "benchmark-evaluation-new" }],
   ["#/benchmark-lab/evaluations/12", { name: "benchmark-evaluation-detail", id: 12 }],
   [

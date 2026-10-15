@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { req } from "../../shared/api/request.ts";
 
 const BASE = "/extension/aespa.benchmarking";
 const DEFAULT_SITE = "https://benchmarks.aespa.app";
 
-export function BenchmarkPublishing({ mode = "publish" }) {
+export function BenchmarkPublishing({ mode = "publish", datasets = [], results = [] }) {
   const [url, setUrl] = useState(DEFAULT_SITE);
   const [token, setToken] = useState("");
   const [serviceSaved, setServiceSaved] = useState(false);
@@ -13,6 +13,29 @@ export function BenchmarkPublishing({ mode = "publish" }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [selected, setSelected] = useState(() => new Set());
+  const apps = useMemo(() => {
+    const counts = new Map();
+    for (const result of results) {
+      counts.set(result.dataset_id, (counts.get(result.dataset_id) || 0) + 1);
+    }
+    return datasets
+      .filter((dataset) => counts.has(dataset.id))
+      .map((dataset) => ({
+        id: dataset.id,
+        name: dataset.label || dataset.name,
+        count: counts.get(dataset.id),
+      }));
+  }, [datasets, results]);
+  const chosen = apps.filter((app) => selected.has(app.id)).map((app) => app.id);
+  function toggle(id) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
   useEffect(() => {
     req(`${BASE}/publishing`)
       .then((data) => {
@@ -51,8 +74,13 @@ export function BenchmarkPublishing({ mode = "publish" }) {
     setError("");
     setMessage("");
     try {
-      const report = await req(`${BASE}/publish`, { method: "POST" });
-      setMessage(`${report.received} results sent. ${report.skipped_stale} older updates skipped.${report.skipped_site_edits ? ` ${report.skipped_site_edits} site-edited results protected.` : ""}`);
+      const report = await req(`${BASE}/publish`, {
+        method: "POST",
+        body: { dataset_ids: chosen },
+      });
+      setMessage(
+        `${report.received} results sent. ${report.skipped_stale} older updates skipped.${report.skipped_site_edits ? ` ${report.skipped_site_edits} site-edited results protected.` : ""}`,
+      );
     } catch (err) {
       setError(err.message);
     } finally {
@@ -162,24 +190,61 @@ export function BenchmarkPublishing({ mode = "publish" }) {
           </div>
         </form>
       ) : (
-        <div className="form-actions">
-          <button
-            className="btn primary"
-            type="button"
-            disabled={busy || !configured}
-            onClick={publish}
-          >
-            {busy ? "Publishing..." : "Publish results"}
-          </button>
-          <a className="btn secondary" href="#/extensions/aespa.benchmarking/settings">
-            Connection settings
-          </a>
-          {configured && (
-            <a className="btn secondary" href={url} target="_blank" rel="noreferrer">
-              Open results site
+        <>
+          <fieldset className="field" disabled={busy}>
+            <legend>Applications to publish</legend>
+            {apps.length === 0 ? (
+              <p className="subtle">No saved results yet.</p>
+            ) : (
+              <>
+                {apps.map((app) => (
+                  <label key={app.id} className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(app.id)}
+                      onChange={() => toggle(app.id)}
+                    />
+                    {app.name} ({app.count} {app.count === 1 ? "result" : "results"})
+                  </label>
+                ))}
+                <div className="form-actions">
+                  <button
+                    className="btn ghost sm"
+                    type="button"
+                    onClick={() => setSelected(new Set(apps.map((app) => app.id)))}
+                  >
+                    Select all
+                  </button>
+                  <button
+                    className="btn ghost sm"
+                    type="button"
+                    onClick={() => setSelected(new Set())}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </>
+            )}
+          </fieldset>
+          <div className="form-actions">
+            <button
+              className="btn primary"
+              type="button"
+              disabled={busy || !configured || chosen.length === 0}
+              onClick={publish}
+            >
+              {busy ? "Publishing..." : "Publish results"}
+            </button>
+            <a className="btn secondary" href="#/extensions/aespa.benchmarking/settings">
+              Connection settings
             </a>
-          )}
-        </div>
+            {configured && (
+              <a className="btn secondary" href={url} target="_blank" rel="noreferrer">
+                Open results site
+              </a>
+            )}
+          </div>
+        </>
       )}
       {message && <p role="status">{message}</p>}
       {error && (
