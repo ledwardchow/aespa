@@ -101,11 +101,11 @@ export function WebRunAttackSurfaceTab({
       </div>
       {subTab === "owasp" ? (
         <div className="coverage-owasp-content">
-          <CoverageGapsPanel summary={summary} />
           <div className="coverage-workprogram-wrap">
             <WebRunWorkProgramTab
               runId={runId}
               run={run}
+              pagesProgress={<CoverageGapsPanel summary={summary} />}
               reloadKey={reloadKey}
               scanRunning={scanActive || run?.status === "crawling" || run?.status === "crawled"}
             />

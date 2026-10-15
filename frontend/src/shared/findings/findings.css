@@ -317,6 +317,8 @@
   background: var(--hover);
 }
 .finding-group-row td {
+  /* Same row height whether or not the row has a group delete button. */
+  height: 49px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-subtle, var(--border));
   vertical-align: middle;
@@ -495,4 +497,15 @@
 }
 .finding-group-row--nested .finding-title {
   padding-left: 28px;
+}
+
+.finding-category-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
 }

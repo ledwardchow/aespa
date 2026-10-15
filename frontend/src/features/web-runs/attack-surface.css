@@ -17,7 +17,7 @@
   background: var(--bg);
 }
 .coverage-gaps-panel {
-  padding: 12px 44px 0;
+  margin-bottom: 16px;
 }
 .coverage-workprogram-wrap {
   margin-inline: 28px;

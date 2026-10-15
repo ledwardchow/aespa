@@ -282,6 +282,38 @@ async def _close_alice_browser(run_id: int, api_run_id: int | None = None) -> No
         pass
 
 
+# Workprogram finding hooks installed by ALICE turns, keyed by web run id:
+# run_id -> [hook, number of turns using it]. Several chat tabs on one run can
+# run turns at once, so the hook is removed only when the last turn finishes.
+_alice_finding_hooks: dict[int, list[Any]] = {}
+
+
+def _acquire_alice_finding_hook(run_id: int) -> None:
+    from aespa.services.scanner import _finding_hooks
+    from aespa.services.web_workprogram import _make_web_post_finding_fn
+
+    entry = _alice_finding_hooks.get(run_id)
+    if entry is None:
+        entry = _alice_finding_hooks[run_id] = [_make_web_post_finding_fn(run_id), 0]
+    entry[1] += 1
+    _finding_hooks[run_id] = entry[0]
+
+
+def _release_alice_finding_hook(run_id: int) -> None:
+    from aespa.services.scanner import _finding_hooks
+
+    entry = _alice_finding_hooks.get(run_id)
+    if entry is None:
+        return
+    entry[1] -= 1
+    if entry[1] > 0:
+        return  # another chat tab's turn is still using it
+    del _alice_finding_hooks[run_id]
+    # Leave any hook another component installed after ALICE.
+    if _finding_hooks.get(run_id) is entry[0]:
+        _finding_hooks.pop(run_id, None)
+
+
 def _extract_user_directive(history: list[dict]) -> str:
     """Find the most recent user prompt in the chat history."""
     for item in reversed(history):
@@ -2439,18 +2471,6 @@ async def run_alice_turn_stream(
 
     _web_post_probe_fn = _wp_probe_fn(run_id)
 
-    # Register the workprogram finding hook so write_finding tool calls also
-    # flip Work Program cells.  This mirrors the pattern in scanner._do_thinking_scan
-    # (see scanner.py: _finding_hooks[run_id] = _web_post_finding_fn).  Cleared
-    # in the finally block below so the hook never leaks past this turn.
-    from aespa.services.scanner import _finding_hooks
-    from aespa.services.web_workprogram import (
-        _make_web_post_finding_fn as _wp_finding_fn,
-    )
-
-    _web_post_finding_fn = _wp_finding_fn(run_id)
-    _finding_hooks[run_id] = _web_post_finding_fn
-
     # Yield initial thinking chunk immediately (0ms time-to-first-event!)
     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. Initializing] Mapped target sitemap and active scan configuration...\n'})}\n\n"
     await asyncio.sleep(0.01)
@@ -2560,6 +2580,11 @@ async def run_alice_turn_stream(
         ((goal or {}).get("checkpoint") or {}).get("evidence") or []
     )
     goal_terminal = False
+
+    # Register the workprogram finding hook so write_finding tool calls also
+    # flip Work Program cells.  Registered directly before the try block so the
+    # finally below always releases it, even on early exit or cancellation.
+    _acquire_alice_finding_hook(run_id)
 
     # 4. Agentic loop
     try:
@@ -2976,13 +3001,10 @@ async def run_alice_turn_stream(
                 from aespa.services import antigravity_provider as provider_adapter
 
             await provider_adapter.close_conversation(messages)
-        # Always unregister the workprogram finding hook, even on early exit
-        # or exception — mirrors scanner._do_thinking_scan cleanup.
-        # Another chat tab on this run may have replaced the hook with its own;
-        # leave that one in place while its turn is still running.
+        # Always release the workprogram finding hook, even on early exit or
+        # exception. It stays registered while another chat tab is still working.
         try:
-            if _finding_hooks.get(run_id) is _web_post_finding_fn:
-                _finding_hooks.pop(run_id, None)
+            _release_alice_finding_hook(run_id)
         except Exception:
             pass
         # Close the live browser opened for any `browser` tool calls this turn.
