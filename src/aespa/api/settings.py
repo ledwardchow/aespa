@@ -287,21 +287,27 @@ def list_llm_models(session: Session = Depends(get_session)) -> list[LLMConfigOu
 
 
 @router.post("/llm/model-configs", response_model=LLMConfigOut)
-def create_llm_model(
+async def create_llm_model(
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = profile_settings.create_llm_profile(session, payload)
+    discovered = await settings_service.discover_effort_capability(
+        session, payload.provider_id, payload.model, payload.reasoning_effort
+    )
+    cfg = profile_settings.create_llm_profile(session, payload, discovered)
     return settings_service.llm_profile_out_model(session, cfg)
 
 
 @router.put("/llm/model-configs/{model_id}", response_model=LLMConfigOut)
-def update_llm_model(
+async def update_llm_model(
     model_id: int,
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = profile_settings.update_llm_profile(session, model_id, payload)
+    discovered = await settings_service.discover_effort_capability(
+        session, payload.provider_id, payload.model, payload.reasoning_effort
+    )
+    cfg = profile_settings.update_llm_profile(session, model_id, payload, discovered)
     return settings_service.llm_profile_out_model(session, cfg)
 
 

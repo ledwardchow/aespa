@@ -163,9 +163,6 @@ _traffic_operation_var: ContextVar[str | None] = ContextVar(
 )
 _operation_var: ContextVar[str | None] = ContextVar("llm_operation", default=None)
 _traffic_call_ids = itertools.count(1)
-# Running hash of a logged conversation prefix -> the call that logged it. Agent
-# loops resend the whole conversation on every call, so later requests log only
-# the messages added since the matching earlier call.
 _traffic_prefixes: OrderedDict[str, int] = OrderedDict()
 _TRAFFIC_PREFIX_LIMIT = 4096
 _traffic_prefix_lock = threading.Lock()
@@ -3291,7 +3288,6 @@ async def _make_chatgpt_plan_client(config: LLMConfig) -> Any:
     try:
         api_key = await chatgpt_plan.access_token(getattr(config, "username", None))
     except chatgpt_plan.ChatGPTSignInRequired as exc:
-        # Every later call would fail the same way, so stop the whole run.
         llm_sign_in_stop.schedule_stop(_run_kind_var.get(), _run_id_var.get(), str(exc))
         raise
     return AsyncOpenAI(

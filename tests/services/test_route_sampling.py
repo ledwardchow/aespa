@@ -22,7 +22,6 @@ REAL_SITES = json.loads(
     (Path(__file__).parents[1] / "fixtures" / "route_sampling_layouts.json").read_text()
 )
 
-# Pages built from one template share most of their layout.
 PRODUCT = {"kind": "product", "layout": list(range(1000, 1200)), "size": 200}
 
 
@@ -61,9 +60,6 @@ def _phase(sampler: RouteSampler, phase: str, key: str | None = None) -> dict:
     return group["phases"][phase]
 
 
-# ── Admission and decisions ──────────────────────────────────────────────────
-
-
 def test_catalogue_links_are_held_before_queue_and_five_examples_confirm() -> None:
     sampler = RouteSampler()
     admitted = sampler.offer(_links("products", 40_000), "anonymous")
@@ -91,7 +87,6 @@ def test_different_feature_pages_release_held_links() -> None:
     released = _visit_all(sampler, admitted, _page, "anonymous")
     assert len(released) == 7
     assert sampler.summaries() == []
-    # Later links to a rejected route are crawled normally.
     assert len(sampler.offer(_links("features", 5, start=50), "anonymous")) == 5
 
 
@@ -159,7 +154,6 @@ def test_admin_pages_group_but_action_pages_do_not_merge() -> None:
     ]
     admitted = sampler.offer(admin_products + forms, "admin")
     assert "https://shop.test/admin/products/{value}" in sampler.groups
-    # Each create form is for a different kind of record, so all are visited.
     assert all(item in admitted for item in forms)
     assert len([item for item in admitted if item in admin_products]) == 3
 
@@ -243,8 +237,6 @@ def test_second_account_reuses_examples_and_may_see_a_different_page() -> None:
     second = sampler.offer(links, "member")
     assert len(second) == 3
     assert {item["url"] for item in second} <= anonymous_examples
-    # A signed-in user sees extra controls on every product. That is an access
-    # difference to record, not a reason to crawl every product page.
     member_product = {**PRODUCT, "layout": list(range(1100, 1300))}
     _visit_all(sampler, second, lambda _url: member_product, "member")
     assert _phase(sampler, "member")["status"] == "confirmed"
@@ -265,8 +257,6 @@ def test_siblings_are_counted_across_pages() -> None:
     admitted = []
     for page in range(5):
         admitted.extend(sampler.offer(_links("products", 4, start=page * 4), "anon"))
-    # Two pages of four related links are crawled normally. The third page
-    # reaches ten siblings, and from then on only examples are admitted.
     assert len(admitted) == 8 + 3
     assert len(sampler.groups) == 1
 
@@ -319,8 +309,6 @@ def test_known_template_confirms_a_new_section_from_one_article() -> None:
     _visit_all(sampler, tech, lambda _url: article, "anonymous")
     assert sampler.summaries()[0]["label"] == "Articles"
 
-    # Another section with the same URL shape needs only two links, and one
-    # matching article confirms it.
     games = sampler.offer(section("games", 2), "anonymous")
     assert len(games) == 1
     _visit_all(sampler, games, lambda _url: article, "anonymous")
@@ -328,11 +316,10 @@ def test_known_template_confirms_a_new_section_from_one_article() -> None:
     assert _phase(sampler, "anonymous", key)["status"] == "confirmed"
     assert sampler.offer(section("games", 40)[2:], "anonymous") == []
 
-    # Pages with a different layout in another section are checked as usual.
     other = sampler.offer(section("tv", 12), "anonymous")
     assert len(other) == 1
     returned = _visit_all(sampler, other, _page, "anonymous")
-    assert len(returned) == 2 + 9  # two more examples, then the held links
+    assert len(returned) == 2 + 9
     assert sampler.groups["https://news.test/tv/{value}/{value}"]["status"] == (
         "rejected"
     )
@@ -368,9 +355,6 @@ def test_paused_crawl_resumes_with_examples_still_to_visit() -> None:
     assert len(examples) == 3
     _visit_all(resumed, examples, lambda _url: PRODUCT, "anonymous")
     assert resumed.summaries()[0]["pages_sampled"] == 5
-
-
-# ── URL patterns ─────────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
@@ -425,11 +409,9 @@ def test_query_strings_and_fragments_do_not_create_new_route_members() -> None:
         assert _member_identity(product + variant, key) == _member_identity(
             product, key
         )
-    # Client-side routes stay separate pages, as in the crawler.
     assert _member_identity("https://app.test/a/#/orders", key) != _member_identity(
         "https://app.test/a/", key
     )
-    # For a query route the query value is what tells members apart.
     query_key = "https://blog.test/?p={value}"
     assert _member_identity("https://blog.test/?p=1", query_key) != _member_identity(
         "https://blog.test/?p=2", query_key
@@ -461,9 +443,6 @@ def test_single_top_level_pages_are_not_grouped() -> None:
     assert _candidate_keys("https://shop.test/very-long-landing-page-name") == []
 
 
-# ── Page comparison ──────────────────────────────────────────────────────────
-
-
 @pytest.mark.parametrize("site", sorted(REAL_SITES))
 def test_real_site_pages_from_one_template_group_together(site: str) -> None:
     """Layouts captured from real sites with page_features in Chromium."""
@@ -477,7 +456,6 @@ def test_real_site_pages_from_one_template_group_together(site: str) -> None:
 
 
 def test_real_site_odd_product_template_is_reported_as_different() -> None:
-    # Mwave's NUC page is a product URL with a landing-page layout.
     same = REAL_SITES["mwave"]["same"]
     _medoid, members, _cutoff = _cluster(same)
     odd = [page["url"] for index, page in enumerate(same) if index not in members]
@@ -497,7 +475,7 @@ def test_large_layouts_are_compared_from_a_fixed_size_sketch() -> None:
         }
 
     first = sketch(set(range(0, 2000)))
-    second = sketch(set(range(500, 2500)))  # true overlap 1500 / 2500 = 0.6
+    second = sketch(set(range(500, 2500)))
     assert abs(page_similarity(first, second) - 0.6) < 0.1
     assert page_similarity(first, first) == 1.0
 
@@ -521,8 +499,6 @@ def test_page_features_keeps_a_bounded_layout_sketch() -> None:
     assert len(features["layout"]) == LAYOUT_SKETCH_SIZE
     assert features["size"] == 400
 
-
-# ── Crawl simulation ─────────────────────────────────────────────────────────
 
 ROOT = "https://shop.test/"
 PRODUCTS = 40_000
@@ -630,7 +606,6 @@ def test_large_catalogue_crawl_stays_small_and_reaches_other_sections() -> None:
         for item in sampler.summaries()
         if item["route_pattern"] == "https://shop.test/products/{value}"
     )
-    # Every collection lists 24 products, so the count covers them all.
     assert summary["links_seen"] >= 480
     for group in sampler.groups.values():
         for phase in group["phases"].values():
@@ -638,7 +613,6 @@ def test_large_catalogue_crawl_stays_small_and_reaches_other_sections() -> None:
 
 
 NEWS = "https://news.test/"
-# Section names are words, like "politics", so each is a separate route.
 SECTIONS = [
     f"desk-{chr(97 + index // 26)}{chr(97 + index % 26)}" for index in range(30)
 ]
@@ -684,11 +658,10 @@ def test_news_site_visits_a_few_articles_per_section_not_the_archive() -> None:
     )
     articles = [url for url in visits if url.count("/") == 5]
     sections = [url for url in visits if url.rstrip("/").count("/") == 3]
-    # The homepage alone links 90 articles; the archive holds 9,000.
     assert len(articles) <= 2 * len(SECTIONS) + CONFIRMED_LEAD_EXAMPLES
     assert len(sections) >= len(SECTIONS)
     pagination = [url for url in visits if "?page=" in url]
-    assert len(pagination) <= 2 * len(SECTIONS)  # 120 pagination links exist
+    assert len(pagination) <= 2 * len(SECTIONS)
     confirmed = [s for s in sampler.summaries() if s["label"] == "Articles"]
     assert len(confirmed) == len(SECTIONS)
     for group in sampler.groups.values():

@@ -912,8 +912,6 @@ def _validated_match(
         other_fix = str(candidate.get("fix_location") or "").strip()
         same_anchor = bool(fix and other_fix) and same_fix_anchor(fix, other_fix)
         # Two validators identifying different fixes, or different causes
-        # that neither share a fix nor describe the same weakness, outweigh a
-        # discovery-stage match based on similar titles and source paths.
         if fix and other_fix and not same_anchor:
             continue
         if (

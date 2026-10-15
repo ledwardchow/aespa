@@ -8,7 +8,6 @@ for (const kind of ["web", "api"]) {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => {
-      // Production registration is intentionally blocked by the fixture configuration.
       if (message.text() === "Service Worker registration blocked by Playwright") return;
       if (message.type() === "error" || message.type() === "warning") errors.push(message.text());
     });

@@ -41,7 +41,6 @@ _NO_FIX_MAJOR = 999
 _SKIPPED_ENTRIES = {"retire-example", "dont check"}
 _NODE_ONLY_FUNC = re.compile(r"\brequire\s*\(|\bmodule\.")
 
-# Friendlier names for finding titles. Unlisted libraries use the Retire.js key.
 _DISPLAY_NAMES = {
     "jquery": "jQuery",
     "jquery-migrate": "jQuery Migrate",
@@ -77,7 +76,6 @@ _DISPLAY_NAMES = {
     "vue": "Vue.js",
 }
 
-# Detection methods, most reliable first.
 METHOD_RUNTIME = "runtime"
 METHOD_HASH = "file hash"
 METHOD_CONTENT = "file content"
@@ -165,8 +163,6 @@ class LibraryReport:
                 out.append(det.method)
         return out
 
-
-# ── Repository loading ───────────────────────────────────────────────────────
 
 _cache: dict[tuple[str, int], Repository] = {}
 
@@ -313,9 +309,6 @@ def runtime_probes(path: str | None = None) -> list[tuple[str, str]]:
     return probes
 
 
-# ── Version handling ─────────────────────────────────────────────────────────
-
-
 def clean_version(value: object) -> str | None:
     """Normalize ``1.12.4.min`` / ``v3.4.1`` / ``^2.2.0`` to a comparable version."""
     match = _CLEAN_VERSION.search(str(value or ""))
@@ -330,7 +323,6 @@ def _version_key(value: object) -> tuple:
     main, _, pre = text.partition("-")
     numbers = tuple(int(p) if p.isdigit() else 0 for p in main.split(".") if p != "")
     numbers = numbers + (0,) * (6 - len(numbers))
-    # A prerelease sorts below the matching release.
     return numbers + ((0, pre) if pre else (1, ""))
 
 
@@ -375,9 +367,6 @@ def vulnerabilities_for(
         for vuln in entry.get("vulnerabilities") or []
         if isinstance(vuln, dict) and _is_affected(version, vuln)
     ]
-
-
-# ── Detection ────────────────────────────────────────────────────────────────
 
 
 def _match_all(
@@ -447,7 +436,7 @@ def detect_in_content(
     """
     found: list[Detection] = []
     if raw:
-        digest = hashlib.sha1(raw).hexdigest()  # noqa: S324 - Retire.js uses SHA-1
+        digest = hashlib.sha1(raw, usedforsecurity=False).hexdigest()
         hit = get_repository(path).hashes.get(digest)
         if hit:
             found.append(Detection(hit[0], hit[1], METHOD_HASH, source, digest))
@@ -567,8 +556,6 @@ def source_label() -> str:
     """Which Retire.js copy results came from, for messages and findings."""
     return retire_repository.describe()
 
-
-# ── Source trees (SAST) ──────────────────────────────────────────────────────
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
 _MAX_TREE_FILES = 5_000

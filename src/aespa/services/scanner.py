@@ -4398,8 +4398,6 @@ def _upgrade_duplicate_finding(
         "finding_source",
     ):
         setattr(existing, field, getattr(candidate, field))
-    # Title normalization is used to find the existing issue. Keep the more
-    # specific title from the new report when replacing its contents.
     existing.title = original_title or candidate.title
     existing.validation_status = "unvalidated"
     existing.validation_note = None
@@ -12836,8 +12834,6 @@ async def _run_deterministic_site_modules(
     if tls_findings and _save_deterministic_findings(run_id, tls_findings):
         _emit_scan_update(run_id)
 
-    # Library version checks only read captured scripts (and re-fetch in-scope
-    # static files), so they also run in passive mode.
     try:
         js_findings = await _run_outdated_js_module(
             run_id=run_id,

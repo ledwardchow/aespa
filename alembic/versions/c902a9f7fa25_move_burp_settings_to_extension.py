@@ -91,7 +91,6 @@ def upgrade() -> None:
         if legacy
         else False
     )
-    # Stored as text, matching what sqlite3's deprecated datetime adapter wrote.
     now = datetime.now(timezone.utc).isoformat(" ")
     if existing:
         connection.execute(

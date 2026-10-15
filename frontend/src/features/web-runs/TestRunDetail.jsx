@@ -622,7 +622,6 @@ function TestRunContent({
                     JSON.stringify(next),
                   );
                 } catch {
-                  // The notice still dismisses for this page if browser storage is unavailable.
                 }
                 setNotificationFocus((value) => value + 1);
                 setFocusedNotificationId(null);

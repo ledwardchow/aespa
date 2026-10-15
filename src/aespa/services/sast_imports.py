@@ -52,8 +52,8 @@ def search_import_sources(
             ).where(
                 ScanLead.producer_run_type == "sast",
                 ScanLead.producer_run_id.in_(ids),
-                ScanLead.imported_into_run_id == None,  # noqa: E711
-                ScanLead.reportable == True,  # noqa: E712
+                ScanLead.imported_into_run_id.is_(None),
+                ScanLead.reportable.is_(True),
             )
         ).all():
             originals[source_id].add(

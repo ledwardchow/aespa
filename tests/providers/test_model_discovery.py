@@ -73,7 +73,7 @@ def test_discover_bedrock_mantle_models_uses_v1_models_route():
             captured["url"] = url
             return mock_response
 
-    with patch("httpx.AsyncClient", _MockClient):
+    with patch("httpx2.AsyncClient", _MockClient):
         records = asyncio.run(
             model_discovery.discover_bedrock_mantle_model_options(
                 api_key="mantle-key",
@@ -117,7 +117,7 @@ def test_discover_bedrock_mantle_models_uses_sigv4_without_api_key(monkeypatch):
 
     monkeypatch.setenv("AWS_PROFILE", "mantle-dev")
     monkeypatch.setattr("aespa.services.llm._BedrockMantleSigV4Auth", _MockSigner)
-    with patch("httpx.AsyncClient", _MockClient):
+    with patch("httpx2.AsyncClient", _MockClient):
         asyncio.run(
             model_discovery.discover_bedrock_mantle_model_options(
                 base_url="https://bedrock-mantle.eu-west-1.api.aws",
@@ -127,6 +127,30 @@ def test_discover_bedrock_mantle_models_uses_sigv4_without_api_key(monkeypatch):
 
     assert captured["signer"] == {"region": "eu-west-1", "profile": "mantle-selected"}
     assert captured["client"]["auth"] is signer
+
+
+def test_discover_bedrock_mantle_models_accepts_real_sigv4_signer(monkeypatch):
+    """The real signer must be accepted by the real HTTP client used here."""
+    from aespa.services.llm import _BedrockMantleSigV4Auth
+
+    captured: dict[str, object] = {}
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"data": [{"id": "nvidia.nemotron"}]}
+
+    async def _fake_get(self, url):
+        captured["auth"] = self.auth
+        return mock_response
+
+    monkeypatch.setattr("httpx2.AsyncClient.get", _fake_get)
+    records = asyncio.run(
+        model_discovery.discover_bedrock_mantle_model_options(
+            base_url="https://bedrock-mantle.us-east-1.api.aws",
+            profile="mantle-selected",
+        )
+    )
+
+    assert isinstance(captured["auth"], _BedrockMantleSigV4Auth)
+    assert [record["id"] for record in records] == ["nvidia.nemotron"]
 
 
 def test_provider_model_discovery_sorts_and_deduplicates_all_formats(monkeypatch):

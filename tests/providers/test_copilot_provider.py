@@ -264,8 +264,6 @@ def test_cli_resolution(monkeypatch, tmp_path, api_key, cli_source):
     async def exercise():
         try:
             client = await copilot_provider._get_client(config, None)
-            # Keep the real SDK constructor so this checks runtime selection,
-            # not just the environment passed to a fake client.
             assert client._connection.path == str(cli_path)
             if cli_source == "sdk":
                 download.assert_called_once_with()

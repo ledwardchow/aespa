@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
@@ -36,13 +37,8 @@ def _merge_persisted_coverage(
 def _is_transient_provider_error(exc: BaseException) -> bool:
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return True
-    try:
-        import httpx
-
-        if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
-            return True
-    except Exception:  # pragma: no cover - httpx is a runtime dependency
-        pass
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
     status_code = getattr(exc, "status_code", None)
     response = getattr(exc, "response", None)
     status_code = status_code or getattr(response, "status_code", None)
@@ -128,7 +124,6 @@ def _validation_incomplete(candidate: dict) -> bool:
         return False
     if candidate.get("validation_retry_pending"):
         return True
-    # Candidates saved before the retry flag existed.
     reasoning = str(candidate.get("validation_reasoning") or "")
     return reasoning.startswith("Validator failed:") or reasoning in {
         "Validator returned no explicit verdict.",
@@ -176,8 +171,6 @@ def _candidate_brief(candidates: list[dict], *, reportable_only: bool = False) -
     return json.dumps(
         [
             {
-                # The numeric key is private validator bookkeeping. Public
-                # output and lead references use ``reference``.
                 "candidate_id": c["candidate_id"],
                 "reference": c.get("reference"),
                 "title": c["title"],

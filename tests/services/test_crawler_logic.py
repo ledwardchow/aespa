@@ -2686,7 +2686,6 @@ def test_authenticate_does_not_reuse_unconfirmed_entra_session(monkeypatch):
 @pytest.mark.parametrize(
     ("site_login_url", "expected"),
     [
-        # The site's own login page comes before the identity provider.
         ("https://target.local/login", "https://target.local/login"),
         ("", "https://login.microsoftonline.com/"),
     ],

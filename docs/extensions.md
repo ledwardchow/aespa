@@ -227,24 +227,29 @@ The legacy primary-database tables remain available for this one-time import,
 but new Benchmark Lab data and settings are handled only by the extension.
 
 The `aespa.chatgptplanusage` API extension is disabled by default. While enabled, it reads
-AESPA's monthly usage totals for the ChatGPT plan and Codex CLI providers once a minute (and
+AESPA's monthly usage totals for the ChatGPT plan and Codex CLI providers every 15 seconds (and
 before each request) and stores the increase per provider and model in its own database. It
 never writes to the primary database. Every few minutes (setting `codex_poll_minutes`, default
 5) it starts a separate, short-lived Codex app-server, reads `account/read` and
 `account/rateLimits/read`, and saves a reading for each 300-minute or 10080-minute window of
-the `codex` limit whose percentage or reset time changed. Every 15 seconds it also reads the
-Active Jobs list and resolves each running job's LLM profile for every agent role, read-only.
-When a job using the ChatGPT plan or Codex CLI provider starts or ends, it saves a reading for
-every window with the job's name in the note, and it checks every `scan_poll_minutes`
-(default 2) while such a job runs. Turn Codex readings off with the `codex_readings` setting. Users can also enter the percentage shown by ChatGPT, with an optional
-reset time. If Codex and the ChatGPT plan provider are signed in to different accounts, only
-Codex CLI usage is compared with readings. Usage between two readings in the same window, or
-from the window start to a reading when the reset time is known, is priced with the Usage
-page's API prices to estimate the cost of 1% and 100% of the window. Usage recorded before the
-extension was first enabled has no time and is not compared with readings. Its routes are
-`GET /summary?window=five_hour|weekly`, `POST /readings`, `DELETE /readings/{id}`,
-`POST /codex/check`, and `POST /sample`, below `/extension/aespa.chatgptplanusage/`. Its code
-is in `extensions/builtin/chatgpt_plan_usage/`.
+the `codex` limit whose percentage or reset time changed. It also reads the Active Jobs list and
+resolves each running job's LLM profile for every agent role, read-only. When a job using the
+ChatGPT plan or Codex CLI provider starts or ends, it saves a reading for every window with the
+job's name in the note, and it checks every `scan_poll_minutes` (default 2) while such a job
+runs. Turn Codex readings off with the `codex_readings` setting. Readings cannot be entered by
+hand.
+
+If Codex and the ChatGPT plan provider are signed in to different accounts, only Codex CLI usage
+is compared with readings. Usage between two readings in the same window, or from the window
+start to a reading when the reset time is known, is priced with the Usage page's API prices to
+estimate the cost of 1% and 100% of the window. Intervals where the percentage changed while
+AESPA used no tokens are skipped. A reading with no AESPA usage on either side and a percentage
+change on at least one side is deleted after each Codex check and on start-up; the first and
+last reading of each window are kept, so the estimate does not change. Usage recorded before
+the extension was first enabled has no time and is not compared with readings. Its routes are
+`GET /summary?window=five_hour|weekly`, `DELETE /readings/{id}`, `POST /codex/check`, and
+`POST /sample`, below `/extension/aespa.chatgptplanusage/`. Its code is in
+`extensions/builtin/chatgpt_plan_usage/`.
 
 ## Testing and packaging
 

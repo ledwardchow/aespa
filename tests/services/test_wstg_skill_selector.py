@@ -87,9 +87,7 @@ def _input(key: str, value: str = "") -> dict:
 @pytest.mark.parametrize(
     ("pages", "intel_items", "selected"),
     [
-        # avatarurl is one of the newly-added SSRF-prone parameter names.
         pytest.param([], [_input("avatarurl")], True, id="expanded_param_name"),
-        # A PDF-export feature is an SSRF lead even with no url= parameter.
         pytest.param(
             [{"url": "https://t/account/export/pdf"}],
             [],

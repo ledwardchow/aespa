@@ -3,7 +3,6 @@ import { useCallback, useEffect, useState } from "react";
 
 import { fmtTok } from "../../shared/ui/TokenUsageBar.jsx";
 import { UsageChart } from "./UsageChart.jsx";
-import { ReadingForm } from "./ReadingForm.jsx";
 import { fmtPercent, fmtTime, fmtUsd } from "./format.js";
 import "./chatgpt-plan-usage.css";
 
@@ -132,53 +131,6 @@ function Summary({ data }) {
   );
 }
 
-function TokenFit({ fit }) {
-  if (!fit) return null;
-  const rows = [
-    ["input_tokens", "Uncached input"],
-    ["output_tokens", "Output"],
-    ["cache_read_tokens", "Cached input"],
-  ];
-  return (
-    <div className="panel">
-      <div className="panel-header">
-        <h2>Usage by token type</h2>
-        <span className="subtle">
-          Fitted from {fit.segments} intervals without API prices
-          {fit.fit_quality != null ? ` · fit ${Math.round(fit.fit_quality * 100)}%` : ""}
-        </span>
-      </div>
-      <div className="table-wrap">
-        <table className="plan-usage-table">
-          <thead>
-            <tr>
-              <th>Token type</th>
-              <th>% per 1M tokens</th>
-              <th>Tokens for 100% if used alone</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(([key, label]) => (
-              <tr key={key}>
-                <td>{label}</td>
-                <td>{fit.percent_per_million[key].toFixed(3)}</td>
-                <td>
-                  {fit.millions_for_full_window[key] != null
-                    ? `${fit.millions_for_full_window[key].toLocaleString()}M`
-                    : "No measurable effect"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="subtle" style={{ marginTop: 8 }}>
-        Readings with different mixes of input and output make this more reliable.
-      </div>
-    </div>
-  );
-}
-
 function Readings({ readings, onDelete, busy }) {
   return (
     <div className="panel">
@@ -189,7 +141,7 @@ function Readings({ readings, onDelete, busy }) {
       {readings.length === 0 ? (
         <div className="empty-state">
           <strong>No readings yet</strong>
-          <span>Readings appear after Codex is checked, or when you add one.</span>
+          <span>Readings appear after Codex is checked.</span>
         </div>
       ) : (
         <div className="table-wrap">
@@ -197,7 +149,6 @@ function Readings({ readings, onDelete, busy }) {
             <thead>
               <tr>
                 <th>Time</th>
-                <th>From</th>
                 <th>Used</th>
                 <th>Resets</th>
                 <th>Note</th>
@@ -208,7 +159,6 @@ function Readings({ readings, onDelete, busy }) {
               {readings.map((row) => (
                 <tr key={row.id}>
                   <td>{fmtTime(row.observed_at)}</td>
-                  <td>{row.source === "codex" ? "Codex" : "Entered"}</td>
                   <td>{fmtPercent(row.used_percent)}</td>
                   <td>{row.resets_at ? fmtTime(row.resets_at) : "—"}</td>
                   <td>{row.note || ""}</td>
@@ -325,7 +275,6 @@ export function ChatGPTPlanUsagePage() {
   };
 
   const shown = data?.window === usageWindow ? data : null;
-  // Hide the 5-hour window when Codex reports that the plan has none.
   const codex = data?.codex;
   const noFiveHour =
     codex?.ok && !(codex.windows || []).some((item) => item.window === "five_hour");
@@ -379,7 +328,6 @@ export function ChatGPTPlanUsagePage() {
                 onCheck={checkCodex}
               />
               <Summary data={shown} />
-              <ReadingForm usageWindow={usageWindow} onSaved={load} />
               <div className="panel">
                 <div className="panel-header">
                   <h2>Usage over time</h2>
@@ -389,7 +337,6 @@ export function ChatGPTPlanUsagePage() {
                 </div>
                 <UsageChart timeline={shown.timeline} readings={shown.readings} />
               </div>
-              <TokenFit fit={shown.fit} />
               <Readings readings={shown.readings} onDelete={remove} busy={busy} />
               <Intervals segments={shown.segments} />
               <div className="subtle">

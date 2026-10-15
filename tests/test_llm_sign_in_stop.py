@@ -34,7 +34,6 @@ def test_sign_in_error_stops_web_run_once_and_tells_the_user(monkeypatch):
         crawler_svc._active_tasks[run_id] = crawl
         try:
             assert llm_sign_in_stop.schedule_stop("web", run_id, "Sign in again")
-            # Calls already in flight hit the same error; they must not stop twice.
             assert not llm_sign_in_stop.schedule_stop("web", run_id, "Sign in again")
             await asyncio.gather(*llm_sign_in_stop._stop_tasks)
         finally:

@@ -9,16 +9,10 @@ function initialOpen() {
     const saved = localStorage.getItem(OPEN_KEY);
     if (saved === "true" || saved === "false") return saved === "true";
   } catch {
-    // Storage can be unavailable; fall back to the window width.
   }
-  // Narrow windows start collapsed so the graph keeps its width.
   return typeof window === "undefined" || window.innerWidth > 900;
 }
 
-/**
- * Crawl details beside the site map. Collapsed, it shrinks to a narrow rail
- * so the graph gets the width back; the choice is remembered per browser.
- */
 export function SitemapSidePanel({ children }) {
   const [open, setOpen] = useState(initialOpen);
   const update = (value) => {
@@ -26,7 +20,6 @@ export function SitemapSidePanel({ children }) {
     try {
       localStorage.setItem(OPEN_KEY, String(value));
     } catch {
-      // Remembering the choice is optional.
     }
   };
   if (!open) {
@@ -67,7 +60,6 @@ export function SitemapSidePanel({ children }) {
   );
 }
 
-/** One collapsible group in the site map side panel. */
 export function SidePanelSection({ id, title, count, defaultOpen = true, children }) {
   const [open, setOpen] = useState(defaultOpen);
   const bodyId = `sitemap-side-${id}`;

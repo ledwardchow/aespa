@@ -182,3 +182,39 @@ test("saves a Fast speed only for models that offer it", async () => {
   await user.selectOptions(screen.getByLabelText("Model"), "gpt-5.6-sol");
   expect(screen.queryByLabelText("Speed")).toBeNull();
 });
+
+test("a new model does not inherit another model's thinking level", async () => {
+  const firstProvider = {
+    ...provider,
+    models: ["model-a"],
+    model_capabilities: {
+      "model-a": {
+        context_window_tokens: 400000,
+        supported_efforts: ["low", "high", "xhigh"],
+        default_effort: "xhigh",
+      },
+    },
+  };
+  const chosenProvider = {
+    ...provider,
+    id: 8,
+    name: "Second provider",
+    models: ["no-levels-model"],
+    model_capabilities: { "no-levels-model": {} },
+  };
+
+  render(
+    <LLMModelForm
+      mode="new"
+      providers={[firstProvider, chosenProvider]}
+      initialProviderId={chosenProvider.id}
+      initialModel="no-levels-model"
+    />,
+  );
+
+  const thinking = screen.getByLabelText(/Thinking level/);
+  expect(thinking.value).toBe("");
+  expect([...thinking.options].map((option) => option.value)).toEqual([""]);
+  await waitFor(() => expect(settingsApi.discoverModelOptions).toHaveBeenCalled());
+  expect(thinking.value).toBe("");
+});

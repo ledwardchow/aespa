@@ -11,27 +11,15 @@ from typing import Callable
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 MIN_SIBLINGS = 10
-# Once one route of a URL shape is confirmed (for example /tech/{id}/{slug}),
-# other routes with the same shape (/games/{id}/{slug}) need fewer links.
 KNOWN_SHAPE_SIBLINGS = 2
 INITIAL_SAMPLES = 3
 CONFIRM_SAMPLES = 5
 MAX_UNCERTAIN_SAMPLES = 12
-# Pages that fail to load are replaced by other examples, up to this many.
 MAX_FAILED_SAMPLES = 2
-# Patterns still below MIN_SIBLINGS are counted across pages. Cap the number
-# tracked so a site with many unrelated URL shapes cannot grow this forever.
 MAX_TRACKED_PATTERNS = 2_000
 SAVE_INTERVAL_SECONDS = 5.0
-# Layout similarity between pages of one template varies by site: about 0.65
-# for large retail pages with many optional panels, 0.95 or more for simple
-# themes. So an example belongs to a group when it is at least OUTLIER_RATIO as
-# similar to the group's most typical page as the other examples are, and
-# never below SIMILARITY_FLOOR.
 SIMILARITY_FLOOR = 0.5
 OUTLIER_RATIO = 0.75
-# A route is confirmed when this share of its examples belong to one group.
-# The other examples are still visited and reported as different.
 DOMINANT_SHARE = 0.75
 LAYOUT_SKETCH_SIZE = 256
 _ACTION_SEGMENTS = {
@@ -68,7 +56,6 @@ def _value_like(text: str) -> bool:
 
 
 def _fragment(fragment: str) -> str:
-    # Match the crawler: only client-side routes (#/...) are separate pages.
     return fragment if fragment.startswith("/") else ""
 
 
@@ -134,9 +121,6 @@ def _candidate_keys(url: str) -> list[str]:
     if parts.fragment.startswith("/"):
         return []
     segments = [segment for segment in parts.path.split("/") if segment]
-    # An action word may be a fixed part of a route (/admin/products/{value})
-    # but never the part that varies: /products/new or /orders/5/delete is an
-    # operation, not another member of the route.
     actions = {
         index
         for index, segment in enumerate(segments)
@@ -144,10 +128,6 @@ def _candidate_keys(url: str) -> list[str]:
     }
     base = f"{parts.scheme.lower()}://{parts.netloc.lower()}"
     keys = []
-    # Path routes ignore the query string. Whether a query value changes the
-    # page is decided by comparing the visited examples, not by its name.
-    # A URL ending in an action (/admin/products/new) is a form for one kind of
-    # record. Only its IDs may vary, so forms for different records stay apart.
     ends_in_action = len(segments) - 1 in actions
     for index in range(1, len(segments)):
         if index in actions or (ends_in_action and not _value_like(segments[index])):
@@ -155,8 +135,6 @@ def _candidate_keys(url: str) -> list[str]:
         template = segments.copy()
         template[index] = "{value}"
         keys.append(f"{base}/{'/'.join(template)}")
-    # Routes such as /{slug}/p/{id} or /2024/10/23/{id}/{slug} change in more
-    # than one place. Vary every ID- or slug-like segment together.
     variable = {
         index
         for index, seg in enumerate(segments)
@@ -172,8 +150,6 @@ def _candidate_keys(url: str) -> list[str]:
         key = f"{base}/{'/'.join(template)}"
         if key not in keys:
             keys.append(key)
-    # Query routes such as ?p=123 or ?page=7 vary every ID-like value; other
-    # query values stay fixed so different operations are not merged.
     query = parse_qsl(parts.query, keep_blank_values=True)
     if any(_value_like(value) for _name, value in query):
         query_template = "&".join(
@@ -217,7 +193,6 @@ def page_similarity(first: dict | str, second: dict | str) -> float:
     first_sketch = first.get("layout") or []
     second_sketch = second.get("layout") or []
     if not first_sketch or not second_sketch:
-        # An empty page gives no evidence that two pages are alike.
         return 0.0
     first_set, second_set = set(first_sketch), set(second_sketch)
     if (
@@ -225,8 +200,6 @@ def page_similarity(first: dict | str, second: dict | str) -> float:
         and second.get("size", len(second_set)) <= LAYOUT_SKETCH_SIZE
     ):
         return len(first_set & second_set) / len(first_set | second_set)
-    # Each sketch holds the smallest element hashes of its page. The smallest
-    # hashes of the union estimate the share of elements both pages have.
     count = min(len(first_set), len(second_set))
     union = sorted(first_set | second_set)[:count]
     return (
@@ -289,12 +262,9 @@ class RouteSampler:
         for key, group in self.groups.items():
             self._seen[key] = set(group.get("seen") or [])
             group.setdefault("features", None)
-        # Links counted so far per URL shape, across every route not yet found.
         self._shape_counts: dict[str, int] = defaultdict(int)
         for key, identities in self.tallies.items():
             self._shape_counts[_key_shape(key)] += len(identities)
-
-    # ── Persistence ──────────────────────────────────────────────────────────
 
     def snapshot(self) -> str:
         for key, group in self.groups.items():
@@ -329,8 +299,6 @@ class RouteSampler:
         self.dirty = True
         if status_changed:
             self._status_changed = True
-
-    # ── Read-only views ──────────────────────────────────────────────────────
 
     def summaries(self) -> list[dict]:
         result = []
@@ -392,16 +360,11 @@ class RouteSampler:
             if phase is not None
         )
 
-    # ── Link admission ───────────────────────────────────────────────────────
-
     def _assign_keys(self, unique: list[dict]) -> tuple[dict[str, str], dict]:
         buckets: dict[str, set[str]] = defaultdict(set)
         for item in unique:
             for key in _candidate_keys(item["url"]):
                 buckets[key].add(_member_identity(item["url"], key))
-        # Shapes of routes already found. A news site links a few articles
-        # from each of many sections; once one section is a route, the others
-        # with the same URL shape are checked from two links.
         known_shapes = {
             group.get("shape")
             for group in self.groups.values()
@@ -424,8 +387,6 @@ class RouteSampler:
                     self._seen[key] | {_seen_hash(identity) for identity in identities}
                 )
                 continue
-            # Count siblings across pages: a catalogue can be reached only
-            # through pages that each link to a few related products.
             known = set(self.tallies.get(key, ()))
             combined = combined_by_key[key]
             shape = _key_shape(key)
@@ -442,8 +403,6 @@ class RouteSampler:
                     self.tallies[key] = sorted(combined)
                     self._shape_counts[shape] += len(combined) - len(known)
                     self._mark()
-        # A link can match several possible templates. Prefer the largest
-        # sibling family, then the more specific pattern.
         chosen: dict[str, str] = {}
         for key in sorted(counts, key=lambda k: (-counts[k], -k.count("/"), k)):
             for item in unique:
@@ -473,7 +432,6 @@ class RouteSampler:
             else:
                 by_group[key].append(item)
 
-        # Larger routes first, so they lead their URL shape (see _advance).
         for key, members in sorted(by_group.items(), key=lambda kv: -len(kv[1])):
             group = self.groups.get(key)
             if group is None:
@@ -566,8 +524,6 @@ class RouteSampler:
             self._mark(status_changed=True)
         return released
 
-    # ── Decisions ────────────────────────────────────────────────────────────
-
     def _templates(self, phase_key: str, exclude: dict) -> list[dict]:
         """Return page templates this account has confirmed on other routes."""
         return [
@@ -603,12 +559,8 @@ class RouteSampler:
             if isinstance(features, dict) and features.get("kind") == "blocked"
         )
         if 0 < blocked < len(loaded):
-            # Some pages need a login and others do not: an access difference
-            # that sampling could miss, so every link is crawled.
             return self._reject(group, phase, phase_key, is_queued)
         templates = self._templates(phase_key, group)
-        # The same template often serves many routes, such as articles in
-        # every news section. One matching example is enough for those.
         for template in templates:
             if loaded and all(
                 page_similarity(template["features"], features) >= template["cutoff"]
@@ -623,23 +575,16 @@ class RouteSampler:
                     template["cutoff"],
                     0,
                 )
-        # Each account compares its own examples. Accounts may legitimately
-        # see different pages (a signed-in user gets a review form), and that
-        # access difference is what visiting the same example URLs records.
         confirmed_elsewhere = group["status"] == "confirmed"
         target = INITIAL_SAMPLES if confirmed_elsewhere else CONFIRM_SAMPLES
-        # Links queued since they were held will be visited anyway.
         phase["pending"] = [
             item for item in phase["pending"] if not is_queued(item["url"])
         ]
         if not phase["pending"]:
-            # Every link of this route has been visited, so confirming it
-            # skips nothing. It still gives sibling routes a template to match.
             target = INITIAL_SAMPLES
         if len(loaded) >= INITIAL_SAMPLES:
             medoid, members, cutoff = _cluster(loaded)
             if len(members) < 2:
-                # No two examples look alike: these are different pages.
                 return self._reject(group, phase, phase_key, is_queued)
             if len(loaded) >= target and len(members) >= DOMINANT_SHARE * len(loaded):
                 return self._confirm(
@@ -659,20 +604,15 @@ class RouteSampler:
             and not templates
             and self._lead_in_progress(group, phase_key)
         ):
-            # Another route with this URL shape is being checked. Wait for it:
-            # if it is confirmed, one example will be enough here.
             return []
         if not phase["samples"] and templates:
-            # Try one page first: it may match a template already confirmed.
             wanted = 1
         elif len(loaded) < INITIAL_SAMPLES:
             wanted = INITIAL_SAMPLES - len(loaded)
         else:
-            # Some examples differed: look at more before deciding.
             wanted = max(target - len(loaded), 2)
         selected = self._pick(group, phase["pending"], min(wanted, room))
         if not selected:
-            # Wait for more links; drain() releases this check if none arrive.
             return []
         picked = {id(item) for item in selected}
         phase["samples"].extend(selected)
@@ -694,7 +634,6 @@ class RouteSampler:
         phase["pending"] = []
         phase["template"] = {"features": template, "cutoff": cutoff}
         phase["different"] = different
-        # Keep only the typical page's layout; the others are no longer needed.
         phase["observed"] = {
             identity: (
                 {"kind": features.get("kind")}
@@ -710,7 +649,6 @@ class RouteSampler:
         return self._wake_siblings(group, phase_key, is_queued)
 
     def _pick(self, group: dict, pending: list[dict], count: int) -> list[dict]:
-        # Reuse another account's example URLs so access can be compared.
         preferred = {
             _identity(item["url"])
             for phase in group["phases"].values()
@@ -792,7 +730,6 @@ _LAYOUT_SCRIPT = (
     return tokens;
   };
   let tokens = collect(false);
-  // Pages with little class markup are compared by element nesting instead.
   if (tokens.size < 30) tokens = collect(true);
   const types = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
     .map(el => el.textContent || '').join(' ');

@@ -103,13 +103,9 @@ def codex_step(store, watcher, settings: dict, next_codex: float, now: float) ->
 
 def _sample_loop(store, stop: threading.Event) -> None:
     watcher = scans.ScanWatcher()
-    # The first Codex check waits for a later pass, so a registration that is
-    # replaced right away never starts Codex.
     next_codex = time.monotonic() + SAMPLE_SECONDS
     first = True
     while True:
-        # Stop once this registration is replaced, for example when the
-        # extension is disabled or the registry reloads.
         if get_extension_manager().data_stores.get(EXTENSION_ID) is not store:
             return
         _quietly(usage.sample, store)
@@ -129,6 +125,7 @@ class ChatGPTPlanUsageExtension:
     def register(self, registry) -> None:
         registry.register_settings_fields(SETTINGS)
         store = registry.data_store(models.metadata)
+        _quietly(usage.prune_readings, store)
         registry.register_api_router(build_router(store))
         threading.Thread(
             target=_sample_loop,

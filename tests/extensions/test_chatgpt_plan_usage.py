@@ -106,15 +106,12 @@ def test_reset_statistics_counts_new_usage_from_zero(store):
 def test_window_start_and_readings_give_cost_per_percent(store):
     _price()
     usage.sample(store, at=T0)
-    reset = T0 + timedelta(hours=6)  # The window started at T0 + 1h.
-    # $4 of input before the window start must not count.
+    reset = T0 + timedelta(hours=6)
     _use(input=1_000_000)
     usage.sample(store, at=T0 + timedelta(minutes=30))
-    # $20 of output inside the window, then a 10% reading.
     _use(output=1_000_000)
     usage.sample(store, at=T0 + timedelta(hours=2))
     _read(store, "five_hour", 10, T0 + timedelta(hours=2), reset)
-    # Another $10 takes the window to 15%.
     _use(input=2_500_000)
     usage.sample(store, at=T0 + timedelta(hours=3))
     _read(store, "five_hour", 15, T0 + timedelta(hours=3))
@@ -141,7 +138,6 @@ def test_window_start_before_sampling_began_is_not_used(store):
     usage.sample(store, at=T0)
     _use(output=1_000_000)
     usage.sample(store, at=T0 + timedelta(hours=1))
-    # The window began an hour before sampling, so its usage is incomplete.
     _read(store, "five_hour", 10, T0 + timedelta(hours=1), T0 + timedelta(hours=4))
 
     result = usage.summary(store, "five_hour", at=T0 + timedelta(hours=1))
@@ -184,8 +180,8 @@ def test_codex_cli_usage_counts_toward_the_estimate(store):
     _price()
     _price(model="gpt-5.6-sol", provider=usage.CODEX)
     usage.sample(store, at=T0)
-    _use(output=500_000)  # $10 through the ChatGPT plan provider.
-    _use(output=250_000, model="gpt-5.6-sol", provider=usage.CODEX)  # $5.
+    _use(output=500_000)
+    _use(output=250_000, model="gpt-5.6-sol", provider=usage.CODEX)
     usage.sample(store, at=T0 + timedelta(hours=1))
     _read(store, "weekly", 10, T0 + timedelta(minutes=30))
     _read(store, "weekly", 13, T0 + timedelta(hours=1))
@@ -313,42 +309,25 @@ def test_codex_failure_is_reported_without_readings(store, monkeypatch):
     assert codex.status(store)["error"] == "Codex CLI is not installed"
 
 
-def test_fit_recovers_token_weights():
-    weights = {"input_tokens": 2.0, "output_tokens": 10.0, "cache_read_tokens": 0.2}
-    mixes = [
-        (1_000_000, 100_000, 3_000_000),
-        (200_000, 400_000, 1_000_000),
-        (3_000_000, 50_000, 0),
-        (500_000, 500_000, 6_000_000),
-    ]
-    items = [
-        {
-            "percent_change": (
-                i * weights["input_tokens"]
-                + o * weights["output_tokens"]
-                + c * weights["cache_read_tokens"]
-            )
-            / 1_000_000,
-            "usage": {
-                "input_tokens": i,
-                "output_tokens": o,
-                "cache_read_tokens": c,
-                "cache_write_tokens": 0,
-            },
-        }
-        for i, o, c in mixes
-    ]
+def test_percent_change_without_aespa_usage_is_ignored(store):
+    _price()
+    usage.sample(store, at=T0)
+    _read(store, "weekly", 10, T0 + timedelta(minutes=10))
+    # Another app used the plan: +5% with no AESPA tokens.
+    _read(store, "weekly", 15, T0 + timedelta(minutes=20))
+    # Idle with no change: kept, but adds nothing.
+    _read(store, "weekly", 15, T0 + timedelta(minutes=30))
+    _use(output=500_000)  # $10 for 2%.
+    usage.sample(store, at=T0 + timedelta(minutes=40))
+    _read(store, "weekly", 17, T0 + timedelta(minutes=40))
 
-    result = usage.fit(items)
+    result = usage.summary(store, "weekly", at=T0 + timedelta(minutes=40))
 
-    for key, value in weights.items():
-        assert result["percent_per_million"][key] == pytest.approx(value, rel=1e-6)
-    assert result["millions_for_full_window"]["output_tokens"] == pytest.approx(10)
-    assert result["fit_quality"] == pytest.approx(1)
-    assert usage.fit(items[:3]) is None
+    assert [item["percent_change"] for item in result["segments"]] == [2, 0]
+    assert result["estimate"]["usd_per_percent"] == pytest.approx(5)
 
 
-def test_extension_api_records_and_deletes_readings(client, monkeypatch, tmp_path):
+def test_extension_api_lists_and_deletes_readings(client, monkeypatch, tmp_path):
     from aespa.extensions import get_extension_manager
 
     manager = get_extension_manager()
@@ -379,31 +358,13 @@ def test_extension_api_records_and_deletes_readings(client, monkeypatch, tmp_pat
         assert mismatched["providers"] == ["Codex CLI"]
         assert mismatched["codex"]["same_account"] is False
 
-        created = client.post(
-            f"{base}/readings",
-            json={"window": "weekly", "used_percent": 12.5, "note": " start "},
-        )
-        assert created.status_code == 201
-        reading = created.json()
-        assert reading["note"] == "start"
+        _read(manager.data_stores[EXTENSION], "weekly", 12.5, T0 + timedelta(minutes=1))
         listed = client.get(f"{base}/summary?window=weekly").json()["readings"]
-        assert [row["id"] for row in listed] == [reading["id"]]
-
-        late_reset = client.post(
-            f"{base}/readings",
-            json={
-                "window": "five_hour",
-                "used_percent": 5,
-                "resets_at": "2099-01-01T00:00:00Z",
-            },
-        )
-        assert late_reset.status_code == 422
-        assert (
-            client.post(
-                f"{base}/readings", json={"window": "daily", "used_percent": 5}
-            ).status_code
-            == 422
-        )
+        reading = listed[0]
+        assert reading["used_percent"] == 12.5
+        assert client.post(
+            f"{base}/readings", json={"window": "weekly", "used_percent": 5}
+        ).status_code in {404, 405}
 
         assert client.delete(f"{base}/readings/{reading['id']}").status_code == 204
         assert client.delete(f"{base}/readings/{reading['id']}").status_code == 404
@@ -477,12 +438,10 @@ def test_codex_readings_follow_scans(monkeypatch):
     settings = {"codex_poll_minutes": 10, "scan_poll_minutes": 2}
     step = extension.codex_step
 
-    # Idle: check on the normal interval.
     due = step("store", watcher, settings, 0, now=0)
     assert (calls, due) == ([("", False)], 600)
     assert step("store", watcher, settings, due, now=60) == 600
 
-    # A scan starts: read at once, then every 2 minutes while it runs.
     scan = scans.Scan(("web", 3, "Crawl"), "Crawl 'Shop'")
     current[scan.key] = scan
     due = step("store", watcher, settings, due, now=90)
@@ -491,13 +450,11 @@ def test_codex_readings_follow_scans(monkeypatch):
     due = step("store", watcher, settings, due, now=210)
     assert calls[-1] == ("", False) and due == 330
 
-    # The scan ends: read at once, then return to the normal interval.
     current.clear()
     due = step("store", watcher, settings, due, now=240)
     assert calls[-1] == ("Crawl 'Shop' ended", True) and due == 840
     assert len(calls) == 4
 
-    # Turning Codex readings off stops all checks.
     assert step("store", watcher, {"codex_readings": False}, 0, now=900) == 0
     assert len(calls) == 4
 
@@ -517,3 +474,36 @@ def test_forced_codex_readings_are_saved_with_a_note(store, monkeypatch):
         "Crawl 'Shop' started",
         "Crawl 'Shop' started",
     ]
+
+
+def test_readings_between_idle_intervals_are_pruned_without_changing_estimate(store):
+    _price()
+    usage.sample(store, at=T0)
+    reset = T0 + timedelta(days=3)
+    _read(store, "weekly", 10, T0 + timedelta(minutes=1), reset)
+    _use(output=500_000)  # $10
+    usage.sample(store, at=T0 + timedelta(minutes=5))
+    _read(store, "weekly", 12, T0 + timedelta(minutes=10))
+    # Something outside AESPA uses the plan twice.
+    _read(store, "weekly", 15, T0 + timedelta(minutes=20))
+    _read(store, "weekly", 18, T0 + timedelta(minutes=30))
+    _use(output=500_000)  # $10
+    usage.sample(store, at=T0 + timedelta(minutes=35))
+    _read(store, "weekly", 20, T0 + timedelta(minutes=40))
+    _read(store, "weekly", 20, T0 + timedelta(minutes=50))
+    at = T0 + timedelta(minutes=50)
+    before = usage.summary(store, "weekly", at=at)["estimate"]
+
+    assert usage.prune_readings(store) == 1
+    assert usage.prune_readings(store) == 0
+
+    result = usage.summary(store, "weekly", at=at)
+    assert [row["used_percent"] for row in reversed(result["readings"])] == [
+        10,
+        12,
+        18,
+        20,
+        20,
+    ]
+    assert result["estimate"] == before
+    assert result["estimate"]["usd_per_percent"] == pytest.approx(5)

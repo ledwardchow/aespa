@@ -350,7 +350,6 @@ def test_persist_discovered_credential_refuses_out_of_scope_login(monkeypatch, e
     scan" foreign-credential bug)."""
     from aespa.models import Credential, Site, TestRun
 
-    # Both the persister and check_scope must read the same DB.
     monkeypatch.setattr(scanner.events_svc, "emit", lambda *a, **k: None)
 
     with Session(engine) as session:
@@ -366,7 +365,6 @@ def test_persist_discovered_credential_refuses_out_of_scope_login(monkeypatch, e
         session.refresh(run)
         site_id, run_id = site.id, run.id
 
-    # Off-host login → refused, nothing written.
     created = scanner._maybe_persist_discovered_credential(
         run_id,
         username="attacker",
@@ -375,7 +373,6 @@ def test_persist_discovered_credential_refuses_out_of_scope_login(monkeypatch, e
     )
     assert created is False
 
-    # In-scope login → saved.
     created = scanner._maybe_persist_discovered_credential(
         run_id,
         username="realuser",
@@ -425,7 +422,6 @@ def test_load_findings_snapshot_returns_existing_findings(engine):
                 description="param is concatenated into the query",
             )
         )
-        # A finding for a different run must not leak in.
         session.add(
             ScanFinding(
                 test_run_id=99,
@@ -445,8 +441,6 @@ def test_load_findings_snapshot_returns_existing_findings(engine):
     assert snapshot[0]["title"] == "SQL injection in /search"
     assert snapshot[0]["owasp"] == "A03"
 
-    # finding_list over the loaded snapshot must surface the finding rather
-    # than the empty-list regression that returned count 0 (issue #124).
     result = scanner._run_thinking_context_tool(
         "finding_list",
         {"category": "sqli"},
@@ -1247,7 +1241,6 @@ def test_calibrate_finding_rating():
 
 def test_calibrate_all_findings_for_run(engine):
     with Session(engine) as session:
-        # Add one CORS finding (should calibrate to Low) and one SQLi finding (should remain High)
         cors = ScanFinding(
             test_run_id=1,
             owasp_category="A05",
@@ -1280,7 +1273,6 @@ def test_calibrate_all_findings_for_run(engine):
         session.add(explicit)
         session.commit()
 
-    # Monkeypatch get_engine to use our memory db
     from unittest import mock
 
     with mock.patch("aespa.services.scanner.get_engine", return_value=engine):

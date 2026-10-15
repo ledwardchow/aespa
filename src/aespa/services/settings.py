@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 from fastapi import HTTPException, Request
@@ -23,6 +24,7 @@ from aespa.schemas import (
 from aespa.services.model_capabilities import (
     documented_model_capability,
     enrich_model_options,
+    has_effort_list,
     validate_effort,
     validate_service_tier,
 )
@@ -218,6 +220,8 @@ from aespa.services.settings_values import (
 from aespa.services.settings_values import (
     _utcnow as _utcnow,
 )
+
+log = logging.getLogger("aespa.settings")
 
 
 def resolve_llm_config(
@@ -623,6 +627,41 @@ async def discover_model_options_for_format(
                 inference_api = "unknown"
             capabilities.setdefault(model, {})["inference_api"] = inference_api
     return {"models": discovered, "capabilities": capabilities}
+
+
+async def discover_effort_capability(
+    session: Session, provider_id: int, model: str, effort: str | None
+) -> dict | None:
+    """Look up a model's thinking levels live when the provider has none saved.
+
+    The model form offers levels from the same live lookup when the provider
+    record has none, so saving must accept the levels the form showed.  Returns
+    ``None`` when no lookup is needed or the lookup fails.
+    """
+    if not effort or not effort.strip():
+        return None
+    provider = session.get(LLMProviderConfig, provider_id)
+    if provider is None:
+        return None
+    if has_effort_list(_provider_capabilities(provider).get(model)):
+        return None
+    kwargs: dict[str, object] = {
+        "api_format": provider.api_format,
+        "api_key": provider.api_key,
+        "base_url": provider.base_url,
+        "username": provider.username,
+    }
+    if provider.api_format == "google_vertex":
+        kwargs.update(project_id=provider.project_id, location=provider.location)
+    if provider.api_format in {"bedrock", "bedrock_mantle"}:
+        kwargs["aws_profile"] = provider.aws_profile
+    try:
+        result = await discover_model_options_for_format(**kwargs)
+    except Exception as exc:
+        log.warning("Thinking level lookup for '%s' failed: %s", model, exc)
+        return None
+    capability = dict(result.get("capabilities", {})).get(model)
+    return capability if isinstance(capability, dict) else None
 
 
 # ── LLM config export / import ────────────────────────────────────────────────

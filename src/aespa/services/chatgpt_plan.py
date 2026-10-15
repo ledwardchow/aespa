@@ -32,7 +32,6 @@ _pending: dict[str, dict[str, Any]] = {}
 _access_check_lock = asyncio.Lock()
 _access_checks: dict[str, tuple[float, dict[str, Any]]] = {}
 
-# OAuth error codes meaning the saved refresh token can never work again.
 _DEAD_REFRESH_ERRORS = {"invalid_grant", "invalid_client", "unauthorized_client"}
 
 
@@ -371,8 +370,6 @@ async def access_token(client_id: str | None = None) -> str:
             if response.status_code >= 400:
                 code = _oauth_error_code(response)
                 if response.status_code == 401 or code in _DEAD_REFRESH_ERRORS:
-                    # Drop the dead tokens so later calls fail at once
-                    # instead of each sending another doomed refresh.
                     for key in (
                         "access_token",
                         "refresh_token",

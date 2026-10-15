@@ -61,8 +61,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def use_data_dir_for_legacy_database_url(self) -> Settings:
-        # Older .env files explicitly set the former default. Keep those
-        # installations on the new portable path without changing custom URLs.
         if self.database_url in {
             "",
             "sqlite:///./aespa.db",

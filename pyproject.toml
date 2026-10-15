@@ -1,6 +1,6 @@
 [project]
 name = "aespa"
-version = "0.7.20261015.12"
+version = "0.7.20261015.17"
 description = "AI-Enabled Security Pentesting Agent"
 authors = [
     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
@@ -47,8 +47,6 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Run across all CPU cores (pytest-xdist). Pass `-n 0` to run serially, e.g.
-# when debugging with breakpoints or print output.
 addopts = "-n auto"
 filterwarnings = [
     # SQLModel domain classes named `Test*` (e.g. TestRun) collide with pytest's

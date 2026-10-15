@@ -208,7 +208,6 @@ class PublishingIn(BaseModel):
 
 
 class PublishIn(BaseModel):
-    # None publishes every ground truth; the UI always sends an explicit choice.
     dataset_ids: list[int] | None = Field(default=None, max_length=1000)
 
 

@@ -240,7 +240,7 @@ async def ensure_fresh(
                 return {**info(), "status": "unchanged"}
             store(directory, raw, etag=new_etag, source=url)
             return {**info(), "status": "updated"}
-        except Exception as exc:  # noqa: BLE001 - keep scanning on any failure
+        except Exception as exc:
             log.warning("Could not update the Retire.js list: %s", exc)
             return {**info(), "status": "failed", "error": str(exc)[:300]}
         finally:

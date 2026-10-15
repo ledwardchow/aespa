@@ -105,7 +105,6 @@ def test_site_workflow_data_can_be_edited_without_a_run(client):
     assert updated.status_code == 200
     assert updated.json()["workflow_data"][0]["instructions"] == "Use a sample keyboard"
 
-    # Clients that do not send workflow_data leave the site-level data alone.
     unchanged = client.put(
         f"/api/sites/{site_id}",
         json={"name": "With workflow", "base_url": "https://juice.local"},

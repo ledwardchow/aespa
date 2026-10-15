@@ -18,7 +18,6 @@ export function WebRunCrawlProgress({ run, crawlerTask, crawlerActive }) {
     }[run.phase] || (isRunning ? "Crawl in progress" : "Crawl is not running");
   const stageText = crawlerTask || phaseLabel;
   if (!showStage) return progressBar;
-  // One line: the stage text, with the progress bar along its lower edge.
   return (
     <div className="crawl-stage-strip">
       <span className="crawl-stage-label">Current stage</span>
@@ -30,7 +29,6 @@ export function WebRunCrawlProgress({ run, crawlerTask, crawlerActive }) {
   );
 }
 
-/** Users section of the site map side panel. */
 export function WebRunUserCrawlProgress({ run, crawlerActive, activityLog = [] }) {
   const credentials = (run?.credentials || []).filter(
     (credential) => !run.crawl_credential_id || credential.id === run.crawl_credential_id,

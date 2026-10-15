@@ -483,6 +483,66 @@ def _make_profile(client: TestClient, provider_id: int, **overrides):
     return client.post("/api/settings/llm/model-configs", json=payload)
 
 
+def test_thinking_level_is_rejected_when_model_lists_none(
+    client: TestClient, monkeypatch
+):
+    async def no_levels(**kwargs):
+        return {"models": ["plain-model"], "capabilities": {"plain-model": {}}}
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_model_options_for_format", no_levels
+    )
+    provider = _make_provider(
+        client, models=["plain-model"], model_capabilities={"plain-model": {}}
+    ).json()
+
+    rejected = _make_profile(
+        client, provider["id"], model="plain-model", reasoning_effort="xhigh"
+    )
+    assert rejected.status_code == 422
+    assert "Set Thinking level to Default" in rejected.json()["detail"]
+
+    accepted = _make_profile(client, provider["id"], model="plain-model")
+    assert accepted.status_code == 200
+    assert accepted.json()["reasoning_effort"] is None
+
+
+def test_thinking_level_uses_live_levels_when_none_are_saved(
+    client: TestClient, monkeypatch
+):
+    calls = []
+
+    async def live_levels(**kwargs):
+        calls.append(kwargs)
+        return {
+            "models": ["live-model"],
+            "capabilities": {"live-model": {"supported_efforts": ["low", "high"]}},
+        }
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_model_options_for_format", live_levels
+    )
+    provider = _make_provider(
+        client, models=["live-model"], model_capabilities={"live-model": {}}
+    ).json()
+
+    accepted = _make_profile(
+        client, provider["id"], model="live-model", reasoning_effort="high"
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["reasoning_effort"] == "high"
+    assert calls and calls[0]["api_format"] == "openai"
+
+    rejected = _make_profile(
+        client,
+        provider["id"],
+        name="Other",
+        model="live-model",
+        reasoning_effort="xhigh",
+    )
+    assert rejected.status_code == 422
+
+
 def test_auto_context_uses_freshly_discovered_form_value(client: TestClient):
     provider_r = _make_provider(
         client,

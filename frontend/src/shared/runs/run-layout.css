@@ -1567,7 +1567,6 @@
   font-size: 11px;
 }
 
-/* Site map: settings toolbar, crawl stage line and details side panel */
 .sitemap-toolbar {
   display: flex;
   flex-shrink: 0;
@@ -1828,7 +1827,6 @@
   white-space: nowrap;
 }
 @media (max-width: 900px) {
-  /* The details panel opens over the graph instead of narrowing it. */
   .sitemap-side-panel {
     position: absolute;
     top: 0;

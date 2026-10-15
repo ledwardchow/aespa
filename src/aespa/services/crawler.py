@@ -291,7 +291,6 @@ async def _crawl_task(run_id: int) -> None:
         _stop_requested.discard(run_id)
         shared = _active_shared.pop(run_id, None)
         if shared is not None:
-            # Keep counts saved between timed saves for a stop, pause or error.
             payload = shared.route_sampler.take_snapshot(force=True)
             if payload is not None:
                 _write_route_sampler(run_id, *payload)
@@ -382,7 +381,6 @@ class _CrawlShared:
         self.lock: asyncio.Lock = asyncio.Lock()
         self.pages_done: int = pages_done
         self.route_sampler = RouteSampler(route_sampler_snapshot)
-        # Keeps grouped-page saves in order when they run off the event loop.
         self.route_save_lock: asyncio.Lock = asyncio.Lock()
         # Absolute JS asset URLs already fetched+mined for endpoint/API-call
         # intelligence, shared across every phase/credential in this run so a
@@ -1300,8 +1298,6 @@ async def _crawl_as_credential(
         phase_key = str(credential_id) if credential_id is not None else "anonymous"
 
         def push(entry: tuple[str, int, Optional[int], Optional[dict]]) -> None:
-            # An example page decides whether thousands of held links need
-            # visiting, so it goes ahead of ordinary links.
             if page_selection == "group_similar" and (
                 shared.route_sampler.wants_observation(entry[0], phase_key)
             ):
@@ -1343,8 +1339,6 @@ async def _crawl_as_credential(
             if run_id in _stop_requested:
                 break
             if not queue and page_selection == "group_similar":
-                # Examples the crawler skipped can never be checked. Release
-                # their held links to the normal crawl rather than drop them.
                 async with shared.lock:
                     released = shared.route_sampler.drain(phase_key)
                 enqueue_group_items(released)
@@ -1461,8 +1455,6 @@ async def _crawl_as_credential(
 
             if resp is not None and resp.status >= 400:
                 if page_selection == "group_similar":
-                    # Access denied is a real difference between pages; other
-                    # errors only mean another example should be tried.
                     await record_route_example(
                         url,
                         {"kind": "blocked"} if resp.status in {401, 403} else None,
@@ -1677,8 +1669,6 @@ async def _crawl_as_credential(
                         link_items, phase_key, route_is_queued
                     )
                 await _save_route_sampler(run_id, shared)
-                # Drop only held links. External links and admitted links are
-                # still recorded as page intelligence.
                 held_urls = {_norm(item["url"]) for item in link_items} - {
                     _norm(item["url"]) for item in admitted
                 }
@@ -5654,8 +5644,6 @@ def _is_api_page(url: str, text: str) -> bool:
 
 def _is_api_response_candidate(url: str, resource_type: str, content_type: str) -> bool:
     parsed = urlparse(url)
-    # Next.js fetches page data with an _rsc query value. These responses are
-    # navigation traffic, not separate API endpoints in the site map.
     if "_rsc" in parse_qs(parsed.query):
         return False
     path = parsed.path.lower()

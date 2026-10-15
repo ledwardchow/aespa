@@ -511,14 +511,10 @@ legend {
   outline: none;
 }
 
-/* A form's error sits just above its submit buttons, where the person is
-   looking after pressing Save. */
 .alert.form-error {
   margin: 12px 0;
 }
 
-/* Notices float in the lower-right corner so they never push the page down.
-   Several notices stack upwards from the corner. */
 .notice-stack {
   position: fixed;
   right: 20px;

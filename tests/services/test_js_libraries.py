@@ -30,9 +30,6 @@ SMALL = str(Path(__file__).parents[1] / "fixtures" / "retire_small.json")
 SHIPPED = retire_repository.BUNDLED_DIR / retire_repository.FILE_NAME
 
 
-# ── Detector, against a small Retire.js-format fixture ──────────────────────
-
-
 def test_detects_versions_from_names_urls_and_content():
     by_name = js_libraries.detect("https://cdn.test/jquery-1.12.4.min.js", path=SMALL)
     assert [(d.library, d.version, d.method) for d in by_name] == [
@@ -71,7 +68,6 @@ def test_filecontentreplace_and_hashes():
     assert [(d.library, d.version, d.method) for d in hashed] == [
         ("dojo", "1.4.1", js_libraries.METHOD_HASH)
     ]
-    # Without the complete file there is no hash match.
     assert js_libraries.detect_in_content("hello", "dojo.js", SMALL) == []
 
 
@@ -152,9 +148,6 @@ def test_shipped_retire_list_flags_old_jquery():
     assert current == []
 
 
-# ── Downloading the latest list ─────────────────────────────────────────────
-
-
 def _transport(responses: list[httpx.Response], seen: list[httpx.Request]):
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
@@ -220,7 +213,6 @@ def test_download_replaces_cached_copy_and_uses_etag(offline_retire_list):
     assert result["status"] == "unchanged"
     assert seen[-1].headers["if-none-match"] == '"v1"'
 
-    # A fresh copy is not downloaded again.
     client = httpx.AsyncClient(transport=_transport([], seen))
     assert _refresh(client)["status"] == "fresh"
 
@@ -244,9 +236,6 @@ def test_bad_downloads_keep_the_current_copy(offline_retire_list, response):
 def test_disabled_download_makes_no_request():
     client = httpx.AsyncClient(transport=_transport([], []))
     assert _refresh(client, enabled=False)["status"] == "disabled"
-
-
-# ── Scanner and SAST, against the shipped list ──────────────────────────────
 
 
 def _web_run(db_session) -> TestRun:
@@ -350,7 +339,6 @@ def test_lockfile_version_wins_over_declared_range(tmp_path):
         build_repository_model(tmp_path), {"updated_at": None, "advisories": []}
     )
     matched = {m["library"]: m for m in analysis["matches"] if m.get("library")}
-    # jQuery resolves to a fixed version in the lockfile; Lodash only has a range.
     assert "jQuery" not in matched
     assert matched["Lodash"]["declared_range"] is True
 
@@ -441,7 +429,6 @@ def test_settings_api_reports_and_refreshes_the_list(client, monkeypatch):
     monkeypatch.setattr(retire_repository, "ensure_fresh", fake_refresh)
     refreshed = client.post("/api/settings/retire-list/refresh").json()
     assert refreshed["status"] == "unchanged"
-    # A manual refresh always checks, even when automatic updates are off.
     assert calls[0]["enabled"] is True
     assert calls[0]["max_age"].total_seconds() == 0
 
