@@ -268,7 +268,7 @@ class ManifestAdapter:
         "yarn.lock",
     }
     _yarn_entry = re.compile(
-        r'^"?(?P<name>@?[^@\s",]+)@[^\n]*:\s*\n(?:[ \t]+[^\n]*\n)*?[ \t]+version:?\s+"?(?P<version>[^"\s]+)',
+        r'^"?(?P<name>@?[^@\s",]+)@[^\n]*:[ \t]*\n(?:[ \t][^\n]*\n)*?[ \t]+version:?[ \t]+"?(?P<version>[^"\s]+)',
         re.MULTILINE,
     )
     _suffixes = {".csproj", ".vbproj", ".fsproj"}
