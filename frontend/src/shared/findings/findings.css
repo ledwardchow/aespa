@@ -520,3 +520,62 @@
   background: var(--panel-2);
   border: 1px solid var(--border-2);
 }
+.findings-more-menu {
+  position: relative;
+}
+.findings-more-trigger {
+  min-width: 34px;
+  font-size: 16px;
+  line-height: 1;
+}
+.findings-more-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 70;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+.findings-more-popover button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-2);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+}
+.findings-more-popover button:hover:not(:disabled),
+.findings-more-popover button:focus-visible {
+  color: var(--text);
+  background: var(--panel-2);
+  outline: none;
+}
+.findings-more-popover button.danger {
+  color: var(--danger);
+}
+.findings-more-popover button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.findings-more-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+@container findings-panel (max-width: 900px) {
+  .findings-more-popover {
+    right: auto;
+    left: 0;
+  }
+}

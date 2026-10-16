@@ -57,15 +57,15 @@ for (const [route, text] of screens) {
   });
 }
 
-test("upstream proxy settings are under Global", async ({ page }) => {
+test("connectivity settings are under Global", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/scan-policy");
   await expect(page.getByRole("link", { name: "External Integrations" })).toHaveCount(0);
-  await page.getByRole("tab", { name: "Upstream Proxy" }).click();
+  await page.getByRole("tab", { name: "Connectivity" }).click();
   await expect(page).toHaveURL(/#\/scan-policy\/global\/proxy$/);
   await expect(page.getByText("Send target requests through an upstream proxy")).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("tab", { name: "Upstream Proxy" })).toHaveAttribute(
+  await expect(page.getByRole("tab", { name: "Connectivity" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -116,10 +116,6 @@ test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
   await page.getByRole("combobox", { name: "Completed scan" }).selectOption("1");
   await expect(page.getByText("Benchmark model: Fixture model")).toBeVisible();
   await page.getByRole("tab", { name: "Analyses" }).click();
-  await page.getByRole("button", { name: "Open Fixture scan" }).click();
-  await expect(page.getByText("Compared by Fixture model")).toBeVisible();
-  await expect(page.getByText("Scan model: Fixture Test Lead (fixture-model)")).toBeVisible();
-  await expect(page.getByText("GT-2 - Missing audit logs")).toBeVisible();
   const panel = await page.locator("main").boundingBox();
   const tabs = await page.getByRole("tablist", { name: "Scan type" }).boundingBox();
   expect(tabs.x).toBe(panel.x);
@@ -128,18 +124,31 @@ test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
   expect(siteTabs.x).toBe(panel.x);
   expect(siteTabs.width).toBe(panel.width);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-benchmark-lab.png") });
+  // An analysis opens on its own page.
+  await page.getByRole("link", { name: "Open Fixture scan" }).click();
+  await expect(page.getByText("Compared by Fixture model")).toBeVisible();
+  await expect(page.getByText("Scan model: Fixture Test Lead (fixture-model)")).toBeVisible();
+  await expect(page.getByText("GT-2 - Missing audit logs")).toBeVisible();
+  await page.goBack();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("tab", { name: "SAST" })).toBeVisible();
   await page.getByRole("tab", { name: "New" }).click();
+  await page.getByRole("combobox", { name: "Site" }).selectOption("1");
   const card = await page.locator(".benchmark-setup").boundingBox();
   const replace = await page.getByText("Replace file").boundingBox();
   expect(replace.x + replace.width).toBeLessThanOrEqual(card.x + card.width);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-benchmark-lab-mobile.png") });
   await page.getByRole("tab", { name: "Analyses" }).click();
-  await page.getByRole("button", { name: "Open Fixture scan" }).click();
+  await page.getByRole("link", { name: "Open Fixture scan" }).click();
   page.once("dialog", (dialog) => dialog.accept());
+  const deleted = page.waitForRequest(
+    (request) =>
+      request.method() === "DELETE" && /\/aespa\.benchmarking\/results\/\d+$/.test(request.url()),
+  );
   await page.getByRole("button", { name: "Delete result" }).click();
-  await expect(page.getByText("No saved analyses match this selection.")).toBeVisible();
+  await deleted;
+  // Deleting returns to Benchmark Lab.
+  await expect(page).toHaveURL(/#\/benchmark-lab$/);
   expect(errors).toEqual([]);
 });
 
@@ -477,8 +486,9 @@ test("site map groups page and API variants with individual modes", async ({ pag
   const pageDisplay = page.getByLabel("Page display");
   const apiDisplay = page.getByLabel("API display");
   const displayApis = page.getByRole("checkbox", { name: "Display APIs" });
-  const displaySettings = page.getByRole("button", { name: "Display settings" });
-  const displayControls = page.locator("#sitemap-display-settings");
+  // Display settings live in a collapsed section of the Crawl details side panel.
+  const displaySettings = page.getByRole("button", { name: /^Display \d+ shown$/ });
+  const displayControls = page.locator("#sitemap-side-display");
   await expect(displaySettings).toHaveAttribute("aria-expanded", "false");
   await expect(displayControls).toBeHidden();
   await expect(extensionFilter).toBeHidden();
@@ -487,6 +497,12 @@ test("site map groups page and API variants with individual modes", async ({ pag
   await expect(apiDisplay).toHaveValue("grouped");
   await expect(displayApis).not.toBeChecked();
   await expect(apiDisplay).toBeDisabled();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-collapsed.png") });
+  await displaySettings.click();
+  await expect(displaySettings).toHaveAttribute("aria-expanded", "true");
+  await expect(displayControls).toBeVisible();
+  await expect(extensionFilter).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-expanded.png") });
   const searchBounds = await page.locator(".sitemap-search").boundingBox();
   const apiToggleBounds = await page.locator(".sitemap-api-toggle").boundingBox();
   expect(apiToggleBounds.y).toBeGreaterThanOrEqual(searchBounds.y + searchBounds.height + 4);
@@ -523,16 +539,6 @@ test("site map groups page and API variants with individual modes", async ({ pag
   await page.getByRole("button", { name: "Clear node search" }).click();
   await expect(page.locator(".sitemap-search-match")).toHaveCount(0);
 
-  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-collapsed.png") });
-
-  await displaySettings.click();
-  await expect(displaySettings).toHaveAttribute("aria-expanded", "true");
-  await expect(displayControls).toBeVisible();
-  await expect(extensionFilter).toBeVisible();
-  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-expanded.png") });
-  await displaySettings.click();
-  await expect(displayControls).toBeHidden();
-
   const pageRouteNode = page.locator("g.node-group", { hasText: "/orders/{id}" });
   await expect(pageRouteNode).toBeVisible();
   await pageRouteNode.dispatchEvent("click");
@@ -548,10 +554,8 @@ test("site map groups page and API variants with individual modes", async ({ pag
   await expect(
     page.getByText("5 shown · 2 API requests in 1 endpoints · 2 files hidden", { exact: true }),
   ).toBeVisible();
-  await displaySettings.click();
   await pageDisplay.selectOption("grouped");
   await expect(page.locator("g.node-group")).toHaveCount(4);
-  await displaySettings.click();
 
   const apiNode = page.locator("g.node-group", { hasText: "GET /api/account" });
   await expect(apiNode).toBeVisible();
@@ -573,7 +577,6 @@ test("site map groups page and API variants with individual modes", async ({ pag
   ).toBeVisible();
   await expect(page.locator("g.node-group")).toHaveCount(5);
 
-  await displaySettings.click();
   await displayApis.uncheck();
   await expect(apiDisplay).toBeDisabled();
   await expect(apiDisplay).toHaveValue("individual");
@@ -632,37 +635,29 @@ test("multi-user crawl progress expands and collapses", async ({ page }) => {
   await expect(page).toHaveTitle("AESPA");
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 
-  const toggle = page.getByRole("button", { name: "User crawl progress" });
-  const details = page.locator("#crawl-user-progress-details");
-  await expect(toggle).toHaveAttribute("aria-expanded", "false");
-  await expect(details).toBeHidden();
-  await expect(page.getByText("2 users · 5 pages · 1 done", { exact: true })).toBeVisible();
-  const displayToggle = page.getByRole("button", { name: "Display settings" });
-  const progressBounds = await toggle.boundingBox();
-  const displayBounds = await displayToggle.boundingBox();
-  expect(Math.abs(progressBounds.y - displayBounds.y)).toBeLessThan(2);
-  const barBounds = await page.locator(".sitemap-filter-panel").boundingBox();
-  expect(barBounds.height).toBeLessThan(70);
-  await page.screenshot({ path: path.join(tmpdir(), "aespa-user-progress-collapsed.png") });
-
-  await toggle.click();
+  // Per-user progress is the Users section of the Crawl details side panel, open by default.
+  const toggle = page.getByRole("button", { name: "Users 2 users · 5 pages · 1 done" });
+  const details = page.locator("#sitemap-side-users");
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(details).toBeVisible();
   await expect(details.getByText("Alice", { exact: true })).toBeVisible();
   await expect(details.getByText("Bob", { exact: true })).toBeVisible();
-  await expect(details.getByText("3 pg", { exact: true })).toBeVisible();
   await expect(details.getByText("done", { exact: true })).toBeVisible();
   await page.screenshot({ path: path.join(tmpdir(), "aespa-user-progress-expanded.png") });
 
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(details).toBeHidden();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-user-progress-collapsed.png") });
+
+  const displayToggle = page.getByRole("button", { name: /^Display \d+ shown$/ });
   await displayToggle.click();
   await expect(page.getByLabel("Page display")).toBeVisible();
+  await toggle.click();
   await expect(details).toBeVisible();
   const detailsBounds = await details.boundingBox();
-  const settingsBounds = await page.locator("#sitemap-display-settings").boundingBox();
+  const settingsBounds = await page.locator("#sitemap-side-display").boundingBox();
   expect(settingsBounds.y).toBeGreaterThanOrEqual(detailsBounds.y + detailsBounds.height);
-  await toggle.click();
-  await expect(details).toBeHidden();
-  await expect(page.getByLabel("Page display")).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(displayToggle).toBeVisible();
   await expect(page.getByLabel("Page display")).toBeVisible();
@@ -1049,7 +1044,8 @@ test("Workflows shows crawl notes outside Attack Surface", async ({ page }) => {
   await page.getByRole("button", { name: "Attack Surface", exact: true }).click();
   await expect(page.locator(".attack-surface-section-title")).toContainText([
     "Grouped pages",
-    "Observed Technologies",
+    "Tech Stack",
+    "Route & Input Inventory",
   ]);
   await expect(page.locator(".surface-crawl-note")).toHaveCount(0);
   await page.getByRole("button", { name: /Workflows/ }).click();
@@ -1099,6 +1095,14 @@ test("a workflow needing input opens its matching notification", async ({ page }
   await expect(page.getByRole("button", { name: /^Workflows/ })).toHaveClass(/active/);
   await expect(page.locator("#workflow-input-24")).toBeFocused();
 });
+
+// The status endpoint lists every workflow retry; these tests track one at a time.
+function retryStatusResponse(state) {
+  return {
+    status: state.status === "running" ? "running" : "idle",
+    retries: state.note_id ? [state] : [],
+  };
+}
 
 test("Status collects sample data for a stopped workflow", async ({ page }) => {
   await installFixtures(page);
@@ -1165,7 +1169,7 @@ test("Status collects sample data for a stopped workflow", async ({ page }) => {
     }),
   );
   await page.route("**/api/test-runs/1/crawl/workflows/retry/status", (route) =>
-    route.fulfill({ json: retryState }),
+    route.fulfill({ json: retryStatusResponse(retryState) }),
   );
   let submitted = null;
   await page.route(/\/api\/test-runs\/1\/crawl\/workflows\/(23|25)\/retry$/, async (route) => {
@@ -1306,7 +1310,7 @@ test("a workflow notification can authorize generated sample data", async ({ pag
     }),
   );
   await page.route("**/api/test-runs/1/crawl/workflows/retry/status", (route) =>
-    route.fulfill({ json: retryState }),
+    route.fulfill({ json: retryStatusResponse(retryState) }),
   );
   await page.route("**/api/test-runs/1/crawl/workflows/23/retry", async (route) => {
     submitted = route.request().postDataJSON();
@@ -1751,7 +1755,8 @@ test("site map controls remain reachable across widths", async ({ page }) => {
   );
   await page.goto("/#/runs/1/sitemap");
   await expect(page).toHaveTitle("AESPA");
-  await expect(page.getByRole("button", { name: "User crawl progress" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Users \d+ users/ })).toBeVisible();
+  const displaySettings = page.getByRole("button", { name: /^Display \d+ shown$/ });
   for (const width of [2560, 1440, 1100, 900, 768, 640, 390]) {
     await page.setViewportSize({ width, height: 1000 });
     if (await page.getByLabel("Run section").isVisible()) {
@@ -1760,7 +1765,7 @@ test("site map controls remain reachable across widths", async ({ page }) => {
       await expect(page.locator(".web-run-tab-links button:visible")).toHaveCount(7);
     }
     const overflow = await page
-      .locator(".web-run-tab-bar, .sitemap-filter-panel, .sitemap-meta, .scope-hosts-panel")
+      .locator(".web-run-tab-bar, .sitemap-side-panel, .sitemap-meta, .scope-hosts-panel")
       .evaluateAll((elements) =>
         elements.filter((el) => el.scrollWidth > el.clientWidth + 1).map((el) => el.className),
       );
@@ -1769,7 +1774,7 @@ test("site map controls remain reachable across widths", async ({ page }) => {
       ".web-run-tab-links button",
       ".web-run-tab-actions button",
       ".sitemap-filter-summary .traffic-count-label",
-      ".crawl-user-progress-count",
+      ".side-section-count",
     ]) {
       for (const element of await page.locator(selector).all()) {
         if (!(await element.isVisible())) continue;
@@ -1778,7 +1783,7 @@ test("site map controls remain reachable across widths", async ({ page }) => {
         expect(bounds.x + bounds.width).toBeLessThanOrEqual(width + 1);
       }
     }
-    await page.getByRole("button", { name: "Display settings" }).click();
+    await displaySettings.click();
     await expect(page.getByLabel("API display")).toBeVisible();
     if (width > 1100) {
       const stats = await page.locator(".sitemap-meta > .run-stat").all();
@@ -1787,10 +1792,12 @@ test("site map controls remain reachable across widths", async ({ page }) => {
         expect(bounds.width, `stat width at ${width}px`).toBeLessThan(250);
       }
       const input = await page.getByLabel("Exclude site map extensions").boundingBox();
-      expect(input.width).toBeLessThan(200);
+      const panel = await page.locator(".sitemap-side-panel").boundingBox();
+      expect(input.x).toBeGreaterThanOrEqual(panel.x);
+      expect(input.x + input.width).toBeLessThanOrEqual(panel.x + panel.width);
     }
     await page.screenshot({ path: path.join(tmpdir(), `aespa-responsive-${width}.png`) });
-    await page.getByRole("button", { name: "Display settings" }).click();
+    await displaySettings.click();
   }
   await page.getByRole("button", { name: "By User", exact: true }).click();
   await expect(page.getByRole("button", { name: "By User", exact: true })).toHaveClass(/active/);

@@ -289,11 +289,10 @@ for (const viewport of [
     await page.screenshot({
       path: path.join(tmpdir(), `aespa-summary-tooltip-${viewport.width}.png`),
     });
+    // A point opens that scan's analysis page.
     await point("Combined scan").click();
-    await expect(page.getByRole("tab", { name: "Analyses" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    await expect(page).toHaveURL(/#\/benchmark-lab\/results\/\d+$/);
+    await expect(page.getByRole("heading", { name: "Combined scan", level: 2 })).toBeVisible();
     expect(errors).toEqual([]);
   });
 }

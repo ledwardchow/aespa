@@ -1,0 +1,43 @@
+.dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: 24px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 20px 70px #0006;
+  overflow-y: auto;
+}
+
+.dialog::backdrop {
+  background: #0008;
+}
+
+.dialog h2 {
+  margin: 0 0 12px;
+  font-size: 20px;
+}
+
+.dialog p {
+  margin: 0 0 16px;
+}
+
+.dialog ul {
+  max-height: 35dvh;
+  overflow-y: auto;
+  margin: 0 0 20px;
+  padding-left: 24px;
+}
+
+.dialog li {
+  margin: 6px 0;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}

@@ -53,10 +53,7 @@ export function SitesList() {
       let valA = a[sortField];
       let valB = b[sortField];
 
-      if (sortField === "requires_auth") {
-        valA = a.requires_auth ? 1 : 0;
-        valB = b.requires_auth ? 1 : 0;
-      } else if (sortField === "credential_count") {
+      if (sortField === "credential_count") {
         valA = a.credential_count || 0;
         valB = b.credential_count || 0;
       }
@@ -152,17 +149,12 @@ export function SitesList() {
               <colgroup>
                 <col
                   style={{
-                    width: "30%",
+                    width: "38%",
                   }}
                 />
                 <col
                   style={{
                     width: "32%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "8%",
                   }}
                 />
                 <col
@@ -192,12 +184,6 @@ export function SitesList() {
                   </th>
                   <th
                     style={{ cursor: "pointer", userSelect: "none" }}
-                    onClick={() => toggleSort("requires_auth")}
-                  >
-                    Auth {sortArrow("requires_auth")}
-                  </th>
-                  <th
-                    style={{ cursor: "pointer", userSelect: "none" }}
                     onClick={() => toggleSort("credential_count")}
                   >
                     Credentials {sortArrow("credential_count")}
@@ -219,13 +205,6 @@ export function SitesList() {
                       </a>
                     </td>
                     <td className="url">{s.base_url}</td>
-                    <td>
-                      {s.requires_auth ? (
-                        <span className="badge ok">required</span>
-                      ) : (
-                        <span className="badge neutral">none</span>
-                      )}
-                    </td>
                     <td>
                       {s.credential_count > 0 ? (
                         s.credential_count

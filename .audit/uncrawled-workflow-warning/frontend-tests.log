@@ -1,0 +1,17 @@
+
+> aespa-frontend@0.0.0 test
+> vitest run
+
+
+ RUN  v5.0.0 /Users/ledwardchow/GitHub/aespa/frontend
+
+
+ Test Files  84 passed (84)
+      Tests  389 passed (389)
+   Start at  16:34:09
+   Duration  9.95s (environment 59%, tests 20%, setup 10%, transform 8%, import 3%, worker 1%)
+
+Environment  jsdom was created 84 times · 45.63s total, 59% of tracked time
+             create it once per worker with pool: 'vmThreads' (keeps per-file isolation) or isolate: false (shares it across files)
+             learn more: https://vitest.dev/guide/improving-performance#test-environments
+

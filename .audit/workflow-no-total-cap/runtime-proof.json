@@ -1,0 +1,46 @@
+{
+  "workflows": [
+    {
+      "name": "Pay invoice",
+      "status": "needs_input",
+      "generate_sample_data": false
+    },
+    {
+      "name": "Delete account",
+      "status": "not_attempted",
+      "generate_sample_data": false
+    },
+    {
+      "name": "Save delivery address 2",
+      "status": "crawled",
+      "generate_sample_data": true
+    },
+    {
+      "name": "Save delivery address 3",
+      "status": "crawled",
+      "generate_sample_data": true
+    },
+    {
+      "name": "Save delivery address",
+      "status": "crawled",
+      "generate_sample_data": true
+    },
+    {
+      "name": "Save delivery address 6",
+      "status": "crawled",
+      "generate_sample_data": true
+    },
+    {
+      "name": "Save delivery address 4",
+      "status": "crawled",
+      "generate_sample_data": true
+    },
+    {
+      "name": "Save delivery address 5",
+      "status": "crawled",
+      "generate_sample_data": true
+    }
+  ],
+  "ordinary_submissions": 6,
+  "restricted_submissions": 0
+}

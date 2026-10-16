@@ -98,7 +98,7 @@ for (const width of [1440, 600]) {
     await page.getByLabel("Site", { exact: true }).selectOption("dataset:7");
     await page.getByRole("tab", { name: "Analyses", exact: true }).click();
     await expect(page.getByText("Remote scan (imported)")).toBeVisible();
-    await page.getByRole("button", { name: "Open Remote scan" }).click();
+    await page.getByRole("link", { name: "Open Remote scan" }).click();
     await expect(page.getByText("remote-model", { exact: false }).first()).toBeVisible();
     await expect(page.locator("vite-error-overlay")).toHaveCount(0);
     expect(errors).toEqual([]);

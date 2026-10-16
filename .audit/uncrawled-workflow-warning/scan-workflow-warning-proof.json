@@ -1,0 +1,21 @@
+{
+  "startRequests": [
+    {
+      "coverage_mode": "standard"
+    }
+  ],
+  "resumeRequests": [
+    "http://127.0.0.1:64255/api/test-runs/1/thinking-scan/resume"
+  ],
+  "consoleErrors": [],
+  "warning": "Some workflows have not been crawled\n\n2 workflows have not been crawled. These workflows may not be tested by the scan if they remain uncrawled.\n\nPay invoice - Needs input\nDelete account - Not tried\nCancel\nView workflows\nStart scan anyway",
+  "reviewUrl": "http://127.0.0.1:64255/#/runs/1/attack?subtab=workflows",
+  "combinedWarned": true,
+  "bounds": {
+    "left": 88,
+    "right": 648,
+    "width": 560,
+    "viewport": 736
+  },
+  "resumeBypassed": true
+}

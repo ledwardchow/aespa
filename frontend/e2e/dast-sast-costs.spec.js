@@ -50,7 +50,8 @@ test("DAST counter shows source SAST costs separately at desktop and narrow widt
   await expect(page.getByText("≈$13.87 est. cost", { exact: true })).toHaveCount(0);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-dast-sast-costs-desktop.png") });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByTitle("Collapse sidebar").click();
+  // The sidebar collapses on its own at phone width.
+  await expect(page.getByTitle("Expand sidebar")).toBeVisible();
   await expect(page.getByText("≈$10.68 est. cost", { exact: true })).toBeVisible();
   await expect(page.getByText("≈$3.19 est. cost", { exact: true })).toBeVisible();
   await page.screenshot({ path: path.join(tmpdir(), "aespa-dast-sast-costs-narrow.png") });

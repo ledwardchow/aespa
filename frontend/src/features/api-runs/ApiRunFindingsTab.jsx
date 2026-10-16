@@ -1,4 +1,4 @@
-import { FindingFileControls } from "../../shared/findings/FindingFileControls.tsx";
+import { FindingsMoreMenu } from "../../shared/findings/FindingsMoreMenu.tsx";
 import { FindingsList } from "../../shared/findings/FindingsList.tsx";
 import {
   CoverageFindingsFilter,
@@ -248,11 +248,6 @@ export function ApiRunFindingsTab({
               <button className="btn secondary sm" onClick={load}>
                 Refresh
               </button>
-              <FindingFileControls
-                hasFindings={findings.length > 0}
-                onExport={onExportFindingsMarkdown}
-                onImport={onImportFindingsFile}
-              />
               {findings.length > 0 && (
                 <button
                   className="btn secondary sm"
@@ -263,15 +258,13 @@ export function ApiRunFindingsTab({
                   {dedupeBusy ? "Reviewing…" : "Review with AI"}
                 </button>
               )}
-              {findings.length > 0 && (
-                <button
-                  className="btn danger-outline sm"
-                  disabled={clearBusy}
-                  onClick={onClearFindings}
-                >
-                  {clearBusy ? "Clearing…" : "Clear all"}
-                </button>
-              )}
+              <FindingsMoreMenu
+                hasFindings={findings.length > 0}
+                onExport={onExportFindingsMarkdown}
+                onImport={onImportFindingsFile}
+                clearBusy={clearBusy}
+                onClear={onClearFindings}
+              />
             </div>
           )}
         </div>

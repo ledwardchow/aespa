@@ -33,6 +33,7 @@ import { WebRunSitemapGraph } from "./WebRunSitemapGraph.jsx";
 import { WebRunCrawlProgress } from "./WebRunCrawlProgress.jsx";
 import { WebRunHeader } from "./WebRunHeader.jsx";
 import { WorkflowInputDrawer } from "./WorkflowInputDrawer.jsx";
+import { useUncrawledWorkflowWarning } from "./useUncrawledWorkflowWarning.jsx";
 import { isRetryBusy, retriesByNote } from "./workflowRetries.js";
 import { WebRunSastLeadsTab } from "../../shared/leads/RunLeadsTab.jsx";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
@@ -315,15 +316,17 @@ function TestRunContent({
       setError(e.message);
     }
   };
-  const onStartThinkingScan = async () => {
+  const startThinkingScan = async (selectedCoverageMode) => {
     try {
       setThinkingStopReq(false);
       setThinkingStatus({
         status: "running",
       });
       setCheckpointStatus(null);
-      setRun((current) => (current ? { ...current, coverage_mode: coverageMode } : current));
-      const s = await webRunsApi.startThinkingScan(runId, coverageMode);
+      setRun((current) =>
+        current ? { ...current, coverage_mode: selectedCoverageMode } : current,
+      );
+      const s = await webRunsApi.startThinkingScan(runId, selectedCoverageMode);
       setThinkingStatus(s);
       setWpReloadKey((k) => k + 1);
     } catch (e) {
@@ -348,13 +351,16 @@ function TestRunContent({
       setError(e.message);
     }
   };
-  const startCrawl = async (startPentestAfterCrawl = false) => {
+  const startCrawl = async (
+    startPentestAfterCrawl = false,
+    selectedCoverageMode = coverageMode,
+  ) => {
     try {
       setCrawlStopRequested(false);
       const body = {
         ...(crawlCredentialId ? { crawl_credential_id: crawlCredentialId } : {}),
         ...(startPentestAfterCrawl
-          ? { start_pentest_after_crawl: true, coverage_mode: coverageMode }
+          ? { start_pentest_after_crawl: true, coverage_mode: selectedCoverageMode }
           : {}),
       };
       const r = await webRunsApi.startRun(runId, body);
@@ -370,8 +376,17 @@ function TestRunContent({
       setError(e.message);
     }
   };
+  const { requestStart, warning } = useUncrawledWorkflowWarning({
+    runId,
+    onStart: (action, selectedCoverageMode) =>
+      action === "crawl-then-scan"
+        ? startCrawl(true, selectedCoverageMode)
+        : startThinkingScan(selectedCoverageMode),
+    onViewWorkflows: viewWorkflow,
+  });
+  const onStartThinkingScan = () => requestStart("scan", coverageMode);
   const onStart = () => startCrawl();
-  const onStartCrawlThenPentest = () => startCrawl(true);
+  const onStartCrawlThenPentest = () => requestStart("crawl-then-scan", coverageMode);
   const onStop = async () => {
     try {
       setCrawlStopRequested(true);
@@ -484,6 +499,7 @@ function TestRunContent({
   }
   return (
     <>
+      {warning}
       <WebRunHeader
         run={run}
         siteName={siteName}
