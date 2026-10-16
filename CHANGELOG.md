@@ -2,7 +2,7 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## Unreleased - Workflow detection, grouped page routes
+## [PR #283] October 16 - Workflow detection, grouped page routes
 
 ### New features
 
@@ -35,6 +35,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Benchmark publishing**: Choose which applications to publish before sending results to AESPA Benchmarks Online. Benchmark Lab lists each ground truth that has saved results, with a result count, and only the selected ones are uploaded. Publishing now defaults to `benchmarks.aespa.app`; existing upload tokens also work with the original `chatgpt.site` address. Results edited on the site are protected from later scanner uploads, and Benchmark Lab reports how many were skipped when publishing.
 
 - **Loading models for a new provider**: Load models from API now saves a new provider straight away, so you can open and configure its models without saving and reopening the provider first.
+
+- **Findings toolbar**: Web and API findings now show Validate findings (web only) and Review with AI as buttons. Export findings, Import findings, and Clear all findings are in the **⋯** menu beside them.
 
 - **Attack Surface**: Removed the Signals and Access Observations sections from the display and renamed Observed Technologies to Tech Stack. Route access is still shown in the route inventory.
 

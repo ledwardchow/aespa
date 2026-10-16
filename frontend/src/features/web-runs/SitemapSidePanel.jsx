@@ -8,8 +8,7 @@ function initialOpen() {
   try {
     const saved = localStorage.getItem(OPEN_KEY);
     if (saved === "true" || saved === "false") return saved === "true";
-  } catch {
-  }
+  } catch {}
   return typeof window === "undefined" || window.innerWidth > 900;
 }
 
@@ -19,8 +18,7 @@ export function SitemapSidePanel({ children }) {
     setOpen(value);
     try {
       localStorage.setItem(OPEN_KEY, String(value));
-    } catch {
-    }
+    } catch {}
   };
   if (!open) {
     return (
