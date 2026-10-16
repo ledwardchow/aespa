@@ -205,3 +205,12 @@ When updating `CHANGELOG.md`, write for users rather than implementation special
 - Avoid casual phrasing, promotional language, and repetitive sentence patterns that make the entry sound machine-generated.
 - Do not include source file paths or internal function and class names unless they are genuinely useful to the intended reader.
 - Preserve released changelog text and unrelated unreleased entries unless the user explicitly asks for them to be revised. You may revise or consolidate entries for the current unreleased work as described above.
+
+### Pull requests to `main`
+
+When the user asks for a pull request to `main`, do all of the following without asking for further confirmation:
+
+1. Commit all outstanding changes on the current branch and push it.
+2. Open the pull request with `gh pr create --base main`.
+3. Rename the `## Unreleased` heading in `CHANGELOG.md` to `## [PR #<number>] <Month> <Day> - <short title>`, matching earlier release headings (for example, `## [PR #283] October 16 - Workflow detection, grouped page routes`). Keep any short title the user has already added to the Unreleased heading.
+4. Commit and push the changelog heading change to the same branch so it is part of the pull request.

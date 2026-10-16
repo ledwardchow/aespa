@@ -14,8 +14,7 @@ export function leadImportPayload(l) {
           ? JSON.parse(l.source_trace_json)
           : l.source_trace_json;
       external = trace?.external_report;
-    } catch {
-    }
+    } catch {}
   }
   return {
     ...(external ? { scanner: external.scanner, rule_id: external.rule_id } : {}),

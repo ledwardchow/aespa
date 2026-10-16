@@ -91,9 +91,11 @@ test("publishing stays disabled until an upload token has been saved", async () 
 
 test("publishing reports results protected by site edits", async () => {
   const user = userEvent.setup();
-  req.mockImplementation(async (url) => url.endsWith("/publish")
-    ? { received: 1, stored: 0, skipped_stale: 0, skipped_site_edits: 1 }
-    : { site_url: "https://benchmarks.aespa.app", token_saved: true, upload_token_saved: true });
+  req.mockImplementation(async (url) =>
+    url.endsWith("/publish")
+      ? { received: 1, stored: 0, skipped_stale: 0, skipped_site_edits: 1 }
+      : { site_url: "https://benchmarks.aespa.app", token_saved: true, upload_token_saved: true },
+  );
   render(<BenchmarkPublishing datasets={DATASETS} results={RESULTS} />);
   await user.click(await screen.findByRole("button", { name: "Select all" }));
   await user.click(await screen.findByRole("button", { name: "Publish results" }));

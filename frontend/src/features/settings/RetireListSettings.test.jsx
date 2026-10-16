@@ -55,7 +55,5 @@ test("explains a failed download", async () => {
 
   fireEvent.click(screen.getByRole("button", { name: "Refresh now" }));
 
-  expect(
-    await screen.findByText("Could not download the latest list: timed out"),
-  ).toBeTruthy();
+  expect(await screen.findByText("Could not download the latest list: timed out")).toBeTruthy();
 });
