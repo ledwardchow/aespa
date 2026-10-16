@@ -18,6 +18,29 @@ from aespa.services import llm, scanner, validator
 from aespa.services.validator import _body_contains_page_evidence, _looks_like_spa_shell
 
 
+def test_anonymous_matrix_request_logs_no_authenticated_username(monkeypatch):
+    import httpx
+
+    captured = {}
+
+    def make_client(**kwargs):
+        captured.update(kwargs)
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(403, request=request, text="Denied")
+            )
+        )
+
+    monkeypatch.setattr(scanner, "_make_scanner_client", make_client)
+    monkeypatch.setattr(scanner, "_waf_strategy_for_run", lambda run_id: {})
+    result = asyncio.run(scanner._fetch_matrix_url(1, "http://target.test/orders/297"))
+
+    assert result["status"] == 403
+    assert result["sent_authenticated"] is False
+    assert "Actor: anonymous" in result["request_evidence"]
+    assert captured["username"] is None
+
+
 def test_validate_finding_result_without_probe_results_is_false_positive():
     result = asyncio.run(
         llm.validate_finding_result(
@@ -876,7 +899,7 @@ def test_dynamic_finding_reuses_canonical_page_for_query_payload(engine):
             first_page_id=None,
         )
 
-        assert page_id == page.id
+        assert page_id is None
         assert len(session.exec(select(CrawledPage)).all()) == 1
 
 
@@ -1686,7 +1709,7 @@ def test_dynamic_deterministic_analysis_persists_findings(monkeypatch, engine):
     assert len(findings) == 1
     assert findings[0].title == "SQL injection error disclosure"
     assert findings[0].finding_source == "deterministic_probe"
-    assert findings[0].page_id == page_id
+    assert findings[0].page_id is None
 
 
 def test_deterministic_sessions_from_vault_merges_non_anonymous_sessions(monkeypatch):
@@ -1871,9 +1894,8 @@ def test_idor_matrix_skips_unbound_tokens(monkeypatch, engine):
         )
     )
 
-    assert calls == ["known_user"]
-    assert len(findings) == 1
-    assert findings[0].title == "Insecure direct object reference"
+    assert calls == ["known_admin"]
+    assert findings == []
 
 
 def test_auth_matrix_does_not_call_authenticated_request_anonymous(monkeypatch):

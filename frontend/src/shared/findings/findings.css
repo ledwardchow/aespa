@@ -12,6 +12,17 @@
   width: 100%;
   min-width: 0;
 }
+.coverage-findings-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.coverage-findings-filter span {
+  flex: 1 1 220px;
+}
 .findings-status-bar {
   display: flex;
   align-items: center;
@@ -137,7 +148,7 @@
 }
 .finding-row td {
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border-subtle, var(--border));
+  border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
 .findings-table .finding-title {
@@ -320,7 +331,7 @@
   /* Same row height whether or not the row has a group delete button. */
   height: 49px;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border-subtle, var(--border));
+  border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
 .finding-group-row:hover .finding-del-btn {
@@ -354,7 +365,7 @@
 }
 .finding-instance-row td {
   padding: 6px 12px 6px 28px;
-  border-bottom: 1px solid var(--border-subtle, var(--border));
+  border-bottom: 1px solid var(--border);
   font-size: 12px;
   vertical-align: middle;
 }

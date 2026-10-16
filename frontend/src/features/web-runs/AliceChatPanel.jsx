@@ -209,8 +209,8 @@ export function AliceChatPanel({
           className="alice-chat-input"
           placeholder={
             aliceIsThinking && activeGoal?.status === "active"
-              ? "Add guidance to the active goal..."
-              : "Direct A.L.I.C.E., or use /goal <objective>..."
+              ? "Add guidance to the active goal…"
+              : "Direct A.L.I.C.E., or use /goal <objective>…"
           }
           value={aliceInputText}
           disabled={aliceIsThinking && activeGoal?.status !== "active"}

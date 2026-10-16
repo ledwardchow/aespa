@@ -65,9 +65,9 @@ def _identity(url: str) -> str:
         (
             parts.scheme.lower(),
             parts.netloc.lower(),
-            parts.path.rstrip("/") or "/",
+            parts.path or "/",
             parts.query,
-            _fragment(parts.fragment),
+            parts.fragment,
         )
     )
 
@@ -83,15 +83,6 @@ def _path_identity(url: str) -> str:
             _fragment(parts.fragment),
         )
     )
-
-
-def _member_identity(url: str, key: str) -> str:
-    """Return what makes a link a distinct member of a route.
-
-    Routes found from the path ignore the query string, so the same item
-    linked with different tracking or sorting values is counted once.
-    """
-    return _identity(url) if "?" in key else _path_identity(url)
 
 
 def _key_shape(key: str) -> str:
@@ -255,12 +246,22 @@ class RouteSampler:
             parsed = {}
         groups = parsed.get("groups", {})
         tallies = parsed.get("tallies", {})
+        legacy_snapshot = parsed.get("version") != 2
         if isinstance(groups, dict):
             self.groups = groups
         if isinstance(tallies, dict):
-            self.tallies = tallies
+            self.tallies = {} if legacy_snapshot else tallies
         for key, group in self.groups.items():
-            self._seen[key] = set(group.get("seen") or [])
+            if legacy_snapshot:
+                retained = [
+                    item["url"]
+                    for phase in group.get("phases", {}).values()
+                    for item in phase.get("samples", []) + phase.get("pending", [])
+                    if isinstance(item, dict) and item.get("url")
+                ]
+                self._seen[key] = {_seen_hash(_identity(url)) for url in retained}
+            else:
+                self._seen[key] = set(group.get("seen") or [])
             group.setdefault("features", None)
         self._shape_counts: dict[str, int] = defaultdict(int)
         for key, identities in self.tallies.items():
@@ -270,7 +271,8 @@ class RouteSampler:
         for key, group in self.groups.items():
             group["seen"] = sorted(self._seen.get(key, ()))
         return json.dumps(
-            {"groups": self.groups, "tallies": self.tallies}, separators=(",", ":")
+            {"version": 2, "groups": self.groups, "tallies": self.tallies},
+            separators=(",", ":"),
         )
 
     def take_snapshot(
@@ -364,7 +366,7 @@ class RouteSampler:
         buckets: dict[str, set[str]] = defaultdict(set)
         for item in unique:
             for key in _candidate_keys(item["url"]):
-                buckets[key].add(_member_identity(item["url"], key))
+                buckets[key].add(_identity(item["url"]))
         known_shapes = {
             group.get("shape")
             for group in self.groups.values()
@@ -406,7 +408,7 @@ class RouteSampler:
         chosen: dict[str, str] = {}
         for key in sorted(counts, key=lambda k: (-counts[k], -k.count("/"), k)):
             for item in unique:
-                if _member_identity(item["url"], key) in buckets[key]:
+                if _identity(item["url"]) in buckets[key]:
                     chosen.setdefault(_identity(item["url"]), key)
         return chosen, seeds
 
@@ -427,6 +429,7 @@ class RouteSampler:
         by_group: dict[str, list[dict]] = defaultdict(list)
         for item in unique:
             key = chosen.get(_identity(item["url"]))
+            item["route_pattern"] = key
             if key is None:
                 admitted.append(item)
             else:
@@ -447,7 +450,7 @@ class RouteSampler:
                 self._mark(status_changed=True)
             seen = self._seen[key]
             for item in members:
-                digest = _seen_hash(_member_identity(item["url"], key))
+                digest = _seen_hash(_identity(item["url"]))
                 if digest not in seen:
                     seen.add(digest)
                     self._mark()
@@ -465,11 +468,10 @@ class RouteSampler:
                 admitted.extend(item for item in members if is_queued(item["url"]))
                 continue
             already = {
-                _member_identity(item["url"], key)
-                for item in phase["samples"] + phase["pending"]
+                _identity(item["url"]) for item in phase["samples"] + phase["pending"]
             }
             for item in members:
-                member = _member_identity(item["url"], key)
+                member = _identity(item["url"])
                 if is_queued(item["url"]):
                     admitted.append(item)
                 elif member not in already:

@@ -9,6 +9,33 @@ import { WebRunWorkflowsTab } from "./WebRunWorkflowsTab.jsx";
 afterEach(() => vi.restoreAllMocks());
 
 describe("Workflow crawl notes", () => {
+  it("uses root completion for the attack surface headline", () => {
+    render(
+      <AttackSurfacePanel
+        summary={{ routes: [], coverage: { completion_percent: 100 } }}
+        completion={{
+          exercised_units: 1,
+          applicable_units: 2,
+          resolved_units: 1,
+          target_met: false,
+        }}
+      />,
+    );
+    expect(screen.getByText("50%")).toBeTruthy();
+    expect(screen.queryByText("100%")).toBeNull();
+  });
+
+  it("shows unavailable when root completion could not be loaded", () => {
+    render(
+      <AttackSurfacePanel
+        summary={{ routes: [], coverage: { completion_percent: 100 } }}
+        completion={null}
+      />,
+    );
+    expect(screen.getByText("Unavailable")).toBeTruthy();
+    expect(screen.queryByText("100%")).toBeNull();
+  });
+
   it("shows workflows in their own panel", () => {
     const summary = {
       routes: [],
@@ -92,18 +119,56 @@ describe("Workflow crawl notes", () => {
         { id: 8, name: "Checkout", status: "crawled", retryable: false },
       ],
     });
-    vi.spyOn(webRunsApi, "getWorkflowRetryStatus").mockResolvedValue({ status: "idle" });
-    const retry = vi.spyOn(webRunsApi, "retryWorkflow").mockResolvedValue({
-      status: "running",
-      note_id: 7,
-      message: "Opening browser",
-      actions: [],
+    const started = [];
+    vi.spyOn(webRunsApi, "getWorkflowRetryStatus").mockImplementation(async () => ({
+      status: started.length ? "running" : "idle",
+      retries: started,
+    }));
+    const retry = vi.spyOn(webRunsApi, "retryWorkflow").mockImplementation(async () => {
+      const status = { status: "running", note_id: 7, message: "Opening browser", actions: [] };
+      started.push(status);
+      return status;
     });
     render(<WebRunWorkflowsTab runId={1} />);
     fireEvent.click(await screen.findByRole("button", { name: "Retry workflow" }));
     await waitFor(() => expect(retry).toHaveBeenCalledWith(1, 7, "Use 1 Test Street", true));
     expect(await screen.findByText("Opening browser")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "Retry workflow" })).toHaveLength(1);
+  });
+
+  it("runs more than one workflow at once", async () => {
+    vi.spyOn(webRunsApi, "getWorkflowNotes").mockResolvedValue({
+      notes: [
+        { id: 7, name: "Address", status: "not_reached", retryable: true },
+        { id: 8, name: "Checkout", status: "not_reached", retryable: true },
+      ],
+    });
+    const started = [];
+    vi.spyOn(webRunsApi, "getWorkflowRetryStatus").mockImplementation(async () => ({
+      status: started.length ? "running" : "idle",
+      retries: started,
+    }));
+    const retry = vi
+      .spyOn(webRunsApi, "retryWorkflow")
+      .mockImplementation(async (_runId, noteId) => {
+        const status = {
+          status: "running",
+          note_id: noteId,
+          message: `Opening browser for ${noteId}`,
+          actions: [],
+        };
+        started.push(status);
+        return status;
+      });
+    render(<WebRunWorkflowsTab runId={1} />);
+    const [first, second] = await screen.findAllByRole("button", { name: "Retry workflow" });
+    fireEvent.click(first);
+    expect(await screen.findByText("Opening browser for 7")).toBeTruthy();
+    expect(second.disabled).toBe(false);
+    fireEvent.click(second);
+    expect(await screen.findByText("Opening browser for 8")).toBeTruthy();
+    expect(retry).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Opening browser for 7")).toBeTruthy();
   });
 
   it("opens the matching notification when a workflow needs input", async () => {
@@ -145,5 +210,20 @@ describe("Workflow crawl notes", () => {
       />,
     );
     await waitFor(() => expect(document.activeElement?.id).toBe("workflow-input-11"));
+  });
+
+  it("does not notify for reached or superseded workflows", async () => {
+    vi.spyOn(webRunsApi, "getWorkflowNotes").mockResolvedValue({
+      notes: [
+        { id: 10, name: "Checkout", status: "crawled", needs_input: true },
+        { id: 11, name: "Old address", status: "needs_input", needs_input: true, superseded: true },
+        { id: 12, name: "Payment setup", status: "needs_input", needs_input: true },
+      ],
+    });
+    vi.spyOn(webRunsApi, "getWorkflowRetryStatus").mockResolvedValue({ status: "idle" });
+    render(<WebRunNotificationsTab runId={1} onViewWorkflow={() => {}} />);
+    expect(await screen.findByText("Payment setup")).toBeTruthy();
+    expect(screen.queryByText("Checkout")).toBeNull();
+    expect(screen.queryByText("Old address")).toBeNull();
   });
 });

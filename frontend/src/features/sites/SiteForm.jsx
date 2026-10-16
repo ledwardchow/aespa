@@ -614,7 +614,7 @@ export function SiteForm({ siteId }) {
                           <div className="field">
                             <div
                               style={{
-                                background: "var(--surface-2,#2a2a2a)",
+                                background: "var(--panel-2)",
                                 border: "1px solid var(--border)",
                                 borderRadius: 4,
                                 padding: "8px 10px",
@@ -622,7 +622,7 @@ export function SiteForm({ siteId }) {
                                 color: "var(--text-2)",
                               }}
                             >
-                              🖥️ A browser window will open when a crawl or dynamic scan starts.
+                              🖥️ A browser window will open when a crawl or Dynamic Scan starts.
                               Complete the login (including any SSO / MFA / push notifications),
                               then click <strong>I'm Done</strong> in the run detail view. ALICE
                               reuses the session captured by whichever phase runs first.
@@ -633,7 +633,7 @@ export function SiteForm({ siteId }) {
                           <div className="field">
                             <div
                               style={{
-                                background: "var(--surface-2,#2a2a2a)",
+                                background: "var(--panel-2)",
                                 border: "1px solid var(--border)",
                                 borderRadius: 4,
                                 padding: "8px 10px",

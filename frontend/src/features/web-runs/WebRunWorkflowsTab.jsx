@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 import { truncUrl } from "../../shared/lib/urls.js";
+import { anyRetryBusy, isRetryBusy, mergeRetries, retriesByNote } from "./workflowRetries.js";
 
 function statusLabel(note) {
   if (note.status === "crawled") return "Crawled";
@@ -40,9 +41,10 @@ export function WebRunWorkflowsTab({
   onOpenNotification,
 }) {
   const [notes, setNotes] = useState(null);
-  const [retry, setRetry] = useState({ status: "idle" });
+  const [retries, setRetries] = useState({});
   const focusedElement = useRef(null);
   const requestVersion = useRef(0);
+  const finishedNotes = useRef(null);
 
   const load = useCallback(async () => {
     const version = requestVersion.current;
@@ -53,26 +55,24 @@ export function WebRunWorkflowsTab({
     if (version !== requestVersion.current) return;
     setNotes(noteResult?.notes || []);
     onNotesChange?.(noteResult?.notes || []);
-    setRetry((current) => {
-      if (retryResult?.status === "idle" && ["submitting", "running"].includes(current.status)) {
-        return current;
-      }
-      return retryResult || { status: "idle" };
-    });
-    onRetryStatusChange?.(retryResult || { status: "idle" });
-  }, [runId, onNotesChange, onRetryStatusChange]);
+    setRetries((current) => mergeRetries(current, retriesByNote(retryResult)));
+  }, [runId, onNotesChange]);
+
+  useEffect(() => {
+    onRetryStatusChange?.(retries);
+  }, [retries, onRetryStatusChange]);
 
   const retryWorkflow = async (note) => {
     requestVersion.current += 1;
-    const pending = {
+    const setProgress = (progress) =>
+      setRetries((current) => ({ ...current, [note.id]: progress }));
+    setProgress({
       status: "submitting",
       note_id: note.id,
       message: "Starting the workflow",
       actions_done: 0,
       actions: [],
-    };
-    setRetry(pending);
-    onRetryStatusChange?.(pending);
+    });
     try {
       const status = await webRunsApi.retryWorkflow(
         runId,
@@ -80,23 +80,20 @@ export function WebRunWorkflowsTab({
         note.instructions || "",
         Boolean(note.save_to_site_requested),
       );
-      setRetry(status);
-      onRetryStatusChange?.(status);
+      setProgress(status);
     } catch (cause) {
-      const failed = {
+      setProgress({
         status: "error",
         note_id: note.id,
         error: cause.message || "Could not retry this workflow.",
-      };
-      setRetry(failed);
-      onRetryStatusChange?.(failed);
+      });
     }
   };
 
   usePolling(load, {
     enabled: Boolean(runId),
     immediate: Boolean(runId),
-    intervalMs: ["submitting", "running"].includes(retry.status) ? 1000 : 15000,
+    intervalMs: anyRetryBusy(retries) ? 1000 : 15000,
   });
 
   useEffect(() => {
@@ -104,12 +101,17 @@ export function WebRunWorkflowsTab({
   }, [focusSequence, load]);
 
   useEffect(() => {
-    if (retry.status === "complete") onRetryFinished?.();
-  }, [retry.status, onRetryFinished]);
+    const complete = Object.values(retries)
+      .filter((item) => item.status === "complete")
+      .map((item) => item.note_id);
+    const previous = finishedNotes.current;
+    finishedNotes.current = new Set(complete);
+    // Reload once for each retry that finishes while this tab is open.
+    if (previous && complete.some((noteId) => !previous.has(noteId))) onRetryFinished?.();
+  }, [retries, onRetryFinished]);
 
   const shownNotes = notes?.length ? notes : summary?.crawl_notes || [];
   const workflows = groupWorkflowNotes(shownNotes);
-  const anyRetryBusy = ["submitting", "running"].includes(retry.status);
 
   useEffect(() => {
     if (focusedNoteId) focusedElement.current?.scrollIntoView({ block: "nearest" });
@@ -124,10 +126,10 @@ export function WebRunWorkflowsTab({
         <div className="surface-crawl-notes">
           {workflows.map(({ root, attempts }, index) => {
             const latest = attempts.at(-1);
-            const activeRetry = attempts.some((attempt) => attempt.id === retry.note_id)
-              ? retry
-              : null;
-            const busy = ["submitting", "running"].includes(activeRetry?.status);
+            const progressNoteId =
+              [...attempts].reverse().find((attempt) => retries[attempt.id])?.id ?? null;
+            const progress = progressNoteId === null ? null : retries[progressNoteId];
+            const busy = attempts.some((attempt) => isRetryBusy(retries[attempt.id]));
             const focused = attempts.some((attempt) => attempt.id === focusedNoteId);
             return (
               <div
@@ -144,39 +146,39 @@ export function WebRunWorkflowsTab({
                   </span>
                 </div>
                 {root.reason ? <p>{root.reason}</p> : null}
-                {activeRetry && activeRetry.status !== "idle" ? (
+                {progress ? (
                   <div className="workflow-retry-progress" role="status" aria-live="polite">
                     <div className="workflow-retry-heading">
                       {busy ? <span className="workflow-retry-spinner" aria-hidden="true" /> : null}
                       <strong>
                         {busy
-                          ? activeRetry.generate_sample_data
+                          ? progress.generate_sample_data
                             ? "Generating test data and continuing"
                             : "Continuing workflow"
-                          : activeRetry.status === "error"
+                          : progress.status === "error"
                             ? "Could not start"
                             : statusLabel(latest)}
                       </strong>
                     </div>
-                    <p>{activeRetry.error || activeRetry.message}</p>
-                    {activeRetry.current_path ? (
-                      <p className="subtle mono">Page: {activeRetry.current_path}</p>
+                    <p>{progress.error || progress.message}</p>
+                    {progress.current_path ? (
+                      <p className="subtle mono">Page: {progress.current_path}</p>
                     ) : null}
                     {busy ? (
                       <p className="subtle">
-                        {activeRetry.actions_done || 0}{" "}
-                        {activeRetry.actions_done === 1 ? "action" : "actions"} completed
+                        {progress.actions_done || 0}{" "}
+                        {progress.actions_done === 1 ? "action" : "actions"} completed
                       </p>
                     ) : null}
-                    {(activeRetry.actions || []).length ? (
+                    {(progress.actions || []).length ? (
                       <ol className="workflow-retry-actions">
-                        {activeRetry.actions.map((action, actionIndex) => (
+                        {progress.actions.map((action, actionIndex) => (
                           <li key={`${actionIndex}-${action}`}>{action}</li>
                         ))}
                       </ol>
                     ) : null}
-                    {activeRetry.saved_to_site ? <p className="subtle">Saved to site</p> : null}
-                    {activeRetry.save_to_site_requested && !activeRetry.saved_to_site ? (
+                    {progress.saved_to_site ? <p className="subtle">Saved to site</p> : null}
+                    {progress.save_to_site_requested && !progress.saved_to_site ? (
                       <p className="subtle">
                         {busy ? "Will save to site if reached" : "Not saved to site"}
                       </p>
@@ -231,7 +233,7 @@ export function WebRunWorkflowsTab({
                   <button
                     type="button"
                     className="btn sm secondary"
-                    disabled={anyRetryBusy}
+                    disabled={busy}
                     onClick={() => retryWorkflow(latest)}
                   >
                     Retry workflow

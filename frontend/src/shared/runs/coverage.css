@@ -7,7 +7,7 @@
   border-radius: 4px;
   font-size: 10px;
   font-weight: 700;
-  font-family: var(--mono-font, monospace);
+  font-family: var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -44,6 +44,7 @@
 .coverage-matrix {
   width: 100%;
   border-collapse: collapse;
+  border: 1px solid var(--border);
 }
 .coverage-matrix th,
 .coverage-matrix td {
@@ -52,7 +53,7 @@
   white-space: nowrap;
 }
 .coverage-matrix thead th {
-  background: var(--surface);
+  background: var(--panel);
   position: sticky;
   top: 0;
   z-index: 1;
@@ -70,6 +71,72 @@
 
 .coverage-matrix td.coverage-traffic-cell:hover {
   background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+.coverage-check-toggle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin: 4px auto 0;
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 10px;
+  cursor: pointer;
+}
+.coverage-check-toggle span {
+  color: var(--muted);
+}
+.coverage-matrix .coverage-check-expanded > td {
+  padding: 12px;
+  white-space: normal;
+  background: var(--panel);
+}
+.coverage-check-details {
+  min-width: 0;
+  text-align: left;
+}
+.coverage-check-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.coverage-check-heading .mono {
+  overflow-wrap: anywhere;
+}
+.coverage-check-list-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  margin-top: 10px;
+}
+.coverage-check-list {
+  width: 100%;
+  min-width: 650px;
+  border-collapse: collapse;
+}
+.coverage-check-list th,
+.coverage-check-list td {
+  padding: 7px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  text-align: left;
+}
+.coverage-check-list .mono {
+  overflow-wrap: anywhere;
+}
+.coverage-check-finding {
+  display: block;
+  margin-top: 4px;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+}
+.coverage-check-classes {
+  margin-top: 10px;
 }
 
 /* Coverage cell pill */

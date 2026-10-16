@@ -10,13 +10,20 @@ from sqlmodel import Session, select
 
 from aespa.db import get_session
 from aespa.models import (
+    CoverageEvidence,
     CrawledPage,
+    DiscoveredTarget,
     PageCredentialView,
     PageLink,
+    PageOwaspTest,
+    ProbeExecution,
     SastRun,
     ScanFinding,
     ScannerSession,
+    ScanObligation,
     Site,
+    TargetAccessObservation,
+    TargetDiscovery,
     TargetIntelItem,
     TestRun,
     TestRunStatus,
@@ -169,6 +176,30 @@ def _clear_crawl_state(session: Session, run: TestRun) -> None:
     if run_id is None:
         return
 
+    executions = session.exec(
+        select(ProbeExecution).where(ProbeExecution.run_kind == "web").where(ProbeExecution.run_id == run_id)
+    ).all()
+    for execution in executions:
+        for evidence in session.exec(select(CoverageEvidence).where(CoverageEvidence.execution_id == execution.id)).all():
+            session.delete(evidence)
+        session.delete(execution)
+    for row in session.exec(
+        select(ScanObligation).where(ScanObligation.run_kind == "web").where(ScanObligation.run_id == run_id)
+    ).all():
+        session.delete(row)
+    session.flush()
+    for row in session.exec(select(TargetAccessObservation).where(TargetAccessObservation.test_run_id == run_id)).all():
+        session.delete(row)
+    for row in session.exec(select(TargetDiscovery).where(TargetDiscovery.test_run_id == run_id)).all():
+        session.delete(row)
+    session.flush()
+    for cell in session.exec(select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)).all():
+        session.delete(cell)
+    session.flush()
+    for row in session.exec(select(DiscoveredTarget).where(DiscoveredTarget.test_run_id == run_id)).all():
+        session.delete(row)
+    session.flush()
+
     for finding in session.exec(
         select(ScanFinding).where(ScanFinding.test_run_id == run_id)
     ).all():
@@ -206,6 +237,7 @@ def _clear_crawl_state(session: Session, run: TestRun) -> None:
     run.crawl_started_once = False
     run.route_groups_json = "[]"
     run.route_sampling_state_json = "{}"
+    run.discovery_completeness = "incomplete"
     session.add(run)
 
 
@@ -814,6 +846,31 @@ def get_web_coverage_matrix(
     from aespa.services import web_workprogram
 
     return web_workprogram.get_web_coverage_matrix(run_id)
+
+
+@router.get("/api/test-runs/{run_id}/discovered-targets")
+def get_discovered_targets(
+    run_id: int,
+    route_pattern: str | None = None,
+    search: str | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    session: Session = Depends(get_session),
+) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services.target_catalog import list_targets
+
+    try:
+        return list_targets(
+            run_id,
+            route_pattern_filter=route_pattern,
+            search=search,
+            cursor=cursor,
+            limit=limit,
+            session=session,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/api/test-runs/{run_id}/coverage/seed")

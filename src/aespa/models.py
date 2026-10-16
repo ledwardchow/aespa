@@ -1,12 +1,14 @@
 import json
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -15,6 +17,9 @@ from sqlalchemy import (
     text,
 )
 from sqlmodel import Field, Relationship, SQLModel
+
+TargetAccessResult = Literal["reached", "denied", "unknown"]
+ScanScopeKind = Literal["route", "object"]
 
 
 def _utcnow() -> datetime:
@@ -876,6 +881,12 @@ class TestRun(SQLModel, table=True):
         default="{}",
         sa_column=Column(String, nullable=False, server_default=text("'{}'")),
     )
+    discovery_completeness: str = Field(
+        default="incomplete",
+        sa_column=Column(
+            String, nullable=False, server_default=text("'legacy_unknown'")
+        ),
+    )
     scan_mode: str = Field(default="aggressive")
     scanner_policy_json: str = Field(default="{}")
     # Progress
@@ -994,6 +1005,63 @@ class CrawledPage(SQLModel, table=True):
             return {}
 
 
+class DiscoveredTarget(SQLModel, table=True):
+    __tablename__ = "discovered_target"
+    __table_args__ = (
+        UniqueConstraint(
+            "test_run_id", "url", "state_identity", name="uq_discovered_target_identity"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
+    url: str
+    state_key: Optional[str] = Field(default=None)
+    state_identity: str = Field(default="", nullable=False)
+    route_pattern: str = Field(index=True)
+    discovered_at: datetime = Field(default_factory=_utcnow)
+
+
+class TargetDiscovery(SQLModel, table=True):
+    __tablename__ = "target_discovery"
+    __table_args__ = (
+        UniqueConstraint("target_id", "source_key", name="uq_target_discovery_source"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
+    target_id: int = Field(foreign_key="discovered_target.id", index=True)
+    source_key: str
+    source_page_id: Optional[int] = Field(default=None, foreign_key="crawled_page.id")
+    source_state_key: Optional[str] = Field(default=None)
+    actor_key: str = Field(default="unknown", index=True)
+    source_kind: str = Field(default="dom_link")
+    source_ref: Optional[str] = Field(default=None)
+    discovered_at: datetime = Field(default_factory=_utcnow)
+
+
+class TargetAccessObservation(SQLModel, table=True):
+    __tablename__ = "target_access_observation"
+    __table_args__ = (
+        UniqueConstraint(
+            "test_run_id", "source_kind", "source_id", name="uq_target_access_source"
+        ),
+        CheckConstraint(
+            "result IN ('reached', 'denied', 'unknown')", name="ck_target_access_result"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
+    target_id: int = Field(foreign_key="discovered_target.id", index=True)
+    method: str = Field(default="GET")
+    actor_key: str = Field(default="unknown", index=True)
+    source_kind: str
+    source_id: int
+    result: TargetAccessResult = Field(default="unknown", sa_type=String)
+    observed_at: datetime = Field(default_factory=_utcnow)
+
+
 class PageOwaspTest(SQLModel, table=True):
     """One cell in the web workprogram: a (TestRun, CrawledPage, OWASP category) triple.
 
@@ -1030,12 +1098,20 @@ class WorkflowCoverageItem(SQLModel, table=True):
             "test_kind",
             name="uq_workflow_coverage_item_run_note_kind",
         ),
+        Index(
+            "uq_workflow_coverage_item_run_key_kind",
+            "test_run_id",
+            "workflow_key",
+            "test_kind",
+            unique=True,
+        ),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(sa_column=_run_identity_fk())
-    root_note_id: int = Field(index=True)
-    latest_note_id: int = Field(index=True)
+    workflow_key: str = Field(index=True)
+    root_note_id: Optional[int] = Field(default=None, index=True)
+    latest_note_id: Optional[int] = Field(default=None, index=True)
     reached_page_id: Optional[int] = Field(default=None, foreign_key="crawled_page.id")
     name: str
     goal: str = Field(default="")
@@ -1301,6 +1377,15 @@ class ScanFinding(SQLModel, table=True):
         sa_column=Column(
             Integer,
             ForeignKey("crawled_page.id"),
+            index=True,
+            nullable=True,
+        ),
+    )
+    object_check_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("scan_obligation.id", ondelete="SET NULL"),
             index=True,
             nullable=True,
         ),
@@ -2081,9 +2166,7 @@ class ScanLead(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     collection_id: Optional[int] = Field(default=None, index=True)
-    producer_run_type: str = Field(
-        default="sast", index=True
-    )
+    producer_run_type: str = Field(default="sast", index=True)
     producer_run_id: int = Field(index=True)
     source_work_item_id: Optional[int] = Field(default=None, index=True)
     source: str = Field(default="sast", index=True)
@@ -2545,12 +2628,36 @@ class SpecialistHandoff(SQLModel, table=True):
             "fingerprint",
             name="uq_specialist_handoff_scope",
         ),
+        UniqueConstraint(
+            "run_kind",
+            "run_id",
+            "scope_key",
+            "revision_key",
+            name="uq_specialist_handoff_revision",
+        ),
+        Index(
+            "uq_specialist_handoff_active_scope",
+            "run_kind",
+            "run_id",
+            "scope_key",
+            unique=True,
+            sqlite_where=text(
+                "status IN ('queued', 'running') AND scope_key IS NOT NULL"
+            ),
+        ),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     run_kind: str = Field(default="web", index=True)
     run_id: int = Field(sa_column=_run_identity_fk())
     fingerprint: str = Field(index=True)
+    scope_key: Optional[str] = Field(default=None, index=True)
+    revision_key: Optional[str] = Field(default=None)
+    method: str = Field(default="GET")
+    state_identity: str = Field(default="[null]")
+    body_identity: Optional[str] = Field(default=None)
+    actor_key: str = Field(default="unknown:unresolved")
+    comparison_actor_key: Optional[str] = Field(default=None)
     attack_class: str = Field(index=True)
     target_url: str
     canonical_url: str = Field(index=True)
@@ -2612,6 +2719,14 @@ class ScanObligation(SQLModel, table=True):
     """A required or exploratory security test obligation."""
 
     __tablename__ = "scan_obligation"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_kind", "run_id", "selection_key", name="uq_object_check_selection"
+        ),
+        CheckConstraint(
+            "scope_kind IN ('route', 'object')", name="ck_scan_obligation_scope_kind"
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     run_kind: str = Field(default="web", index=True)  # web | api
@@ -2622,6 +2737,21 @@ class ScanObligation(SQLModel, table=True):
     vulnerability_technique: str = Field(index=True)  # sqli, idor, etc.
     route_template: str = Field(index=True)
     http_method: str = Field(default="GET")
+    scope_kind: ScanScopeKind = Field(default="route", sa_type=String)
+    target_id: Optional[int] = Field(
+        default=None, foreign_key="discovered_target.id", index=True
+    )
+    selection_key: Optional[str] = Field(default=None)
+    body_identity: Optional[str] = Field(default=None)
+    baseline_actor_key: Optional[str] = Field(default=None)
+    comparison_actor_key: Optional[str] = Field(default=None)
+    baseline_observation_id: Optional[int] = Field(
+        default=None, foreign_key="target_access_observation.id"
+    )
+    parent_page_cell_id: Optional[int] = Field(
+        default=None, foreign_key="page_owasp_test.id"
+    )
+    parent_test_class: Optional[str] = Field(default=None)
     parameter: Optional[str] = Field(default=None)
     required_identity_comparison: Optional[str] = Field(default=None)
     status: str = Field(
@@ -2927,6 +3057,11 @@ class ProbeExecution(SQLModel, table=True):
     traffic_id: Optional[int] = Field(
         default=None, foreign_key="traffic_entry.id", index=True
     )
+    target_id: Optional[int] = Field(
+        default=None, foreign_key="discovered_target.id", index=True
+    )
+    request_identity: Optional[str] = Field(default=None)
+    acting_actor_key: Optional[str] = Field(default=None)
     session_identity: Optional[str] = Field(default=None)
     payload_preview: Optional[str] = Field(default=None)  # redacted max 512 bytes
     status_code: Optional[int] = Field(default=None)

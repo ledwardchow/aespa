@@ -52,7 +52,7 @@ test("hides Playwright Chromium and selects system Chrome after provisioning fai
   expect(screen.getByText(/could not be installed/)).toBeTruthy();
 });
 
-test("groups Systems, Deep Scan, and Team Scan under Experimental Features", () => {
+test("groups Systems, Deep Scan, and Team Scan under Experimental features", () => {
   const setShowDeepScan = vi.fn();
   const setShowTeamScan = vi.fn();
   render(
@@ -72,9 +72,9 @@ test("groups Systems, Deep Scan, and Team Scan under Experimental Features", () 
     />,
   );
 
-  expect(screen.getByText("Experimental Features")).toBeTruthy();
+  expect(screen.getByText("Experimental features")).toBeTruthy();
   expect(screen.getByLabelText("Systems scanning").checked).toBe(true);
-  const deepScanToggle = screen.getByLabelText("DAST Deep Scan Mode");
+  const deepScanToggle = screen.getByLabelText("DAST Deep Scan mode");
   expect(deepScanToggle.checked).toBe(false);
 
   fireEvent.click(deepScanToggle);

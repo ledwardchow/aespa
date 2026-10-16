@@ -189,7 +189,7 @@ export function ApiFilesManager({ collectionId }) {
             textAlign: "center",
             cursor: "pointer",
             color: dragOver ? "var(--accent)" : "var(--muted)",
-            background: dragOver ? "var(--surface-2,#222)" : "transparent",
+            background: dragOver ? "var(--panel-2)" : "transparent",
           }}
         >
           <div
@@ -214,7 +214,7 @@ export function ApiFilesManager({ collectionId }) {
           <div
             className="alert"
             style={{
-              background: "var(--surface-2,#1a2a1a)",
+              background: "var(--panel-2)",
               borderColor: "var(--ok,#4caf50)",
               color: "var(--ok,#4caf50)",
               padding: "10px 14px",

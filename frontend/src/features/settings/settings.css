@@ -340,7 +340,7 @@
 }
 
 .settings-list-head > div.sortable:hover {
-  color: var(--fg);
+  color: var(--text);
 }
 
 .settings-list-row {

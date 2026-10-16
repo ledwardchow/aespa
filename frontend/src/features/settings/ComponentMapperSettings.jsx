@@ -224,7 +224,7 @@ export function ComponentMapperSettings() {
 
           <div className="form-row">
             <button type="submit" className="btn" disabled={saving}>
-              {saving ? "Saving…" : "Save Component Mapper Settings"}
+              {saving ? "Saving…" : "Save component mapper settings"}
             </button>
             {saved && (
               <span className="saved-indicator">

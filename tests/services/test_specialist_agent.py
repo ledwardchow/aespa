@@ -332,6 +332,15 @@ def test_handoff_reserves_scope_and_delivers_completion(isolated_db_engine):
 
     assert created is True
     assert handoff.page_id == page.id
+    same_scope = find_active_conflict(
+        run_id,
+        run_kind="web",
+        attack_class="sqli",
+        target_url="https://target.test/search?q=one",
+        parameter="q",
+    )
+    assert same_scope is not None
+    assert same_scope.id == handoff.id
     assert (
         find_active_conflict(
             run_id,
@@ -339,8 +348,8 @@ def test_handoff_reserves_scope_and_delivers_completion(isolated_db_engine):
             attack_class="sqli",
             target_url="https://target.test/search?q=two",
             parameter="q",
-        ).id
-        == handoff.id
+        )
+        is None
     )
 
     update_handoff(handoff.id, status="completed", outcome="No SQL injection found")
@@ -390,7 +399,7 @@ def test_missing_priority_uses_configured_default_and_queues(isolated_db_engine)
         _specialist_pending.pop(run_id, None)
 
 
-def test_specialist_dispatch_resolves_query_url_to_canonical_page(
+def test_specialist_dispatch_keeps_query_variant_separate_from_crawled_page(
     isolated_db_engine,
 ):
     from sqlmodel import Session
@@ -438,10 +447,14 @@ def test_specialist_dispatch_resolves_query_url_to_canonical_page(
         )
 
         assert decision["status"] == "queued"
-        assert _specialist_pending[run_id][0]["target_page_id"] == page_id
+        assert _specialist_pending[run_id][0]["target_page_id"] is None
         with Session(isolated_db_engine) as session:
             handoff = session.get(SpecialistHandoff, decision["handoff_id"])
-            assert handoff.page_id == page_id
+            assert handoff.page_id is None
+            assert handoff.target_url == "https://target.test/search?q=%27"
+            assert session.get(CrawledPage, page_id).url == (
+                "https://target.test/search?q=baseline"
+            )
     finally:
         _specialist_running.pop(run_id, None)
         _specialist_pending.pop(run_id, None)

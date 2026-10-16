@@ -13,7 +13,7 @@ from aespa.services.route_sampling import (
     RouteSampler,
     _candidate_keys,
     _cluster,
-    _member_identity,
+    _identity,
     page_features,
     page_similarity,
 )
@@ -397,28 +397,20 @@ def test_real_site_url_shapes_have_a_route(url: str, key: str) -> None:
     assert key in _candidate_keys(url)
 
 
-def test_query_strings_and_fragments_do_not_create_new_route_members() -> None:
+def test_query_strings_and_fragments_keep_distinct_route_members() -> None:
     product = "https://www.example.test/card/p/N82E16814202457"
-    key = "https://www.example.test/{value}/p/{value}"
     for variant in (
         "#IsFeedbackTab",
         "?cm_sp=Head-_-Nav&icid=1",
         "?any_tracking_name=xyz",
         "?sort=price&page=2",
     ):
-        assert _member_identity(product + variant, key) == _member_identity(
-            product, key
-        )
-    assert _member_identity("https://app.test/a/#/orders", key) != _member_identity(
-        "https://app.test/a/", key
-    )
-    query_key = "https://blog.test/?p={value}"
-    assert _member_identity("https://blog.test/?p=1", query_key) != _member_identity(
-        "https://blog.test/?p=2", query_key
-    )
+        assert _identity(product + variant) != _identity(product)
+    assert _identity("https://app.test/a/#/orders") != _identity("https://app.test/a/")
+    assert _identity("https://blog.test/?p=1") != _identity("https://blog.test/?p=2")
 
 
-def test_route_members_are_counted_once_across_tracking_variants() -> None:
+def test_route_members_keep_exact_query_variants() -> None:
     sampler = RouteSampler()
     links = []
     for index in range(12):
@@ -433,9 +425,9 @@ def test_route_members_are_counted_once_across_tracking_variants() -> None:
             )
     admitted = sampler.offer(links, "anonymous")
     assert len(admitted) == 3
-    assert len({_member_identity(i["url"], "x") for i in admitted}) == 3
+    assert len({_identity(i["url"]) for i in admitted}) == 3
     _visit_all(sampler, admitted, lambda _url: PRODUCT, "anonymous")
-    assert sampler.summaries()[0]["links_seen"] == 12
+    assert sampler.summaries()[0]["links_seen"] == 36
 
 
 def test_single_top_level_pages_are_not_grouped() -> None:

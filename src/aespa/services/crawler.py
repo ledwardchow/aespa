@@ -33,6 +33,7 @@ from aespa.models import (
 )
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
+from aespa.services import target_catalog
 from aespa.services import traffic as traffic_svc
 from aespa.services.route_sampling import RouteSampler, page_features
 from aespa.services.settings import (
@@ -569,6 +570,9 @@ async def _do_crawl_inner(run_id: int) -> None:
     )
     _active_shared[run_id] = shared
 
+    starting_discovery_status = (
+        "recording" if run.started_at is None else run.discovery_completeness
+    )
     _update_run(
         run_id,
         status=TestRunStatus.running,
@@ -579,6 +583,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         pages_discovered=shared.pages_done,
         current_url=base_url,
         per_user_progress=None,
+        discovery_completeness=starting_discovery_status,
     )
     events_svc.emit(
         run_id,
@@ -799,6 +804,15 @@ async def _do_crawl_inner(run_id: int) -> None:
         final_status,
         shared.pages_done,
     )
+    with Session(get_engine()) as _discovery_session:
+        _discovery_run = _discovery_session.get(TestRun, run_id)
+        discovery_status = (
+            "recorded"
+            if final_status == TestRunStatus.complete
+            and _discovery_run is not None
+            and _discovery_run.discovery_completeness == "recording"
+            else _discovery_run.discovery_completeness if _discovery_run else "incomplete"
+        )
     _update_run(
         run_id,
         status=final_status,
@@ -806,6 +820,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         completed_at=_utcnow(),
         current_url=None,
         pages_discovered=shared.pages_done,
+        discovery_completeness=discovery_status,
     )
     _crawl_log(
         run_id,
@@ -1192,6 +1207,7 @@ async def _crawl_as_credential(
                 base_netloc=base_netloc,
             )
 
+        login_status = "not_required"
         if requires_auth and cred:
             log.info("Authenticating as %s at %s", cred.username, credential_login_url)
             events_svc.emit(
@@ -1288,6 +1304,13 @@ async def _crawl_as_credential(
 
         observed_api_calls.clear()
         observed_script_bodies.clear()
+        discovery_actor = (
+            target_catalog.actor_key(credential_id)
+            if credential_id is not None and login_status == "success"
+            else target_catalog.actor_key(unknown=f"login:{credential_id}")
+            if credential_id is not None
+            else "anonymous"
+        )
 
         seed_urls = _crawl_seed_urls(
             base_url,
@@ -1645,6 +1668,17 @@ async def _crawl_as_credential(
                 for r in raw_links
                 if _same_domain(r["href"], base_netloc)
             ]
+            await asyncio.to_thread(
+                target_catalog.record_discoveries,
+                run_id,
+                [link_url for link_url, _ in same_domain_links],
+                source=target_catalog.DiscoverySource(
+                    page_id,
+                    None,
+                    discovery_actor,
+                    "dom_link",
+                ),
+            )
             if page_selection == "group_similar":
                 if shared.route_sampler.wants_observation(url, phase_key):
                     page_calls_for_signature = [
@@ -1670,9 +1704,13 @@ async def _crawl_as_credential(
                     if not _is_session_ending_url(link_url, link_text)
                 ]
                 async with shared.lock:
+                    old_groups = set(shared.route_sampler.groups)
                     admitted = shared.route_sampler.offer(
                         link_items, phase_key, route_is_queued
                     )
+                    new_groups = set(shared.route_sampler.groups) - old_groups
+                await asyncio.to_thread(target_catalog.assign_route_patterns, run_id, link_items)
+                await asyncio.to_thread(target_catalog.backfill_group_patterns, run_id, new_groups)
                 await _save_route_sampler(run_id, shared)
                 held_urls = {_norm(item["url"]) for item in link_items} - {
                     _norm(item["url"]) for item in admitted
@@ -1735,6 +1773,17 @@ async def _crawl_as_credential(
                 extra_scripts=page_scripts,
                 shared=shared,
             )
+            await asyncio.to_thread(
+                target_catalog.record_discoveries,
+                run_id,
+                [url for url in js_nav_urls if _same_domain(url, base_netloc)],
+                source=target_catalog.DiscoverySource(
+                    page_id,
+                    None,
+                    discovery_actor,
+                    "script_route",
+                ),
+            )
             if js_endpoint_discovery_enabled and js_endpoint_calls:
                 await _promote_api_calls(
                     run_id=run_id,
@@ -1768,9 +1817,13 @@ async def _crawl_as_credential(
                         and not _is_session_ending_url(nav_url)
                     ]
                     async with shared.lock:
+                        old_groups = set(shared.route_sampler.groups)
                         admitted_js = shared.route_sampler.offer(
                             js_items, phase_key, route_is_queued
                         )
+                        new_groups = set(shared.route_sampler.groups) - old_groups
+                    await asyncio.to_thread(target_catalog.assign_route_patterns, run_id, js_items)
+                    await asyncio.to_thread(target_catalog.backfill_group_patterns, run_id, new_groups)
                     await _save_route_sampler(run_id, shared)
                     held_js = {_norm(item["url"]) for item in js_items} - {
                         _norm(item["url"]) for item in admitted_js
@@ -3596,22 +3649,6 @@ async def _record_page_intelligence(
             url=page_url,
             source="page_text",
             evidence=item["evidence"],
-            metadata={"username": username},
-        )
-
-    for link in raw_links[:300]:
-        href = str(link.get("href") or "")
-        if not href or not _same_domain(href, base_netloc):
-            continue
-        _save_intel_item(
-            run_id=run_id,
-            kind="endpoint",
-            key=_path_key(href),
-            value=href,
-            url=page_url,
-            method="GET",
-            source="dom_link",
-            evidence=str(link.get("text") or "")[:200],
             metadata={"username": username},
         )
 
@@ -5552,8 +5589,8 @@ def _clear_pages(run_id: int) -> None:
 def _norm(url: str) -> str:
     try:
         p = urlparse(url)
-        path = p.path.rstrip("/") or "/"
-        frag = p.fragment if p.fragment.startswith("/") else ""
+        path = p.path or "/"
+        frag = p.fragment
         return urlunparse(
             (p.scheme.lower(), p.netloc.lower(), path, p.params, p.query, frag)
         )

@@ -8,14 +8,12 @@ import { downloadTextFile } from "../../shared/lib/download.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 import { LoadingState } from "../../shared/ui/LoadingState.jsx";
 import { CoverageStatusBadges } from "../../shared/ui/CoverageStatusBadges.jsx";
-import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
 import { nav } from "../../shared/navigation/router.js";
 import { runHref } from "../../shared/navigation/links.ts";
 
 export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
   const [matrix, setMatrix] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [selectedCell, setSelectedCell] = useState(null);
   const [enforce, setEnforce] = useState(null); // latest enforce_progress event
   const esRef = useRef(null);
   const loadMatrix = useCallback(
@@ -302,7 +300,7 @@ export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
                       <span
                         title="Auth required"
                         style={{
-                          color: readyOk ? "var(--success,#4caf50)" : "var(--danger,#f44336)",
+                          color: readyOk ? "var(--ok)" : "var(--danger)",
                         }}
                       >
                         {readyOk ? "✔" : "✘"}
@@ -311,7 +309,7 @@ export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
                       <span
                         title="No auth"
                         style={{
-                          color: "var(--success,#4caf50)",
+                          color: "var(--ok)",
                         }}
                       >
                         ✔
@@ -335,9 +333,6 @@ export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
                         </td>
                       );
                     const fids = cell.finding_ids || [];
-                    const findings = cell.findings || [];
-                    const isSelected =
-                      selectedCell?.endpoint_id === ep.endpoint_id && selectedCell?.cat === cat;
                     return (
                       <td
                         key={cat}
@@ -361,7 +356,6 @@ export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
                           className={
                             "cov-cell cov-" +
                             cell.status.replace("_", "-") +
-                            (isSelected ? " selected" : "") +
                             (fids.length ? " has-findings" : "")
                           }
                           title={
@@ -378,17 +372,11 @@ export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
                           onClick={(event) => {
                             event.stopPropagation();
                             if (fids.length)
-                              setSelectedCell(
-                                isSelected
-                                  ? null
-                                  : {
-                                      endpoint_id: ep.endpoint_id,
-                                      cat,
-                                      path: ep.path,
-                                      method: ep.method,
-                                      fids,
-                                      findings,
-                                    },
+                              nav(
+                                runHref({ runKind: "api", runId }, "findings", {
+                                  finding_ids: fids.join(","),
+                                  from: "coverage",
+                                }),
                               );
                           }}
                         >
@@ -403,124 +391,6 @@ export function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
           </tbody>
         </table>
       </div>
-
-      {selectedCell && (
-        <div
-          style={{
-            marginTop: 12,
-            padding: 12,
-            background: "var(--surface)",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              marginBottom: 8,
-            }}
-          >
-            <b
-              style={{
-                fontSize: 13,
-              }}
-            >
-              {selectedCell.method} {selectedCell.path} — {selectedCell.cat}{" "}
-              {OWASP_LABELS[selectedCell.cat] || ""}
-            </b>
-            <button className="btn ghost sm" onClick={() => setSelectedCell(null)}>
-              ✕
-            </button>
-          </div>
-          {selectedCell.findings && selectedCell.findings.length ? (
-            selectedCell.findings.map((f) => (
-              <div
-                key={f.id}
-                style={{
-                  padding: "6px 0",
-                  borderTop: "1px solid var(--border)",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    marginBottom: 2,
-                  }}
-                >
-                  <span className={"sev-badge sev-" + (f.severity || "info")}>
-                    {f.severity || "info"}
-                  </span>
-                  <b
-                    style={{
-                      fontSize: 12,
-                    }}
-                  >
-                    {f.title}
-                  </b>
-                  {f.validation_status && f.validation_status !== "unvalidated" ? (
-                    <span
-                      style={{
-                        fontSize: 11,
-                        color: "var(--muted)",
-                      }}
-                    >
-                      ({f.validation_status})
-                    </span>
-                  ) : (
-                    ""
-                  )}
-                </div>
-                {f.description ? (
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: "var(--muted)",
-                      whiteSpace: "pre-wrap",
-                    }}
-                  >
-                    {f.description}
-                  </div>
-                ) : (
-                  ""
-                )}
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: "var(--muted)",
-                    marginTop: 2,
-                  }}
-                >
-                  <FindingReferenceLink
-                    reference={f.reference}
-                    title={f.title}
-                    description={f.description}
-                    severity={f.severity}
-                    validation_status={f.validation_status}
-                    href={`#/api-runs/${runId}/findings?finding=${encodeURIComponent(f.reference || "")}`}
-                  />{" "}
-                  — view in the Findings tab.
-                </div>
-              </div>
-            ))
-          ) : (
-            <div
-              style={{
-                fontSize: 12,
-              }}
-            >
-              Finding references:{" "}
-              {selectedCell.findings
-                ?.map((f) => f.reference)
-                .filter(Boolean)
-                .join(", ") || selectedCell.fids.map((id) => `#${id}`).join(", ")}{" "}
-              — view in the Findings tab.
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }

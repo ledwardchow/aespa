@@ -248,7 +248,7 @@ export function BenchmarkLabPage({ initialResultId }) {
         }}
       >
         <option value="">
-          {siteTab === "new" ? "Select an application..." : "All applications"}
+          {siteTab === "new" ? "Select an application…" : "All applications"}
         </option>
         {siteTab !== "new" &&
           datasets.map((item) => (
@@ -499,7 +499,7 @@ export function BenchmarkLabPage({ initialResultId }) {
         <div className="content scroll-content benchmark-page benchmark-simple">
           <PageError error={error} inline={!loaded} onDismiss={() => setError(null)} />
           {loaded && !error && !selectedResult && <p className="subtle">Analysis not found.</p>}
-          {!loaded && <p className="subtle">Loading analysis...</p>}
+          {!loaded && <p className="subtle">Loading analysis…</p>}
           {resultDetails}
         </div>
       </>
@@ -678,7 +678,7 @@ export function BenchmarkLabPage({ initialResultId }) {
                         setRunId(event.target.value);
                       }}
                     >
-                      <option value="">Select a scan...</option>
+                      <option value="">Select a scan…</option>
                       {target.runs.map((run) => (
                         <option key={run.id} value={run.id}>
                           {run.name} ({run.status})
@@ -698,7 +698,7 @@ export function BenchmarkLabPage({ initialResultId }) {
                   onClick={compare}
                   disabled={busy || !runId || !defaultModel || !target.dataset}
                 >
-                  {busy ? "Working..." : "Compare scan"}
+                  {busy ? "Working…" : "Compare scan"}
                 </button>
               </>
             )}
@@ -712,7 +712,7 @@ export function BenchmarkLabPage({ initialResultId }) {
               value={selectedResultId || ""}
               onChange={(event) => setSelectedResultId(Number(event.target.value) || null)}
             >
-              <option value="">Select a result...</option>
+              <option value="">Select a result…</option>
               {relevantResults.map((result) => (
                 <option key={result.id} value={result.id}>
                   {result.run_name} - {fmtDate(result.created_at)}

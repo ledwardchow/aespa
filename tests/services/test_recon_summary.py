@@ -539,6 +539,19 @@ def test_thinking_context_lists_grouped_pages(monkeypatch):
         "https://target.local/products/{value}: 4000 links seen, "
         "5 example pages visited" in context
     )
+    assert "crawl sampling for indexing, not scan scope" in context
+    assert "other in-scope URLs and object IDs" in context
+    assert (
+        "unsampled records for access control, IDOR, ownership, roles, and business logic"
+        in context
+    )
+    assert (
+        "Similar page layout does not establish shared authorization or coverage"
+        in context
+    )
+    assert "Base findings and coverage claims on concrete tests and evidence" in context
+    assert "do not need to index or exhaustively test every linked page" in context
+    assert "try another example only" not in context
 
 
 def test_thinking_context_includes_confirmed_findings(monkeypatch):

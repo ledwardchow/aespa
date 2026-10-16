@@ -1,6 +1,7 @@
 import * as apiRunsApi from "../../shared/api/apiRuns.js";
 import { useState, useCallback, useEffect, useRef } from "react";
 
+import { fmtTime } from "../../shared/lib/dates.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 import { PageError } from "../../shared/ui/Notice.jsx";
 
@@ -124,14 +125,7 @@ export function ApiRunLogTab({ runId, scanRunning }) {
             </div>
           )}
           {log.map((r) => {
-            const ts = r.created_at
-              ? new Date(r.created_at).toLocaleTimeString("en-US", {
-                  hour12: false,
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  second: "2-digit",
-                })
-              : "";
+            const ts = fmtTime(r.created_at, "");
             return (
               <div key={r.id} className="activity-entry">
                 <span className="activity-ts">{ts}</span>

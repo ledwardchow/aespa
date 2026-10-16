@@ -243,9 +243,7 @@ export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initia
                     key={l.id}
                     style={{
                       cursor: "pointer",
-                      background: investigated
-                        ? "var(--surface, rgba(255,255,255,0.02))"
-                        : undefined,
+                      background: investigated ? "var(--panel))" : undefined,
                     }}
                     onClick={() => toggle(l.id)}
                   >

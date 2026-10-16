@@ -3,6 +3,13 @@ import { req } from "./request.ts";
 
 export const getWebCoverageMatrix = (id) => req(`/api/test-runs/${id}/coverage`);
 
+export const getDiscoveredTargets = (id, { routePattern, search = "", cursor, limit = 50 }) => {
+  const params = new URLSearchParams({ route_pattern: routePattern, limit: String(limit) });
+  if (search) params.set("search", search);
+  if (cursor) params.set("cursor", cursor);
+  return req(`/api/test-runs/${id}/discovered-targets?${params}`);
+};
+
 export const getWorkflowCoverage = (id) => req(`/api/test-runs/${id}/workflow-coverage`);
 
 export const seedWebWorkprogram = (id) =>

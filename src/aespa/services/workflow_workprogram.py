@@ -145,6 +145,44 @@ def _reached_page(note: dict, pages: list[CrawledPage]) -> CrawledPage | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _workflow_inventory(notes: list[dict], pages: list[CrawledPage]) -> list[dict]:
+    by_id = {note["id"]: note for note in notes}
+    latest: dict[int, dict] = {}
+    reached: dict[int, CrawledPage] = {}
+    for note in notes:
+        if not str(note.get("name") or "").strip():
+            continue
+        root = _root_note_id(note, by_id)
+        latest[root] = note
+        if note.get("status") == "crawled":
+            page = _reached_page(note, pages)
+            if page is not None:
+                reached[root] = page
+
+    workflows = []
+    for root, note in latest.items():
+        page = reached.get(root)
+        workflows.append(
+            {
+                "workflow_key": f"note:{root}",
+                "root_note_id": root,
+                "latest_note_id": note["id"],
+                "name": str(note.get("name") or "Workflow")[:100],
+                "goal": str(note.get("goal") or "")[:220],
+                "url": page.url
+                if page
+                else str(note.get("start_url") or note.get("url") or ""),
+                "reached_page_id": page.id if page else None,
+                "crawl_status": "reached"
+                if page
+                else "needs_input"
+                if note.get("needs_input")
+                else "not_reached",
+            }
+        )
+    return workflows
+
+
 def seed_workflow_tests(run_id: int) -> int:
     """Add checks for reached workflows, preserving results across resume/retry."""
     with Session(get_engine()) as session:
@@ -156,24 +194,28 @@ def seed_workflow_tests(run_id: int) -> int:
             session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id))
         )
         existing = {
-            (item.root_note_id, item.test_kind): item
+            (item.workflow_key, item.test_kind): item
             for item in session.exec(
                 select(WorkflowCoverageItem).where(
                     WorkflowCoverageItem.test_run_id == run_id
                 )
             )
         }
-        latest: dict[int, tuple[dict, CrawledPage]] = {}
+        latest: dict[str, tuple[dict, CrawledPage, int]] = {}
         for note in notes:
-            if note.get("status") != "crawled" or note.get("destructive"):
+            if (
+                not str(note.get("name") or "").strip()
+                or note.get("status") != "crawled"
+                or note.get("destructive")
+            ):
                 continue
             page = _reached_page(note, pages)
             if page is None:
                 continue
             root = _root_note_id(note, by_id)
-            if root not in latest or note["id"] > latest[root][0]["id"]:
-                latest[root] = (note, page)
-
+            key = f"note:{root}"
+            if key not in latest or note["id"] > latest[key][0]["id"]:
+                latest[key] = (note, page, root)
         max_traffic_id = (
             session.exec(
                 select(TrafficEntry.id)
@@ -183,15 +225,26 @@ def seed_workflow_tests(run_id: int) -> int:
             or 0
         )
         created = 0
-        for root_id, (note, page) in latest.items():
+        for workflow_key, (note, page, root_id) in latest.items():
             for test_kind, category in _workflow_checks(note, page):
-                key = (root_id, test_kind)
+                key = (workflow_key, test_kind)
                 item = existing.get(key)
+                if item is None:
+                    item = existing.pop((f"page:{page.id}", test_kind), None)
+                    if item is not None:
+                        item.workflow_key = workflow_key
+                        item.root_note_id = root_id
+                        item.latest_note_id = note["id"]
+                        item.name = str(note.get("name") or item.name)[:100]
+                        item.goal = str(note.get("goal") or item.goal)[:220]
+                        session.add(item)
+                        existing[key] = item
                 if item is None:
                     item = WorkflowCoverageItem(
                         test_run_id=run_id,
+                        workflow_key=workflow_key,
                         root_note_id=root_id,
-                        latest_note_id=note["id"],
+                        latest_note_id=note.get("id"),
                         reached_page_id=page.id,
                         name=str(note.get("name") or page.state_label or "Workflow")[
                             :100
@@ -205,7 +258,7 @@ def seed_workflow_tests(run_id: int) -> int:
                     session.add(item)
                     created += 1
                     continue
-                if item.latest_note_id != note["id"]:
+                if item.latest_note_id != note.get("id"):
                     # A new replay state needs a new test. Re-seeding the same
                     # crawl or resuming a scan leaves established evidence intact.
                     if item.reached_page_id != page.id:
@@ -214,7 +267,7 @@ def seed_workflow_tests(run_id: int) -> int:
                         item.evidence_json = "{}"
                         item.finding_id = None
                         item.crawl_traffic_max_id = max_traffic_id
-                    item.latest_note_id = note["id"]
+                    item.latest_note_id = note.get("id")
                     item.reached_page_id = page.id
                     item.reached_page_url = page.url
                     item.name = str(note.get("name") or item.name)[:100]
@@ -227,11 +280,17 @@ def seed_workflow_tests(run_id: int) -> int:
 
 def list_workflow_tests(run_id: int) -> dict:
     with Session(get_engine()) as session:
+        notes = list_workflow_notes(session, run_id)
+        pages = list(
+            session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id))
+        )
+        workflows = _workflow_inventory(notes, pages)
+        workflow_keys = {workflow["workflow_key"] for workflow in workflows}
         rows = list(
             session.exec(
                 select(WorkflowCoverageItem)
                 .where(WorkflowCoverageItem.test_run_id == run_id)
-                .order_by(WorkflowCoverageItem.root_note_id, WorkflowCoverageItem.id)
+                .order_by(WorkflowCoverageItem.id)
             )
         )
         totals = {
@@ -246,6 +305,8 @@ def list_workflow_tests(run_id: int) -> dict:
         }
         items = []
         for row in rows:
+            if row.workflow_key not in workflow_keys:
+                continue
             totals[row.status] = totals.get(row.status, 0) + 1
             try:
                 evidence = json.loads(row.evidence_json or "{}")
@@ -254,6 +315,7 @@ def list_workflow_tests(run_id: int) -> dict:
             items.append(
                 {
                     "id": row.id,
+                    "workflow_key": row.workflow_key,
                     "root_note_id": row.root_note_id,
                     "latest_note_id": row.latest_note_id,
                     "reached_page_id": row.reached_page_id,
@@ -276,7 +338,12 @@ def list_workflow_tests(run_id: int) -> dict:
                     "finding_ids": [row.finding_id] if row.finding_id else [],
                 }
             )
-        return {"run_id": run_id, "items": items, "totals": totals}
+        return {
+            "run_id": run_id,
+            "items": items,
+            "workflows": workflows,
+            "totals": totals,
+        }
 
 
 def remaining_workflow_tests(run_id: int) -> list[dict]:

@@ -156,7 +156,7 @@
 .workflow-coverage-detail {
   margin-top: 12px;
   padding: 12px;
-  background: var(--surface);
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 12px;
@@ -779,6 +779,63 @@
 .surface-route-table tbody tr:hover {
   background: var(--panel-2);
 }
+.route-links-expanded > td {
+  background: var(--panel);
+  padding: 12px !important;
+}
+.route-links {
+  min-width: 0;
+  max-width: 100%;
+}
+.route-links-toggle,
+.route-links-url {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  text-align: left;
+}
+.route-links-url {
+  overflow-wrap: anywhere;
+}
+.route-links-search {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-width: 360px;
+  margin-bottom: 10px;
+}
+.route-links-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.route-links-table {
+  min-width: 700px;
+}
+.route-links-table td:first-child {
+  max-width: 380px;
+}
+.route-links-pages {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.route-links-detail {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.route-links-detail strong {
+  font-size: 12px;
+}
 .surface-route-url {
   display: block;
   max-width: 360px;
@@ -872,7 +929,7 @@
   flex-shrink: 0;
   margin: 0 -28px;
   padding: 10px 14px;
-  background: var(--surface);
+  background: var(--panel);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
@@ -907,7 +964,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: var(--accent-muted, rgba(99, 102, 241, 0.12));
+  background: var(--accent-glow);
   color: var(--accent, #6366f1);
   border-radius: 4px;
   padding: 2px 6px 2px 8px;

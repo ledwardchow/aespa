@@ -66,11 +66,10 @@ export function ScannerPolicyFields({ form, upd, disabled = false }) {
             })
           }
         />
-        <span>Enforce full coverage obligations</span>
+        <span>Require full test coverage before finishing</span>
       </label>
       <div className="subtle" style={{ marginBottom: "10px" }}>
-        Include strict task-graph completion rules in system prompt before allowing the agent to end
-        the scan.
+        Tell the agent it must finish every remaining test before it can end the scan.
       </div>
       <div className="field" style={{ marginTop: "8px" }}>
         <label>Standard mode coverage target (%)</label>

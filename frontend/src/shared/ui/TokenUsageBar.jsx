@@ -1,3 +1,4 @@
+import { parseDate } from "../lib/dates.js";
 import { fmtUsd } from "../lib/money.ts";
 export function fmtTok(n) {
   if (!n || n <= 0) return "0";
@@ -173,7 +174,7 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
               </span>
               {quota.reset_at ? (
                 <span className="token-out" title={quota.reset_at}>
-                  resets {new Date(quota.reset_at).toLocaleDateString()}
+                  resets {parseDate(quota.reset_at).toLocaleDateString()}
                 </span>
               ) : null}
             </div>

@@ -1,6 +1,7 @@
 import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useEffect, useRef } from "react";
 
+import { fmtTime } from "../../shared/lib/dates.js";
 import { campaignDisplayWarnings } from "../../shared/runs/campaignPresentation.js";
 
 const MAX_ENTRIES = 300;
@@ -153,9 +154,7 @@ export function CampaignActivityTab({ systemId, campaignId, campaign }) {
         <div className="activity-feed">
           {entries.map((e) => (
             <div key={e.id} className="activity-entry">
-              <span className="activity-ts">
-                {new Date(e.ts).toLocaleTimeString("en-US", { hour12: false })}
-              </span>
+              <span className="activity-ts">{fmtTime(e.ts)}</span>
               <span className="activity-badge phase-other">
                 {(e.status || e.type || "").toUpperCase()}
               </span>

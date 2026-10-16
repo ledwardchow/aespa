@@ -39,21 +39,89 @@ _MAX_SAME_FORM_ERROR = 2
 _FIELD_SELECTOR = 'input:not([type="hidden"]),textarea,select'
 _CONTROL_SELECTOR = 'a[href],button,input[type="submit"],[role="button"]'
 _DELETE_ACTION = re.compile(r"\b(?:delete|remove|destroy|erase|purge)\b", re.I)
+_PAYMENT_WORKFLOW = re.compile(
+    r"\b(?:pay|payment|paying|checkout|purchase|charge|"
+    r"(?:place|submit)\W+(?:an?\W+)?order|"
+    r"(?:transfer\W+(?:money|funds)|(?:money|funds|account)\W+transfer)|"
+    r"(?:credit|debit|payment)\W*card|card\W*(?:details|number|payment|method)|"
+    r"bank[-_ ](?:transfer|details))\b",
+    re.I,
+)
+_PAYMENT_ACTION = re.compile(
+    r"\b(?:pay|payment|paying|charge|purchase|"
+    r"(?:place|submit)\W+(?:an?\W+)?order|(?:credit|debit)\W*card|"
+    r"card\W*(?:number|details)|bank\W*transfer)\b",
+    re.I,
+)
+_PAYMENT_CONTEXT = re.compile(
+    r"(?:^|[/_-])(?:payment|card|bank[-_]transfer)(?:[/_-]|$)",
+    re.I,
+)
 _MISSING_DATA = re.compile(
     r"\b(?:no|none|without|missing|lack)\b.{0,150}"
     r"\b(?:provided|supplied|available|sample|details|data|invent|content)\b",
     re.IGNORECASE,
 )
 _SENSITIVE_SAMPLE_FIELD = re.compile(
-    r"payment|card|cvc|cvv|security.?code|bank|iban|routing|account.?number|"
-    r"password|passcode|one.?time|otp|pin\b",
+    r"payment|card|cvc|cvv|security.?code|bank.?transfer|"
+    r"bank.?details|"
+    r"iban|routing|sort.?code|swift|bic\b|account.?number|"
+    r"password|passcode|one.?time|otp|pin\b|api.?key|secret",
     re.IGNORECASE,
 )
-_retry_tasks: dict[int, asyncio.Task] = {}
-_retry_results: dict[int, dict] = {}
+_PASSWORD_FIELD = re.compile(r"password", re.I)
+_EXISTING_PASSWORD = re.compile(r"\b(?:current|old|existing)\W*password\b", re.I)
+_NEW_PASSWORD = re.compile(
+    r"\b(?:new|create|confirm|repeat)\W*password\b|\bpassword\W*confirm",
+    re.I,
+)
+_REGISTRATION_PAGE = re.compile(
+    r"\b(?:register|registration|sign.?up|create.?account|new.?account)\b",
+    re.I,
+)
+_MAX_PARALLEL_WORKFLOWS = 3
+# Workflow retries are keyed by (run_id, note_id) so several can run at once.
+_retry_tasks: dict[tuple[int, int], asyncio.Task] = {}
+_retry_results: dict[tuple[int, int], dict] = {}
+
+
+def _is_payment_workflow(workflow: dict) -> bool:
+    return bool(
+        _PAYMENT_WORKFLOW.search(
+            f"{workflow.get('name') or ''} {workflow.get('goal') or ''}"
+        )
+    )
+
+
+def _can_generate_sample_data(workflow: dict) -> bool:
+    return not workflow.get("destructive") and not _is_payment_workflow(workflow)
+
+
+def _is_new_password_field(field: dict, observation: dict) -> bool:
+    field_text = " ".join(
+        str(field.get(key) or "") for key in ("name", "fieldName", "fieldId", "label")
+    )
+    field_text = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", field_text).replace("_", "-")
+    if not _PASSWORD_FIELD.search(field_text) or _EXISTING_PASSWORD.search(field_text):
+        return False
+    if _NEW_PASSWORD.search(field_text):
+        return True
+    page_text = " ".join(str(observation.get(key) or "") for key in ("url", "title"))
+    return bool(_REGISTRATION_PAGE.search(page_text))
+
+
+def _field_needs_supplied_secret(field: dict, observation: dict) -> bool:
+    field_text = " ".join(
+        str(field.get(key) or "") for key in ("name", "fieldName", "fieldId", "label")
+    )
+    return bool(_SENSITIVE_SAMPLE_FIELD.search(field_text)) and not (
+        _is_new_password_field(field, observation)
+    )
 
 
 def _needs_user_input(note: dict) -> bool:
+    if note.get("status") == "crawled":
+        return False
     if "needs_input" in note:
         return note["needs_input"] is True
     return note.get("status") == "not_attempted" and bool(
@@ -153,7 +221,11 @@ def _crawl_inventory(run_id: int) -> tuple[list[dict], dict[str, CrawledPage]]:
             replay = {}
         inventory.append(
             {
+                "page_id": page.id,
                 "url": page.url,
+                "state_label": page.state_label,
+                "state_kind": page.state_kind,
+                "has_business_logic": bool(page.has_business_logic),
                 "title": (page.title or "")[:100],
                 "purpose": (page.llm_context or "")[:230],
                 "text": page_text,
@@ -228,7 +300,17 @@ def _workflow_credential(
     return None, bool(candidate_ids or start_page.req_auth)
 
 
-def _prior_workflow_names(run_id: int) -> set[str]:
+def _workflow_identity(workflow: dict) -> tuple[str, str, str]:
+    from aespa.services.crawler import _norm
+
+    return (
+        str(workflow.get("name") or "").strip().casefold(),
+        _norm(str(workflow.get("start_url") or "")),
+        str(workflow.get("goal") or "").strip().casefold(),
+    )
+
+
+def _prior_workflow_identities(run_id: int) -> set[tuple[str, str, str]]:
     with Session(get_engine()) as session:
         rows = session.exec(
             select(ScanLog.data_json)
@@ -236,15 +318,15 @@ def _prior_workflow_names(run_id: int) -> set[str]:
             .where(ScanLog.run_kind == "web")
             .where(ScanLog.phase == "crawl_note")
         )
-        names = set()
+        identities = set()
         for data_json in rows:
             try:
-                name = json.loads(data_json or "{}").get("note", {}).get("name")
+                note = json.loads(data_json or "{}").get("note", {})
             except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
                 continue
-            if isinstance(name, str) and name.strip():
-                names.add(name.strip().casefold())
-        return names
+            if isinstance(note, dict) and isinstance(note.get("name"), str):
+                identities.add(_workflow_identity(note))
+        return identities
 
 
 def _saved_workflow_proposals(site: Site) -> list[dict]:
@@ -261,19 +343,17 @@ def _saved_workflow_proposals(site: Site) -> list[dict]:
         start_url = str(saved.start_url)
         if not _same_domain(start_url, base_netloc):
             continue
-        proposals.append(
-            {
-                "name": saved.name,
-                "goal": saved.goal,
-                "start_url": start_url,
-                "reason": "Saved workflow data for this site.",
-                "destructive": bool(
-                    _DELETE_ACTION.search(f"{saved.name} {saved.goal}")
-                ),
-                "user_instructions": saved.instructions,
-                "saved_site_data": True,
-            }
-        )
+        workflow = {
+            "name": saved.name,
+            "goal": saved.goal,
+            "start_url": start_url,
+            "reason": "Saved workflow data for this site.",
+            "destructive": bool(_DELETE_ACTION.search(f"{saved.name} {saved.goal}")),
+            "user_instructions": saved.instructions,
+            "saved_site_data": True,
+        }
+        workflow["generate_sample_data"] = _can_generate_sample_data(workflow)
+        proposals.append(workflow)
     return proposals
 
 
@@ -281,27 +361,35 @@ async def _infer_workflows(
     llm_cfg,
     inventory: list[dict],
     known_urls: set[str],
-    prior_names: set[str] | None = None,
+    prior_identities: set[tuple[str, str, str]] | None = None,
 ) -> list[dict]:
     from aespa.services.crawler import _norm
 
     prompt = (
-        "You are reviewing a completed web crawl. Infer up to four useful application "
-        "workflows that may exist but were not reached. Use only the page observations "
-        "below. Look past setup actions to a further page or function they may unlock. "
-        "For example, adding an item can be a step toward a checkout form; viewing the "
-        "form is the workflow goal. A workflow can require state changes such as adding "
+        "You are reviewing a completed web crawl. Identify user actions with a "
+        "specific goal, such as submitting a review or changing an address. "
+        "Do not list ordinary pages, page titles, reading content, or navigation "
+        "as workflows. Include a reached action only when its goal was observed, "
+        "even when several actions share a URL. For a reached action, set "
+        "reached_page_id to its page_id only "
+        "when the goal is already visible in that page's observations. If further "
+        "actions are needed to reach the goal, it has not been reached. "
+        "For an unreached workflow, set reached_page_id to null. Use only the page observations "
+        "below. Look past setup actions to a specific user goal they may unlock. "
+        "For example, adding an item can be a step toward placing an order. "
+        "A workflow can require state changes such as adding "
         "an item, saving a draft, or submitting a review. "
         "An interactive page with reached_from requires its recorded actions; "
         "choose reached_from as start_url if you need to reproduce that state. "
         "Do not repeat these already noted workflows: "
-        f"{json.dumps(sorted(prior_names or set()))}. Do not invent a URL or claim "
+        f"{json.dumps(sorted(prior_identities or set()))}. Each entry contains its name, "
+        "starting URL, and goal. Do not invent a URL or claim "
         "that an unseen page definitely exists. Pick an observed start_url. Mark a "
         "workflow destructive only if reaching it requires deleting or removing "
         "something. Other state changes, including submitting reviews and placing "
         "orders, are allowed. "
         'Return only JSON: {"workflows":[{"name":"...","start_url":"...",'
-        '"goal":"...","reason":"visible evidence",'
+        '"goal":"...","reason":"visible evidence","reached_page_id":null,'
         '"destructive":false}]}. Return an empty array if there is no evidence.\n'
         + json.dumps(inventory, ensure_ascii=False)
     )
@@ -311,7 +399,10 @@ async def _infer_workflows(
         raise ValueError("The workflow model did not return a workflow list")
     proposals: list[dict] = []
     seen: set[str] = set()
-    for raw in workflows[:_MAX_WORKFLOWS]:
+    page_ids = {
+        page["page_id"] for page in inventory if isinstance(page.get("page_id"), int)
+    }
+    for raw in workflows:
         if not isinstance(raw, dict):
             continue
         start_url = str(raw.get("start_url") or "")
@@ -320,22 +411,37 @@ async def _infer_workflows(
         reason = " ".join(str(raw.get("reason") or "").split())[:360]
         if not name or not goal or not reason or _norm(start_url) not in known_urls:
             continue
-        key = name.casefold()
-        if key in seen or key in (prior_names or set()):
+        page_id = raw.get("reached_page_id")
+        if page_id is not None and (
+            type(page_id) is not int or page_id not in page_ids
+        ):
+            continue
+        key = (
+            f"page:{page_id}:{name.casefold()}:{goal.casefold()}"
+            if page_id is not None
+            else f"unreached:{name.casefold()}:{_norm(start_url)}:{goal.casefold()}"
+        )
+        if key in seen or (
+            page_id is None
+            and _workflow_identity({"name": name, "start_url": start_url, "goal": goal})
+            in (prior_identities or set())
+        ):
             continue
         seen.add(key)
-        proposals.append(
-            {
-                "name": name,
-                "start_url": start_url,
-                "goal": goal,
-                "reason": reason,
-                "destructive": bool(
-                    _DELETE_ACTION.search(f"{name} {goal}")
-                    or (raw.get("destructive") and _DELETE_ACTION.search(reason))
-                ),
-            }
-        )
+        workflow = {
+            "name": name,
+            "start_url": start_url,
+            "goal": goal,
+            "reason": reason,
+            "reached_page_id": page_id,
+            "inferred": True,
+            "destructive": bool(
+                _DELETE_ACTION.search(f"{name} {goal}")
+                or (raw.get("destructive") and _DELETE_ACTION.search(reason))
+            ),
+        }
+        workflow["generate_sample_data"] = _can_generate_sample_data(workflow)
+        proposals.append(workflow)
     return proposals
 
 
@@ -428,10 +534,12 @@ async def _decide_action(
     llm_cfg, workflow: dict, observation: dict, history: list[str]
 ) -> dict:
     sample_data_rule = (
-        "The user explicitly authorized you to generate missing sample values for "
-        "this retry. Use clearly fictitious test names, addresses, emails, and phone "
+        "Generate missing ordinary sample values for this workflow. Use clearly "
+        "fictitious test names, addresses, emails, and phone "
         "numbers where needed. Keep provided values unchanged. Do not generate "
-        "payment card or bank details, passwords, one-time codes, or other secrets. "
+        "payment card or bank details, existing passwords, one-time codes, "
+        "API keys, or other secrets. A new password for a test account may be "
+        "generated. Reuse that value for its confirmation field. "
         if workflow.get("generate_sample_data")
         else "Use only sample data or instructions supplied for this workflow; "
         "do not invent names, addresses, card details, or review text. "
@@ -445,8 +553,8 @@ async def _decide_action(
         "radio group, choose the field index with the desired choice_value and "
         "use action=check. Use only supplied indexes, options, and URLs. "
         "Do not delete or remove anything. "
-        "Other state changes, including submitting reviews, placing orders, and "
-        "payments, are allowed. Stop if the next action would delete something. "
+        "Other state changes, including submitting reviews and placing orders, "
+        "are allowed. Stop if the next action would delete something. "
         + sample_data_rule
         + "If required data is missing and cannot be generated under the rule "
         "above, stop with needs_input=true and state what to ask for in "
@@ -493,7 +601,19 @@ async def _decide_with_corrections(
                     request_text,
                     re.I,
                 )
-                and not _SENSITIVE_SAMPLE_FIELD.search(request_text)
+                and (
+                    not _SENSITIVE_SAMPLE_FIELD.search(request_text)
+                    or (
+                        _PASSWORD_FIELD.search(request_text)
+                        and any(
+                            _is_new_password_field(field, observation)
+                            for field in observation.get("fields", [])
+                        )
+                        and not _SENSITIVE_SAMPLE_FIELD.search(
+                            _PASSWORD_FIELD.sub("", request_text)
+                        )
+                    )
+                )
                 and (
                     not _invalid_supplied_input(observation)
                     or observation.get("form_errors")
@@ -501,8 +621,8 @@ async def _decide_with_corrections(
             ):
                 break
             feedback = (
-                "The user already approved generating ordinary test values for "
-                "missing fields. Choose the next form action instead of asking "
+                "Generate ordinary test values for missing fields. Choose the "
+                "next form action instead of asking "
                 "for those values."
             )
         else:
@@ -573,6 +693,59 @@ def _submission_validation_action(
     return "retry", request
 
 
+def _plain_words(text: str) -> str:
+    return " ".join(re.sub(r"[\W_]+", " ", text.casefold()).split())
+
+
+def _radio_choice_supplied(item: dict, instructions: str) -> bool:
+    """Whether the instructions name this radio option by its value or label."""
+    value = str(item.get("choice_value") or "")
+    if value and value.casefold() in " ".join(instructions.split()).casefold():
+        return True
+    supplied = f" {_plain_words(instructions)} "
+    label = str(item.get("label") or "")
+    # A label such as "Bank transfer - pay after placing the order" can be
+    # mentioned by its leading phrase, e.g. "Pay by bank transfer".
+    phrases = {
+        _plain_words(value),
+        _plain_words(label),
+        _plain_words(re.split(r"\s[-\u2013\u2014:|(]|[(:|,]", label, maxsplit=1)[0]),
+    }
+    return any(len(phrase) >= 3 and f" {phrase} " in supplied for phrase in phrases)
+
+
+def _field_display_name(item: dict) -> str:
+    return str(
+        item.get("label") or item.get("fieldName") or item.get("fieldId") or "field"
+    )[:80]
+
+
+def _input_request(why: str, decision: dict, observation: dict) -> str:
+    """Name the exact field or option that needs a value from the user."""
+    try:
+        item = observation["fields"][int(decision.get("index"))]
+    except (IndexError, KeyError, TypeError, ValueError):
+        return "Provide the sample values needed for this form."
+    if decision.get("action") == "check":
+        option = _field_display_name(item)
+        others = [
+            _field_display_name(field)
+            for field in observation["fields"]
+            if field is not item
+            and field.get("type") == "radio"
+            and field.get("fieldName")
+            and field.get("fieldName") == item.get("fieldName")
+        ]
+        request = f'Name the option to choose, such as "{option}".'
+        if others:
+            request += " Other options: " + ", ".join(f'"{o}"' for o in others) + "."
+        return request
+    field = _field_display_name(item)
+    if why.startswith("Payment or secret"):
+        return f'Provide a test value for the "{field}" payment or secret field.'
+    return f'Provide a sample value for the "{field}" field.'
+
+
 def _field_action_key(decision: dict, observation: dict) -> tuple[str, str, str, str]:
     item = observation["fields"][int(decision["index"])]
     value = (
@@ -614,16 +787,26 @@ def _action_allowed(
         ) != 1 and not isinstance(item.get("domIndex"), int):
             return False, "The chosen control could not be identified uniquely."
         direct_action = " ".join(
-            str(item.get(key) or "") for key in ("name", "href", "formAction")
+            str(item.get(key) or "") for key in ("name", "href", "formAction", "form")
         )
         direct_action = re.sub(r"[-_/]+", " ", direct_action)
         if _DELETE_ACTION.search(direct_action):
             return False, "The next action would delete something."
+        if _PAYMENT_ACTION.search(direct_action):
+            supplied_payment = bool(user_instructions.strip()) and (
+                not generate_sample_data
+                or bool(_PAYMENT_ACTION.search(user_instructions))
+            )
+            if not supplied_payment:
+                return False, "Payment steps need user-supplied test data."
         href = item.get("href") or ""
         if href and urlparse(href).netloc != urlparse(observation["url"]).netloc:
             return False, "The next action leaves the target site."
     else:
         field_type = str(item.get("type") or "")
+        payment_context = bool(
+            _PAYMENT_CONTEXT.search(urlparse(observation.get("url") or "").path)
+        )
         if action in {"fill", "select"} and field_type == "radio":
             return False, "Use check to choose a radio option."
         if action == "check":
@@ -633,9 +816,8 @@ def _action_allowed(
                 decision["value"]
             ) != str(item["choice_value"]):
                 return False, "The chosen radio value did not match the field."
-            value = str(item["choice_value"])
-            supplied = " ".join(user_instructions.split())
-            if value.casefold() not in supplied.casefold() and not generate_sample_data:
+            radio_supplied = _radio_choice_supplied(item, user_instructions)
+            if not radio_supplied and not generate_sample_data:
                 return False, "The field needs a value supplied by the user."
         if action == "fill":
             value = " ".join(str(decision.get("value") or "").split())
@@ -645,27 +827,20 @@ def _action_allowed(
             if value.casefold() not in supplied.casefold() and not generate_sample_data:
                 return False, "The field needs a value supplied by the user."
             if value.casefold() not in supplied.casefold() and (
-                _SENSITIVE_SAMPLE_FIELD.search(
-                    " ".join(
-                        str(item.get(key) or "")
-                        for key in ("name", "fieldName", "fieldId")
-                    )
-                )
-                or re.search(r"payment|payment-method|card", observation["url"], re.I)
+                payment_context or _field_needs_supplied_secret(item, observation)
             ):
                 return False, "Payment or secret fields need user-supplied test data."
         if (
             action == "check"
-            and value.casefold() not in supplied.casefold()
-            and (
-                _SENSITIVE_SAMPLE_FIELD.search(
-                    " ".join(
-                        str(item.get(key) or "")
-                        for key in ("name", "fieldName", "fieldId", "label")
-                    )
-                )
-                or re.search(r"payment|payment-method|card", observation["url"], re.I)
-            )
+            and not radio_supplied
+            and (payment_context or _field_needs_supplied_secret(item, observation))
+        ):
+            return False, "Payment or secret fields need user-supplied test data."
+        if (
+            action == "select"
+            and (payment_context or _field_needs_supplied_secret(item, observation))
+            and str(decision.get("value") or "").casefold()
+            not in user_instructions.casefold()
         ):
             return False, "Payment or secret fields need user-supplied test data."
         if not item.get("fieldName") and not item.get("fieldId"):
@@ -1046,8 +1221,8 @@ async def explore_after_crawl(
                 llm_cfg,
                 inventory,
                 set(known_pages),
-                _prior_workflow_names(run_id)
-                | {item["name"].casefold() for item in saved_workflows},
+                _prior_workflow_identities(run_id)
+                | {_workflow_identity(item) for item in saved_workflows},
             )
         except Exception as exc:
             log.warning("Post-crawl workflow inference failed: %s", exc)
@@ -1055,10 +1230,411 @@ async def explore_after_crawl(
                 raise
             inferred = []
         proposals = saved_workflows + inferred
+        with Session(get_engine()) as session:
+            reached = {
+                (
+                    note.get("page_id"),
+                    str(note.get("name") or "").casefold(),
+                    str(note.get("goal") or "").casefold(),
+                )
+                for note in list_workflow_notes(session, run_id)
+                if note.get("status") == "crawled"
+            }
+        pending = []
+        inferred_to_explore = 0
+        for workflow in proposals:
+            page_id = workflow.get("reached_page_id")
+            if page_id is None:
+                if workflow.get("inferred") and inferred_to_explore >= _MAX_WORKFLOWS:
+                    _record_note(
+                        run_id,
+                        workflow,
+                        "not_attempted",
+                        [],
+                        "Not tried because the workflow exploration limit was reached.",
+                    )
+                else:
+                    pending.append(workflow)
+                    if workflow.get("inferred"):
+                        inferred_to_explore += 1
+            elif (
+                page_id,
+                workflow["name"].casefold(),
+                workflow["goal"].casefold(),
+            ) not in reached:
+                _record_note(
+                    run_id,
+                    workflow,
+                    "crawled",
+                    [],
+                    "Reached during the page crawl.",
+                    url=next(
+                        page["url"] for page in inventory if page["page_id"] == page_id
+                    ),
+                    page_id=page_id,
+                )
+                reached.add(
+                    (page_id, workflow["name"].casefold(), workflow["goal"].casefold())
+                )
+        proposals = pending
     if not proposals:
         return
 
+    for workflow in proposals:
+        workflow["generate_sample_data"] = _can_generate_sample_data(workflow)
+
+    for workflow in proposals:
+        if known_pages.get(_norm(workflow["start_url"])) is None and not (
+            workflow.get("saved_site_data")
+            and _same_domain(workflow["start_url"], base_netloc)
+        ):
+            raise ValueError("Workflow start page is not in the saved crawl")
+
     historical_usernames = _historical_credential_usernames(run_id)
+    # Each workflow gets its own browser context and signs in separately, so
+    # several can run at once without sharing cookies or application state.
+    limit = asyncio.Semaphore(_MAX_PARALLEL_WORKFLOWS)
+
+    async def explore_workflow(browser, workflow: dict) -> None:
+        if run_id in _stop_requested:
+            return
+        start_page = known_pages.get(_norm(workflow["start_url"]))
+        if workflow["destructive"]:
+            _record_note(
+                run_id,
+                workflow,
+                "not_attempted",
+                [],
+                "Not tried because this workflow appears to delete something.",
+            )
+            return
+        if (
+            _is_payment_workflow(workflow)
+            and not str(workflow.get("user_instructions") or "").strip()
+        ):
+            _record_note(
+                run_id,
+                workflow,
+                "needs_input",
+                [],
+                "Payment details are needed before trying this workflow.",
+                needs_input=True,
+                request="Provide test payment details or instructions for this workflow.",
+            )
+            return
+        credential, requires_credential = _workflow_credential(
+            start_page, creds, historical_usernames
+        )
+        if credential is None and requires_credential:
+            _record_note(
+                run_id,
+                workflow,
+                "not_attempted",
+                [],
+                "The saved account for this page is no longer available. "
+                "Update the site credentials and retry this workflow.",
+            )
+            return
+        credential_id = credential.id if credential else None
+        if credential and credential.auth_mode in {
+            AuthMode.guided,
+            AuthMode.entra_id,
+        }:
+            _record_note(
+                run_id,
+                workflow,
+                "not_attempted",
+                [],
+                "Not tried because this workflow needs a guided sign-in.",
+            )
+            return
+        context = await browser.new_context(
+            user_agent=playwright_user_agent(browser),
+            ignore_https_errors=True,
+            **pw_proxy,
+        )
+        protect_playwright_context(browser, context)
+        await context.route("**/*", _block_delete_request)
+        if global_http_header:
+            await context.set_extra_http_headers(global_http_header)
+        username = credential.username if credential else "unauthenticated"
+        traffic_svc.setup_playwright_logging(
+            context, run_id, username=username, purpose="Post-crawl workflow"
+        )
+        page = await context.new_page()
+        steps: list[dict] = []
+        descriptions: list[str] = []
+        decision_feedback: list[str] = []
+        prior_actions: set[tuple[str, str, str, str]] = set()
+        submission_errors: dict[str, int] = {}
+        detail = "Stopped before the workflow was reached."
+        status = "not_reached"
+        saved_id = None
+        needs_input = False
+        request = ""
+        attempted_action = "opening the starting page"
+        try:
+            if credential:
+                report("Signing in", stage="sign_in")
+                try:
+                    await _authenticate(
+                        page,
+                        _login_url_for_credential(site.login_url or "", credential),
+                        credential,
+                        run_id,
+                        llm_cfg=llm_cfg,
+                    )
+                except Exception:
+                    log.warning(
+                        "Could not sign in for workflow %s",
+                        workflow["name"],
+                        exc_info=True,
+                    )
+                    detail = (
+                        "Could not sign in with the saved site credential. "
+                        "Update it and retry this workflow."
+                    )
+                    status = "not_attempted"
+                    return
+            report(
+                "Opening the starting page",
+                stage="opening_page",
+                current_path=urlparse(workflow["start_url"]).path or "/",
+            )
+            await page.goto(
+                workflow["start_url"],
+                wait_until="domcontentloaded",
+                timeout=20_000,
+            )
+            await _wait_for_content_settle(page, max_wait_ms=1200)
+            if not _same_domain(page.url, base_netloc):
+                detail = "The starting page redirected outside the target site."
+                return
+            parent_id = start_page.id if start_page else None
+            action_limit = (
+                _MAX_RETRY_ACTIONS if selected_workflows is not None else _MAX_ACTIONS
+            )
+            report(
+                "Checking the page",
+                stage="checking_page",
+                current_path=urlparse(page.url).path or "/",
+                actions_done=0,
+                action_limit=action_limit,
+                actions=[],
+            )
+            for _ in range(action_limit):
+                attempted_action = "checking the page"
+                if run_id in _stop_requested:
+                    detail = "Stopped by the user."
+                    break
+                observation = await _observe(page)
+                report(
+                    "Choosing the next step",
+                    stage="deciding",
+                    current_path=urlparse(page.url).path or "/",
+                )
+                decision = await _decide_with_corrections(
+                    llm_cfg,
+                    workflow,
+                    observation,
+                    [*descriptions, *decision_feedback],
+                    prior_actions,
+                )
+                action = decision.get("action")
+                if action == "reached":
+                    evidence = str(decision.get("evidence") or "").strip()
+                    visible = " ".join(
+                        str(observation.get(key) or "")
+                        for key in ("url", "title", "text")
+                    )
+                    if evidence and evidence.casefold() in visible.casefold():
+                        status = "crawled"
+                        report("Saving the reached page", stage="saving_page")
+                        detail = (
+                            "Reached the workflow with test data."
+                            if workflow.get("user_instructions")
+                            or workflow.get("generate_sample_data")
+                            else f"Reached the workflow. Visible evidence: {evidence[:140]}"
+                        )
+                        saved_id = await _save_discovered_page(
+                            run_id=run_id,
+                            page=page,
+                            root_url=workflow["start_url"],
+                            steps=steps,
+                            parent_id=parent_id,
+                            credential_id=credential_id,
+                            username=username,
+                            shared=shared,
+                            max_pages=max_pages,
+                            llm_cfg=llm_cfg,
+                        )
+                        if saved_id is None:
+                            status = "not_reached"
+                            detail = "The crawl page limit was reached."
+                    else:
+                        detail = "The model could not point to visible evidence that the workflow was reached."
+                    break
+                if action == "stop":
+                    needs_input = decision.get("needs_input") is True
+                    request = str(decision.get("request") or "")[:300]
+                    detail = str(decision.get("reason") or detail)[:500]
+                    if (
+                        workflow.get("user_instructions")
+                        and not workflow.get("generate_sample_data")
+                        and _invalid_supplied_input(observation)
+                    ):
+                        needs_input = True
+                        request = _invalid_supplied_input(observation)
+                    if needs_input:
+                        status = "needs_input"
+                    elif _DELETE_ACTION.search(detail):
+                        status = "not_attempted"
+                    break
+                allowed, why = _action_allowed(
+                    decision,
+                    observation,
+                    workflow.get("user_instructions") or "",
+                    generate_sample_data=bool(workflow.get("generate_sample_data")),
+                    prior_actions=prior_actions,
+                )
+                if not allowed:
+                    needs_input = why in {
+                        "The field needs a value supplied by the user.",
+                        "Payment or secret fields need user-supplied test data.",
+                        "Payment steps need user-supplied test data.",
+                    }
+                    status = "needs_input" if needs_input else "not_attempted"
+                    if needs_input:
+                        request = _input_request(why, decision, observation)
+                    detail = why
+                    break
+                before_url = page.url
+                action_label = {
+                    "click": "Clicking a page control",
+                    "fill": "Filling a field",
+                    "select": "Choosing an option",
+                    "check": "Choosing a radio option",
+                }.get(action, "Using a page control")
+                report(action_label, stage="acting")
+                if action == "click":
+                    attempted_action = "clicking a page control"
+                else:
+                    field = observation["fields"][int(decision["index"])]
+                    field_name = str(field.get("name") or "field")[:80]
+                    attempted_action = (
+                        f"filling {field_name}"
+                        if action == "fill"
+                        else f"selecting {field_name}"
+                        if action == "select"
+                        else f"checking {field_name}"
+                    )
+                step = await _apply_action(page, decision, observation)
+                steps.append(step)
+                if action in {"fill", "select", "check"}:
+                    prior_actions.add(_field_action_key(decision, observation))
+                _remember_generated_value(workflow, decision, observation)
+                descriptions.append(
+                    f"{decision['action']} {step.get('name') or step.get('selector')}"
+                )
+                report(
+                    "Checking the result",
+                    stage="checking_page",
+                    current_path=urlparse(page.url).path or "/",
+                    actions_done=len(descriptions),
+                    actions=descriptions.copy(),
+                )
+                await _wait_for_content_settle(page, max_wait_ms=1200)
+                if action == "click" and (
+                    observation["controls"][int(decision["index"])].get("submits")
+                    or re.search(
+                        r"\b(?:save|submit|continue|confirm|apply|next)\b",
+                        observation["controls"][int(decision["index"])].get("name", ""),
+                        re.I,
+                    )
+                ):
+                    submitted_observation = await _observe(page)
+                    validation_action, validation_request = (
+                        _submission_validation_action(
+                            submitted_observation,
+                            generate_sample_data=bool(
+                                workflow.get("generate_sample_data")
+                            ),
+                            seen_errors=submission_errors,
+                        )
+                    )
+                    if validation_action == "needs_input":
+                        needs_input = True
+                        status = "needs_input"
+                        request = validation_request
+                        detail = (
+                            "The site kept rejecting the generated form data."
+                            if workflow.get("generate_sample_data")
+                            else "The site rejected a supplied form value."
+                        )
+                        break
+                    if validation_action == "retry":
+                        decision_feedback.append(
+                            f"Form error after submit: {validation_request}"
+                        )
+                if not _same_domain(page.url, base_netloc):
+                    detail = "The action left the target site."
+                    break
+                if _norm(page.url) != _norm(before_url):
+                    parent_id = await _save_discovered_page(
+                        run_id=run_id,
+                        page=page,
+                        root_url=workflow["start_url"],
+                        steps=steps,
+                        parent_id=parent_id,
+                        credential_id=credential_id,
+                        username=username,
+                        shared=shared,
+                        max_pages=max_pages,
+                        llm_cfg=llm_cfg,
+                    )
+                    if parent_id is None:
+                        detail = "The crawl page limit was reached."
+                        break
+            else:
+                detail = "Stopped after the workflow exploration limit."
+        except PlaywrightTimeoutError as exc:
+            log.warning(
+                "Timed out while %s in workflow %s: %s",
+                attempted_action,
+                workflow["name"],
+                exc,
+            )
+            detail = f"Timed out while {attempted_action}."
+        except Exception as exc:
+            log.warning("Could not explore workflow %s: %s", workflow["name"], exc)
+            detail = f"Could not finish exploring: {type(exc).__name__}."
+        finally:
+            _record_note(
+                run_id,
+                workflow,
+                status,
+                descriptions,
+                detail,
+                page.url if page.url.startswith("http") else "",
+                page_id=saved_id if status == "crawled" else None,
+                needs_input=needs_input,
+                request=request,
+                instructions=_instructions_with_generated_values(workflow),
+            )
+            report(
+                detail,
+                stage="finished",
+                current_path=urlparse(page.url).path or "/",
+                actions_done=len(descriptions),
+                actions=descriptions.copy(),
+                result_status=status,
+            )
+            await context.close()
+
+    async def explore_when_free(browser, workflow: dict) -> None:
+        async with limit:
+            await explore_workflow(browser, workflow)
+
     report("Opening browser", stage="browser")
     async with async_playwright() as playwright:
         browser = await launch_playwright_browser(
@@ -1068,354 +1644,33 @@ async def explore_after_crawl(
             args=["--proxy-bypass-list=<-loopback>"] if pw_proxy else [],
         )
         try:
-            for workflow in proposals:
-                if run_id in _stop_requested:
-                    break
-                start_page = known_pages.get(_norm(workflow["start_url"]))
-                if start_page is None and not (
-                    workflow.get("saved_site_data")
-                    and _same_domain(workflow["start_url"], base_netloc)
-                ):
-                    raise ValueError("Workflow start page is not in the saved crawl")
-                if workflow["destructive"]:
-                    _record_note(
-                        run_id,
-                        workflow,
-                        "not_attempted",
-                        [],
-                        "Not tried because this workflow appears to delete something.",
-                    )
-                    continue
-                credential, requires_credential = _workflow_credential(
-                    start_page, creds, historical_usernames
-                )
-                if credential is None and requires_credential:
-                    _record_note(
-                        run_id,
-                        workflow,
-                        "not_attempted",
-                        [],
-                        "The saved account for this page is no longer available. "
-                        "Update the site credentials and retry this workflow.",
-                    )
-                    continue
-                credential_id = credential.id if credential else None
-                if credential and credential.auth_mode in {
-                    AuthMode.guided,
-                    AuthMode.entra_id,
-                }:
-                    _record_note(
-                        run_id,
-                        workflow,
-                        "not_attempted",
-                        [],
-                        "Not tried because this workflow needs a guided sign-in.",
-                    )
-                    continue
-                context = await browser.new_context(
-                    user_agent=playwright_user_agent(browser),
-                    ignore_https_errors=True,
-                    **pw_proxy,
-                )
-                protect_playwright_context(browser, context)
-                await context.route("**/*", _block_delete_request)
-                if global_http_header:
-                    await context.set_extra_http_headers(global_http_header)
-                username = credential.username if credential else "unauthenticated"
-                traffic_svc.setup_playwright_logging(
-                    context, run_id, username=username, purpose="Post-crawl workflow"
-                )
-                page = await context.new_page()
-                steps: list[dict] = []
-                descriptions: list[str] = []
-                decision_feedback: list[str] = []
-                prior_actions: set[tuple[str, str, str, str]] = set()
-                submission_errors: dict[str, int] = {}
-                detail = "Stopped before the workflow was reached."
-                status = "not_reached"
-                saved_id = None
-                needs_input = False
-                request = ""
-                attempted_action = "opening the starting page"
-                try:
-                    if credential:
-                        report("Signing in", stage="sign_in")
-                        try:
-                            await _authenticate(
-                                page,
-                                _login_url_for_credential(
-                                    site.login_url or "", credential
-                                ),
-                                credential,
-                                run_id,
-                                llm_cfg=llm_cfg,
-                            )
-                        except Exception:
-                            log.warning(
-                                "Could not sign in for workflow %s",
-                                workflow["name"],
-                                exc_info=True,
-                            )
-                            detail = (
-                                "Could not sign in with the saved site credential. "
-                                "Update it and retry this workflow."
-                            )
-                            status = "not_attempted"
-                            continue
-                    report(
-                        "Opening the starting page",
-                        stage="opening_page",
-                        current_path=urlparse(workflow["start_url"]).path or "/",
-                    )
-                    await page.goto(
-                        workflow["start_url"],
-                        wait_until="domcontentloaded",
-                        timeout=20_000,
-                    )
-                    await _wait_for_content_settle(page, max_wait_ms=1200)
-                    if not _same_domain(page.url, base_netloc):
-                        detail = "The starting page redirected outside the target site."
-                        continue
-                    parent_id = start_page.id if start_page else None
-                    action_limit = (
-                        _MAX_RETRY_ACTIONS
-                        if selected_workflows is not None
-                        else _MAX_ACTIONS
-                    )
-                    report(
-                        "Checking the page",
-                        stage="checking_page",
-                        current_path=urlparse(page.url).path or "/",
-                        actions_done=0,
-                        action_limit=action_limit,
-                        actions=[],
-                    )
-                    for _ in range(action_limit):
-                        attempted_action = "checking the page"
-                        if run_id in _stop_requested:
-                            detail = "Stopped by the user."
-                            break
-                        observation = await _observe(page)
-                        report(
-                            "Choosing the next step",
-                            stage="deciding",
-                            current_path=urlparse(page.url).path or "/",
-                        )
-                        decision = await _decide_with_corrections(
-                            llm_cfg,
-                            workflow,
-                            observation,
-                            [*descriptions, *decision_feedback],
-                            prior_actions,
-                        )
-                        action = decision.get("action")
-                        if action == "reached":
-                            evidence = str(decision.get("evidence") or "").strip()
-                            visible = " ".join(
-                                str(observation.get(key) or "")
-                                for key in ("url", "title", "text")
-                            )
-                            if evidence and evidence.casefold() in visible.casefold():
-                                status = "crawled"
-                                report("Saving the reached page", stage="saving_page")
-                                detail = (
-                                    "Reached the workflow with test data."
-                                    if workflow.get("user_instructions")
-                                    or workflow.get("generate_sample_data")
-                                    else f"Reached the workflow. Visible evidence: {evidence[:140]}"
-                                )
-                                saved_id = await _save_discovered_page(
-                                    run_id=run_id,
-                                    page=page,
-                                    root_url=workflow["start_url"],
-                                    steps=steps,
-                                    parent_id=parent_id,
-                                    credential_id=credential_id,
-                                    username=username,
-                                    shared=shared,
-                                    max_pages=max_pages,
-                                    llm_cfg=llm_cfg,
-                                )
-                                if saved_id is None:
-                                    status = "not_reached"
-                                    detail = "The crawl page limit was reached."
-                            else:
-                                detail = "The model could not point to visible evidence that the workflow was reached."
-                            break
-                        if action == "stop":
-                            needs_input = decision.get("needs_input") is True
-                            request = str(decision.get("request") or "")[:300]
-                            detail = str(decision.get("reason") or detail)[:500]
-                            if (
-                                workflow.get("user_instructions")
-                                and not workflow.get("generate_sample_data")
-                                and _invalid_supplied_input(observation)
-                            ):
-                                needs_input = True
-                                request = _invalid_supplied_input(observation)
-                            if needs_input:
-                                status = "needs_input"
-                            elif _DELETE_ACTION.search(detail):
-                                status = "not_attempted"
-                            break
-                        allowed, why = _action_allowed(
-                            decision,
-                            observation,
-                            workflow.get("user_instructions") or "",
-                            generate_sample_data=bool(
-                                workflow.get("generate_sample_data")
-                            ),
-                            prior_actions=prior_actions,
-                        )
-                        if not allowed:
-                            needs_input = why in {
-                                "The field needs a value supplied by the user.",
-                                "Payment or secret fields need user-supplied test data.",
-                            }
-                            status = "needs_input" if needs_input else "not_attempted"
-                            if needs_input:
-                                request = (
-                                    "Provide test values for the payment or secret fields."
-                                    if why.startswith("Payment or secret")
-                                    else "Provide the sample values needed for this form."
-                                )
-                            detail = why
-                            break
-                        before_url = page.url
-                        action_label = {
-                            "click": "Clicking a page control",
-                            "fill": "Filling a field",
-                            "select": "Choosing an option",
-                            "check": "Choosing a radio option",
-                        }.get(action, "Using a page control")
-                        report(action_label, stage="acting")
-                        if action == "click":
-                            attempted_action = "clicking a page control"
-                        else:
-                            field = observation["fields"][int(decision["index"])]
-                            field_name = str(field.get("name") or "field")[:80]
-                            attempted_action = (
-                                f"filling {field_name}"
-                                if action == "fill"
-                                else f"selecting {field_name}"
-                                if action == "select"
-                                else f"checking {field_name}"
-                            )
-                        step = await _apply_action(page, decision, observation)
-                        steps.append(step)
-                        if action in {"fill", "select", "check"}:
-                            prior_actions.add(_field_action_key(decision, observation))
-                        _remember_generated_value(workflow, decision, observation)
-                        descriptions.append(
-                            f"{decision['action']} {step.get('name') or step.get('selector')}"
-                        )
-                        report(
-                            "Checking the result",
-                            stage="checking_page",
-                            current_path=urlparse(page.url).path or "/",
-                            actions_done=len(descriptions),
-                            actions=descriptions.copy(),
-                        )
-                        await _wait_for_content_settle(page, max_wait_ms=1200)
-                        if action == "click" and (
-                            observation["controls"][int(decision["index"])].get(
-                                "submits"
-                            )
-                            or re.search(
-                                r"\b(?:save|submit|continue|confirm|apply|next)\b",
-                                observation["controls"][int(decision["index"])].get(
-                                    "name", ""
-                                ),
-                                re.I,
-                            )
-                        ):
-                            submitted_observation = await _observe(page)
-                            validation_action, validation_request = (
-                                _submission_validation_action(
-                                    submitted_observation,
-                                    generate_sample_data=bool(
-                                        workflow.get("generate_sample_data")
-                                    ),
-                                    seen_errors=submission_errors,
-                                )
-                            )
-                            if validation_action == "needs_input":
-                                needs_input = True
-                                status = "needs_input"
-                                request = validation_request
-                                detail = (
-                                    "The site kept rejecting the generated form data."
-                                    if workflow.get("generate_sample_data")
-                                    else "The site rejected a supplied form value."
-                                )
-                                break
-                            if validation_action == "retry":
-                                decision_feedback.append(
-                                    f"Form error after submit: {validation_request}"
-                                )
-                        if not _same_domain(page.url, base_netloc):
-                            detail = "The action left the target site."
-                            break
-                        if _norm(page.url) != _norm(before_url):
-                            parent_id = await _save_discovered_page(
-                                run_id=run_id,
-                                page=page,
-                                root_url=workflow["start_url"],
-                                steps=steps,
-                                parent_id=parent_id,
-                                credential_id=credential_id,
-                                username=username,
-                                shared=shared,
-                                max_pages=max_pages,
-                                llm_cfg=llm_cfg,
-                            )
-                            if parent_id is None:
-                                detail = "The crawl page limit was reached."
-                                break
-                    else:
-                        detail = "Stopped after the workflow exploration limit."
-                except PlaywrightTimeoutError as exc:
-                    log.warning(
-                        "Timed out while %s in workflow %s: %s",
-                        attempted_action,
-                        workflow["name"],
-                        exc,
-                    )
-                    detail = f"Timed out while {attempted_action}."
-                except Exception as exc:
-                    log.warning(
-                        "Could not explore workflow %s: %s", workflow["name"], exc
-                    )
-                    detail = f"Could not finish exploring: {type(exc).__name__}."
-                finally:
-                    _record_note(
-                        run_id,
-                        workflow,
-                        status,
-                        descriptions,
-                        detail,
-                        page.url if page.url.startswith("http") else "",
-                        page_id=saved_id if status == "crawled" else None,
-                        needs_input=needs_input,
-                        request=request,
-                        instructions=_instructions_with_generated_values(workflow),
-                    )
-                    report(
-                        detail,
-                        stage="finished",
-                        current_path=urlparse(page.url).path or "/",
-                        actions_done=len(descriptions),
-                        actions=descriptions.copy(),
-                        result_status=status,
-                    )
-                    await context.close()
+            results = await asyncio.gather(
+                *(explore_when_free(browser, workflow) for workflow in proposals),
+                return_exceptions=True,
+            )
         finally:
             await browser.close()
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+
+def _active_retry_notes(run_id: int) -> set[int]:
+    return {
+        note_id
+        for (task_run_id, note_id), task in _retry_tasks.items()
+        if task_run_id == run_id and not task.done()
+    }
 
 
 def workflow_retry_status(run_id: int) -> dict:
-    state = _retry_results.get(run_id)
-    return dict(state) if state else {"status": "idle"}
+    retries = [
+        dict(state)
+        for (state_run_id, _note_id), state in sorted(_retry_results.items())
+        if state_run_id == run_id
+    ]
+    running = any(state.get("status") == "running" for state in retries)
+    return {"status": "running" if running else "idle", "retries": retries}
 
 
 def start_workflow_retry(
@@ -1430,17 +1685,19 @@ def start_workflow_retry(
 
     if crawler.is_running(run_id):
         raise ValueError("Wait for the crawl to finish before continuing a workflow.")
-    active = _retry_tasks.get(run_id)
-    if active is not None and not active.done():
-        raise ValueError("Another workflow is already running for this test run.")
+    active_notes = _active_retry_notes(run_id)
+    if note["id"] in active_notes:
+        raise ValueError("This workflow is already running.")
+    if len(active_notes) >= _MAX_PARALLEL_WORKFLOWS:
+        raise ValueError(
+            f"Up to {_MAX_PARALLEL_WORKFLOWS} workflows can run at once. "
+            "Wait for one to finish."
+        )
     if not can_retry_workflow(note):
         raise ValueError("This workflow cannot be retried.")
-    instructions = instructions.strip()
+    instructions = instructions.strip() or str(note.get("instructions") or "").strip()
     if len(instructions) > 4000:
         raise ValueError("Enter up to 4000 characters of sample data or instructions.")
-    generate_sample_data = (
-        generate_sample_data or note.get("generate_sample_data") is True
-    )
     workflow = {
         "name": str(note.get("name") or "Workflow")[:100],
         "goal": str(note.get("goal") or note.get("name") or "Workflow")[:220],
@@ -1449,10 +1706,13 @@ def start_workflow_retry(
         "destructive": False,
         "retry_of": note["id"],
         "user_instructions": instructions,
-        "generate_sample_data": generate_sample_data,
+        "generate_sample_data": False,
         "save_to_site_requested": save_to_site,
     }
-    _retry_results[run_id] = {
+    generate_sample_data = _can_generate_sample_data(workflow)
+    workflow["generate_sample_data"] = generate_sample_data
+    key = (run_id, note["id"])
+    _retry_results[key] = {
         "status": "running",
         "note_id": note["id"],
         "workflow_name": workflow["name"],
@@ -1465,10 +1725,16 @@ def start_workflow_retry(
         "action_limit": _MAX_RETRY_ACTIONS,
         "actions": [],
     }
-    _retry_tasks[run_id] = asyncio.create_task(
+    task = asyncio.create_task(
         _run_workflow_retry(run_id, workflow, save_to_site=save_to_site)
     )
-    return workflow_retry_status(run_id)
+    _retry_tasks[key] = task
+    task.add_done_callback(
+        lambda done: (
+            _retry_tasks.pop(key, None) if _retry_tasks.get(key) is done else None
+        )
+    )
+    return dict(_retry_results[key])
 
 
 async def _run_workflow_retry(
@@ -1483,10 +1749,11 @@ async def _run_workflow_retry(
     )
 
     note_id = workflow["retry_of"]
+    key = (run_id, note_id)
 
     def report(changes: dict) -> None:
-        state = _retry_results.get(run_id, {})
-        _retry_results[run_id] = {**state, **changes, "status": "running"}
+        state = _retry_results.get(key, {})
+        _retry_results[key] = {**state, **changes, "status": "running"}
 
     crawler._crawl_log(
         run_id,
@@ -1548,7 +1815,7 @@ async def _run_workflow_retry(
             selected_workflows=[workflow],
             progress=report,
         )
-        if "result_status" not in _retry_results.get(run_id, {}):
+        if "result_status" not in _retry_results.get(key, {}):
             raise ValueError("The workflow did not produce a result")
         from aespa.services.workflow_workprogram import seed_workflow_tests
 
@@ -1557,7 +1824,7 @@ async def _run_workflow_retry(
         if (
             save_to_site
             and effective_instructions
-            and _retry_results[run_id]["result_status"] == "crawled"
+            and _retry_results[key]["result_status"] == "crawled"
         ):
             from aespa.services.sites import save_site_workflow_data
 
@@ -1570,18 +1837,18 @@ async def _run_workflow_retry(
         log.warning(
             "Workflow retry failed for run %s note %s", run_id, note_id, exc_info=True
         )
-        _retry_results[run_id] = {
-            **_retry_results.get(run_id, {}),
+        _retry_results[key] = {
+            **_retry_results.get(key, {}),
             "status": "error",
             "note_id": note_id,
             "error": f"Could not continue the workflow: {type(exc).__name__}.",
         }
-        if "result_status" not in _retry_results[run_id]:
+        if "result_status" not in _retry_results[key]:
             _record_note(
                 run_id,
                 workflow,
                 "not_reached",
-                _retry_results[run_id].get("actions") or [],
+                _retry_results[key].get("actions") or [],
                 f"Could not continue the workflow: {type(exc).__name__}.",
                 needs_input=True,
                 request="Check the instructions and try again.",
@@ -1595,8 +1862,8 @@ async def _run_workflow_retry(
             data={"note_id": note_id},
         )
     else:
-        _retry_results[run_id] = {
-            **_retry_results[run_id],
+        _retry_results[key] = {
+            **_retry_results[key],
             "status": "complete",
             "note_id": note_id,
         }

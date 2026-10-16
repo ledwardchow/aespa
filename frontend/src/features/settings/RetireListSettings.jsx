@@ -2,18 +2,13 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect } from "react";
 import { PolicySettings } from "./ScannerPolicySettings.jsx";
 import styles from "./RetireListSettings.module.css";
+import { fmtDate } from "../../shared/lib/dates.js";
 import { PageError } from "../../shared/ui/Notice.jsx";
 
 const REFRESH_MESSAGES = {
   updated: "Downloaded the latest list.",
   unchanged: "Already up to date.",
 };
-
-function formatDate(value) {
-  if (!value) return "Unknown";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
 
 function RetireListStatus() {
   const [status, setStatus] = useState(null);
@@ -63,7 +58,7 @@ function RetireListStatus() {
           <dt>List in use</dt>
           <dd>{status.copy === "downloaded" ? "Downloaded copy" : "Copy included with AESPA"}</dd>
           <dt>Last updated</dt>
-          <dd>{formatDate(status.fetched_at)}</dd>
+          <dd>{fmtDate(status.fetched_at)}</dd>
           <dt>Coverage</dt>
           <dd>
             {status.libraries} libraries, {status.vulnerabilities} known issues

@@ -538,13 +538,18 @@ def delete_api_finding(
 @router.delete("/{run_id}/findings", status_code=204)
 def clear_api_findings(
     run_id: int,
+    title: str | None = Query(
+        default=None,
+        description="Delete all findings with this title. Omit to clear ALL findings.",
+    ),
     session: Session = Depends(get_session),
 ) -> None:
-    """Delete all findings for this API test run."""
+    """Delete findings for this API test run, or only those with *title*."""
     _get_run_or_404(session, run_id)
-    for f in session.exec(
-        select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
-    ).all():
+    stmt = select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
+    if title is not None:
+        stmt = stmt.where(ScanFinding.title == title)
+    for f in session.exec(stmt).all():
         session.delete(f)
     session.commit()
 

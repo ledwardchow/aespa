@@ -417,7 +417,7 @@ export function SiteDetail({ siteId }) {
                         style={{
                           marginTop: 8,
                           padding: "8px 12px",
-                          background: "var(--surface-2,#2a2a2a)",
+                          background: "var(--panel-2)",
                           border: "1px solid var(--warn,#f59e0b)",
                           borderRadius: 5,
                           fontSize: 12,

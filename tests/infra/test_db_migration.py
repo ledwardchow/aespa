@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, inspect, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa import db, db_legacy
 from aespa.config import Settings
+from aespa.models import DeepScanTask
 from aespa.services import settings_providers
 from alembic import command
 
@@ -193,7 +194,7 @@ def test_llm_rate_limit_migration_recovers_after_partial_application():
                 for row in conn.execute(text("PRAGMA table_info(llm_provider_config)"))
             }
 
-        assert version == "1ac6f6041728"
+        assert version == "45623834b15e"
         assert limits == (120_000, 60)
         assert "max_tpm" not in provider_columns
         assert "max_rpm" not in provider_columns
@@ -1136,7 +1137,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
         assert "dast_max_concurrent_llm_requests" in scanner_policy_columns
         assert "sast_max_concurrent_llm_requests" in scanner_policy_columns
         assert was_pre_alembic is False
-        assert version == "1ac6f6041728"
+        assert version == "45623834b15e"
     finally:
         engine.dispose()
 
@@ -1178,7 +1179,7 @@ def test_deep_task_finding_timestamp_is_added_and_backfilled():
 
         assert "created_at" in columns
         assert created_at is not None
-        assert version == "1ac6f6041728"
+        assert version == "45623834b15e"
     finally:
         engine.dispose()
 
@@ -1467,6 +1468,11 @@ def test_legacy_db_with_run_identity_but_no_systems_tables_gets_new_schema():
                 row[1]
                 for row in conn.execute(text("PRAGMA table_info(assessment_campaign)"))
             }
+            run = conn.execute(
+                text(
+                    "SELECT site_id, name, discovery_completeness FROM test_run WHERE id = 1"
+                )
+            ).one()
 
         # The full Systems/Campaign schema now exists...
         assert {
@@ -1487,7 +1493,341 @@ def test_legacy_db_with_run_identity_but_no_systems_tables_gets_new_schema():
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "1ac6f6041728"
+        assert run == (1, "legacy run", "legacy_unknown")
+        assert version == "45623834b15e"
+    finally:
+        engine.dispose()
+
+
+def test_discovered_targets_migration_preserves_pages_through_downgrade_and_upgrade():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        _upgrade_to(engine, "91c4b6e7a205")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO site "
+                    "(id, name, base_url, requires_auth, created_at, updated_at) "
+                    "VALUES (1, 'Site', 'https://example.test', 0, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO run_identity (id, kind, legacy_id, created_at) "
+                    "VALUES (1, 'web', 1, CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO test_run "
+                    "(id, site_id, name, status, use_screenshots, max_depth, "
+                    "max_pages, scan_mode, scanner_policy_json, pages_discovered, "
+                    "created_at) VALUES "
+                    "(1, 1, 'Run', 'pending', 0, 3, 50, 'safe_active', '{}', 1, "
+                    "CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO crawled_page "
+                    "(id, test_run_id, url, state_key, state_kind, "
+                    "replay_steps_json, depth, status, in_scope, scan_status, "
+                    "accessible_by, owasp_applicable_json, discovered_at) "
+                    "VALUES (1, 1, 'https://example.test/orders/42?view=full', "
+                    "'signed-in', 'page', '[]', 1, 'crawled', 1, 'pending', "
+                    "'[]', '{}', CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO target_intel_item "
+                    "(id, test_run_id, kind, key, value, source, confidence, "
+                    "evidence, item_metadata, discovered_at) VALUES "
+                    "(1, 1, 'endpoint', 'link', 'https://example.test/receipts/7', "
+                    "'dom_link', 1.0, '', '{}', CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO scan_obligation "
+                    "(id, run_kind, run_id, scan_mode, owasp_catalog, "
+                    "owasp_category, vulnerability_technique, route_template, "
+                    "http_method, status, created_at, updated_at) VALUES "
+                    "(99, 'web', 1, 'quick', 'web_2025', 'A01', 'idor', "
+                    "'/orders/{id}', 'GET', 'not_planned', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+        with Session(engine) as session:
+            session.add(
+                DeepScanTask(
+                    run_id=1,
+                    fingerprint="saved-task",
+                    attack_class="idor",
+                    target_url="https://example.test/orders/42",
+                    obligation_id=99,
+                )
+            )
+            session.commit()
+
+        for _ in range(2):
+            _upgrade_to(engine, "head")
+            with engine.connect() as conn:
+                target = conn.execute(
+                    text(
+                        "SELECT url, state_key, state_identity, route_pattern "
+                        "FROM discovered_target WHERE url = "
+                        "'https://example.test/orders/42?view=full'"
+                    )
+                ).one()
+                page = conn.execute(
+                    text("SELECT url, state_key FROM crawled_page WHERE id = 1")
+                ).one()
+                linked_target = conn.execute(
+                    text(
+                        "SELECT state_identity, route_pattern FROM discovered_target "
+                        "WHERE url = 'https://example.test/receipts/7'"
+                    )
+                ).one()
+            assert target == (
+                "https://example.test/orders/42?view=full",
+                "signed-in",
+                '["signed-in"]',
+                "/orders/{id}?view={view}",
+            )
+            assert page == ("https://example.test/orders/42?view=full", "signed-in")
+            assert linked_target == ("[null]", "/receipts/{id}")
+            _downgrade_to(engine, "91c4b6e7a205")
+            with engine.connect() as conn:
+                assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+                assert (
+                    conn.execute(
+                        text(
+                            "SELECT obligation_id FROM deep_scan_task "
+                            "WHERE fingerprint = 'saved-task'"
+                        )
+                    ).scalar_one()
+                    == 99
+                )
+                assert not conn.execute(text("PRAGMA foreign_key_check")).all()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "interrupted_statement",
+    [
+        "create index ix_target_discovery_actor_key",
+        "alter table scan_obligation add column parent_test_class",
+        "alter table _alembic_tmp_scan_obligation rename to scan_obligation",
+        "index uq_specialist_handoff_active_scope",
+    ],
+)
+def test_discovered_targets_migration_recovers_after_interrupted_ddl(
+    interrupted_statement,
+):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        _upgrade_to(engine, "91c4b6e7a205")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO site (id, name, base_url, requires_auth, "
+                    "created_at, updated_at) VALUES "
+                    "(1, 'Site', 'https://example.test', 0, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO run_identity (id, kind, legacy_id, created_at) "
+                    "VALUES (1, 'web', 1, CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO test_run (id, site_id, name, status, "
+                    "use_screenshots, max_depth, max_pages, scan_mode, "
+                    "scanner_policy_json, pages_discovered, created_at) VALUES "
+                    "(1, 1, 'Run', 'pending', 0, 3, 50, 'safe_active', "
+                    "'{}', 1, CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO crawled_page (id, test_run_id, url, state_key, "
+                    "state_kind, replay_steps_json, depth, status, in_scope, "
+                    "scan_status, accessible_by, owasp_applicable_json, "
+                    "discovered_at) VALUES "
+                    "(1, 1, 'https://example.test/orders/42', 'signed-in', "
+                    "'page', '[]', 1, 'crawled', 1, 'pending', '[]', '{}', "
+                    "CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO scan_obligation "
+                    "(id, run_kind, run_id, scan_mode, owasp_catalog, "
+                    "owasp_category, vulnerability_technique, route_template, "
+                    "http_method, status, created_at, updated_at) VALUES "
+                    "(99, 'web', 1, 'quick', 'web_2025', 'A01', 'idor', "
+                    "'/orders/{id}', 'GET', 'not_planned', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+        with Session(engine) as session:
+            session.add(
+                DeepScanTask(
+                    run_id=1,
+                    fingerprint="saved-task",
+                    attack_class="idor",
+                    target_url="https://example.test/orders/42",
+                    obligation_id=99,
+                )
+            )
+            session.commit()
+
+        base_indexes = {
+            table: {index["name"] for index in inspect(engine).get_indexes(table)}
+            for table in (
+                "scan_obligation",
+                "scan_finding",
+                "probe_execution",
+                "specialist_handoff",
+            )
+        }
+
+        interrupted = False
+
+        def interrupt_ddl(conn, cursor, statement, parameters, context, executemany):
+            nonlocal interrupted
+            normalized = statement.replace('"', "").lower()
+            if not interrupted and interrupted_statement in normalized:
+                interrupted = True
+                raise RuntimeError("simulated interruption")
+
+        event.listen(engine, "before_cursor_execute", interrupt_ddl)
+        try:
+            with pytest.raises(RuntimeError, match="simulated interruption"):
+                _upgrade_to(engine, "head")
+        finally:
+            event.remove(engine, "before_cursor_execute", interrupt_ddl)
+        assert interrupted
+
+        with engine.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+                == "91c4b6e7a205"
+            )
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO discovered_target "
+                    "(id, test_run_id, url, state_key, state_identity, "
+                    "route_pattern, discovered_at) VALUES "
+                    "(99, 1, 'https://example.test/saved/9', NULL, '[null]', "
+                    "'/saved/{id}', CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO target_discovery "
+                    "(id, test_run_id, target_id, source_key, actor_key, "
+                    "source_kind, discovered_at) VALUES "
+                    "(99, 1, 99, 'saved', 'anonymous', 'seed', "
+                    "CURRENT_TIMESTAMP)"
+                )
+            )
+
+        _upgrade_to(engine, "head")
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE alembic_version SET version_num = '91c4b6e7a205'")
+            )
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+                == "45623834b15e"
+            )
+            assert conn.execute(
+                text(
+                    "SELECT url, state_identity FROM discovered_target "
+                    "WHERE url = 'https://example.test/orders/42'"
+                )
+            ).one() == ("https://example.test/orders/42", '["signed-in"]')
+            assert conn.execute(
+                text("SELECT url, state_identity FROM discovered_target WHERE id = 99")
+            ).one() == ("https://example.test/saved/9", "[null]")
+            assert conn.execute(
+                text("SELECT target_id, source_key FROM target_discovery WHERE id = 99")
+            ).one() == (99, "saved")
+            assert conn.execute(
+                text(
+                    "SELECT route_template, scope_kind FROM scan_obligation WHERE id = 99"
+                )
+            ).one() == ("/orders/{id}", "route")
+            assert (
+                conn.execute(
+                    text("SELECT url FROM crawled_page WHERE id = 1")
+                ).scalar_one()
+                == "https://example.test/orders/42"
+            )
+            assert not conn.execute(text("PRAGMA foreign_key_check")).all()
+            assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT obligation_id FROM deep_scan_task "
+                        "WHERE fingerprint = 'saved-task'"
+                    )
+                ).scalar_one()
+                == 99
+            )
+
+        inspector = inspect(engine)
+        for table, index_names in base_indexes.items():
+            assert index_names <= {
+                index["name"] for index in inspector.get_indexes(table)
+            }
+        assert "ck_target_access_result" in {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(
+                "target_access_observation"
+            )
+        }
+        assert "ck_scan_obligation_scope_kind" in {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("scan_obligation")
+        }
+        assert "uq_object_check_selection" in {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints("scan_obligation")
+        }
     finally:
         engine.dispose()
 
@@ -1565,7 +1905,7 @@ def test_current_db_with_systems_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "1ac6f6041728"
+        assert version == "45623834b15e"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

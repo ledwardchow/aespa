@@ -104,7 +104,7 @@ function DatasetRow({ dataset, targets, onChange }) {
           )}
           <div className={`form-actions ${styles.actions}`}>
             <button className="btn primary" type="submit">
-              {busy ? "Working..." : "Save"}
+              {busy ? "Working…" : "Save"}
             </button>
             <button
               className={`btn ghost ${styles.deleteButton}`}

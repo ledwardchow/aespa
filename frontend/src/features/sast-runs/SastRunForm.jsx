@@ -148,7 +148,7 @@ export function SastRunForm({ showSastDeepScan = false }) {
       />
       <div className="content scroll-content">
         <form className="card" style={{ maxWidth: 620 }} onSubmit={onSubmit}>
-          <div className="form-section-title">New SAST Scan</div>
+          <div className="form-section-title">New SAST scan</div>
 
           <div className="field">
             <label htmlFor="sast-source-provider">Source</label>
@@ -287,7 +287,7 @@ export function SastRunForm({ showSastDeepScan = false }) {
               Cancel
             </button>
             <button type="submit" className="btn" disabled={saving || !sourceReady}>
-              {saving ? "Creating…" : "Create & Start Scan"}
+              {saving ? "Creating…" : "Create and start scan"}
             </button>
           </div>
         </form>
