@@ -35,6 +35,7 @@ from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
 from aespa.services.references import ensure_finding_reference
+from aespa.services.run_cleanup import detach_finding_dependents
 
 router = APIRouter(tags=["scan"])
 
@@ -271,6 +272,7 @@ def delete_finding(
     finding = session.get(ScanFinding, finding_id)
     if finding is None or finding.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Finding not found")
+    detach_finding_dependents(session, [finding_id])
     session.delete(finding)
     session.commit()
 
@@ -325,6 +327,7 @@ def delete_findings_group(
         ).all():
             page.scan_status = "pending"
             session.add(page)
+    detach_finding_dependents(session, [f.id for f in findings if f.id is not None])
     for f in findings:
         session.delete(f)
     session.commit()

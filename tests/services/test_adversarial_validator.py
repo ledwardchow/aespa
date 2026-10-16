@@ -190,13 +190,14 @@ def test_validator_http_request_does_not_inherit_primary_session(monkeypatch):
             merged = {**self.default_headers, **(headers or {})}
             return httpx.Request(method, url, content=content, headers=merged)
 
-        async def send(self, request):
+        async def send(self, request, follow_redirects=False):
             captured.append((dict(request.headers), self.default_cookies))
             return httpx.Response(401, text="unauthorized", request=request)
 
     from aespa.services import traffic
 
     monkeypatch.setattr(traffic, "LoggingAsyncClient", FakeClient)
+    monkeypatch.setattr(validator, "_validator_scope_check", lambda run_id: lambda url: None)
     primary = {
         "cookies": {"session": "primary-secret"},
         "extra_headers": {"Authorization": "Bearer primary-secret"},

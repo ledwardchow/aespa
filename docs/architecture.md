@@ -1238,6 +1238,8 @@ Before each tool-using agent turn, AESPA estimates the complete request, includi
 
 When the request is too large, completed older tool exchanges are replaced with one bounded context journal. Existing journals from earlier checkpoints are merged into that journal instead of being appended indefinitely. AESPA keeps recent complete tool-call and tool-result pairs when they fit, but can remove all completed exchanges when necessary. The initial scan brief and any exchange that is still incomplete remain intact. Full findings, traffic, coverage, and other scan evidence stay in the database and can be retrieved again through context tools.
 
+Bedrock thinking blocks carry signatures tied to the preceding conversation. Compaction removes those blocks because the earlier messages have changed. Resuming an older compacted checkpoint also removes its stale thinking blocks before the next request. New thinking blocks can then be replayed against the shortened conversation.
+
 If the compacted request fits only with a smaller response allowance, AESPA creates a request-only model configuration with a reduced `max_tokens` value. Saved model settings are not changed. Plain completion calls apply the same context budget and trim variable user content while preserving their system instructions. AESPA raises a context-limit error only when the fixed request and minimum response allowance cannot fit.
 
 ### Prompt caching

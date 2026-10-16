@@ -47,6 +47,7 @@ from aespa.services import alice_goals, alice_tasks, run_cleanup
 from aespa.services import findings as findings_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services.references import ensure_finding_reference
+from aespa.services.run_cleanup import detach_finding_dependents
 
 _UTC = timezone.utc
 
@@ -177,6 +178,7 @@ class AliceRunRequest(BaseModel):
 
 class AliceSteerRequest(BaseModel):
     message: str
+    tab_id: str | None = None
 
 
 def _save_api_sessions(
@@ -531,6 +533,7 @@ def delete_api_finding(
     finding = session.get(ScanFinding, finding_id)
     if finding is None or finding.api_test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Finding not found")
+    detach_finding_dependents(session, [finding_id])
     session.delete(finding)
     session.commit()
 
@@ -549,7 +552,9 @@ def clear_api_findings(
     stmt = select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
     if title is not None:
         stmt = stmt.where(ScanFinding.title == title)
-    for f in session.exec(stmt).all():
+    findings = session.exec(stmt).all()
+    detach_finding_dependents(session, [f.id for f in findings if f.id is not None])
+    for f in findings:
         session.delete(f)
     session.commit()
 
@@ -842,7 +847,7 @@ def update_api_scanner_session(
     session.add(record)
     session.commit()
     session.refresh(record)
-    return ScannerSessionOut.model_validate(record)
+    return _scanner_session_out(record)
 
 
 @router.get("/{run_id}/token-usage")

@@ -8,6 +8,18 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Finding review after web scans**: AESPA reviews batches of findings concurrently, up to the saved DAST LLM request limit. Failed requests and missing verdicts leave the affected findings unvalidated.
 
+### Fixes
+
+- **A.L.I.C.E. on API runs**: Endpoint lists, coverage, and finding commands in API-run chats no longer fail every time. Steering an active goal on an API run now works instead of returning a server error.
+
+- **API run sessions**: Renaming or turning off a saved session on an API run no longer fails, and the response hides cookie values, header values, and secret session details, as other session views already did.
+
+- **Deleting runs, findings, pages, and API documents**: Deleting a web run, API run, or campaign, removing or merging findings, deleting crawled pages, starting a recrawl, and deleting an API document could fail with a database error when workflow checks or campaign findings referred to the deleted items. These actions now complete. Workflow checks keep their results without the link, and endpoints from a deleted API document stay in the collection. The document file is removed only after the delete succeeds.
+
+- **API coverage by HTTP method**: When several methods share a path, such as `GET`, `PUT`, and `DELETE /users/{id}`, probes and findings now update the coverage cells for the method actually used instead of the first endpoint on that path. Findings from SAST lead validation scans on API runs now get their OWASP API category.
+
+- **Finding validation requests**: Requests sent while validating findings now follow the run's target scope and the scan mode's allowed HTTP methods. Redirects that leave the target scope are not followed. These requests also use the configured testing proxy and global HTTP headers. The fallback validation probes, which previously failed without sending anything, now send their requests.
+
 ## [PR #283] October 16 - Workflow detection, grouped page routes
 
 ### New features
@@ -69,6 +81,8 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Dates, costs, and statuses**: Lists use one short date and time format, costs show two decimal places with thousands separators, and finished runs read "completed" on every run type.
 
 ### Fixes
+
+- **Bedrock scans after context compaction**: Fixed scans stopping with an invalid thinking signature after older conversation messages were shortened. Affected saved scans can be resumed.
 
 - **Benchmark Lab filters and links**: On narrow windows, the model and scan type filter menus no longer open partly behind the sidebar. **Open results site** now appears only when the saved address is an `http` or `https` link.
 

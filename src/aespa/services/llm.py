@@ -5634,6 +5634,36 @@ def _fit_text_to_chars(text: str, budget: int) -> str:
     return text[:left] + marker + text[-(available - left) :]
 
 
+def _without_bedrock_reasoning(messages: list[dict]) -> list[dict]:
+    cleaned = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            filtered = [
+                block
+                for block in content
+                if not (
+                    isinstance(block, dict) and block.get("type") == "bedrock_reasoning"
+                )
+            ]
+            if len(filtered) != len(content):
+                message = {**message, "content": filtered}
+        cleaned.append(message)
+    return cleaned
+
+
+def _has_context_journal(message: dict) -> bool:
+    content = message.get("content")
+    if isinstance(content, str):
+        return "[CONTEXT JOURNAL:" in content
+    return isinstance(content, list) and any(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and "[CONTEXT JOURNAL:" in str(block.get("text") or "")
+        for block in content
+    )
+
+
 def compact_agentic_messages(
     messages: list[dict],
     *,
@@ -5818,6 +5848,10 @@ def compact_agentic_messages(
         removed_count = build_stats["removed_messages"]
         if selected_fit:
             break
+
+    if provider == "bedrock" and compacted != messages:
+        compacted = _without_bedrock_reasoning(compacted)
+        compacted[0] = {**compacted[0], "_bedrock_reasoning_reset": True}
 
     after_estimate = _estimate(compacted)
     after_chars = len(json.dumps(compacted, default=str))
@@ -7634,6 +7668,14 @@ async def thinking_agentic_loop(
     resume_repair: dict[str, Any] | None = None
     if resume_messages is not None:
         messages = list(resume_messages)
+        if (
+            config.provider == "bedrock"
+            and messages
+            and not messages[0].get("_bedrock_reasoning_reset")
+            and _has_context_journal(messages[0])
+        ):
+            messages = _without_bedrock_reasoning(messages)
+            messages[0] = {**messages[0], "_bedrock_reasoning_reset": True}
         if messages and messages[-1].get("role") == "assistant":
             assistant_content = messages[-1].get("content")
             assistant_blocks = (

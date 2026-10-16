@@ -20,7 +20,7 @@ import re
 import shlex
 import subprocess
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -42,8 +42,10 @@ from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.references import ensure_finding_reference
+from aespa.services.scope import check_scope
 from aespa.services.settings import (
     get_adversarial_validator_config,
+    get_global_http_header_config,
     get_llm_config_for_role,
     get_run_scanner_policy,
     get_upstream_proxy_config,
@@ -55,8 +57,15 @@ log = logging.getLogger("aespa.validator")
 def _apply_traffic_settings() -> None:
     with Session(get_engine()) as session:
         config = get_upstream_proxy_config(session)
+        global_header_cfg = get_global_http_header_config(session)
     scanner_svc._scanner_proxy_var.set(
         config.scanner_proxy_url if config.proxy_scanner else None
+    )
+    scanner_svc._scanner_global_header_var.set(
+        {
+            header.header_name: header.header_value
+            for header in global_header_cfg.headers
+        }
     )
     scanner_svc._scanner_ca_bundle_var.set(config.scanner_ca_bundle_path)
     llm_svc.set_llm_proxy(config.llm_proxy_url if config.proxy_llm else None)
@@ -913,6 +922,104 @@ async def _run_adversarial_validator_loop(
     )
 
 
+_MAX_VALIDATOR_REDIRECTS = 10
+
+
+def _validator_scope_check(run_id: Optional[int]) -> Callable[[str], str | None]:
+    """Return the target scope check for the web run being validated."""
+    site_id: Optional[int] = None
+    if run_id is not None:
+        with Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            site_id = run.site_id if run is not None else None
+
+    def _check(url: str) -> str | None:
+        if run_id is None or site_id is None:
+            return "validator request has no run to check scope against"
+        return check_scope(url, site_id, run_id)
+
+    return _check
+
+
+def _validator_request_rejection(
+    method: str,
+    url: str,
+    scanner_policy,
+    scope_check: Callable[[str], str | None],
+) -> str | None:
+    """Apply target scope and the scan mode's HTTP method and scheme rules.
+
+    Validator requests replay finding evidence, so header rules are not
+    applied here; the scanner's own HTTP tool does not apply them either.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        return f"invalid URL: {exc}"
+    if not parsed.scheme or not parsed.hostname:
+        return "URL must include a scheme and host"
+    if scanner_policy is not None:
+        allowed_schemes = {
+            str(value).lower()
+            for value in getattr(scanner_policy, "allowed_schemes", ["http", "https"])
+        }
+        if parsed.scheme.lower() not in allowed_schemes:
+            return f"scheme {parsed.scheme} is not allowed"
+        scan_mode = str(getattr(scanner_policy, "scan_mode", "aggressive"))
+        methods_by_mode = getattr(scanner_policy, "methods_by_mode", None)
+        if methods_by_mode is not None:
+            allowed_methods = {
+                str(value).upper() for value in methods_by_mode.get(scan_mode, [])
+            }
+            if method.upper() not in allowed_methods:
+                return f"method {method.upper()} is not allowed in {scan_mode} mode"
+    try:
+        return scope_check(url)
+    except Exception as exc:  # noqa: BLE001 - fail closed on scope errors
+        return f"scope check failed: {exc}"
+
+
+async def _send_with_scoped_redirects(
+    client: httpx.AsyncClient,
+    request: httpx.Request,
+    *,
+    follow_redirects: bool,
+    scope_check: Callable[[str], str | None],
+) -> httpx.Response:
+    """Send a request, following only redirects that stay inside target scope.
+
+    An out-of-scope redirect is not followed; the 3xx response is returned.
+    """
+    response = await client.send(request, follow_redirects=False)
+    hops = 0
+    while (
+        follow_redirects
+        and response.next_request is not None
+        and hops < _MAX_VALIDATOR_REDIRECTS
+    ):
+        next_request = response.next_request
+        if scope_check(str(next_request.url)):
+            break
+        response = await client.send(next_request, follow_redirects=False)
+        hops += 1
+    return response
+
+
+def _prepare_probe_body(body, headers: dict | None) -> tuple[bytes | None, dict, str]:
+    """Encode a probe body and return ``(content, headers, preview)``."""
+    request_headers = dict(headers or {})
+    if body is None:
+        return None, request_headers, ""
+    if isinstance(body, bytes):
+        return body, request_headers, body.decode("utf-8", errors="replace")
+    if isinstance(body, str):
+        return body.encode(), request_headers, body
+    body_text = json.dumps(body, separators=(",", ":"))
+    if not any(str(k).lower() == "content-type" for k in request_headers):
+        request_headers["Content-Type"] = "application/json"
+    return body_text.encode(), request_headers, body_text
+
+
 async def _validator_http_request(
     tool_input: dict,
     primary_session: dict | None,
@@ -942,23 +1049,35 @@ async def _validator_http_request(
         else:
             content = str(body).encode()
 
-    from aespa.services.traffic import LoggingAsyncClient
+    scope_check = _validator_scope_check(run_id)
+    rejection = _validator_request_rejection(method, url, scanner_policy, scope_check)
+    if rejection:
+        return {
+            "error": f"Request blocked: {rejection}",
+            "status": None,
+            "headers": {},
+            "body": "",
+        }
 
     try:
-        async with LoggingAsyncClient(
+        async with scanner_svc._make_scanner_client(
             run_id=run_id,
             username=(session or {}).get("username"),
             cookies=cookies,
             headers=hdrs,
             timeout=REQUEST_TIMEOUT,
-            follow_redirects=getattr(scanner_policy, "follow_redirects", True),
             verify=scanner_svc._scanner_tls_verify(),
             page_id=(traffic_provenance or {}).get("page_id"),
             provenance=traffic_provenance,
         ) as client:
             req = client.build_request(method, url, content=content, headers=headers_in)
             t0 = time.perf_counter()
-            resp = await client.send(req)
+            resp = await _send_with_scoped_redirects(
+                client,
+                req,
+                follow_redirects=getattr(scanner_policy, "follow_redirects", True),
+                scope_check=scope_check,
+            )
             duration_ms = int((time.perf_counter() - t0) * 1000)
         return {
             "status": resp.status_code,
@@ -1731,10 +1850,19 @@ async def _request_access_validation_actor(
     username: str,
     session: dict | None,
 ) -> tuple[httpx.Response, str] | None:
-    from aespa.services.traffic import LoggingAsyncClient
-
+    scope_check = _validator_scope_check(finding.test_run_id)
+    rejection = _validator_request_rejection(
+        method, finding.affected_url or "", scanner_policy, scope_check
+    )
+    if rejection:
+        log.info(
+            "Access-control validation request blocked for finding=%s: %s",
+            finding.id,
+            rejection,
+        )
+        return None
     try:
-        async with LoggingAsyncClient(
+        async with scanner_svc._make_scanner_client(
             run_id=finding.test_run_id,
             username=username,
             cookies=(session or {}).get("cookies", {}),
@@ -1743,7 +1871,6 @@ async def _request_access_validation_actor(
                 **((session or {}).get("extra_headers", {})),
             },
             timeout=scanner_policy.request_timeout_s,
-            follow_redirects=scanner_policy.follow_redirects,
             verify=scanner_svc._scanner_tls_verify(),
             page_id=finding.page_id,
             provenance={
@@ -1757,7 +1884,12 @@ async def _request_access_validation_actor(
                 "owasp_category": finding.owasp_category,
             },
         ) as client:
-            resp = await client.request(method, finding.affected_url)
+            resp = await _send_with_scoped_redirects(
+                client,
+                client.build_request(method, finding.affected_url),
+                follow_redirects=scanner_policy.follow_redirects,
+                scope_check=scope_check,
+            )
         body = resp.text[: scanner_policy.response_body_read_limit_bytes]
         return resp, body
     except Exception as exc:
@@ -2536,14 +2668,14 @@ async def _run_validation_probe(
     desc = probe.get("desc", url)
     as_user = probe.get("as_user") or None
 
-    rejection = scanner_svc._probe_policy_rejection(probe, page_url, scanner_policy)
+    url = url or page_url
+    scope_check = _validator_scope_check(run_id)
+    rejection = _validator_request_rejection(method, url, scanner_policy, scope_check)
     if rejection:
         log.info("  Validation probe rejected by policy: %s (%s)", rejection, desc)
         return None
 
-    content, request_headers, body_preview = scanner_svc._prepare_probe_body(
-        body, extra_hdrs
-    )
+    content, request_headers, body_preview = _prepare_probe_body(body, extra_hdrs)
 
     # Use the override session (specific user) if provided, else the primary.
     session = override_session or primary_session
@@ -2551,15 +2683,12 @@ async def _run_validation_probe(
     hdrs = {"User-Agent": _UA, **(session.get("extra_headers", {}) if session else {})}
 
     try:
-        from aespa.services.traffic import LoggingAsyncClient
-
-        async with LoggingAsyncClient(
+        async with scanner_svc._make_scanner_client(
             run_id=run_id,
             username=(session or {}).get("username"),
             cookies=cookies,
             headers=hdrs,
             timeout=scanner_policy.request_timeout_s,
-            follow_redirects=scanner_policy.follow_redirects,
             verify=scanner_svc._scanner_tls_verify(),
             provenance={
                 "agent_id": "validator",
@@ -2578,8 +2707,11 @@ async def _run_validation_probe(
                 headers=request_headers,
             )
             started = time.perf_counter()
-            resp = await client.send(
-                req, follow_redirects=scanner_policy.follow_redirects
+            resp = await _send_with_scoped_redirects(
+                client,
+                req,
+                follow_redirects=scanner_policy.follow_redirects,
+                scope_check=scope_check,
             )
             duration_ms = int((time.perf_counter() - started) * 1000)
             resp_body = resp.text[

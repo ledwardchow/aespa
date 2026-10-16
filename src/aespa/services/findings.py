@@ -24,6 +24,7 @@ from ..models import (
     ScanFinding,
     ScanLead,
     SpecialistHandoff,
+    WorkflowCoverageItem,
 )
 
 ALLOWED_SEVERITIES = {"critical", "high", "medium", "low", "info"}
@@ -173,6 +174,7 @@ def consolidate_findings(
         DeepScanTask,
         DeepScanCheck,
         DeepScanClaim,
+        WorkflowCoverageItem,
     ):
         for row in session.exec(
             select(model).where(model.finding_id.in_(duplicate_ids))
@@ -251,6 +253,9 @@ def consolidate_findings(
     removed_references = [
         finding.reference for finding in duplicates if finding.id in duplicate_ids
     ]
+    # Persist the reassignments before the deletes so SQLite foreign-key
+    # checks never see a duplicate that is still referenced.
+    session.flush()
     for finding in duplicates:
         if finding.id in duplicate_ids:
             session.delete(finding)

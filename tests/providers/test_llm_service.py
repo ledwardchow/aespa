@@ -285,6 +285,81 @@ def test_agentic_context_compaction_normalizes_anthropic_sdk_blocks():
     assert compacted[1]["content"][1]["signature"] == "sig"
 
 
+def test_bedrock_compaction_drops_reasoning_bound_to_old_prefix():
+    signed_reasoning = {
+        "type": "bedrock_reasoning",
+        "reasoning_content": {
+            "reasoningText": {
+                "text": "private plan",
+                "signature": "old-prefix-signature",
+            }
+        },
+    }
+    messages = [
+        {"role": "user", "content": "initial brief"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "old", "name": "check", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "old", "content": "done"}
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                signed_reasoning,
+                {"type": "tool_use", "id": "recent", "name": "check", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "recent",
+                    "content": "response " + "x" * 3_000,
+                }
+            ],
+        },
+    ]
+    original = copy.deepcopy(messages)
+
+    unchanged, no_compaction = llm.compact_agentic_messages(
+        messages, max_context_chars=20_000, provider="bedrock"
+    )
+    assert no_compaction is None
+    assert unchanged[3]["content"][0] == signed_reasoning
+
+    compacted, stats = llm.compact_agentic_messages(
+        messages,
+        max_context_chars=2_000,
+        recent_messages=2,
+        provider="bedrock",
+    )
+
+    assert stats and stats["compaction_applied"]
+    assert compacted[0]["_bedrock_reasoning_reset"] is True
+    assert "[CONTEXT JOURNAL:" in str(compacted[0]["content"])
+    assert all(
+        block.get("type") != "bedrock_reasoning"
+        for message in compacted
+        for block in message.get("content", [])
+        if isinstance(block, dict)
+    )
+    assert any(
+        block.get("id") == "recent"
+        for block in compacted[1]["content"]
+        if isinstance(block, dict)
+    )
+    assert stats["protocol_valid"] is True
+    assert messages == original
+
+
 def test_agentic_context_compaction_collapses_repeated_journals():
     messages = _completed_pairs(40, result_size=800)
     compacted, first_stats = llm.compact_agentic_messages(
@@ -5662,6 +5737,145 @@ def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
     assert raw_content[0] == {
         "type": "bedrock_reasoning",
         "reasoning_content": reasoning,
+    }
+
+
+def test_bedrock_saved_compaction_journal_drops_stale_reasoning(monkeypatch):
+    captured = []
+    checkpoints = []
+
+    class FakeBedrockClient:
+        def converse_stream(self, **kwargs):
+            captured.append(kwargs["messages"])
+            return {
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "contentBlockIndex": 0,
+                            "delta": {"text": "continued"},
+                        }
+                    },
+                    {"messageStop": {"stopReason": "end_turn"}},
+                    {"metadata": {"usage": {}}},
+                ]
+            }
+
+    class FakeSession:
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    monkeypatch.setattr(llm, "_bedrock_session", lambda *args: FakeSession())
+    config = LLMConfig(
+        provider="bedrock",
+        model="anthropic.claude-opus-test",
+        max_tokens=2048,
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": "initial brief\n\n[CONTEXT JOURNAL: 2 older messages compacted.]\n- check",
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "bedrock_reasoning",
+                    "reasoning_content": {
+                        "reasoningText": {
+                            "text": "private plan",
+                            "signature": "old-prefix-signature",
+                        }
+                    },
+                },
+                {"type": "tool_use", "id": "recent", "name": "check", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "recent", "content": "done"}
+            ],
+        },
+    ]
+    original = copy.deepcopy(messages)
+
+    stop_checks = 0
+
+    def stop_after_one_call():
+        nonlocal stop_checks
+        stop_checks += 1
+        return stop_checks > 1
+
+    async def save_checkpoint(history, step):
+        checkpoints.append(copy.deepcopy(history))
+
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="unused",
+            tool_executor=None,
+            resume_messages=messages,
+            stop_check=stop_after_one_call,
+            on_checkpoint=save_checkpoint,
+            tools=[],
+            execution_monitor_enabled=False,
+        )
+    )
+
+    assert captured[0][1]["content"] == [
+        {
+            "toolUse": {
+                "toolUseId": "recent",
+                "name": "check",
+                "input": {},
+            }
+        }
+    ]
+    assert messages == original
+    assert checkpoints[-1][0]["_bedrock_reasoning_reset"] is True
+
+    fresh_messages = checkpoints[-1]
+    fresh_messages.extend(
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "bedrock_reasoning",
+                        "reasoning_content": {
+                            "reasoningText": {
+                                "text": "fresh plan",
+                                "signature": "new-prefix-signature",
+                            }
+                        },
+                    },
+                    {"type": "tool_use", "id": "new", "name": "check", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "new", "content": "done"}
+                ],
+            },
+        ]
+    )
+    stop_checks = 0
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="unused",
+            tool_executor=None,
+            resume_messages=fresh_messages,
+            stop_check=stop_after_one_call,
+            tools=[],
+            execution_monitor_enabled=False,
+        )
+    )
+    assert captured[1][-2]["content"][0] == {
+        "reasoningContent": fresh_messages[-2]["content"][0]["reasoning_content"]
     }
 
 

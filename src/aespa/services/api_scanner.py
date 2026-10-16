@@ -321,7 +321,7 @@ def _make_post_probe_fn(api_run_id: int):
                 s.get(ApiCollection, endpoints[0].collection_id) if endpoints else None
             )
             base_url = (coll.base_url if coll else "").rstrip("/")
-        ep = _match_endpoint_for_url(url, endpoints, base_url)
+        ep = _match_endpoint_for_url(url, endpoints, base_url, method=method)
         if ep is None:
             return
         cat = owasp_category.strip().upper()
@@ -723,6 +723,7 @@ def _match_endpoint_for_url(
     affected_url: str,
     endpoints: list[ApiEndpoint],
     collection_base_url: str,
+    method: str | None = None,
 ) -> ApiEndpoint | None:
     """Find the best-matching endpoint for a finding's affected_url.
 
@@ -730,7 +731,18 @@ def _match_endpoint_for_url(
     1. Extract path from the URL.
     2. For each endpoint, convert path-template params (``{id}``) to a regex.
     3. Return the longest-matching endpoint path.
+
+    When ``method`` is given, endpoints with that HTTP method win; a path-only
+    match is used only when no endpoint with that method matches.  This keeps
+    ``PUT /users/{id}`` from being credited to ``GET /users/{id}``.
     """
+    if method:
+        wanted = method.strip().upper()
+        same_method = [ep for ep in endpoints if (ep.method or "").upper() == wanted]
+        match = _match_endpoint_for_url(affected_url, same_method, collection_base_url)
+        if match is not None:
+            return match
+
     import re as _re
     from urllib.parse import urlparse
 
@@ -945,7 +957,9 @@ def _sast_validation_authentication_blocked(api_run_id: int) -> bool:
     saw_auth_failure = False
     saw_authenticated_success = False
     for entry in traffic:
-        endpoint = _match_endpoint_for_url(entry.url, endpoints, base_url)
+        endpoint = _match_endpoint_for_url(
+            entry.url, endpoints, base_url, method=entry.method
+        )
         if endpoint is None or endpoint.method.upper() != entry.method.upper():
             continue
         if entry.status in {401, 419, 440}:
@@ -1067,6 +1081,19 @@ _OWASP_WEB_TO_API: dict[str, str] = {
 }
 
 
+_HTTP_METHODS = frozenset(
+    {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"}
+)
+
+
+def _request_method_from_evidence(request_evidence: str | None) -> str | None:
+    """Return the HTTP method from a raw request line such as ``PUT /users/1``."""
+    first = (request_evidence or "").lstrip().split(None, 1)
+    if first and first[0].upper() in _HTTP_METHODS:
+        return first[0].upper()
+    return None
+
+
 def _make_post_finding_fn(api_run_id: int, *, update_coverage: bool = True):
     """Return a hook that derives ``owasp_api_category`` for each finding and
     updates the coverage matrix cell for the finding's endpoint + category.
@@ -1092,6 +1119,7 @@ def _make_post_finding_fn(api_run_id: int, *, update_coverage: bool = True):
             s.refresh(f)
             owasp_api_cat = f.owasp_api_category
             affected_url = f.affected_url
+            finding_method = _request_method_from_evidence(f.request_evidence)
             finding_id = f.id
 
         # Update the coverage matrix cell for this finding unless the scan is
@@ -1101,18 +1129,21 @@ def _make_post_finding_fn(api_run_id: int, *, update_coverage: bool = True):
         if owasp_api_cat:
             with Session(get_engine()) as s:
                 run = s.get(ApiTestRun, api_run_id)
-                if run is not None:
-                    endpoints = list(
-                        s.exec(
-                            select(ApiEndpoint)
-                            .where(ApiEndpoint.collection_id == run.collection_id)
-                            .where(ApiEndpoint.in_scope == True)  # noqa: E712
-                        ).all()
-                    )
-                    coll = s.get(ApiCollection, run.collection_id)
-                    base_url = (coll.base_url if coll else "").rstrip("/")
+                if run is None:
+                    return
+                endpoints = list(
+                    s.exec(
+                        select(ApiEndpoint)
+                        .where(ApiEndpoint.collection_id == run.collection_id)
+                        .where(ApiEndpoint.in_scope == True)  # noqa: E712
+                    ).all()
+                )
+                coll = s.get(ApiCollection, run.collection_id)
+                base_url = (coll.base_url if coll else "").rstrip("/")
 
-            ep = _match_endpoint_for_url(affected_url or "", endpoints, base_url)
+            ep = _match_endpoint_for_url(
+                affected_url or "", endpoints, base_url, method=finding_method
+            )
             if ep is not None:
                 update_coverage_cell(
                     api_run_id,
@@ -1414,9 +1445,9 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     # web's _do_thinking_scan. ponytail: popped in the finally below.
     from aespa.services.scanner import _finding_hooks
 
-    _finding_hooks[api_run_id] = (
-        post_finding_fn if coverage_mode != "sast_validate" else None
-    )
+    # In sast_validate mode the hook skips coverage updates but still maps the
+    # finding's OWASP API category.
+    _finding_hooks[api_run_id] = post_finding_fn
 
     events_svc.emit(
         api_run_id,
@@ -1499,9 +1530,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             ),
             scope_check_fn=lambda url: _api_check_scope(url, api_run_id),
             context_tool_fn=context_tool_fn,
-            post_finding_fn=(
-                post_finding_fn if coverage_mode != "sast_validate" else None
-            ),
+            post_finding_fn=post_finding_fn,
             post_probe_fn=post_probe_fn,
             persist_credential_fn=persist_credential_fn,
             coverage_mode=coverage_mode,

@@ -34,6 +34,7 @@ from aespa.models import (
     ApiEndpointTest,
     ApiTestRun,
     AssessmentCampaign,
+    CampaignFindingReference,
     CampaignSourceMember,
     CampaignTargetMember,
     CampaignValidationCase,
@@ -85,6 +86,7 @@ from aespa.models import (
     TargetIntelItem,
     TestRun,
     TrafficEntry,
+    WorkflowCoverageItem,
 )
 
 
@@ -164,6 +166,51 @@ def _detach_validation_cases_for_findings(
         case.finding_id = None
         case.updated_at = datetime.now(timezone.utc)
         session.add(case)
+
+
+def detach_finding_dependents(session: Session, finding_ids: list[int]) -> None:
+    """Clear restrictive references to findings that are about to be deleted.
+
+    Workflow coverage items keep their result but lose the finding link.  A
+    campaign finding reference is an alias for exactly one finding, so it is
+    removed with that finding.  Flushes so the caller can delete the findings
+    on SQLite with foreign-key enforcement on.
+    """
+    if not finding_ids:
+        return
+    for item in session.exec(
+        select(WorkflowCoverageItem).where(
+            WorkflowCoverageItem.finding_id.in_(finding_ids)
+        )
+    ).all():
+        item.finding_id = None
+        session.add(item)
+    for reference in session.exec(
+        select(CampaignFindingReference).where(
+            CampaignFindingReference.finding_id.in_(finding_ids)
+        )
+    ).all():
+        session.delete(reference)
+    session.flush()
+
+
+def detach_page_dependents(session: Session, page_ids: list[int]) -> None:
+    """Clear restrictive references to crawled pages that are about to be deleted."""
+    if not page_ids:
+        return
+    for item in session.exec(
+        select(WorkflowCoverageItem).where(
+            WorkflowCoverageItem.reached_page_id.in_(page_ids)
+        )
+    ).all():
+        item.reached_page_id = None
+        session.add(item)
+    for discovery in session.exec(
+        select(TargetDiscovery).where(TargetDiscovery.source_page_id.in_(page_ids))
+    ).all():
+        discovery.source_page_id = None
+        session.add(discovery)
+    session.flush()
 
 
 def cascade_delete_web_run(session: Session, run_id: int) -> None:
@@ -312,6 +359,11 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         session.delete(target)
     session.flush()
 
+    detach_finding_dependents(session, finding_ids)
+    detach_page_dependents(
+        session, [page.id for page in pages if page.id is not None]
+    )
+
     # Findings and page workprogram cells must go before crawled pages because
     # both carry page references.
     for finding in findings:
@@ -426,9 +478,9 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
     api_findings = session.exec(
         select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
     ).all()
-    _detach_validation_cases_for_findings(
-        session, [finding.id for finding in api_findings if finding.id is not None]
-    )
+    api_finding_ids = [finding.id for finding in api_findings if finding.id is not None]
+    _detach_validation_cases_for_findings(session, api_finding_ids)
+    detach_finding_dependents(session, api_finding_ids)
     for finding in api_findings:
         session.delete(finding)
     for entry in session.exec(
@@ -676,6 +728,15 @@ def cascade_delete_campaign(session: Session, campaign_id: int) -> None:
         select(LeadTargetMapping).where(LeadTargetMapping.campaign_id == campaign_id)
     ).all():
         session.delete(mapping)
+
+    # Campaign finding aliases point at child-run findings and target members,
+    # both of which are deleted below.
+    for reference in session.exec(
+        select(CampaignFindingReference).where(
+            CampaignFindingReference.campaign_id == campaign_id
+        )
+    ).all():
+        session.delete(reference)
 
     campaign_leads = session.exec(
         select(ScanLead)

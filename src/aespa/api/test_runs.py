@@ -222,9 +222,13 @@ def _clear_crawl_state(session: Session, run: TestRun) -> None:
         select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
     ).all():
         session.delete(entry)
-    for pg in session.exec(
+    pages = session.exec(
         select(CrawledPage).where(CrawledPage.test_run_id == run_id)
-    ).all():
+    ).all()
+    run_cleanup.detach_page_dependents(
+        session, [pg.id for pg in pages if pg.id is not None]
+    )
+    for pg in pages:
         session.delete(pg)
 
     run.status = TestRunStatus.pending
@@ -1347,6 +1351,7 @@ def delete_page(
         .where(PageCredentialView.page_id.in_(ids))
     ).all():
         session.delete(view)
+    run_cleanup.detach_page_dependents(session, ids)
     for p in session.exec(select(CrawledPage).where(CrawledPage.id.in_(ids))).all():
         session.delete(p)
     session.commit()

@@ -126,6 +126,12 @@ def test_unauthenticated_access_claim_is_false_positive_when_anonymous_is_denied
         async def __aexit__(self, *args):
             return None
 
+        def build_request(self, method, url):
+            return __import__("httpx").Request(method, url)
+
+        async def send(self, request, follow_redirects=False):
+            return await self.request(request.method, str(request.url))
+
         async def request(self, method, url):
             request = __import__("httpx").Request(method, url)
             return __import__("httpx").Response(
@@ -135,6 +141,7 @@ def test_unauthenticated_access_claim_is_false_positive_when_anonymous_is_denied
     from aespa.services import traffic
 
     monkeypatch.setattr(traffic, "LoggingAsyncClient", FakeClient)
+    monkeypatch.setattr(validator, "_validator_scope_check", lambda run_id: lambda url: None)
     finding = ScanFinding(
         id=1,
         test_run_id=1,
@@ -184,6 +191,12 @@ def test_unauthenticated_access_claim_is_confirmed_against_exact_route_baseline(
         async def __aexit__(self, *args):
             return None
 
+        def build_request(self, method, url):
+            return __import__("httpx").Request(method, url)
+
+        async def send(self, request, follow_redirects=False):
+            return await self.request(request.method, str(request.url))
+
         async def request(self, method, url):
             request = __import__("httpx").Request(method, url)
             return __import__("httpx").Response(
@@ -196,6 +209,7 @@ def test_unauthenticated_access_claim_is_confirmed_against_exact_route_baseline(
     from aespa.services import traffic
 
     monkeypatch.setattr(traffic, "LoggingAsyncClient", FakeClient)
+    monkeypatch.setattr(validator, "_validator_scope_check", lambda run_id: lambda url: None)
     finding = ScanFinding(
         id=1,
         test_run_id=1,

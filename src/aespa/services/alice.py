@@ -709,8 +709,13 @@ def _invoke_context_tool(
     history: list[dict],
     run_id: int,
     base_url: str,
+    api_run_id: int | None = None,
 ) -> dict:
-    """Call a context adapter with rich state, falling back for old callbacks."""
+    """Call a context adapter with rich state, falling back for old callbacks.
+
+    ``api_run_id`` is forwarded only to adapters that declare it; the API
+    adapter already closes over its run id.
+    """
     kwargs = {
         "pages_snapshot": pages_snapshot,
         "findings_snapshot": findings_snapshot,
@@ -719,8 +724,19 @@ def _invoke_context_tool(
         "base_url": base_url,
     }
     try:
-        inspect.signature(callback).bind(tool_name, args, **kwargs)
+        signature = inspect.signature(callback)
     except (TypeError, ValueError):
+        return callback(tool_name, args)
+    if api_run_id is not None:
+        try:
+            signature.bind(tool_name, args, **kwargs, api_run_id=api_run_id)
+        except TypeError:
+            pass
+        else:
+            return callback(tool_name, args, **kwargs, api_run_id=api_run_id)
+    try:
+        signature.bind(tool_name, args, **kwargs)
+    except TypeError:
         return callback(tool_name, args)
     return callback(tool_name, args, **kwargs)
 
@@ -2304,6 +2320,9 @@ async def _execute_alice_tool(
             title = finding.title
             public_reference = finding.reference
             finding_id = finding.id
+            from aespa.services.run_cleanup import detach_finding_dependents
+
+            detach_finding_dependents(s, [finding_id])
             s.delete(finding)
             s.commit()
 
@@ -3445,6 +3464,7 @@ def _run_api_context_tool(
                 from aespa.services.api_scanner import (
                     OWASP_API_CATEGORIES,
                     _match_endpoint_for_url,
+                    _request_method_from_evidence,
                     update_coverage_cell,
                 )
 
@@ -3461,7 +3481,12 @@ def _run_api_context_tool(
                         coll = s2.get(_AC, collection_id)
                         base = (coll.base_url if coll else "").rstrip("/")
                     ep = _match_endpoint_for_url(
-                        finding.affected_url or "", endpoints, base
+                        finding.affected_url or "",
+                        endpoints,
+                        base,
+                        method=_request_method_from_evidence(
+                            finding.request_evidence
+                        ),
                     )
                     if ep is not None:
                         update_coverage_cell(
@@ -3808,7 +3833,9 @@ async def run_api_alice_turn_stream(
                     .where(_AE.in_scope == True)  # noqa: E712
                 ).all()
             )
-        ep = _match_endpoint_for_url(url, endpoints, base_url.rstrip("/"))
+        ep = _match_endpoint_for_url(
+            url, endpoints, base_url.rstrip("/"), method=method
+        )
         if ep is None:
             return
         update_coverage_cell(api_run_id, ep.id, cat, "in_progress")
