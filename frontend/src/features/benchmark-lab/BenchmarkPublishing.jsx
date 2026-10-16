@@ -4,8 +4,18 @@ import { req } from "../../shared/api/request.ts";
 const BASE = "/extension/aespa.benchmarking";
 const DEFAULT_SITE = "https://benchmarks.aespa.app";
 
+function webLink(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
 export function BenchmarkPublishing({ mode = "publish", datasets = [], results = [] }) {
   const [url, setUrl] = useState(DEFAULT_SITE);
+  const siteLink = webLink(url);
   const [token, setToken] = useState("");
   const [serviceSaved, setServiceSaved] = useState(false);
   const [configured, setConfigured] = useState(false);
@@ -182,8 +192,8 @@ export function BenchmarkPublishing({ mode = "publish", datasets = [], results =
             <button className="btn secondary" disabled={busy}>
               Save connection
             </button>
-            {serviceSaved && (
-              <a className="btn secondary" href={url} target="_blank" rel="noreferrer">
+            {serviceSaved && siteLink && (
+              <a className="btn secondary" href={siteLink} target="_blank" rel="noreferrer">
                 Open results site
               </a>
             )}
@@ -238,8 +248,8 @@ export function BenchmarkPublishing({ mode = "publish", datasets = [], results =
             <a className="btn secondary" href="#/extensions/aespa.benchmarking/settings">
               Connection settings
             </a>
-            {configured && (
-              <a className="btn secondary" href={url} target="_blank" rel="noreferrer">
+            {configured && siteLink && (
+              <a className="btn secondary" href={siteLink} target="_blank" rel="noreferrer">
                 Open results site
               </a>
             )}

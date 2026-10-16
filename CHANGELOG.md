@@ -64,6 +64,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Benchmark Lab filters and links**: On narrow windows, the model and scan type filter menus no longer open partly behind the sidebar. **Open results site** now appears only when the saved address is an `http` or `https` link.
+
 - **Log times**: SAST activity, SAST agent events, API run logs, campaign activity, and the vulnerable-library list's last update time could appear shifted by your time zone offset. They now show the correct local time, and activity and agent logs use the same 24-hour format.
 
 - **A.L.I.C.E. chat**: Each chat tab now works on its own. Sending a message in one tab no longer locks the others or cancels A.L.I.C.E.'s work there, so you can run several requests on the same run at once. A dot marks tabs that are still working, the chat stop button stops only the open tab, and Stop A.L.I.C.E. at the top of the run stops all of them. For users ahead of UTC, reopening a web run could also restore an older copy of the chat saved in the browser instead of newer messages saved by AESPA; the chat now loads whichever copy is newer.

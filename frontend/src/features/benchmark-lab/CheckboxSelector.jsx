@@ -1,8 +1,18 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import styles from "./SiteSummary.module.css";
 
 export function CheckboxSelector({ label, options, selected, onToggle, onSelectAll }) {
   const ref = useRef(null);
+  const [alignStart, setAlignStart] = useState(false);
+  const placeMenu = () => {
+    const details = ref.current;
+    if (!details?.open) return setAlignStart(false);
+    const menu = details.querySelector("fieldset").getBoundingClientRect();
+    const boundary = details.closest("main")?.getBoundingClientRect().left ?? 0;
+    const summary = details.querySelector("summary").getBoundingClientRect();
+    // A right-aligned menu that would slide under the fixed sidebar opens rightwards instead.
+    setAlignStart(summary.right - menu.width < boundary);
+  };
   useEffect(() => {
     const closeOutside = (event) => {
       if (!ref.current?.contains(event.target) && ref.current) ref.current.open = false;
@@ -22,6 +32,7 @@ export function CheckboxSelector({ label, options, selected, onToggle, onSelectA
       <details
         ref={ref}
         className={styles.dropdown}
+        onToggle={placeMenu}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             ref.current.open = false;
@@ -33,7 +44,7 @@ export function CheckboxSelector({ label, options, selected, onToggle, onSelectA
           {selection}
           <span aria-hidden="true">⌄</span>
         </summary>
-        <fieldset className={styles.menu}>
+        <fieldset className={alignStart ? `${styles.menu} ${styles.menuStart}` : styles.menu}>
           <legend className={styles.menuTitle}>{label}</legend>
           <label className={styles.selectAll}>
             <input
